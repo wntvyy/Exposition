@@ -46,4 +46,26 @@ describe("editors", () => {
     expect(await editors.close("b")).toBe(true);
     expect(useEditors.getState().groups.primary.activeKey).toBe("c");
   });
+
+  it("closes a resource in one group without consulting its guard while another group shows it", async () => {
+    editors.open(res("a"), { group: "primary" });
+    editors.open(res("a"), { group: "secondary" });
+    let consulted = false;
+    editors.registerCloseGuard("a", async () => {
+      consulted = true;
+      return false;
+    });
+    expect(await editors.closeInGroup("a", "secondary")).toBe(true);
+    expect(consulted).toBe(false);
+    expect(useEditors.getState().groups.secondary.editors).toEqual([]);
+    expect(useEditors.getState().groups.primary.editors.map((e) => e.resource.key)).toEqual(["a"]);
+    // Last view of the resource: the guard decides.
+    expect(await editors.closeInGroup("a", "primary")).toBe(false);
+    expect(consulted).toBe(true);
+  });
+
+  it("focuses a group, including an empty one", () => {
+    editors.focusGroup("secondary");
+    expect(useEditors.getState().activeGroup).toBe("secondary");
+  });
 });
