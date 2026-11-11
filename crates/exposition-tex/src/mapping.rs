@@ -186,17 +186,26 @@ impl PageMapping {
     /// Caret at a page point: the mapped glyph under (or nearest to, within
     /// `tolerance` points) the point, and the caret boundary closest to `x`.
     pub fn hit_test(&self, x: f64, y: f64, tolerance: f64) -> Option<CaretHit> {
-        let mut best: Option<(f64, usize)> = None;
+        // A glyph whose ink (outline bounds, slightly inflated) contains the
+        // point wins — stacked math (limits over a large operator) has
+        // overlapping layout boxes. Otherwise the nearest layout box; among
+        // overlapping boxes (kerning), the glyph whose centre is closest.
+        let mut best: Option<(u8, f64, f64, usize)> = None;
         for (i, (glyph, target)) in self.glyphs.iter().zip(&self.targets).enumerate() {
-            if !target.is_mapped() {
+            if !target.is_mapped() || self.is_attached_accent(i) {
                 continue;
             }
+            let in_ink =
+                glyph.ink.is_some_and(|r| PageRect::new(r.x0 - 0.5, r.y0 - 0.5, r.x1 + 0.5, r.y1 + 0.5).contains(x, y));
+            let rank = u8::from(!in_ink);
             let d = glyph.bbox.distance_sq(x, y);
-            if d <= tolerance * tolerance && best.is_none_or(|(b, _)| d < b) {
-                best = Some((d, i));
+            let centre = (x - (glyph.origin_x + glyph.advance / 2.0)).abs();
+            let better = best.is_none_or(|(r, b, c, _)| (rank, d, centre) < (r, b, c));
+            if (in_ink || d <= tolerance * tolerance) && better {
+                best = Some((rank, d, centre, i));
             }
         }
-        let (_, index) = best?;
+        let (_, _, _, index) = best?;
         let glyph = &self.glyphs[index];
         let GlyphTarget::Source { path, boundaries, .. } = &self.targets[index] else { return None };
         let steps = boundaries.len().saturating_sub(1).max(1);
@@ -211,6 +220,22 @@ impl PageMapping {
             y0: glyph.bbox.y0,
             y1: glyph.bbox.y1,
         })
+    }
+
+    /// A spacing accent glyph drawn over a neighbouring base glyph with the
+    /// same target (TeX `ccent` construction): the base is the hit target.
+    fn is_attached_accent(&self, i: usize) -> bool {
+        let is_accent = self.glyphs[i]
+            .text
+            .as_deref()
+            .and_then(|t| t.chars().next().filter(|_| t.chars().count() == 1))
+            .and_then(spacing_accent_to_combining)
+            .is_some();
+        is_accent
+            && [i.checked_sub(1), Some(i + 1)]
+                .into_iter()
+                .flatten()
+                .any(|j| self.targets.get(j).is_some_and(|t| t == &self.targets[i]))
     }
 
     /// Page position of a caret at `offset` in `path`, if a mapped glyph

@@ -29,12 +29,19 @@
 //!
 //! # Security
 //!
-//! `-no-shell-escape` explicitly; `openout_any=p` and `openin_any=p` (no
-//! absolute or parent-directory names, no dot files); a constructed
-//! environment (no inherited secrets); program + argument arrays only, run
-//! through [`JobRunner`]. LuaLaTeX keeps Lua's file I/O even without shell
-//! escape (`--safer` breaks luaotfload), so LuaLaTeX projects still require
-//! workspace trust.
+//! `-no-shell-escape` explicitly (also `shell_escape=f`); `openout_any=p`
+//! (verified: absolute and parent-directory writes are refused by both
+//! engines, including LuaLaTeX's `io.open`; `\write18`, `os.execute`, and
+//! `io.popen` are disabled); a constructed environment (no inherited
+//! secrets); program + argument arrays only, run through [`JobRunner`].
+//!
+//! Reads are **not** confined: TeX Live 2026 reads absolute and `../` paths
+//! through `\input` even with `openin_any=p` (set anyway as defense in depth
+//! for distributions that honour it). A project can therefore typeset any
+//! file the user can read into its PDF, so building an unfamiliar project
+//! requires workspace trust, or the restricted execution backend once the
+//! execution service provides one. `--safer` would restrict LuaLaTeX further
+//! but breaks luaotfload, so it is not used.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

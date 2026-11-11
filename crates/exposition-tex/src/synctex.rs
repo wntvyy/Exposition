@@ -320,6 +320,7 @@ impl SyncTex {
         // Within it, the nearest point record at or right of x (a word belongs
         // to the line of the space that ends it), else the nearest overall.
         let mut right: Option<(f64, &SyncNode)> = None;
+        let mut left: Option<(f64, &SyncNode)> = None;
         let mut any: Option<(f64, &SyncNode)> = None;
         for node in sheet.nodes.iter().filter(|n| self.is_within(sheet, n, container as u32)) {
             if node.kind.is_box() || node.kind == NodeKind::Form {
@@ -327,15 +328,24 @@ impl SyncTex {
             }
             let r = node.rect();
             let dx = r.x1 - x;
-            if dx >= 0.0 && right.is_none_or(|(d, _)| dx < d) {
+            // `x` (current) records inherit the previous record's line; only
+            // glue, kern, and math records carry the line of the word they end.
+            // The zero-width kern closing a paragraph line carries the
+            // paragraph's last line, not the word's.
+            let carries_line = matches!(node.kind, NodeKind::Kern | NodeKind::Glue | NodeKind::Math)
+                && !(node.kind == NodeKind::Kern && node.width.abs() < 1e-9);
+            if carries_line && dx >= 0.0 && right.is_none_or(|(d, _)| dx < d) {
                 right = Some((dx, node));
+            }
+            if carries_line && dx < 0.0 && left.is_none_or(|(d, _)| -dx < d) {
+                left = Some((-dx, node));
             }
             let d = dx.abs();
             if any.is_none_or(|(b, _)| d < b) {
                 any = Some((d, node));
             }
         }
-        let node = right.or(any).map(|(_, n)| n).unwrap_or(&sheet.nodes[container]);
+        let node = right.or(left).or(any).map(|(_, n)| n).unwrap_or(&sheet.nodes[container]);
         Some(BackwardHit { tag: node.tag, line: node.line })
     }
 
