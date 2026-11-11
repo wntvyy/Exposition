@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-typesetting-page-svg"
+description = "Enables the typesetting_page_svg command without any pre-configured scope."
+commands.allow = ["typesetting_page_svg"]
+
+[[permission]]
+identifier = "deny-typesetting-page-svg"
+description = "Denies the typesetting_page_svg command without any pre-configured scope."
+commands.deny = ["typesetting_page_svg"]

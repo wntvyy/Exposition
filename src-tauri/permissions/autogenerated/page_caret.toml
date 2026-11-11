@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-page-caret"
+description = "Enables the page_caret command without any pre-configured scope."
+commands.allow = ["page_caret"]
+
+[[permission]]
+identifier = "deny-page-caret"
+description = "Denies the page_caret command without any pre-configured scope."
+commands.deny = ["page_caret"]

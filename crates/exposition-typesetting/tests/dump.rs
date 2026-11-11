@@ -41,3 +41,51 @@ fn dump_typst_basic() {
         }
     }
 }
+
+#[test]
+#[ignore = "diagnostic output only"]
+fn dump_pdf_structure() {
+    let fx = Fixture::open("typst-basic", "main.typ");
+    let record = fx.build();
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.pdf");
+    let artifact = fx.service.export_pdf(record.id(), Some(dest.clone())).unwrap();
+    let bytes = std::fs::read(&dest).unwrap();
+    println!("{artifact:?} {} bytes", bytes.len());
+    let text = String::from_utf8_lossy(&bytes);
+    for needle in ["/Type /Page", "/Type/Page", "/MediaBox", "/Count", "ObjStm"] {
+        println!("{needle}: {}", text.matches(needle).count());
+    }
+    if let Some(i) = text.find("/MediaBox") {
+        println!("{}", &text[i..i + 60]);
+    }
+}
+
+#[test]
+#[ignore = "diagnostic output only"]
+fn dump_svg_header() {
+    let fx = Fixture::open("typst-basic", "main.typ");
+    let record = fx.build();
+    let svg = fx.service.page_svg(&record.result.pages[0].render_ref).unwrap();
+    println!("{}", &svg[..300.min(svg.len())]);
+    println!("len {}", svg.len());
+}
+
+#[test]
+#[ignore = "diagnostic output only"]
+fn dump_document_event_json() {
+    use exposition_core::document::*;
+    let event = DocumentEvent::Changed(DocumentChanged {
+        document: DocumentId("doc-1".into()),
+        transaction: None,
+        origin: EditOrigin::Page,
+        kind: ChangeKind::Edit,
+        previous_revision: 1,
+        revision: 2,
+        patches: vec![],
+        selection: None,
+        can_undo: true,
+        can_redo: false,
+    });
+    println!("{}", serde_json::to_string(&event).unwrap());
+}

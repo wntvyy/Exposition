@@ -31,7 +31,7 @@ impl Fixture {
     pub fn open(name: &str, entry: &str) -> Self {
         let dir = fixture_dir(name);
         let documents = Arc::new(DocumentService::new());
-        let service = TypesettingService::new(Arc::clone(&documents), Fonts::embedded_only());
+        let service = TypesettingService::new(Arc::clone(&documents), Fonts::embedded_only);
         service.open_workspace(&dir).expect("fixture dir");
         let path = WorkspacePath::parse(entry).unwrap();
         let text = std::fs::read_to_string(dir.join(entry)).unwrap();

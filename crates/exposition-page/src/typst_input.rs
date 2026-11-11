@@ -183,13 +183,20 @@ fn tokenize(node: &SyntaxNode, offset: usize, collapse_math: bool, in_raw: bool,
         }
         return;
     }
-    out.push(Token { tok: Tok::Open(kind), pos: range.start, extent: range.clone() });
+    // Markup and math containers have no delimiters of their own; text
+    // typed at their edges belongs inside them.
+    let container = matches!(kind, SyntaxKind::Markup | SyntaxKind::Math);
+    if !container {
+        out.push(Token { tok: Tok::Open(kind), pos: range.start, extent: range.clone() });
+    }
     let mut child_offset = offset;
     for child in node.children() {
         tokenize(child, child_offset, collapse_math, in_raw || kind == SyntaxKind::Raw, out);
         child_offset += child.len();
     }
-    out.push(Token { tok: Tok::Close(kind), pos: range.end, extent: range });
+    if !container {
+        out.push(Token { tok: Tok::Close(kind), pos: range.end, extent: range });
+    }
 }
 
 /// Collapse whitespace runs: Typst renders consecutive spaces as one, and a
@@ -422,8 +429,39 @@ impl<'a> Doc<'a> {
         let typed: String = typed.replace("\r\n", "\n").replace('\r', "\n").replace('\t', " ");
         match mode {
             Mode::Math => self.insert_math(p, &deletions, &typed),
-            _ => self.insert_markup(p, &deletions, &typed, line_ending),
+            _ => {
+                let first = self.insert_markup(p, &deletions, &typed, line_ending);
+                if !matches!(first, Err(EditRefusal::WouldChangeStructure)) || !deletions.is_empty() {
+                    return first;
+                }
+                // Next to an emphasis delimiter Typst may not allow plain text
+                // (e.g. a letter directly before `*bold*`): type inside the
+                // adjacent strong/emphasis instead.
+                for q in self.delimiter_neighbours(p) {
+                    if let Ok(plan) = self.insert_markup(q, &deletions, &typed, line_ending) {
+                        return Ok(plan);
+                    }
+                }
+                first
+            }
         }
+    }
+
+    /// Positions across strong/emphasis delimiters adjacent to `p`.
+    fn delimiter_neighbours(&self, p: usize) -> Vec<usize> {
+        let is_delim = |l: &Leaf| matches!(l.kind, SyntaxKind::Star | SyntaxKind::Underscore) && l.mode == Mode::Markup;
+        let mut out = Vec::new();
+        let mut q = p;
+        while let Some(leaf) = self.leaves.iter().find(|l| l.range.start == q && is_delim(l)) {
+            q = leaf.range.end;
+            out.push(q);
+        }
+        let mut q = p;
+        while let Some(leaf) = self.leaves.iter().find(|l| l.range.end == q && is_delim(l)) {
+            q = leaf.range.start;
+            out.push(q);
+        }
+        out
     }
 
     fn insert_markup(
@@ -905,6 +943,21 @@ mod tests {
         assert_eq!(run("ab cd", 3, PageEditOp::ParagraphBreak).unwrap(), ("ab \n\ncd".into(), 5));
         let (text, _) = run("ab", 1, ins("x*y\n- z")).unwrap();
         assert_eq!(text, "ax\\*y\n\n\\- zb");
+    }
+
+    #[test]
+    fn typing_at_container_edges() {
+        // Start of a heading's text.
+        assert_eq!(run("= Title\n", 2, ins("A")).unwrap(), ("= ATitle\n".into(), 3));
+        // Start of a content block.
+        assert_eq!(run("#emph[word] x", 6, ins("A")).unwrap().0, "#emph[Aword] x");
+        // A letter directly before `*bold*` cannot stay outside it in Typst:
+        // it is typed inside the strong text.
+        let (text, caret) = run("a *bold*", 2, ins("X")).unwrap();
+        assert_eq!(text, "a *Xbold*");
+        assert_eq!(caret, 4);
+        // After code, text needs no separator when it cannot continue the expression.
+        assert_eq!(run("#emph[x] y", 8, ins("z")).unwrap().0, "#emph[x]z y");
     }
 
     #[test]

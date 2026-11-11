@@ -12,6 +12,16 @@
     "allow-document-state",
     "allow-document-apply",
     "allow-document-undo",
-    "allow-document-redo"
+    "allow-document-redo",
+    "allow-typesetting-watch",
+    "allow-typesetting-unwatch",
+    "allow-typesetting-build",
+    "allow-typesetting-page-svg",
+    "allow-typesetting-export-pdf",
+    "allow-page-hit-test",
+    "allow-page-caret",
+    "allow-page-navigate",
+    "allow-page-selection",
+    "allow-page-edit"
   ]
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-typesetting-export-pdf"
+description = "Enables the typesetting_export_pdf command without any pre-configured scope."
+commands.allow = ["typesetting_export_pdf"]
+
+[[permission]]
+identifier = "deny-typesetting-export-pdf"
+description = "Denies the typesetting_export_pdf command without any pre-configured scope."
+commands.deny = ["typesetting_export_pdf"]

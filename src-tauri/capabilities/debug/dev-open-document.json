@@ -1,0 +1,7 @@
+{
+  "$schema": "../../gen/schemas/desktop-schema.json",
+  "identifier": "debug-dev-open-document",
+  "description": "DEBUG BUILDS ONLY (not loaded by release builds): opening a file by absolute path until the workspace service opens projects. Remove at integration.",
+  "windows": ["main"],
+  "permissions": ["allow-dev-open-document"]
+}

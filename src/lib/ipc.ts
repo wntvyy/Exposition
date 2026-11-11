@@ -4,7 +4,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import type { Affinity } from "../bindings/Affinity";
 import type { AppInfo } from "../bindings/AppInfo";
+import type { BuildEvent } from "../bindings/BuildEvent";
+import type { BuildStatusEvent } from "../bindings/BuildStatusEvent";
+import type { CaretGeometry } from "../bindings/CaretGeometry";
 import type { CommandError } from "../bindings/CommandError";
 import type { DocumentChanged } from "../bindings/DocumentChanged";
 import type { DocumentEvent } from "../bindings/DocumentEvent";
@@ -12,6 +16,13 @@ import type { DocumentId } from "../bindings/DocumentId";
 import type { DocumentInfo } from "../bindings/DocumentInfo";
 import type { DocumentState } from "../bindings/DocumentState";
 import type { EditOrigin } from "../bindings/EditOrigin";
+import type { ExportArtifact } from "../bindings/ExportArtifact";
+import type { Motion } from "../bindings/Motion";
+import type { NavigationResult } from "../bindings/NavigationResult";
+import type { PageEditOutcome } from "../bindings/PageEditOutcome";
+import type { PageEditRequest } from "../bindings/PageEditRequest";
+import type { PageHit } from "../bindings/PageHit";
+import type { SelectionGeometry } from "../bindings/SelectionGeometry";
 import type { TransactionError } from "../bindings/TransactionError";
 import type { TransactionOutcome } from "../bindings/TransactionOutcome";
 import type { TransactionRequest } from "../bindings/TransactionRequest";
@@ -26,6 +37,25 @@ export const commands = {
     invoke<DocumentChanged>("document_undo", { document, origin }),
   documentRedo: (document: DocumentId, origin: EditOrigin) =>
     invoke<DocumentChanged>("document_redo", { document, origin }),
+
+  // Typesetting (builds, rendered pages, export).
+  typesettingWatch: (entry: string) => invoke<BuildEvent | null>("typesetting_watch", { entry }),
+  typesettingUnwatch: (entry: string) => invoke<void>("typesetting_unwatch", { entry }),
+  typesettingBuild: (entry: string) => invoke<BuildEvent>("typesetting_build", { entry }),
+  typesettingPageSvg: (renderRef: string) => invoke<string>("typesetting_page_svg", { renderRef }),
+  typesettingExportPdf: (build: string, destination: string | null = null) =>
+    invoke<ExportArtifact>("typesetting_export_pdf", { build, destination }),
+
+  // Exact-page editing (offsets are UTF-16 in the named build's snapshot).
+  pageHitTest: (build: string, page: number, x: number, y: number) =>
+    invoke<PageHit>("page_hit_test", { build, page, x, y }),
+  pageCaret: (build: string, path: string, offset: number, affinity: Affinity) =>
+    invoke<CaretGeometry | null>("page_caret", { build, path, offset, affinity }),
+  pageNavigate: (build: string, path: string, offset: number, affinity: Affinity, motion: Motion, goalX: number | null) =>
+    invoke<NavigationResult | null>("page_navigate", { build, path, offset, affinity, motion, goalX }),
+  pageSelection: (build: string, path: string, start: number, end: number) =>
+    invoke<SelectionGeometry>("page_selection", { build, path, start, end }),
+  pageEdit: (request: PageEditRequest) => invoke<PageEditOutcome>("page_edit", { request }),
 };
 
 export const events = {
@@ -34,6 +64,12 @@ export const events = {
     listen<DocumentEvent>("documents:event", (e) => handler(e.payload)),
   /** The frontend fell behind; re-read state of every attached document. */
   documentsResync: (handler: () => void): Promise<UnlistenFn> => listen("documents:resync", () => handler()),
+  /** A finished build of a watched typesetting entry. */
+  typesettingBuild: (handler: (event: BuildEvent) => void): Promise<UnlistenFn> =>
+    listen<BuildEvent>("typesetting:build", (e) => handler(e.payload)),
+  /** Build activity (queued/building/idle) of a watched entry. */
+  typesettingStatus: (handler: (event: BuildStatusEvent) => void): Promise<UnlistenFn> =>
+    listen<BuildStatusEvent>("typesetting:status", (e) => handler(e.payload)),
 };
 
 export function isCommandError(value: unknown): value is CommandError {

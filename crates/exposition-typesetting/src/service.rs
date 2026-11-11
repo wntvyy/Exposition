@@ -9,7 +9,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 use exposition_core::build::{
@@ -103,21 +103,30 @@ struct Store {
 
 pub struct TypesettingService {
     documents: Arc<DocumentService>,
-    fonts: Arc<Fonts>,
+    /// Loaded on first use (system font discovery can take a moment).
+    fonts: OnceLock<Arc<Fonts>>,
+    load_fonts: fn() -> Arc<Fonts>,
     workspace: RwLock<Option<Arc<WorkspaceContext>>>,
     store: Mutex<Store>,
     counter: AtomicU64,
 }
 
 impl TypesettingService {
-    pub fn new(documents: Arc<DocumentService>, fonts: Arc<Fonts>) -> Self {
+    /// `load_fonts` provides the font set on first use, e.g.
+    /// [`Fonts::with_system`] or [`Fonts::embedded_only`].
+    pub fn new(documents: Arc<DocumentService>, load_fonts: fn() -> Arc<Fonts>) -> Self {
         Self {
             documents,
-            fonts,
+            fonts: OnceLock::new(),
+            load_fonts,
             workspace: RwLock::new(None),
             store: Mutex::new(Store::default()),
             counter: AtomicU64::new(0),
         }
+    }
+
+    pub fn fonts(&self) -> &Arc<Fonts> {
+        self.fonts.get_or_init(self.load_fonts)
     }
 
     pub fn documents(&self) -> &Arc<DocumentService> {
@@ -141,7 +150,7 @@ impl TypesettingService {
         let context = WorkspaceContext {
             root: resolver.root().to_path_buf(),
             resolver,
-            compiler: TypstCompiler::new(Arc::clone(&self.fonts)),
+            compiler: TypstCompiler::new(Arc::clone(self.fonts())),
         };
         *self.workspace.write().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(context));
         *self.store.lock().unwrap_or_else(|p| p.into_inner()) = Store::default();
@@ -168,7 +177,7 @@ impl TypesettingService {
         let configuration = BuildConfiguration {
             engine: Engine::Typst,
             compiler: COMPILER.into(),
-            font_fingerprint: self.fonts.fingerprint().to_owned(),
+            font_fingerprint: self.fonts().fingerprint().to_owned(),
             profile: None,
         };
         let fingerprint = format!("{}|{}|{}", configuration.compiler, configuration.font_fingerprint, target.entry);

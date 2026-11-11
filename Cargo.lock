@@ -1070,6 +1070,8 @@ name = "exposition"
 version = "0.1.0"
 dependencies = [
  "exposition-core",
+ "exposition-page",
+ "exposition-typesetting",
  "exposition-workspace",
  "serde",
  "serde_json",
