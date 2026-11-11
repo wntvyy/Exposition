@@ -118,6 +118,30 @@ export const editors = {
     return true;
   },
 
+  /**
+   * Close a resource in one group. When another group still shows it, only this
+   * tab is removed (no guard); otherwise this behaves like `close`.
+   */
+  async closeInGroup(key: string, group: EditorGroupId): Promise<boolean> {
+    const other: EditorGroupId = group === "primary" ? "secondary" : "primary";
+    const { groups } = useEditors.getState();
+    if (!groups[other].editors.some((e) => e.resource.key === key)) return editors.close(key);
+    updateGroup(group, (g) => {
+      const index = g.editors.findIndex((e) => e.resource.key === key);
+      if (index < 0) return g;
+      const remaining = g.editors.filter((e) => e.resource.key !== key);
+      const activeKey =
+        g.activeKey === key ? (remaining[Math.min(index, remaining.length - 1)]?.resource.key ?? null) : g.activeKey;
+      return { ...g, editors: remaining, activeKey };
+    });
+    return true;
+  },
+
+  /** Make a group active (keyboard/pointer focus moved into it), even when it is empty. */
+  focusGroup(group: EditorGroupId): void {
+    if (useEditors.getState().activeGroup !== group) useEditors.setState({ activeGroup: group });
+  },
+
   activate(key: string, group?: EditorGroupId): void {
     const found = group ? { group } : findEditor(key);
     if (!found) return;

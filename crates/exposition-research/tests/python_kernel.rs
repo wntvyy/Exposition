@@ -12,8 +12,9 @@ use exposition_core::artifact::{ArtifactKind, Producer, RunStatus};
 use exposition_core::document::TextEncoding;
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::TextRange;
+use exposition_execution::{ExecutionConfig, ExecutionService};
 use exposition_research::helper::sha256_hex;
-use exposition_research::launcher::StdProcessLauncher;
+use exposition_research::launcher::ExecutionLauncher;
 use exposition_research::types::{
     Availability, ExecuteRequest, OutputItem, ResearchEvent, RunSource, RunSummary, RuntimeLanguage, SessionInfo,
     SessionOwner, SessionState,
@@ -41,11 +42,19 @@ async fn fixture(trusted: bool) -> Fixture {
     std::fs::create_dir_all(&root).unwrap();
     let data = std::fs::canonicalize(dir.path()).unwrap().join("appdata");
     let documents = Arc::new(DocumentService::new());
-    let mut config = ResearchConfig::new(data.clone(), Arc::new(StdProcessLauncher), documents.clone());
+    // The real shared execution service: containment, clean environment, trust.
+    let execution = ExecutionService::with_config(ExecutionConfig::new(&data)).unwrap();
+    let mut config =
+        ResearchConfig::new(data.clone(), Arc::new(ExecutionLauncher::new(execution.clone())), documents.clone());
     config.cancel_grace = Duration::from_secs(3);
     let service = ResearchService::new(config);
     let root = std::fs::canonicalize(&root).unwrap();
-    service.set_workspace(&root, trusted).unwrap();
+    if trusted {
+        execution.grant_trust(&root.display().to_string()).unwrap();
+    }
+    // Trust is the execution service's decision; the flag passed here is ignored.
+    let status = service.set_workspace(&root, !trusted).unwrap();
+    assert_eq!(status.trusted, trusted);
     let events = service.subscribe();
     Fixture { _dir: dir, root, data, service, documents, events }
 }
@@ -213,6 +222,12 @@ async fn runs_record_portable_provenance() {
     let stored = fx.service.run_manifest(&summary.id.0).unwrap();
     assert!(matches!(stored.record.producer, Producer::KernelSession { ref runtime, .. } if runtime == "python"));
     assert!(!stored.session.interpreter.location.is_empty());
+
+    // Secret-looking output is redacted before it is kept or shown.
+    let leak = run(&fx, &session, input("print('key: sk-ant-' + 'a1b2c3d4' * 4)"));
+    finished(&mut fx.events, &leak.id.0, Duration::from_secs(60)).await;
+    let (stream, _) = texts(&fx, &leak.id.0);
+    assert!(stream.contains("[REDACTED]") && !stream.contains("a1b2c3d4a1b2c3d4"), "{stream}");
 
     // A file on disk: pinned by content hash.
     let source = "squares = [n * n for n in range(5)]\nprint(sum(squares))\n";

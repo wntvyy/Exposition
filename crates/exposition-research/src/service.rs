@@ -1,7 +1,6 @@
 //! The research supervisor: workspace trust, sessions, runs, and events.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -12,12 +11,12 @@ use exposition_core::job::{ExecutionPolicy, JobSpec};
 use exposition_core::text::utf16_range_to_bytes;
 use exposition_workspace::DocumentService;
 use serde_json::{Value, json};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::discovery::{DiscoveryOptions, discover, now_ms};
 use crate::error::ResearchError;
 use crate::helper::{HELPER_VERSION, PROTOCOL_VERSION, install_helper, sha256_hex};
-use crate::launcher::{KernelProcessLauncher, ProcessControl, research_environment};
+use crate::launcher::{KernelProcessLauncher, LaunchError, LineSink, ProcessControl, research_environment};
 use crate::protocol::{HelperEvent, HelperFailure, HelperMessage, parse_line};
 use crate::runs::{
     ARTIFACT_SIZE_LIMIT, MANIFEST_CODE_LIMIT, RunState, artifact_belongs_to_run, page_of, settle_orphan,
@@ -28,7 +27,7 @@ use crate::store::{
 };
 use crate::types::{
     Availability, CodeOrigin, CodeProvenance, EnvironmentReport, ExecuteRequest, InterpreterProvenance, KernelChoice,
-    KernelDescriptor, OutputItem, OutputPage, OutputSummary, ResearchEvent, RunErrorInfo, RunManifest, RunSource,
+    KernelDescriptor, OutputItem, OutputSummary, ResearchEvent, RunErrorInfo, RunManifest, RunOutputPage, RunSource,
     RunSummary, RuntimeEnvironment, RuntimeLanguage, SessionInfo, SessionOwner, SessionProvenance, SessionState,
     StreamName, WorkspaceStatus,
 };
@@ -143,14 +142,21 @@ impl ResearchService {
         if !canonical.is_dir() {
             return Err(ResearchError::InvalidWorkspace("workspace root must be a directory".into()));
         }
+        self.shared
+            .config
+            .launcher
+            .register_workspace(&canonical)
+            .map_err(|e| ResearchError::InvalidWorkspace(format!("the workspace cannot be used for execution: {e}")))?;
         *lock(&self.shared.workspace) = Some(Workspace { root: canonical.clone(), trusted });
+        let trusted = self.shared.config.launcher.workspace_trusted(&canonical).unwrap_or(trusted);
         Ok(WorkspaceStatus { root: canonical.display().to_string(), trusted })
     }
 
+    /// The current workspace; trust comes from the launcher's trust store when it has one.
     pub fn workspace(&self) -> Option<WorkspaceStatus> {
-        lock(&self.shared.workspace)
-            .as_ref()
-            .map(|w| WorkspaceStatus { root: w.root.display().to_string(), trusted: w.trusted })
+        let workspace = lock(&self.shared.workspace).clone()?;
+        let trusted = self.shared.config.launcher.workspace_trusted(&workspace.root).unwrap_or(workspace.trusted);
+        Some(WorkspaceStatus { root: workspace.root.display().to_string(), trusted })
     }
 
     fn current_workspace(&self) -> Result<Workspace, ResearchError> {
@@ -180,7 +186,10 @@ impl ResearchService {
                 )));
             }
         }
-        let probe_dir = self.shared.research_dir("probe")?;
+        let probe_dir = match self.shared.config.launcher.probe_dir() {
+            Some(dir) => dir,
+            None => self.shared.research_dir("probe")?,
+        };
         let launcher = self.shared.config.launcher.clone();
         let report = tokio::task::spawn_blocking(move || {
             discover(&DiscoveryOptions { launcher: launcher.as_ref(), probe_dir: &probe_dir, extra_interpreters })
@@ -201,7 +210,8 @@ impl ResearchService {
 
     pub async fn start_session(&self, request: StartSessionRequest) -> Result<SessionInfo, ResearchError> {
         let workspace = self.current_workspace()?;
-        if !workspace.trusted {
+        let trusted = self.shared.config.launcher.workspace_trusted(&workspace.root).unwrap_or(workspace.trusted);
+        if !trusted {
             return Err(ResearchError::NotTrusted);
         }
         if lock(&self.shared.environments).is_none() {
@@ -392,7 +402,7 @@ impl ResearchService {
     }
 
     /// Page through retained output (live runs) or the stored transcript.
-    pub fn run_output(&self, run_id: &str, after: Option<u32>, limit: u32) -> Result<OutputPage, ResearchError> {
+    pub fn run_output(&self, run_id: &str, after: Option<u32>, limit: u32) -> Result<RunOutputPage, ResearchError> {
         if let Some(run) = lock(&self.shared.runs).get(run_id) {
             return Ok(run.page(after, limit));
         }
@@ -477,7 +487,7 @@ fn abbreviate_home(path: &str) -> String {
 type Pending = oneshot::Sender<Result<Value, ResearchError>>;
 
 struct HelperIo {
-    stdin: Box<dyn Write + Send>,
+    input: Arc<dyn LineSink>,
     control: Arc<dyn ProcessControl>,
 }
 
@@ -609,20 +619,21 @@ impl Session {
             log_limit_bytes: Some(64 * 1024),
             stdin: None,
         };
-        let process = shared.config.launcher.launch_interactive(&spec).map_err(|e| match e {
-            crate::launcher::LaunchError::Refused(message) => ResearchError::PolicyRefused(message),
+        let process = shared.config.launcher.launch_interactive(spec).await.map_err(|e| match e {
+            LaunchError::Untrusted(_) => ResearchError::NotTrusted,
+            LaunchError::Refused(message) => ResearchError::PolicyRefused(message),
             other => ResearchError::Launch(other.to_string()),
         })?;
         let epoch = {
             let mut state = lock(&self.state);
             state.epoch += 1;
             state.helper_pid = process.pid;
-            state.io = Some(HelperIo { stdin: process.stdin, control: process.control.clone() });
+            state.io = Some(HelperIo { input: process.input.clone(), control: process.control.clone() });
             state.last_seen = Instant::now();
             state.epoch
         };
-        self.spawn_reader(process.stdout, epoch);
-        self.spawn_stderr(process.stderr);
+        self.spawn_reader(process.lines, epoch);
+        self.spawn_diagnostics(process.diagnostics);
 
         let hello = self.request(json!({"cmd": "handshake", "protocol": PROTOCOL_VERSION})).await?;
         let protocol = hello.get("protocol").and_then(Value::as_u64).unwrap_or(0);
@@ -689,47 +700,33 @@ impl Session {
         self.emit_changed();
     }
 
-    fn spawn_reader(self: &Arc<Self>, stdout: Box<dyn Read + Send>, epoch: u64) {
+    fn spawn_reader(self: &Arc<Self>, mut lines: mpsc::UnboundedReceiver<String>, epoch: u64) {
         let session = Arc::downgrade(self);
-        std::thread::Builder::new()
-            .name("research-helper-stdout".into())
-            .spawn(move || {
-                let mut reader = BufReader::new(stdout);
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            let Some(session) = session.upgrade() else { return };
-                            session.on_line(line.trim_end(), epoch);
-                        }
-                    }
-                }
-                if let Some(session) = session.upgrade() {
-                    session.on_helper_exit(epoch);
-                }
-            })
-            .expect("spawn helper reader thread");
+        // A dedicated blocking thread: event handling writes manifests.
+        tokio::task::spawn_blocking(move || {
+            while let Some(line) = lines.blocking_recv() {
+                let Some(session) = session.upgrade() else { return };
+                session.on_line(line.trim_end(), epoch);
+            }
+            if let Some(session) = session.upgrade() {
+                session.on_helper_exit(epoch);
+            }
+        });
     }
 
-    fn spawn_stderr(self: &Arc<Self>, stderr: Box<dyn Read + Send>) {
+    fn spawn_diagnostics(self: &Arc<Self>, diagnostics: Option<mpsc::UnboundedReceiver<String>>) {
+        let Some(mut diagnostics) = diagnostics else { return };
         let session = Arc::downgrade(self);
-        std::thread::Builder::new()
-            .name("research-helper-stderr".into())
-            .spawn(move || {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines() {
-                    let Ok(line) = line else { break };
-                    let Some(session) = session.upgrade() else { return };
-                    let mut state = lock(&session.state);
-                    state.diagnostics.push_back(line.chars().take(2000).collect());
-                    while state.diagnostics.len() > DIAGNOSTIC_LINES {
-                        state.diagnostics.pop_front();
-                    }
+        tokio::spawn(async move {
+            while let Some(line) = diagnostics.recv().await {
+                let Some(session) = session.upgrade() else { return };
+                let mut state = lock(&session.state);
+                state.diagnostics.push_back(line.chars().take(2000).collect());
+                while state.diagnostics.len() > DIAGNOSTIC_LINES {
+                    state.diagnostics.pop_front();
                 }
-            })
-            .expect("spawn helper stderr thread");
+            }
+        });
     }
 
     fn spawn_watchdog(self: &Arc<Self>) {
@@ -777,11 +774,11 @@ impl Session {
         message["id"] = json!(id);
         let (tx, rx) = oneshot::channel();
         lock(&self.pending).insert(id, tx);
-        let line = format!("{message}\n");
+        let line = message.to_string();
         let written = {
-            let mut state = lock(&self.state);
-            match state.io.as_mut() {
-                Some(io) => io.stdin.write_all(line.as_bytes()).and_then(|_| io.stdin.flush()).is_ok(),
+            let state = lock(&self.state);
+            match state.io.as_ref() {
+                Some(io) => io.input.send_line(&line).is_ok(),
                 None => false,
             }
         };
@@ -920,7 +917,8 @@ impl Session {
             }
             HelperEvent::Error { run_id, ename, evalue, traceback } => {
                 if let Some(run) = lock(&shared.runs).get_mut(&run_id) {
-                    run.manifest.error = Some(RunErrorInfo { ename: ename.clone(), evalue: evalue.clone() });
+                    let redact = |text: &str| shared.config.launcher.redact(text);
+                    run.manifest.error = Some(RunErrorInfo { ename: redact(&ename), evalue: redact(&evalue) });
                 }
                 self.push_output(&shared, &run_id, OutputItem::Error { ename, evalue, traceback });
             }
@@ -987,6 +985,21 @@ impl Session {
     }
 
     fn push_output(&self, shared: &Shared, run_id: &str, item: OutputItem) {
+        // Kernel output is untrusted text: redact secrets before it is kept,
+        // written to the transcript, or sent to the webview.
+        let redact = |text: String| shared.config.launcher.redact(&text);
+        let item = match item {
+            OutputItem::Stream { name, text } => OutputItem::Stream { name, text: redact(text) },
+            OutputItem::Display { output_type, execution_count, text, artifacts } => {
+                OutputItem::Display { output_type, execution_count, text: text.map(redact), artifacts }
+            }
+            OutputItem::Error { ename, evalue, traceback } => OutputItem::Error {
+                ename: redact(ename),
+                evalue: redact(evalue),
+                traceback: traceback.into_iter().map(redact).collect(),
+            },
+            other => other,
+        };
         let entry = {
             let mut runs = lock(&shared.runs);
             let Some(run) = runs.get_mut(run_id) else { return };

@@ -753,6 +753,7 @@ version = "0.1.0"
 dependencies = [
  "exposition-attach",
  "exposition-core",
+ "exposition-execution",
  "exposition-research",
  "exposition-workspace",
  "serde",
@@ -788,10 +789,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "exposition-execution"
+version = "0.1.0"
+dependencies = [
+ "exposition-core",
+ "libc",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "ts-rs",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "exposition-research"
 version = "0.1.0"
 dependencies = [
  "exposition-core",
+ "exposition-execution",
  "exposition-workspace",
  "serde",
  "serde_json",

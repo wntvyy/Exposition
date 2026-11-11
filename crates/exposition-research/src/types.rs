@@ -322,7 +322,7 @@ pub struct OutputEntry {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
-pub struct OutputPage {
+pub struct RunOutputPage {
     pub run_id: RunId,
     pub entries: Vec<OutputEntry>,
     /// Sequence number of the oldest entry still retained.

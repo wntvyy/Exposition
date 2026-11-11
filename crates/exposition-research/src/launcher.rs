@@ -1,71 +1,33 @@
-//! Process launching seam for the kernel host helper and discovery probes.
+//! Process launching for the kernel host helper and discovery probes.
 //!
-//! Research never spawns processes directly: everything goes through a
+//! Research never spawns processes itself: everything goes through a
 //! [`KernelProcessLauncher`] given an [`exposition_core::job::JobSpec`]
 //! (executable + argument array, deliberately constructed environment,
-//! validated working directory, execution policy).
-//!
-//! TEMPORARY: [`StdProcessLauncher`] is a stand-in until the shared
-//! ExecutionService (m1/execution) offers long-lived interactive jobs (stdin kept
-//! open, ordered stdout stream, job-object process-tree cleanup). Replace it with
-//! an adapter over that service; the trait is the only thing research depends on.
+//! validated working directory, execution policy). The application uses
+//! [`ExecutionLauncher`], an adapter over the shared
+//! [`exposition_execution::ExecutionService`]: interactive jobs for the helper
+//! (job-object containment, clean environment, trust enforcement, bounded and
+//! redacted stderr log) and application probes for discovery.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobSpec};
+use exposition_core::job::{EnvironmentSpec, JobId, JobOutcome, JobSpec, OutputStream};
+use exposition_execution::credentials::is_credential_name;
+use exposition_execution::{ExecutionService, InteractiveOptions, RefusalCode};
+use tokio::sync::mpsc;
 
-/// Host variables a research child may inherit. Nothing else is copied; in
-/// particular no provider credentials or tokens.
-#[cfg(windows)]
-pub const INHERITED_VARIABLES: &[&str] = &[
-    "SYSTEMROOT",
-    "WINDIR",
-    "SYSTEMDRIVE",
-    "COMSPEC",
-    "PATH",
-    "PATHEXT",
-    "TEMP",
-    "TMP",
-    "USERPROFILE",
-    "HOMEDRIVE",
-    "HOMEPATH",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "PROGRAMDATA",
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "PROGRAMW6432",
-    "COMMONPROGRAMFILES",
-    "COMMONPROGRAMFILES(X86)",
-    "NUMBER_OF_PROCESSORS",
-    "PROCESSOR_ARCHITECTURE",
-    "PROCESSOR_IDENTIFIER",
-    "OS",
-    "USERNAME",
-    "COMPUTERNAME",
-    "LANG",
-    "LC_ALL",
-    "TZ",
-];
-
-#[cfg(not(windows))]
-pub const INHERITED_VARIABLES: &[&str] =
-    &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "XDG_RUNTIME_DIR"];
-
-/// Never copied into a child even if a caller lists them.
+/// Never placed in a research child's environment.
 pub fn looks_secret(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "SESSION_COOKIE"]
-        .iter()
-        .any(|marker| upper.contains(marker))
+    is_credential_name(name)
 }
 
-/// The environment research children receive.
+/// Variables research children get on top of the execution service's base
+/// environment. Nothing is inherited from the host beyond that base.
 pub fn research_environment(extra: BTreeMap<String, String>) -> EnvironmentSpec {
     let mut set = BTreeMap::new();
     set.insert("PYTHONUTF8".to_owned(), "1".to_owned());
@@ -73,12 +35,15 @@ pub fn research_environment(extra: BTreeMap<String, String>) -> EnvironmentSpec 
     set.insert("PYTHONUNBUFFERED".to_owned(), "1".to_owned());
     set.insert("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned());
     set.insert("PYDEVD_DISABLE_FILE_VALIDATION".to_owned(), "1".to_owned());
-    set.extend(extra);
-    EnvironmentSpec { inherit: INHERITED_VARIABLES.iter().map(|s| (*s).to_owned()).collect(), set }
+    set.extend(extra.into_iter().filter(|(name, _)| !looks_secret(name)));
+    EnvironmentSpec { inherit: Vec::new(), set }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LaunchError {
+    /// The workspace is not trusted for native execution.
+    #[error("{0}")]
+    Untrusted(String),
     #[error("{0}")]
     Refused(String),
     #[error("{0}")]
@@ -103,12 +68,26 @@ pub trait ProcessControl: Send + Sync {
     fn try_wait(&self) -> Option<ExitInfo>;
 }
 
+/// The child's stdin is closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the process input is closed")]
+pub struct InputClosed;
+
+/// Writes protocol lines to a child's stdin without blocking the caller.
+pub trait LineSink: Send + Sync {
+    /// Queue `line` (a newline is appended). Fails once stdin is closed.
+    fn send_line(&self, line: &str) -> Result<(), InputClosed>;
+}
+
 /// A long-lived child with open stdin and line-oriented stdout.
 pub struct InteractiveProcess {
     pub pid: Option<u32>,
-    pub stdin: Box<dyn Write + Send>,
-    pub stdout: Box<dyn Read + Send>,
-    pub stderr: Box<dyn Read + Send>,
+    pub input: Arc<dyn LineSink>,
+    /// Stdout lines in order; the channel closes at end of stream.
+    pub lines: mpsc::UnboundedReceiver<String>,
+    /// Stderr lines when the launcher hands them to the owner (otherwise they
+    /// stay in the launcher's own bounded, redacted log).
+    pub diagnostics: Option<mpsc::UnboundedReceiver<String>>,
     pub control: Arc<dyn ProcessControl>,
 }
 
@@ -119,165 +98,164 @@ pub struct ProbeOutput {
     pub stderr: String,
 }
 
+pub type LaunchFuture<'a> = Pin<Box<dyn Future<Output = Result<InteractiveProcess, LaunchError>> + Send + 'a>>;
+
 pub trait KernelProcessLauncher: Send + Sync {
-    /// Launch a long-lived interactive process.
-    fn launch_interactive(&self, spec: &JobSpec) -> Result<InteractiveProcess, LaunchError>;
-    /// Run a short discovery probe to completion (bounded by `spec.timeout_ms`).
+    /// Launch a long-lived interactive process (from an async context).
+    fn launch_interactive(&self, spec: JobSpec) -> LaunchFuture<'_>;
+    /// Run a short discovery probe to completion (blocking; call off the async runtime).
     fn run_probe(&self, spec: &JobSpec) -> Result<ProbeOutput, LaunchError>;
-}
-
-/// TEMPORARY launcher over `std::process` (see module docs).
-#[derive(Debug, Default)]
-pub struct StdProcessLauncher;
-
-const DEFAULT_PROBE_TIMEOUT_MS: u64 = 20_000;
-const PROBE_OUTPUT_LIMIT: usize = 1024 * 1024;
-
-impl StdProcessLauncher {
-    fn command(spec: &JobSpec) -> Result<Command, LaunchError> {
-        match &spec.policy {
-            ExecutionPolicy::TrustedNative => {}
-            ExecutionPolicy::Restricted { backend } => {
-                return Err(LaunchError::Refused(format!(
-                    "restricted execution backend {backend:?} is not available for research kernels; \
-                     it is never replaced by native execution"
-                )));
-            }
-        }
-        let program = Path::new(&spec.program);
-        if !program.is_absolute() {
-            return Err(LaunchError::InvalidSpec(format!("program must be an absolute path: {}", spec.program)));
-        }
-        let cwd = Path::new(&spec.working_directory);
-        if !cwd.is_absolute() || !cwd.is_dir() {
-            return Err(LaunchError::InvalidSpec("working directory must be an existing absolute directory".into()));
-        }
-        let mut command = Command::new(program);
-        command.args(&spec.args).current_dir(cwd).env_clear();
-        for name in &spec.environment.inherit {
-            if looks_secret(name) {
-                continue;
-            }
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
-        for (name, value) in &spec.environment.set {
-            command.env(name, value);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
-        Ok(command)
+    /// Application-owned directory probes must run in, if the launcher has one.
+    fn probe_dir(&self) -> Option<PathBuf> {
+        None
+    }
+    /// Make `root` an allowed working directory for project jobs.
+    fn register_workspace(&self, _root: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    /// The launcher's trust decision for `root`, if it keeps one.
+    fn workspace_trusted(&self, _root: &Path) -> Option<bool> {
+        None
+    }
+    /// Redact secrets from child output before it is shown, stored, or logged.
+    fn redact(&self, text: &str) -> String {
+        text.to_owned()
     }
 }
 
-impl KernelProcessLauncher for StdProcessLauncher {
-    fn launch_interactive(&self, spec: &JobSpec) -> Result<InteractiveProcess, LaunchError> {
-        let mut command = Self::command(spec)?;
-        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|e| LaunchError::Spawn { program: spec.program.clone(), message: e.to_string() })?;
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        let pid = Some(child.id());
-        Ok(InteractiveProcess {
-            pid,
-            stdin: Box::new(stdin),
-            stdout: Box::new(stdout),
-            stderr: Box::new(stderr),
-            control: Arc::new(StdControl { child: Mutex::new(child) }),
+/// [`KernelProcessLauncher`] over the shared execution service.
+#[derive(Clone)]
+pub struct ExecutionLauncher {
+    execution: ExecutionService,
+}
+
+impl ExecutionLauncher {
+    pub fn new(execution: ExecutionService) -> Self {
+        Self { execution }
+    }
+
+    fn refusal(&self, id: &JobId, outcome: &JobOutcome) -> LaunchError {
+        let summary = self.execution.summary(id);
+        let refusal = summary.and_then(|s| s.refusal);
+        match (refusal, outcome) {
+            (Some(refusal), _) if refusal.code == RefusalCode::UntrustedWorkspace => {
+                LaunchError::Untrusted(refusal.message)
+            }
+            (Some(refusal), _) => LaunchError::Refused(refusal.message),
+            (None, JobOutcome::FailedToStart { reason }) => LaunchError::Refused(reason.clone()),
+            (None, other) => LaunchError::Refused(format!("the process ended before it started: {other:?}")),
+        }
+    }
+}
+
+struct ExecutionControl {
+    execution: ExecutionService,
+    id: JobId,
+}
+
+impl ProcessControl for ExecutionControl {
+    fn kill_tree(&self) {
+        self.execution.cancel(&self.id);
+    }
+
+    fn try_wait(&self) -> Option<ExitInfo> {
+        self.execution.result(&self.id).map(|result| ExitInfo {
+            code: match result.outcome {
+                JobOutcome::Exited { code } => Some(code),
+                _ => None,
+            },
+        })
+    }
+}
+
+struct ChannelSink {
+    tx: mpsc::UnboundedSender<String>,
+}
+
+impl LineSink for ChannelSink {
+    fn send_line(&self, line: &str) -> Result<(), InputClosed> {
+        self.tx.send(line.to_owned()).map_err(|_| InputClosed)
+    }
+}
+
+impl KernelProcessLauncher for ExecutionLauncher {
+    fn launch_interactive(&self, spec: JobSpec) -> LaunchFuture<'_> {
+        Box::pin(async move {
+            let job = match self.execution.launch_interactive(spec, InteractiveOptions::default()).await {
+                Ok(job) => job,
+                Err(result) => return Err(self.refusal(&result.id, &result.outcome)),
+            };
+            let (line_tx, lines) = mpsc::unbounded_channel();
+            let mut output = job.output;
+            tokio::spawn(async move {
+                while let Some(line) = output.next_line().await {
+                    if line_tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
+            let input = job.input;
+            tokio::spawn(async move {
+                while let Some(line) = input_rx.recv().await {
+                    if input.write_line(&line).await.is_err() {
+                        break;
+                    }
+                }
+                // Dropping `input` closes the helper's stdin (it then shuts down).
+            });
+            Ok(InteractiveProcess {
+                pid: job.pid,
+                input: Arc::new(ChannelSink { tx: input_tx }),
+                lines,
+                diagnostics: None,
+                control: Arc::new(ExecutionControl { execution: self.execution.clone(), id: job.id }),
+            })
         })
     }
 
     fn run_probe(&self, spec: &JobSpec) -> Result<ProbeOutput, LaunchError> {
-        let mut command = Self::command(spec)?;
-        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|e| LaunchError::Spawn { program: spec.program.clone(), message: e.to_string() })?;
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        let out_reader = std::thread::spawn(move || read_bounded(stdout));
-        let err_reader = std::thread::spawn(move || read_bounded(stderr));
-        let timeout = Duration::from_millis(spec.timeout_ms.unwrap_or(DEFAULT_PROBE_TIMEOUT_MS));
+        let id = self.execution.launch_application(spec.clone());
+        let timeout = Duration::from_millis(spec.timeout_ms.unwrap_or(30_000) + 5_000);
         let started = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
-                _ => {
-                    kill_tree(&mut child);
-                    let _ = child.wait();
-                    return Err(LaunchError::TimedOut(timeout.as_millis() as u64));
-                }
+        let result = loop {
+            if let Some(result) = self.execution.result(&id) {
+                break result;
             }
+            if started.elapsed() > timeout {
+                self.execution.cancel(&id);
+                return Err(LaunchError::TimedOut(timeout.as_millis() as u64));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let code = match &result.outcome {
+            JobOutcome::Exited { code } => Some(*code),
+            JobOutcome::FailedToStart { .. } => return Err(self.refusal(&id, &result.outcome)),
+            JobOutcome::TimedOut => return Err(LaunchError::TimedOut(spec.timeout_ms.unwrap_or(0))),
+            _ => None,
         };
         Ok(ProbeOutput {
-            exit: ExitInfo { code: status.code() },
-            stdout: out_reader.join().unwrap_or_default(),
-            stderr: err_reader.join().unwrap_or_default(),
+            exit: ExitInfo { code },
+            stdout: self.execution.output_text(&id, OutputStream::Stdout).unwrap_or_default(),
+            stderr: self.execution.output_text(&id, OutputStream::Stderr).unwrap_or_default(),
         })
     }
-}
 
-fn read_bounded(mut reader: impl Read) -> String {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                if buffer.len() < PROBE_OUTPUT_LIMIT {
-                    buffer.extend_from_slice(&chunk[..n.min(PROBE_OUTPUT_LIMIT - buffer.len())]);
-                }
-            }
-        }
-    }
-    String::from_utf8_lossy(&buffer).into_owned()
-}
-
-struct StdControl {
-    child: Mutex<Child>,
-}
-
-impl ProcessControl for StdControl {
-    fn kill_tree(&self) {
-        let mut child = self.child.lock().unwrap_or_else(|p| p.into_inner());
-        kill_tree(&mut child);
-        let _ = child.wait();
+    fn probe_dir(&self) -> Option<PathBuf> {
+        Some(self.execution.probe_dir().to_path_buf())
     }
 
-    fn try_wait(&self) -> Option<ExitInfo> {
-        let mut child = self.child.lock().unwrap_or_else(|p| p.into_inner());
-        child.try_wait().ok().flatten().map(|status| ExitInfo { code: status.code() })
+    fn register_workspace(&self, root: &Path) -> Result<(), String> {
+        self.execution.register_workspace_root(root).map(|_| ()).map_err(|e| e.to_string())
     }
-}
 
-fn kill_tree(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
+    fn workspace_trusted(&self, root: &Path) -> Option<bool> {
+        Some(self.execution.trust_status(&root.display().to_string()).map(|s| s.trusted).unwrap_or(false))
     }
-    #[cfg(windows)]
-    {
-        // Without job objects (owned by the ExecutionService), terminate the
-        // tree with the system taskkill; the kernel also exits on its own when
-        // its parent helper disappears.
-        if let Some(root) = std::env::var_os("SYSTEMROOT") {
-            let taskkill = Path::new(&root).join("System32").join("taskkill.exe");
-            let mut command = Command::new(taskkill);
-            command.args(["/PID", &child.id().to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null());
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000);
-            let _ = command.status();
-        }
+
+    fn redact(&self, text: &str) -> String {
+        self.execution.redact(text)
     }
-    let _ = child.kill();
 }
 
 #[cfg(test)]
@@ -285,33 +263,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn secrets_are_never_inherited() {
-        for name in ["ANTHROPIC_API_KEY", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "DB_PASSWORD", "MY_AUTH"] {
-            assert!(looks_secret(name), "{name}");
-        }
-        for name in INHERITED_VARIABLES {
-            assert!(!looks_secret(name), "{name}");
-        }
-        let env = research_environment(BTreeMap::new());
-        assert!(env.inherit.iter().all(|name| !looks_secret(name)));
+    fn research_environment_never_carries_credentials() {
+        let mut extra = BTreeMap::new();
+        extra.insert("ANTHROPIC_API_KEY".to_owned(), "x".to_owned());
+        extra.insert("GITHUB_TOKEN".to_owned(), "x".to_owned());
+        extra.insert("R_LIBS_USER".to_owned(), "C:/lib".to_owned());
+        let env = research_environment(extra);
+        assert!(env.inherit.is_empty());
+        assert!(env.set.keys().all(|name| !looks_secret(name)));
+        assert_eq!(env.set.get("R_LIBS_USER").map(String::as_str), Some("C:/lib"));
         assert_eq!(env.set.get("PYTHONUTF8").map(String::as_str), Some("1"));
-    }
-
-    #[test]
-    fn restricted_policy_is_refused_not_downgraded() {
-        let spec = JobSpec {
-            label: "probe".into(),
-            program: std::env::current_exe().unwrap().display().to_string(),
-            args: vec![],
-            environment: EnvironmentSpec::default(),
-            working_directory: std::env::temp_dir().display().to_string(),
-            policy: ExecutionPolicy::Restricted { backend: "container".into() },
-            timeout_ms: None,
-            log_limit_bytes: None,
-            stdin: None,
-        };
-        assert!(matches!(StdProcessLauncher.run_probe(&spec), Err(LaunchError::Refused(_))));
-        let relative = JobSpec { program: "python".into(), policy: ExecutionPolicy::TrustedNative, ..spec };
-        assert!(matches!(StdProcessLauncher.run_probe(&relative), Err(LaunchError::InvalidSpec(_))));
     }
 }

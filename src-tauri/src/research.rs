@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use exposition_core::artifact::{AttachArtifactOutcome, AttachArtifactRequest};
 use exposition_research::types::{
-    EnvironmentReport, ExecuteRequest, OutputPage, RunManifest, RunSummary, SessionInfo, WorkspaceStatus,
+    EnvironmentReport, ExecuteRequest, RunManifest, RunOutputPage, RunSummary, SessionInfo, WorkspaceStatus,
 };
 use exposition_research::{ResearchError, StartSessionRequest};
 use serde::Serialize;
@@ -49,16 +49,13 @@ pub struct AttachArtifactResult {
     pub warnings: Vec<String>,
 }
 
-/// TEMPORARY until the workspace service (m1/workspace) owns project roots and
-/// trust: the Research panel opens a folder and records the user's explicit
-/// trust decision here.
+/// TEMPORARY until the workspace service (m1/workspace) owns the open project
+/// root: the Research panel opens a folder here. The root is registered with the
+/// execution service; trust is always the execution service's decision (granted
+/// only through the trust dialog), never asserted by the webview.
 #[tauri::command]
-pub async fn research_workspace_set(
-    state: State<'_, AppState>,
-    root: String,
-    trusted: bool,
-) -> Result<WorkspaceStatus, CommandError> {
-    Ok(state.research.set_workspace(&PathBuf::from(root), trusted)?)
+pub async fn research_workspace_set(state: State<'_, AppState>, root: String) -> Result<WorkspaceStatus, CommandError> {
+    Ok(state.research.set_workspace(&PathBuf::from(root), false)?)
 }
 
 #[tauri::command]
@@ -136,7 +133,7 @@ pub async fn research_run_output(
     run_id: String,
     after: Option<u32>,
     limit: Option<u32>,
-) -> Result<OutputPage, CommandError> {
+) -> Result<RunOutputPage, CommandError> {
     Ok(state.research.run_output(&run_id, after, limit.unwrap_or(200))?)
 }
 

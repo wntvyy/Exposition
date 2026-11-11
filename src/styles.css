@@ -1,7 +1,14 @@
-/* Bootstrap styles. The UI owner replaces these with the shared token system. */
-:root {
-  color-scheme: light dark;
-  font-family: system-ui, "Segoe UI", sans-serif;
+/*
+ * Global base styles. Element selectors (low specificity) so shared component
+ * classes always win regardless of stylesheet order; the only class rule is the
+ * Monaco hidden-input override below.
+ * Tokens live in src/ui/tokens.css; components in src/ui/components/*.css.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 html,
@@ -9,8 +16,96 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  overflow: hidden;
 }
 
-.bootstrap {
-  padding: 24px;
+body {
+  background: var(--color-surface-base);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Desktop app: text in chrome is not selectable unless a surface opts in. */
+  user-select: none;
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--font-code);
+}
+
+a {
+  color: var(--color-accent-text);
+}
+
+::selection {
+  background: var(--color-selection);
+  color: var(--color-text);
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Monaco's hidden text input receives focus; the caret is its focus indicator. */
+.monaco-editor .native-edit-context,
+.monaco-editor .inputarea {
+  outline: none !important;
+}
+
+/* Thin, theme-aware scrollbars (no arrow buttons). Setting the standard
+   scrollbar-width/scrollbar-color on an element disables these styles. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-scrollbar);
+  border: 2px solid transparent;
+  border-radius: var(--radius-full);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-scrollbar-hover);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0ms !important;
+  }
 }

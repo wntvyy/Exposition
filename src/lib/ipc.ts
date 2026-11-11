@@ -12,9 +12,15 @@ import type { DocumentId } from "../bindings/DocumentId";
 import type { DocumentInfo } from "../bindings/DocumentInfo";
 import type { DocumentState } from "../bindings/DocumentState";
 import type { EditOrigin } from "../bindings/EditOrigin";
+import type { JobEvent } from "../bindings/JobEvent";
+import type { JobId } from "../bindings/JobId";
+import type { JobSummary } from "../bindings/JobSummary";
+import type { OutputPage } from "../bindings/OutputPage";
+import type { ToolchainInfo } from "../bindings/ToolchainInfo";
 import type { TransactionError } from "../bindings/TransactionError";
 import type { TransactionOutcome } from "../bindings/TransactionOutcome";
 import type { TransactionRequest } from "../bindings/TransactionRequest";
+import type { TrustStatus } from "../bindings/TrustStatus";
 
 export const commands = {
   appInfo: () => invoke<AppInfo>("app_info"),
@@ -26,6 +32,19 @@ export const commands = {
     invoke<DocumentChanged>("document_undo", { document, origin }),
   documentRedo: (document: DocumentId, origin: EditOrigin) =>
     invoke<DocumentChanged>("document_redo", { document, origin }),
+
+  jobList: () => invoke<JobSummary[]>("job_list"),
+  /** Retained output chunks after sequence number `after` (exclusive), oldest first. */
+  jobOutput: (job: JobId, after: number | null, maxBytes?: number) =>
+    invoke<OutputPage>("job_output", { job, after, maxBytes: maxBytes ?? null }),
+  /** Resolves false when the job had already finished. */
+  jobCancel: (job: JobId) => invoke<boolean>("job_cancel", { job }),
+  toolchainsList: () => invoke<ToolchainInfo[]>("toolchains_list"),
+  toolchainsRefresh: () => invoke<ToolchainInfo[]>("toolchains_refresh"),
+  trustStatus: (root: string) => invoke<TrustStatus>("trust_status", { root }),
+  /** Only call from the explicit trust dialog (`requestWorkspaceTrust`). */
+  trustGrant: (root: string) => invoke<TrustStatus>("trust_grant", { root }),
+  trustRevoke: (root: string) => invoke<TrustStatus>("trust_revoke", { root }),
 };
 
 export const events = {
@@ -34,6 +53,11 @@ export const events = {
     listen<DocumentEvent>("documents:event", (e) => handler(e.payload)),
   /** The frontend fell behind; re-read state of every attached document. */
   documentsResync: (handler: () => void): Promise<UnlistenFn> => listen("documents:resync", () => handler()),
+  /** Every job lifecycle event (queued, started, output, cancel requested, finished). */
+  jobs: (handler: (event: JobEvent) => void): Promise<UnlistenFn> =>
+    listen<JobEvent>("jobs:event", (e) => handler(e.payload)),
+  /** The frontend fell behind; re-read the job list. */
+  jobsResync: (handler: () => void): Promise<UnlistenFn> => listen("jobs:resync", () => handler()),
 };
 
 export function isCommandError(value: unknown): value is CommandError {

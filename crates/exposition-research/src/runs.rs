@@ -10,7 +10,7 @@ use exposition_core::path::WorkspacePath;
 use crate::helper::sha256_hex;
 use crate::protocol::HelperFile;
 use crate::store::artifact_dir_path;
-use crate::types::{OutputEntry, OutputItem, OutputPage, RunManifest, RunSummary, SessionOwner};
+use crate::types::{OutputEntry, OutputItem, RunManifest, RunOutputPage, RunSummary, SessionOwner};
 
 /// Text retained in memory per run (older entries are dropped first).
 pub const RETAINED_CHARS: usize = 2 * 1024 * 1024;
@@ -65,7 +65,7 @@ impl RunState {
         entry
     }
 
-    pub fn page(&self, after: Option<u32>, limit: u32) -> OutputPage {
+    pub fn page(&self, after: Option<u32>, limit: u32) -> RunOutputPage {
         page_of(self.id(), self.entries.iter(), after, limit, self.manifest.output.truncated, self.next_seq)
     }
 
@@ -118,12 +118,12 @@ pub(crate) fn page_of<'a>(
     limit: u32,
     truncated: bool,
     last_seq: u32,
-) -> OutputPage {
+) -> RunOutputPage {
     let limit = limit.clamp(1, PAGE_LIMIT) as usize;
     let all: Vec<&OutputEntry> = entries.collect();
     let first_retained_seq = all.first().map(|e| e.seq).unwrap_or(last_seq + 1);
     let entries = all.into_iter().filter(|e| after.is_none_or(|a| e.seq > a)).take(limit).cloned().collect();
-    OutputPage {
+    RunOutputPage {
         run_id: exposition_core::artifact::RunId(run_id.to_owned()),
         entries,
         first_retained_seq,
