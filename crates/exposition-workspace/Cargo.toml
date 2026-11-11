@@ -1,0 +1,17 @@
+[package]
+name = "exposition-workspace"
+description = "Workspace and document services: revisioned buffers, transactions, undo, files, saves, and recovery."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+exposition-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["src-tauri", "crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+
+[workspace.dependencies]
+exposition-core = { path = "crates/exposition-core" }
+exposition-workspace = { path = "crates/exposition-workspace" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ts-rs = { version = "12", features = ["serde-compat"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+tracing = "0.1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+# Typst, PDF interpretation, and other compute-heavy dependencies are far too slow
+# unoptimized; optimize dependencies in dev builds while keeping workspace crates
+# fast to rebuild.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

@@ -1,0 +1,32 @@
+# Private development plans, agent instructions, and local agent state
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+AGENTS.local.md
+.claude/
+.agents/
+.exposition-dev/
+
+# Local credentials
+.env
+.env.*
+!.env.example
+
+# JavaScript and Rust build output
+node_modules/
+dist/
+target/
+
+# Tauri generated capability schemas
+src-tauri/gen/schemas/
+
+# Parallel development worktrees and local test output
+.worktrees/
+test-results/
+*.log
+
+# Local tooling state
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-document-redo"
+description = "Enables the document_redo command without any pre-configured scope."
+commands.allow = ["document_redo"]
+
+[[permission]]
+identifier = "deny-document-redo"
+description = "Denies the document_redo command without any pre-configured scope."
+commands.deny = ["document_redo"]

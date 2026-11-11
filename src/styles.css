@@ -1,0 +1,16 @@
+/* Bootstrap styles. The UI owner replaces these with the shared token system. */
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, "Segoe UI", sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.bootstrap {
+  padding: 24px;
+}

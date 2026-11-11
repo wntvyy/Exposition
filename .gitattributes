@@ -1,0 +1,18 @@
+# Normalize source text to LF in the repository and working tree.
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.ico binary
+*.icns binary
+*.pdf binary
+*.gz binary
+*.zip binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+
+# Fixtures that deliberately exercise line-ending and encoding preservation
+# must be stored byte-for-byte.
+tests/fixtures/encoding/** -text

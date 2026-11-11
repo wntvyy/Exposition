@@ -1,0 +1,5 @@
+[env]
+# ts-rs writes generated TypeScript contract types here when `cargo test` runs.
+TS_RS_EXPORT_DIR = { value = "src/bindings", relative = true }
+# 64-bit integers cross the IPC boundary as JSON numbers; values stay below 2^53.
+TS_RS_LARGE_INT = "number"
