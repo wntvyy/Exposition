@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agents-task-cancel"
+description = "Enables the agents_task_cancel command without any pre-configured scope."
+commands.allow = ["agents_task_cancel"]
+
+[[permission]]
+identifier = "deny-agents-task-cancel"
+description = "Denies the agents_task_cancel command without any pre-configured scope."
+commands.deny = ["agents_task_cancel"]
