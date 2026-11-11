@@ -1,0 +1,45 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath}
+\usepackage{graphicx}
+
+\title{Direct Editing Fixture}
+\author{Exposition Test Suite}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}\label{sec:intro}
+
+The first paragraph defines a baseline for official workflows and fluffy
+ligature tests: affine, office, baffle, and shuffle all contain ligatures.
+We write ``double quotes'' and `single quotes', an en dash in 1--2, an em
+dash---like this---and a tie in Section~\ref{sec:results}.
+The caf\'e served a na\"ive r\^ole; \emph{emphasized words} and \textbf{bold
+words} appear inline.
+Incomprehensibilities notwithstanding, characteristically uncharacteristic
+interdisciplinary counterrevolutionaries institutionalized
+electroencephalographically.
+
+Inline mathematics such as $a^2 + b^2 = c^2$ and $\alpha + \beta \leq \gamma$
+sits inside prose, followed by a footnote.\footnote{A short footnote with text.}
+Knuth described the system in detail~\cite{knuth1984}.
+\begin{equation}
+  E = m c^2 + \sum_{i=1}^{n} x_i
+  \label{eq:energy}
+\end{equation}
+Equation~\eqref{eq:energy} is numbered.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.3\linewidth]{figures/box.png}
+  \caption{A small boxed figure.}
+  \label{fig:box}
+\end{figure}
+
+\input{sections/results}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}

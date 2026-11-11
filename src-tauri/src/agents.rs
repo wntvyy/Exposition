@@ -136,21 +136,24 @@ pub async fn agents_review_accept(
     state.agents.accept(&task_id(task)?, path.as_ref()).map_err(command_error)
 }
 
-/// Queue a script for the scripted provider — development builds only.
+/// Queue a script for the scripted provider — development builds only. The
+/// command is compiled, listed (`DEV_COMMANDS`), and granted only in debug builds.
+#[cfg(debug_assertions)]
 #[tauri::command]
-#[allow(unused_variables)]
 pub async fn agents_dev_load_script(state: State<'_, AppState>, script: serde_json::Value) -> Result<(), CommandError> {
-    #[cfg(debug_assertions)]
-    {
-        if script.to_string().len() > 1024 * 1024 {
-            return Err(CommandError::new("agents.invalidScript", "the script is too large"));
-        }
-        state.agents.load_script(script).map_err(command_error)
+    if script.to_string().len() > 1024 * 1024 {
+        return Err(CommandError::new("agents.invalidScript", "the script is too large"));
     }
-    #[cfg(not(debug_assertions))]
-    {
-        Err(CommandError::new("agents.scriptedUnavailable", "the scripted provider is not part of release builds"))
-    }
+    state.agents.load_script(script).map_err(command_error)
+}
+
+/// Grant the debug-only agent command (never present in release builds).
+#[cfg(debug_assertions)]
+pub fn add_dev_capability(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::ipc::CapabilityBuilder;
+    app.add_capability(
+        CapabilityBuilder::new("dev-agents-scripted").window("main").permission("allow-agents-dev-load-script"),
+    )
 }
 
 /// Forward agent events to the webview in order.

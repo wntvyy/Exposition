@@ -3,11 +3,11 @@
 //! execution service (commands). Agent tools call the same services people
 //! use; they never launch processes themselves.
 //!
-//! [`UnavailableServices`] is what this build provides until those services
-//! are integrated: every call reports a clear "not available in this build"
-//! error. Results are never simulated.
+//! [`super::execution::ExecutionToolServices`] runs commands and Python on the
+//! shared execution service; [`UnavailableServices`] reports every tool as
+//! unavailable. Results are never simulated.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use exposition_core::job::ExecutionPolicy;
@@ -50,6 +50,8 @@ pub struct CommandRequest {
     pub args: Vec<String>,
     /// Absolute working directory inside the project root.
     pub working_directory: PathBuf,
+    /// Canonical project root of the task.
+    pub root: PathBuf,
     /// Never `TrustedNative` unless the user approved this launch.
     pub policy: ExecutionPolicy,
     /// Agent task that requested the launch (agent runs use separate sessions).
@@ -59,6 +61,9 @@ pub struct CommandRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PythonRequest {
     pub code: String,
+    /// Project root of the task (also the working directory).
+    pub root: PathBuf,
+    pub working_directory: PathBuf,
     pub policy: ExecutionPolicy,
     /// Agent runs use a session separate from the user's.
     pub session: String,
@@ -84,6 +89,12 @@ pub trait ToolServices: Send + Sync {
     /// Name of the tested restricted (container) execution backend, if one is
     /// available. Unattended agent execution requires it.
     fn restricted_backend(&self) -> Option<String>;
+
+    /// Why trusted native execution is not possible in `root` (e.g. the folder
+    /// is not trusted), checked before the user is asked to approve a launch.
+    fn native_refusal(&self, _root: &Path) -> Option<String> {
+        None
+    }
 
     async fn build_document(&self, request: BuildRequest, cancel: CancellationToken) -> Result<Value, ServiceError>;
     async fn run_python(&self, request: PythonRequest, cancel: CancellationToken) -> Result<Value, ServiceError>;

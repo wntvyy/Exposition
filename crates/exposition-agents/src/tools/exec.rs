@@ -310,6 +310,9 @@ fn process_gate(env: &ToolEnv<'_>, kind: ServiceKind, describe: impl FnOnce() ->
             )),
         },
         ExecutionMode::ApproveEach => {
+            if let Some(reason) = env.services.native_refusal(env.files.root()) {
+                return Gate::Refused(ToolOutput::error(reason));
+            }
             let (title, detail) = describe();
             Gate::NeedsApproval {
                 title,
@@ -345,7 +348,13 @@ pub async fn run(
             service_result(
                 env.services
                     .run_python(
-                        PythonRequest { code: input.code, policy, session: format!("agent-{}", env.task_id.0) },
+                        PythonRequest {
+                            code: input.code,
+                            root: env.files.root().to_path_buf(),
+                            working_directory: env.files.root().to_path_buf(),
+                            policy,
+                            session: format!("agent-{}", env.task_id.0),
+                        },
                         cancel,
                     )
                     .await,
@@ -390,6 +399,7 @@ async fn run_command(
                     program: input.program,
                     args: input.args,
                     working_directory,
+                    root: env.files.root().to_path_buf(),
                     policy,
                     task_id: env.task_id.0.clone(),
                 },

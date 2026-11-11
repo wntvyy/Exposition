@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-toolchains-refresh"
+description = "Enables the toolchains_refresh command without any pre-configured scope."
+commands.allow = ["toolchains_refresh"]
+
+[[permission]]
+identifier = "deny-toolchains-refresh"
+description = "Denies the toolchains_refresh command without any pre-configured scope."
+commands.deny = ["toolchains_refresh"]

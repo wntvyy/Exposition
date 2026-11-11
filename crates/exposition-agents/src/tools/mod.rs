@@ -10,6 +10,7 @@
 //! execution mode, consent, and budgets — never by model or project text.
 
 pub mod exec;
+pub mod execution;
 pub mod services;
 
 use serde::Deserialize;
@@ -120,8 +121,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: RUN_PYTHON,
-            description: "Run Python code in a separate research session for this task (not the user's sessions) \
-                and return its real output. Use it for calculations, data analysis, and figures the user asked for.",
+            description: "Run Python code in a separate process for this task (never the user's own sessions) and \
+                return its real exit code and output. Use it for calculations and data analysis the user asked for. \
+                In the restricted sandbox the project is read-only at /workspace and files can be written to /out.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -147,7 +149,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: RUN_COMMAND,
             description: "Run one program with an argument list (no shell, no pipes or redirection) in the project \
-                folder and return its exit code and bounded output. Use only when no dedicated tool fits.",
+                folder and return its exit code and bounded output. Use only when no dedicated tool fits. In the \
+                restricted sandbox the project is read-only at /workspace and files can be written to /out.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
