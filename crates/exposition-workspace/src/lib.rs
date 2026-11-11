@@ -14,4 +14,4 @@ pub mod types;
 
 pub use documents::{DocumentService, DocumentSnapshot, OpenDocument};
 pub use error::{WorkspaceError, WorkspaceResult};
-pub use service::{AppSettingsState, BuildInput, ProjectSettingsState, WorkspaceService};
+pub use service::{AppSettingsState, BuildInput, ProjectSettingsState, WorkspaceService, WorkspaceSnapshot};

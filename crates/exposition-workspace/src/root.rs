@@ -85,7 +85,12 @@ impl WorkspaceRoot {
                 if fs::symlink_metadata(&joined).is_ok() {
                     WorkspaceError::new("path.brokenLink", format!("{path} is a link whose target does not exist."))
                 } else {
-                    WorkspaceError::not_found(path)
+                    // Report an escape (not "missing") when an existing ancestor
+                    // leads outside, so paths outside cannot be probed.
+                    match self.resolve_for_write(path) {
+                        Err(e) if e.code == "path.outsideWorkspace" => e,
+                        _ => WorkspaceError::not_found(path),
+                    }
                 }
             }
             _ => WorkspaceError::io(path, &e),
@@ -259,6 +264,9 @@ mod tests {
         let f = fixture();
         assert_eq!(f.root.resolve_existing(&wp("escape")).unwrap_err().code, "path.outsideWorkspace");
         assert_eq!(f.root.resolve_existing(&wp("escape/secret.txt")).unwrap_err().code, "path.outsideWorkspace");
+        // Missing files behind the junction are reported as escapes, not as missing,
+        // so the existence of outside files cannot be probed.
+        assert_eq!(f.root.resolve_existing(&wp("escape/absent.txt")).unwrap_err().code, "path.outsideWorkspace");
         // Creating a new file through the junction is refused too.
         assert_eq!(f.root.resolve_for_write(&wp("escape/new.txt")).unwrap_err().code, "path.outsideWorkspace");
         assert_eq!(f.root.resolve_for_write(&wp("escape/deeper/new.txt")).unwrap_err().code, "path.outsideWorkspace");

@@ -1,10 +1,13 @@
 // Source editor contributions: the Monaco editor for workspace text files,
 // save commands, and the encoding/line-ending status item.
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSyncExternalStore } from "react";
 
 import { editors, useActiveEditor } from "../../app/editors";
 import { registry, type EditorProps } from "../../app/registry";
-import { activeHandle, handleForPath, saveAll, saveDocument } from "./documentClient";
+import { commands } from "../../lib/ipc";
+import { ask } from "../workspace/prompt";
+import { activeHandle, handleForPath, openHandles, saveAll, saveDocument } from "./documentClient";
 import { SourceEditor } from "./SourceEditor";
 
 function SourceEditorTab({ resource, active }: EditorProps) {
@@ -77,3 +80,43 @@ registry.registerCommand({
 });
 
 registry.registerStatusItem({ id: "editor.documentStatus", alignment: "right", order: 50, render: () => <DocumentStatus /> });
+
+// Closing the window with unsaved changes asks first. Unsaved buffers are
+// journaled for crash recovery either way; "Don't Save" discards them.
+function installWindowCloseGuard() {
+  let current;
+  try {
+    current = getCurrentWindow();
+  } catch {
+    return; // Not running inside the desktop shell (e.g. unit tests).
+  }
+  void current
+    .onCloseRequested(async (event) => {
+      await Promise.all(openHandles().map((h) => h.sync.idle()));
+      const dirty = (await commands.documentList()).filter((d) => d.path && d.savedRevision !== d.revision);
+      if (dirty.length === 0) return;
+      const names = dirty.map((d) => d.path?.split("/").pop()).join(", ");
+      const choice = await ask({
+        title: dirty.length === 1 ? `Save changes to ${names}?` : `Save changes to ${dirty.length} files?`,
+        message:
+          dirty.length === 1
+            ? "Your changes will be lost if you don't save them."
+            : `${names} have unsaved changes. They will be lost if you don't save them.`,
+        buttons: [
+          { id: "save", label: dirty.length === 1 ? "Save" : "Save All", primary: true },
+          { id: "discard", label: "Don't Save", danger: true },
+          { id: "cancel", label: "Cancel", cancel: true },
+        ],
+      });
+      if (choice === "save") {
+        if (!(await saveAll())) event.preventDefault();
+      } else if (choice === "discard") {
+        for (const doc of dirty) await commands.documentClose(doc.id).catch(() => {});
+      } else {
+        event.preventDefault();
+      }
+    })
+    .catch(() => {});
+}
+
+installWindowCloseGuard();

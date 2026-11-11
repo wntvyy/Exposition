@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use exposition_core::document::{
     ConflictPolicy, DocumentEdit, DocumentEvent, DocumentId, DocumentInfo, DocumentState, EditOrigin, LineEnding,
-    TextPatch, TransactionId, TransactionOutcome, TransactionRequest, UndoBehavior,
+    TextEncoding, TextPatch, TransactionId, TransactionOutcome, TransactionRequest, UndoBehavior,
 };
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::TextRange;
@@ -32,7 +32,7 @@ use tokio::time::Instant;
 use ts_rs::TS;
 
 use crate::diff::diff_patches;
-use crate::documents::{DocumentService, OpenDocument};
+use crate::documents::{DocumentService, DocumentSnapshot, OpenDocument};
 use crate::encoding::{DecodeError, Decoded, MAX_TEXT_BYTES, decode, encode, encoding_label, language_for};
 use crate::error::{WorkspaceError, WorkspaceResult};
 use crate::fsutil::{hash_file, read_limited, sha256_hex, write_atomic};
@@ -91,6 +91,61 @@ pub struct BuildInput {
     pub revision: Option<u64>,
     /// SHA-256 of `bytes`.
     pub content_hash: String,
+}
+
+/// An immutable view of the workspace for one build: open buffers as of the
+/// moment it was taken, and disk files read on demand through the workspace
+/// path checks (no traversal, no link escapes). Compilers resolve every input,
+/// including files they discover while compiling, through [`Self::read`].
+#[derive(Debug, Clone)]
+pub struct WorkspaceSnapshot {
+    root: WorkspaceRoot,
+    buffers: HashMap<WorkspacePath, (DocumentSnapshot, TextEncoding)>,
+}
+
+impl WorkspaceSnapshot {
+    /// Canonical workspace root (e.g. a working directory for external tools).
+    pub fn root(&self) -> &Path {
+        self.root.path()
+    }
+
+    /// Open buffers captured in this snapshot.
+    pub fn buffers(&self) -> impl Iterator<Item = &DocumentSnapshot> {
+        self.buffers.values().map(|(snapshot, _)| snapshot)
+    }
+
+    /// Read one input: the captured buffer when the file is open, otherwise
+    /// the file on disk (resolved inside the workspace).
+    pub fn read(&self, path: &WorkspacePath) -> WorkspaceResult<BuildInput> {
+        if let Some((snapshot, encoding)) = self.buffers.get(path) {
+            let bytes: Arc<[u8]> = encode(&snapshot.text, *encoding).into();
+            return Ok(BuildInput {
+                path: path.clone(),
+                content_hash: sha256_hex(&bytes),
+                bytes,
+                text: Some(Arc::clone(&snapshot.text)),
+                document: Some(snapshot.id.clone()),
+                revision: Some(snapshot.revision),
+            });
+        }
+        let target = self.root.resolve_existing(path)?;
+        if fs::metadata(&target).map(|m| m.is_dir()).unwrap_or(false) {
+            return Err(WorkspaceError::new("file.isDirectory", format!("{path} is a folder.")));
+        }
+        let bytes = match read_limited(&target, MAX_BUILD_INPUT_BYTES).map_err(|e| WorkspaceError::io(path, &e))? {
+            Ok(bytes) => bytes,
+            Err(size) => return Err(too_large(path, size)),
+        };
+        let text = decode(&bytes).ok().map(|d| Arc::<str>::from(d.text));
+        Ok(BuildInput {
+            path: path.clone(),
+            content_hash: sha256_hex(&bytes),
+            bytes: bytes.into(),
+            text,
+            document: None,
+            revision: None,
+        })
+    }
 }
 
 /// A raw watcher notification tagged with the workspace generation it belongs to.
@@ -829,48 +884,29 @@ impl WorkspaceService {
 
     // ----- build inputs --------------------------------------------------------
 
-    /// Read files for a build snapshot. Open buffers are used instead of disk
-    /// (taken atomically across all open documents); other files are read from
-    /// disk through the same path checks as every other file access.
-    pub fn build_inputs(&self, paths: &[WorkspacePath]) -> WorkspaceResult<Vec<BuildInput>> {
+    /// Capture an immutable build view: every open buffer at its current
+    /// revision (taken atomically), plus path-checked access to disk files.
+    pub fn snapshot(&self) -> WorkspaceResult<WorkspaceSnapshot> {
         let root = self.root()?;
-        let infos: HashMap<DocumentId, DocumentInfo> =
-            self.documents.list().into_iter().map(|i| (i.id.clone(), i)).collect();
-        let snapshots = self.documents.snapshots();
-        let mut out = Vec::with_capacity(paths.len());
-        for path in paths {
-            if let Some(snapshot) = snapshots.iter().find(|s| s.path.as_ref() == Some(path)) {
-                let encoding = infos
-                    .get(&snapshot.id)
-                    .map(|i| i.encoding)
-                    .unwrap_or(exposition_core::document::TextEncoding::Utf8);
-                let bytes: Arc<[u8]> = encode(&snapshot.text, encoding).into();
-                out.push(BuildInput {
-                    path: path.clone(),
-                    content_hash: sha256_hex(&bytes),
-                    bytes,
-                    text: Some(Arc::clone(&snapshot.text)),
-                    document: Some(snapshot.id.clone()),
-                    revision: Some(snapshot.revision),
-                });
-                continue;
-            }
-            let target = root.resolve_existing(path)?;
-            let bytes = match read_limited(&target, MAX_BUILD_INPUT_BYTES).map_err(|e| WorkspaceError::io(path, &e))? {
-                Ok(bytes) => bytes,
-                Err(size) => return Err(too_large(path, size)),
-            };
-            let text = decode(&bytes).ok().map(|d| Arc::<str>::from(d.text));
-            out.push(BuildInput {
-                path: path.clone(),
-                content_hash: sha256_hex(&bytes),
-                bytes: bytes.into(),
-                text,
-                document: None,
-                revision: None,
-            });
-        }
-        Ok(out)
+        let encodings: HashMap<DocumentId, TextEncoding> =
+            self.documents.list().into_iter().map(|i| (i.id, i.encoding)).collect();
+        let buffers = self
+            .documents
+            .snapshots()
+            .into_iter()
+            .filter_map(|snapshot| {
+                let path = snapshot.path.clone()?;
+                let encoding = encodings.get(&snapshot.id).copied().unwrap_or(TextEncoding::Utf8);
+                Some((path, (snapshot, encoding)))
+            })
+            .collect();
+        Ok(WorkspaceSnapshot { root, buffers })
+    }
+
+    /// Read several files from one snapshot (see [`WorkspaceSnapshot::read`]).
+    pub fn build_inputs(&self, paths: &[WorkspacePath]) -> WorkspaceResult<Vec<BuildInput>> {
+        let snapshot = self.snapshot()?;
+        paths.iter().map(|path| snapshot.read(path)).collect()
     }
 
     // ----- file watching -------------------------------------------------------

@@ -405,6 +405,19 @@ fn build_inputs_prefer_open_buffers() {
     assert_eq!(inputs[1].document, None);
     assert_eq!(&*inputs[1].bytes, b"= Title\n\nBody.\n");
     assert_eq!(inputs[1].content_hash, sha256_hex(b"= Title\n\nBody.\n"));
+
+    // A snapshot is immutable: later edits do not change what it reads.
+    let snapshot = f.service.snapshot().unwrap();
+    edit(&f.service, &id, vec![TextPatch::insert(0, "later ")]);
+    assert_eq!(snapshot.read(&wp("bom.md")).unwrap().text.as_deref(), Some("new # Heading\n"));
+    assert_eq!(snapshot.buffers().count(), 1);
+    // Disk reads go through the same path checks.
+    let outside = f.dir.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    junction(&f.file("escape"), &outside);
+    assert_eq!(snapshot.read(&wp("escape/x.typ")).unwrap_err().code, "path.outsideWorkspace");
+    assert_eq!(snapshot.read(&wp("chapters")).unwrap_err().code, "file.isDirectory");
+    assert_eq!(snapshot.read(&wp("image.png")).unwrap().text, None, "binary inputs carry bytes only");
 }
 
 #[test]
