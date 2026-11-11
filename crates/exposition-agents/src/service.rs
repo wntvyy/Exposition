@@ -8,7 +8,9 @@
 //! enforced here, outside model prose. Cancellation aborts the stream or the
 //! running tool immediately; changes made so far stay recorded and revertible.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+#[cfg(debug_assertions)]
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -1165,5 +1167,35 @@ impl Run<'_> {
             self.set_status(TaskStatus::Running);
         }
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credentials::MemoryStore;
+    use crate::tools::services::UnavailableServices;
+
+    #[test]
+    fn scripted_provider_is_only_available_in_debug_builds() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let service = AgentService::new(AgentConfig {
+            database: None,
+            documents: Arc::new(DocumentService::new()),
+            credentials: Arc::new(MemoryStore::default()),
+            services: Arc::new(UnavailableServices),
+            runtime: runtime.handle().clone(),
+            allow_scripted: true,
+            anthropic_base_url: None,
+            retry: None,
+        })
+        .unwrap();
+        assert_eq!(service.provider_status().scripted_available, cfg!(debug_assertions));
+        let scripted = ProviderSettings { provider: ProviderKind::Scripted, ..ProviderSettings::default() };
+        assert_eq!(service.update_settings(scripted).is_ok(), cfg!(debug_assertions));
+        // A stored scripted setting is never honored by a release build.
+        if !cfg!(debug_assertions) {
+            assert_eq!(service.settings().unwrap().provider, ProviderKind::Anthropic);
+        }
     }
 }
