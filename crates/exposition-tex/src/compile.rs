@@ -303,6 +303,22 @@ impl<R: JobRunner> TexBuilder<R> {
         }
 
         let entry_name = target.entry.file_name().to_owned();
+        // The entry becomes the engine's first command-line argument, which
+        // TeX interprets (`&format`, `\code`), and TeX cannot read names with
+        // spaces or specials: accept plain names only.
+        let plain_name = !entry_name.starts_with(['-', '&', '.'])
+            && entry_name.chars().all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'));
+        if !plain_name {
+            return self.early(
+                request,
+                id,
+                BuildStatus::Error {
+                    message: format!(
+                        "entry file name {entry_name:?} is not supported by TeX; use letters, digits, '.', '_', '-'"
+                    ),
+                },
+            );
+        }
         let job_name = entry_name.rsplit_once('.').map(|(stem, _)| stem.to_owned()).unwrap_or(entry_name.clone());
         let env = self.environment(toolchain, &overlay_entry_dir, &project_entry_dir);
         let out_arg = slash(&out_dir);

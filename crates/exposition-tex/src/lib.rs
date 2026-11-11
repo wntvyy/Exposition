@@ -29,6 +29,8 @@ pub use toolchain::{TexTool, TexToolchain};
 
 #[cfg(test)]
 mod thread_safety {
+    use super::*;
+
     fn send_sync<T: Send + Sync>() {}
 
     /// Builds and page sessions can move to and be shared across worker threads.

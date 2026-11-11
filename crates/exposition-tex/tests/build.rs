@@ -261,3 +261,20 @@ fn biblatex_projects_run_biber() {
         assert!(!again.passes.iter().any(|p| p.tool == "biber"), "{:?}", again.passes);
     }
 }
+
+#[test]
+fn entry_names_tex_would_interpret_are_rejected() {
+    let Some(h) = common::Harness::new("latex-basic", Engine::PdfLatex) else { return };
+    for name in ["&pdflatex.tex", "-shell-escape.tex", "my paper.tex"] {
+        std::fs::copy(h.project.path().join("main.tex"), h.project.path().join(name)).unwrap();
+        let mut request = h.request(BuildMode::Draft);
+        request.target.entry = exposition_core::path::WorkspacePath::parse(name).unwrap();
+        let build = h.builder.build(&request);
+        assert!(
+            matches!(&build.result.status, BuildStatus::Error { message } if message.contains("not supported")),
+            "{name}: {:?}",
+            build.result.status
+        );
+        assert!(build.passes.is_empty(), "{name}: no engine may run");
+    }
+}
