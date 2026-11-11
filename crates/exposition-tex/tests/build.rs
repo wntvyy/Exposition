@@ -245,7 +245,7 @@ fn writes_outside_the_build_and_process_execution_are_refused() {
 fn biblatex_projects_run_biber() {
     for engine in ENGINES {
         let Some(h) = common::Harness::new("latex-biblatex", engine) else { continue };
-        if h.builder.toolchain().and_then(|t| t.tool(exposition_tex::TexTool::Biber)).is_none() {
+        if h.builder.toolchain().and_then(|t| t.tool(exposition_tex::TexTool::Biber).map(|_| ())).is_none() {
             eprintln!("SKIPPED: biber not found");
             return;
         }

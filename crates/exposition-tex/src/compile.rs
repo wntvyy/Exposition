@@ -45,7 +45,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use exposition_core::build::{
@@ -56,6 +56,7 @@ use exposition_core::document::DocumentId;
 use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobOutcome, JobSpec};
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::{LineColumn, LineIndex, TextRange};
+use exposition_execution::JobRefusal;
 use exposition_workspace::DocumentSnapshot;
 use sha2::{Digest, Sha256};
 
@@ -159,12 +160,15 @@ pub struct TexBuild {
     pub output: Option<TexOutput>,
     pub snapshot: Option<BuildSnapshot>,
     pub passes: Vec<PassRecord>,
+    /// Why the execution service refused to run a tool (e.g. the workspace is
+    /// not trusted); the status is then `Error`.
+    pub refusal: Option<JobRefusal>,
 }
 
 /// Builds LaTeX targets with pdfLaTeX or LuaLaTeX.
 pub struct TexBuilder<R: JobRunner> {
     runner: R,
-    toolchain: Option<TexToolchain>,
+    toolchain: RwLock<Option<TexToolchain>>,
     build_root: PathBuf,
     versions: Mutex<BTreeMap<TexTool, String>>,
     lock: Mutex<()>,
@@ -182,7 +186,7 @@ impl<R: JobRunner> TexBuilder<R> {
         let build_root = plain_path(&build_root.canonicalize()?);
         Ok(Self {
             runner,
-            toolchain,
+            toolchain: RwLock::new(toolchain),
             build_root,
             versions: Mutex::new(BTreeMap::new()),
             lock: Mutex::new(()),
@@ -194,21 +198,45 @@ impl<R: JobRunner> TexBuilder<R> {
         &self.build_root
     }
 
-    pub fn toolchain(&self) -> Option<&TexToolchain> {
-        self.toolchain.as_ref()
+    pub fn toolchain(&self) -> Option<TexToolchain> {
+        self.toolchain.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Replace the toolchain (e.g. after settings or discovery changed).
+    pub fn set_toolchain(&self, toolchain: Option<TexToolchain>) {
+        *self.toolchain.write().unwrap_or_else(|p| p.into_inner()) = toolchain;
     }
 
     pub fn build(&self, request: &TexBuildRequest) -> TexBuild {
+        let n = self.counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.build_with_id(BuildId(format!("tex-{}-{n}", std::process::id())), request)
+    }
+
+    /// Build under a caller-assigned id (unique per build root; it names the
+    /// immutable output directory, so it must be a plain file name).
+    pub fn build_with_id(&self, id: BuildId, request: &TexBuildRequest) -> TexBuild {
         let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         let started = Instant::now();
-        let n = self.counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let id = BuildId(format!("tex-{}-{n}", std::process::id()));
+        if id.0.is_empty() || !id.0.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return self.early(request, &id, BuildStatus::Error { message: "invalid build id".into() });
+        }
         let mut build = self.build_inner(request, &id);
         build.result.duration_ms = started.elapsed().as_millis() as u64;
         build
     }
 
     fn early(&self, request: &TexBuildRequest, id: &BuildId, status: BuildStatus) -> TexBuild {
+        self.refused(request, id, status, None, Vec::new())
+    }
+
+    fn refused(
+        &self,
+        request: &TexBuildRequest,
+        id: &BuildId,
+        status: BuildStatus,
+        refusal: Option<JobRefusal>,
+        passes: Vec<PassRecord>,
+    ) -> TexBuild {
         TexBuild {
             result: BuildResult {
                 id: id.clone(),
@@ -225,7 +253,8 @@ impl<R: JobRunner> TexBuilder<R> {
             },
             output: None,
             snapshot: None,
-            passes: Vec::new(),
+            passes,
+            refusal,
         }
     }
 
@@ -239,7 +268,8 @@ impl<R: JobRunner> TexBuilder<R> {
                 BuildStatus::Error { message: format!("{:?} is not a TeX engine target", target.engine) },
             );
         };
-        let Some(toolchain) = self.toolchain.as_ref() else {
+        let toolchain = self.toolchain();
+        let Some(toolchain) = toolchain.as_ref() else {
             return self.early(
                 request,
                 id,
@@ -320,7 +350,7 @@ impl<R: JobRunner> TexBuilder<R> {
             );
         }
         let job_name = entry_name.rsplit_once('.').map(|(stem, _)| stem.to_owned()).unwrap_or(entry_name.clone());
-        let env = self.environment(toolchain, &overlay_entry_dir, &project_entry_dir);
+        let env = self.environment(&overlay_entry_dir, &project_entry_dir);
         let out_arg = slash(&out_dir);
         let mut engine_args = vec![
             "-synctex=1".to_owned(),
@@ -355,7 +385,8 @@ impl<R: JobRunner> TexBuilder<R> {
         let pdf_path = out_dir.join(format!("{job_name}.pdf"));
         let _ = std::fs::remove_file(&pdf_path);
 
-        let run_engine = |passes: &mut Vec<PassRecord>| -> Result<ProcessOutput, BuildStatus> {
+        type Stop = (BuildStatus, Option<JobRefusal>);
+        let run_engine = |passes: &mut Vec<PassRecord>| -> Result<ProcessOutput, Stop> {
             let output = self.runner.run(&engine_spec);
             passes.push(PassRecord {
                 tool: engine_tool.name().into(),
@@ -364,16 +395,21 @@ impl<R: JobRunner> TexBuilder<R> {
             });
             match &output.outcome {
                 JobOutcome::Exited { .. } => Ok(output),
-                JobOutcome::Canceled => Err(BuildStatus::Canceled),
-                JobOutcome::TimedOut => Err(BuildStatus::Error { message: "the TeX engine timed out".into() }),
-                JobOutcome::FailedToStart { reason } => Err(BuildStatus::Error { message: reason.clone() }),
-                JobOutcome::Terminated { description } => Err(BuildStatus::Error { message: description.clone() }),
+                JobOutcome::Canceled => Err((BuildStatus::Canceled, None)),
+                JobOutcome::TimedOut => Err((BuildStatus::Error { message: "the TeX engine timed out".into() }, None)),
+                JobOutcome::FailedToStart { reason } => {
+                    let message = output.refusal.as_ref().map(|r| r.message.clone()).unwrap_or_else(|| reason.clone());
+                    Err((BuildStatus::Error { message }, output.refusal.clone()))
+                }
+                JobOutcome::Terminated { description } => {
+                    Err((BuildStatus::Error { message: description.clone() }, None))
+                }
             }
         };
 
         let mut last = match run_engine(&mut passes) {
             Ok(o) => o,
-            Err(status) => return self.early(request, id, status),
+            Err((status, refusal)) => return self.refused(request, id, status, refusal, passes),
         };
         if request.mode == BuildMode::Full {
             let mut aux_hash = file_hash(&aux_path);
@@ -400,6 +436,10 @@ impl<R: JobRunner> TexBuilder<R> {
                         });
                     }
                     BibOutcome::NotNeeded => {}
+                    BibOutcome::Canceled(record) => {
+                        passes.push(record);
+                        return self.refused(request, id, BuildStatus::Canceled, None, passes);
+                    }
                 }
                 let log = read_lossy(&log_path);
                 let new_aux = file_hash(&aux_path);
@@ -412,7 +452,7 @@ impl<R: JobRunner> TexBuilder<R> {
                 }
                 last = match run_engine(&mut passes) {
                     Ok(o) => o,
-                    Err(status) => return self.early(request, id, status),
+                    Err((status, refusal)) => return self.refused(request, id, status, refusal, passes),
                 };
                 if file_hash(&aux_path) == aux_hash && !rerun_requested(&read_lossy(&log_path)) {
                     break;
@@ -520,23 +560,16 @@ impl<R: JobRunner> TexBuilder<R> {
             output,
             snapshot: Some(snapshot),
             passes,
+            refusal: None,
         }
     }
 
-    fn environment(&self, toolchain: &TexToolchain, overlay_dir: &Path, project_dir: &Path) -> EnvironmentSpec {
+    /// The TeX-specific variables. The runner supplies the platform base
+    /// (PATH with the program's directory, system root, temp, profile).
+    fn environment(&self, overlay_dir: &Path, project_dir: &Path) -> EnvironmentSpec {
         let sep = if cfg!(windows) { ";" } else { ":" };
         let search = format!("{}{sep}{}{sep}", slash(overlay_dir), slash(project_dir));
         let mut set = BTreeMap::new();
-        let mut path = toolchain.bin_dir.display().to_string();
-        if cfg!(windows)
-            && let Some(root) = std::env::var_os("SystemRoot")
-        {
-            path.push(';');
-            path.push_str(&Path::new(&root).join("System32").display().to_string());
-        } else if !cfg!(windows) {
-            path.push_str(":/usr/bin:/bin");
-        }
-        set.insert("PATH".to_owned(), path);
         set.insert("TEXINPUTS".to_owned(), search.clone());
         set.insert("BIBINPUTS".to_owned(), search.clone());
         set.insert("BSTINPUTS".to_owned(), search);
@@ -546,24 +579,7 @@ impl<R: JobRunner> TexBuilder<R> {
         set.insert("openout_any".to_owned(), "p".to_owned());
         set.insert("openin_any".to_owned(), "p".to_owned());
         set.insert("shell_escape".to_owned(), "f".to_owned());
-        let inherit = [
-            "SystemRoot",
-            "windir",
-            "TEMP",
-            "TMP",
-            "TMPDIR",
-            "USERPROFILE",
-            "HOMEDRIVE",
-            "HOMEPATH",
-            "HOME",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "LANG",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        EnvironmentSpec { inherit, set }
+        EnvironmentSpec { inherit: Vec::new(), set }
     }
 
     fn version(&self, tool: TexTool, program: &Path, env: &EnvironmentSpec, cwd: &Path) -> String {
@@ -653,6 +669,9 @@ impl<R: JobRunner> TexBuilder<R> {
         let output = self.runner.run(&spec);
         let record =
             PassRecord { tool: tool.name().into(), duration_ms: output.duration_ms, exit_code: output.exit_code() };
+        if output.outcome == JobOutcome::Canceled {
+            return BibOutcome::Canceled(record);
+        }
         match output.exit_code() {
             // bibtex exits 1 for warnings, 2 for errors.
             Some(0) | Some(1) if bbl.is_file() => {
@@ -731,6 +750,7 @@ impl<R: JobRunner> TexBuilder<R> {
 
 enum BibOutcome {
     NotNeeded,
+    Canceled(PassRecord),
     Ran(PassRecord),
     Missing(TexTool),
     Failed(PassRecord, String),

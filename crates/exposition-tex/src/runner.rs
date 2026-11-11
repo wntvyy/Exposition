@@ -1,22 +1,27 @@
 //! Process launching through the shared [`JobSpec`] contract.
 //!
 //! The TeX adapter never builds shell strings: every tool launch is a
-//! [`JobSpec`] (absolute program + argument array + deliberately constructed
-//! environment + validated working directory) handed to a [`JobRunner`]. In the
-//! application the runner is the shared execution service (branch
-//! `m1/execution`), which owns supervision, cancellation, log bounds, and
-//! process-tree cleanup.
+//! [`JobSpec`] (absolute program + argument array + the TeX-specific
+//! environment variables + validated working directory) handed to a
+//! [`JobRunner`].
 //!
-//! [`LocalProcessRunner`] is a **temporary** minimal runner for this crate's
-//! tests and for use until the execution service is integrated. It enforces the
-//! same input rules (absolute program, absolute working directory inside an
-//! allowed root, cleared environment with secret-looking variables never
-//! inherited, no shell, `TrustedNative` policy only) but it is not a sandbox.
+//! * [`ExecutionRunner`] — the production runner: the shared
+//!   [`ExecutionService`] (validated roots, workspace trust, clean
+//!   environment, process-tree containment, bounded/redacted logs). A refusal
+//!   (e.g. an untrusted workspace) is reported, never downgraded.
+//! * [`LocalProcessRunner`] — a minimal runner for this crate's engine tests
+//!   only. It enforces the same input rules (absolute program, absolute working
+//!   directory inside an allowed root, environment built from empty, no shell,
+//!   `TrustedNative` only) but it does not check trust and is not a sandbox.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use exposition_core::job::{JobId, OutputStream};
+use exposition_execution::{ExecutionService, JobRefusal};
 
 use exposition_core::job::{ExecutionPolicy, JobOutcome, JobSpec};
 
@@ -28,6 +33,8 @@ pub struct ProcessOutput {
     pub stderr: String,
     pub duration_ms: u64,
     pub output_truncated: bool,
+    /// Why the execution service refused to start the job, if it did.
+    pub refusal: Option<JobRefusal>,
 }
 
 impl ProcessOutput {
@@ -38,7 +45,12 @@ impl ProcessOutput {
             stderr: String::new(),
             duration_ms: 0,
             output_truncated: false,
+            refusal: None,
         }
+    }
+
+    pub fn canceled() -> Self {
+        Self { outcome: JobOutcome::Canceled, ..Self::failed_to_start("") }
     }
 
     pub fn exit_code(&self) -> Option<i32> {
@@ -113,6 +125,25 @@ impl JobRunner for LocalProcessRunner {
         };
         let mut command = Command::new(&spec.program);
         command.args(&spec.args).current_dir(&cwd).env_clear();
+        // A minimal platform base, as the execution service provides: the
+        // program's directory and the system directories on PATH, the system
+        // root, temp, and profile locations (kpathsea and luaotfload need them).
+        let program_dir = Path::new(&spec.program).parent().map(Path::to_path_buf).unwrap_or_default();
+        let mut path = vec![program_dir];
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            path.push(PathBuf::from(&root).join("System32"));
+        }
+        if !cfg!(windows) {
+            path.extend([PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
+        }
+        if let Ok(joined) = std::env::join_paths(path) {
+            command.env("PATH", joined);
+        }
+        for name in BASE_VARS {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
         for name in &spec.environment.inherit {
             if is_secret_variable(name) {
                 continue;
@@ -174,6 +205,117 @@ impl JobRunner for LocalProcessRunner {
             stderr,
             duration_ms: started.elapsed().as_millis() as u64,
             output_truncated: out_truncated || err_truncated,
+            refusal: None,
+        }
+    }
+}
+
+const BASE_VARS: &[&str] = &[
+    "SystemRoot",
+    "windir",
+    "SystemDrive",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HOME",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "LANG",
+];
+
+/// Cancellation shared between a build controller and the runner executing
+/// that build's jobs.
+#[derive(Clone, Default)]
+pub struct CancelToken {
+    inner: Arc<Mutex<CancelState>>,
+}
+
+#[derive(Default)]
+struct CancelState {
+    canceled: bool,
+    current: Option<JobId>,
+    service: Option<ExecutionService>,
+}
+
+impl CancelToken {
+    /// Cancel the build: the running job (if any) is canceled through the
+    /// execution service and no further job starts.
+    pub fn cancel(&self) {
+        let (job, service) = {
+            let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            state.canceled = true;
+            (state.current.clone(), state.service.clone())
+        };
+        if let (Some(job), Some(service)) = (job, service) {
+            service.cancel(&job);
+        }
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).canceled
+    }
+
+    /// Clear the canceled flag before the next build.
+    pub fn reset(&self) {
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        state.canceled = false;
+        state.current = None;
+    }
+
+    /// Record the running job; returns false if the build was canceled meanwhile.
+    fn begin(&self, job: &JobId, service: &ExecutionService) -> bool {
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        state.current = Some(job.clone());
+        state.service = Some(service.clone());
+        !state.canceled
+    }
+
+    fn end(&self) {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).current = None;
+    }
+}
+
+/// The production [`JobRunner`]: every TeX tool runs as an [`ExecutionService`]
+/// batch job (validated roots, workspace trust, clean environment, process
+/// tree containment, bounded and redacted logs). Blocking: call it from a
+/// worker thread, not from inside the async runtime.
+pub struct ExecutionRunner {
+    service: ExecutionService,
+    runtime: tokio::runtime::Handle,
+    cancel: CancelToken,
+}
+
+impl ExecutionRunner {
+    pub fn new(service: ExecutionService, runtime: tokio::runtime::Handle, cancel: CancelToken) -> Self {
+        Self { service, runtime, cancel }
+    }
+}
+
+impl JobRunner for ExecutionRunner {
+    fn run(&self, spec: &JobSpec) -> ProcessOutput {
+        if self.cancel.is_canceled() {
+            return ProcessOutput::canceled();
+        }
+        let started = Instant::now();
+        let id = self.service.launch(spec.clone());
+        if !self.cancel.begin(&id, &self.service) {
+            self.service.cancel(&id);
+        }
+        let result = self.runtime.block_on(self.service.wait(&id));
+        self.cancel.end();
+        let Some(result) = result else {
+            return ProcessOutput::failed_to_start("the job disappeared from the execution service");
+        };
+        ProcessOutput {
+            outcome: result.outcome,
+            stdout: self.service.output_text(&id, OutputStream::Stdout).unwrap_or_default(),
+            stderr: self.service.output_text(&id, OutputStream::Stderr).unwrap_or_default(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            output_truncated: result.output_truncated,
+            refusal: self.service.summary(&id).and_then(|s| s.refusal),
         }
     }
 }
