@@ -14,7 +14,7 @@ import type { RecoveryEntry } from "../../bindings/RecoveryEntry";
 import type { WorkspaceEvent } from "../../bindings/WorkspaceEvent";
 import type { WorkspaceInfo } from "../../bindings/WorkspaceInfo";
 import { commands, errorMessage, events } from "../../lib/ipc";
-import { fileKey } from "../editor/documentClient";
+import { disposeAllHandles, fileKey } from "../editor/documentClient";
 
 /** Key of the root directory in `dirs`. */
 export const ROOT = "";
@@ -209,6 +209,14 @@ function onFilesChanged(changes: FileChange[], rescan: boolean) {
   for (const key of stale) void loadDir(key);
 }
 
+/** Remove every workspace-file tab without prompting (their documents are already closed). */
+function dropFileTabs() {
+  disposeAllHandles();
+  for (const editor of editors.all()) {
+    if (editor.resource.key.startsWith("file:")) void editors.close(editor.resource.key);
+  }
+}
+
 let started = false;
 
 export function startWorkspaceEvents() {
@@ -220,7 +228,11 @@ export function startWorkspaceEvents() {
         if (useWorkspace.getState().info?.root !== event.info.root) applyInfo(event.info);
         break;
       case "closed":
+        // The service closed the folder's documents (unsaved ones keep their
+        // recovery journals); tabs of its files no longer refer to anything.
+        dropFileTabs();
         useWorkspace.setState({ info: null, dirs: {}, expanded: new Set(), recovery: [] });
+        setWindowTitle(null);
         break;
       case "filesChanged":
         onFilesChanged(event.changes, event.rescan);

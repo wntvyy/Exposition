@@ -353,7 +353,7 @@ function start() {
         notify({ tone: "danger", title: `Recovery backup failed for ${event.path}`, body: event.message });
         break;
       case "closed":
-        for (const handle of [...handles.values()]) disposeHandle(handle);
+        disposeAllHandles();
         break;
       default:
         break;
@@ -394,7 +394,19 @@ function disposeHandle(handle: DocumentHandle) {
   handles.delete(handle.id);
   guardDisposers.get(handle.id)?.();
   guardDisposers.delete(handle.id);
+  // The document was closed in the service (e.g. its folder was closed): close
+  // any tab still showing it (its guard is gone, so this does not prompt).
+  const key = handle.key;
+  if (key) {
+    seenKeys.delete(key);
+    if (editors.all().some((e) => e.resource.key === key)) void editors.close(key);
+  }
   handle.dispose();
+}
+
+/** Forget every workspace-file handle (the service closed the folder's documents). */
+export function disposeAllHandles() {
+  for (const handle of [...handles.values()]) if (handle.path !== null) disposeHandle(handle);
 }
 
 /** Open a workspace file (or return its open handle). */

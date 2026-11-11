@@ -3,7 +3,7 @@
 // (LF, CRLF, UTF-8 BOM, UTF-16), undo/redo through the shared document
 // service, mixed line endings, unavailable files, close/reopen, and rejection of
 // traversal and junction escapes.
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -247,6 +247,20 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
     const missing = await invokeError(page, "document_open", { path: "missing.typ" });
     assert.equal(missing.error?.code, "path.notFound");
     await shot("07-final");
+
+    // --- switching folders closes the previous folder's documents and tabs ------
+    const other = join(project.base, "other");
+    await mkdir(other, { recursive: true });
+    await writeFile(join(other, "other.md"), "# Other\n");
+    const otherInfo = await invoke(page, "workspace_open", { path: other });
+    assert.equal(otherInfo.name, "other");
+    await page.locator('[data-testid="file-tree"] [data-path="other.md"]').waitFor();
+    await waitFor(async () => (await page.locator('[data-editor-key^="file:"]').count()) === 0, {
+      message: "previous folder's tabs closed",
+    });
+    assert.deepEqual(await invoke(page, "document_list"), []);
+    const recent = await invoke(page, "workspace_recent");
+    assert.deepEqual(recent.slice(0, 2).map((p) => p.name), ["other", "project"], "recent projects, newest first");
 
     const errors = app.consoleMessages.filter((m) => m.startsWith("pageerror") || m.startsWith("error"));
     assert.deepEqual(errors, [], "no page errors");
