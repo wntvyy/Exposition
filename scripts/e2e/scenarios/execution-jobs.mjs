@@ -89,6 +89,21 @@ export default async function executionJobs({ launchApp, artifactsDir, assert })
   const app = await launchApp({ env: { EXPOSITION_TOOL_CACHE_DIR: join(artifactsDir, "..", "tool-cache") } });
   try {
     const { page } = app;
+    // Give the bottom panel room for the Jobs view (persisted workbench layout).
+    await page.evaluate(() =>
+      localStorage.setItem(
+        "exposition.workbench.layout",
+        JSON.stringify({
+          version: 1,
+          sidebar: { visible: true, size: 220, activeView: null },
+          panel: { visible: true, size: 560, activeView: "jobs.panel" },
+          auxiliary: { visible: false, size: 320, activeView: null },
+          editorSplit: 50,
+        }),
+      ),
+    );
+    await page.reload();
+    await page.waitForFunction(() => (document.getElementById("root")?.childElementCount ?? 0) > 0);
 
     // --- Jobs panel: start a supervised process tree and see it running.
     await page.getByRole("tab", { name: "Jobs" }).click();
@@ -97,9 +112,9 @@ export default async function executionJobs({ launchApp, artifactsDir, assert })
     const { jobId, job, tree } = await startProbeTree(page);
     evidence.processTreeBeforeCancel = tree;
     assert.ok(tree.filter((p) => /python/i.test(p.name)).length >= 2, `parent + grandchild: ${JSON.stringify(tree)}`);
-    const row = panel.locator(`li.exp-job-row[data-job-id="${jobId}"]`);
-    await row.locator('[data-testid="job-status"][data-status="running"]').waitFor({ timeout: 15_000 });
-    await row.locator(".exp-job-select").click();
+    const row = panel.locator(`li.exp-jobs__row[data-job-id="${jobId}"]`);
+    await row.locator('[data-testid="job-status"][data-job-status="running"]').waitFor({ timeout: 15_000 });
+    await row.locator(".exp-jobs__select").click();
     const output = page.getByTestId("job-output");
     await waitFor("tick output in the viewer", async () => /tick \d+ parent=/.test(await output.innerText()));
     assert.match(await output.locator('[data-stream="stderr"]').first().innerText(), /stderr tick/);
@@ -108,7 +123,7 @@ export default async function executionJobs({ launchApp, artifactsDir, assert })
 
     // --- Cancel from the UI; the whole tree must disappear from the OS.
     await row.getByRole("button", { name: `Cancel ${job.info.label}` }).click();
-    await row.locator('[data-testid="job-status"][data-status="canceled"]').waitFor({ timeout: 15_000 });
+    await row.locator('[data-testid="job-status"][data-job-status="canceled"]').waitFor({ timeout: 15_000 });
     const survivors = await waitFor(
       "process tree to exit",
       () => {
@@ -131,7 +146,7 @@ export default async function executionJobs({ launchApp, artifactsDir, assert })
     assert.ok(bytes.stdout <= PROBE_LOG_LIMIT && bytes.stderr <= PROBE_LOG_LIMIT, JSON.stringify(bytes));
     assert.ok(outputPage.truncated && finished.info.result.outputTruncated, "burst output must have been truncated");
     await page.getByTestId("output-truncated").waitFor();
-    await page.getByTestId("jobs-status").filter({ hasText: "No jobs running" }).waitFor();
+    await page.getByTestId("jobs-status").waitFor({ state: "detached" });
     await page.screenshot({ path: join(artifactsDir, "jobs-canceled.png") });
 
     // --- No generic command runner is exposed; unknown/invalid ids are refused.
@@ -155,29 +170,38 @@ export default async function executionJobs({ launchApp, artifactsDir, assert })
     const marker = join(workspace, "exposition-dev-ran.txt");
     await mkdir(workspace, { recursive: true });
     const refusedId = await invoke(page, "dev_start_workspace_job", { root: workspace });
-    const refusedRow = panel.locator(`li.exp-job-row[data-job-id="${refusedId}"]`);
-    await refusedRow.locator('[data-testid="job-status"][data-status="failedToStart"]').waitFor({ timeout: 15_000 });
+    const refusedRow = panel.locator(`li.exp-jobs__row[data-job-id="${refusedId}"]`);
+    await refusedRow.locator('[data-testid="job-status"][data-job-status="failedToStart"]').waitFor({ timeout: 15_000 });
     assert.ok(!existsSync(marker), "an untrusted workspace must not execute");
     const refusedJob = (await invoke(page, "job_list")).find((j) => j.info.id === refusedId);
     assert.equal(refusedJob.refusal.code, "untrustedWorkspace");
     assert.equal(refusedJob.info.startedAtMs, null);
     evidence.untrustedRefusal = refusedJob.refusal;
-    await refusedRow.locator(".exp-job-select").click();
-    const dialog = page.getByTestId("trust-dialog");
-    await page.getByRole("button", { name: "Trust workspace…" }).click();
+    await refusedRow.locator(".exp-jobs__select").click();
+    // The refusal is also announced as a notification offering the same action.
+    await page.getByTestId("notification").filter({ hasText: "Workspace not trusted" }).waitFor();
+    const trustButton = page.getByTestId("job-detail").getByRole("button", { name: "Trust workspace…" });
+    const dialog = page.getByRole("alertdialog", { name: "Trust this workspace?" });
+    await trustButton.click();
     await dialog.waitFor();
+    assert.ok(
+      await dialog.getByRole("button", { name: /Don.t trust/ }).evaluate((el) => el === document.activeElement),
+      "the safe choice is focused",
+    );
     assert.ok((await dialog.getByTestId("trust-root").innerText()).endsWith("untrusted-project"));
+    await page.waitForTimeout(400); // let the dialog's enter transition finish
     await page.screenshot({ path: join(artifactsDir, "trust-dialog.png") });
     await dialog.getByRole("button", { name: /Don.t trust/ }).click();
     await dialog.waitFor({ state: "detached" });
     assert.equal((await invoke(page, "trust_status", { root: workspace })).trusted, false, "declining keeps it untrusted");
-    await page.getByRole("button", { name: "Trust workspace…" }).click();
+    await trustButton.click();
     await dialog.getByRole("button", { name: "Trust workspace", exact: true }).click();
     await dialog.waitFor({ state: "detached" });
     assert.equal((await invoke(page, "trust_status", { root: workspace })).trusted, true);
+    await page.getByTestId("notification").filter({ hasText: "Workspace not trusted" }).waitFor({ state: "detached" });
     const allowedId = await invoke(page, "dev_start_workspace_job", { root: workspace });
     await panel
-      .locator(`li.exp-job-row[data-job-id="${allowedId}"] [data-testid="job-status"][data-status="succeeded"]`)
+      .locator(`li.exp-jobs__row[data-job-id="${allowedId}"] [data-testid="job-status"][data-job-status="succeeded"]`)
       .waitFor({ timeout: 30_000 });
     assert.ok(existsSync(marker), "the trusted workspace job ran");
 

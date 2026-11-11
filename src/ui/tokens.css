@@ -1,0 +1,250 @@
+/*
+ * Exposition design tokens.
+ *
+ * The single styling vocabulary for every workbench surface. Feature code uses
+ * these custom properties (or the names exported from `tokens.ts`); it never
+ * introduces ad-hoc colors, sizes, or shadows. Values below are the light theme;
+ * `:root[data-theme="dark"]` overrides the color roles. `src/ui/theme.ts` sets
+ * `data-theme` from the user's preference (default: follow the OS).
+ *
+ * Color values are plain hex so `tokens.test.ts` can verify WCAG contrast for
+ * every documented text/background and boundary pair in both themes, and that
+ * `tokens.ts` (used by the Monaco theme) carries the same values.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* --- Color: surfaces (back to front) --- */
+  --color-surface-base: #eceef2; /* window chrome: activity rail, status bar */
+  --color-surface-sunken: #f6f7f9; /* sidebars, bottom/auxiliary panels, tab strips */
+  --color-surface: #ffffff; /* editors and document content */
+  --color-surface-raised: #ffffff; /* menus, popovers, dialogs, notifications */
+  --color-surface-hover: #e7eaee;
+  --color-surface-active: #dde1e7;
+  --color-surface-selected: #e1e6ee; /* selected row without focus */
+  --color-field: #ffffff; /* text inputs, selects */
+  --color-overlay: rgba(15, 18, 24, 0.32); /* modal backdrop */
+
+  /* --- Color: text --- */
+  --color-text: #1c2026;
+  --color-text-muted: #4a515c;
+  --color-text-subtle: #5f6672;
+  --color-text-disabled: #9aa0a9;
+  --color-text-on-accent: #ffffff;
+
+  /* --- Color: borders --- */
+  --color-border: #dcdfe4; /* pane dividers, card outlines (decorative) */
+  --color-border-subtle: #e8eaee;
+  --color-border-strong: #7b828d; /* control boundaries: inputs, checkboxes (>= 3:1) */
+
+  /* --- Color: accent, focus, selection --- */
+  --color-accent: #2457c5;
+  --color-accent-hover: #1e4aa8;
+  --color-accent-active: #193f8f;
+  --color-accent-text: #1f50b8; /* links, accent-colored text and icons */
+  --color-accent-subtle: #dfe8fb; /* focused selection, active toggles */
+  --color-focus-ring: #2563eb;
+  --color-selection: #c8daf8; /* text selection */
+  --color-selection-inactive: #e1e6ee;
+
+  /* --- Color: feedback tones. -text: text and icons (4.5:1); -bg/-border: tinted containers;
+     danger-solid: destructive button fill under text-on-accent. --- */
+  --color-danger-text: #b42318;
+  --color-danger-bg: #fdecec;
+  --color-danger-border: #f0b4b4;
+  --color-danger-solid: #c4282d;
+  --color-danger-solid-hover: #a82024;
+  --color-warning-text: #8a4b00;
+  --color-warning-bg: #fff4e0;
+  --color-warning-border: #f2cf8c;
+  --color-success-text: #18723a;
+  --color-success-bg: #e6f4ea;
+  --color-success-border: #a9d9b7;
+  --color-info-text: #1f50b8;
+  --color-info-bg: #e6eefc;
+  --color-info-border: #b3c8f2;
+
+  /* --- Color: job/document status (paired with icon + label, never color alone) --- */
+  --color-status-running-text: var(--color-info-text);
+  --color-status-running-bg: var(--color-info-bg);
+  --color-status-running-border: var(--color-info-border);
+  --color-status-stale-text: #6941c6;
+  --color-status-stale-bg: #f1ebf9;
+  --color-status-stale-border: #d4c4f0;
+  --color-status-neutral-text: #4a515c;
+  --color-status-neutral-bg: #eef0f3;
+  --color-status-neutral-border: #d5d9df;
+  --color-status-idle-text: var(--color-status-neutral-text);
+  --color-status-idle-bg: var(--color-status-neutral-bg);
+  --color-status-unavailable-text: var(--color-status-neutral-text);
+  --color-status-unavailable-bg: var(--color-status-neutral-bg);
+  --color-status-canceled-text: var(--color-status-neutral-text);
+  --color-status-canceled-bg: var(--color-status-neutral-bg);
+
+  /* --- Color: component roles --- */
+  --color-tooltip-bg: #1c2026;
+  --color-tooltip-text: #f3f4f6;
+  --color-kbd-bg: #eef0f3;
+  --color-kbd-border: #c9ced6;
+  --color-kbd-text: #4a515c;
+  --color-statusbar-bg: var(--color-surface-base);
+  --color-statusbar-text: var(--color-text-muted);
+  --color-tab-active-bg: var(--color-surface);
+  --color-tab-indicator: var(--color-accent);
+  --color-scrollbar: rgba(95, 102, 114, 0.35);
+  --color-scrollbar-hover: rgba(95, 102, 114, 0.55);
+  --color-shadow: rgba(16, 24, 40, 0.14);
+  --color-shadow-strong: rgba(16, 24, 40, 0.24);
+
+  /* --- Typography --- */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-code: "Cascadia Code", "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  --font-size-xs: 11px; /* section labels, badges */
+  --font-size-sm: 12px; /* status bar, secondary text, tabs */
+  --font-size-md: 13px; /* default UI text and controls */
+  --font-size-lg: 14px; /* emphasized body, dialog text */
+  --font-size-xl: 16px; /* dialog/empty-state titles */
+  --font-size-2xl: 20px; /* page headings (UI reference) */
+  --font-size-code: 13px;
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.45;
+  --line-height-code: 20px;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --letter-spacing-label: 0.04em;
+
+  /* --- Spacing (4px grid with 2px/6px half steps) --- */
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-1-5: 6px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* --- Control dimensions (compact desktop density) --- */
+  --control-height-sm: 22px;
+  --control-height-md: 26px;
+  --control-height-lg: 32px;
+  --icon-size-sm: 14px;
+  --icon-size-md: 16px;
+  --icon-size-lg: 20px;
+  --border-width: 1px;
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 1px;
+
+  /* --- Workbench dimensions --- */
+  --activity-rail-width: 44px;
+  --tab-height: 32px;
+  --pane-header-height: 32px;
+  --statusbar-height: 24px;
+  --resize-handle-size: 4px;
+
+  /* --- Radii --- */
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 8px;
+  --radius-full: 999px;
+
+  /* --- Elevation --- */
+  --shadow-1: 0 1px 2px var(--color-shadow);
+  --shadow-2: 0 4px 12px var(--color-shadow), 0 1px 3px var(--color-shadow);
+  --shadow-3: 0 12px 32px var(--color-shadow-strong), 0 2px 6px var(--color-shadow);
+
+  /* --- Stacking --- */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-resize-handle: 20;
+  --z-popover: 1000;
+  --z-modal: 1100;
+  --z-notification: 1200;
+  --z-tooltip: 1300;
+
+  /* --- Motion (zeroed under prefers-reduced-motion) --- */
+  --duration-fast: 80ms;
+  --duration-normal: 150ms;
+  --duration-slow: 240ms;
+  --duration-spin: 900ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-surface-base: #141518;
+  --color-surface-sunken: #18191c;
+  --color-surface: #1f2024;
+  --color-surface-raised: #2a2c31;
+  --color-surface-hover: #2c2e34;
+  --color-surface-active: #34373e;
+  --color-surface-selected: #2d3036;
+  --color-field: #222328;
+  --color-overlay: rgba(0, 0, 0, 0.5);
+
+  --color-text: #e6e8eb;
+  --color-text-muted: #b3b8c0;
+  --color-text-subtle: #959ba5;
+  --color-text-disabled: #6a7079;
+  --color-text-on-accent: #ffffff;
+
+  --color-border: #2e3036;
+  --color-border-subtle: #25272b;
+  --color-border-strong: #727986;
+
+  --color-accent: #3671df;
+  --color-accent-hover: #2f6ad6;
+  --color-accent-active: #2a5fc2;
+  --color-accent-text: #7fadff;
+  --color-accent-subtle: #1d2e4f;
+  --color-focus-ring: #5b9bff;
+  --color-selection: #264f78;
+  --color-selection-inactive: #33363d;
+
+  --color-danger-text: #ff8a8a;
+  --color-danger-bg: #3b1c1e;
+  --color-danger-border: #6e2c2f;
+  --color-danger-solid: #c4282d;
+  --color-danger-solid-hover: #d63a3f;
+  --color-warning-text: #f0b357;
+  --color-warning-bg: #3a2a12;
+  --color-warning-border: #6b4d1c;
+  --color-success-text: #6fd08e;
+  --color-success-bg: #16301f;
+  --color-success-border: #2b5a3a;
+  --color-info-text: #7fadff;
+  --color-info-bg: #1a2a45;
+  --color-info-border: #2f4a7a;
+
+  --color-status-stale-text: #c3a6ff;
+  --color-status-stale-bg: #2c2342;
+  --color-status-stale-border: #4d3d73;
+  --color-status-neutral-text: #b3b8c0;
+  --color-status-neutral-bg: #2a2c31;
+  --color-status-neutral-border: #3a3d44;
+
+  --color-tooltip-bg: #44474f;
+  --color-tooltip-text: #f3f4f6;
+  --color-kbd-bg: #33363d;
+  --color-kbd-border: #4a4e57;
+  --color-kbd-text: #c9cdd3;
+  --color-scrollbar: rgba(149, 155, 165, 0.3);
+  --color-scrollbar-hover: rgba(149, 155, 165, 0.5);
+  --color-shadow: rgba(0, 0, 0, 0.35);
+  --color-shadow-strong: rgba(0, 0, 0, 0.55);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-normal: 0ms;
+    --duration-slow: 0ms;
+    --duration-spin: 2400ms; /* spinners keep a slow, non-essential indication */
+  }
+}

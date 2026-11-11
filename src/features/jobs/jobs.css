@@ -1,31 +1,15 @@
-/* Jobs feature styles. Uses shared design tokens when present (src/ui, owned by
-   the UI owner) with system-color fallbacks that follow light/dark schemes. */
-.exp-jobs,
-.exp-tools,
-.exp-trust-dialog {
-  --exp-fg: var(--color-text, CanvasText);
-  --exp-bg: var(--color-surface, Canvas);
-  --exp-muted: var(--color-text-muted, color-mix(in srgb, CanvasText 62%, Canvas));
-  --exp-border: var(--color-border, color-mix(in srgb, CanvasText 18%, Canvas));
-  --exp-subtle: var(--color-surface-subtle, color-mix(in srgb, CanvasText 5%, Canvas));
-  --exp-accent: var(--color-accent, light-dark(#2459c6, #7aa2ff));
-  --exp-success: var(--color-success, light-dark(#1a7f37, #4ac26b));
-  --exp-warning: var(--color-warning, light-dark(#9a6700, #d4a72c));
-  --exp-danger: var(--color-danger, light-dark(#c4251c, #ff7b72));
-  --exp-info: var(--color-info, light-dark(#0969da, #58a6ff));
-  --exp-space: var(--space-2, 8px);
-  --exp-radius: var(--radius-sm, 4px);
-  --exp-mono: var(--font-mono, ui-monospace, "Cascadia Mono", Consolas, monospace);
-  color: var(--exp-fg);
-  font-size: var(--font-size-sm, 13px);
+/* Jobs and Toolchains views. Tokens only (src/ui/tokens.css); shared
+   components provide buttons, pills, banners, fields, and region states. */
+
+.exp-muted {
+  color: var(--color-text-muted);
 }
 
 .exp-jobs {
   display: grid;
   grid-template-columns: minmax(220px, 34%) 1fr;
-  gap: var(--exp-space);
-  min-height: 0;
   height: 100%;
+  min-height: 0;
 }
 
 @media (max-width: 760px) {
@@ -34,297 +18,241 @@
   }
 }
 
-.exp-jobs-list,
-.exp-jobs-detail {
+.exp-jobs__list,
+.exp-jobs__detail {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   overflow: auto;
 }
 
-.exp-toolbar {
+.exp-jobs__list {
+  border-right: var(--border-width) solid var(--color-border);
+}
+
+.exp-jobs__toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--exp-space);
-  padding: 4px 0;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
 }
 
-.exp-panel-title {
-  font-size: 1em;
-  font-weight: 600;
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.exp-job-rows {
+.exp-jobs__rows {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-.exp-job-row {
+.exp-jobs__row {
   display: flex;
   align-items: center;
-  gap: var(--exp-space);
-  border-bottom: 1px solid var(--exp-border);
-  padding: 2px 4px;
+  gap: var(--space-1);
+  padding-right: var(--space-1);
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
 }
 
-.exp-job-row[data-selected] {
-  background: var(--exp-subtle);
+.exp-jobs__row:hover {
+  background: var(--color-surface-hover);
 }
 
-.exp-job-select {
+.exp-jobs__row[data-selected] {
+  background: var(--color-surface-selected);
+}
+
+.exp-jobs__select {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
+  gap: var(--space-0-5);
+  padding: var(--space-1-5) var(--space-2);
   background: none;
   border: none;
   color: inherit;
   font: inherit;
   text-align: left;
-  padding: 4px;
-  cursor: pointer;
-}
-
-.exp-job-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
-}
-
-.exp-job-meta {
-  display: flex;
-  gap: var(--exp-space);
-  align-items: center;
-  color: var(--exp-muted);
-}
-
-.exp-pill {
-  display: inline-block;
-  padding: 0 8px;
-  border-radius: 999px;
-  border: 1px solid currentColor;
-  font-size: 0.85em;
-  line-height: 1.6;
-  white-space: nowrap;
-}
-
-.exp-tone-neutral {
-  color: var(--exp-muted);
-}
-.exp-tone-info {
-  color: var(--exp-info);
-}
-.exp-tone-success {
-  color: var(--exp-success);
-}
-.exp-tone-warning {
-  color: var(--exp-warning);
-}
-.exp-tone-danger {
-  color: var(--exp-danger);
-}
-
-.exp-button {
-  font: inherit;
-  color: var(--exp-fg);
-  background: var(--exp-subtle);
-  border: 1px solid var(--exp-border);
-  border-radius: var(--exp-radius);
-  padding: 3px 10px;
-  cursor: pointer;
-}
-
-.exp-button:disabled,
-.exp-button[data-disabled] {
-  opacity: 0.55;
   cursor: default;
 }
 
-.exp-button-primary {
-  background: var(--exp-accent);
-  border-color: var(--exp-accent);
-  color: var(--color-on-accent, white);
+.exp-jobs__select:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-width));
 }
 
-.exp-button-danger {
-  color: var(--exp-danger);
-  border-color: currentColor;
+.exp-jobs__label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.exp-jobs :focus-visible,
-.exp-tools :focus-visible,
-.exp-trust-dialog :focus-visible,
-.exp-button[data-focus-visible] {
-  outline: 2px solid var(--exp-accent);
-  outline-offset: 1px;
+.exp-jobs__job {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  min-height: 0;
 }
 
-.exp-check {
-  display: inline-flex;
+.exp-jobs__heading {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
 }
 
-.exp-job-facts {
+.exp-jobs__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.exp-jobs__facts {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: 2px var(--exp-space);
-  margin: 4px 0;
+  gap: var(--space-0-5) var(--space-3);
+  margin: 0;
+  font-size: var(--font-size-sm);
+  user-select: text;
 }
 
-.exp-job-facts dt {
-  color: var(--exp-muted);
+.exp-jobs__facts dt {
+  color: var(--color-text-muted);
 }
 
-.exp-job-facts dd {
+.exp-jobs__facts dd {
   margin: 0;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.exp-job-facts code,
-.exp-tool-path {
-  font-family: var(--exp-mono);
-  font-size: 0.95em;
+.exp-jobs__facts code,
+.exp-tools__path {
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
   overflow-wrap: anywhere;
+  user-select: text;
 }
 
-.exp-output {
-  font-family: var(--exp-mono);
-  font-size: 12px;
-  line-height: 1.45;
-  background: var(--exp-subtle);
-  border: 1px solid var(--exp-border);
-  border-radius: var(--exp-radius);
-  padding: 6px 8px;
-  margin: 4px 0;
-  max-height: 320px;
-  min-height: 80px;
+.exp-jobs__output {
+  flex: 1 0 auto;
+  min-height: calc(var(--line-height-code) * 4);
+  max-height: 60vh;
+  margin: 0;
+  padding: var(--space-1-5) var(--space-2);
   overflow: auto;
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--line-height-code);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
+  user-select: text;
 }
 
-.exp-out-stderr {
-  color: var(--exp-danger);
-  box-shadow: inset 3px 0 0 var(--exp-danger);
-  padding-left: 6px;
+.exp-jobs__output:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
-.exp-legend {
-  font-size: 0.85em;
-  margin: 0;
+[data-stream="stderr"] {
+  color: var(--color-danger-text);
+  box-shadow: inset 3px 0 0 var(--color-danger-border);
+  padding-left: var(--space-1-5);
 }
 
-.exp-muted {
-  color: var(--exp-muted);
-}
-
-.exp-error {
-  color: var(--exp-danger);
-}
-
-.exp-empty {
-  color: var(--exp-muted);
-  padding: var(--exp-space);
-}
-
-.exp-tool-table {
+.exp-jobs__chunk[data-stream="stderr"] {
+  display: inline-block;
   width: 100%;
+}
+
+.exp-jobs__legend {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.exp-tools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+}
+
+.exp-tools__table {
+  width: calc(100% - 2 * var(--space-2));
+  margin: 0 var(--space-2);
   table-layout: fixed;
   border-collapse: collapse;
-  margin-bottom: 12px;
 }
 
-.exp-tool-table th:nth-child(1) {
+.exp-tools__table caption {
+  padding: var(--space-2) 0 var(--space-1);
+  text-align: left;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.exp-tools__table th,
+.exp-tools__table td {
+  padding: var(--space-1) var(--space-2);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+  overflow-wrap: anywhere;
+}
+
+.exp-tools__table thead th {
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-muted);
+}
+
+.exp-tools__table th:nth-child(1) {
   width: 22%;
 }
-.exp-tool-table th:nth-child(2) {
-  width: 11%;
+
+.exp-tools__table th:nth-child(2) {
+  width: 13%;
 }
-.exp-tool-table th:nth-child(3) {
+
+.exp-tools__table th:nth-child(3) {
   width: 27%;
 }
 
-.exp-tool-table td,
-.exp-tool-table th {
-  overflow-wrap: anywhere;
+.exp-tools__table td {
+  user-select: text;
 }
 
-.exp-tool-table caption {
-  text-align: left;
-  font-weight: 600;
-  padding: 6px 0 2px;
+.exp-tools__guidance {
+  margin-top: var(--space-0-5);
 }
 
-.exp-tool-table th,
-.exp-tool-table td {
-  text-align: left;
-  vertical-align: top;
-  border-bottom: 1px solid var(--exp-border);
-  padding: 4px 6px;
-}
-
-.exp-tool-table thead th {
-  color: var(--exp-muted);
-  font-weight: 500;
-}
-
-.exp-guidance {
-  margin-top: 2px;
-}
-
-.exp-status-item {
-  white-space: nowrap;
-}
-
-.exp-trust-overlay {
-  position: fixed;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  background: color-mix(in srgb, black 40%, transparent);
-  z-index: 1000;
-}
-
-.exp-trust-modal {
-  max-width: min(520px, calc(100vw - 32px));
-}
-
-.exp-trust-dialog {
-  background: var(--exp-bg);
-  border: 1px solid var(--exp-border);
-  border-radius: var(--radius-md, 8px);
-  padding: 16px 20px;
-  box-shadow: 0 12px 40px color-mix(in srgb, black 30%, transparent);
-  outline: none;
-}
-
-.exp-trust-title {
+.exp-trust {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 1.1em;
-  margin: 0 0 8px;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 
-.exp-trust-path {
-  font-family: var(--exp-mono);
-  background: var(--exp-subtle);
-  padding: 4px 8px;
-  border-radius: var(--exp-radius);
+.exp-trust p {
+  margin: 0;
+}
+
+.exp-trust__path {
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-sm);
   overflow-wrap: anywhere;
-}
-
-.exp-trust-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 12px;
+  user-select: text;
 }

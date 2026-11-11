@@ -2,24 +2,30 @@
 import { useEffect } from "react";
 import { ListChecks, Wrench } from "lucide-react";
 
+import { layout } from "../../app/layout";
 import { registry } from "../../app/registry";
+import { StatusPill } from "../../ui/components";
 import { JobsPanel } from "./JobsPanel";
 import { ToolchainsView } from "./ToolchainsView";
 import { loadToolchains, refreshJobs, startJobsTracking, useJobs } from "./store";
 import "./trust";
 
+export const JOBS_VIEW_ID = "jobs.panel";
+export const TOOLCHAINS_VIEW_ID = "jobs.toolchains";
+
 function RunningJobsStatus() {
   const running = useJobs((s) => s.jobs.filter((j) => j.info.result === null && j.kind !== "probe").length);
   useEffect(() => startJobsTracking(), []);
+  if (running === 0) return null;
   return (
-    <span className="exp-status-item" data-testid="jobs-status" aria-live="polite">
-      {running === 0 ? "No jobs running" : running === 1 ? "1 job running" : `${running} jobs running`}
+    <span data-testid="jobs-status">
+      <StatusPill size="sm" status="running" label={running === 1 ? "1 job running" : `${running} jobs running`} />
     </span>
   );
 }
 
 registry.registerView({
-  id: "jobs.panel",
+  id: JOBS_VIEW_ID,
   location: "panel",
   title: "Jobs",
   icon: ListChecks,
@@ -28,7 +34,7 @@ registry.registerView({
 });
 
 registry.registerView({
-  id: "jobs.toolchains",
+  id: TOOLCHAINS_VIEW_ID,
   location: "panel",
   title: "Toolchains",
   icon: Wrench,
@@ -44,17 +50,32 @@ registry.registerStatusItem({
 });
 
 registry.registerCommand({
+  id: "jobs.show",
+  title: "Show Jobs",
+  category: "Jobs",
+  run: () => layout.showView("panel", JOBS_VIEW_ID),
+});
+
+registry.registerCommand({
   id: "jobs.refresh",
-  title: "Refresh job list",
+  title: "Refresh Job List",
   category: "Jobs",
   run: () => refreshJobs(),
 });
 
 registry.registerCommand({
-  id: "toolchains.refresh",
-  title: "Re-check installed toolchains",
+  id: "toolchains.show",
+  title: "Show Toolchains",
   category: "Jobs",
-  run: () => loadToolchains(true),
+  run: () => layout.showView("panel", TOOLCHAINS_VIEW_ID),
 });
 
-export { requestWorkspaceTrust } from "./trust";
+registry.registerCommand({
+  id: "toolchains.refresh",
+  title: "Re-check Installed Toolchains",
+  category: "Jobs",
+  run: async () => {
+    layout.showView("panel", TOOLCHAINS_VIEW_ID);
+    await loadToolchains(true);
+  },
+});

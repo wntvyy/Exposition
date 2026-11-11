@@ -1,11 +1,10 @@
 // Pure job presentation helpers (status pills, durations, bounded output).
 import type { JobSummary } from "../../bindings/JobSummary";
 import type { OutputChunk } from "../../bindings/OutputChunk";
-
-export type StatusTone = "neutral" | "info" | "success" | "warning" | "danger";
+import type { Status } from "../../ui/components";
 
 export interface JobStatus {
-  /** Stable machine value (also exposed as `data-status`). */
+  /** Stable machine value (exposed as `data-job-status` for tests and tooling). */
   key:
     | "queued"
     | "running"
@@ -16,38 +15,43 @@ export interface JobStatus {
     | "canceled"
     | "timedOut"
     | "failedToStart";
+  /** Shared status vocabulary (UI standard `StatusPill`). */
+  status: Status;
   label: string;
-  tone: StatusTone;
   /** Extra explanation (exit code, refusal reason). */
   detail?: string;
 }
 
+const UNAVAILABLE_REFUSALS = new Set(["programNotFound", "restrictedBackendUnavailable", "unsupportedBackend"]);
+
 export function jobStatus(job: JobSummary): JobStatus {
   const result = job.info.result;
   if (!result) {
-    if (job.state === "canceling") return { key: "canceling", label: "Canceling…", tone: "warning" };
-    if (job.state === "running") return { key: "running", label: "Running", tone: "info" };
-    return { key: "queued", label: "Queued", tone: "neutral" };
+    if (job.state === "canceling") return { key: "canceling", status: "running", label: "Canceling…" };
+    if (job.state === "running") return { key: "running", status: "running", label: "Running" };
+    return { key: "queued", status: "idle", label: "Queued" };
   }
   const outcome = result.outcome;
   switch (outcome.kind) {
     case "exited":
       return outcome.code === 0
-        ? { key: "succeeded", label: "Succeeded", tone: "success" }
-        : { key: "failed", label: `Failed (exit ${outcome.code})`, tone: "danger" };
+        ? { key: "succeeded", status: "succeeded", label: "Succeeded" }
+        : { key: "failed", status: "failed", label: `Failed (exit ${outcome.code})` };
     case "terminated":
-      return { key: "terminated", label: "Terminated", tone: "danger", detail: outcome.description };
+      return { key: "terminated", status: "failed", label: "Terminated", detail: outcome.description };
     case "canceled":
-      return { key: "canceled", label: "Canceled", tone: "neutral" };
+      return { key: "canceled", status: "canceled", label: "Canceled" };
     case "timedOut":
-      return { key: "timedOut", label: "Timed out", tone: "danger" };
-    case "failedToStart":
-      return {
-        key: "failedToStart",
-        label: "Not started",
-        tone: "danger",
-        detail: job.refusal?.message ?? outcome.reason,
-      };
+      return { key: "timedOut", status: "failed", label: "Timed out" };
+    case "failedToStart": {
+      const code = job.refusal?.code;
+      const detail = job.refusal?.message ?? outcome.reason;
+      if (code === "untrustedWorkspace") return { key: "failedToStart", status: "warning", label: "Not trusted", detail };
+      if (code && UNAVAILABLE_REFUSALS.has(code)) {
+        return { key: "failedToStart", status: "unavailable", label: "Unavailable", detail };
+      }
+      return { key: "failedToStart", status: "failed", label: "Not started", detail };
+    }
   }
 }
 

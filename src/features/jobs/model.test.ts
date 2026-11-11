@@ -32,7 +32,9 @@ describe("job presentation", () => {
     expect(finished({ kind: "exited", code: 0 }).key).toBe("succeeded");
     expect(finished({ kind: "exited", code: 2 }).label).toBe("Failed (exit 2)");
     expect(finished({ kind: "canceled" }).key).toBe("canceled");
-    expect(finished({ kind: "timedOut" }).tone).toBe("danger");
+    expect(finished({ kind: "timedOut" }).status).toBe("failed");
+    expect(finished({ kind: "canceled" }).status).toBe("canceled");
+    expect(jobStatus(job({ state: "queued" })).status).toBe("idle");
     expect(finished({ kind: "failedToStart", reason: "untrusted" }).detail).toBe("untrusted");
   });
 
