@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-forget-recent"
+description = "Enables the workspace_forget_recent command without any pre-configured scope."
+commands.allow = ["workspace_forget_recent"]
+
+[[permission]]
+identifier = "deny-workspace-forget-recent"
+description = "Denies the workspace_forget_recent command without any pre-configured scope."
+commands.deny = ["workspace_forget_recent"]

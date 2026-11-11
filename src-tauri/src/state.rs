@@ -2,12 +2,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use exposition_execution::{ExecutionConfig, ExecutionService};
-use exposition_workspace::DocumentService;
+use exposition_workspace::{DocumentService, WorkspaceService};
 use tauri::{AppHandle, Manager};
 
 /// Application-wide services. One instance is managed by Tauri.
 pub struct AppState {
     pub documents: Arc<DocumentService>,
+    /// Open folder, files, saves, recovery, watcher, and settings.
+    pub workspace: Arc<WorkspaceService>,
     /// Supervised process execution (jobs, toolchains, trust).
     pub execution: ExecutionService,
     /// Application data directory (settings, recovery, session metadata).
@@ -25,7 +27,9 @@ impl AppState {
             execution_config.tool_cache_dir = Some(PathBuf::from(dir));
         }
         let execution = ExecutionService::with_config(execution_config)?;
-        Ok(Self { documents: Arc::new(DocumentService::new()), execution, data_dir })
+        let documents = Arc::new(DocumentService::new());
+        let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
+        Ok(Self { documents, workspace, execution, data_dir })
     }
 }
 

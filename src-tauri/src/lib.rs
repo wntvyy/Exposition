@@ -7,6 +7,7 @@ mod documents;
 mod error;
 mod execution;
 mod state;
+mod workspace;
 
 use tauri::{Manager, RunEvent};
 
@@ -20,6 +21,7 @@ pub fn run() {
             let state = AppState::initialize(app.handle())?;
             app.manage(state);
             documents::forward_events(app.handle().clone());
+            workspace::start(app.handle().clone());
             execution::forward_events(app.handle().clone());
             #[cfg(debug_assertions)]
             execution::add_dev_capability(app.handle())?;
@@ -32,6 +34,26 @@ pub fn run() {
             documents::document_apply,
             documents::document_undo,
             documents::document_redo,
+            workspace::workspace_open,
+            workspace::workspace_close,
+            workspace::workspace_current,
+            workspace::workspace_recent,
+            workspace::workspace_forget_recent,
+            workspace::workspace_list_dir,
+            workspace::document_open,
+            workspace::document_close,
+            workspace::document_save,
+            workspace::document_save_all,
+            workspace::document_reload,
+            workspace::document_keep_buffer,
+            workspace::document_normalize_line_endings,
+            workspace::recovery_list,
+            workspace::recovery_restore,
+            workspace::recovery_discard,
+            workspace::settings_get,
+            workspace::settings_update,
+            workspace::project_settings_get,
+            workspace::project_settings_update,
             execution::job_list,
             execution::job_output,
             execution::job_cancel,
