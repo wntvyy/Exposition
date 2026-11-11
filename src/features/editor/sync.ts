@@ -215,7 +215,7 @@ export class DocumentSync {
     }
     this.view.applyPatches(remote);
     this.revision = event.revision;
-    if (event.selection && event.kind !== "edit" && this.queue.length === 0) {
+    if (event.selection && event.change !== "edit" && this.queue.length === 0) {
       this.view.setSelection?.(event.selection);
     }
     this.callbacks.onChange?.();

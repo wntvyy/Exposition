@@ -9,7 +9,12 @@ import type { TransactionId } from "./TransactionId";
 /**
  * Emitted for every accepted revision, in revision order per document.
  */
-export type DocumentChanged = { document: DocumentId, transaction: TransactionId | null, origin: EditOrigin, kind: ChangeKind, previousRevision: number, revision: number, patches: Array<TextPatch>, 
+export type DocumentChanged = { document: DocumentId, transaction: TransactionId | null, origin: EditOrigin, 
+/**
+ * Edit, undo, or redo. (Named `change`, not `kind`: `DocumentEvent` is
+ * internally tagged by `kind`, and a nested `kind` field would collide.)
+ */
+change: ChangeKind, previousRevision: number, revision: number, patches: Array<TextPatch>, 
 /**
  * Selection a view should adopt (undo/redo restore the recorded selection).
  */

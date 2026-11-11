@@ -316,7 +316,7 @@ fn recovery_restores_unsaved_text_with_undo_back_to_disk() {
     // The restored buffer is journaled again before the entry was removed.
     assert_eq!(fs::read(f.file("main.typ")).unwrap(), b"= Title\n\nBody.\n", "disk untouched");
     let undone = service.documents().undo(&restored_id, EditOrigin::Source).unwrap();
-    assert_eq!(undone.kind, ChangeKind::Undo);
+    assert_eq!(undone.change, ChangeKind::Undo);
     assert_eq!(text(&service, &restored_id), "= Title\n\nBody.\n");
 
     // A second crash now still has the restored text (redo re-applies it first).
