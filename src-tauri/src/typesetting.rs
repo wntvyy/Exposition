@@ -201,20 +201,6 @@ pub async fn typesetting_build(state: State<'_, AppState>, entry: WorkspacePath)
     .map_err(|e| command_error("typesetting.build", e))?
 }
 
-/// The SVG of a rendered page, by the page's `renderRef` from a build result.
-#[tauri::command]
-pub async fn typesetting_page_svg(state: State<'_, AppState>, render_ref: String) -> Result<String, CommandError> {
-    if render_ref.len() != 32 || !render_ref.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(CommandError::new("typesetting.invalidRef", "invalid page reference"));
-    }
-    let runtime = Arc::clone(runtime(&state));
-    tauri::async_runtime::spawn_blocking(move || runtime.service.page_svg(&render_ref))
-        .await
-        .map_err(|e| command_error("typesetting.render", e))?
-        .map(|svg| svg.as_ref().clone())
-        .ok_or_else(|| CommandError::new("typesetting.unknownPage", "the page is no longer available"))
-}
-
 /// Export a build to PDF from the same layout as its pages. Without a
 /// destination the PDF is written next to the entry in the workspace.
 #[tauri::command]

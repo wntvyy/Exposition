@@ -18,7 +18,7 @@ use exposition_core::build::{
 };
 use exposition_core::document::DocumentId;
 use exposition_core::path::WorkspacePath;
-use exposition_page::PageMap;
+use exposition_page::{PageImage, PageMap, PageMapProvider};
 use exposition_workspace::DocumentService;
 use typst_layout::PagedDocument;
 
@@ -181,7 +181,8 @@ impl TypesettingService {
             profile: None,
         };
         let fingerprint = format!("{}|{}|{}", configuration.compiler, configuration.font_fingerprint, target.entry);
-        let id = BuildId(format!("b{}", self.counter.fetch_add(1, Ordering::Relaxed) + 1));
+        // Build ids are unique across formats' providers.
+        let id = BuildId(format!("typst-{}", self.counter.fetch_add(1, Ordering::Relaxed) + 1));
         let failed = output.document.is_none() || output.diagnostics.iter().any(|d| d.severity == Severity::Error);
         let pages = output
             .document
@@ -315,6 +316,21 @@ impl TypesettingService {
         };
         write_atomically(&path, &bytes).map_err(|e| TypesettingError::Export(e.to_string()))?;
         Ok(ExportArtifact { kind: ExportKind::Pdf, path: path.display().to_string(), content_hash: sha256_hex(&bytes) })
+    }
+}
+
+impl PageMapProvider for TypesettingService {
+    fn page_map(&self, build: &str) -> Option<Arc<PageMap>> {
+        self.record(build)?.map.clone()
+    }
+
+    fn page_image(&self, render_ref: &str) -> Option<PageImage> {
+        let svg = self.page_svg(render_ref)?;
+        Some(PageImage { media_type: "image/svg+xml", bytes: Arc::from(svg.as_bytes()) })
+    }
+
+    fn revision_text(&self, document: &DocumentId, revision: u64) -> Option<Arc<str>> {
+        TypesettingService::revision_text(self, document, revision)
     }
 }
 

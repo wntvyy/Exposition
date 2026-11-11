@@ -13,8 +13,14 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 ts-rs.workspace = true
-typst-syntax.workspace = true
+typst-syntax = { workspace = true, optional = true }
 unicode-segmentation.workspace = true
+
+[features]
+# Typst input rules (escaping, structure verification). Other formats can use
+# the format-neutral core with `default-features = false`.
+default = ["typst"]
+typst = ["dep:typst-syntax"]
 
 [lints]
 workspace = true

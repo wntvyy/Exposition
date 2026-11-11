@@ -123,17 +123,12 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     await setViewport(page, WIDE);
     await page.getByTestId("workbench").waitFor({ timeout: 15000 });
 
-    // Honest empty states for regions whose features are not built yet.
+    // Honest empty states for regions whose features are not built yet. (The
+    // bottom panel now hosts registered views such as Jobs, so it shows tabs.)
     for (const text of ["No folder open", "No editor open", "Not available yet"]) {
       assert.ok(await page.getByText(text, { exact: true }).first().isVisible(), `shows "${text}"`);
     }
-    // The bottom panel shows its first registered view's empty state (the
-    // typesetting Problems view), or "No output" when no panel view exists.
-    assert.ok(
-      (await page.getByText("No output", { exact: true }).first().isVisible().catch(() => false)) ||
-        (await page.getByText("No problems", { exact: true }).first().isVisible()),
-      "bottom panel shows an honest empty state",
-    );
+    assert.ok(await page.getByRole("tab", { name: "Jobs" }).isVisible(), "panel shows registered views");
 
     // Command palette: filter + Enter runs the top match.
     await runCommand(page, assert, "color theme light", /Color Theme: Light/);

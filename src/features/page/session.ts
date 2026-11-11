@@ -82,6 +82,13 @@ function refusalText(refusal: EditRefusal): string {
   }
 }
 
+/** Media type of a page image from its leading bytes (SVG from Typst, PNG from TeX). */
+export function imageType(bytes: Uint8Array): string {
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
+  return "image/svg+xml";
+}
+
 /** Changed events are recognised by shape: the change's own `kind`
  *  (edit/undo/redo) shares the event's tag field. */
 function asChange(event: DocumentEvent): DocumentChanged | null {
@@ -193,8 +200,8 @@ export class PageSession {
   private async urlFor(renderRef: string): Promise<string> {
     const cached = this.urls.get(renderRef);
     if (cached) return cached;
-    const svg = await commands.typesettingPageSvg(renderRef);
-    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    const bytes = new Uint8Array(await commands.pageImage(renderRef));
+    const url = URL.createObjectURL(new Blob([bytes], { type: imageType(bytes) }));
     this.urls.set(renderRef, url);
     return url;
   }

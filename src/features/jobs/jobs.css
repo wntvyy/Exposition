@@ -1,0 +1,258 @@
+/* Jobs and Toolchains views. Tokens only (src/ui/tokens.css); shared
+   components provide buttons, pills, banners, fields, and region states. */
+
+.exp-muted {
+  color: var(--color-text-muted);
+}
+
+.exp-jobs {
+  display: grid;
+  grid-template-columns: minmax(220px, 34%) 1fr;
+  height: 100%;
+  min-height: 0;
+}
+
+@media (max-width: 760px) {
+  .exp-jobs {
+    grid-template-columns: 1fr;
+  }
+}
+
+.exp-jobs__list,
+.exp-jobs__detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.exp-jobs__list {
+  border-right: var(--border-width) solid var(--color-border);
+}
+
+.exp-jobs__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+}
+
+.exp-jobs__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.exp-jobs__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding-right: var(--space-1);
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+}
+
+.exp-jobs__row:hover {
+  background: var(--color-surface-hover);
+}
+
+.exp-jobs__row[data-selected] {
+  background: var(--color-surface-selected);
+}
+
+.exp-jobs__select {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-0-5);
+  padding: var(--space-1-5) var(--space-2);
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.exp-jobs__select:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-width));
+}
+
+.exp-jobs__label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.exp-jobs__job {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  min-height: 0;
+}
+
+.exp-jobs__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.exp-jobs__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.exp-jobs__facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-0-5) var(--space-3);
+  margin: 0;
+  font-size: var(--font-size-sm);
+  user-select: text;
+}
+
+.exp-jobs__facts dt {
+  color: var(--color-text-muted);
+}
+
+.exp-jobs__facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.exp-jobs__facts code,
+.exp-tools__path {
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.exp-jobs__output {
+  flex: 1 0 auto;
+  min-height: calc(var(--line-height-code) * 4);
+  max-height: 60vh;
+  margin: 0;
+  padding: var(--space-1-5) var(--space-2);
+  overflow: auto;
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--line-height-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
+  user-select: text;
+}
+
+.exp-jobs__output:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+[data-stream="stderr"] {
+  color: var(--color-danger-text);
+  box-shadow: inset 3px 0 0 var(--color-danger-border);
+  padding-left: var(--space-1-5);
+}
+
+.exp-jobs__chunk[data-stream="stderr"] {
+  display: inline-block;
+  width: 100%;
+}
+
+.exp-jobs__legend {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.exp-tools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+}
+
+.exp-tools__table {
+  width: calc(100% - 2 * var(--space-2));
+  margin: 0 var(--space-2);
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+
+.exp-tools__table caption {
+  padding: var(--space-2) 0 var(--space-1);
+  text-align: left;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.exp-tools__table th,
+.exp-tools__table td {
+  padding: var(--space-1) var(--space-2);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+  overflow-wrap: anywhere;
+}
+
+.exp-tools__table thead th {
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-muted);
+}
+
+.exp-tools__table th:nth-child(1) {
+  width: 22%;
+}
+
+.exp-tools__table th:nth-child(2) {
+  width: 13%;
+}
+
+.exp-tools__table th:nth-child(3) {
+  width: 27%;
+}
+
+.exp-tools__table td {
+  user-select: text;
+}
+
+.exp-tools__guidance {
+  margin-top: var(--space-0-5);
+}
+
+.exp-trust {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.exp-trust p {
+  margin: 0;
+}
+
+.exp-trust__path {
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+  user-select: text;
+}

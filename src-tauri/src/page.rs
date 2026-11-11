@@ -1,7 +1,9 @@
-//! Exact-page editing commands.
+//! Exact-page editing commands (format-neutral).
 //!
 //! Geometry queries name the build whose page map they use; offsets are UTF-16
-//! positions in that build's snapshot of the file. Edits go through the
+//! positions in that build's snapshot of the file. Builds, page images, and
+//! revision texts come from the formats' [`PageMapProvider`]s; typed input is
+//! translated by the format's [`PageInputRules`]. Edits go through the
 //! document service as `EditOrigin::Page` transactions.
 
 use std::sync::Arc;
@@ -10,21 +12,51 @@ use exposition_core::document::TransactionError;
 use exposition_core::path::WorkspacePath;
 use exposition_page::map::Affinity;
 use exposition_page::{
-    CaretGeometry, Motion, NavigationResult, PageEditOutcome, PageEditRequest, PageHit, PageMap, SelectionGeometry,
-    TypstInput, apply_page_edit,
+    CaretGeometry, EditRefusal, Motion, NavigationResult, PageEditOutcome, PageEditRequest, PageHit, PageInputRules,
+    PageMap, PageMapProvider, SelectionGeometry, TypstInput, apply_page_edit,
 };
 use tauri::State;
+use tauri::ipc::Response;
 
 use crate::error::CommandError;
 use crate::state::AppState;
 
+/// Every format's retained builds. Integration point: add the LaTeX/Markdown
+/// providers here.
+fn providers<'a>(state: &'a State<'_, AppState>) -> [&'a dyn PageMapProvider; 1] {
+    [state.typesetting.service.as_ref()]
+}
+
+/// Page input rules by document path. Integration point: add `.tex`
+/// (LaTeX escaping) and `.md` rules here.
+fn rules_for(path: Option<&WorkspacePath>) -> Option<&'static dyn PageInputRules> {
+    match path?.extension()?.to_ascii_lowercase().as_str() {
+        "typ" => Some(&TypstInput),
+        _ => None,
+    }
+}
+
 fn map_of(state: &State<'_, AppState>, build: &str) -> Result<Arc<PageMap>, CommandError> {
-    let record = state
-        .typesetting
-        .service
-        .record(build)
-        .ok_or_else(|| CommandError::new("page.unknownBuild", "the build is no longer available"))?;
-    record.map.clone().ok_or_else(|| CommandError::new("page.noMap", "the build has no page map"))
+    providers(state)
+        .iter()
+        .find_map(|p| p.page_map(build))
+        .ok_or_else(|| CommandError::new("page.unknownBuild", "the build or its page map is no longer available"))
+}
+
+/// A rendered page (SVG, PNG, ...) as raw bytes, by its `renderRef`.
+#[tauri::command]
+pub async fn page_image(state: State<'_, AppState>, render_ref: String) -> Result<Response, CommandError> {
+    if render_ref.is_empty()
+        || render_ref.len() > 128
+        || !render_ref.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(CommandError::new("page.invalidRef", "invalid page reference"));
+    }
+    providers(&state)
+        .iter()
+        .find_map(|p| p.page_image(&render_ref))
+        .map(|image| Response::new(image.bytes.to_vec()))
+        .ok_or_else(|| CommandError::new("page.unknownPage", "the page is no longer available"))
 }
 
 fn finite(values: &[f64]) -> Result<(), CommandError> {
@@ -94,9 +126,16 @@ pub async fn page_edit(
     state: State<'_, AppState>,
     request: PageEditRequest,
 ) -> Result<PageEditOutcome, TransactionError> {
-    let service = &state.typesetting.service;
-    apply_page_edit(&state.documents, &TypstInput, &request, &|document, revision| {
-        service.revision_text(document, revision)
+    let path = state.documents.info(&request.document)?.path;
+    let Some(rules) = rules_for(path.as_ref()) else {
+        return Ok(PageEditOutcome::Refused {
+            revision: request.base_revision,
+            refusal: EditRefusal::NotEditable { reason: "no page editing for this format yet".into() },
+        });
+    };
+    let providers = providers(&state);
+    apply_page_edit(&state.documents, rules, &request, &|document, revision| {
+        providers.iter().find_map(|p| p.revision_text(document, revision))
     })
 }
 
@@ -138,4 +177,12 @@ pub async fn dev_open_document(
         encoding: TextEncoding::Utf8,
         read_only: None,
     }))
+}
+
+/// DEBUG BUILDS ONLY: grant `dev_open_document` to the main window.
+#[cfg(debug_assertions)]
+pub fn add_dev_capability(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::Manager;
+    use tauri::ipc::CapabilityBuilder;
+    app.add_capability(CapabilityBuilder::new("dev-open-document").window("main").permission("allow-dev-open-document"))
 }

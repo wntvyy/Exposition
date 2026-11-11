@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use exposition_execution::{ExecutionConfig, ExecutionService};
 use exposition_typesetting::{Fonts, TypesettingService};
 use exposition_workspace::DocumentService;
 use tauri::{AppHandle, Manager};
@@ -10,6 +11,8 @@ use crate::typesetting::TypesettingRuntime;
 /// Application-wide services. One instance is managed by Tauri.
 pub struct AppState {
     pub documents: Arc<DocumentService>,
+    /// Supervised process execution (jobs, toolchains, trust).
+    pub execution: ExecutionService,
     /// Typesetting builds, page maps, and rendering (Typst).
     pub typesetting: Arc<TypesettingRuntime>,
     /// Application data directory (settings, recovery, session metadata).
@@ -20,6 +23,13 @@ impl AppState {
     pub fn initialize(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
         let data_dir = resolve_data_dir(app)?;
         std::fs::create_dir_all(&data_dir)?;
+        let mut execution_config = ExecutionConfig::new(&data_dir);
+        // Test/dev override so isolated data dirs can share the extraction cache
+        // of self-extracting tools (e.g. biber) instead of re-extracting.
+        if let Some(dir) = std::env::var_os("EXPOSITION_TOOL_CACHE_DIR").filter(|v| !v.is_empty()) {
+            execution_config.tool_cache_dir = Some(PathBuf::from(dir));
+        }
+        let execution = ExecutionService::with_config(execution_config)?;
         let documents = Arc::new(DocumentService::new());
         let typesetting =
             TypesettingRuntime::new(Arc::new(TypesettingService::new(Arc::clone(&documents), Fonts::with_system)));
@@ -27,7 +37,7 @@ impl AppState {
         std::thread::spawn(|| {
             Fonts::with_system();
         });
-        Ok(Self { documents, typesetting, data_dir })
+        Ok(Self { documents, execution, typesetting, data_dir })
     }
 }
 
