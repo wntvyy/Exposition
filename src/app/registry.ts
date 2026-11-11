@@ -63,6 +63,14 @@ export interface CommandContribution {
   category?: string;
   /** Keybinding in `Mod+Shift+P` form; `Mod` is Ctrl on Windows/Linux, Cmd on macOS. */
   keybinding?: string;
+  /**
+   * Where the keybinding fires. `"global"` also fires while focus is in a text
+   * input or Monaco (unless that editor handled the key first); `"workbench"`
+   * fires only outside text-editing surfaces. Defaults to `"global"` for chords
+   * with Ctrl/Cmd/Alt or a function key (except text-editing chords such as
+   * Mod+C or Mod+Z), and `"workbench"` otherwise. See `src/app/keybindings.ts`.
+   */
+  keybindingScope?: "global" | "workbench";
   /** Return false (or a promise of false) when the command is unavailable. */
   enabled?: () => boolean;
   run: () => void | Promise<void>;
