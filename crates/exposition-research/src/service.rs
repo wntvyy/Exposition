@@ -1,0 +1,1401 @@
+//! The research supervisor: workspace trust, sessions, runs, and events.
+
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::{Duration, Instant};
+
+use exposition_core::artifact::{ArtifactRecord, Producer, RunId, RunInput, RunRecord, RunStatus, ToolVersion};
+use exposition_core::job::{ExecutionPolicy, JobSpec};
+use exposition_core::text::utf16_range_to_bytes;
+use exposition_workspace::DocumentService;
+use serde_json::{Value, json};
+use tokio::sync::{broadcast, oneshot};
+
+use crate::discovery::{DiscoveryOptions, discover, now_ms};
+use crate::error::ResearchError;
+use crate::helper::{HELPER_VERSION, PROTOCOL_VERSION, install_helper, sha256_hex};
+use crate::launcher::{KernelProcessLauncher, ProcessControl, research_environment};
+use crate::protocol::{HelperEvent, HelperFailure, HelperMessage, parse_line};
+use crate::runs::{
+    ARTIFACT_SIZE_LIMIT, MANIFEST_CODE_LIMIT, RunState, artifact_belongs_to_run, page_of, settle_orphan,
+};
+use crate::store::{
+    self, MANIFEST_FORMAT, artifact_dir_path, ensure_dir_within, new_run_id, read_manifest, resolve_existing,
+    write_manifest, write_transcript,
+};
+use crate::types::{
+    Availability, CodeOrigin, CodeProvenance, EnvironmentReport, ExecuteRequest, InterpreterProvenance, KernelChoice,
+    KernelDescriptor, OutputItem, OutputPage, OutputSummary, ResearchEvent, RunErrorInfo, RunManifest, RunSource,
+    RunSummary, RuntimeEnvironment, RuntimeLanguage, SessionInfo, SessionOwner, SessionProvenance, SessionState,
+    StreamName, WorkspaceStatus,
+};
+
+/// Largest code accepted for one run.
+const CODE_LIMIT: usize = 4 * 1024 * 1024;
+/// Helper stderr lines kept for diagnostics.
+const DIAGNOSTIC_LINES: usize = 200;
+
+#[derive(Clone)]
+pub struct ResearchConfig {
+    /// Application data directory; research uses `<data_dir>/research/...` for
+    /// the installed helper, Jupyter connection files, and probe scratch space.
+    pub data_dir: PathBuf,
+    pub launcher: Arc<dyn KernelProcessLauncher>,
+    pub documents: Arc<DocumentService>,
+    /// Timeout for helper requests (kernel start/restart can take a while).
+    pub request_timeout: Duration,
+    /// The helper is declared unresponsive after this long without any line.
+    pub heartbeat_timeout: Duration,
+    /// Cancel waits this long after interrupting before restarting the kernel.
+    pub cancel_grace: Duration,
+}
+
+impl ResearchConfig {
+    pub fn new(data_dir: PathBuf, launcher: Arc<dyn KernelProcessLauncher>, documents: Arc<DocumentService>) -> Self {
+        Self {
+            data_dir,
+            launcher,
+            documents,
+            request_timeout: Duration::from_secs(120),
+            heartbeat_timeout: Duration::from_secs(20),
+            cancel_grace: Duration::from_secs(5),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct StartSessionRequest {
+    pub environment_id: String,
+    pub owner: SessionOwner,
+}
+
+#[derive(Clone)]
+struct Workspace {
+    root: PathBuf,
+    trusted: bool,
+}
+
+pub struct ResearchService {
+    shared: Arc<Shared>,
+}
+
+struct Shared {
+    config: ResearchConfig,
+    events: broadcast::Sender<ResearchEvent>,
+    workspace: Mutex<Option<Workspace>>,
+    environments: Mutex<Option<EnvironmentReport>>,
+    sessions: Mutex<HashMap<String, Arc<Session>>>,
+    runs: Mutex<HashMap<String, RunState>>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl Shared {
+    fn emit(&self, event: ResearchEvent) {
+        let _ = self.events.send(event);
+    }
+
+    fn research_dir(&self, name: &str) -> Result<PathBuf, ResearchError> {
+        let dir = self.config.data_dir.join("research").join(name);
+        std::fs::create_dir_all(&dir).map_err(|e| ResearchError::io("creating research data directory", e))?;
+        Ok(dir)
+    }
+}
+
+impl ResearchService {
+    pub fn new(config: ResearchConfig) -> Self {
+        let (events, _) = broadcast::channel(8192);
+        Self {
+            shared: Arc::new(Shared {
+                config,
+                events,
+                workspace: Mutex::new(None),
+                environments: Mutex::new(None),
+                sessions: Mutex::new(HashMap::new()),
+                runs: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<ResearchEvent> {
+        self.shared.events.subscribe()
+    }
+
+    // ---- workspace ------------------------------------------------------
+
+    /// Set the workspace research operates in, with its trust decision.
+    ///
+    /// TEMPORARY bridge: the workspace service (m1/workspace) owns project roots
+    /// and trust; once it lands, the application wires its root/trust here.
+    pub fn set_workspace(&self, root: &Path, trusted: bool) -> Result<WorkspaceStatus, ResearchError> {
+        if !root.is_absolute() {
+            return Err(ResearchError::InvalidWorkspace("workspace root must be an absolute path".into()));
+        }
+        let canonical = std::fs::canonicalize(root)
+            .map_err(|e| ResearchError::InvalidWorkspace(format!("workspace root cannot be opened: {e}")))?;
+        if !canonical.is_dir() {
+            return Err(ResearchError::InvalidWorkspace("workspace root must be a directory".into()));
+        }
+        *lock(&self.shared.workspace) = Some(Workspace { root: canonical.clone(), trusted });
+        Ok(WorkspaceStatus { root: canonical.display().to_string(), trusted })
+    }
+
+    pub fn workspace(&self) -> Option<WorkspaceStatus> {
+        lock(&self.shared.workspace)
+            .as_ref()
+            .map(|w| WorkspaceStatus { root: w.root.display().to_string(), trusted: w.trusted })
+    }
+
+    fn current_workspace(&self) -> Result<Workspace, ResearchError> {
+        lock(&self.shared.workspace).clone().ok_or(ResearchError::NoWorkspace)
+    }
+
+    // ---- environments ---------------------------------------------------
+
+    /// Discover research runtimes. Cached; `refresh` probes again.
+    pub async fn environments(
+        &self,
+        refresh: bool,
+        extra_interpreters: Vec<PathBuf>,
+    ) -> Result<EnvironmentReport, ResearchError> {
+        if !refresh
+            && extra_interpreters.is_empty()
+            && let Some(report) = lock(&self.shared.environments).clone()
+        {
+            return Ok(report);
+        }
+        for path in &extra_interpreters {
+            let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            if !path.is_absolute() || !path.is_file() || !name.starts_with("python") {
+                return Err(ResearchError::InvalidRequest(format!(
+                    "{} is not a Python interpreter executable",
+                    path.display()
+                )));
+            }
+        }
+        let probe_dir = self.shared.research_dir("probe")?;
+        let launcher = self.shared.config.launcher.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            discover(&DiscoveryOptions { launcher: launcher.as_ref(), probe_dir: &probe_dir, extra_interpreters })
+        })
+        .await
+        .map_err(|e| ResearchError::Io(format!("environment discovery failed: {e}")))?;
+        *lock(&self.shared.environments) = Some(report.clone());
+        Ok(report)
+    }
+
+    fn environment(&self, id: &str) -> Result<RuntimeEnvironment, ResearchError> {
+        let guard = lock(&self.shared.environments);
+        let report = guard.as_ref().ok_or_else(|| ResearchError::UnknownEnvironment(id.to_owned()))?;
+        report.runtimes.iter().find(|r| r.id == id).cloned().ok_or_else(|| ResearchError::UnknownEnvironment(id.into()))
+    }
+
+    // ---- sessions -------------------------------------------------------
+
+    pub async fn start_session(&self, request: StartSessionRequest) -> Result<SessionInfo, ResearchError> {
+        let workspace = self.current_workspace()?;
+        if !workspace.trusted {
+            return Err(ResearchError::NotTrusted);
+        }
+        if lock(&self.shared.environments).is_none() {
+            self.environments(false, Vec::new()).await?;
+        }
+        let environment = self.environment(&request.environment_id)?;
+        if let Availability::Unavailable { reason, guidance } = &environment.availability {
+            return Err(ResearchError::EnvironmentUnavailable { reason: reason.clone(), guidance: guidance.clone() });
+        }
+        if environment.kernel.is_none() || environment.host_interpreter.is_none() {
+            return Err(ResearchError::EnvironmentUnavailable {
+                reason: format!("{} has no usable kernel.", environment.display_name),
+                guidance: "Refresh environments.".into(),
+            });
+        }
+        let session = Session::new(&self.shared, environment, request.owner, workspace.root.clone());
+        lock(&self.shared.sessions).insert(session.id.clone(), session.clone());
+        session.emit_changed();
+        match session.launch().await {
+            Ok(()) => {
+                session.spawn_watchdog();
+                Ok(session.info())
+            }
+            Err(error) => {
+                session.stop_process();
+                lock(&self.shared.sessions).remove(&session.id);
+                self.shared.emit(ResearchEvent::SessionRemoved { session_id: session.id.clone() });
+                Err(error)
+            }
+        }
+    }
+
+    pub fn sessions(&self) -> Vec<SessionInfo> {
+        let mut infos: Vec<SessionInfo> = lock(&self.shared.sessions).values().map(|s| s.info()).collect();
+        infos.sort_by_key(|s| s.started_at_ms);
+        infos
+    }
+
+    fn session(&self, id: &str) -> Result<Arc<Session>, ResearchError> {
+        lock(&self.shared.sessions).get(id).cloned().ok_or_else(|| ResearchError::UnknownSession(id.to_owned()))
+    }
+
+    pub async fn interrupt(&self, session_id: &str) -> Result<SessionInfo, ResearchError> {
+        let session = self.session(session_id)?;
+        session.interrupt().await?;
+        Ok(session.info())
+    }
+
+    pub async fn restart(&self, session_id: &str) -> Result<SessionInfo, ResearchError> {
+        let session = self.session(session_id)?;
+        session.restart().await?;
+        Ok(session.info())
+    }
+
+    pub async fn shutdown(&self, session_id: &str) -> Result<(), ResearchError> {
+        let session = self.session(session_id)?;
+        session.shutdown().await;
+        lock(&self.shared.sessions).remove(session_id);
+        self.shared.emit(ResearchEvent::SessionRemoved { session_id: session_id.to_owned() });
+        Ok(())
+    }
+
+    /// Stop every session (application exit).
+    pub async fn shutdown_all(&self) {
+        let sessions: Vec<Arc<Session>> = lock(&self.shared.sessions).drain().map(|(_, s)| s).collect();
+        for session in sessions {
+            session.shutdown().await;
+        }
+    }
+
+    // ---- runs -----------------------------------------------------------
+
+    pub fn execute(&self, request: ExecuteRequest) -> Result<RunSummary, ResearchError> {
+        let session = self.session(&request.session_id)?;
+        if session.owner != request.requester {
+            return Err(ResearchError::OwnerMismatch { session: session.id.clone() });
+        }
+        let (code, origin, inputs) = self.resolve_source(&session, &request.source)?;
+        session.enqueue(code, origin, inputs)
+    }
+
+    fn resolve_source(
+        &self,
+        session: &Session,
+        source: &RunSource,
+    ) -> Result<(String, CodeOrigin, Vec<RunInput>), ResearchError> {
+        let documents = &self.shared.config.documents;
+        let resolved = match source {
+            RunSource::Input { code } => (code.clone(), CodeOrigin::Input, Vec::new()),
+            RunSource::Selection { document, revision, range } => {
+                let snapshot =
+                    documents.snapshot(document).map_err(|e| ResearchError::InvalidRequest(e.to_string()))?;
+                if snapshot.revision != *revision {
+                    return Err(ResearchError::StaleSource(format!(
+                        "the document changed since the selection was made (revision {} is now {}); select again",
+                        revision, snapshot.revision
+                    )));
+                }
+                let bytes = utf16_range_to_bytes(&snapshot.text, *range)
+                    .map_err(|e| ResearchError::InvalidRequest(format!("invalid selection: {e}")))?;
+                if let Some(path) = &snapshot.path {
+                    check_language(session.env.language, path.extension())?;
+                }
+                let inputs = snapshot
+                    .path
+                    .iter()
+                    .map(|path| RunInput {
+                        path: path.clone(),
+                        revision: Some(snapshot.revision),
+                        content_hash: Some(format!("sha256:{}", sha256_hex(snapshot.text.as_bytes()))),
+                    })
+                    .collect();
+                (
+                    snapshot.text[bytes].to_owned(),
+                    CodeOrigin::Selection { path: snapshot.path.clone(), revision: snapshot.revision, range: *range },
+                    inputs,
+                )
+            }
+            RunSource::File { path } => {
+                check_language(session.env.language, path.extension())?;
+                let (text, revision) = match documents.find_by_path(path) {
+                    Some(id) => {
+                        let snapshot =
+                            documents.snapshot(&id).map_err(|e| ResearchError::InvalidRequest(e.to_string()))?;
+                        (snapshot.text.to_string(), Some(snapshot.revision))
+                    }
+                    None => {
+                        let file = resolve_existing(&session.root, path)?;
+                        let bytes = std::fs::read(&file).map_err(|e| ResearchError::io("reading the file", e))?;
+                        let text = String::from_utf8(bytes)
+                            .map_err(|_| ResearchError::InvalidRequest(format!("{path} is not UTF-8 text")))?;
+                        (text, None)
+                    }
+                };
+                let input = RunInput {
+                    path: path.clone(),
+                    revision,
+                    content_hash: Some(format!("sha256:{}", sha256_hex(text.as_bytes()))),
+                };
+                (text, CodeOrigin::File { path: path.clone(), revision }, vec![input])
+            }
+        };
+        if resolved.0.trim().is_empty() {
+            return Err(ResearchError::InvalidRequest("there is no code to run".into()));
+        }
+        if resolved.0.len() > CODE_LIMIT {
+            return Err(ResearchError::InvalidRequest("the code is too large to run interactively".into()));
+        }
+        Ok(resolved)
+    }
+
+    /// Cancel a queued run, or interrupt (then restart, if needed) a running one.
+    pub async fn cancel_run(&self, run_id: &str) -> Result<(), ResearchError> {
+        let session_id = lock(&self.shared.runs)
+            .get(run_id)
+            .filter(|run| !run.finished)
+            .map(|run| run.session_id.clone())
+            .ok_or_else(|| ResearchError::UnknownRun(run_id.to_owned()))?;
+        let session = self.session(&session_id)?;
+        session.cancel(run_id).await
+    }
+
+    /// Run history for the current workspace, newest first.
+    pub fn runs(&self) -> Result<Vec<RunSummary>, ResearchError> {
+        let workspace = self.current_workspace()?;
+        let live: HashMap<String, RunSummary> = lock(&self.shared.runs)
+            .values()
+            .filter(|run| run.root == workspace.root)
+            .map(|run| (run.id().to_owned(), run.summary()))
+            .collect();
+        let mut out: Vec<RunSummary> = live.values().cloned().collect();
+        for manifest in store::list_manifests(&workspace.root) {
+            if !live.contains_key(&manifest.record.id.0) {
+                let owner = manifest.session.owner.clone();
+                out.push(crate::runs::summary_of(&settle_orphan(manifest), owner, false));
+            }
+        }
+        out.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms).then_with(|| b.id.0.cmp(&a.id.0)));
+        Ok(out)
+    }
+
+    pub fn run_manifest(&self, run_id: &str) -> Result<RunManifest, ResearchError> {
+        if let Some(run) = lock(&self.shared.runs).get(run_id) {
+            return Ok(run.manifest.clone());
+        }
+        let workspace = self.current_workspace()?;
+        read_manifest(&workspace.root, run_id).map(settle_orphan)
+    }
+
+    /// Page through retained output (live runs) or the stored transcript.
+    pub fn run_output(&self, run_id: &str, after: Option<u32>, limit: u32) -> Result<OutputPage, ResearchError> {
+        if let Some(run) = lock(&self.shared.runs).get(run_id) {
+            return Ok(run.page(after, limit));
+        }
+        let workspace = self.current_workspace()?;
+        let manifest = read_manifest(&workspace.root, run_id)?;
+        let entries = store::read_transcript(&workspace.root, run_id);
+        let last = entries.last().map(|e| e.seq).unwrap_or(0);
+        Ok(page_of(run_id, entries.iter(), after, limit, manifest.output.truncated, last))
+    }
+
+    /// Resolve an artifact of a run to its file inside the workspace.
+    pub fn artifact(&self, run_id: &str, artifact_id: &str) -> Result<(ArtifactRecord, PathBuf), ResearchError> {
+        let manifest = self.run_manifest(run_id)?;
+        let record = manifest
+            .record
+            .outputs
+            .iter()
+            .find(|a| a.id.0 == artifact_id)
+            .cloned()
+            .ok_or_else(|| ResearchError::UnknownArtifact(artifact_id.to_owned()))?;
+        let path = record.path.clone().ok_or_else(|| ResearchError::UnknownArtifact(artifact_id.to_owned()))?;
+        if !artifact_belongs_to_run(&path, run_id) {
+            return Err(ResearchError::UnknownArtifact(artifact_id.to_owned()));
+        }
+        let root = match lock(&self.shared.runs).get(run_id) {
+            Some(run) => run.root.clone(),
+            None => self.current_workspace()?.root,
+        };
+        let file = resolve_existing(&root, &path)?;
+        Ok((record, file))
+    }
+
+    /// Bytes of an artifact (bounded), for display in the webview.
+    pub fn artifact_bytes(&self, run_id: &str, artifact_id: &str) -> Result<(ArtifactRecord, Vec<u8>), ResearchError> {
+        let (record, file) = self.artifact(run_id, artifact_id)?;
+        let metadata = std::fs::metadata(&file).map_err(|e| ResearchError::io("reading artifact", e))?;
+        if metadata.len() > ARTIFACT_SIZE_LIMIT {
+            return Err(ResearchError::InvalidRequest("artifact is too large to display".into()));
+        }
+        let bytes = std::fs::read(&file).map_err(|e| ResearchError::io("reading artifact", e))?;
+        Ok((record, bytes))
+    }
+}
+
+fn check_language(language: RuntimeLanguage, extension: Option<&str>) -> Result<(), ResearchError> {
+    let extension = extension.unwrap_or("").to_ascii_lowercase();
+    let ok = match language {
+        RuntimeLanguage::Python => matches!(extension.as_str(), "py" | "ipy" | "pyw"),
+        RuntimeLanguage::R => extension == "r",
+        RuntimeLanguage::Julia => extension == "jl",
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(ResearchError::InvalidRequest(format!(
+            "a .{extension} file cannot run in a {} session",
+            match language {
+                RuntimeLanguage::Python => "Python",
+                RuntimeLanguage::R => "R",
+                RuntimeLanguage::Julia => "Julia",
+            }
+        )))
+    }
+}
+
+fn abbreviate_home(path: &str) -> String {
+    for var in ["USERPROFILE", "HOME"] {
+        if let Some(home) = std::env::var_os(var).map(|h| h.to_string_lossy().into_owned())
+            && !home.is_empty()
+            && path.len() >= home.len()
+            && path[..home.len()].eq_ignore_ascii_case(&home)
+        {
+            return format!("~{}", &path[home.len()..]);
+        }
+    }
+    path.to_owned()
+}
+
+// ==========================================================================
+// Session
+
+type Pending = oneshot::Sender<Result<Value, ResearchError>>;
+
+struct HelperIo {
+    stdin: Box<dyn Write + Send>,
+    control: Arc<dyn ProcessControl>,
+}
+
+struct SessionMut {
+    state: SessionState,
+    io: Option<HelperIo>,
+    epoch: u64,
+    kernel: Option<KernelDescriptor>,
+    kernel_pid: Option<u32>,
+    helper_pid: Option<u32>,
+    helper_version: Option<String>,
+    interpreter: Option<InterpreterProvenance>,
+    packages: Vec<ToolVersion>,
+    transport_encryption: String,
+    interrupt_mode: String,
+    active: Option<String>,
+    queue: VecDeque<String>,
+    generation: u32,
+    last_seen: Instant,
+    diagnostics: VecDeque<String>,
+}
+
+struct Session {
+    id: String,
+    owner: SessionOwner,
+    env: RuntimeEnvironment,
+    root: PathBuf,
+    started_at_ms: u64,
+    shared: Weak<Shared>,
+    state: Mutex<SessionMut>,
+    pending: Mutex<HashMap<u64, Pending>>,
+    next_request: AtomicU64,
+}
+
+impl Session {
+    fn new(shared: &Arc<Shared>, env: RuntimeEnvironment, owner: SessionOwner, root: PathBuf) -> Arc<Self> {
+        let id = format!("session-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        Arc::new(Self {
+            id,
+            owner,
+            env,
+            root,
+            started_at_ms: now_ms(),
+            shared: Arc::downgrade(shared),
+            state: Mutex::new(SessionMut {
+                state: SessionState::Starting,
+                io: None,
+                epoch: 0,
+                kernel: None,
+                kernel_pid: None,
+                helper_pid: None,
+                helper_version: None,
+                interpreter: None,
+                packages: Vec::new(),
+                transport_encryption: "none".into(),
+                interrupt_mode: "none".into(),
+                active: None,
+                queue: VecDeque::new(),
+                generation: 0,
+                last_seen: Instant::now(),
+                diagnostics: VecDeque::new(),
+            }),
+            pending: Mutex::new(HashMap::new()),
+            next_request: AtomicU64::new(1),
+        })
+    }
+
+    fn shared(&self) -> Option<Arc<Shared>> {
+        self.shared.upgrade()
+    }
+
+    fn info(&self) -> SessionInfo {
+        let state = lock(&self.state);
+        SessionInfo {
+            id: self.id.clone(),
+            owner: self.owner.clone(),
+            environment_id: self.env.id.clone(),
+            language: self.env.language,
+            display_name: self.env.display_name.clone(),
+            state: state.state.clone(),
+            kernel: state.kernel.clone(),
+            kernel_pid: state.kernel_pid,
+            helper_pid: state.helper_pid,
+            helper_version: state.helper_version.clone(),
+            transport_encryption: state.transport_encryption.clone(),
+            interrupt_mode: state.interrupt_mode.clone(),
+            active_run: state.active.clone().map(RunId),
+            queued_runs: state.queue.iter().cloned().map(RunId).collect(),
+            started_at_ms: self.started_at_ms,
+            generation: state.generation,
+        }
+    }
+
+    fn emit_changed(&self) {
+        if let Some(shared) = self.shared() {
+            shared.emit(ResearchEvent::SessionChanged { session: self.info() });
+        }
+    }
+
+    fn set_state(&self, state: SessionState) {
+        lock(&self.state).state = state;
+        self.emit_changed();
+    }
+
+    // ---- helper process -------------------------------------------------
+
+    async fn launch(self: &Arc<Self>) -> Result<(), ResearchError> {
+        let shared = self.shared().ok_or(ResearchError::HelperGone)?;
+        let helper = install_helper(&shared.research_dir("kernel-host")?)?;
+        let runtime_dir = shared.research_dir("runtime")?;
+        let host = self.env.host_interpreter.clone().ok_or(ResearchError::HelperGone)?;
+        let mut extra: BTreeMap<String, String> = self
+            .env
+            .kernel_environment
+            .iter()
+            .filter(|(name, _)| !crate::launcher::looks_secret(name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        // Connection files (with their HMAC keys) stay in an application-owned directory.
+        extra.insert("JUPYTER_RUNTIME_DIR".to_owned(), runtime_dir.display().to_string());
+        let spec = JobSpec {
+            label: format!("research kernel host ({})", self.env.display_name),
+            program: host,
+            args: vec!["-u".into(), "-X".into(), "utf8".into(), helper.display().to_string()],
+            environment: research_environment(extra),
+            working_directory: self.root.display().to_string(),
+            policy: ExecutionPolicy::TrustedNative,
+            timeout_ms: None,
+            log_limit_bytes: Some(64 * 1024),
+            stdin: None,
+        };
+        let process = shared.config.launcher.launch_interactive(&spec).map_err(|e| match e {
+            crate::launcher::LaunchError::Refused(message) => ResearchError::PolicyRefused(message),
+            other => ResearchError::Launch(other.to_string()),
+        })?;
+        let epoch = {
+            let mut state = lock(&self.state);
+            state.epoch += 1;
+            state.helper_pid = process.pid;
+            state.io = Some(HelperIo { stdin: process.stdin, control: process.control.clone() });
+            state.last_seen = Instant::now();
+            state.epoch
+        };
+        self.spawn_reader(process.stdout, epoch);
+        self.spawn_stderr(process.stderr);
+
+        let hello = self.request(json!({"cmd": "handshake", "protocol": PROTOCOL_VERSION})).await?;
+        let protocol = hello.get("protocol").and_then(Value::as_u64).unwrap_or(0);
+        if protocol != u64::from(PROTOCOL_VERSION) {
+            return Err(ResearchError::Launch(format!(
+                "helper speaks protocol {protocol}; this application needs {PROTOCOL_VERSION}"
+            )));
+        }
+        {
+            let mut state = lock(&self.state);
+            state.helper_version = hello.get("helperVersion").and_then(Value::as_str).map(str::to_owned);
+            let python = hello.get("python").cloned().unwrap_or_default();
+            state.interpreter = Some(InterpreterProvenance {
+                implementation: python.get("implementation").and_then(Value::as_str).unwrap_or("").to_owned(),
+                version: python.get("version").and_then(Value::as_str).unwrap_or("").to_owned(),
+                location: abbreviate_home(python.get("executable").and_then(Value::as_str).unwrap_or("")),
+            });
+            state.packages = hello
+                .get("packages")
+                .and_then(Value::as_object)
+                .map(|packages| {
+                    packages
+                        .iter()
+                        .filter_map(|(name, version)| {
+                            version.as_str().map(|v| ToolVersion { name: name.clone(), version: v.to_owned() })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        self.start_kernel().await
+    }
+
+    async fn start_kernel(self: &Arc<Self>) -> Result<(), ResearchError> {
+        let kernel = match self.env.kernel.clone() {
+            Some(KernelChoice::Kernelspec { name }) => json!({"kind": "kernelspec", "name": name}),
+            _ => json!({"kind": "python"}),
+        };
+        let started =
+            self.request(json!({"cmd": "start", "kernel": kernel, "cwd": self.root.display().to_string()})).await?;
+        self.adopt_kernel(&started);
+        Ok(())
+    }
+
+    fn adopt_kernel(&self, started: &Value) {
+        {
+            let mut state = lock(&self.state);
+            let kernel = started.get("kernel").cloned().unwrap_or_default();
+            let text = |key: &str| kernel.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
+            state.kernel = Some(KernelDescriptor {
+                name: text("name"),
+                language: text("language"),
+                language_version: text("languageVersion"),
+                implementation: text("implementation"),
+                implementation_version: text("implementationVersion"),
+            });
+            state.kernel_pid = started.get("pid").and_then(Value::as_u64).map(|p| p as u32);
+            state.transport_encryption =
+                started.get("transportEncryption").and_then(Value::as_str).unwrap_or("none").to_owned();
+            state.interrupt_mode = started.get("interrupt").and_then(Value::as_str).unwrap_or("none").to_owned();
+            state.generation += 1;
+            state.state = SessionState::Idle;
+        }
+        self.emit_changed();
+    }
+
+    fn spawn_reader(self: &Arc<Self>, stdout: Box<dyn Read + Send>, epoch: u64) {
+        let session = Arc::downgrade(self);
+        std::thread::Builder::new()
+            .name("research-helper-stdout".into())
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let Some(session) = session.upgrade() else { return };
+                            session.on_line(line.trim_end(), epoch);
+                        }
+                    }
+                }
+                if let Some(session) = session.upgrade() {
+                    session.on_helper_exit(epoch);
+                }
+            })
+            .expect("spawn helper reader thread");
+    }
+
+    fn spawn_stderr(self: &Arc<Self>, stderr: Box<dyn Read + Send>) {
+        let session = Arc::downgrade(self);
+        std::thread::Builder::new()
+            .name("research-helper-stderr".into())
+            .spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    let Ok(line) = line else { break };
+                    let Some(session) = session.upgrade() else { return };
+                    let mut state = lock(&session.state);
+                    state.diagnostics.push_back(line.chars().take(2000).collect());
+                    while state.diagnostics.len() > DIAGNOSTIC_LINES {
+                        state.diagnostics.pop_front();
+                    }
+                }
+            })
+            .expect("spawn helper stderr thread");
+    }
+
+    fn spawn_watchdog(self: &Arc<Self>) {
+        let session = Arc::downgrade(self);
+        let Some(timeout) = self.shared().map(|s| s.config.heartbeat_timeout) else { return };
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let Some(session) = session.upgrade() else { return };
+                let (stale, stopped, control) = {
+                    let state = lock(&session.state);
+                    let watched = matches!(
+                        state.state,
+                        SessionState::Idle | SessionState::Busy | SessionState::Restarting | SessionState::Starting
+                    );
+                    (
+                        watched && state.io.is_some() && state.last_seen.elapsed() > timeout,
+                        matches!(state.state, SessionState::Stopped),
+                        state.io.as_ref().map(|io| io.control.clone()),
+                    )
+                };
+                if stopped {
+                    return;
+                }
+                if stale {
+                    session.crash("The research helper stopped responding and was stopped. Restart the session.");
+                    if let Some(control) = control {
+                        control.kill_tree();
+                    }
+                }
+            }
+        });
+    }
+
+    fn stop_process(&self) {
+        let control = lock(&self.state).io.take().map(|io| io.control);
+        if let Some(control) = control {
+            control.kill_tree();
+        }
+    }
+
+    async fn request(&self, mut message: Value) -> Result<Value, ResearchError> {
+        let timeout = self.shared().map(|s| s.config.request_timeout).unwrap_or(Duration::from_secs(60));
+        let id = self.next_request.fetch_add(1, Ordering::Relaxed);
+        message["id"] = json!(id);
+        let (tx, rx) = oneshot::channel();
+        lock(&self.pending).insert(id, tx);
+        let line = format!("{message}\n");
+        let written = {
+            let mut state = lock(&self.state);
+            match state.io.as_mut() {
+                Some(io) => io.stdin.write_all(line.as_bytes()).and_then(|_| io.stdin.flush()).is_ok(),
+                None => false,
+            }
+        };
+        if !written {
+            lock(&self.pending).remove(&id);
+            return Err(ResearchError::HelperGone);
+        }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(ResearchError::HelperGone),
+            Err(_) => {
+                lock(&self.pending).remove(&id);
+                Err(ResearchError::Timeout(timeout.as_secs()))
+            }
+        }
+    }
+
+    fn on_line(self: &Arc<Self>, line: &str, epoch: u64) {
+        {
+            let mut state = lock(&self.state);
+            if state.epoch != epoch {
+                return;
+            }
+            state.last_seen = Instant::now();
+        }
+        match parse_line(line) {
+            Some(HelperMessage::Response { id, result }) => {
+                if let Some(tx) = lock(&self.pending).remove(&id) {
+                    let _ = tx.send(
+                        result.map_err(|HelperFailure { code, message }| ResearchError::Helper { code, message }),
+                    );
+                }
+            }
+            Some(HelperMessage::Event(event)) => self.on_event(event),
+            Some(HelperMessage::Unknown(_)) | None => {}
+        }
+    }
+
+    fn on_helper_exit(self: &Arc<Self>, epoch: u64) {
+        let (current, control) = {
+            let state = lock(&self.state);
+            (state.epoch == epoch, state.io.as_ref().map(|io| io.control.clone()))
+        };
+        if !current {
+            return;
+        }
+        let code = control.as_ref().and_then(|c| {
+            for _ in 0..50 {
+                if let Some(exit) = c.try_wait() {
+                    return Some(exit.code);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            None
+        });
+        lock(&self.state).io = None;
+        for (_, tx) in lock(&self.pending).drain() {
+            let _ = tx.send(Err(ResearchError::HelperGone));
+        }
+        let stopped = matches!(lock(&self.state).state, SessionState::Stopped);
+        if !stopped {
+            let detail = match code.flatten() {
+                Some(code) => format!(" (exit code {code})"),
+                None => String::new(),
+            };
+            self.crash(&format!("The research helper exited unexpectedly{detail}. Restart the session."));
+        }
+    }
+
+    /// Mark the session crashed, failing the active run and canceling queued runs.
+    fn crash(self: &Arc<Self>, reason: &str) {
+        let (active, queued) = {
+            let mut state = lock(&self.state);
+            if matches!(state.state, SessionState::Crashed { .. } | SessionState::Stopped) {
+                return;
+            }
+            state.state = SessionState::Crashed { reason: reason.to_owned() };
+            (state.active.take(), state.queue.drain(..).collect::<Vec<_>>())
+        };
+        if let Some(run) = active {
+            self.finish_run(&run, RunStatus::Failed { message: reason.to_owned() }, None, None, false);
+        }
+        for run in queued {
+            self.finish_run(
+                &run,
+                RunStatus::Canceled,
+                None,
+                Some("The session crashed before this run started."),
+                false,
+            );
+        }
+        self.emit_changed();
+    }
+
+    // ---- events ---------------------------------------------------------
+
+    fn on_event(self: &Arc<Self>, event: HelperEvent) {
+        let Some(shared) = self.shared() else { return };
+        match event {
+            HelperEvent::Heartbeat { .. } | HelperEvent::KernelStatus { .. } => {}
+            HelperEvent::Log { level, message } => {
+                let mut state = lock(&self.state);
+                state.diagnostics.push_back(format!("[{level}] {}", message.chars().take(2000).collect::<String>()));
+                while state.diagnostics.len() > DIAGNOSTIC_LINES {
+                    state.diagnostics.pop_front();
+                }
+            }
+            HelperEvent::RunStarted { run_id, execution_count } => {
+                if let Some(run) = lock(&shared.runs).get_mut(&run_id) {
+                    run.manifest.execution_count = execution_count;
+                }
+                shared.emit(ResearchEvent::RunStarted {
+                    run_id: RunId(run_id),
+                    session_id: self.id.clone(),
+                    execution_count,
+                });
+            }
+            HelperEvent::Stream { run_id, name, text } => {
+                let name = if name == "stderr" { StreamName::Stderr } else { StreamName::Stdout };
+                self.push_output(&shared, &run_id, OutputItem::Stream { name, text });
+            }
+            HelperEvent::Display { run_id, output_type, execution_count, text, files } => {
+                let artifacts = {
+                    let mut runs = lock(&shared.runs);
+                    let Some(run) = runs.get_mut(&run_id) else { return };
+                    files.iter().filter_map(|f| run.register_file(f)).map(|a| a.id).collect()
+                };
+                self.push_output(
+                    &shared,
+                    &run_id,
+                    OutputItem::Display { output_type, execution_count, text, artifacts },
+                );
+            }
+            HelperEvent::ClearOutput { run_id, wait } => {
+                self.push_output(&shared, &run_id, OutputItem::ClearOutput { wait });
+            }
+            HelperEvent::Error { run_id, ename, evalue, traceback } => {
+                if let Some(run) = lock(&shared.runs).get_mut(&run_id) {
+                    run.manifest.error = Some(RunErrorInfo { ename: ename.clone(), evalue: evalue.clone() });
+                }
+                self.push_output(&shared, &run_id, OutputItem::Error { ename, evalue, traceback });
+            }
+            HelperEvent::RunFinished { run_id, status, reason, execution_count, stream_dropped, files_dropped } => {
+                let (interrupted, canceled, ename) = {
+                    let mut runs = lock(&shared.runs);
+                    let Some(run) = runs.get_mut(&run_id) else { return };
+                    run.manifest.output.dropped_stream_chars += stream_dropped;
+                    run.manifest.output.dropped_files += files_dropped;
+                    (
+                        run.interrupt_requested,
+                        run.cancel_requested,
+                        run.manifest.error.as_ref().map(|e| (e.ename.clone(), e.evalue.clone())),
+                    )
+                };
+                let status_text = status;
+                let status = if canceled {
+                    RunStatus::Canceled
+                } else {
+                    match status_text.as_str() {
+                        "ok" => RunStatus::Succeeded,
+                        "aborted" => RunStatus::Canceled,
+                        "lost" => match reason.as_deref() {
+                            Some("kernelDied") => {
+                                RunStatus::Failed { message: "The kernel died during this run.".into() }
+                            }
+                            Some("restarted") | Some("shutdown") => RunStatus::Canceled,
+                            _ => RunStatus::Failed { message: "The research helper stopped.".into() },
+                        },
+                        _ => match ename {
+                            Some((name, _)) if name == "KeyboardInterrupt" || interrupted => RunStatus::Interrupted,
+                            Some((name, value)) => RunStatus::Failed { message: format!("{name}: {value}") },
+                            None => RunStatus::Failed { message: "The run failed.".into() },
+                        },
+                    }
+                };
+                let notice = match (stream_dropped, files_dropped) {
+                    (0, 0) => None,
+                    _ => Some(format!(
+                        "Output limit reached: {stream_dropped} characters and {files_dropped} files were not kept."
+                    )),
+                };
+                let lost = matches!(status_text.as_str(), "lost");
+                let was_active = {
+                    let mut state = lock(&self.state);
+                    if state.active.as_deref() == Some(run_id.as_str()) {
+                        state.active = None;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                // A lost run (kernel died/restarted) must not start queued work;
+                // the crash or restart path settles the queue.
+                self.finish_run(&run_id, status, execution_count, notice.as_deref(), was_active && !lost);
+            }
+            HelperEvent::KernelDied { exit_code, .. } => {
+                let detail = exit_code.map(|c| format!(" (exit code {c})")).unwrap_or_default();
+                self.crash(&format!(
+                    "The kernel process exited{detail}. Restart the session to continue with a fresh kernel."
+                ));
+            }
+        }
+    }
+
+    fn push_output(&self, shared: &Shared, run_id: &str, item: OutputItem) {
+        let entry = {
+            let mut runs = lock(&shared.runs);
+            let Some(run) = runs.get_mut(run_id) else { return };
+            run.push(item)
+        };
+        shared.emit(ResearchEvent::Output { run_id: RunId(run_id.to_owned()), entry });
+    }
+
+    // ---- runs -----------------------------------------------------------
+
+    fn enqueue(
+        self: &Arc<Self>,
+        code: String,
+        origin: CodeOrigin,
+        inputs: Vec<RunInput>,
+    ) -> Result<RunSummary, ResearchError> {
+        let shared = self.shared().ok_or(ResearchError::HelperGone)?;
+        // The session lock is held until the run is registered and placed, so
+        // concurrent requests cannot both become the active run.
+        let mut state = lock(&self.state);
+        let (provenance, environment) = {
+            match &state.state {
+                SessionState::Idle | SessionState::Busy => {}
+                other => {
+                    let (name, hint) = match other {
+                        SessionState::Crashed { .. } => ("crashed", "restart the session to continue"),
+                        SessionState::Starting | SessionState::Restarting => ("starting", "wait until it is ready"),
+                        _ => ("stopped", "start a new session"),
+                    };
+                    return Err(ResearchError::SessionNotReady {
+                        session: self.id.clone(),
+                        state: name.into(),
+                        hint: hint.into(),
+                    });
+                }
+            }
+            let kernel = state.kernel.clone().unwrap_or_default();
+            let provenance = SessionProvenance {
+                session_id: self.id.clone(),
+                owner: self.owner.clone(),
+                environment_id: self.env.id.clone(),
+                generation: state.generation,
+                interpreter: state.interpreter.clone().unwrap_or(InterpreterProvenance {
+                    implementation: String::new(),
+                    version: String::new(),
+                    location: String::new(),
+                }),
+                kernel: kernel.clone(),
+                helper_version: state.helper_version.clone().unwrap_or_else(|| HELPER_VERSION.to_owned()),
+                protocol: PROTOCOL_VERSION,
+            };
+            let mut environment =
+                vec![ToolVersion { name: "exposition-kernel-host".into(), version: provenance.helper_version.clone() }];
+            if !kernel.language.is_empty() {
+                environment
+                    .push(ToolVersion { name: kernel.language.clone(), version: kernel.language_version.clone() });
+            }
+            if !kernel.implementation.is_empty() {
+                environment.push(ToolVersion {
+                    name: format!("kernel:{}", kernel.implementation),
+                    version: kernel.implementation_version.clone(),
+                });
+            }
+            environment.extend(self.env.packages.iter().filter(|p| p.name == "r" || p.name == "julia").cloned());
+            environment.extend(state.packages.iter().cloned());
+            (provenance, environment)
+        };
+        let dispatch_now = state.active.is_none();
+        let run_id = new_run_id();
+        let code_bytes = code.len();
+        let manifest = RunManifest {
+            format: MANIFEST_FORMAT.into(),
+            record: RunRecord {
+                id: RunId(run_id.clone()),
+                producer: Producer::KernelSession {
+                    session_id: self.id.clone(),
+                    runtime: self.env.language.as_str().to_owned(),
+                },
+                inputs,
+                environment,
+                outputs: Vec::new(),
+                status: RunStatus::Running,
+                started_at_ms: now_ms(),
+                finished_at_ms: None,
+            },
+            session: provenance,
+            code: CodeProvenance {
+                origin,
+                sha256: sha256_hex(code.as_bytes()),
+                bytes: code_bytes as u64,
+                text: (code_bytes <= MANIFEST_CODE_LIMIT).then(|| code.clone()),
+            },
+            execution_count: None,
+            error: None,
+            output: OutputSummary::default(),
+        };
+        let run = RunState {
+            manifest,
+            session_id: self.id.clone(),
+            owner: self.owner.clone(),
+            root: self.root.clone(),
+            code,
+            queued: !dispatch_now,
+            output_dir: None,
+            entries: VecDeque::new(),
+            next_seq: 0,
+            retained_chars: 0,
+            interrupt_requested: false,
+            cancel_requested: false,
+            finished: false,
+        };
+        let summary = run.summary();
+        lock(&shared.runs).insert(run_id.clone(), run);
+        if dispatch_now {
+            state.active = Some(run_id.clone());
+            state.state = SessionState::Busy;
+        } else {
+            state.queue.push_back(run_id.clone());
+        }
+        drop(state);
+        shared.emit(ResearchEvent::RunQueued { run: summary.clone() });
+        self.emit_changed();
+        if dispatch_now {
+            self.spawn_dispatch(run_id);
+        }
+        Ok(summary)
+    }
+
+    fn spawn_dispatch(self: &Arc<Self>, run_id: String) {
+        let session = self.clone();
+        tokio::spawn(async move { session.dispatch(run_id).await });
+    }
+
+    async fn dispatch(self: Arc<Self>, run_id: String) {
+        let Some(shared) = self.shared() else { return };
+        let prepared = (|| {
+            let dir = ensure_dir_within(&self.root, &artifact_dir_path(&run_id))?;
+            let mut runs = lock(&shared.runs);
+            let run = runs.get_mut(&run_id).ok_or_else(|| ResearchError::UnknownRun(run_id.clone()))?;
+            run.queued = false;
+            run.output_dir = Some(dir.clone());
+            run.manifest.record.started_at_ms = now_ms();
+            write_manifest(&self.root, &run.manifest)?;
+            Ok::<_, ResearchError>((run.code.clone(), dir, run.summary()))
+        })();
+        let (code, dir, summary) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.fail_dispatch(&run_id, error);
+                return;
+            }
+        };
+        shared.emit(ResearchEvent::RunQueued { run: summary });
+        let result = self
+            .request(json!({
+                "cmd": "execute",
+                "run_id": run_id,
+                "code": code,
+                "output_dir": dir.display().to_string(),
+            }))
+            .await;
+        if let Err(error) = result {
+            self.fail_dispatch(&run_id, error);
+        }
+    }
+
+    fn fail_dispatch(self: &Arc<Self>, run_id: &str, error: ResearchError) {
+        let was_active = {
+            let mut state = lock(&self.state);
+            if state.active.as_deref() == Some(run_id) {
+                state.active = None;
+                true
+            } else {
+                false
+            }
+        };
+        self.finish_run(run_id, RunStatus::Failed { message: error.to_string() }, None, None, was_active);
+    }
+
+    /// Finalize a run: status, manifest, transcript, events; then start the next queued run.
+    fn finish_run(
+        self: &Arc<Self>,
+        run_id: &str,
+        status: RunStatus,
+        execution_count: Option<u32>,
+        notice: Option<&str>,
+        dispatch_next: bool,
+    ) {
+        let Some(shared) = self.shared() else { return };
+        let summary = {
+            let mut runs = lock(&shared.runs);
+            let Some(run) = runs.get_mut(run_id) else { return };
+            if run.finished {
+                return;
+            }
+            if let Some(message) = notice {
+                let entry = run.push(OutputItem::Notice { message: message.to_owned() });
+                shared.emit(ResearchEvent::Output { run_id: RunId(run_id.to_owned()), entry });
+            }
+            run.finished = true;
+            run.queued = false;
+            run.manifest.record.status = status;
+            run.manifest.record.finished_at_ms = Some(now_ms());
+            if execution_count.is_some() {
+                run.manifest.execution_count = execution_count;
+            }
+            let entries: Vec<_> = run.entries.iter().cloned().collect();
+            let _ = write_manifest(&run.root, &run.manifest);
+            let _ = write_transcript(&run.root, run_id, &entries);
+            run.summary()
+        };
+        shared.emit(ResearchEvent::RunFinished { run: summary });
+        if dispatch_next {
+            self.dispatch_next();
+        } else {
+            self.emit_changed();
+        }
+    }
+
+    fn dispatch_next(self: &Arc<Self>) {
+        let next = {
+            let mut state = lock(&self.state);
+            if state.active.is_some() || !matches!(state.state, SessionState::Idle | SessionState::Busy) {
+                None
+            } else {
+                let next = state.queue.pop_front();
+                state.active = next.clone();
+                state.state = if next.is_some() { SessionState::Busy } else { SessionState::Idle };
+                next
+            }
+        };
+        self.emit_changed();
+        if let Some(next) = next {
+            self.spawn_dispatch(next);
+        }
+    }
+
+    async fn interrupt(self: &Arc<Self>) -> Result<(), ResearchError> {
+        let active = {
+            let state = lock(&self.state);
+            if !matches!(state.state, SessionState::Idle | SessionState::Busy) {
+                return Err(ResearchError::SessionNotReady {
+                    session: self.id.clone(),
+                    state: "not running".into(),
+                    hint: "restart the session".into(),
+                });
+            }
+            state.active.clone()
+        };
+        if let (Some(run_id), Some(shared)) = (&active, self.shared()) {
+            if let Some(run) = lock(&shared.runs).get_mut(run_id) {
+                run.interrupt_requested = true;
+            }
+            let message = if lock(&self.state).interrupt_mode == "unsupported" {
+                "Interrupt requested, but this kernel does not support interrupts on this platform; use Cancel to stop the run (it restarts the kernel)."
+            } else {
+                "Interrupt requested."
+            };
+            self.push_output(&shared, run_id, OutputItem::Notice { message: message.into() });
+        }
+        self.request(json!({"cmd": "interrupt"})).await.map(|_| ())
+    }
+
+    async fn cancel(self: &Arc<Self>, run_id: &str) -> Result<(), ResearchError> {
+        let (queued, active) = {
+            let mut state = lock(&self.state);
+            let position = state.queue.iter().position(|r| r == run_id);
+            if let Some(index) = position {
+                state.queue.remove(index);
+            }
+            (position.is_some(), state.active.as_deref() == Some(run_id))
+        };
+        if queued {
+            self.finish_run(run_id, RunStatus::Canceled, None, Some("Canceled before it started."), false);
+            self.emit_changed();
+            return Ok(());
+        }
+        if !active {
+            return Err(ResearchError::UnknownRun(run_id.to_owned()));
+        }
+        let shared = self.shared().ok_or(ResearchError::HelperGone)?;
+        if let Some(run) = lock(&shared.runs).get_mut(run_id) {
+            run.cancel_requested = true;
+        }
+        self.push_output(&shared, run_id, OutputItem::Notice { message: "Cancel requested.".into() });
+        let _ = self.request(json!({"cmd": "interrupt"})).await;
+        // Escalate: if the run ignores the interrupt, restart the kernel.
+        let grace = shared.config.cancel_grace;
+        let session = self.clone();
+        let run_id = run_id.to_owned();
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            let still_active = lock(&session.state).active.as_deref() == Some(run_id.as_str());
+            if still_active {
+                if let Some(shared) = session.shared() {
+                    session.push_output(
+                        &shared,
+                        &run_id,
+                        OutputItem::Notice {
+                            message: "The run did not stop after the interrupt; restarting the kernel.".into(),
+                        },
+                    );
+                }
+                let _ = session.restart().await;
+            }
+        });
+        Ok(())
+    }
+
+    async fn restart(self: &Arc<Self>) -> Result<(), ResearchError> {
+        let (queued, helper_alive) = {
+            let mut state = lock(&self.state);
+            if matches!(state.state, SessionState::Stopped | SessionState::Starting | SessionState::Restarting) {
+                return Err(ResearchError::SessionNotReady {
+                    session: self.id.clone(),
+                    state: "busy starting or stopped".into(),
+                    hint: "wait or start a new session".into(),
+                });
+            }
+            state.state = SessionState::Restarting;
+            let alive = state.io.as_ref().is_some_and(|io| io.control.try_wait().is_none());
+            (state.queue.drain(..).collect::<Vec<_>>(), alive)
+        };
+        self.emit_changed();
+        for run in queued {
+            self.finish_run(
+                &run,
+                RunStatus::Canceled,
+                None,
+                Some("The session was restarted before this run started."),
+                false,
+            );
+        }
+        let result = if helper_alive {
+            match self.request(json!({"cmd": "restart"})).await {
+                Ok(started) => {
+                    self.adopt_kernel(&started);
+                    Ok(())
+                }
+                Err(ResearchError::HelperGone) => self.relaunch().await,
+                Err(error) => Err(error),
+            }
+        } else {
+            self.relaunch().await
+        };
+        // Any run that was active is finished by the helper's run_finished("lost");
+        // make sure nothing stays marked active after a restart.
+        let stale_active = lock(&self.state).active.take();
+        if let Some(run) = stale_active {
+            self.finish_run(&run, RunStatus::Canceled, None, Some("The session was restarted."), false);
+        }
+        match result {
+            Ok(()) => {
+                self.set_state(SessionState::Idle);
+                Ok(())
+            }
+            Err(error) => {
+                self.set_state(SessionState::Crashed { reason: format!("Restart failed: {error}") });
+                Err(error)
+            }
+        }
+    }
+
+    async fn relaunch(self: &Arc<Self>) -> Result<(), ResearchError> {
+        self.stop_process();
+        for (_, tx) in lock(&self.pending).drain() {
+            let _ = tx.send(Err(ResearchError::HelperGone));
+        }
+        self.launch().await
+    }
+
+    async fn shutdown(self: &Arc<Self>) {
+        let (queued, control) = {
+            let mut state = lock(&self.state);
+            state.state = SessionState::Stopped;
+            (state.queue.drain(..).collect::<Vec<_>>(), state.io.as_ref().map(|io| io.control.clone()))
+        };
+        for run in queued {
+            self.finish_run(&run, RunStatus::Canceled, None, Some("The session was shut down."), false);
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(20), self.request(json!({"cmd": "shutdown"}))).await;
+        if let Some(control) = control {
+            for _ in 0..50 {
+                if control.try_wait().is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            control.kill_tree();
+        }
+        lock(&self.state).io = None;
+        let active = lock(&self.state).active.take();
+        if let Some(run) = active {
+            self.finish_run(&run, RunStatus::Canceled, None, Some("The session was shut down."), false);
+        }
+        self.emit_changed();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn language_checks_file_extensions() {
+        assert!(check_language(RuntimeLanguage::Python, Some("py")).is_ok());
+        assert!(check_language(RuntimeLanguage::Python, Some("typ")).is_err());
+        assert!(check_language(RuntimeLanguage::R, Some("R")).is_ok());
+        assert!(check_language(RuntimeLanguage::Julia, Some("jl")).is_ok());
+        assert!(check_language(RuntimeLanguage::Julia, None).is_err());
+    }
+}

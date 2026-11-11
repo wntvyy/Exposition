@@ -12,6 +12,21 @@
     "allow-document-state",
     "allow-document-apply",
     "allow-document-undo",
-    "allow-document-redo"
+    "allow-document-redo",
+    "allow-research-workspace-set",
+    "allow-research-workspace",
+    "allow-research-environments",
+    "allow-research-session-start",
+    "allow-research-sessions",
+    "allow-research-session-interrupt",
+    "allow-research-session-restart",
+    "allow-research-session-shutdown",
+    "allow-research-execute",
+    "allow-research-run-cancel",
+    "allow-research-runs",
+    "allow-research-run",
+    "allow-research-run-output",
+    "allow-research-artifact",
+    "allow-artifact-attach"
   ]
 }

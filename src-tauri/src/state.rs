@@ -1,12 +1,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use exposition_research::launcher::StdProcessLauncher;
+use exposition_research::{ResearchConfig, ResearchService};
 use exposition_workspace::DocumentService;
 use tauri::{AppHandle, Manager};
 
 /// Application-wide services. One instance is managed by Tauri.
 pub struct AppState {
     pub documents: Arc<DocumentService>,
+    /// Research sessions, runs, and provenance (M4).
+    pub research: Arc<ResearchService>,
     /// Application data directory (settings, recovery, session metadata).
     pub data_dir: PathBuf,
 }
@@ -15,7 +19,14 @@ impl AppState {
     pub fn initialize(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
         let data_dir = resolve_data_dir(app)?;
         std::fs::create_dir_all(&data_dir)?;
-        Ok(Self { documents: Arc::new(DocumentService::new()), data_dir })
+        let documents = Arc::new(DocumentService::new());
+        // TEMPORARY launcher until the shared ExecutionService offers interactive jobs.
+        let research = Arc::new(ResearchService::new(ResearchConfig::new(
+            data_dir.clone(),
+            Arc::new(StdProcessLauncher),
+            documents.clone(),
+        )));
+        Ok(Self { documents, research, data_dir })
     }
 }
 
