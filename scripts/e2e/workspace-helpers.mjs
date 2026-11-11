@@ -74,12 +74,12 @@ export async function openFromTree(page, path) {
     const row = page.locator(`[data-testid="file-tree"] [data-path="${dir}"]`).first();
     await row.waitFor();
     if ((await row.getAttribute("aria-expanded")) !== "true") {
-      await row.locator(".xp-tree-chevron").first().click();
+      await row.locator(".ui-tree-item__chevron").first().click();
     }
   }
   const row = page.locator(`[data-testid="file-tree"] [data-path="${path}"]`).first();
   await row.waitFor();
-  await row.locator(".xp-tree-name").click();
+  await row.locator(".ui-tree-item__title").first().click();
 }
 
 export function editorLocator(page, path) {
@@ -110,6 +110,21 @@ export async function waitForText(page, id, expected, message = "document text")
   return waitFor(async () => (await documentState(page, id)).text === expected, { message });
 }
 
+export function tabLocator(page, path) {
+  return page.locator(`[data-editor-key="file:${path}"]`).first();
+}
+
+/** "true" when the editor tab shows unsaved changes, else "false". */
 export async function tabDirty(page, path) {
-  return page.locator(`[data-testid="editor-tab"][data-key="file:${path}"]`).getAttribute("data-dirty");
+  return (await tabLocator(page, path).getAttribute("data-dirty")) === "true" ? "true" : "false";
+}
+
+/** Close an editor tab with its close affordance. */
+export async function closeTab(page, path) {
+  await tabLocator(page, path).locator(".ui-editor-tab__close").click();
+}
+
+/** The unsaved-changes / confirmation alert dialog. */
+export function alertDialog(page) {
+  return page.getByRole("alertdialog");
 }

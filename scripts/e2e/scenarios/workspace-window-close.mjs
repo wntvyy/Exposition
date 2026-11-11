@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { focusEditor, invoke, makeProject, openInEditor, openWorkspace, waitFor, waitForText } from "../workspace-helpers.mjs";
+import { alertDialog, focusEditor, invoke, makeProject, openInEditor, openWorkspace, waitFor, waitForText } from "../workspace-helpers.mjs";
 
 function requestClose(pid) {
   try {
@@ -31,18 +31,18 @@ export default async function workspaceWindowClose({ launchApp, artifactsDir, as
     await waitForText(page, id, `${original}Not saved.`);
 
     requestClose(app.child.pid);
-    const prompt = page.locator('[data-testid="prompt"]');
+    const prompt = alertDialog(page);
     await prompt.waitFor({ timeout: 10_000 });
     assert.match(await prompt.innerText(), /Save changes to main\.typ\?/);
     await page.screenshot({ path: join(artifactsDir, "01-close-prompt.png") });
-    await prompt.locator('[data-prompt-button="cancel"]').click();
+    await prompt.getByRole("button", { name: "Cancel" }).click();
     await prompt.waitFor({ state: "detached" });
     assert.equal(app.child.exitCode, null, "cancel keeps the app open");
     assert.equal((await invoke(page, "document_state", { document: id })).text, `${original}Not saved.`);
 
     requestClose(app.child.pid);
     await prompt.waitFor({ timeout: 10_000 });
-    await prompt.locator('[data-prompt-button="discard"]').click();
+    await prompt.getByRole("button", { name: "Don't Save" }).click();
     await waitFor(() => app.child.exitCode !== null, { message: "app exited after Don't Save" });
   } catch (error) {
     await app.page.screenshot({ path: join(artifactsDir, "failure.png") }).catch(() => {});

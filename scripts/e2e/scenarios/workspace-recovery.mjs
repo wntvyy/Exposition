@@ -15,6 +15,7 @@ import {
   openInEditor,
   openWorkspace,
   tabDirty,
+  tabLocator,
   waitFor,
   waitForText,
 } from "../workspace-helpers.mjs";
@@ -132,8 +133,7 @@ export default async function workspaceRecovery({ launchApp, artifactsDir, asser
     });
 
     // Saving clears the journal.
-    const mainTab = page.locator('[data-testid="editor-tab"][data-key="file:main.typ"]');
-    await mainTab.click();
+    await tabLocator(page, "main.typ").click();
     await focusEditor(page, "main.typ", "end");
     await page.keyboard.press("Control+S");
     await waitFor(async () => (await readFile(mainPath, "utf8")) === `${mainOriginal}Recovered paragraph.`, {

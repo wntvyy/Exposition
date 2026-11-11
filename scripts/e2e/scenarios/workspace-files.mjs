@@ -7,6 +7,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
+  alertDialog,
+  closeTab,
   documentState,
   editorLocator,
   focusEditor,
@@ -120,7 +122,7 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
     // --- close (clean, after saving) and reopen ----------------------------
     await page.keyboard.press("Control+S");
     await waitFor(async () => (await tabDirty(page, "main.typ")) === "false", { message: "saved" });
-    await page.locator('[data-testid="editor-tab-close"]').first().click();
+    await closeTab(page, "main.typ");
     await waitFor(async () => (await invoke(page, "document_list")).every((d) => d.path !== "main.typ"), {
       message: "document closed in the service",
     });
@@ -199,10 +201,14 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
 
     // --- unavailable files are never opened as text ------------------------
     await openFromTree(page, "encoding/binary.bin");
-    await page.locator('[data-testid="source-editor-unavailable"]').waitFor();
-    assert.match(await page.locator('[data-testid="source-editor-unavailable"]').innerText(), /binary/i);
+    const binary = page.locator('[data-testid="source-editor-unavailable"][data-path="encoding/binary.bin"]');
+    await binary.waitFor();
+    assert.match(await binary.innerText(), /binary/i);
     await openFromTree(page, "encoding/latin1.txt");
-    await page.locator('[data-testid="source-editor-unavailable"]').getByText(/not valid UTF-8/).waitFor();
+    await page
+      .locator('[data-testid="source-editor-unavailable"][data-path="encoding/latin1.txt"]')
+      .getByText(/not valid UTF-8/)
+      .waitFor();
     assert.deepEqual(await readFile(join(project.root, "encoding", "latin1.txt")), Buffer.from("caf\xe9 au lait\n", "latin1"));
     await shot("05-unavailable");
 
@@ -213,17 +219,16 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
     await focusEditor(page, "notes.md", "end");
     await page.keyboard.type("- three");
     await waitFor(async () => (await tabDirty(page, "notes.md")) === "true", { message: "notes dirty" });
-    const notesClose = page.locator('[data-testid="editor-tab"][data-key="file:notes.md"] + [data-testid="editor-tab-close"]');
-    await notesClose.click();
-    const prompt = page.locator('[data-testid="prompt"]');
+    await closeTab(page, "notes.md");
+    const prompt = alertDialog(page);
     await prompt.waitFor();
     assert.match(await prompt.innerText(), /Save changes to notes\.md\?/);
     await shot("06-close-prompt");
-    await prompt.locator('[data-prompt-button="cancel"]').click();
+    await prompt.getByRole("button", { name: "Cancel" }).click();
     await prompt.waitFor({ state: "detached" });
     assert.equal(await tabDirty(page, "notes.md"), "true", "cancel keeps the dirty editor");
-    await notesClose.click();
-    await prompt.locator('[data-prompt-button="discard"]').click();
+    await closeTab(page, "notes.md");
+    await prompt.getByRole("button", { name: "Don't Save" }).click();
     await waitFor(async () => (await invoke(page, "document_list")).every((d) => d.id !== notesId), {
       message: "discarded document closed",
     });

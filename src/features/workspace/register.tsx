@@ -3,13 +3,13 @@ import { Files } from "lucide-react";
 
 import { registry } from "../../app/registry";
 import { FilesView } from "./FilesView";
-import { closeWorkspace, openFolderDialog, startWorkspaceEvents, useWorkspace } from "./store";
+import { closeWorkspace, FILES_VIEW_ID, openFolderDialog, startWorkspaceEvents, useWorkspace } from "./store";
 import "./workspace.css";
 
 startWorkspaceEvents();
 
 registry.registerView({
-  id: "workspace.files",
+  id: FILES_VIEW_ID,
   location: "sidebar",
   title: "Files",
   icon: Files,

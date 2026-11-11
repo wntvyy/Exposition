@@ -7,7 +7,7 @@ import { commands } from "../../lib/ipc";
 const defaults: AppSettings = {
   version: 1,
   editor: {
-    fontSize: 14,
+    fontSize: 13,
     tabSize: 2,
     insertSpaces: true,
     wordWrap: true,

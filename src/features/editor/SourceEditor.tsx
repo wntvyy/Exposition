@@ -3,13 +3,15 @@
 // Exported for composition: typesetting/page-editing views can render
 // `<SourceEditor path="main.typ" />` or `<SourceEditor documentId={id} />`
 // beside a page view; both edit the same revisioned document and share undo.
+import { FileWarning } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import type { DocumentId } from "../../bindings/DocumentId";
 import type { TextRange } from "../../bindings/TextRange";
 import { registry } from "../../app/registry";
 import { errorMessage, isCommandError } from "../../lib/ipc";
-import { monaco } from "../../lib/monaco";
+import { editorDefaults, monaco } from "../../lib/monaco";
+import { Banner, Button, ErrorState, UnavailableState } from "../../ui/components";
 import {
   attachDocument,
   keepBuffer,
@@ -51,10 +53,6 @@ function toRanges(model: monaco.editor.ITextModel, selections: readonly monaco.S
   }));
 }
 
-function prefersDark() {
-  return typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-}
-
 export function SourceEditor({ documentId, path, active, readOnly, onEditor, className }: SourceEditorProps) {
   const [load, setLoad] = useState<Load>({ status: "loading" });
   const container = useRef<HTMLDivElement>(null);
@@ -91,11 +89,8 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
   useEffect(() => {
     if (!handle || !container.current || handle.closed) return;
     const editor = monaco.editor.create(container.current, {
+      ...editorDefaults,
       model: handle.model,
-      automaticLayout: true,
-      theme: prefersDark() ? "vs-dark" : "vs",
-      fontFamily: 'var(--xp-font-mono, "Cascadia Code", Consolas, "Courier New", monospace)',
-      scrollBeyondLastLine: false,
       renderWhitespace: "selection",
       unicodeHighlight: { ambiguousCharacters: false },
       ariaLabel: `Source of ${handle.name}`,
@@ -169,6 +164,7 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
       readOnly: reason !== null,
       readOnlyMessage: reason ? { value: reason } : undefined,
       fontSize: settings.fontSize,
+      lineHeight: Math.round((settings.fontSize * 20) / 13),
       tabSize: settings.tabSize,
       insertSpaces: settings.insertSpaces,
       wordWrap: settings.wordWrap ? "on" : "off",
@@ -183,12 +179,23 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
   }, [active, handle]);
 
   if (load.status === "error") {
+    const unavailable = ["file.binary", "file.undecodable", "file.tooLarge"].includes(load.code);
     return (
-      <div className={`xp-source-editor ${className ?? ""}`} data-testid="source-editor-unavailable">
-        <div className="xp-unavailable" role="status">
-          <h2>{load.code === "file.tooLarge" ? "File too large" : "Can't open this file as text"}</h2>
-          <p>{load.message}</p>
-        </div>
+      <div
+        className={`xp-source-editor ${className ?? ""}`}
+        data-testid="source-editor-unavailable"
+        data-code={load.code}
+        data-path={path}
+      >
+        {unavailable ? (
+          <UnavailableState
+            icon={FileWarning}
+            title={load.code === "file.tooLarge" ? "File too large to edit as text" : "Can't open this file as text"}
+            description={load.message}
+          />
+        ) : (
+          <ErrorState title="Could not open this file" description={load.message} />
+        )}
       </div>
     );
   }
@@ -205,51 +212,77 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
       aria-busy={load.status === "loading"}
     >
       {conflict && handle && (
-        <div className="xp-banner xp-banner-warning" role="alert" data-testid="conflict-banner" data-kind={conflict.kind}>
-          <span>{conflict.message}</span>
-          <span className="xp-banner-actions">
-            {conflict.kind === "modified" && (
-              <button type="button" className="xp-button" onClick={() => void reloadDocument(handle)}>
-                Reload from Disk
-              </button>
-            )}
-            <button type="button" className="xp-button" onClick={() => void keepBuffer(handle)}>
-              {conflict.kind === "deleted" ? "Keep in Editor" : "Keep My Changes"}
-            </button>
-          </span>
+        <div data-testid="conflict-banner" data-kind={conflict.kind}>
+          <Banner
+            tone="warning"
+            live
+            title={
+              conflict.kind === "deleted"
+                ? `${handle.name} was deleted on disk`
+                : conflict.kind === "unreadable"
+                  ? `${handle.name} can no longer be read from disk`
+                  : `${handle.name} changed on disk`
+            }
+            actions={
+              <>
+                {conflict.kind === "modified" && (
+                  <Button size="sm" onPress={() => void reloadDocument(handle)}>
+                    Reload from Disk
+                  </Button>
+                )}
+                <Button size="sm" variant="primary" onPress={() => void keepBuffer(handle)}>
+                  {conflict.kind === "deleted" ? "Keep in Editor" : "Keep My Changes"}
+                </Button>
+              </>
+            }
+          >
+            {conflict.message}
+            {conflict.kind === "modified" && " Reloading keeps your version in undo history."}
+          </Banner>
         </div>
       )}
       {handle?.saveError && (
-        <div className="xp-banner xp-banner-danger" role="alert" data-testid="save-error-banner">
-          <span>Not saved: {handle.saveError}</span>
-          <span className="xp-banner-actions">
-            <button type="button" className="xp-button" onClick={() => void saveDocument(handle)}>
-              Retry
-            </button>
-            <button type="button" className="xp-button" onClick={() => handle.setSaveError(null)}>
-              Dismiss
-            </button>
-          </span>
+        <div data-testid="save-error-banner">
+          <Banner
+            tone="danger"
+            live
+            title={`${handle.name} was not saved`}
+            actions={
+              <>
+                <Button size="sm" onPress={() => handle.setSaveError(null)}>
+                  Dismiss
+                </Button>
+                <Button size="sm" variant="primary" onPress={() => void saveDocument(handle)}>
+                  Retry
+                </Button>
+              </>
+            }
+          >
+            {handle.saveError}
+          </Banner>
         </div>
       )}
       {handle?.eolMode === "mixed" && (
-        <div className="xp-banner xp-banner-info" role="status" data-testid="mixed-eol-banner">
-          <span>This file mixes line endings and is read-only here, so they are never changed silently.</span>
-          <span className="xp-banner-actions">
-            <button type="button" className="xp-button" onClick={() => void normalizeLineEndings(handle, "lf")}>
-              Normalize to LF
-            </button>
-            <button type="button" className="xp-button" onClick={() => void normalizeLineEndings(handle, "crlf")}>
-              Normalize to CRLF
-            </button>
-          </span>
+        <div data-testid="mixed-eol-banner">
+          <Banner
+            tone="info"
+            title="Mixed line endings"
+            actions={
+              <>
+                <Button size="sm" onPress={() => void normalizeLineEndings(handle, "lf")}>
+                  Normalize to LF
+                </Button>
+                <Button size="sm" onPress={() => void normalizeLineEndings(handle, "crlf")}>
+                  Normalize to CRLF
+                </Button>
+              </>
+            }
+          >
+            This file mixes line endings, so it is read-only here and they are never changed silently.
+          </Banner>
         </div>
       )}
-      {handle?.info.readOnly && (
-        <div className="xp-banner xp-banner-info" role="status">
-          Read-only: {handle.info.readOnly}
-        </div>
-      )}
+      {handle?.info.readOnly && <Banner tone="info" title="Read-only">{handle.info.readOnly}</Banner>}
       <div className="xp-monaco" ref={container} />
     </div>
   );

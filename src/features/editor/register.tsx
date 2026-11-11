@@ -3,15 +3,17 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSyncExternalStore } from "react";
 
-import { editors, useActiveEditor } from "../../app/editors";
+import { useActiveEditor, useEditors } from "../../app/editors";
 import { registry, type EditorProps } from "../../app/registry";
 import { commands } from "../../lib/ipc";
-import { ask } from "../workspace/prompt";
+import { confirm, confirmUnsaved, type UnsavedChoice } from "../../ui/components";
 import { activeHandle, handleForPath, openHandles, saveAll, saveDocument } from "./documentClient";
 import { SourceEditor } from "./SourceEditor";
 
 function SourceEditorTab({ resource, active }: EditorProps) {
-  return <SourceEditor path={resource.path} active={active} />;
+  // Inactive tabs stay mounted; only the selected tab of the active group takes focus.
+  const selected = useEditors((s) => s.groups[s.activeGroup].activeKey === resource.key);
+  return <SourceEditor path={resource.path} active={active && selected} />;
 }
 
 const ENCODING_LABELS: Record<string, string> = {
@@ -67,17 +69,6 @@ registry.registerCommand({
   },
 });
 
-registry.registerCommand({
-  id: "file.close",
-  title: "Close Editor",
-  category: "File",
-  keybinding: "Mod+W",
-  enabled: () => Boolean(editors.active()),
-  run: async () => {
-    const active = editors.active();
-    if (active) await editors.close(active.resource.key);
-  },
-});
 
 registry.registerStatusItem({ id: "editor.documentStatus", alignment: "right", order: 50, render: () => <DocumentStatus /> });
 
@@ -96,18 +87,21 @@ function installWindowCloseGuard() {
       const dirty = (await commands.documentList()).filter((d) => d.path && d.savedRevision !== d.revision);
       if (dirty.length === 0) return;
       const names = dirty.map((d) => d.path?.split("/").pop()).join(", ");
-      const choice = await ask({
-        title: dirty.length === 1 ? `Save changes to ${names}?` : `Save changes to ${dirty.length} files?`,
-        message:
-          dirty.length === 1
-            ? "Your changes will be lost if you don't save them."
-            : `${names} have unsaved changes. They will be lost if you don't save them.`,
-        buttons: [
-          { id: "save", label: dirty.length === 1 ? "Save" : "Save All", primary: true },
-          { id: "discard", label: "Don't Save", danger: true },
-          { id: "cancel", label: "Cancel", cancel: true },
-        ],
-      });
+      const choice =
+        dirty.length === 1
+          ? await confirmUnsaved(names)
+          : await confirm<UnsavedChoice>({
+              title: `Save changes to ${dirty.length} files?`,
+              message: `${names} have unsaved changes. They will be lost if you don't save them.`,
+              actions: [
+                { id: "cancel", label: "Cancel", variant: "secondary" },
+                { id: "discard", label: "Don't Save", variant: "secondary" },
+                { id: "save", label: "Save All", variant: "primary" },
+              ],
+              cancelId: "cancel",
+              defaultId: "save",
+              tone: "warning",
+            });
       if (choice === "save") {
         if (!(await saveAll())) event.preventDefault();
       } else if (choice === "discard") {

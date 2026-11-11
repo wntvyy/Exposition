@@ -20,7 +20,7 @@ import type { TextPatch } from "../../bindings/TextPatch";
 import type { TextRange } from "../../bindings/TextRange";
 import { commands, errorMessage, events, isCommandError } from "../../lib/ipc";
 import { monaco } from "../../lib/monaco";
-import { ask } from "../workspace/prompt";
+import { confirm, confirmUnsaved } from "../../ui/components";
 import { classifyEol, textFitsEol, type EolMode } from "./eol";
 import { ensureLanguage } from "./languages";
 import { diffPatch } from "./ot";
@@ -446,15 +446,7 @@ async function closeDocument(handle: DocumentHandle) {
 async function closeGuard(handle: DocumentHandle): Promise<boolean> {
   await handle.sync.idle();
   if (!handle.isDirty) return true;
-  const choice = await ask({
-    title: `Save changes to ${handle.name}?`,
-    message: "Your changes will be lost if you don't save them.",
-    buttons: [
-      { id: "save", label: "Save", primary: true },
-      { id: "discard", label: "Don't Save", danger: true },
-      { id: "cancel", label: "Cancel", cancel: true },
-    ],
-  });
+  const choice = await confirmUnsaved(handle.name);
   if (choice === "save") return saveDocument(handle);
   return choice === "discard";
 }
@@ -472,15 +464,18 @@ export async function saveDocument(handle: DocumentHandle, options: { overwrite?
     return true;
   } catch (error) {
     if (isCommandError(error) && error.code === "file.modifiedOnDisk" && !options.overwrite) {
-      const choice = await ask({
+      const choice = await confirm<"cancel" | "reload" | "overwrite">({
         title: `${handle.name} changed on disk`,
         message:
           "Another program changed this file after it was opened. Overwrite the file with your version, or reload the version on disk (your changes stay in undo history)?",
-        buttons: [
-          { id: "overwrite", label: "Overwrite", danger: true },
-          { id: "reload", label: "Reload from Disk" },
-          { id: "cancel", label: "Cancel", cancel: true, primary: true },
+        actions: [
+          { id: "cancel", label: "Cancel", variant: "secondary" },
+          { id: "reload", label: "Reload from Disk", variant: "secondary" },
+          { id: "overwrite", label: "Overwrite", variant: "danger" },
         ],
+        cancelId: "cancel",
+        defaultId: "cancel",
+        tone: "warning",
       });
       if (choice === "overwrite") return saveDocument(handle, { overwrite: true });
       if (choice === "reload") await reloadDocument(handle);

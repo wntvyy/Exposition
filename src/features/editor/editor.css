@@ -1,11 +1,15 @@
-/* Source editor. Uses shared tokens when present (src/ui), with fallbacks. */
+/* Source editor layout. Visual treatment comes from the shared components and tokens. */
 .xp-source-editor {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background: var(--xp-color-surface, Canvas);
-  color: var(--xp-color-text, CanvasText);
+  background: var(--color-surface);
+}
+
+.xp-source-editor .ui-banner {
+  border-radius: 0;
+  border-width: 0 0 var(--border-width) 0;
 }
 
 .xp-monaco {
@@ -13,73 +17,6 @@
   min-height: 0;
 }
 
-.xp-banner {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--xp-space-2, 8px);
-  padding: var(--xp-space-2, 6px) var(--xp-space-3, 12px);
-  font: var(--xp-font-ui-small, 13px system-ui, "Segoe UI", sans-serif);
-  border-bottom: 1px solid var(--xp-color-border, color-mix(in srgb, CanvasText 15%, transparent));
-}
-
-.xp-banner-warning {
-  background: var(--xp-color-warning-surface, color-mix(in srgb, #e6a700 18%, Canvas));
-}
-
-.xp-banner-danger {
-  background: var(--xp-color-danger-surface, color-mix(in srgb, #d13438 18%, Canvas));
-}
-
-.xp-banner-info {
-  background: var(--xp-color-info-surface, color-mix(in srgb, #0f6cbd 12%, Canvas));
-}
-
-.xp-banner-actions {
-  display: inline-flex;
-  gap: var(--xp-space-2, 8px);
-}
-
-.xp-button {
-  font: inherit;
-  padding: 3px 10px;
-  border-radius: var(--xp-radius-control, 4px);
-  border: 1px solid var(--xp-color-border-strong, color-mix(in srgb, CanvasText 30%, transparent));
-  background: var(--xp-color-control, ButtonFace);
-  color: var(--xp-color-text, ButtonText);
-  cursor: pointer;
-}
-
-.xp-button:focus-visible {
-  outline: 2px solid var(--xp-color-focus, Highlight);
-  outline-offset: 1px;
-}
-
-.xp-button-primary {
-  background: var(--xp-color-accent, #0f6cbd);
-  border-color: var(--xp-color-accent, #0f6cbd);
-  color: var(--xp-color-on-accent, white);
-}
-
-.xp-button-danger {
-  color: var(--xp-color-danger, #c50f1f);
-}
-
-.xp-unavailable {
-  margin: auto;
-  max-width: 36rem;
-  padding: var(--xp-space-6, 32px);
-  text-align: center;
-  font: var(--xp-font-ui, 14px system-ui, "Segoe UI", sans-serif);
-}
-
-.xp-unavailable h2 {
-  font-size: 1.1em;
-  margin: 0 0 8px;
-}
-
-.xp-unavailable p {
-  margin: 0;
-  color: var(--xp-color-text-muted, color-mix(in srgb, CanvasText 70%, transparent));
+.xp-document-status {
+  white-space: nowrap;
 }

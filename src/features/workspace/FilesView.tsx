@@ -1,12 +1,23 @@
 // Files sidebar: open-folder empty state with recent projects, recovery
 // entries from an earlier session, and the lazily loaded, keyboard-accessible
-// file tree (react-aria Tree).
-import { ChevronRight, File, FileWarning, Folder, FolderOpen, FolderPlus, History, RefreshCw } from "lucide-react";
+// file tree (shared Tree component).
+import { File, FileWarning, Folder, FolderOpen, FolderPlus, Link2, RefreshCw, Unlink } from "lucide-react";
 import type { ReactNode } from "react";
-import { Button, Tree, TreeItem, TreeItemContent, type Key } from "react-aria-components";
 
 import type { FileEntry } from "../../bindings/FileEntry";
 import type { RecoveryEntry } from "../../bindings/RecoveryEntry";
+import {
+  Banner,
+  Button,
+  EmptyState,
+  ErrorState,
+  IconButton,
+  LoadingState,
+  Section,
+  Toolbar,
+  Tree,
+  TreeItem,
+} from "../../ui/components";
 import {
   ROOT,
   discardRecovery,
@@ -17,45 +28,54 @@ import {
   restoreRecovery,
   setExpanded,
   useWorkspace,
+  type DirState,
 } from "./store";
 
 function formatTime(ms: number) {
   return new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-function EmptyState() {
+function EmptyFolder() {
   const recent = useWorkspace((s) => s.recent);
   const opening = useWorkspace((s) => s.opening);
   const error = useWorkspace((s) => s.error);
   return (
-    <div className="xp-files-empty" data-testid="files-empty">
-      <p>No folder is open.</p>
-      <Button className="xp-button xp-button-primary" onPress={() => void openFolderDialog()} isDisabled={opening}>
-        <FolderPlus size={14} aria-hidden /> Open Folder…
-      </Button>
+    <div className="xp-files" data-testid="files-empty">
+      <EmptyState
+        icon={FolderOpen}
+        fill={recent.length === 0}
+        title="No folder open"
+        description="Open a project folder to browse and edit its files."
+        actions={
+          <Button variant="primary" icon={FolderPlus} isPending={opening} onPress={() => void openFolderDialog()}>
+            Open Folder…
+          </Button>
+        }
+      />
       {error && (
-        <p role="alert" className="xp-files-error">
+        <Banner tone="danger" title="Could not open folder" live>
           {error}
-        </p>
+        </Banner>
       )}
       {recent.length > 0 && (
-        <section aria-labelledby="xp-recent-title" className="xp-recent">
-          <h3 id="xp-recent-title">Recent</h3>
-          <ul>
+        <Section title="Recent">
+          <ul className="xp-recent">
             {recent.map((project) => (
               <li key={project.path}>
                 <Button
-                  className="xp-recent-item"
-                  onPress={() => void openWorkspace(project.path)}
+                  variant="ghost"
+                  className="xp-recent__item"
+                  icon={Folder}
                   aria-label={`Open ${project.name} (${project.path})`}
+                  onPress={() => void openWorkspace(project.path)}
                 >
-                  <span className="xp-recent-name">{project.name}</span>
-                  <span className="xp-recent-path">{project.path}</span>
+                  <span className="xp-recent__name">{project.name}</span>
+                  <span className="xp-recent__path">{project.path}</span>
                 </Button>
               </li>
             ))}
           </ul>
-        </section>
+        </Section>
       )}
     </div>
   );
@@ -63,41 +83,38 @@ function EmptyState() {
 
 function RecoveryList({ entries }: { entries: RecoveryEntry[] }) {
   return (
-    <section className="xp-recovery" aria-labelledby="xp-recovery-title" data-testid="recovery-list">
-      <h3 id="xp-recovery-title">
-        <History size={14} aria-hidden /> Unsaved changes from a previous session
-      </h3>
-      <ul>
+    <Banner tone="warning" title="Unsaved changes from a previous session" className="xp-recovery">
+      <ul className="xp-recovery__list" data-testid="recovery-list">
         {entries.map((entry) => (
           <li key={entry.id} data-recovery-path={entry.path}>
-            <div className="xp-recovery-path">{entry.path}</div>
-            <div className="xp-recovery-meta">
+            <span className="xp-recovery__path">{entry.path}</span>
+            <span className="xp-recovery__meta">
               {formatTime(entry.savedAt)}
               {entry.disk === "changed" && " · file changed on disk since"}
               {entry.disk === "missing" && " · file no longer exists"}
-            </div>
-            <div className="xp-recovery-actions">
-              <Button className="xp-button xp-button-primary" onPress={() => void restoreRecovery(entry)}>
+            </span>
+            <span className="xp-recovery__actions">
+              <Button size="sm" variant="primary" onPress={() => void restoreRecovery(entry)}>
                 Restore
               </Button>
-              <Button className="xp-button xp-button-danger" onPress={() => void discardRecovery(entry)}>
+              <Button size="sm" variant="secondary" onPress={() => void discardRecovery(entry)}>
                 Discard
               </Button>
-            </div>
+            </span>
           </li>
         ))}
       </ul>
-    </section>
+    </Banner>
   );
 }
 
-function EntryIcon({ entry, expanded }: { entry: FileEntry; expanded: boolean }) {
-  if (entry.unavailable) return <FileWarning size={14} aria-hidden />;
-  if (entry.kind === "directory") return expanded ? <FolderOpen size={14} aria-hidden /> : <Folder size={14} aria-hidden />;
-  return <File size={14} aria-hidden />;
+function entryIcon(entry: FileEntry, expanded: boolean) {
+  if (entry.unavailable) return entry.link ? Unlink : FileWarning;
+  if (entry.kind === "directory") return expanded ? FolderOpen : Folder;
+  return File;
 }
 
-function renderEntries(entries: FileEntry[], dirs: ReturnType<typeof useWorkspace.getState>["dirs"]): ReactNode {
+function renderEntries(entries: FileEntry[], dirs: Record<string, DirState>, expanded: Set<string>): ReactNode {
   return entries.map((entry) => {
     const isDir = entry.kind === "directory" && !entry.unavailable;
     const children = isDir ? dirs[entry.path] : undefined;
@@ -105,35 +122,30 @@ function renderEntries(entries: FileEntry[], dirs: ReturnType<typeof useWorkspac
       <TreeItem
         key={entry.path}
         id={entry.path}
-        textValue={entry.name}
+        title={entry.name}
+        icon={entryIcon(entry, expanded.has(entry.path))}
+        trailing={
+          entry.unavailable ? (
+            <span className="xp-tree-note" title={entry.unavailable}>
+              {entry.link ? "outside folder" : "unavailable"}
+            </span>
+          ) : entry.link ? (
+            <Link2 size={12} aria-label="Link" />
+          ) : undefined
+        }
         hasChildItems={isDir}
         isDisabled={Boolean(entry.unavailable)}
-        className="xp-tree-item"
         data-path={entry.path}
-        onAction={isDir || entry.kind !== "file" ? undefined : () => openFile(entry)}
+        aria-description={entry.unavailable ?? undefined}
+        onAction={entry.kind === "file" && !entry.unavailable ? () => openFile(entry) : undefined}
       >
-        <TreeItemContent>
-          {({ isExpanded }) => (
-            <div className="xp-tree-row" title={entry.unavailable ?? entry.path}>
-              {isDir ? (
-                <Button slot="chevron" className="xp-tree-chevron" aria-label={isExpanded ? "Collapse" : "Expand"}>
-                  <ChevronRight size={12} aria-hidden />
-                </Button>
-              ) : (
-                <span className="xp-tree-chevron-spacer" />
-              )}
-              <EntryIcon entry={entry} expanded={isExpanded} />
-              <span className="xp-tree-name">{entry.name}</span>
-            </div>
-          )}
-        </TreeItemContent>
-        {isDir && children?.entries && renderEntries(children.entries, dirs)}
-        {isDir && children?.loading && !children.entries && (
-          <TreeItem id={`${entry.path}/\u0000loading`} textValue="Loading" isDisabled className="xp-tree-item">
-            <TreeItemContent>
-              <div className="xp-tree-row xp-tree-muted">Loading…</div>
-            </TreeItemContent>
-          </TreeItem>
+        {isDir && children?.entries && renderEntries(children.entries, dirs, expanded)}
+        {isDir && !children?.entries && (
+          <TreeItem
+            id={`${entry.path}/\u0000status`}
+            title={children?.error ? `Could not list: ${children.error}` : "Loading…"}
+            isDisabled
+          />
         )}
       </TreeItem>
     );
@@ -145,37 +157,46 @@ export function FilesView() {
   const dirs = useWorkspace((s) => s.dirs);
   const expanded = useWorkspace((s) => s.expanded);
   const recovery = useWorkspace((s) => s.recovery);
-  if (!info) return <EmptyState />;
+  if (!info) return <EmptyFolder />;
   const root = dirs[ROOT];
   return (
     <div className="xp-files" data-testid="files-view" data-root={info.root}>
-      <div className="xp-files-header">
-        <span className="xp-files-title" title={info.root}>
+      <div className="xp-files__header">
+        <span className="xp-files__name" title={info.root}>
           {info.name}
         </span>
-        <Button className="xp-icon-button" aria-label="Refresh" onPress={() => void loadDir(ROOT)}>
-          <RefreshCw size={14} aria-hidden />
-        </Button>
-        <Button className="xp-icon-button" aria-label="Open Folder…" onPress={() => void openFolderDialog()}>
-          <FolderPlus size={14} aria-hidden />
-        </Button>
+        <Toolbar aria-label="Folder actions">
+          <IconButton icon={RefreshCw} size="sm" aria-label="Refresh" onPress={() => void loadDir(ROOT)} />
+          <IconButton
+            icon={FolderPlus}
+            size="sm"
+            aria-label="Open Folder…"
+            keybinding="Mod+O"
+            onPress={() => void openFolderDialog()}
+          />
+        </Toolbar>
       </div>
       {recovery.length > 0 && <RecoveryList entries={recovery} />}
-      {root?.error && (
-        <p role="alert" className="xp-files-error">
-          {root.error}
-        </p>
+      {root?.error ? (
+        <ErrorState
+          title="Could not list this folder"
+          description={root.error}
+          actions={<Button onPress={() => void loadDir(ROOT)}>Retry</Button>}
+        />
+      ) : !root?.entries ? (
+        <LoadingState title="Loading files…" />
+      ) : (
+        <Tree
+          aria-label={`Files in ${info.name}`}
+          className="xp-tree"
+          data-testid="file-tree"
+          expandedKeys={expanded}
+          onExpandedChange={(keys) => setExpanded(new Set([...keys].map(String)))}
+          renderEmptyState={() => <EmptyState fill={false} title="This folder is empty" />}
+        >
+          {renderEntries(root.entries, dirs, expanded)}
+        </Tree>
       )}
-      <Tree
-        aria-label={`Files in ${info.name}`}
-        className="xp-tree"
-        data-testid="file-tree"
-        expandedKeys={expanded}
-        onExpandedChange={(keys: Set<Key>) => setExpanded(new Set([...keys].map(String)))}
-        renderEmptyState={() => (root?.loading ? "Loading…" : "This folder is empty.")}
-      >
-        {root?.entries ? renderEntries(root.entries, dirs) : []}
-      </Tree>
     </div>
   );
 }

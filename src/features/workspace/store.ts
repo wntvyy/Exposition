@@ -1,9 +1,11 @@
 // Workspace state: the open folder, lazily listed directories, recent
 // projects, and recovery entries. Actions call the Rust workspace service.
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { create } from "zustand";
 
 import { editors } from "../../app/editors";
+import { layout } from "../../app/layout";
 import { notify } from "../../app/notifications";
 import type { FileChange } from "../../bindings/FileChange";
 import type { FileEntry } from "../../bindings/FileEntry";
@@ -82,6 +84,18 @@ async function closeFileEditors(): Promise<boolean> {
   return true;
 }
 
+export const FILES_VIEW_ID = "workspace.files";
+
+function setWindowTitle(name: string | null) {
+  try {
+    void getCurrentWindow()
+      .setTitle(name ? `${name} — Exposition` : "Exposition")
+      .catch(() => {});
+  } catch {
+    // Not running inside the desktop shell.
+  }
+}
+
 function applyInfo(info: WorkspaceInfo) {
   useWorkspace.setState({
     info,
@@ -93,7 +107,9 @@ function applyInfo(info: WorkspaceInfo) {
   });
   void loadDir(ROOT);
   void refreshRecent();
+  setWindowTitle(info.name);
   if (info.recovery.length > 0) {
+    layout.showView("sidebar", FILES_VIEW_ID);
     notify({
       id: "recovery-available",
       tone: "warning",
@@ -130,6 +146,7 @@ export async function closeWorkspace(): Promise<void> {
   if (!(await closeFileEditors())) return;
   await commands.workspaceClose();
   useWorkspace.setState({ info: null, dirs: {}, expanded: new Set(), recovery: [] });
+  setWindowTitle(null);
   void refreshRecent();
 }
 

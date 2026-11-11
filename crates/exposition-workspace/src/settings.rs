@@ -53,7 +53,7 @@ pub struct EditorSettings {
 impl Default for EditorSettings {
     fn default() -> Self {
         Self {
-            font_size: 14,
+            font_size: 13,
             tab_size: 2,
             insert_spaces: true,
             word_wrap: true,
@@ -323,7 +323,7 @@ mod tests {
         fs::write(app_settings_file(dir.path()), r#"{"version":1,"editor":{"tabSize":4}}"#).unwrap();
         let loaded = load_app_settings(dir.path());
         assert_eq!(loaded.value.editor.tab_size, 4);
-        assert_eq!(loaded.value.editor.font_size, 14);
+        assert_eq!(loaded.value.editor.font_size, 13);
         assert!(loaded.warning.is_none());
     }
 

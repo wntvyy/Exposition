@@ -6,6 +6,7 @@ import { chmod, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
+  alertDialog,
   documentState,
   focusEditor,
   invoke,
@@ -69,14 +70,14 @@ export default async function workspaceSaveFailure({ launchApp, artifactsDir, as
     // Write from "another program" and save before the watcher can react.
     await writeFile(target, "changed elsewhere\n");
     await page.keyboard.press("Control+S");
-    const prompt = page.locator('[data-testid="prompt"]');
+    const prompt = alertDialog(page);
     await prompt.waitFor();
     assert.match(await prompt.innerText(), /changed on disk/);
     await shot("02-overwrite-prompt");
-    await prompt.locator('[data-prompt-button="cancel"]').click();
+    await prompt.getByRole("button", { name: "Cancel" }).click();
     assert.equal(await readFile(target, "utf8"), "changed elsewhere\n", "cancel never overwrites");
     await page.keyboard.press("Control+S");
-    await prompt.locator('[data-prompt-button="overwrite"]').click();
+    await prompt.getByRole("button", { name: "Overwrite" }).click();
     await waitFor(async () => (await readFile(target, "utf8")) === `${expected} More.`, { message: "explicit overwrite" });
   } catch (error) {
     await shot("failure").catch(() => {});
