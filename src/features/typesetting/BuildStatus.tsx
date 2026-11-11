@@ -1,17 +1,8 @@
-// Build status item: building / succeeded / failed / stale for the active
-// editor's typesetting entry (or the most recently built entry).
-import { CircleCheck, CircleX, Loader, TriangleAlert } from "lucide-react";
-
+// Build status item: the active editor's typesetting entry (or the most
+// recently built one) as building / built / failed / stale.
 import { useActiveEditor } from "../../app/editors";
+import { StatusPill } from "../../ui/components";
 import { summarize, useTypesetting } from "./store";
-
-const LABELS = {
-  building: "Building",
-  succeeded: "Built",
-  failed: "Build failed",
-  stale: "Errors — pages stale",
-  none: "",
-} as const;
 
 export function BuildStatus() {
   const active = useActiveEditor();
@@ -19,17 +10,18 @@ export function BuildStatus() {
   const path = active?.resource.path;
   const state = (path && entries[path]) || Object.values(entries)[0];
   const summary = summarize(state);
-  if (summary === "none") return null;
-  const Icon =
-    summary === "building" ? Loader : summary === "succeeded" ? CircleCheck : summary === "failed" ? CircleX : TriangleAlert;
-  const errors = state?.latest?.result.diagnostics.filter((d) => d.severity === "error").length ?? 0;
-  const duration = state?.latest?.result.durationMs;
+  if (!state || summary === "none") return null;
+  const errors = state.latest?.result.diagnostics.filter((d) => d.severity === "error").length ?? 0;
+  const errorText = `${errors} error${errors === 1 ? "" : "s"}`;
+  const name = state.entry;
   return (
-    <span className={`build-status build-status--${summary}`} data-testid="build-status" role="status">
-      <Icon size={12} aria-hidden />
-      {LABELS[summary]}
-      {summary === "succeeded" && duration !== undefined ? ` · ${duration} ms` : ""}
-      {errors > 0 ? ` · ${errors} error${errors === 1 ? "" : "s"}` : ""}
+    <span data-testid="build-status" data-status={summary}>
+      {summary === "building" && <StatusPill status="running" label={`Building ${name}`} size="sm" />}
+      {summary === "succeeded" && (
+        <StatusPill status="succeeded" label={`Built ${name}`} detail={`${state.latest?.result.durationMs ?? 0} ms`} size="sm" />
+      )}
+      {summary === "failed" && <StatusPill status="failed" label={`${name} failed`} detail={errorText} size="sm" />}
+      {summary === "stale" && <StatusPill status="stale" label={`${name}: pages stale`} detail={errorText} size="sm" />}
     </span>
   );
 }

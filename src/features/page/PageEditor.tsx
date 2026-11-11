@@ -1,17 +1,19 @@
 // Exact-page editor: the compiler's actual pages, edited in place.
 //
 // Pages are the build's SVG renderings shown as images (no active content).
-// A hidden textarea at the caret is the keyboard/IME/clipboard target; the
-// caret, selection, and composition are drawn over the pages from the page
-// map's geometry. All source changes go through page transactions.
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+// One hidden textarea, kept at the caret, is the keyboard/IME/clipboard
+// target; caret, selection, equation outline, and composition are drawn over
+// the pages from the page map. All source changes are page transactions.
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, KeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
-import { FileDown, Minus, Plus } from "lucide-react";
+import { FileDown, FileWarning, RefreshCw, ZoomIn, ZoomOut } from "lucide-react";
 
+import { notify } from "../../app/notifications";
 import type { EditorProps } from "../../app/registry";
 import type { Motion } from "../../bindings/Motion";
 import type { PageRect } from "../../bindings/PageRect";
-import { errorMessage } from "../../lib/ipc";
+import { commands, errorMessage } from "../../lib/ipc";
+import { Banner, Button, ErrorState, IconButton, LoadingState, StatusPill, Toolbar } from "../../ui/components";
 import { summarize, useTypesetting } from "../typesetting/store";
 import { PageSession } from "./session";
 import "./page.css";
@@ -28,6 +30,13 @@ const MOTIONS: Record<string, Motion> = {
   End: "lineEnd",
 };
 
+const MOD_MOTIONS: Record<string, Motion> = {
+  ArrowLeft: "wordLeft",
+  ArrowRight: "wordRight",
+  Home: "documentStart",
+  End: "documentEnd",
+};
+
 function rectStyle(rect: { x: number; y: number; width: number; height: number }, scale: number): CSSProperties {
   return { left: rect.x * scale, top: rect.y * scale, width: rect.width * scale, height: rect.height * scale };
 }
@@ -40,11 +49,13 @@ export function PageEditor({ resource, active }: EditorProps) {
   const [focused, setFocused] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
   const caretRef = useRef<HTMLDivElement>(null);
+  const pageRefs = useRef(new Map<number, HTMLDivElement>());
   const composing = useRef(false);
   const dragging = useRef<{ page: number; element: HTMLElement } | null>(null);
   const scale = zoom * PX_PER_PT;
   const buildState = useTypesetting((s) => s.entries[path]);
   const reveal = useTypesetting((s) => s.reveal);
+  const caret = model.caret;
 
   useEffect(() => {
     void session.attach();
@@ -56,13 +67,21 @@ export function PageEditor({ resource, active }: EditorProps) {
   }, [reveal, path, session]);
 
   useEffect(() => {
-    if (active) input.current?.focus({ preventScroll: true });
-  }, [active, model.phase]);
+    if (active && model.pages.length > 0) input.current?.focus({ preventScroll: true });
+  }, [active, model.pages.length]);
 
-  // Keep the caret visible.
-  useEffect(() => {
+  // Keep the input at the caret (IME candidate windows open there) and the caret visible.
+  useLayoutEffect(() => {
+    const element = input.current;
+    if (!element) return;
+    const page = caret ? pageRefs.current.get(caret.page) : pageRefs.current.get(0);
+    const left = (page?.offsetLeft ?? 0) + (caret ? caret.x * scale : 0);
+    const top = (page?.offsetTop ?? 0) + (caret ? caret.top * scale : 0);
+    element.style.left = `${left}px`;
+    element.style.top = `${top}px`;
+    element.style.height = `${caret ? Math.max(caret.bottom - caret.top, 4) * scale : 16}px`;
     caretRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [model.caret?.page, model.caret?.x, model.caret?.top]);
+  }, [caret, scale, model.pages]);
 
   const pointFor = (event: { clientX: number; clientY: number }, element: HTMLElement) => {
     const box = element.getBoundingClientRect();
@@ -72,10 +91,10 @@ export function PageEditor({ resource, active }: EditorProps) {
   const onPageMouseDown = (page: number) => (event: ReactMouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     event.preventDefault();
+    input.current?.focus({ preventScroll: true });
     const element = event.currentTarget;
     const { x, y } = pointFor(event, element);
     dragging.current = { page, element };
-    input.current?.focus({ preventScroll: true });
     void session.click(page, x, y, event.shiftKey);
   };
 
@@ -106,35 +125,19 @@ export function PageEditor({ resource, active }: EditorProps) {
     if (composing.current || event.nativeEvent.isComposing) return;
     const mod = event.ctrlKey || event.metaKey;
     const key = event.key;
-    if (mod && (key === "z" || key === "Z")) {
+    const lower = key.toLowerCase();
+    if (mod && !event.altKey && (lower === "z" || lower === "y")) {
       event.preventDefault();
-      void session.undo(event.shiftKey);
+      void session.undo(lower === "y" || event.shiftKey);
       return;
     }
-    if (mod && (key === "y" || key === "Y")) {
-      event.preventDefault();
-      void session.undo(true);
-      return;
-    }
-    if (mod && (key === "a" || key === "A")) {
+    if (mod && !event.altKey && lower === "a") {
       event.preventDefault();
       void session.selectAll();
       return;
     }
-    let motion = MOTIONS[key];
-    if (motion && mod) {
-      motion =
-        key === "ArrowLeft"
-          ? "wordLeft"
-          : key === "ArrowRight"
-            ? "wordRight"
-            : key === "Home"
-              ? "documentStart"
-              : key === "End"
-                ? "documentEnd"
-                : motion;
-    }
-    if (motion) {
+    const motion = (mod ? MOD_MOTIONS[key] : undefined) ?? MOTIONS[key];
+    if (motion && !event.altKey) {
       event.preventDefault();
       void session.move(motion, event.shiftKey);
       return;
@@ -144,9 +147,14 @@ export function PageEditor({ resource, active }: EditorProps) {
       void session.edit({ kind: key === "Backspace" ? "deleteBackward" : "deleteForward" });
       return;
     }
-    if (key === "Enter") {
+    if (key === "Enter" && !mod) {
       event.preventDefault();
       void session.edit({ kind: "paragraphBreak" });
+      return;
+    }
+    if (key === "Escape" && model.hasSelection) {
+      event.preventDefault();
+      void session.collapse();
     }
   };
 
@@ -158,76 +166,90 @@ export function PageEditor({ resource, active }: EditorProps) {
     if (text) void session.edit({ kind: "insert", text });
   };
 
-  const caret = model.caret;
+  const exportPdf = () => {
+    session.exportPdf().then(
+      (file) => notify({ tone: "success", title: "Exported PDF", body: file }),
+      (error: unknown) => notify({ tone: "danger", title: "PDF export failed", body: errorMessage(error) }),
+    );
+  };
+
+  const status = summarize(buildState);
+  const byPage = (rects: PageRect[], page: number) => rects.filter((r) => r.page === page);
   const caretStyle: CSSProperties | undefined = caret
     ? { left: caret.x * scale, top: caret.top * scale, height: Math.max(caret.bottom - caret.top, 4) * scale }
     : undefined;
-  const status = summarize(buildState);
-  const byPage = (rects: PageRect[], page: number) => rects.filter((r) => r.page === page);
+  const errors = `${model.errorCount} error${model.errorCount === 1 ? "" : "s"}`;
 
   if (model.phase === "missing" || model.phase === "error") {
     return (
-      <div className="page-editor page-editor--empty" role="alert">
-        {model.error ?? "Document unavailable"}
-      </div>
+      <ErrorState
+        title={`Cannot show pages of ${resource.title}`}
+        description={model.error ?? "The document is not available."}
+      />
     );
   }
 
+  const pill =
+    status === "building" ? (
+      <StatusPill status="running" label={`Building ${resource.title}`} size="sm" />
+    ) : model.failed ? (
+      <StatusPill status="failed" label="Build failed" detail={errors} size="sm" />
+    ) : model.buildId ? (
+      <StatusPill
+        status="succeeded"
+        label="Built"
+        detail={model.latencyMs !== null ? `${Math.round(model.latencyMs)} ms` : undefined}
+        size="sm"
+      />
+    ) : null;
+
   return (
     <div
-      className={`page-editor${focused ? " page-editor--focused" : ""}${model.stale ? " page-editor--stale" : ""}`}
+      className={`page-editor${focused ? " page-editor--focused" : ""}${model.failed ? " page-editor--stale" : ""}`}
       data-testid="page-editor"
       data-build={model.buildId ?? ""}
       data-stale={model.stale ? "true" : "false"}
       data-failed={model.failed ? "true" : "false"}
     >
-      <div className="page-editor__toolbar" role="toolbar" aria-label="Page view">
-        <span className="page-editor__title">{resource.title}</span>
-        <span className={`page-editor__status page-editor__status--${status}`} data-testid="page-build-status">
-          {status === "building"
-            ? "Building…"
-            : model.failed
-              ? `${model.errorCount} error${model.errorCount === 1 ? "" : "s"} — showing last good pages`
-              : status === "succeeded"
-                ? model.latencyMs !== null
-                  ? `Up to date · ${Math.round(model.latencyMs)} ms`
-                  : "Up to date"
-                : ""}
+      <Toolbar aria-label="Page view" className="page-editor__toolbar">
+        <span className="page-editor__status" data-testid="page-build-status">
+          {pill}
         </span>
         {caret && (
           <span className="page-editor__mode" data-testid="page-mode">
             {caret.mode === "math" ? "Math" : "Text"}
           </span>
         )}
-        <button
-          type="button"
+        <IconButton
           aria-label="Zoom out"
-          onClick={() => setZoom((z) => Math.max(0.5, Math.round((z - 0.25) * 100) / 100))}
-        >
-          <Minus size={14} aria-hidden />
-        </button>
+          icon={ZoomOut}
+          size="sm"
+          onPress={() => setZoom((z) => Math.max(0.5, Math.round((z - 0.25) * 100) / 100))}
+        />
         <span className="page-editor__zoom">{Math.round(zoom * 100)}%</span>
-        <button
-          type="button"
+        <IconButton
           aria-label="Zoom in"
-          onClick={() => setZoom((z) => Math.min(4, Math.round((z + 0.25) * 100) / 100))}
+          icon={ZoomIn}
+          size="sm"
+          onPress={() => setZoom((z) => Math.min(4, Math.round((z + 0.25) * 100) / 100))}
+        />
+        <IconButton aria-label="Export PDF" icon={FileDown} size="sm" isDisabled={!model.buildId} onPress={exportPdf} />
+      </Toolbar>
+
+      {model.failed && model.pages.length > 0 && (
+        <Banner
+          tone="stale"
+          title="Showing pages from an earlier revision"
+          actions={
+            <Button variant="ghost" size="sm" icon={RefreshCw} onPress={() => void commands.typesettingBuild(path)}>
+              Rebuild
+            </Button>
+          }
         >
-          <Plus size={14} aria-hidden />
-        </button>
-        <button
-          type="button"
-          aria-label="Export PDF"
-          disabled={!model.buildId}
-          onClick={() => {
-            session.exportPdf().then(
-              (file) => session.showMessage({ tone: "info", text: `Exported ${file}` }),
-              (error: unknown) => session.showMessage({ tone: "warning", text: errorMessage(error) }),
-            );
-          }}
-        >
-          <FileDown size={14} aria-hidden /> PDF
-        </button>
-      </div>
+          The document has {errors} (see Problems). Placing the caret and moving on these pages is disabled until it
+          builds; typing and deleting continue at the caret.
+        </Banner>
+      )}
 
       <div className="page-editor__scroller" data-testid="page-scroller">
         {model.pages.map((page) => {
@@ -236,6 +258,10 @@ export function PageEditor({ resource, active }: EditorProps) {
           return (
             <div
               key={page.index}
+              ref={(el) => {
+                if (el) pageRefs.current.set(page.index, el);
+                else pageRefs.current.delete(page.index);
+              }}
               className="page-editor__page"
               data-testid="page"
               data-page={page.index}
@@ -260,82 +286,77 @@ export function PageEditor({ resource, active }: EditorProps) {
                   className={`page-editor__caret${model.hasSelection ? " page-editor__caret--selecting" : ""}`}
                   data-testid="page-caret"
                   data-offset={session.caretPosition()?.offset ?? ""}
+                  data-anchor={session.caretPosition()?.anchor ?? ""}
+                  data-selection-rects={model.selection.length}
                   style={caretStyle}
                 >
                   {model.composition && <span className="page-editor__composition">{model.composition}</span>}
                 </div>
               )}
-              {caret?.page === page.index && (
-                <textarea
-                  ref={input}
-                  className="page-editor__input"
-                  style={{ left: caret.x * scale, top: caret.top * scale }}
-                  aria-label={`Page editor for ${resource.title}`}
-                  aria-roledescription="page editor"
-                  aria-multiline="true"
-                  autoCapitalize="off"
-                  autoComplete="off"
-                  spellCheck={false}
-                  data-testid="page-input"
-                  onKeyDown={onKeyDown}
-                  onInput={flushInput}
-                  onFocus={() => setFocused(true)}
-                  onBlur={() => setFocused(false)}
-                  onCompositionStart={() => {
-                    composing.current = true;
-                  }}
-                  onCompositionUpdate={(e) => session.setComposition(e.data)}
-                  onCompositionEnd={(e) => {
-                    composing.current = false;
-                    session.setComposition("");
-                    if (input.current) input.current.value = "";
-                    if (e.data) void session.edit({ kind: "insert", text: e.data });
-                  }}
-                  onCopy={(e) => {
-                    e.preventDefault();
-                    if (model.selectionText) e.clipboardData.setData("text/plain", model.selectionText);
-                  }}
-                  onCut={(e) => {
-                    e.preventDefault();
-                    if (!model.selectionText) return;
-                    e.clipboardData.setData("text/plain", model.selectionText);
-                    void session.edit({ kind: "deleteBackward" });
-                  }}
-                  onPaste={(e) => {
-                    e.preventDefault();
-                    const text = e.clipboardData.getData("text/plain");
-                    if (text) void session.edit({ kind: "insert", text });
-                  }}
-                />
-              )}
             </div>
           );
         })}
-        {model.pages.length === 0 && <div className="page-editor__placeholder">Building pages…</div>}
-        {!caret && model.pages.length > 0 && (
-          // Keyboard users can focus the editor before clicking: the first
-          // arrow key places the caret at the document start.
-          <textarea
-            ref={input}
-            className="page-editor__input"
-            aria-label={`Page editor for ${resource.title}`}
-            data-testid="page-input"
-            onKeyDown={(e) => {
-              if (e.key.startsWith("Arrow") || e.key === "Home") {
-                e.preventDefault();
-                void session.reveal(0).then(() => session.move("documentStart", false));
-              }
-            }}
-            onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
-          />
-        )}
+        {model.pages.length === 0 &&
+          (model.failed ? (
+            <ErrorState
+              title="The document did not build"
+              description={`${errors} — see Problems. Pages appear after the first successful build.`}
+            />
+          ) : (
+            <LoadingState title="Building pages…" />
+          ))}
+        <textarea
+          ref={input}
+          className="page-editor__input"
+          aria-label={`Page editor for ${resource.title}`}
+          aria-roledescription="page editor"
+          aria-multiline="true"
+          aria-describedby={`page-line-${resource.key}`}
+          autoCapitalize="off"
+          autoComplete="off"
+          spellCheck={false}
+          data-testid="page-input"
+          onKeyDown={onKeyDown}
+          onInput={flushInput}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onCompositionStart={() => {
+            composing.current = true;
+          }}
+          onCompositionUpdate={(e) => session.setComposition(e.data)}
+          onCompositionEnd={(e) => {
+            composing.current = false;
+            session.setComposition("");
+            if (input.current) input.current.value = "";
+            if (e.data) void session.edit({ kind: "insert", text: e.data });
+          }}
+          onCopy={(e) => {
+            e.preventDefault();
+            if (model.selectionText) e.clipboardData.setData("text/plain", model.selectionText);
+          }}
+          onCut={(e) => {
+            e.preventDefault();
+            if (!model.selectionText) return;
+            e.clipboardData.setData("text/plain", model.selectionText);
+            void session.edit({ kind: "deleteBackward" });
+          }}
+          onPaste={(e) => {
+            e.preventDefault();
+            const text = e.clipboardData.getData("text/plain");
+            if (text) void session.edit({ kind: "insert", text });
+          }}
+        />
       </div>
 
       <div className="page-editor__message" role="status" aria-live="polite" data-testid="page-message">
-        {model.message?.text ?? ""}
+        {model.message && (
+          <>
+            <FileWarning size={14} aria-hidden />
+            {model.message.text}
+          </>
+        )}
       </div>
-      <div className="page-editor__sr-only" aria-live="polite" data-testid="page-line">
+      <div id={`page-line-${resource.key}`} className="page-editor__sr-only" aria-live="polite" data-testid="page-line">
         {caret ? caret.lineText : ""}
       </div>
     </div>

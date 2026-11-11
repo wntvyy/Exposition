@@ -1,17 +1,13 @@
 // Problems panel: diagnostics of the latest build of each watched entry,
 // linked to their source ranges.
-import { useEffect, useState } from "react";
-import { AlertTriangle, CircleX, Info } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { AlertTriangle, CircleCheck, CircleX, Info } from "lucide-react";
 
 import type { Diagnostic } from "../../bindings/Diagnostic";
 import { commands } from "../../lib/ipc";
+import { EmptyState } from "../../ui/components";
 import { requestReveal, useTypesetting } from "./store";
-
-interface Located {
-  diagnostic: Diagnostic;
-  line: number | null;
-  column: number | null;
-}
+import "./typesetting.css";
 
 /** 1-based line/column of a UTF-16 offset. */
 export function lineColumn(text: string, offset: number): { line: number; column: number } {
@@ -31,67 +27,63 @@ const ICONS = { error: CircleX, warning: AlertTriangle, info: Info } as const;
 
 export function ProblemsPanel() {
   const entries = useTypesetting((s) => s.entries);
-  const diagnostics = Object.values(entries).flatMap((e) => e.latest?.result.diagnostics ?? []);
-  const [located, setLocated] = useState<Located[]>([]);
+  const diagnostics = useMemo(
+    () => Object.values(entries).flatMap((e) => e.latest?.result.diagnostics ?? []),
+    [entries],
+  );
+  const key = JSON.stringify(diagnostics);
+  const [positions, setPositions] = useState<Map<number, string>>(new Map());
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       const docs = await commands.documentList().catch(() => []);
       const texts = new Map<string, string>();
-      const result: Located[] = [];
-      for (const diagnostic of diagnostics) {
+      const result = new Map<number, string>();
+      for (const [i, diagnostic] of diagnostics.entries()) {
         const loc = diagnostic.location;
-        if (!loc) {
-          result.push({ diagnostic, line: null, column: null });
-          continue;
-        }
+        if (!loc) continue;
         if (!texts.has(loc.path)) {
           const doc = docs.find((d) => d.path === loc.path);
-          const text = doc ? (await commands.documentState(doc.id).catch(() => null))?.text : undefined;
-          texts.set(loc.path, text ?? "");
+          const state = doc ? await commands.documentState(doc.id).catch(() => null) : null;
+          texts.set(loc.path, state?.text ?? "");
         }
-        const text = texts.get(loc.path) ?? "";
-        const { line, column } = lineColumn(text, loc.range.start);
-        result.push({ diagnostic, line, column });
+        const { line, column } = lineColumn(texts.get(loc.path) ?? "", loc.range.start);
+        result.set(i, `${loc.path}:${line}:${column}`);
       }
-      if (!cancelled) setLocated(result);
+      if (!cancelled) setPositions(result);
     })();
     return () => {
       cancelled = true;
     };
-    // Recompute when the set of diagnostics changes.
-  }, [JSON.stringify(diagnostics)]);
+    // `key` captures the diagnostics' content.
+  }, [key]);
 
   if (diagnostics.length === 0) {
     return (
-      <div className="problems problems--empty" data-testid="problems-panel">
-        No problems
+      <div data-testid="problems-panel" className="problems-empty">
+        <EmptyState icon={CircleCheck} title="No problems" description="Build diagnostics of open documents appear here." />
       </div>
     );
   }
   return (
     <ul className="problems" data-testid="problems-panel" aria-label="Problems">
-      {located.map(({ diagnostic, line, column }, i) => {
+      {diagnostics.map((diagnostic: Diagnostic, i) => {
         const Icon = ICONS[diagnostic.severity];
         const loc = diagnostic.location;
         return (
-          <li key={i}>
+          <li key={i} className="problems__entry">
             <button
               type="button"
-              className={`problems__item problems__item--${diagnostic.severity}`}
+              className="problems__item"
+              data-severity={diagnostic.severity}
               data-testid="problem"
               disabled={!loc}
               onClick={() => loc && requestReveal(loc.path, loc.range.start)}
             >
-              <Icon size={14} aria-label={diagnostic.severity} />
+              <Icon size={14} className="problems__icon" aria-label={diagnostic.severity} />
               <span className="problems__message">{diagnostic.message}</span>
-              {loc && (
-                <span className="problems__location">
-                  {loc.path}
-                  {line !== null ? `:${line}:${column}` : ""}
-                </span>
-              )}
+              {loc && <span className="problems__location">{positions.get(i) ?? loc.path}</span>}
             </button>
             {diagnostic.hints.length > 0 && (
               <ul className="problems__hints">

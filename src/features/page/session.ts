@@ -320,9 +320,20 @@ export class PageSession {
 
   // ---- pointer ------------------------------------------------------------
 
+  private staleRefusal(): boolean {
+    if (!this.model.failed) return false;
+    this.set({
+      message: {
+        tone: "warning",
+        text: "These pages are from an earlier revision (the document has errors): fix them first, or edit in source",
+      },
+    });
+    return true;
+  }
+
   async click(page: number, x: number, y: number, extend: boolean): Promise<void> {
     const build = this.build;
-    if (!build) return;
+    if (!build || this.staleRefusal()) return;
     const hit = await commands.pageHitTest(build.id, page, x, y);
     const message = hit.nonEditable ? { tone: "info" as const, text: NON_EDITABLE[hit.nonEditable] } : null;
     if (!hit.caret || hit.caret.path !== this.path) {
@@ -350,9 +361,15 @@ export class PageSession {
   async move(motion: Motion, extend: boolean): Promise<void> {
     await this.enqueue(async () => {
       const build = this.build;
+      if (!build || this.staleRefusal()) return;
       this.syncPositions();
+      if (!this.caret) {
+        // No caret yet (keyboard user): start at the beginning of the document.
+        this.caret = { offset: 0, revision: this.docRevision, affinity: "downstream" };
+        motion = "documentStart";
+        extend = false;
+      }
       const caret = this.caret;
-      if (!build || !caret) return;
       // Collapse a selection to its edge on plain left/right.
       if (!extend && this.anchor && (motion === "left" || motion === "right")) {
         const anchor = this.anchor;
@@ -381,6 +398,11 @@ export class PageSession {
       this.group += 1;
       await this.refreshGeometry();
     });
+  }
+
+  async collapse(): Promise<void> {
+    this.anchor = null;
+    await this.refreshGeometry();
   }
 
   async selectAll(): Promise<void> {

@@ -124,8 +124,16 @@ impl TypesettingRuntime {
                             STATUS_EVENT,
                             BuildStatusEvent { entry: entry.clone(), activity: BuildActivity::Building },
                         );
-                        if let Ok(record) = runtime.service.build(&target(&entry)) {
-                            let _ = handle.emit(BUILD_EVENT, runtime.event_for(&record));
+                        // A compiler panic must not stop future builds.
+                        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            runtime.service.build(&target(&entry))
+                        }));
+                        match built {
+                            Ok(Ok(record)) => {
+                                let _ = handle.emit(BUILD_EVENT, runtime.event_for(&record));
+                            }
+                            Ok(Err(_)) => {}
+                            Err(_) => eprintln!("typesetting: the compiler panicked while building {entry}"),
                         }
                         let _ = handle.emit(STATUS_EVENT, BuildStatusEvent { entry, activity: BuildActivity::Idle });
                     }

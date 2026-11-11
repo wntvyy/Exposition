@@ -36,7 +36,12 @@ impl PageInputRules for TypstInput {
         let doc = Doc::new(text);
         match op {
             PageEditOp::Insert { text: typed } => doc.insert(bytes, typed, line_ending),
-            PageEditOp::ParagraphBreak => doc.insert(bytes, "\n", line_ending),
+            PageEditOp::ParagraphBreak => {
+                if doc.insertion_mode(bytes.start) == Ok(Mode::Math) {
+                    return Err(EditRefusal::NotEditable { reason: "line breaks inside equations".into() });
+                }
+                doc.insert(bytes, "\n", line_ending)
+            }
             PageEditOp::DeleteBackward | PageEditOp::DeleteForward if !bytes.is_empty() => doc.replace(bytes, ""),
             PageEditOp::DeleteBackward => doc.delete_unit(bytes.start, false),
             PageEditOp::DeleteForward => doc.delete_unit(bytes.start, true),
@@ -390,6 +395,20 @@ impl<'a> Doc<'a> {
         let mut placed = false;
         let insert_toks = if math { Vec::new() } else { rendered_tokens(inserted) };
         for token in &old {
+            // Typing inside a run of whitespace splits it around the text.
+            if !placed
+                && !math
+                && token.tok == Tok::Space
+                && token.extent.start < at
+                && at < token.extent.end
+                && !contained(token, deletions)
+            {
+                expected.push(Tok::Space);
+                expected.extend(insert_toks.iter().cloned());
+                expected.push(Tok::Space);
+                placed = true;
+                continue;
+            }
             if !placed && !before(token, at) {
                 expected.extend(insert_toks.iter().cloned());
                 placed = true;
@@ -474,26 +493,10 @@ impl<'a> Doc<'a> {
         let deleted_end = deletions.iter().map(|d| d.end).max().unwrap_or(p).max(p);
         let prev = self.prev_char(p);
         let next = self.next_char(deleted_end);
-        // Whitespace runs collapse when rendered: drop typed spaces next to
-        // existing whitespace (typing a space before a space moves past it).
-        let mut rendered = typed.to_owned();
-        if deletions.is_empty() && !rendered.is_empty() && rendered.chars().all(|c| c == ' ') {
-            if next.is_some_and(char::is_whitespace) {
-                let skip =
-                    self.text[p..].chars().take_while(|c| *c == ' ' || *c == '\t').map(char::len_utf8).sum::<usize>();
-                let caret = to_u16(self.text, p + skip.max(next.map_or(0, char::len_utf8)))?;
-                return Ok(EditPlan { patches: Vec::new(), caret, mode: EditMode::Markup });
-            }
-            if prev.is_none_or(char::is_whitespace) {
-                return Err(EditRefusal::NoChange);
-            }
-        }
-        if prev.is_some_and(char::is_whitespace) {
-            rendered = rendered.trim_start_matches(' ').to_owned();
-        }
-        if next.is_some_and(char::is_whitespace) && !rendered.ends_with('\n') {
-            rendered = rendered.trim_end_matches(' ').to_owned();
-        }
+        // Spaces are inserted as typed: Typst renders a run of spaces as one,
+        // so a space typed next to an existing one keeps the following word
+        // separated once more text is typed in between.
+        let rendered = typed.to_owned();
         if rendered.is_empty() && deletions.is_empty() {
             return Err(EditRefusal::NoChange);
         }
@@ -531,10 +534,12 @@ impl<'a> Doc<'a> {
         let typed: String = typed.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
         let prev = self.prev_char(p);
         let next = self.next_char(deleted_end);
-        if deletions.is_empty() && typed.chars().all(|c| c == ' ') {
-            if prev.is_none_or(char::is_whitespace) || next.is_none_or(char::is_whitespace) {
-                return Err(EditRefusal::NoChange);
-            }
+        // Spaces in math only separate tokens: next to whitespace they change nothing.
+        if deletions.is_empty()
+            && typed.chars().all(|c| c == ' ')
+            && (prev.is_none_or(char::is_whitespace) || next.is_none_or(char::is_whitespace))
+        {
+            return Err(EditRefusal::NoChange);
         }
         let mut source = String::new();
         let mut last = prev;
@@ -922,6 +927,8 @@ mod tests {
     fn math_deletion_inside_equation() {
         assert_eq!(run("$x^2$", 4, PageEditOp::DeleteBackward).unwrap().0, "$x^$");
         assert_eq!(run("$alpha + 1$", 6, PageEditOp::DeleteBackward).unwrap().0, "$ + 1$");
+        // Enter inside an equation is refused (no paragraph break in math).
+        assert!(matches!(run("$x + 1$", 2, PageEditOp::ParagraphBreak), Err(EditRefusal::NotEditable { .. })));
     }
 
     #[test]
@@ -961,9 +968,11 @@ mod tests {
     }
 
     #[test]
-    fn space_next_to_space_moves_caret() {
-        let plan = TypstInput.plan("a b", TextRange::empty(1), &ins(" "), "\n").unwrap();
-        assert!(plan.patches.is_empty());
-        assert_eq!(plan.caret, 2);
+    fn space_next_to_space_is_inserted() {
+        // Typing " x" before an existing space yields "a x b", not "a xb".
+        let (text, caret) = run("a b", 1, ins(" ")).unwrap();
+        assert_eq!((text.as_str(), caret), ("a  b", 2));
+        let (text, _) = run(&text, caret, ins("x")).unwrap();
+        assert_eq!(text, "a x b");
     }
 }

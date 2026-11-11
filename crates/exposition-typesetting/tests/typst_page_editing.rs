@@ -248,11 +248,9 @@ fn ligature_gets_proportional_caret_stops() {
     assert_eq!(cluster.stops.len(), 4);
     assert!(cluster.stops.windows(2).all(|w| w[0].x < w[1].x && w[0].offset + 1 == w[1].offset));
     // Arrows step through the ligature one character at a time.
-    let mut offset = start + 1;
-    for _ in 0..3 {
+    for offset in start + 1..start + 4 {
         let next = map.navigate(&fx.path, offset, Affinity::Downstream, Motion::Right, None).unwrap();
         assert_eq!(next.caret.offset, offset + 1);
-        offset += 1;
     }
 }
 

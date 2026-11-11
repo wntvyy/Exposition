@@ -5,9 +5,9 @@
 //
 // Uses the debug-only `__expositionDev.openPage` harness (dev_open_document)
 // until the workbench shell and workspace file opening are integrated.
-import { cp, mkdtemp, readFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 const PATH = "main.typ";
 
@@ -17,6 +17,25 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
   const app = await launchApp();
   const { page } = app;
   const shot = (name) => page.screenshot({ path: join(artifactsDir, `${name}.png`) });
+  const references = [];
+  /** Reference screenshot in both themes (UI_STANDARD), returning to light. */
+  const referenceShots = async (name) => {
+    for (const theme of ["dark", "light"]) {
+      await page.keyboard.press("Control+Shift+P");
+      const palette = page.getByRole("textbox", { name: "Command" });
+      await palette.waitFor({ state: "visible", timeout: 5000 });
+      await palette.fill(`color theme ${theme}`);
+      await page.locator(".wb-palette__item").first().waitFor();
+      await page.keyboard.press("Enter");
+      await palette.waitFor({ state: "detached", timeout: 5000 });
+      await page.waitForFunction((t) => document.documentElement.dataset.theme === t, theme);
+      await page.waitForTimeout(150);
+      const file = join(artifactsDir, `${name}-${theme}.png`);
+      await page.screenshot({ path: file });
+      references.push(file);
+    }
+    await page.locator('[data-testid="page-input"]').focus();
+  };
   const invoke = (cmd, args = {}) => page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args]);
   const timings = [];
 
@@ -50,6 +69,14 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
       const g = await invoke("page_caret", { build: await build(), path: PATH, offset, affinity });
       assert.ok(g, `no geometry for offset ${offset}`);
       const el = page.locator(`[data-testid="page"][data-page="${g.page}"]`);
+      // Scroll the target line into the middle of the page view first.
+      await el.evaluate((pageEl, top) => {
+        const scroller = pageEl.closest('[data-testid="page-scroller"]');
+        const scale = pageEl.getBoundingClientRect().width / Number(pageEl.dataset.widthPt);
+        const y = pageEl.getBoundingClientRect().top + top * scale;
+        const view = scroller.getBoundingClientRect();
+        scroller.scrollTop += y - (view.top + view.height / 2);
+      }, g.top);
       const box = await el.boundingBox();
       const scale = box.width / Number(await el.getAttribute("data-width-pt"));
       return { x: box.x + (g.x + dx) * scale, y: box.y + ((g.top + g.bottom) / 2) * scale, g, scale };
@@ -93,19 +120,30 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     assert.ok(after.box.x > before.box.x, "caret moved right after the typed text");
     await shot("02-typed-in-word");
 
-    // 2. Type at the end of the first line until it reflows; the caret follows.
+    // 2. Type after the last word of the paragraph's first line until the
+    //    text no longer fits and reflows; the caret follows onto the next line.
     let source = await text();
-    const lineEndOffset = source.indexOf("long enough ") + "long enough".length;
-    const p2 = await point(lineEndOffset, "upstream", -0.2);
+    const paragraph = source.indexOf("The first paragraph");
+    const lineEnd = await invoke("page_navigate", {
+      build: await build(),
+      path: PATH,
+      offset: paragraph,
+      affinity: "downstream",
+      motion: "lineEnd",
+      goalX: null,
+    });
+    // The line ends after a (trimmed) space: the last word ends just before it.
+    const lastWordEnd = source[lineEnd.caret.offset - 1] === " " ? lineEnd.caret.offset - 1 : lineEnd.caret.offset;
+    const p2 = await point(lastWordEnd, "upstream", -0.3);
     await page.mouse.click(p2.x, p2.y);
-    await waitCaretOffset(lineEndOffset);
+    await waitCaretOffset(lastWordEnd);
     const startTop = (await caret()).box.y;
     let typed = "";
     let reflowed = false;
-    for (const ch of " wonderfully extended") {
+    for (const ch of " wonderfully") {
       await page.keyboard.type(ch);
       typed += ch;
-      await waitCaretOffset(lineEndOffset + typed.length);
+      await waitCaretOffset(lastWordEnd + typed.length);
       await settled(`reflow typing ${typed.length}`);
       const c = await caret();
       if (c.box.y > startTop + 5) {
@@ -115,7 +153,7 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     }
     assert.ok(reflowed, "typing at the line end reflowed the caret onto the next line");
     source = await text();
-    assert.ok(source.includes(`long enough${typed} to wrap`), "typed text is in the source at the caret");
+    assert.equal(source.slice(lastWordEnd, lastWordEnd + typed.length + 1), `${typed} `, "typed text is in the source at the caret");
     await shot("03-reflowed");
 
     // 3. Edit inside the display equation: after the denominator 2, type 0.
@@ -132,6 +170,7 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     const mathSel = await invoke("page_selection", { build: await build(), path: PATH, start: denominator - 1, end: denominator + 1 });
     assert.equal(mathSel.text, "20", "the denominator renders as 20");
     await shot("04-math-edit");
+    await referenceShots("page-editing");
 
     // 4. Select "plain " with click + shift-click and delete it; then undo.
     const plain = source.indexOf("plain prose");
@@ -139,9 +178,12 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     const s2 = await point(plain + 6, "downstream", 0.2);
     await page.mouse.click(s1.x, s1.y);
     await waitCaretOffset(plain);
-    await page.mouse.click(s2.x, s2.y, { modifiers: ["Shift"] });
+    await page.keyboard.down("Shift");
+    await page.mouse.click(s2.x, s2.y);
+    await page.keyboard.up("Shift");
     await waitCaretOffset(plain + 6);
-    await page.waitForSelector(".page-editor__selection");
+    await page.waitForSelector(".page-editor__selection", { timeout: 5000 });
+    assert.equal(await page.locator('[data-testid="page-caret"]').getAttribute("data-anchor"), String(plain));
     await shot("05-selection");
     const beforeDelete = await text();
     await page.keyboard.press("Backspace");
@@ -177,7 +219,7 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     const p5 = await point(insertAt, "downstream", 0.2);
     await page.mouse.click(p5.x, p5.y);
     await waitCaretOffset(insertAt);
-    const long = "This inserted passage is long enough to push the following material further down the page. ".repeat(6);
+    const long = "This inserted passage is long enough to push the following material further down the page. ".repeat(18);
     await page.keyboard.insertText(long);
     await page.waitForFunction(
       async ([d]) => (await window.__TAURI_INTERNALS__.invoke("document_state", { document: d })).text.includes("push the following"),
@@ -217,10 +259,12 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
       timeout: 10000,
     });
     assert.equal(await build(), goodBuild, "last good pages stay visible");
+    await page.evaluate(() => window.__expositionDev.showProblems());
     await page.waitForSelector('[data-testid="problem"]');
     const problem = await page.locator('[data-testid="problem"]').first().textContent();
     assert.ok(problem.includes("nosuch"), `problem listed: ${problem}`);
     await shot("09-failed-build-stale");
+    await referenceShots("page-stale-output");
     // Fix it from the page view's undo (shared history) and recover.
     await page.locator('[data-testid="page-input"]').focus();
     await page.keyboard.press("Control+z");
@@ -229,7 +273,32 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     });
     await settled("recovered");
 
-    // 7. Export PDF from the shown build: same page count and sizes.
+    // 7. IME composition: shown while composing, inserted once on commit,
+    //    including an astral character (UTF-16 surrogate pair).
+    source = await text();
+    const imeAt = source.indexOf("setting");
+    const p7 = await point(imeAt, "downstream", 0.2);
+    await page.mouse.click(p7.x, p7.y);
+    await waitCaretOffset(imeAt);
+    const beforeIme = await text();
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.imeSetComposition", { text: "u", selectionStart: 1, selectionEnd: 1 });
+    await cdp.send("Input.imeSetComposition", { text: "ü", selectionStart: 1, selectionEnd: 1 });
+    await page.waitForSelector(".page-editor__composition");
+    assert.equal(await page.locator(".page-editor__composition").textContent(), "ü", "composition shown at the caret");
+    assert.equal(await text(), beforeIme, "nothing is inserted while composing");
+    await shot("11-ime-composing");
+    await cdp.send("Input.insertText", { text: "über𝔸 " });
+    await waitCaretOffset(imeAt + "über𝔸 ".length);
+    source = await text();
+    assert.equal(source, beforeIme.slice(0, imeAt) + "über𝔸 " + beforeIme.slice(imeAt), "committed composition inserted once");
+    assert.equal(await page.locator(".page-editor__composition").count(), 0, "composition cleared");
+    await settled("rebuild after IME commit");
+    const imeSel = await invoke("page_selection", { build: await build(), path: PATH, start: imeAt, end: imeAt + 6 });
+    assert.equal(imeSel.text, "über𝔸", "committed text renders at the caret");
+    await cdp.detach();
+
+    // 8. Export PDF from the shown build: same page count and sizes.
     const exported = await invoke("typesetting_export_pdf", { build: await build(), destination: null });
     const pdf = (await readFile(exported.path)).toString("latin1");
     const pdfPages = [...pdf.matchAll(/\/Type\/Page(?!s)/g)].length;
@@ -241,6 +310,11 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
 
     console.log(`      pages ${pages}; export ${exported.path}`);
     for (const t of timings) console.log(`      ${t.label}: ${t.ms} ms`);
+    if (process.env.EXPOSITION_DEV_HOME) {
+      const dir = join(process.env.EXPOSITION_DEV_HOME, "ui-reference");
+      await mkdir(dir, { recursive: true });
+      for (const file of references) await copyFile(file, join(dir, basename(file)));
+    }
     const errors = app.consoleMessages.filter((m) => m.startsWith("error") || m.startsWith("pageerror"));
     assert.deepEqual(errors, [], "no console errors");
   } catch (error) {
