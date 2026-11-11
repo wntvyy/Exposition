@@ -129,10 +129,9 @@ impl ResearchService {
 
     // ---- workspace ------------------------------------------------------
 
-    /// Set the workspace research operates in, with its trust decision.
-    ///
-    /// TEMPORARY bridge: the workspace service (m1/workspace) owns project roots
-    /// and trust; once it lands, the application wires its root/trust here.
+    /// Set the workspace research operates in. The application passes the
+    /// workspace service's open folder; `trusted` is only a fallback for
+    /// launchers without a trust store (the execution launcher decides itself).
     pub fn set_workspace(&self, root: &Path, trusted: bool) -> Result<WorkspaceStatus, ResearchError> {
         if !root.is_absolute() {
             return Err(ResearchError::InvalidWorkspace("workspace root must be an absolute path".into()));
@@ -150,6 +149,12 @@ impl ResearchService {
         *lock(&self.shared.workspace) = Some(Workspace { root: canonical.clone(), trusted });
         let trusted = self.shared.config.launcher.workspace_trusted(&canonical).unwrap_or(trusted);
         Ok(WorkspaceStatus { root: canonical.display().to_string(), trusted })
+    }
+
+    /// Forget the workspace (the project was closed). Running sessions keep
+    /// their own root until they are stopped.
+    pub fn clear_workspace(&self) {
+        *lock(&self.shared.workspace) = None;
     }
 
     /// The current workspace; trust comes from the launcher's trust store when it has one.

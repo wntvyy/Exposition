@@ -4,12 +4,14 @@ use std::sync::Arc;
 use exposition_execution::{ExecutionConfig, ExecutionService};
 use exposition_research::launcher::ExecutionLauncher;
 use exposition_research::{ResearchConfig, ResearchService};
-use exposition_workspace::DocumentService;
+use exposition_workspace::{DocumentService, WorkspaceService};
 use tauri::{AppHandle, Manager};
 
 /// Application-wide services. One instance is managed by Tauri.
 pub struct AppState {
     pub documents: Arc<DocumentService>,
+    /// Open folder, files, saves, recovery, watcher, and settings.
+    pub workspace: Arc<WorkspaceService>,
     /// Supervised process execution (jobs, toolchains, trust).
     pub execution: ExecutionService,
     /// Research sessions, runs, and provenance (M4). Launches through `execution`.
@@ -30,12 +32,13 @@ impl AppState {
         }
         let execution = ExecutionService::with_config(execution_config)?;
         let documents = Arc::new(DocumentService::new());
+        let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
         let research = Arc::new(ResearchService::new(ResearchConfig::new(
             data_dir.clone(),
             Arc::new(ExecutionLauncher::new(execution.clone())),
             documents.clone(),
         )));
-        Ok(Self { documents, execution, research, data_dir })
+        Ok(Self { documents, workspace, execution, research, data_dir })
     }
 }
 

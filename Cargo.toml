@@ -25,6 +25,7 @@ uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 tracing = "0.1"
 tempfile = "3"
+notify = "8.2"
 regex = "1"
 # Execution service OS integration (process-tree containment).
 libc = "0.2"

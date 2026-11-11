@@ -1,9 +1,9 @@
 // Research state for the workbench: workspace, environments, sessions, runs,
 // and bounded run output. All work happens in Rust; this store mirrors events.
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 
 import { notify } from "../../app/notifications";
+import { registry } from "../../app/registry";
 import type { ArtifactRecord } from "../../bindings/ArtifactRecord";
 import type { DocumentId } from "../../bindings/DocumentId";
 import type { EnvironmentReport } from "../../bindings/EnvironmentReport";
@@ -13,6 +13,7 @@ import type { SessionInfo } from "../../bindings/SessionInfo";
 import type { TextRange } from "../../bindings/TextRange";
 import type { WorkspaceStatus } from "../../bindings/WorkspaceStatus";
 import { commands, errorMessage, events, isCommandError } from "../../lib/ipc";
+import { activeHandle } from "../editor";
 import { requestWorkspaceTrust } from "../jobs/trust";
 import { EMPTY_RUN_OUTPUT, applyEvent, appendEntries, defaultInsertOffset, documentFormat, type RunOutput } from "./model";
 
@@ -73,7 +74,11 @@ export function startResearchTracking(): void {
 export async function refreshAll(): Promise<void> {
   try {
     const [workspace, sessions] = await Promise.all([commands.researchWorkspace(), commands.researchSessions()]);
-    useResearch.setState({ workspace, sessions });
+    useResearch.setState((state) =>
+      state.workspace?.root === workspace?.root
+        ? { workspace, sessions }
+        : { workspace, sessions, runs: [], outputs: {}, selectedRun: null },
+    );
     if (workspace) await refreshRuns();
   } catch (e) {
     useResearch.setState({ error: errorMessage(e) });
@@ -107,23 +112,10 @@ export async function loadEnvironments(refresh = false): Promise<void> {
   }
 }
 
-/** TEMPORARY: choose the project folder until the workspace service provides it. */
-export async function chooseWorkspaceFolder(): Promise<void> {
-  const picked = await openDialog({ directory: true, multiple: false, title: "Open research project folder" });
-  if (typeof picked !== "string") return;
-  await setWorkspace(picked);
-}
-
-export async function setWorkspace(root: string): Promise<WorkspaceStatus | null> {
-  try {
-    const workspace = await commands.researchWorkspaceSet(root);
-    useResearch.setState({ workspace, error: null, selectedRun: null, outputs: {} });
-    await refreshRuns();
-    return workspace;
-  } catch (e) {
-    useResearch.setState({ error: errorMessage(e) });
-    return null;
-  }
+/** Research works in the folder opened by the workspace (Files view). */
+export async function openProjectFolder(): Promise<void> {
+  await registry.runCommand("workspace.openFolder");
+  await refreshAll();
 }
 
 /** Ask for trust through the shared dialog; refreshes the workspace status. */
@@ -197,27 +189,34 @@ export async function execute(source: RunSource): Promise<RunSummary | null> {
 export const runCode = (code: string) => execute({ kind: "input", code });
 export const runFile = (path: string) => execute({ kind: "file", path });
 
-/**
- * Selection source for "Run Selection in Research Session". The source editor
- * registers a provider for its active selection (document id, exact revision,
- * UTF-16 range); until then the panel's own input selection is used.
- */
-export type SelectionProvider = () => { document: DocumentId; revision: number; range: TextRange } | null;
-let selectionProvider: SelectionProvider | null = null;
 let inputSelection: (() => string | null) | null = null;
 
-export function setEditorSelectionProvider(provider: SelectionProvider | null): void {
-  selectionProvider = provider;
-}
-
+/** The Research panel registers a reader for its own input's selection. */
 export function setPanelSelectionReader(reader: (() => string | null) | null): void {
   inputSelection = reader;
 }
 
+/**
+ * The active source editor's primary selection, pinned to the service revision
+ * the editor shows (waits briefly for unacknowledged local edits to settle).
+ */
+async function editorSelection(): Promise<{ document: DocumentId; revision: number; range: TextRange } | null> {
+  const handle = activeHandle();
+  if (!handle) return null;
+  for (let i = 0; i < 40 && handle.sync.pendingCount > 0; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const range = handle.selection[0];
+  if (handle.sync.pendingCount > 0 || !range || range.start === range.end) return null;
+  const ordered = range.start <= range.end ? range : { start: range.end, end: range.start };
+  return { document: handle.id, revision: handle.sync.revision, range: ordered };
+}
+
+/** Run the active editor selection, else the Research input's selection. */
 export async function runSelection(): Promise<void> {
-  const editorSelection = selectionProvider?.();
-  if (editorSelection && editorSelection.range.start !== editorSelection.range.end) {
-    await execute({ kind: "selection", ...editorSelection });
+  const selection = await editorSelection();
+  if (selection) {
+    await execute({ kind: "selection", ...selection });
     return;
   }
   const panelSelection = inputSelection?.();
@@ -228,7 +227,7 @@ export async function runSelection(): Promise<void> {
   notify({
     tone: "info",
     title: "Nothing selected",
-    body: "Select code in the Research input (or in a source editor that provides selections), then run again.",
+    body: "Select code in a Python, R, or Julia editor (or in the Research input), then run the selection.",
   });
 }
 

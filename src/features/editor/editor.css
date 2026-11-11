@@ -1,0 +1,22 @@
+/* Source editor layout. Visual treatment comes from the shared components and tokens. */
+.xp-source-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--color-surface);
+}
+
+.xp-source-editor .ui-banner {
+  border-radius: 0;
+  border-width: 0 0 var(--border-width) 0;
+}
+
+.xp-monaco {
+  flex: 1;
+  min-height: 0;
+}
+
+.xp-document-status {
+  white-space: nowrap;
+}

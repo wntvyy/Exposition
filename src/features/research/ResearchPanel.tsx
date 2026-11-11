@@ -53,9 +53,9 @@ import {
   attachArtifact,
   attachTargets,
   cancelRun,
-  chooseWorkspaceFolder,
   interruptSession,
   loadEnvironments,
+  openProjectFolder,
   restartSession,
   runCode,
   selectRun,
@@ -98,10 +98,10 @@ export function ResearchPanel() {
       <div className="exp-research" data-testid="research-panel" role="region" aria-label="Research">
         <EmptyState
           icon={FlaskConical}
-          title="No project folder for research"
-          description="Run Python, R, or Julia next to your paper. Runs, figures, and tables are recorded in the project's .exposition folder."
+          title="No folder open"
+          description="Open a project folder to run Python, R, or Julia next to your paper. Runs, figures, and tables are recorded in the project's .exposition folder."
           actions={
-            <Button variant="primary" icon={FolderOpen} onPress={() => void chooseWorkspaceFolder()}>
+            <Button variant="primary" icon={FolderOpen} onPress={() => void openProjectFolder()}>
               Open folder…
             </Button>
           }
@@ -239,12 +239,6 @@ function SessionBar() {
       <span className="exp-research__root" title={workspace?.root}>
         <code>{workspace?.root}</code>
       </span>
-      <IconButton
-        icon={FolderOpen}
-        size="sm"
-        aria-label="Open a different project folder"
-        onPress={() => void chooseWorkspaceFolder()}
-      />
     </Toolbar>
   );
 }
