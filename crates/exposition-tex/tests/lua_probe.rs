@@ -92,7 +92,7 @@ fn lua_callbacks_see_no_per_glyph_source_positions() {
     let output = runner.run(&spec);
     assert_eq!(output.exit_code(), Some(0), "{}", output.stdout);
     let log = std::fs::read_to_string(project.path().join("main.log")).unwrap();
-    let line = log.lines().filter(|l| l.starts_with("EXPOSITION-PROBE")).last().expect("probe report");
+    let line = log.lines().rfind(|l| l.starts_with("EXPOSITION-PROBE")).expect("probe report");
     eprintln!("{line}");
     let field = |name: &str| -> u32 {
         line.split_whitespace()
