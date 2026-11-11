@@ -154,6 +154,25 @@ describe("installKeybindings", () => {
     input.remove();
   });
 
+  it("lets AltGr characters through in text inputs but keeps the chord elsewhere", async () => {
+    const run = vi.fn();
+    offs.push(registry.registerCommand({ id: "t.aux", title: "Aux", keybinding: "Mod+Alt+B", run }));
+    offs.push(installKeybindings(window, "windows"));
+    const input = document.createElement("input");
+    document.body.append(input);
+    // Hungarian layout: AltGr+B types "{".
+    const typed = key({ key: "{", code: "KeyB", ctrlKey: true, altKey: true });
+    input.dispatchEvent(typed);
+    await Promise.resolve();
+    expect(run).not.toHaveBeenCalled();
+    expect(typed.defaultPrevented).toBe(false);
+    document.body.dispatchEvent(key({ key: "{", code: "KeyB", ctrlKey: true, altKey: true }));
+    input.dispatchEvent(key({ key: "b", code: "KeyB", ctrlKey: true, altKey: true }));
+    await Promise.resolve();
+    expect(run).toHaveBeenCalledTimes(2);
+    input.remove();
+  });
+
   it("skips disabled commands so another binding can apply", async () => {
     const first = vi.fn();
     const second = vi.fn();

@@ -14,6 +14,7 @@ import {
 
 import type { IconComponent } from "./Button";
 import { cx } from "./cx";
+import { keybindingLabel } from "./Kbd";
 
 /** Tabs container. Arrow keys move between tabs; selection follows focus. */
 export function Tabs({ className, ...props }: Omit<AriaTabsProps, "className"> & { className?: string }) {
@@ -111,7 +112,7 @@ export function EditorTabList({ items, onClose, onDoubleClick, className, ...ari
             <span
               className="ui-editor-tab__close"
               aria-hidden
-              title="Close (Ctrl+W)"
+              title={`Close (${keybindingLabel("Mod+W")})`}
               onPointerDown={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {

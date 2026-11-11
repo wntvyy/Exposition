@@ -193,12 +193,25 @@ function cachedChord(binding: string, platform: Platform): Chord | null {
   return parsed.get(cacheKey) ?? null;
 }
 
+/**
+ * True when Ctrl+Alt (AltGr on Windows/Linux layouts) produced a character,
+ * e.g. AltGr+B → "{" on a Hungarian layout. That is text input, not a chord.
+ */
+export function isAltGraphCharacter(event: KeyboardEvent): boolean {
+  if (event.getModifierState?.("AltGraph")) return [...event.key].length === 1;
+  if (!(event.ctrlKey && event.altKey) || event.metaKey || [...event.key].length !== 1) return false;
+  const letter = /^Key([A-Z])$/.exec(event.code)?.[1]?.toLowerCase();
+  const digit = /^Digit(\d)$/.exec(event.code)?.[1];
+  return event.key.toLowerCase() !== (letter ?? digit ?? "");
+}
+
 /** The enabled command bound to this event, honoring editing scope; undefined when none applies. */
 export function commandForEvent(event: KeyboardEvent, platform: Platform = detectPlatform()): CommandContribution | undefined {
   if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return undefined;
-  if (["Control", "Shift", "Alt", "Meta"].includes(event.key)) return undefined;
-  const chord = chordFromEvent(event);
+  if (["Control", "Shift", "Alt", "Meta", "AltGraph"].includes(event.key)) return undefined;
   const editing = isEditableTarget(event.target);
+  if (editing && isAltGraphCharacter(event)) return undefined;
+  const chord = chordFromEvent(event);
   return registry.allCommands().find((command) => {
     if (!command.keybinding) return false;
     const bound = cachedChord(command.keybinding, platform);

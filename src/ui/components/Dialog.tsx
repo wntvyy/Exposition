@@ -66,6 +66,11 @@ export function Dialog({
   );
 }
 
+/** Dialog with `alertdialog` semantics for decisions that interrupt the task; not dismissed by clicking outside. */
+export function AlertDialog(props: Omit<DialogProps, "role">) {
+  return <Dialog {...props} role="alertdialog" />;
+}
+
 export interface ConfirmAction<A extends string> {
   id: A;
   label: string;

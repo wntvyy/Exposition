@@ -3,7 +3,7 @@
 .ref {
   height: 100%;
   overflow: auto;
-  padding: var(--space-6) var(--space-8) var(--space-12);
+  padding: var(--space-6) clamp(var(--space-4), 4%, var(--space-8)) var(--space-12);
   background: var(--color-surface);
 }
 .ref > * {
@@ -13,11 +13,15 @@
 
 .ref-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-6);
   padding-bottom: var(--space-5);
   border-bottom: var(--border-width) solid var(--color-border);
+}
+.ref-header > div:first-child {
+  flex: 1 1 320px;
 }
 .ref-header__title {
   font-size: var(--font-size-2xl);
@@ -44,9 +48,12 @@
 }
 .ref-section__body {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
   gap: var(--space-4);
   margin-top: var(--space-4);
+}
+.ref-section__body > * {
+  min-width: 0;
 }
 .ref-section__body > :is(.ref-swatch-groups, .ref-type, .ref-states, .ref-stack, .ref-table, .ref-split, .ref-tree-frame, .ref-monaco, .ui-state) {
   grid-column: 1 / -1;
@@ -112,12 +119,13 @@
   background: var(--color-surface-sunken);
   font-size: var(--font-size-code);
   line-height: var(--line-height-code);
+  overflow-x: auto;
   user-select: text;
 }
 
 .ref-swatch-groups {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
   gap: var(--space-4);
 }
 .ref-swatches {
@@ -142,7 +150,9 @@
   border-radius: var(--radius-sm);
 }
 .ref-swatch__name {
+  min-width: 0;
   font-family: var(--font-code);
+  overflow-wrap: anywhere;
 }
 .ref-swatch__value {
   color: var(--color-text-subtle);
@@ -214,7 +224,7 @@
 
 .ref-states {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(230px, 100%), 1fr));
   gap: var(--space-3);
 }
 .ref-state-frame {
@@ -260,6 +270,7 @@
 .ref-table code {
   color: var(--color-text-subtle);
   font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
 }
 
 .ref-split {

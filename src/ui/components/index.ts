@@ -5,7 +5,7 @@ import "./components.css";
 
 export { Button, IconButton, SegmentedControl, ToggleButton } from "./Button";
 export type { ButtonProps, ButtonSize, ButtonVariant, IconButtonProps, IconComponent, SegmentedControlProps, ToggleButtonProps } from "./Button";
-export { confirm, confirmUnsaved, ConfirmHost, Dialog, DialogTrigger } from "./Dialog";
+export { AlertDialog, confirm, confirmUnsaved, ConfirmHost, Dialog, DialogTrigger } from "./Dialog";
 export type { ConfirmAction, ConfirmOptions, DialogProps, UnsavedChoice } from "./Dialog";
 export { Checkbox, SearchField, Select, Switch, TextField } from "./Fields";
 export type { CheckboxProps, SearchFieldProps, SelectOption, SelectProps, SwitchProps, TextFieldProps } from "./Fields";

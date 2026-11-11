@@ -158,16 +158,19 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     for (const region of ["activitybar", "sidebar", "editor", "panel", "auxiliary", "statusbar"]) {
       assert.ok(visited.includes(region), `F6 reaches ${region} (visited ${visited.join(", ")})`);
     }
-    // Into the activity rail, then Tab within it.
+    // F6 into the activity rail: its first button shows the focus ring.
     while ((await page.evaluate(() => document.activeElement?.closest("[data-region]")?.dataset.region)) !== "activitybar") {
       await page.keyboard.press("F6");
     }
     const ring = await focusRingVisible(page);
     assert.ok(ring.ok, `focus ring visible on keyboard focus: ${ring.reason}`);
 
-    // Keyboard pane resize: focus the sidebar splitter and press ArrowRight.
+    // Keyboard pane resize: F6 to the sidebar, Tab to its splitter, ArrowRight.
     const before = await width(page, '[data-region="sidebar"]');
-    await page.locator("#wb-sidebar-handle").focus();
+    await page.keyboard.press("F6");
+    assert.equal(await page.evaluate(() => document.activeElement?.closest("[data-region]")?.dataset.region), "sidebar");
+    await page.keyboard.press("Tab");
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "wb-sidebar-handle", "Tab reaches the sidebar splitter");
     const handleRing = await page.evaluate(() => {
       const el = document.getElementById("wb-sidebar-handle");
       return { state: el?.dataset.separator, shadow: el ? getComputedStyle(el).boxShadow : "none" };
@@ -227,6 +230,24 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     await page.getByRole("region", { name: "Notifications" }).waitFor({ state: "detached" });
 
     await captureFullReference(page, shot, "ui-reference-light-full");
+
+    // Two editor groups: split right (Ctrl+\), resize between them, close the right group's tab (Ctrl+W).
+    await page.getByRole("tab", { name: "UI Reference" }).click();
+    await page.keyboard.press("Control+Backslash");
+    const secondary = page.locator('[data-group="secondary"]');
+    await secondary.getByTestId("ui-reference").waitFor({ timeout: 10000 });
+    assert.equal(await page.locator('[data-group="primary"] .wb-editor-group__header [role="tab"]').count(), 1, "left group keeps its tab");
+    const leftBefore = await width(page, '[data-group="primary"]');
+    await page.getByRole("separator", { name: "Resize editor groups" }).focus();
+    await page.keyboard.press("ArrowLeft");
+    await page.waitForTimeout(100);
+    const leftAfter = await width(page, '[data-group="primary"]');
+    assert.ok(leftAfter < leftBefore - 10, `ArrowLeft narrows the left group (${leftBefore} -> ${leftAfter})`);
+    await shot(page, "editor-split-light");
+    await secondary.getByRole("tab", { name: "UI Reference" }).click();
+    await page.keyboard.press("Control+w");
+    await secondary.waitFor({ state: "detached" });
+    assert.equal(await page.locator('[data-group="primary"] .wb-editor-group__header [role="tab"]').count(), 1, "closing in one group keeps the other");
 
     // Dark theme.
     await runCommand(page, assert, "color theme dark", /Color Theme: Dark/);
