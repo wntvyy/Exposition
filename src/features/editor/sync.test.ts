@@ -41,7 +41,7 @@ class FakeService {
     this.text = text;
   }
 
-  commit(patches: TextPatch[], transaction: string | null, kind: DocumentChanged["kind"], origin: DocumentChanged["origin"]) {
+  commit(patches: TextPatch[], transaction: string | null, change: DocumentChanged["change"], origin: DocumentChanged["origin"]) {
     const before = this.text;
     this.text = applyPatches(before, patches);
     // inverse relative to new text
@@ -58,7 +58,7 @@ class FakeService {
       document: "doc-1",
       transaction,
       origin,
-      kind,
+      change,
       previousRevision,
       revision: this.revision,
       patches,

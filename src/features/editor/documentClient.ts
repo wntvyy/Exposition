@@ -295,9 +295,7 @@ let started = false;
  * its revision fields instead of the tag.
  */
 export function asChanged(event: DocumentEvent): DocumentChanged | null {
-  return typeof event === "object" && event !== null && "previousRevision" in event
-    ? (event as unknown as DocumentChanged)
-    : null;
+  return event.kind === "changed" ? event : null;
 }
 
 function start() {
