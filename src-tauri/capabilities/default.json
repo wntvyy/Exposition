@@ -12,6 +12,21 @@
     "allow-document-state",
     "allow-document-apply",
     "allow-document-undo",
-    "allow-document-redo"
+    "allow-document-redo",
+    "allow-agents-provider-status",
+    "allow-agents-provider-update",
+    "allow-agents-provider-set-key",
+    "allow-agents-provider-clear-key",
+    "allow-agents-task-list",
+    "allow-agents-task-detail",
+    "allow-agents-task-create",
+    "allow-agents-task-continue",
+    "allow-agents-task-cancel",
+    "allow-agents-approval-resolve",
+    "allow-agents-review",
+    "allow-agents-review-diff",
+    "allow-agents-review-revert",
+    "allow-agents-review-accept",
+    "allow-agents-dev-load-script"
   ]
 }

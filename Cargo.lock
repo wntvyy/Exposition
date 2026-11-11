@@ -852,6 +852,7 @@ dependencies = [
 name = "exposition"
 version = "0.1.0"
 dependencies = [
+ "exposition-agents",
  "exposition-core",
  "exposition-workspace",
  "serde",
