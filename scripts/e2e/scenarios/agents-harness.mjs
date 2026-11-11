@@ -59,11 +59,12 @@ async function waitForStatus(page, kind, timeout = 20_000) {
   );
 }
 
-async function startTask(page, { prompt, folder, permission }) {
+async function startTask(page, { prompt, permission }) {
   const panel = page.getByTestId("agents-panel");
   await panel.getByTestId("agents-new-task").click();
   await page.fill("[data-testid=agents-prompt]", prompt);
-  await panel.getByLabel("Project folder").fill(folder);
+  // The task acts on the open project folder.
+  await panel.getByTestId("agents-folder").waitFor();
   await selectOption(page, panel, /Document changes/, permission);
   await panel.getByRole("button", { name: "Start task" }).click();
   await page.waitForSelector("[data-testid=agents-task-view]");
@@ -123,6 +124,10 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
     );
     step("key removed; Not configured");
 
+    // Open the project folder through the workspace service (as File ▸ Open Folder does).
+    const opened = await invoke(page, "workspace_open", { path: project });
+    step("project folder opened in the workspace", { root: opened.root });
+
     // Select the development-only scripted provider.
     await selectOption(page, dialog, /Provider/, "Scripted provider — development only");
     await dialog.getByRole("button", { name: "Save settings" }).click();
@@ -140,7 +145,7 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
         ],
       },
     });
-    await startTask(page, { prompt: "Summarize main.typ", folder: project, permission: "Read only" });
+    await startTask(page, { prompt: "Summarize main.typ", permission: "Read only" });
     await waitForStatus(page, "completed");
     let state = await documentText(page, "main.typ");
     assert.equal(state.text, MAIN);
@@ -195,7 +200,7 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
         ],
       },
     });
-    await startTask(page, { prompt: "Make the cat sentence more precise", folder: project, permission: "Ask before each change" });
+    await startTask(page, { prompt: "Make the cat sentence more precise", permission: "Ask before each change" });
     const samples = [];
     for (let i = 0; i < 12; i++) {
       samples.push(
@@ -260,7 +265,7 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
         ],
       },
     });
-    await startTask(page, { prompt: "A long task to cancel", folder: project, permission: "Read only" });
+    await startTask(page, { prompt: "A long task to cancel", permission: "Read only" });
     await page.waitForFunction(() =>
       (document.querySelector("[data-testid=agents-draft]")?.textContent ?? "").includes("canceled"),
     );

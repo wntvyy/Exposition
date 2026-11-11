@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 /// Largest file the agent reads or creates.
 pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// Directories never listed.
-const SKIPPED_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", "__pycache__", ".lake"];
+pub(crate) const SKIPPED_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", "__pycache__", ".lake"];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FileError {

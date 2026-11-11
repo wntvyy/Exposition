@@ -1,4 +1,3 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen, Play } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
 
@@ -8,30 +7,13 @@ import type { ExecutionMode } from "../../bindings/ExecutionMode";
 import type { PermissionProfile } from "../../bindings/PermissionProfile";
 import type { TaskScope } from "../../bindings/TaskScope";
 import { editors } from "../../app/editors";
+import { registry } from "../../app/registry";
 import { commands } from "../../lib/ipc";
 import { Banner, Button, Section, Select, TextField } from "../../ui/components";
 import { CONSENT_LABELS, EXECUTION_LABELS, PERMISSION_LABELS } from "./format";
 import { agents, useAgents } from "./store";
 
 type ScopeKind = "workspace" | "files" | "document";
-
-const FOLDER_KEY = "exposition.agents.projectFolder";
-
-function rememberedFolder(): string {
-  try {
-    return localStorage.getItem(FOLDER_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function rememberFolder(folder: string) {
-  try {
-    localStorage.setItem(FOLDER_KEY, folder);
-  } catch {
-    // Per-viewer convenience only.
-  }
-}
 
 export const DEFAULT_BUDGETS: Budgets = {
   maxTurns: 40,
@@ -101,8 +83,9 @@ const option = <K extends string>(labels: Record<K, string>) =>
 
 export function TaskComposer() {
   const status = useAgents((s) => s.status);
+  const workspace = useAgents((s) => s.workspace);
+  const folder = workspace?.root ?? "";
   const [prompt, setPrompt] = useState("");
-  const [folder, setFolder] = useState(rememberedFolder);
   const [scopeKind, setScopeKind] = useState<ScopeKind>("workspace");
   const [files, setFiles] = useState("");
   const [document, setDocument] = useState(() => editors.active()?.resource.path ?? "");
@@ -116,21 +99,15 @@ export function TaskComposer() {
   const providerReady = status !== null && (status.settings.provider === "scripted" || status.configured);
   const canStart = prompt.trim().length > 0 && folder.trim().length > 0 && scope !== null && providerReady && !busy;
 
-  async function browse() {
-    const picked = await agents.run(() => open({ directory: true, multiple: false, title: "Project folder" }));
-    if (typeof picked === "string") setFolder(picked);
-  }
-
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     if (!canStart || !scope) return;
     setBusy(true);
     const task = await agents.run(() =>
-      commands.agentsTaskCreate({ prompt, workspaceRoot: folder.trim(), scope, permission, execution, consent, budgets }),
+      commands.agentsTaskCreate({ prompt, workspaceRoot: folder, scope, permission, execution, consent, budgets }),
     );
     setBusy(false);
     if (task) {
-      rememberFolder(folder.trim());
       setPrompt("");
       agents.show("task", task.id);
     }
@@ -159,12 +136,24 @@ export function TaskComposer() {
         onChange={setPrompt}
         testId="agents-prompt"
       />
-      <div className="agents-row">
-        <TextField label="Project folder" code value={folder} onChange={setFolder} className="agents-grow" data-testid="agents-folder" />
-        <Button icon={FolderOpen} onPress={() => void browse()}>
-          Browse…
-        </Button>
-      </div>
+      {workspace ? (
+        <p className="agents-small" data-testid="agents-folder">
+          <span className="agents-muted">Project folder: </span>
+          <code className="agents-code">{workspace.root}</code>
+        </p>
+      ) : (
+        <Banner
+          tone="info"
+          title="No project folder is open"
+          actions={
+            <Button size="sm" icon={FolderOpen} onPress={() => void registry.runCommand("workspace.openFolder")}>
+              Open Folder…
+            </Button>
+          }
+        >
+          The agent works on the open project, through the same documents as your editors.
+        </Banner>
+      )}
       <Select
         label="Scope"
         value={scopeKind}

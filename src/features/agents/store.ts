@@ -7,6 +7,7 @@ import type { ProviderStatus } from "../../bindings/ProviderStatus";
 import type { TaskDetail } from "../../bindings/TaskDetail";
 import type { TaskId } from "../../bindings/TaskId";
 import type { TaskSummary } from "../../bindings/TaskSummary";
+import type { WorkspaceInfo } from "../../bindings/WorkspaceInfo";
 import type { Notification } from "../../app/notifications";
 import { notify } from "../../app/notifications";
 import { commands, errorMessage, events } from "../../lib/ipc";
@@ -27,6 +28,8 @@ export interface StreamDraft {
 
 export interface AgentsState {
   status: ProviderStatus | null;
+  /** The open project folder; agent tasks act only on it. */
+  workspace: WorkspaceInfo | null;
   tasks: TaskSummary[];
   details: Record<TaskId, TaskDetail>;
   drafts: Record<TaskId, StreamDraft>;
@@ -40,6 +43,7 @@ export interface AgentsState {
 
 export const initialAgentsState: AgentsState = {
   status: null,
+  workspace: null,
   tasks: [],
   details: {},
   drafts: {},
@@ -217,8 +221,12 @@ function handleEvent(event: AgentEvent) {
 }
 
 async function resync() {
-  const [status, tasks] = await Promise.all([commands.agentsProviderStatus(), commands.agentsTaskList()]);
-  useAgents.setState({ status, tasks });
+  const [status, tasks, workspace] = await Promise.all([
+    commands.agentsProviderStatus(),
+    commands.agentsTaskList(),
+    commands.workspaceCurrent(),
+  ]);
+  useAgents.setState({ status, tasks, workspace });
   const selected = useAgents.getState().selected;
   if (selected) await refetch(selected);
 }
@@ -229,6 +237,10 @@ export const agents = {
     initialized ??= (async () => {
       await events.agents(handleEvent);
       await events.agentsResync(() => void resync().catch((e: unknown) => useAgents.setState({ error: errorMessage(e) })));
+      await events.workspace((event) => {
+        if (event.kind === "opened") useAgents.setState({ workspace: event.info });
+        if (event.kind === "closed") useAgents.setState({ workspace: null });
+      });
       await resync();
     })().catch((e: unknown) => {
       initialized = null;

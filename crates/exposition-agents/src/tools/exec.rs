@@ -418,9 +418,50 @@ fn file_error(e: FileError) -> ToolOutput {
     ToolOutput::error(e.to_string())
 }
 
+/// List through the workspace service (its link and hidden-file rules), breadth first.
+fn list_with_workspace(
+    workspace: &WorkspaceService,
+    dir: Option<&WorkspacePath>,
+    recursive: bool,
+) -> Result<workspace::Listing, ToolOutput> {
+    use exposition_workspace::types::EntryKind;
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    let mut queue: VecDeque<Option<WorkspacePath>> = VecDeque::from([dir.cloned()]);
+    'walk: while let Some(current) = queue.pop_front() {
+        let mut items = workspace.list_dir(current.as_ref()).map_err(|e| ToolOutput::error(e.message))?;
+        items.sort_by(|a, b| a.path.cmp(&b.path));
+        for item in items {
+            if item.unavailable.is_some() || item.kind == EntryKind::Other {
+                continue;
+            }
+            if entries.len() >= LIST_LIMIT {
+                truncated = true;
+                break 'walk;
+            }
+            let is_dir = item.kind == EntryKind::Directory;
+            if is_dir && workspace::SKIPPED_DIRS.contains(&item.name.as_str()) {
+                continue;
+            }
+            if recursive && is_dir && !item.link {
+                queue.push_back(Some(item.path.clone()));
+            }
+            entries.push(workspace::FileEntry {
+                path: item.path.to_string(),
+                kind: if is_dir { "directory" } else { "file" },
+                size: item.size,
+            });
+        }
+    }
+    Ok(workspace::Listing { entries, truncated })
+}
+
 fn list_files(env: &ToolEnv<'_>, input: ListFilesInput) -> Result<ToolOutput, ToolOutput> {
     let dir = parse_dir(&input.path)?;
-    let listing = env.files.list(dir.as_ref(), input.recursive, LIST_LIMIT).map_err(file_error)?;
+    let listing = match env.workspace {
+        Some(workspace) => list_with_workspace(workspace, dir.as_ref(), input.recursive)?,
+        None => env.files.list(dir.as_ref(), input.recursive, LIST_LIMIT).map_err(file_error)?,
+    };
     let open: HashMap<String, (u64, bool)> = env
         .documents
         .list()
@@ -458,10 +499,20 @@ fn read_file(env: &ToolEnv<'_>, seen: &mut SeenTexts, input: ReadFileInput) -> R
         )));
     }
     seen.insert(&id, snapshot.revision, Arc::clone(&snapshot.text));
+    // The workspace snapshot reports the hash of the exact bytes a save or a
+    // build would use (the buffer encoded in its encoding).
+    let content_hash = env
+        .workspace
+        .and_then(|w| w.snapshot().ok())
+        .and_then(|s| s.read(&path).ok())
+        .filter(|input| input.revision == Some(snapshot.revision))
+        .map(|input| input.content_hash)
+        .unwrap_or_else(|| workspace::content_hash(&snapshot.text));
     Ok(ToolOutput::ok(json!({
         "path": path.as_str(),
         "revision": snapshot.revision,
         "unsavedChanges": info.saved_revision != Some(info.revision),
+        "contentHash": content_hash,
         "text": &*snapshot.text,
     })))
 }
