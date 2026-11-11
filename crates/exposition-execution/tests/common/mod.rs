@@ -40,6 +40,8 @@ pub fn fixture_with(settings: ExecutionSettings, trusted: bool) -> Fixture {
         host_env: host_env(),
         settings: Some(settings),
         too_broad_to_trust: Some(vec![]),
+        // Shared across test runs so self-extracting tools (biber) stay warm.
+        tool_cache_dir: Some(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("exposition-tool-cache")),
     })
     .unwrap();
     let workspace = service.register_workspace_root(&workspace).unwrap();

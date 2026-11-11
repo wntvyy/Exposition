@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use exposition_execution::ExecutionService;
+use exposition_execution::{ExecutionConfig, ExecutionService};
 use exposition_workspace::DocumentService;
 use tauri::{AppHandle, Manager};
 
@@ -18,7 +18,13 @@ impl AppState {
     pub fn initialize(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
         let data_dir = resolve_data_dir(app)?;
         std::fs::create_dir_all(&data_dir)?;
-        let execution = ExecutionService::new(&data_dir)?;
+        let mut execution_config = ExecutionConfig::new(&data_dir);
+        // Test/dev override so isolated data dirs can share the extraction cache
+        // of self-extracting tools (e.g. biber) instead of re-extracting.
+        if let Some(dir) = std::env::var_os("EXPOSITION_TOOL_CACHE_DIR").filter(|v| !v.is_empty()) {
+            execution_config.tool_cache_dir = Some(PathBuf::from(dir));
+        }
+        let execution = ExecutionService::with_config(execution_config)?;
         Ok(Self { documents: Arc::new(DocumentService::new()), execution, data_dir })
     }
 }

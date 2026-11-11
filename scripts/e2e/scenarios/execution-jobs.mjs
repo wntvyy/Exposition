@@ -85,7 +85,8 @@ async function startProbeTree(page) {
 
 export default async function executionJobs({ launchApp, artifactsDir, assert }) {
   const evidence = {};
-  const app = await launchApp();
+  // Keep the extraction cache of self-extracting tools (biber) across runs.
+  const app = await launchApp({ env: { EXPOSITION_TOOL_CACHE_DIR: join(artifactsDir, "..", "tool-cache") } });
   try {
     const { page } = app;
 
@@ -184,7 +185,7 @@ export default async function executionJobs({ launchApp, artifactsDir, assert })
     await page.getByRole("tab", { name: "Toolchains" }).click();
     const tools = page.getByTestId("toolchains-view");
     const toolRow = (id) => tools.locator(`tr[data-tool-id="${id}"]`);
-    await toolRow("pdflatex").waitFor({ timeout: 120_000 });
+    await toolRow("pdflatex").waitFor({ timeout: 180_000 }); // first run unpacks biber (~1 min)
     const toolchains = await invoke(page, "toolchains_list");
     evidence.toolchains = toolchains.map(({ id, status, version, path }) => ({ id, status, version, path }));
     for (const id of ["pdflatex", "lualatex", "python"]) {

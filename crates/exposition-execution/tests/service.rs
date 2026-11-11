@@ -31,6 +31,9 @@ async fn environment_is_built_from_empty_without_credentials() {
         let path = env.lines().find_map(|l| l.strip_prefix("Path=").or_else(|| l.strip_prefix("PATH="))).unwrap();
         assert!(path.to_ascii_lowercase().contains(r"\system32"), "{path}");
     }
+    // Self-extracting tools get a persistent application-owned cache.
+    let par = env.lines().find_map(|l| l.strip_prefix("PAR_GLOBAL_TEMP=")).unwrap();
+    assert!(par.contains("exposition-tool-cache"), "{par}");
     // The per-job temp dir is removed afterwards.
     assert!(!std::path::Path::new(temp).exists());
 }

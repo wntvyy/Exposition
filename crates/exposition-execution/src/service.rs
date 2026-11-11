@@ -30,7 +30,8 @@ use crate::trust::{TrustError, TrustStatus, TrustStore};
 /// Default wall-clock limit for batch jobs without `timeout_ms`.
 pub const DEFAULT_BATCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Limit for application probes (version queries).
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Generous because some tools unpack themselves on their very first run.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 const PROBE_LOG_LIMIT: u64 = 64 * 1024;
 /// Finished jobs retained for listing/output reads.
 const MAX_FINISHED_JOBS: usize = 500;
@@ -143,11 +144,20 @@ pub struct ExecutionConfig {
     pub settings: Option<ExecutionSettings>,
     /// Directories that may never be trusted wholesale (home, system dirs).
     pub too_broad_to_trust: Option<Vec<PathBuf>>,
+    /// Persistent cache for self-extracting tools (default
+    /// `<data_dir>/execution/cache`). Shared by all native jobs.
+    pub tool_cache_dir: Option<PathBuf>,
 }
 
 impl ExecutionConfig {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
-        Self { data_dir: data_dir.into(), host_env: HostEnv::capture(), settings: None, too_broad_to_trust: None }
+        Self {
+            data_dir: data_dir.into(),
+            host_env: HostEnv::capture(),
+            settings: None,
+            too_broad_to_trust: None,
+            tool_cache_dir: None,
+        }
     }
 }
 
@@ -273,6 +283,7 @@ struct Table {
 
 struct Inner {
     exec_dir: PathBuf,
+    tool_cache: PathBuf,
     probe_dir: PathBuf,
     host: HostEnv,
     redactor: Arc<Redactor>,
@@ -314,6 +325,7 @@ impl ExecutionService {
     pub fn with_config(config: ExecutionConfig) -> std::io::Result<Self> {
         let exec_dir = config.data_dir.join("execution");
         let probe_dir = exec_dir.join("probe");
+        let tool_cache = config.tool_cache_dir.unwrap_or_else(|| exec_dir.join("cache"));
         std::fs::create_dir_all(&probe_dir)?;
         std::fs::create_dir_all(exec_dir.join("jobs"))?;
         let exec_dir = canonicalize(&exec_dir)?;
@@ -335,6 +347,7 @@ impl ExecutionService {
         Ok(Self {
             inner: Arc::new(Inner {
                 exec_dir,
+                tool_cache,
                 probe_dir,
                 host,
                 redactor,
@@ -1180,6 +1193,16 @@ impl Inner {
             prepared.env.insert("TMP", temp_text);
         } else {
             prepared.env.insert("TMPDIR", temp_text);
+        }
+        // Self-extracting tools (PAR-packed Perl such as biber, and latexmk's
+        // helpers on some distributions) unpack into TEMP on first run. With a
+        // fresh per-job TEMP they would re-extract on every run (~30 s for
+        // biber), so give them a persistent application-owned cache instead.
+        if !prepared.env.contains("PAR_GLOBAL_TEMP") {
+            let par = self.tool_cache.join("par");
+            if std::fs::create_dir_all(&par).is_ok() {
+                prepared.env.insert("PAR_GLOBAL_TEMP", par.display().to_string());
+            }
         }
 
         // Restricted (docker): preflight and build the real client arguments.

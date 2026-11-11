@@ -13,7 +13,10 @@
 //!    user site-packages under `APPDATA`; Jupyter keeps kernel specs and runtime
 //!    connection files under `APPDATA`. None of them are credentials. On Unix:
 //!    `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`.
-//! 2. `TEMP`/`TMP` (Unix: `TMPDIR`) pointing at a per-job temporary directory.
+//! 2. `TEMP`/`TMP` (Unix: `TMPDIR`) pointing at a per-job temporary directory,
+//!    plus `PAR_GLOBAL_TEMP` pointing at a persistent application-owned cache so
+//!    self-extracting tools (biber) do not re-unpack on every run (set by the
+//!    service at spawn time unless the job sets it).
 //! 3. A constructed `PATH`: the program's own directory, discovered toolchain
 //!    directories, then the system directories. The host `PATH` is NOT used.
 //! 4. The job's `inherit` allowlist, copied from the host when present.
