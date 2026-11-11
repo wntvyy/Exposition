@@ -389,7 +389,7 @@ function RunOutputView() {
       )}
       <div ref={viewer} className="exp-research__entries" tabIndex={0} aria-label={`Output of run ${run.id}`}>
         {output.entries.map((entry) => (
-          <OutputEntryView key={entry.seq} entry={entry} run={run} />
+          <OutputEntryView key={`${run.id}:${entry.seq}`} entry={entry} run={run} />
         ))}
         {isActiveRun(run) && !run.queued && <Spinner size="sm" aria-label="Running" />}
       </div>

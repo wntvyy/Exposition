@@ -57,7 +57,7 @@ fn sync_workspace(state: &AppState) -> Result<(), CommandError> {
     match state.workspace.current() {
         Some(info) => {
             let root = PathBuf::from(&info.root);
-            let current = state.research.workspace().map(|w| PathBuf::from(w.root));
+            let current = state.research.workspace_root();
             let same = current.as_ref().is_some_and(|c| std::fs::canonicalize(&root).map(|r| &r == c).unwrap_or(false));
             if !same {
                 state.research.set_workspace(&root, false)?;

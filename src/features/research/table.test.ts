@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { parseHtmlTable } from "./table";
+import { neutralizeHandlers, parseHtmlTable } from "./table";
 
 describe("parseHtmlTable", () => {
   it("reads a pandas-style table as plain text", () => {
@@ -27,6 +27,12 @@ describe("parseHtmlTable", () => {
     expect(alert).not.toHaveBeenCalled();
     // Nothing from the parsed document reached the live page.
     expect(document.querySelector("img[src='x']")).toBeNull();
+  });
+
+  it("neutralizes inline handlers inside tags only", () => {
+    expect(neutralizeHandlers('<img src="x" onerror="a()"><td ONLOAD = b>one onerror=c</td><svg/onload=d>')).toBe(
+      '<img src="x" data-on-error="a()"><td data-on-LOAD = b>one onerror=c</td><svg/data-on-load=d>',
+    );
   });
 
   it("clamps spans, bounds rows, and handles missing tables", () => {

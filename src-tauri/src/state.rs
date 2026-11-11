@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use exposition_core::path::WorkspacePath;
 use exposition_execution::{ExecutionConfig, ExecutionService};
 use exposition_research::launcher::ExecutionLauncher;
-use exposition_research::{ResearchConfig, ResearchService};
+use exposition_research::{ResearchConfig, ResearchService, ResolvedSource, SourceReader};
 use exposition_workspace::{DocumentService, WorkspaceService};
 use tauri::{AppHandle, Manager};
 
@@ -33,11 +34,13 @@ impl AppState {
         let execution = ExecutionService::with_config(execution_config)?;
         let documents = Arc::new(DocumentService::new());
         let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
-        let research = Arc::new(ResearchService::new(ResearchConfig::new(
+        let mut research_config = ResearchConfig::new(
             data_dir.clone(),
             Arc::new(ExecutionLauncher::new(execution.clone())),
             documents.clone(),
-        )));
+        );
+        research_config.source_reader = Some(Arc::new(WorkspaceSources(Arc::clone(&workspace))));
+        let research = Arc::new(ResearchService::new(research_config));
         Ok(Self { documents, workspace, execution, research, data_dir })
     }
 }
@@ -49,4 +52,15 @@ fn resolve_data_dir(app: &AppHandle) -> Result<PathBuf, Box<dyn std::error::Erro
         return Ok(PathBuf::from(dir));
     }
     Ok(app.path().app_local_data_dir()?)
+}
+
+/// Research reads run inputs through the workspace snapshot, like builds do.
+struct WorkspaceSources(Arc<WorkspaceService>);
+
+impl SourceReader for WorkspaceSources {
+    fn read(&self, path: &WorkspacePath) -> Result<ResolvedSource, String> {
+        let input = self.0.snapshot().and_then(|snapshot| snapshot.read(path)).map_err(|e| e.to_string())?;
+        let text = input.text.ok_or_else(|| format!("{path} is not a text file"))?;
+        Ok(ResolvedSource { text: text.to_string(), revision: input.revision, content_hash: input.content_hash })
+    }
 }

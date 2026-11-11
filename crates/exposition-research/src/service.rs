@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use exposition_core::artifact::{ArtifactRecord, Producer, RunId, RunInput, RunRecord, RunStatus, ToolVersion};
 use exposition_core::job::{ExecutionPolicy, JobSpec};
+use exposition_core::path::WorkspacePath;
 use exposition_core::text::utf16_range_to_bytes;
 use exposition_workspace::DocumentService;
 use serde_json::{Value, json};
@@ -50,6 +51,25 @@ pub struct ResearchConfig {
     pub heartbeat_timeout: Duration,
     /// Cancel waits this long after interrupting before restarting the kernel.
     pub cancel_grace: Duration,
+    /// Reads project files the way builds see them (the workspace snapshot:
+    /// open buffer preferred, exact saved bytes hashed). Without one, research
+    /// reads the open buffer or the file under the workspace root itself.
+    pub source_reader: Option<Arc<dyn SourceReader>>,
+}
+
+/// A project file as a run consumes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedSource {
+    pub text: String,
+    /// Document revision when the text came from an open buffer.
+    pub revision: Option<u64>,
+    /// Hex SHA-256 of the exact bytes (as saved, in the file's encoding).
+    pub content_hash: String,
+}
+
+/// Source access provided by the workspace service.
+pub trait SourceReader: Send + Sync {
+    fn read(&self, path: &WorkspacePath) -> Result<ResolvedSource, String>;
 }
 
 impl ResearchConfig {
@@ -61,6 +81,7 @@ impl ResearchConfig {
             request_timeout: Duration::from_secs(120),
             heartbeat_timeout: Duration::from_secs(20),
             cancel_grace: Duration::from_secs(5),
+            source_reader: None,
         }
     }
 }
@@ -148,7 +169,7 @@ impl ResearchService {
             .map_err(|e| ResearchError::InvalidWorkspace(format!("the workspace cannot be used for execution: {e}")))?;
         *lock(&self.shared.workspace) = Some(Workspace { root: canonical.clone(), trusted });
         let trusted = self.shared.config.launcher.workspace_trusted(&canonical).unwrap_or(trusted);
-        Ok(WorkspaceStatus { root: canonical.display().to_string(), trusted })
+        Ok(WorkspaceStatus { root: display_path(&canonical), trusted })
     }
 
     /// Forget the workspace (the project was closed). Running sessions keep
@@ -161,7 +182,12 @@ impl ResearchService {
     pub fn workspace(&self) -> Option<WorkspaceStatus> {
         let workspace = lock(&self.shared.workspace).clone()?;
         let trusted = self.shared.config.launcher.workspace_trusted(&workspace.root).unwrap_or(workspace.trusted);
-        Some(WorkspaceStatus { root: workspace.root.display().to_string(), trusted })
+        Some(WorkspaceStatus { root: display_path(&workspace.root), trusted })
+    }
+
+    /// Canonical root of the current workspace.
+    pub fn workspace_root(&self) -> Option<PathBuf> {
+        lock(&self.shared.workspace).as_ref().map(|w| w.root.clone())
     }
 
     fn current_workspace(&self) -> Result<Workspace, ResearchError> {
@@ -335,6 +361,17 @@ impl ResearchService {
                     inputs,
                 )
             }
+            RunSource::File { path } if self.shared.config.source_reader.is_some() => {
+                check_language(session.env.language, path.extension())?;
+                let reader = self.shared.config.source_reader.as_ref().expect("checked");
+                let source = reader.read(path).map_err(ResearchError::InvalidRequest)?;
+                let input = RunInput {
+                    path: path.clone(),
+                    revision: source.revision,
+                    content_hash: Some(format!("sha256:{}", source.content_hash)),
+                };
+                (source.text, CodeOrigin::File { path: path.clone(), revision: source.revision }, vec![input])
+            }
             RunSource::File { path } => {
                 check_language(session.env.language, path.extension())?;
                 let (text, revision) = match documents.find_by_path(path) {
@@ -470,6 +507,18 @@ fn check_language(language: RuntimeLanguage, extension: Option<&str>) -> Result<
                 RuntimeLanguage::Julia => "Julia",
             }
         )))
+    }
+}
+
+/// A canonical path for display (without the Windows `\\?\` verbatim prefix).
+pub fn display_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        text
     }
 }
 
@@ -1407,6 +1456,13 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_paths_drop_the_verbatim_prefix() {
+        assert_eq!(display_path(Path::new(r"\\?\C:\Users\x\project")), r"C:\Users\x\project");
+        assert_eq!(display_path(Path::new(r"\\?\UNC\server\share\p")), r"\\server\share\p");
+        assert_eq!(display_path(Path::new("/home/x/p")), "/home/x/p");
+    }
 
     #[test]
     fn language_checks_file_extensions() {

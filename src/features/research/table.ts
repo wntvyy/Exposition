@@ -43,9 +43,20 @@ function cellsOf(row: Element): GridCell[] {
   return cells;
 }
 
+/**
+ * Rename inline event-handler attributes (`onerror=` → `data-on-error=`) inside
+ * tags before parsing. DOMParser documents never run them (no browsing
+ * context, and the app CSP forbids inline handlers), but Chromium still reports
+ * a CSP violation when, e.g., an `<img onerror>` fails in the inert document.
+ * Text between tags is untouched.
+ */
+export function neutralizeHandlers(html: string): string {
+  return html.replace(/<[^<>]*>/g, (tag) => tag.replace(/(\s|\/)on([a-z]+)(\s*=)/gi, "$1data-on-$2$3"));
+}
+
 /** First table of `html` as plain-text cells, or null when there is none. */
 export function parseHtmlTable(html: string, maxRows = 200): Grid | null {
-  const doc = new DOMParser().parseFromString(html, "text/html");
+  const doc = new DOMParser().parseFromString(neutralizeHandlers(html), "text/html");
   const table = doc.querySelector("table");
   if (!table) return null;
   // Script/style text is not table content.
