@@ -7,6 +7,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppInfo } from "../bindings/AppInfo";
 import type { AppSettings } from "../bindings/AppSettings";
 import type { AppSettingsState } from "../bindings/AppSettingsState";
+import type { BuildId } from "../bindings/BuildId";
+import type { BuildTarget } from "../bindings/BuildTarget";
 import type { CommandError } from "../bindings/CommandError";
 import type { DocumentChanged } from "../bindings/DocumentChanged";
 import type { DocumentEvent } from "../bindings/DocumentEvent";
@@ -27,6 +29,11 @@ import type { RecentProject } from "../bindings/RecentProject";
 import type { RecoveryEntry } from "../bindings/RecoveryEntry";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
 import type { SaveAllOutcome } from "../bindings/SaveAllOutcome";
+import type { TexBuildMode } from "../bindings/TexBuildMode";
+import type { TexEvent } from "../bindings/TexEvent";
+import type { TexPageMapping } from "../bindings/TexPageMapping";
+import type { TexTargetRef } from "../bindings/TexTargetRef";
+import type { TexTargetStatus } from "../bindings/TexTargetStatus";
 import type { ToolchainInfo } from "../bindings/ToolchainInfo";
 import type { TransactionError } from "../bindings/TransactionError";
 import type { TransactionOutcome } from "../bindings/TransactionOutcome";
@@ -91,6 +98,16 @@ export const commands = {
   /** Only call from the explicit trust dialog (`requestWorkspaceTrust`). */
   trustGrant: (root: string) => invoke<TrustStatus>("trust_grant", { root }),
   trustRevoke: (root: string) => invoke<TrustStatus>("trust_revoke", { root }),
+
+  /** Build a LaTeX target of the open workspace (`null`: the project's default target). */
+  texBuild: (target: BuildTarget | null, mode: TexBuildMode) =>
+    invoke<TexTargetRef>("tex_build", { target, mode }),
+  texStatus: (target: BuildTarget | null) => invoke<TexTargetStatus | null>("tex_status", { target }),
+  texCancel: (target: BuildTarget | null) => invoke<boolean>("tex_cancel", { target }),
+  /** PNG bytes of a page of a finished build (`scale` pixels per point); wrap in a Blob for an object URL. */
+  texPageImage: (build: BuildId, page: number, scale: number) =>
+    invoke<ArrayBuffer>("tex_page_image", { build, page, scale }),
+  texPageMap: (build: BuildId, page: number) => invoke<TexPageMapping>("tex_page_map", { build, page }),
 };
 
 export const events = {
@@ -107,6 +124,11 @@ export const events = {
     listen<JobEvent>("jobs:event", (e) => handler(e.payload)),
   /** The frontend fell behind; re-read the job list. */
   jobsResync: (handler: () => void): Promise<UnlistenFn> => listen("jobs:resync", () => handler()),
+  /** LaTeX build lifecycle (queued, started, finished with the build result). */
+  tex: (handler: (event: TexEvent) => void): Promise<UnlistenFn> =>
+    listen<TexEvent>("tex:event", (e) => handler(e.payload)),
+  /** The frontend fell behind; re-read TeX target status. */
+  texResync: (handler: () => void): Promise<UnlistenFn> => listen("tex:resync", () => handler()),
 };
 
 export function isCommandError(value: unknown): value is CommandError {

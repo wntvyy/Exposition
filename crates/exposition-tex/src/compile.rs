@@ -1011,7 +1011,7 @@ pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 /// Strip the Windows verbatim prefix (`\\?\C:\...`) that TeX cannot read.
-fn plain_path(path: &Path) -> PathBuf {
+pub(crate) fn plain_path(path: &Path) -> PathBuf {
     let s = path.display().to_string();
     match s.strip_prefix(r"\\?\") {
         Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),

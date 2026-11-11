@@ -398,7 +398,8 @@ impl TexService {
     /// Canonical root of the open workspace.
     fn open_root(&self) -> Result<PathBuf, TexServiceError> {
         let snapshot = self.inner.workspace.snapshot().map_err(|_| TexServiceError::WorkspaceNotOpen)?;
-        Ok(snapshot.root().to_path_buf())
+        // Without the Windows verbatim prefix: shown to users, passed to TeX.
+        Ok(crate::compile::plain_path(snapshot.root()))
     }
 
     fn reference(&self, target: Option<&BuildTarget>) -> Option<TexTargetRef> {
