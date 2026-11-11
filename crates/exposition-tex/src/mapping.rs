@@ -223,7 +223,7 @@ impl PageMapping {
     }
 
     /// A spacing accent glyph drawn over a neighbouring base glyph with the
-    /// same target (TeX `ccent` construction): the base is the hit target.
+    /// same target (TeX `\accent` construction): the base is the hit target.
     fn is_attached_accent(&self, i: usize) -> bool {
         let is_accent = self.glyphs[i]
             .text
@@ -371,7 +371,12 @@ fn build_clusters(glyphs: &[PageGlyph]) -> Vec<Cluster> {
     let mut i = 0;
     while i < glyphs.len() {
         let text = glyphs[i].text.clone().unwrap_or_default();
-        let accent = single_char(&text).and_then(spacing_accent_to_combining);
+        // Spacing accents (TeX `\accent`) and overlay marks (e.g. the U+0338
+        // solidus cm fonts draw over "=" for `\neq`) combine with the glyph
+        // they are drawn over.
+        let accent = single_char(&text).and_then(|c| {
+            spacing_accent_to_combining(c).or(unicode_normalization::char::is_combining_mark(c).then_some(c))
+        });
         if let Some(mark) = accent {
             // Accent followed by its base (\accent order) or preceded by it (cedilla).
             if let Some(next) = glyphs.get(i + 1)
@@ -407,9 +412,14 @@ fn single_char(text: &str) -> Option<char> {
     chars.next().is_none().then_some(c)
 }
 
+/// Whether two glyphs are drawn over each other horizontally (ink extents
+/// when known: overlay marks such as cm's negation slash have no advance).
 fn overlaps(a: &PageGlyph, b: &PageGlyph) -> bool {
-    let (a0, a1) = (a.origin_x, a.origin_x + a.advance);
-    let (b0, b1) = (b.origin_x, b.origin_x + b.advance);
+    let span = |g: &PageGlyph| match g.ink {
+        Some(r) if r.width() > 0.0 => (r.x0, r.x1),
+        _ => (g.origin_x, g.origin_x + g.advance),
+    };
+    let ((a0, a1), (b0, b1)) = (span(a), span(b));
     let overlap = a1.min(b1) - a0.max(b0);
     overlap > 0.3 * (a1 - a0).min(b1 - b0).max(0.1)
 }
@@ -626,12 +636,20 @@ fn align_block(
                     && !taken.contains(&(*file_index, u))
                     && comparison_chars(&unit.text) == clusters[c].chars
                 {
-                    candidates.push((*file_index, u));
+                    let distance =
+                        anchors.iter().filter(|(af, _)| af == file_index).map(|(_, au)| au.abs_diff(u)).min();
+                    candidates.push((distance.unwrap_or(usize::MAX), *file_index, u));
                 }
             }
         }
-        if candidates.len() == 1 {
-            let (f, u) = candidates[0];
+        // The unique candidate, or the one strictly closest to the anchor.
+        candidates.sort_unstable();
+        let unique = match candidates.as_slice() {
+            [only] => Some(*only),
+            [first, second, ..] if first.0 < second.0 => Some(*first),
+            _ => None,
+        };
+        if let Some((_, f, u)) = unique {
             taken.insert((f, u));
             cluster_units[c] = Some((f, vec![u]));
         }
