@@ -1,0 +1,330 @@
+/* Jobs feature styles. Uses shared design tokens when present (src/ui, owned by
+   the UI owner) with system-color fallbacks that follow light/dark schemes. */
+.exp-jobs,
+.exp-tools,
+.exp-trust-dialog {
+  --exp-fg: var(--color-text, CanvasText);
+  --exp-bg: var(--color-surface, Canvas);
+  --exp-muted: var(--color-text-muted, color-mix(in srgb, CanvasText 62%, Canvas));
+  --exp-border: var(--color-border, color-mix(in srgb, CanvasText 18%, Canvas));
+  --exp-subtle: var(--color-surface-subtle, color-mix(in srgb, CanvasText 5%, Canvas));
+  --exp-accent: var(--color-accent, light-dark(#2459c6, #7aa2ff));
+  --exp-success: var(--color-success, light-dark(#1a7f37, #4ac26b));
+  --exp-warning: var(--color-warning, light-dark(#9a6700, #d4a72c));
+  --exp-danger: var(--color-danger, light-dark(#c4251c, #ff7b72));
+  --exp-info: var(--color-info, light-dark(#0969da, #58a6ff));
+  --exp-space: var(--space-2, 8px);
+  --exp-radius: var(--radius-sm, 4px);
+  --exp-mono: var(--font-mono, ui-monospace, "Cascadia Mono", Consolas, monospace);
+  color: var(--exp-fg);
+  font-size: var(--font-size-sm, 13px);
+}
+
+.exp-jobs {
+  display: grid;
+  grid-template-columns: minmax(220px, 34%) 1fr;
+  gap: var(--exp-space);
+  min-height: 0;
+  height: 100%;
+}
+
+@media (max-width: 760px) {
+  .exp-jobs {
+    grid-template-columns: 1fr;
+  }
+}
+
+.exp-jobs-list,
+.exp-jobs-detail {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.exp-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--exp-space);
+  padding: 4px 0;
+}
+
+.exp-panel-title {
+  font-size: 1em;
+  font-weight: 600;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.exp-job-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.exp-job-row {
+  display: flex;
+  align-items: center;
+  gap: var(--exp-space);
+  border-bottom: 1px solid var(--exp-border);
+  padding: 2px 4px;
+}
+
+.exp-job-row[data-selected] {
+  background: var(--exp-subtle);
+}
+
+.exp-job-select {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 4px;
+  cursor: pointer;
+}
+
+.exp-job-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.exp-job-meta {
+  display: flex;
+  gap: var(--exp-space);
+  align-items: center;
+  color: var(--exp-muted);
+}
+
+.exp-pill {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 0.85em;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.exp-tone-neutral {
+  color: var(--exp-muted);
+}
+.exp-tone-info {
+  color: var(--exp-info);
+}
+.exp-tone-success {
+  color: var(--exp-success);
+}
+.exp-tone-warning {
+  color: var(--exp-warning);
+}
+.exp-tone-danger {
+  color: var(--exp-danger);
+}
+
+.exp-button {
+  font: inherit;
+  color: var(--exp-fg);
+  background: var(--exp-subtle);
+  border: 1px solid var(--exp-border);
+  border-radius: var(--exp-radius);
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.exp-button:disabled,
+.exp-button[data-disabled] {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.exp-button-primary {
+  background: var(--exp-accent);
+  border-color: var(--exp-accent);
+  color: var(--color-on-accent, white);
+}
+
+.exp-button-danger {
+  color: var(--exp-danger);
+  border-color: currentColor;
+}
+
+.exp-jobs :focus-visible,
+.exp-tools :focus-visible,
+.exp-trust-dialog :focus-visible,
+.exp-button[data-focus-visible] {
+  outline: 2px solid var(--exp-accent);
+  outline-offset: 1px;
+}
+
+.exp-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.exp-job-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px var(--exp-space);
+  margin: 4px 0;
+}
+
+.exp-job-facts dt {
+  color: var(--exp-muted);
+}
+
+.exp-job-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.exp-job-facts code,
+.exp-tool-path {
+  font-family: var(--exp-mono);
+  font-size: 0.95em;
+  overflow-wrap: anywhere;
+}
+
+.exp-output {
+  font-family: var(--exp-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  background: var(--exp-subtle);
+  border: 1px solid var(--exp-border);
+  border-radius: var(--exp-radius);
+  padding: 6px 8px;
+  margin: 4px 0;
+  max-height: 320px;
+  min-height: 80px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.exp-out-stderr {
+  color: var(--exp-danger);
+  box-shadow: inset 3px 0 0 var(--exp-danger);
+  padding-left: 6px;
+}
+
+.exp-legend {
+  font-size: 0.85em;
+  margin: 0;
+}
+
+.exp-muted {
+  color: var(--exp-muted);
+}
+
+.exp-error {
+  color: var(--exp-danger);
+}
+
+.exp-empty {
+  color: var(--exp-muted);
+  padding: var(--exp-space);
+}
+
+.exp-tool-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+}
+
+.exp-tool-table th:nth-child(1) {
+  width: 22%;
+}
+.exp-tool-table th:nth-child(2) {
+  width: 11%;
+}
+.exp-tool-table th:nth-child(3) {
+  width: 27%;
+}
+
+.exp-tool-table td,
+.exp-tool-table th {
+  overflow-wrap: anywhere;
+}
+
+.exp-tool-table caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 6px 0 2px;
+}
+
+.exp-tool-table th,
+.exp-tool-table td {
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--exp-border);
+  padding: 4px 6px;
+}
+
+.exp-tool-table thead th {
+  color: var(--exp-muted);
+  font-weight: 500;
+}
+
+.exp-guidance {
+  margin-top: 2px;
+}
+
+.exp-status-item {
+  white-space: nowrap;
+}
+
+.exp-trust-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, black 40%, transparent);
+  z-index: 1000;
+}
+
+.exp-trust-modal {
+  max-width: min(520px, calc(100vw - 32px));
+}
+
+.exp-trust-dialog {
+  background: var(--exp-bg);
+  border: 1px solid var(--exp-border);
+  border-radius: var(--radius-md, 8px);
+  padding: 16px 20px;
+  box-shadow: 0 12px 40px color-mix(in srgb, black 30%, transparent);
+  outline: none;
+}
+
+.exp-trust-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1.1em;
+  margin: 0 0 8px;
+}
+
+.exp-trust-path {
+  font-family: var(--exp-mono);
+  background: var(--exp-subtle);
+  padding: 4px 8px;
+  border-radius: var(--exp-radius);
+  overflow-wrap: anywhere;
+}
+
+.exp-trust-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}

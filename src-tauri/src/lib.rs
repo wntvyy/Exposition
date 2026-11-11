@@ -5,9 +5,10 @@
 mod app;
 mod documents;
 mod error;
+mod execution;
 mod state;
 
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
 
 pub use error::CommandError;
 pub use state::AppState;
@@ -19,6 +20,9 @@ pub fn run() {
             let state = AppState::initialize(app.handle())?;
             app.manage(state);
             documents::forward_events(app.handle().clone());
+            execution::forward_events(app.handle().clone());
+            #[cfg(debug_assertions)]
+            execution::add_dev_capability(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -28,7 +32,24 @@ pub fn run() {
             documents::document_apply,
             documents::document_undo,
             documents::document_redo,
+            execution::job_list,
+            execution::job_output,
+            execution::job_cancel,
+            execution::toolchains_list,
+            execution::toolchains_refresh,
+            execution::trust_status,
+            execution::trust_grant,
+            execution::trust_revoke,
+            #[cfg(debug_assertions)]
+            execution::dev_start_probe_job,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Exposition");
+        .build(tauri::generate_context!())
+        .expect("error while building Exposition")
+        .run(|app, event| {
+            // Kill every supervised process tree before exiting. (If the app
+            // crashes instead, job-object kill-on-close does the same.)
+            if let RunEvent::Exit = event {
+                app.state::<AppState>().execution.shutdown();
+            }
+        });
 }

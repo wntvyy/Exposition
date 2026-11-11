@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-toolchains-list"
+description = "Enables the toolchains_list command without any pre-configured scope."
+commands.allow = ["toolchains_list"]
+
+[[permission]]
+identifier = "deny-toolchains-list"
+description = "Denies the toolchains_list command without any pre-configured scope."
+commands.deny = ["toolchains_list"]

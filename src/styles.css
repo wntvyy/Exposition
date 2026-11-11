@@ -14,3 +14,27 @@ body,
 .bootstrap {
   padding: 24px;
 }
+
+.bootstrap-tabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 12px;
+}
+
+.bootstrap-tabs [aria-selected="true"] {
+  font-weight: 600;
+}
+
+.bootstrap-panel {
+  border: 1px solid color-mix(in srgb, CanvasText 18%, Canvas);
+  padding: 8px;
+  height: 480px;
+  overflow: auto;
+}
+
+.bootstrap-status {
+  display: flex;
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 12px;
+}

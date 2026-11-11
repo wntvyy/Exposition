@@ -12,6 +12,14 @@
     "allow-document-state",
     "allow-document-apply",
     "allow-document-undo",
-    "allow-document-redo"
+    "allow-document-redo",
+    "allow-job-list",
+    "allow-job-output",
+    "allow-job-cancel",
+    "allow-toolchains-list",
+    "allow-toolchains-refresh",
+    "allow-trust-status",
+    "allow-trust-grant",
+    "allow-trust-revoke"
   ]
 }
