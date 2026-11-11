@@ -3,12 +3,14 @@ use std::sync::Arc;
 
 use exposition_execution::{ExecutionConfig, ExecutionService};
 use exposition_tex::{TexService, TexServiceConfig};
-use exposition_workspace::DocumentService;
+use exposition_workspace::{DocumentService, WorkspaceService};
 use tauri::{AppHandle, Manager};
 
 /// Application-wide services. One instance is managed by Tauri.
 pub struct AppState {
     pub documents: Arc<DocumentService>,
+    /// Open folder, files, saves, recovery, watcher, and settings.
+    pub workspace: Arc<WorkspaceService>,
     /// Supervised process execution (jobs, toolchains, trust).
     pub execution: ExecutionService,
     /// LaTeX/LuaLaTeX builds (through `execution`) and their pages.
@@ -29,13 +31,14 @@ impl AppState {
         }
         let execution = ExecutionService::with_config(execution_config)?;
         let documents = Arc::new(DocumentService::new());
+        let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
         let tex = TexService::new(
             execution.clone(),
-            documents.clone(),
+            Arc::clone(&workspace),
             tauri::async_runtime::handle().inner().clone(),
             TexServiceConfig::new(&data_dir),
         )?;
-        Ok(Self { documents, execution, tex, data_dir })
+        Ok(Self { documents, workspace, execution, tex, data_dir })
     }
 }
 

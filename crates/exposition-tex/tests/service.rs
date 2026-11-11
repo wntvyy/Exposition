@@ -13,7 +13,7 @@ use exposition_core::path::WorkspacePath;
 use exposition_core::text::utf16_len;
 use exposition_execution::{ExecutionConfig, ExecutionService, RefusalCode};
 use exposition_tex::{TexBuildMode, TexBuildSummary, TexEvent, TexService, TexServiceConfig, TexServiceError};
-use exposition_workspace::{DocumentService, OpenDocument};
+use exposition_workspace::{DocumentService, WorkspaceService};
 use tokio::sync::broadcast;
 
 struct Env {
@@ -22,6 +22,7 @@ struct Env {
     project: tempfile::TempDir,
     exec: ExecutionService,
     documents: Arc<DocumentService>,
+    workspace: Arc<WorkspaceService>,
     service: TexService,
     events: broadcast::Receiver<TexEvent>,
 }
@@ -39,13 +40,16 @@ impl Env {
         let mut config = ExecutionConfig::new(data.path());
         config.too_broad_to_trust = Some(Vec::new());
         let exec = ExecutionService::with_config(config).unwrap();
-        exec.register_workspace_root(project.path()).unwrap();
         let documents = Arc::new(DocumentService::new());
+        let workspace = WorkspaceService::new(documents.clone(), data.path().join("workspace"));
+        // As `workspace_open` does: open the folder and register it for jobs.
+        workspace.open_workspace(project.path()).unwrap();
+        exec.register_workspace_root(project.path()).unwrap();
         let mut tex_config = TexServiceConfig::new(data.path());
         tex_config.idle_full_delay = idle_full;
-        let service = TexService::new(exec.clone(), documents.clone(), runtime.handle().clone(), tex_config).unwrap();
+        let service = TexService::new(exec.clone(), workspace.clone(), runtime.handle().clone(), tex_config).unwrap();
         let events = service.subscribe();
-        Some(Self { runtime, _data: data, project, exec, documents, service, events })
+        Some(Self { runtime, _data: data, project, exec, documents, workspace, service, events })
     }
 
     fn trust(&self) {
@@ -53,7 +57,7 @@ impl Env {
     }
 
     fn request(&self, mode: TexBuildMode) {
-        self.service.request_build(self.project.path(), target(Engine::PdfLatex), mode).unwrap();
+        self.service.request_build(Some(target(Engine::PdfLatex)), mode).unwrap();
     }
 
     fn next_event(&mut self) -> TexEvent {
@@ -73,16 +77,7 @@ impl Env {
     }
 
     fn open_main(&self) -> DocumentId {
-        let text = std::fs::read_to_string(self.project.path().join("main.tex")).unwrap();
-        self.documents
-            .open(OpenDocument {
-                path: Some(WorkspacePath::parse("main.tex").unwrap()),
-                text,
-                language: "latex".into(),
-                encoding: exposition_core::document::TextEncoding::Utf8,
-                read_only: None,
-            })
-            .id
+        self.workspace.open_document(&WorkspacePath::parse("main.tex").unwrap()).unwrap().state.info.id
     }
 
     fn insert(&self, doc: &DocumentId, after: &str, text: &str) -> u64 {
@@ -127,17 +122,15 @@ fn untrusted_workspaces_are_refused_before_anything_runs() {
     let tex_dir = env._data.path().join("tex");
     let written: Vec<_> = walk(&tex_dir).into_iter().filter(|p| p.is_file()).collect();
     assert!(written.is_empty(), "{written:?}");
-    // Unopened workspaces and unsupported targets are refused at the request.
-    let elsewhere = tempfile::tempdir().unwrap();
-    assert!(matches!(
-        env.service.request_build(elsewhere.path(), target(Engine::PdfLatex), TexBuildMode::Draft),
-        Err(TexServiceError::WorkspaceNotOpen(_))
-    ));
+    // Unsupported targets are refused at the request.
     let mut typst = target(Engine::Typst);
     typst.format = DocumentFormat::Typst;
+    assert_eq!(env.service.request_build(Some(typst), TexBuildMode::Draft), Err(TexServiceError::UnsupportedTarget));
+    // Builds only ever target the open workspace.
+    env.workspace.close_workspace();
     assert_eq!(
-        env.service.request_build(env.project.path(), typst, TexBuildMode::Draft),
-        Err(TexServiceError::UnsupportedTarget)
+        env.service.request_build(Some(target(Engine::PdfLatex)), TexBuildMode::Draft),
+        Err(TexServiceError::WorkspaceNotOpen)
     );
 }
 
@@ -177,7 +170,7 @@ fn trusted_builds_run_through_the_execution_service_and_serve_pages() {
     assert!(map.stats.mapped > 600);
     assert!(matches!(env.service.page_png(id, 9, 1.0), Err(TexServiceError::NoSuchPage(9))));
     assert!(matches!(env.service.page_png(id, 0, 50.0), Err(TexServiceError::InvalidScale(_))));
-    let status = env.service.status(env.project.path(), &target(Engine::PdfLatex)).unwrap();
+    let status = env.service.status(Some(&target(Engine::PdfLatex))).unwrap();
     assert_eq!(status.last_good.as_ref().map(|s| &s.result.id), Some(id));
     assert!(!status.stale);
 }
@@ -251,7 +244,7 @@ fn last_good_output_is_kept_and_marked_stale() {
     assert_eq!(failed.result.status, BuildStatus::Failed);
     assert!(!failed.has_output);
     assert!(failed.result.diagnostics.iter().any(|d| d.message.contains("does-not-exist")));
-    let status = env.service.status(env.project.path(), &target(Engine::PdfLatex)).unwrap();
+    let status = env.service.status(Some(&target(Engine::PdfLatex))).unwrap();
     assert_eq!(status.last.as_ref().unwrap().result.id, failed.result.id);
     assert_eq!(status.last_good.as_ref().unwrap().result.id, good.result.id);
     assert!(status.stale, "the last good pages predate the current text");
@@ -265,8 +258,36 @@ fn last_good_output_is_kept_and_marked_stale() {
             break;
         }
     }
-    assert!(env.service.cancel(env.project.path(), &target(Engine::PdfLatex)));
+    assert!(env.service.cancel(Some(&target(Engine::PdfLatex))));
     let canceled = env.next_finished();
     assert_eq!(canceled.result.status, BuildStatus::Canceled);
     assert!(!canceled.superseded);
+}
+
+#[test]
+fn the_default_target_comes_from_project_settings() {
+    let Some(mut env) = Env::new(None) else { return };
+    assert_eq!(env.service.default_target(), Err(TexServiceError::NoTarget));
+    std::fs::create_dir_all(env.project.path().join(".exposition")).unwrap();
+    std::fs::write(
+        env.project.path().join(".exposition/project.json"),
+        r#"{"version":1,"entry":"main.tex","targets":[
+            {"name":"pdf","format":"latex","engine":"pdfLatex","entry":"main.tex"},
+            {"name":"lua","format":"latex","engine":"luaLatex","entry":"main.tex"}],
+           "defaultTarget":"lua"}"#,
+    )
+    .unwrap();
+    let default = env.service.default_target().unwrap();
+    assert_eq!((default.engine, default.entry.as_str()), (Engine::LuaLatex, "main.tex"));
+    env.trust();
+    let reference = env.service.request_build(None, TexBuildMode::Draft).unwrap();
+    assert_eq!(reference.engine, Engine::LuaLatex);
+    let summary = env.next_finished();
+    assert_eq!(summary.result.status, BuildStatus::Succeeded, "{:?}", summary.result.diagnostics);
+    assert!(summary.result.configuration.as_ref().unwrap().compiler.contains("LuaHBTeX"));
+    // Buffers are compiled as they would be saved; disk inputs are recorded
+    // through the workspace snapshot.
+    let sources: Vec<&str> = summary.result.sources.iter().map(|s| s.path.as_str()).collect();
+    assert!(sources.contains(&"sections/results.tex") && sources.contains(&"figures/box.png"), "{sources:?}");
+    assert!(env.service.status(None).is_some_and(|s| s.target == reference));
 }

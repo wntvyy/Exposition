@@ -374,14 +374,6 @@ impl ExecutionService {
         self.inner.roots.lock().expect("roots").register(path, RootKind::Workspace)
     }
 
-    /// The canonical path of `path` if it is a registered workspace root
-    /// (services that act on a workspace refuse paths that are not open).
-    pub fn workspace_root(&self, path: &Path) -> Option<PathBuf> {
-        let canonical = canonicalize(path).ok()?;
-        let roots = self.inner.roots.lock().expect("roots");
-        roots.workspace_roots().find(|r| crate::paths::same_path(r, &canonical)).map(Path::to_path_buf)
-    }
-
     pub fn unregister_root(&self, path: &Path) {
         self.inner.roots.lock().expect("roots").unregister(path);
     }

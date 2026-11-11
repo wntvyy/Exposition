@@ -57,7 +57,7 @@ use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobOutcome, JobSpec
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::{LineColumn, LineIndex, TextRange};
 use exposition_execution::JobRefusal;
-use exposition_workspace::DocumentSnapshot;
+use exposition_workspace::{DocumentSnapshot, WorkspaceSnapshot};
 use sha2::{Digest, Sha256};
 
 use crate::log::{LogMessageKind, parse_log, rerun_requested};
@@ -91,6 +91,53 @@ pub struct TexBuildRequest {
     /// pdfLaTeX only: run with `\pdfgentounicode=1 \input glyphtounicode` so
     /// the PDF carries ToUnicode maps for Type 1 fonts.
     pub tounicode: bool,
+    /// The workspace snapshot to build (the application path). When set, the
+    /// root is the snapshot's root, buffers are materialized exactly as they
+    /// would be saved, and the files the engine read from disk are recorded
+    /// through the snapshot's path-checked reads; `project_root` and `buffers`
+    /// are ignored.
+    pub workspace: Option<WorkspaceSnapshot>,
+}
+
+/// An open buffer materialized into the overlay.
+struct Buffer {
+    bytes: Arc<[u8]>,
+    text: Arc<str>,
+    document: DocumentId,
+    revision: u64,
+}
+
+fn collect_buffers(request: &TexBuildRequest) -> BTreeMap<WorkspacePath, Buffer> {
+    match &request.workspace {
+        Some(workspace) => workspace
+            .buffers()
+            .filter_map(|doc| {
+                let path = doc.path.clone()?;
+                let input = workspace.read(&path).ok()?;
+                let buffer = Buffer {
+                    bytes: input.bytes,
+                    text: doc.text.clone(),
+                    document: doc.id.clone(),
+                    revision: doc.revision,
+                };
+                Some((path, buffer))
+            })
+            .collect(),
+        None => request
+            .buffers
+            .iter()
+            .filter_map(|doc: &DocumentSnapshot| {
+                let path = doc.path.clone()?;
+                let buffer = Buffer {
+                    bytes: Arc::from(doc.text.as_bytes()),
+                    text: doc.text.clone(),
+                    document: doc.id.clone(),
+                    revision: doc.revision,
+                };
+                Some((path, buffer))
+            })
+            .collect(),
+    }
 }
 
 /// One file of a build snapshot.
@@ -283,7 +330,8 @@ impl<R: JobRunner> TexBuilder<R> {
                 BuildStatus::ToolUnavailable { tool: engine_tool.name().into(), guidance: guidance(engine_tool) },
             );
         };
-        let project_root = match request.project_root.canonicalize() {
+        let requested_root = request.workspace.as_ref().map(|w| w.root().to_path_buf());
+        let project_root = match requested_root.unwrap_or_else(|| request.project_root.clone()).canonicalize() {
             Ok(p) => plain_path(&p),
             Err(e) => {
                 return self.early(request, id, BuildStatus::Error { message: format!("project root: {e}") });
@@ -299,21 +347,16 @@ impl<R: JobRunner> TexBuilder<R> {
             return self.early(request, id, BuildStatus::Error { message: format!("build directory: {e}") });
         }
 
-        // Materialize buffers.
-        let mut buffers: BTreeMap<WorkspacePath, &DocumentSnapshot> = BTreeMap::new();
-        for doc in &request.buffers {
-            if let Some(path) = &doc.path {
-                buffers.insert(path.clone(), doc);
-            }
-        }
-        for (path, doc) in &buffers {
+        // Materialize buffers (bytes exactly as they would be saved).
+        let buffers = collect_buffers(request);
+        for (path, buffer) in &buffers {
             let file = path.components().fold(overlay_root.clone(), |p, c| p.join(c));
             if let Some(parent) = file.parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
             {
                 return self.early(request, id, BuildStatus::Error { message: format!("overlay: {e}") });
             }
-            if let Err(e) = std::fs::write(&file, doc.text.as_bytes()) {
+            if let Err(e) = std::fs::write(&file, &buffer.bytes) {
                 return self.early(request, id, BuildStatus::Error { message: format!("overlay: {e}") });
             }
         }
@@ -462,10 +505,11 @@ impl<R: JobRunner> TexBuilder<R> {
         }
 
         // Snapshot: recorder inputs inside the overlay or project.
-        let snapshot = self.snapshot(
+        let snapshot = Self::snapshot(
             target,
             &out_dir.join(format!("{job_name}.fls")),
             &buffers,
+            request.workspace.as_ref(),
             &overlay_root,
             &project_root,
             entry_dir.clone(),
@@ -686,23 +730,23 @@ impl<R: JobRunner> TexBuilder<R> {
     }
 
     fn snapshot(
-        &self,
         target: &BuildTarget,
         fls: &Path,
-        buffers: &BTreeMap<WorkspacePath, &DocumentSnapshot>,
+        buffers: &BTreeMap<WorkspacePath, Buffer>,
+        workspace: Option<&WorkspaceSnapshot>,
         overlay_root: &Path,
         project_root: &Path,
         entry_dir: Option<WorkspacePath>,
     ) -> BuildSnapshot {
         let mut files: BTreeMap<WorkspacePath, SnapshotFile> = BTreeMap::new();
-        for (path, doc) in buffers {
+        for (path, buffer) in buffers {
             files.insert(
                 path.clone(),
                 SnapshotFile {
-                    content_hash: hex_sha256(doc.text.as_bytes()),
-                    text: Some(doc.text.clone()),
-                    document: Some(doc.id.clone()),
-                    revision: Some(doc.revision),
+                    content_hash: hex_sha256(&buffer.bytes),
+                    text: Some(buffer.text.clone()),
+                    document: Some(buffer.document.clone()),
+                    revision: Some(buffer.revision),
                 },
             );
         }
@@ -724,11 +768,22 @@ impl<R: JobRunner> TexBuilder<R> {
             if files.contains_key(&path) {
                 continue;
             }
-            let disk = path.components().fold(project_root.to_path_buf(), |p, c| p.join(c));
-            let Ok(bytes) = std::fs::read(&disk) else { continue };
             let is_text = matches!(path.extension(), Some("tex" | "ltx" | "sty" | "cls" | "bib" | "bbx" | "cbx"));
-            let text = if is_text { String::from_utf8(bytes.clone()).ok().map(Arc::from) } else { None };
-            files.insert(path, SnapshotFile { content_hash: hex_sha256(&bytes), text, document: None, revision: None });
+            // Through the workspace's checked reads when building a workspace
+            // snapshot (no traversal or link escapes), else the project folder.
+            let (content_hash, text) = match workspace {
+                Some(workspace) => {
+                    let Ok(input) = workspace.read(&path) else { continue };
+                    (input.content_hash, input.text.filter(|_| is_text))
+                }
+                None => {
+                    let disk = path.components().fold(project_root.to_path_buf(), |p, c| p.join(c));
+                    let Ok(bytes) = std::fs::read(&disk) else { continue };
+                    let text = if is_text { String::from_utf8(bytes.clone()).ok().map(Arc::from) } else { None };
+                    (hex_sha256(&bytes), text)
+                }
+            };
+            files.insert(path, SnapshotFile { content_hash, text, document: None, revision: None });
         }
         let mut hasher = Sha256::new();
         hasher.update(format!("{:?}|{}|", target.engine, target.entry).as_bytes());
@@ -945,6 +1000,14 @@ fn short_hash(text: &str) -> String {
 /// Forward-slash form of a path (what TeX expects on every platform).
 fn slash(path: &Path) -> String {
     plain_path(path).display().to_string().replace('\\', "/")
+}
+
+/// Whether two directory paths name the same directory (after canonicalization).
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Strip the Windows verbatim prefix (`\\?\C:\...`) that TeX cannot read.

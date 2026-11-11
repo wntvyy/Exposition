@@ -177,6 +177,7 @@ fn missing_engines_report_tool_unavailable() {
         buffers: Vec::new(),
         mode: BuildMode::Full,
         tounicode: false,
+        workspace: None,
     };
     let build = builder.build(&request);
     match &build.result.status {

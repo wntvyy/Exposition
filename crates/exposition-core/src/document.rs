@@ -249,7 +249,9 @@ pub struct DocumentChanged {
     pub document: DocumentId,
     pub transaction: Option<TransactionId>,
     pub origin: EditOrigin,
-    pub kind: ChangeKind,
+    /// Edit, undo, or redo. (Named `change`, not `kind`: `DocumentEvent` is
+    /// internally tagged by `kind`, and a nested `kind` field would collide.)
+    pub change: ChangeKind,
     pub previous_revision: u64,
     pub revision: u64,
     pub patches: Vec<TextPatch>,
@@ -275,4 +277,35 @@ pub enum DocumentEvent {
     InfoChanged {
         info: DocumentInfo,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `DocumentEvent` is internally tagged by `kind`; a variant's payload must
+    /// not have its own `kind` field or the JSON object gets two `kind` keys
+    /// (and JavaScript keeps the last one).
+    #[test]
+    fn changed_events_serialize_with_one_kind_tag() {
+        let event = DocumentEvent::Changed(DocumentChanged {
+            document: DocumentId("doc-1".into()),
+            transaction: Some(TransactionId("t-1".into())),
+            origin: EditOrigin::Source,
+            change: ChangeKind::Undo,
+            previous_revision: 1,
+            revision: 2,
+            patches: vec![TextPatch::insert(0, "x")],
+            selection: None,
+            can_undo: false,
+            can_redo: true,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["kind"], "changed", "{json}");
+        assert_eq!(value["change"], "undo", "{json}");
+        assert_eq!(json.matches("\"kind\":\"changed\"").count(), 1);
+        let back: DocumentEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, event);
+    }
 }

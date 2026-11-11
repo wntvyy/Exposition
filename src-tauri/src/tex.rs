@@ -1,13 +1,12 @@
 //! LaTeX build commands and event forwarding.
 //!
-//! The webview can request builds of a LaTeX target in an open workspace,
-//! read target status, cancel, and fetch the immutable pages of a finished
-//! build (PNG bytes for blob URLs, and the glyph mapping). Builds run in Rust
-//! through the shared execution service and require a trusted workspace; a
-//! refusal arrives as a finished build carrying `refusal.code ==
-//! "untrustedWorkspace"` so the frontend can offer `requestWorkspaceTrust`.
-
-use std::path::PathBuf;
+//! The webview can request builds of a LaTeX target of the open workspace
+//! (default: the project's target from `.exposition/project.json`), read
+//! target status, cancel, and fetch the immutable pages of a finished build
+//! (PNG bytes for blob URLs, and the glyph mapping). Builds run in Rust through
+//! the shared execution service and require a trusted workspace; a refusal
+//! arrives as a finished build carrying `refusal.code == "untrustedWorkspace"`
+//! so the frontend can offer `requestWorkspaceTrust`.
 
 use exposition_core::build::{BuildId, BuildTarget};
 use exposition_tex::mapping::PageMapping;
@@ -29,7 +28,8 @@ const MAX_PAGE: u32 = 10_000;
 fn service_error(error: TexServiceError) -> CommandError {
     let code = match error {
         TexServiceError::UnsupportedTarget => "tex.unsupportedTarget",
-        TexServiceError::WorkspaceNotOpen(_) => "tex.workspaceNotOpen",
+        TexServiceError::WorkspaceNotOpen => "tex.workspaceNotOpen",
+        TexServiceError::NoTarget => "tex.noTarget",
         TexServiceError::UnknownBuild => "tex.unknownBuild",
         TexServiceError::NoOutput => "tex.noOutput",
         TexServiceError::NoSuchPage(_) => "tex.noSuchPage",
@@ -37,13 +37,6 @@ fn service_error(error: TexServiceError) -> CommandError {
         TexServiceError::Io(_) => "tex.io",
     };
     CommandError::new(code, error.to_string())
-}
-
-fn validate_root(root: &str) -> Result<PathBuf, CommandError> {
-    if root.is_empty() || root.len() > 4096 || root.contains('\0') {
-        return Err(CommandError::new("tex.invalidRoot", "invalid workspace root"));
-    }
-    Ok(PathBuf::from(root))
 }
 
 /// Build ids are `tex-<n>-<n>`; anything else is rejected before lookup.
@@ -58,35 +51,38 @@ fn validate_page(page: u32) -> Result<(), CommandError> {
     if page < MAX_PAGE { Ok(()) } else { Err(CommandError::new("tex.noSuchPage", "page index out of range")) }
 }
 
-/// Queue a build of `target` in the open workspace `root`. Requests coalesce;
-/// a newer request cancels a running build of the same target.
+/// Queue a build of `target` (default: the project's LaTeX target) in the
+/// open workspace. Requests coalesce; a newer request cancels a running build
+/// of the same target.
 #[tauri::command]
 pub async fn tex_build(
     state: State<'_, AppState>,
-    root: String,
-    target: BuildTarget,
+    target: Option<BuildTarget>,
     mode: TexBuildMode,
 ) -> Result<TexTargetRef, CommandError> {
-    let root = validate_root(&root)?;
-    state.tex.request_build(&root, target, mode).map_err(service_error)
+    let tex = state.tex.clone();
+    tauri::async_runtime::spawn_blocking(move || tex.request_build(target, mode))
+        .await
+        .map_err(|e| CommandError::new("tex.io", e.to_string()))?
+        .map_err(service_error)
 }
 
 /// Current state of a target (`null` before its first build request).
 #[tauri::command]
 pub async fn tex_status(
     state: State<'_, AppState>,
-    root: String,
-    target: BuildTarget,
+    target: Option<BuildTarget>,
 ) -> Result<Option<TexTargetStatus>, CommandError> {
-    let root = validate_root(&root)?;
-    Ok(state.tex.status(&root, &target))
+    let tex = state.tex.clone();
+    tauri::async_runtime::spawn_blocking(move || tex.status(target.as_ref()))
+        .await
+        .map_err(|e| CommandError::new("tex.io", e.to_string()))
 }
 
 /// Cancel the running build and drop the pending request; `false` when idle.
 #[tauri::command]
-pub async fn tex_cancel(state: State<'_, AppState>, root: String, target: BuildTarget) -> Result<bool, CommandError> {
-    let root = validate_root(&root)?;
-    Ok(state.tex.cancel(&root, &target))
+pub async fn tex_cancel(state: State<'_, AppState>, target: Option<BuildTarget>) -> Result<bool, CommandError> {
+    Ok(state.tex.cancel(target.as_ref()))
 }
 
 /// PNG bytes of a page of a finished build (`scale` pixels per point).
@@ -149,6 +145,6 @@ mod tests {
             assert!(validate_build_id(&BuildId(bad.into())).is_err(), "{bad}");
         }
         assert!(validate_page(MAX_PAGE).is_err());
-        assert!(validate_root("").is_err() && validate_root("a\0b").is_err());
+        assert!(validate_page(0).is_ok());
     }
 }

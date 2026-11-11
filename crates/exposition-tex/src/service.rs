@@ -7,6 +7,11 @@
 //!   `untrustedWorkspace` refusal, before anything is written or run — and the
 //!   service itself refuses any native job there as a second line. There is
 //!   no fallback to another runner.
+//! * **Workspace.** Builds always target the currently open workspace of the
+//!   [`WorkspaceService`]; each build compiles one atomic
+//!   [`exposition_workspace::WorkspaceSnapshot`] (open buffers as they would
+//!   be saved, disk files through its path checks). Without an explicit target
+//!   the default LaTeX target of `.exposition/project.json` is used.
 //! * **Build roots.** Per workspace under `<data_dir>/tex/<hash>`, registered
 //!   with the execution service as an application-owned directory owned by
 //!   that workspace (so its jobs follow the workspace's trust).
@@ -23,7 +28,7 @@
 //!   served from the build's frozen output through [`TexPageSession`].
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -31,7 +36,7 @@ use exposition_core::build::{BuildId, BuildResult, BuildStatus, BuildTarget, Doc
 use exposition_core::path::WorkspacePath;
 use exposition_execution::toolchains::Located;
 use exposition_execution::{ExecutionService, JobRefusal, RefusalCode};
-use exposition_workspace::DocumentService;
+use exposition_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use ts_rs::TS;
@@ -130,8 +135,12 @@ pub struct TexTargetStatus {
 pub enum TexServiceError {
     #[error("only LaTeX targets built with pdfLaTeX or LuaLaTeX are supported")]
     UnsupportedTarget,
-    #[error("{0} is not an open workspace")]
-    WorkspaceNotOpen(String),
+    #[error("no workspace is open")]
+    WorkspaceNotOpen,
+    #[error(
+        "no LaTeX target: add one to .exposition/project.json (targets/defaultTarget) or set a .tex entry document"
+    )]
+    NoTarget,
     #[error("no such build (it may have been evicted)")]
     UnknownBuild,
     #[error("the build has no pages")]
@@ -167,7 +176,7 @@ pub struct TexService {
 
 struct Inner {
     exec: ExecutionService,
-    documents: Arc<DocumentService>,
+    workspace: Arc<WorkspaceService>,
     runtime: tokio::runtime::Handle,
     root: PathBuf,
     idle_full_delay: Option<Duration>,
@@ -223,7 +232,7 @@ struct BuildStore {
 impl TexService {
     pub fn new(
         exec: ExecutionService,
-        documents: Arc<DocumentService>,
+        workspace: Arc<WorkspaceService>,
         runtime: tokio::runtime::Handle,
         config: TexServiceConfig,
     ) -> std::io::Result<Self> {
@@ -233,7 +242,7 @@ impl TexService {
         Ok(Self {
             inner: Arc::new(Inner {
                 exec,
-                documents,
+                workspace,
                 runtime,
                 root,
                 idle_full_delay: config.idle_full_delay,
@@ -250,15 +259,19 @@ impl TexService {
         self.inner.events.subscribe()
     }
 
-    /// Queue a build of `target` in the open workspace `root`. Coalesces with
-    /// a pending request and cancels a running (superseded) build.
+    /// Queue a build of `target` (default: the project's LaTeX target) in the
+    /// open workspace. Coalesces with a pending request and cancels a running
+    /// (superseded) build.
     pub fn request_build(
         &self,
-        root: &Path,
-        target: BuildTarget,
+        target: Option<BuildTarget>,
         mode: TexBuildMode,
     ) -> Result<TexTargetRef, TexServiceError> {
-        let target = self.target(root, target)?;
+        let target = match target {
+            Some(target) => target,
+            None => self.default_target()?,
+        };
+        let target = self.target(target)?;
         {
             let mut control = target.control.lock().unwrap_or_else(|p| p.into_inner());
             control.pending = Some(match control.pending {
@@ -276,9 +289,32 @@ impl TexService {
         Ok(target.reference.clone())
     }
 
+    /// The project's default LaTeX target: `defaultTarget` (or the first LaTeX
+    /// target) of `.exposition/project.json`, else its `.tex` entry document
+    /// built with pdfLaTeX.
+    pub fn default_target(&self) -> Result<BuildTarget, TexServiceError> {
+        let settings = self.inner.workspace.project_settings().map_err(|_| TexServiceError::WorkspaceNotOpen)?.settings;
+        let latex = |t: &&exposition_workspace::settings::ProjectTarget| {
+            t.format == DocumentFormat::Latex && TexTool::for_engine(t.engine).is_some()
+        };
+        let named = settings
+            .default_target
+            .as_ref()
+            .and_then(|name| settings.targets.iter().filter(latex).find(|t| &t.name == name));
+        if let Some(t) = named.or_else(|| settings.targets.iter().find(latex)) {
+            return Ok(BuildTarget { format: t.format, engine: t.engine, entry: t.entry.clone() });
+        }
+        match settings.entry {
+            Some(entry) if entry.extension() == Some("tex") => {
+                Ok(BuildTarget { format: DocumentFormat::Latex, engine: Engine::PdfLatex, entry })
+            }
+            _ => Err(TexServiceError::NoTarget),
+        }
+    }
+
     /// Cancel the running build and drop the pending request of a target.
-    pub fn cancel(&self, root: &Path, target: &BuildTarget) -> bool {
-        let Some(reference) = self.reference(root, target) else { return false };
+    pub fn cancel(&self, target: Option<&BuildTarget>) -> bool {
+        let Some(reference) = self.reference(target) else { return false };
         let Some(target) = self.inner.targets.lock().unwrap_or_else(|p| p.into_inner()).get(&reference).cloned() else {
             return false;
         };
@@ -291,8 +327,9 @@ impl TexService {
         had
     }
 
-    pub fn status(&self, root: &Path, target: &BuildTarget) -> Option<TexTargetStatus> {
-        let reference = self.reference(root, target)?;
+    /// Status of a target of the open workspace (default target when `None`).
+    pub fn status(&self, target: Option<&BuildTarget>) -> Option<TexTargetStatus> {
+        let reference = self.reference(target)?;
         let target = self.inner.targets.lock().unwrap_or_else(|p| p.into_inner()).get(&reference).cloned()?;
         let control = target.control.lock().unwrap_or_else(|p| p.into_inner());
         let changed = control.last_good.as_ref().is_some_and(|b| self.sources_changed(&b.summary.result));
@@ -358,20 +395,26 @@ impl TexService {
         }
     }
 
-    fn reference(&self, root: &Path, target: &BuildTarget) -> Option<TexTargetRef> {
-        let root = self.inner.exec.workspace_root(root)?;
-        Some(TexTargetRef { root: root.display().to_string(), entry: target.entry.clone(), engine: target.engine })
+    /// Canonical root of the open workspace.
+    fn open_root(&self) -> Result<PathBuf, TexServiceError> {
+        let snapshot = self.inner.workspace.snapshot().map_err(|_| TexServiceError::WorkspaceNotOpen)?;
+        Ok(snapshot.root().to_path_buf())
     }
 
-    fn target(&self, root: &Path, target: BuildTarget) -> Result<Arc<Target>, TexServiceError> {
+    fn reference(&self, target: Option<&BuildTarget>) -> Option<TexTargetRef> {
+        let target = match target {
+            Some(target) => target.clone(),
+            None => self.default_target().ok()?,
+        };
+        let root = self.open_root().ok()?;
+        Some(TexTargetRef { root: root.display().to_string(), entry: target.entry, engine: target.engine })
+    }
+
+    fn target(&self, target: BuildTarget) -> Result<Arc<Target>, TexServiceError> {
         if target.format != DocumentFormat::Latex || TexTool::for_engine(target.engine).is_none() {
             return Err(TexServiceError::UnsupportedTarget);
         }
-        let canonical = self
-            .inner
-            .exec
-            .workspace_root(root)
-            .ok_or_else(|| TexServiceError::WorkspaceNotOpen(root.display().to_string()))?;
+        let canonical = self.open_root()?;
         let reference =
             TexTargetRef { root: canonical.display().to_string(), entry: target.entry.clone(), engine: target.engine };
         let mut targets = self.inner.targets.lock().unwrap_or_else(|p| p.into_inner());
@@ -408,13 +451,14 @@ impl TexService {
     /// An open document the build compiled changed (or was closed) since, or
     /// a file the build read from disk is now open with edits.
     fn sources_changed(&self, result: &BuildResult) -> bool {
+        let documents = self.inner.workspace.documents();
         let buffer_changed = result.sources.iter().any(|source| match (&source.document, source.revision) {
             (Some(document), Some(revision)) => {
-                self.inner.documents.info(document).map(|info| info.revision != revision).unwrap_or(true)
+                documents.info(document).map(|info| info.revision != revision).unwrap_or(true)
             }
             _ => false,
         });
-        let opened_with_edits = self.inner.documents.list().iter().any(|doc| {
+        let opened_with_edits = documents.list().iter().any(|doc| {
             doc.path.as_ref().is_some_and(|p| {
                 doc.revision > 1 && result.sources.iter().any(|s| &s.path == p && s.document.as_ref() != Some(&doc.id))
             })
@@ -530,6 +574,7 @@ impl Inner {
             buffers: Vec::new(),
             mode: mode.into(),
             tounicode: false,
+            workspace: None,
         };
         // Builds execute project content: refuse untrusted workspaces before
         // writing or running anything (the execution service refuses too).
@@ -546,10 +591,25 @@ impl Inner {
             };
             return refused_build(&request, id, refusal);
         }
+        // The snapshot: open buffers captured atomically, disk through checks.
+        let snapshot = match self.workspace.snapshot() {
+            Ok(snapshot) if crate::compile::same_dir(snapshot.root(), &target.root) => snapshot,
+            _ => {
+                let mut build = refused_build(
+                    &request,
+                    id,
+                    JobRefusal {
+                        code: RefusalCode::OutsideAllowedRoots,
+                        message: "the workspace this target belongs to is no longer open".into(),
+                        workspace_root: Some(target.root.display().to_string()),
+                    },
+                );
+                build.refusal = None;
+                return build;
+            }
+        };
         target.builder.set_toolchain(self.toolchain());
-        // The snapshot: every open document with a workspace path, as of now.
-        let buffers = self.documents.snapshots().into_iter().filter(|d| d.path.is_some()).collect();
-        target.builder.build_with_id(id, &TexBuildRequest { buffers, ..request })
+        target.builder.build_with_id(id, &TexBuildRequest { workspace: Some(snapshot), ..request })
     }
 
     fn toolchain(&self) -> Option<TexToolchain> {
