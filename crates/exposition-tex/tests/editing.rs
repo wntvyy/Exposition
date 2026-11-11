@@ -302,3 +302,80 @@ fn last_good_output_survives_a_failed_rebuild() {
         assert!(session.map_page(0).unwrap().stats.mapped > 600);
     }
 }
+
+/// A page computed from an older build cannot apply its offsets blindly:
+/// disjoint concurrent edits are rebased, overlapping ones rejected.
+#[test]
+fn stale_page_edits_are_rebased_or_rejected() {
+    use exposition_core::document::TransactionError;
+    let Some((ed, build, mapping, _)) = Editor::new(Engine::PdfLatex) else { return };
+    let base = build.result.sources.iter().find(|s| s.path.as_str() == "main.tex").unwrap().revision.unwrap();
+    let word = find_word(&mapping, "baseline");
+    let e = &mapping.glyphs[word[3] as usize];
+    let caret = mapping.hit_test(e.origin_x + 0.8 * e.advance, e.bbox.center().1, 1.0).unwrap();
+    let request = |id: &str, origin: EditOrigin, base_revision: u64, patch: TextPatch, conflict: ConflictPolicy| {
+        TransactionRequest {
+            id: TransactionId(id.into()),
+            origin,
+            edits: vec![DocumentEdit { document: ed.main.clone(), base_revision, patches: vec![patch] }],
+            undo: UndoBehavior::NewGroup,
+            conflict,
+            label: None,
+            selection: None,
+        }
+    };
+    // The source editor changes the document after the page was built.
+    let header = "% edited in the source editor\n";
+    ed.h.documents
+        .apply(request("src", EditOrigin::Source, base, TextPatch::insert(0, header), ConflictPolicy::Reject))
+        .unwrap();
+    // Strict policy: the stale page edit is refused.
+    let stale = ed.h.documents.apply(request(
+        "page-strict",
+        EditOrigin::Page,
+        base,
+        TextPatch::insert(caret.offset, "QZ"),
+        ConflictPolicy::Reject,
+    ));
+    assert!(matches!(stale, Err(TransactionError::StaleRevision { .. })));
+    // Rebase policy: disjoint, so it lands at the shifted position.
+    let outcome =
+        ed.h.documents
+            .apply(request(
+                "page",
+                EditOrigin::Page,
+                base,
+                TextPatch::insert(caret.offset, "QZ"),
+                ConflictPolicy::RebaseDisjoint,
+            ))
+            .unwrap();
+    assert!(outcome.applied[0].rebased);
+    let text = ed.h.text(&ed.main);
+    assert!(text.starts_with(header) && text.contains("baseQZline"));
+    // A source edit replacing the word, then a page edit inside it from the
+    // older page: overlapping, so rejected.
+    let now = ed.h.documents.info(&ed.main).unwrap().revision;
+    let start = exposition_core::text::utf16_len(&text[..text.find("baseQZline").unwrap()]) as u32;
+    ed.h.documents
+        .apply(request(
+            "src2",
+            EditOrigin::Source,
+            now,
+            TextPatch::replace(start, start + 10, "foundation"),
+            ConflictPolicy::Reject,
+        ))
+        .unwrap();
+    let overlapping = ed.h.documents.apply(request(
+        "page2",
+        EditOrigin::Page,
+        now,
+        TextPatch::insert(start + 4, "X"),
+        ConflictPolicy::RebaseDisjoint,
+    ));
+    assert!(matches!(overlapping, Err(TransactionError::Conflict { .. })), "{overlapping:?}");
+    // The rebuilt page shows the accepted state.
+    let rebuilt = ed.h.builder.build(&ed.h.request(BuildMode::Draft));
+    let map = TexPageSession::open(&rebuilt).unwrap().map_page(0).unwrap();
+    let found = find_word(&map, "foundation");
+    assert!(found.iter().all(|&g| map.targets[g as usize].is_mapped()));
+}

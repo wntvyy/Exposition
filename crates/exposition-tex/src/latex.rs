@@ -1059,6 +1059,131 @@ impl Parser<'_> {
     }
 }
 
+/// Math macros used when typed Unicode must become portable source
+/// (pdfLaTeX cannot take `α` in math without extra packages).
+const TYPED_MATH_MACROS: &[&str] = &[
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+    "epsilon",
+    "varepsilon",
+    "zeta",
+    "eta",
+    "theta",
+    "vartheta",
+    "iota",
+    "kappa",
+    "lambda",
+    "mu",
+    "nu",
+    "xi",
+    "pi",
+    "rho",
+    "sigma",
+    "tau",
+    "upsilon",
+    "phi",
+    "varphi",
+    "chi",
+    "psi",
+    "omega",
+    "Gamma",
+    "Delta",
+    "Theta",
+    "Lambda",
+    "Xi",
+    "Pi",
+    "Sigma",
+    "Upsilon",
+    "Phi",
+    "Psi",
+    "Omega",
+    "leq",
+    "geq",
+    "neq",
+    "pm",
+    "mp",
+    "times",
+    "div",
+    "cdot",
+    "infty",
+    "partial",
+    "nabla",
+    "sum",
+    "prod",
+    "int",
+    "in",
+    "notin",
+    "subset",
+    "subseteq",
+    "supset",
+    "supseteq",
+    "cup",
+    "cap",
+    "to",
+    "leftarrow",
+    "Rightarrow",
+    "Leftrightarrow",
+    "mapsto",
+    "forall",
+    "exists",
+    "neg",
+    "wedge",
+    "vee",
+    "approx",
+    "equiv",
+    "sim",
+    "simeq",
+    "propto",
+    "perp",
+    "circ",
+    "ell",
+    "emptyset",
+    "langle",
+    "rangle",
+    "ll",
+    "gg",
+];
+
+/// Escape text typed on the page for insertion into LaTeX source at a
+/// position of the given mode, so it typesets as the typed characters.
+///
+/// Text mode escapes TeX specials (`\ { } $ & % # _ ~ ^`). Math mode keeps
+/// letters, digits, and ASCII operators, escapes specials, and turns typed
+/// Greek letters and operators into macros (`α` → `\alpha `). Other Unicode
+/// is passed through: LuaLaTeX accepts it; pdfLaTeX accepts what the
+/// document's input encoding supports.
+pub fn escape_insertion(text: &str, mode: Mode) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match (mode, c) {
+            (Mode::Text, '\\') => out.push_str("\\textbackslash{}"),
+            (Mode::Text, '~') => out.push_str("\\textasciitilde{}"),
+            (Mode::Text, '^') => out.push_str("\\textasciicircum{}"),
+            (_, '{' | '}' | '$' | '&' | '%' | '#') | (Mode::Text, '_') => {
+                out.push('\\');
+                out.push(c);
+            }
+            (Mode::Math, '\\') => out.push_str("\\backslash "),
+            (Mode::Math, '~') => out.push_str("\\sim "),
+            (Mode::Math, c) if !c.is_ascii() => {
+                let typed = c.to_string();
+                match TYPED_MATH_MACROS.iter().find(|name| math_symbol(name) == Some(typed.as_str())) {
+                    Some(name) => {
+                        out.push('\\');
+                        out.push_str(name);
+                        out.push(' ');
+                    }
+                    None => out.push(c),
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn accent_base(body: &str) -> Option<String> {
     match body {
         "\\i" => Some("ı".into()),
@@ -1130,6 +1255,24 @@ mod tests {
         let note: Vec<_> = model.units.iter().filter(|u| u.construct == Construct::Footnote).collect();
         assert_eq!(note.iter().map(|u| u.text.as_str()).collect::<String>(), "Note.");
         assert_eq!(note[0].line, 5);
+    }
+
+    #[test]
+    fn typed_text_is_escaped_for_its_mode() {
+        assert_eq!(
+            escape_insertion("50% of {x} & $y_1$ ~ ^", Mode::Text),
+            r"50\% of \{x\} \& \$y\_1\$ \textasciitilde{} \textasciicircum{}"
+        );
+        assert_eq!(escape_insertion("a\\b", Mode::Text), r"a\textbackslash{}b");
+        assert_eq!(escape_insertion("x_1^2 + α ≤ β", Mode::Math), r"x_1^2 + \alpha  \leq  \beta ");
+        assert_eq!(escape_insertion("ε", Mode::Math), r"\varepsilon ");
+        // What is inserted typesets as what was typed.
+        for (typed, mode) in [("50% {x} & #", Mode::Text), ("α+β≤γ", Mode::Math)] {
+            let escaped = escape_insertion(typed, mode);
+            let src = if mode == Mode::Math { format!("${escaped}$") } else { escaped };
+            let seen: String = parse(&src).units.iter().map(|u| u.text.as_str()).collect();
+            assert_eq!(seen, typed.replace(' ', ""));
+        }
     }
 
     #[test]

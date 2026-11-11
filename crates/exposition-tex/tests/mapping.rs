@@ -177,6 +177,13 @@ fn hit_testing_and_caret_positions_round_trip() {
         assert!(checked > 600, "{checked}");
         // Points in the margin hit nothing.
         assert!(p.hit_test(5.0, 5.0, 2.0).is_none());
+        assert!(p.glyph_at(5.0, 5.0).is_none());
+        // A click on generated text (the section number) identifies it as such.
+        let number = find_word(&p, "1Introduction")[0];
+        let (x, y) = p.glyphs[number as usize].bbox.center();
+        let at = p.glyph_at(x, y).unwrap();
+        assert_eq!(at, number);
+        assert_eq!(p.targets[at as usize], GlyphTarget::Unmapped { reason: UnmappedReason::Generated });
     }
 }
 

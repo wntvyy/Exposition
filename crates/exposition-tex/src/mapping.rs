@@ -282,6 +282,16 @@ impl PageMapping {
             .collect()
     }
 
+    /// The glyph drawn at a page point (ink first, then layout box), mapped
+    /// or not — lets a page view show generated/unsupported regions (and
+    /// their reason) instead of placing a caret in them.
+    pub fn glyph_at(&self, x: f64, y: f64) -> Option<u32> {
+        let ink = self.glyphs.iter().position(|g| {
+            g.ink.is_some_and(|r| PageRect::new(r.x0 - 0.5, r.y0 - 0.5, r.x1 + 0.5, r.y1 + 0.5).contains(x, y))
+        });
+        ink.or_else(|| self.glyphs.iter().position(|g| g.bbox.contains(x, y))).map(|i| i as u32)
+    }
+
     /// Visible text of the page in drawing order (debugging/tests).
     pub fn text(&self) -> String {
         self.glyphs.iter().map(|g| g.text.as_deref().unwrap_or("\u{FFFD}")).collect()
