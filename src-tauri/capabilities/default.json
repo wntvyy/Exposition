@@ -20,6 +20,11 @@
     "allow-toolchains-refresh",
     "allow-trust-status",
     "allow-trust-grant",
-    "allow-trust-revoke"
+    "allow-trust-revoke",
+    "allow-tex-build",
+    "allow-tex-status",
+    "allow-tex-cancel",
+    "allow-tex-page-image",
+    "allow-tex-page-map"
   ]
 }

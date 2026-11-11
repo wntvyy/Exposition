@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use exposition_execution::{ExecutionConfig, ExecutionService};
+use exposition_tex::{TexService, TexServiceConfig};
 use exposition_workspace::DocumentService;
 use tauri::{AppHandle, Manager};
 
@@ -10,6 +11,8 @@ pub struct AppState {
     pub documents: Arc<DocumentService>,
     /// Supervised process execution (jobs, toolchains, trust).
     pub execution: ExecutionService,
+    /// LaTeX/LuaLaTeX builds (through `execution`) and their pages.
+    pub tex: TexService,
     /// Application data directory (settings, recovery, session metadata).
     pub data_dir: PathBuf,
 }
@@ -25,7 +28,14 @@ impl AppState {
             execution_config.tool_cache_dir = Some(PathBuf::from(dir));
         }
         let execution = ExecutionService::with_config(execution_config)?;
-        Ok(Self { documents: Arc::new(DocumentService::new()), execution, data_dir })
+        let documents = Arc::new(DocumentService::new());
+        let tex = TexService::new(
+            execution.clone(),
+            documents.clone(),
+            tauri::async_runtime::handle().inner().clone(),
+            TexServiceConfig::new(&data_dir),
+        )?;
+        Ok(Self { documents, execution, tex, data_dir })
     }
 }
 

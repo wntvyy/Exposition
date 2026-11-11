@@ -17,6 +17,11 @@ const COMMANDS: &[&str] = &[
     "trust_status",
     "trust_grant",
     "trust_revoke",
+    "tex_build",
+    "tex_status",
+    "tex_cancel",
+    "tex_page_image",
+    "tex_page_map",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,
