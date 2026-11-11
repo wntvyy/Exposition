@@ -7,9 +7,11 @@
 //! symlinks or junctions). Text is decoded strictly: undecodable or binary
 //! files are refused, never lossily replaced.
 //!
-//! The workspace service (file tree, safe saves, external-change detection) is
-//! owned elsewhere; when it exposes "open this path as a document", the agent
-//! should call it instead of [`open_document`].
+//! When the application's [`WorkspaceService`] is present, documents are
+//! opened and closed through it (disk bookkeeping, recovery journals, open
+//! editors) and a task may only act while its folder is the open workspace:
+//! the document service keys documents by workspace-relative path, so acting
+//! on any other folder could touch the wrong project's buffers.
 
 use std::fs;
 use std::io::Write;
@@ -17,7 +19,7 @@ use std::path::{Component, Path, PathBuf};
 
 use exposition_core::document::{DocumentId, DocumentInfo, TextEncoding};
 use exposition_core::path::WorkspacePath;
-use exposition_workspace::{DocumentService, OpenDocument};
+use exposition_workspace::{DocumentService, OpenDocument, WorkspaceService};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -46,6 +48,8 @@ pub enum FileError {
     InvalidRoot(String),
     #[error("file system error for {path}: {message}")]
     Io { path: String, message: String },
+    #[error("{0}")]
+    Workspace(String),
 }
 
 fn io_err(path: &str, error: std::io::Error) -> FileError {
@@ -358,6 +362,58 @@ pub fn language_for(path: &WorkspacePath) -> &'static str {
         Some("yaml" | "yml") => "yaml",
         Some("csv") => "csv",
         _ => "plaintext",
+    }
+}
+
+/// Ok when the task's folder is the open workspace (or no workspace service is
+/// in use); otherwise a message explaining why the agent cannot act.
+pub fn check_root(workspace: Option<&WorkspaceService>, root: &Path) -> Result<(), String> {
+    let Some(workspace) = workspace else { return Ok(()) };
+    let Some(current) = workspace.current() else {
+        return Err(format!(
+            "No project folder is open. Open {} in Exposition to let the agent work on it.",
+            display_path(root)
+        ));
+    };
+    let open = fs::canonicalize(&current.root).unwrap_or_else(|_| PathBuf::from(&current.root));
+    let task = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if open == task {
+        Ok(())
+    } else {
+        Err(format!(
+            "The open project folder is {}, not this task's folder {}. Open the task's folder to continue.",
+            current.root,
+            display_path(root)
+        ))
+    }
+}
+
+/// Open `path` as a document: through the workspace service when present,
+/// otherwise directly from disk.
+pub fn open_document_in(
+    workspace: Option<&WorkspaceService>,
+    documents: &DocumentService,
+    files: &dyn ProjectFiles,
+    path: &WorkspacePath,
+) -> Result<DocumentId, FileError> {
+    match workspace {
+        Some(workspace) => workspace.open_document(path).map(|opened| opened.state.info.id).map_err(|e| match e.code {
+            "path.notFound" => FileError::NotFound(path.to_string()),
+            _ => FileError::Workspace(e.message),
+        }),
+        None => open_document(documents, files, path).map(|(id, _)| id),
+    }
+}
+
+/// Close a document (through the workspace service when present).
+pub fn close_document_in(
+    workspace: Option<&WorkspaceService>,
+    documents: &DocumentService,
+    id: &DocumentId,
+) -> Result<(), String> {
+    match workspace {
+        Some(workspace) => workspace.close_document(id).map_err(|e| e.message),
+        None => documents.close(id).map_err(|e| e.to_string()),
     }
 }
 

@@ -40,6 +40,7 @@ fn harness(docker_image: Option<String>) -> Harness {
     let service = AgentService::new(AgentConfig {
         database: None,
         documents: Arc::new(DocumentService::new()),
+        workspace: None,
         credentials: Arc::new(MemoryStore::default()),
         services: Arc::new(ExecutionToolServices::new(execution.clone())),
         runtime: tokio::runtime::Handle::current(),

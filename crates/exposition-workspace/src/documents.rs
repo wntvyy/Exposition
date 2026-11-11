@@ -263,7 +263,7 @@ impl DocumentService {
                 document: doc.id.clone(),
                 transaction: Some(request.id.clone()),
                 origin: request.origin.clone(),
-                kind: ChangeKind::Edit,
+                change: ChangeKind::Edit,
                 previous_revision,
                 revision: doc.revision,
                 patches: plan.patches.clone(),
@@ -337,7 +337,7 @@ impl DocumentService {
             document: doc.id.clone(),
             transaction: None,
             origin,
-            kind,
+            change: kind,
             previous_revision,
             revision: doc.revision,
             patches,
@@ -796,7 +796,7 @@ mod tests {
         assert_eq!(text(&service, &id), "let x = 2");
 
         let undone = service.undo(&id, EditOrigin::Source).unwrap();
-        assert_eq!(undone.kind, ChangeKind::Undo);
+        assert_eq!(undone.change, ChangeKind::Undo);
         assert_eq!(text(&service, &id), "x = 2");
         let undone = service.undo(&id, EditOrigin::Page).unwrap();
         assert_eq!(undone.selection, Some(vec![TextRange::empty(5)]));

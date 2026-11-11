@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-document-keep-buffer"
+description = "Enables the document_keep_buffer command without any pre-configured scope."
+commands.allow = ["document_keep_buffer"]
+
+[[permission]]
+identifier = "deny-document-keep-buffer"
+description = "Denies the document_keep_buffer command without any pre-configured scope."
+commands.deny = ["document_keep_buffer"]

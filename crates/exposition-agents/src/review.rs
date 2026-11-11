@@ -20,9 +20,9 @@ use exposition_core::document::{
     TransactionRequest, UndoBehavior,
 };
 use exposition_core::path::WorkspacePath;
-use exposition_workspace::DocumentService;
+use exposition_workspace::{DocumentService, WorkspaceService};
 
-use crate::model::{FileChangeKind, FileDiff, FileReview, ReviewActionResult, ReviewState, TaskId};
+use crate::model::{FileDiff, FileReview, ReviewActionResult, ReviewChangeKind, ReviewState, TaskId};
 use crate::patch;
 use crate::store::{ChangeRow, Store, StoreResult, TaskFileRow, now_ms};
 use crate::workspace::{self, FileError, ProjectFiles};
@@ -48,7 +48,7 @@ pub fn record_edit(store: &Store, task: &TaskId, rec: &EditRecord<'_>) -> StoreR
             let before = rec.before.unwrap_or_default().to_owned();
             TaskFileRow {
                 path: rec.path.clone(),
-                kind: FileChangeKind::Edited,
+                kind: ReviewChangeKind::Edited,
                 document: Some(rec.document.0.clone()),
                 checkpoint_text: before.clone(),
                 baseline_text: before.clone(),
@@ -120,7 +120,7 @@ pub fn record_create(
 ) -> StoreResult<()> {
     let row = TaskFileRow {
         path: path.clone(),
-        kind: FileChangeKind::Created,
+        kind: ReviewChangeKind::Created,
         document: document.map(|(id, _)| id.0.clone()),
         checkpoint_text: String::new(),
         baseline_text: String::new(),
@@ -211,6 +211,7 @@ pub fn revert_file(
     store: &Store,
     task: &TaskId,
     documents: &DocumentService,
+    workspace: Option<&WorkspaceService>,
     files: &dyn ProjectFiles,
     row: TaskFileRow,
 ) -> StoreResult<ReviewActionResult> {
@@ -220,8 +221,8 @@ pub fn revert_file(
             separated automatically. Compare the versions and fix the text by hand, or keep the changes."
             .to_owned()),
         _ => match row.kind {
-            FileChangeKind::Created => revert_created(store, task, documents, files, &row),
-            FileChangeKind::Edited => revert_edited(store, task, documents, files, &row),
+            ReviewChangeKind::Created => revert_created(store, task, documents, workspace, files, &row),
+            ReviewChangeKind::Edited => revert_edited(store, task, documents, workspace, files, &row),
         },
     };
     let mut row = row;
@@ -262,6 +263,7 @@ fn revert_edited(
     store: &Store,
     task: &TaskId,
     documents: &DocumentService,
+    workspace: Option<&WorkspaceService>,
     files: &dyn ProjectFiles,
     row: &TaskFileRow,
 ) -> Result<String, String> {
@@ -292,7 +294,7 @@ fn revert_edited(
 
     // Otherwise rebase against the current text ourselves (the document was
     // reopened, or its history no longer reaches the tip).
-    let (id, _) = workspace::open_document(documents, files, &row.path).map_err(|e| match e {
+    let id = workspace::open_document_in(workspace, documents, files, &row.path).map_err(|e| match e {
         FileError::NotFound(_) => "The file no longer exists, so there is nothing to revert.".to_owned(),
         other => format!("The file could not be opened: {other}"),
     })?;
@@ -353,6 +355,7 @@ fn revert_created(
     store: &Store,
     task: &TaskId,
     documents: &DocumentService,
+    workspace: Option<&WorkspaceService>,
     files: &dyn ProjectFiles,
     row: &TaskFileRow,
 ) -> Result<String, String> {
@@ -369,14 +372,14 @@ fn revert_created(
         Ok(_) => return Err(CHANGED.into()),
         Err(FileError::NotFound(_)) => {
             if let Some(id) = documents.find_by_path(&row.path) {
-                let _ = documents.close(&id);
+                let _ = workspace::close_document_in(workspace, documents, &id);
             }
             return Ok("The file was already removed.".into());
         }
         Err(e) => return Err(format!("The file could not be checked: {e}")),
     }
     if let Some(id) = documents.find_by_path(&row.path) {
-        documents.close(&id).map_err(|e| e.to_string())?;
+        workspace::close_document_in(workspace, documents, &id)?;
     }
     files.remove_file(&row.path).map_err(|e| format!("The file could not be deleted: {e}"))?;
     store.insert_change(task, &marker(row, "delete")).map_err(|e| e.to_string())?;

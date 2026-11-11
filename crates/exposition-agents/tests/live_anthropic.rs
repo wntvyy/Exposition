@@ -32,6 +32,7 @@ async fn live_anthropic_task_fixes_a_typo_through_a_transaction() {
     let service = AgentService::new(AgentConfig {
         database: Some(data.path().join("agents.sqlite3")),
         documents: Arc::clone(&documents),
+        workspace: None,
         credentials,
         services: Arc::new(UnavailableServices),
         runtime: tokio::runtime::Handle::current(),

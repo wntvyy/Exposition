@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-document-normalize-line-endings"
+description = "Enables the document_normalize_line_endings command without any pre-configured scope."
+commands.allow = ["document_normalize_line_endings"]
+
+[[permission]]
+identifier = "deny-document-normalize-line-endings"
+description = "Denies the document_normalize_line_endings command without any pre-configured scope."
+commands.deny = ["document_normalize_line_endings"]

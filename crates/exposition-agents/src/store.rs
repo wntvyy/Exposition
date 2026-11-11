@@ -17,7 +17,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::model::{
-    Checkpoint, FileChangeKind, NoticeLevel, ReviewState, TaskId, TaskSpec, TaskStatus, TaskUsage, ToolCallStatus,
+    Checkpoint, NoticeLevel, ReviewChangeKind, ReviewState, TaskId, TaskSpec, TaskStatus, TaskUsage, ToolCallStatus,
 };
 
 /// Current schema version.
@@ -156,7 +156,7 @@ pub struct ToolCallRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskFileRow {
     pub path: WorkspacePath,
-    pub kind: FileChangeKind,
+    pub kind: ReviewChangeKind,
     pub document: Option<String>,
     /// Text before this task first changed the file.
     pub checkpoint_text: String,

@@ -15,7 +15,7 @@ use exposition_core::document::{
 use exposition_core::job::ExecutionPolicy;
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::byte_range_to_utf16;
-use exposition_workspace::DocumentService;
+use exposition_workspace::{DocumentService, WorkspaceService};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -65,6 +65,8 @@ pub struct ToolEnv<'a> {
     pub spec: &'a TaskSpec,
     pub files: &'a dyn ProjectFiles,
     pub documents: &'a DocumentService,
+    /// The application's workspace service, when present.
+    pub workspace: Option<&'a WorkspaceService>,
     pub services: &'a dyn ToolServices,
     pub store: &'a Store,
 }
@@ -162,6 +164,9 @@ fn truncate(text: &str, limit: usize) -> String {
 /// Decide whether `call` may run, and whether it needs the user's approval.
 pub fn gate(call: &ToolCall, env: &ToolEnv<'_>) -> Gate {
     let spec = env.spec;
+    if let Err(reason) = workspace::check_root(env.workspace, env.files.root()) {
+        return Gate::Refused(ToolOutput::error(reason));
+    }
     match call {
         ToolCall::ListFiles(input) => match parse_dir(&input.path) {
             Ok(dir) if dir_visible(dir.as_ref(), &spec.scope) => Gate::Allowed { policy: None },
@@ -443,7 +448,7 @@ fn list_files(env: &ToolEnv<'_>, input: ListFilesInput) -> Result<ToolOutput, To
 
 fn read_file(env: &ToolEnv<'_>, seen: &mut SeenTexts, input: ReadFileInput) -> Result<ToolOutput, ToolOutput> {
     let path = parse_path(&input.path)?;
-    let (id, _) = workspace::open_document(env.documents, env.files, &path).map_err(file_error)?;
+    let id = workspace::open_document_in(env.workspace, env.documents, env.files, &path).map_err(file_error)?;
     let snapshot = env.documents.snapshot(&id).map_err(|e| ToolOutput::error(e.to_string()))?;
     let info = env.documents.info(&id).map_err(|e| ToolOutput::error(e.to_string()))?;
     if snapshot.text.len() > MAX_READ_BYTES {
@@ -615,8 +620,8 @@ fn create_file(
         return Err(ToolOutput::error(format!("{path} already exists; use read_file and edit_document to change it.")));
     }
     env.files.create_text(&path, &input.content).map_err(file_error)?;
-    let opened = workspace::open_document(env.documents, env.files, &path).ok();
-    let document = opened.as_ref().and_then(|(id, _)| env.documents.snapshot(id).ok().map(|s| (id.clone(), s)));
+    let opened = workspace::open_document_in(env.workspace, env.documents, env.files, &path).ok();
+    let document = opened.as_ref().and_then(|id| env.documents.snapshot(id).ok().map(|s| (id.clone(), s)));
     if let Some((id, snapshot)) = &document {
         seen.insert(id, snapshot.revision, Arc::clone(&snapshot.text));
     }

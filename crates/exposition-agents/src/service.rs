@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::utf16_range_to_bytes;
-use exposition_workspace::DocumentService;
+use exposition_workspace::{DocumentService, WorkspaceService};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
 use tokio::task::JoinHandle;
@@ -33,7 +33,7 @@ use crate::store::{Store, StoreError, TaskRow, ToolCallRow, TranscriptEntry, now
 use crate::tools::exec::{self, Gate, SeenTexts, ToolEnv, ToolOutput};
 use crate::tools::services::ToolServices;
 use crate::tools::{self, ToolCall};
-use crate::workspace::{LocalProjectFiles, content_hash};
+use crate::workspace::{LocalProjectFiles, ProjectFiles, content_hash};
 use crate::{prompt, review};
 
 const SETTINGS_KEY: &str = "provider";
@@ -45,6 +45,9 @@ pub struct AgentConfig {
     /// SQLite database path; `None` keeps everything in memory (tests).
     pub database: Option<PathBuf>,
     pub documents: Arc<DocumentService>,
+    /// The application's workspace service. When present, tasks may only act
+    /// on the open workspace folder and documents open through it.
+    pub workspace: Option<Arc<WorkspaceService>>,
     pub credentials: Arc<dyn SecretStore>,
     pub services: Arc<dyn ToolServices>,
     pub runtime: tokio::runtime::Handle,
@@ -87,6 +90,7 @@ pub struct AgentService {
 struct Inner {
     store: Store,
     documents: Arc<DocumentService>,
+    workspace: Option<Arc<WorkspaceService>>,
     credentials: Arc<dyn SecretStore>,
     services: Arc<dyn ToolServices>,
     runtime: tokio::runtime::Handle,
@@ -136,6 +140,7 @@ impl AgentService {
             inner: Arc::new(Inner {
                 store,
                 documents: config.documents,
+                workspace: config.workspace,
                 credentials: config.credentials,
                 services: config.services,
                 runtime: config.runtime,
@@ -250,6 +255,8 @@ impl AgentService {
         }
         let files = LocalProjectFiles::open(Path::new(request.workspace_root.trim()))
             .map_err(|e| AgentError::new("agents.invalidWorkspace", e.to_string()))?;
+        crate::workspace::check_root(self.inner.workspace.as_deref(), files.root())
+            .map_err(|e| AgentError::new("agents.workspaceNotOpen", e))?;
         let budgets = request.budgets.unwrap_or_default();
         budgets.validate().map_err(|e| AgentError::new("agents.invalidBudgets", e))?;
         if let TaskScope::Files { paths } = &request.scope
@@ -315,6 +322,8 @@ impl AgentService {
             row.spec.budgets = budgets;
             self.inner.store.update_task_spec(id, &row.spec)?;
         }
+        crate::workspace::check_root(self.inner.workspace.as_deref(), Path::new(&row.spec.workspace_root))
+            .map_err(|e| AgentError::new("agents.workspaceNotOpen", e))?;
         let provider = self.inner.make_provider(&row.spec.provider, id)?;
         let mut content = self.inner.dangling_tool_results(id)?;
         content.push(json!({"type": "text", "text": prompt}));
@@ -402,12 +411,15 @@ impl AgentService {
         }
         let files = LocalProjectFiles::open(Path::new(&row.spec.workspace_root))
             .map_err(|e| AgentError::new("agents.invalidWorkspace", e.to_string()))?;
+        crate::workspace::check_root(self.inner.workspace.as_deref(), files.root())
+            .map_err(|e| AgentError::new("agents.workspaceNotOpen", e))?;
         let mut results = Vec::new();
         for file in self.inner.store.task_files(id)? {
             if path.is_some_and(|p| p != &file.path) {
                 continue;
             }
-            results.push(review::revert_file(&self.inner.store, id, &self.inner.documents, &files, file)?);
+            let workspace = self.inner.workspace.as_deref();
+            results.push(review::revert_file(&self.inner.store, id, &self.inner.documents, workspace, &files, file)?);
         }
         if results.is_empty() && path.is_some() {
             return Err(AgentError::new("agents.notFound", "The task did not change that file."));
@@ -1092,6 +1104,7 @@ impl Run<'_> {
             spec: &self.spec,
             files: &self.files,
             documents: &inner.documents,
+            workspace: inner.workspace.as_deref(),
             services: inner.services.as_ref(),
             store: &inner.store,
         };
@@ -1117,6 +1130,7 @@ impl Run<'_> {
             spec: &self.spec,
             files: &self.files,
             documents: &self.inner.documents,
+            workspace: self.inner.workspace.as_deref(),
             services: self.inner.services.as_ref(),
             store: &self.inner.store,
         }
@@ -1182,6 +1196,7 @@ mod tests {
         let service = AgentService::new(AgentConfig {
             database: None,
             documents: Arc::new(DocumentService::new()),
+            workspace: None,
             credentials: Arc::new(MemoryStore::default()),
             services: Arc::new(UnavailableServices),
             runtime: runtime.handle().clone(),

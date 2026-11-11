@@ -519,7 +519,7 @@ pub enum AgentEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
-pub enum FileChangeKind {
+pub enum ReviewChangeKind {
     Edited,
     Created,
 }
@@ -538,7 +538,7 @@ pub enum ReviewState {
 #[serde(rename_all = "camelCase")]
 pub struct FileReview {
     pub path: WorkspacePath,
-    pub kind: FileChangeKind,
+    pub kind: ReviewChangeKind,
     pub state: ReviewState,
     pub change_count: u32,
     /// Concurrent edits overlapped the agent's changes while the task ran, so

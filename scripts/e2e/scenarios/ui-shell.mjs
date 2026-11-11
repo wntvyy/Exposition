@@ -173,7 +173,10 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     const before = await width(page, '[data-region="sidebar"]');
     await page.keyboard.press("F6");
     assert.equal(await page.evaluate(() => document.activeElement?.closest("[data-region]")?.dataset.region), "sidebar");
-    await page.keyboard.press("Tab");
+    // Tab past the sidebar view's own controls (e.g. the Files view's Open Folder).
+    for (let i = 0; i < 20 && (await page.evaluate(() => document.activeElement?.id)) !== "wb-sidebar-handle"; i++) {
+      await page.keyboard.press("Tab");
+    }
     assert.equal(await page.evaluate(() => document.activeElement?.id), "wb-sidebar-handle", "Tab reaches the sidebar splitter");
     const handleRing = await page.evaluate(() => {
       const el = document.getElementById("wb-sidebar-handle");

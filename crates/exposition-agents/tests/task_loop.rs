@@ -50,6 +50,7 @@ fn harness_with(services: Arc<dyn ToolServices>) -> Harness {
     let service = AgentService::new(AgentConfig {
         database: Some(data.path().join("agents.sqlite3")),
         documents: Arc::clone(&documents),
+        workspace: None,
         credentials: Arc::new(MemoryStore::default()),
         services,
         runtime: tokio::runtime::Handle::current(),
@@ -396,8 +397,8 @@ async fn created_files_and_multi_file_changes_are_reviewable_per_file() {
     assert_eq!(
         states,
         vec![
-            ("chapters/intro.typ".into(), ReviewState::Reverted, FileChangeKind::Edited),
-            ("figures/plot.typ".into(), ReviewState::Pending, FileChangeKind::Created)
+            ("chapters/intro.typ".into(), ReviewState::Reverted, ReviewChangeKind::Edited),
+            ("figures/plot.typ".into(), ReviewState::Pending, ReviewChangeKind::Created)
         ]
     );
     // Reverting the creation deletes the untouched file.
@@ -728,6 +729,7 @@ async fn tasks_persist_and_interrupted_runs_are_marked_after_restart() {
         AgentService::new(AgentConfig {
             database: Some(db.clone()),
             documents: Arc::new(DocumentService::new()),
+            workspace: None,
             credentials: Arc::new(MemoryStore::default()),
             services: Arc::new(UnavailableServices),
             runtime: tokio::runtime::Handle::current(),
