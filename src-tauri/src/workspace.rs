@@ -4,7 +4,7 @@
 //! the workspace service against the canonical root, rejecting link escapes.
 //! File I/O runs on the blocking pool, never on the UI thread.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use exposition_core::document::{DocumentId, DocumentInfo, LineEnding, TransactionOutcome};
@@ -44,14 +44,37 @@ where
         .map_err(CommandError::from)
 }
 
+/// Opening a folder also registers it as the execution service's workspace
+/// root (so jobs there follow its trust); the previous folder is unregistered.
 #[tauri::command]
 pub async fn workspace_open(state: State<'_, AppState>, path: String) -> Result<WorkspaceInfo, CommandError> {
-    blocking(&state, move |ws| ws.open_workspace(&PathBuf::from(path))).await
+    let execution = state.execution.clone();
+    blocking(&state, move |ws| {
+        let previous = ws.current().map(|info| info.root);
+        let info = ws.open_workspace(&PathBuf::from(path))?;
+        if previous.as_deref() != Some(info.root.as_str()) {
+            if let Some(previous) = previous {
+                execution.unregister_root(Path::new(&previous));
+            }
+            execution.register_workspace_root(Path::new(&info.root)).map_err(|e| {
+                WorkspaceError::new(
+                    "workspace.executionRoot",
+                    format!("The folder could not be prepared for jobs: {e}"),
+                )
+            })?;
+        }
+        Ok(info)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn workspace_close(state: State<'_, AppState>) -> Result<(), CommandError> {
-    blocking(&state, |ws| {
+    let execution = state.execution.clone();
+    blocking(&state, move |ws| {
+        if let Some(info) = ws.current() {
+            execution.unregister_root(Path::new(&info.root));
+        }
         ws.close_workspace();
         Ok(())
     })

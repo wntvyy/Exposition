@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-trust-grant"
+description = "Enables the trust_grant command without any pre-configured scope."
+commands.allow = ["trust_grant"]
+
+[[permission]]
+identifier = "deny-trust-grant"
+description = "Denies the trust_grant command without any pre-configured scope."
+commands.deny = ["trust_grant"]

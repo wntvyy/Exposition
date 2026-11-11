@@ -2,4 +2,5 @@
 // import of its `register.ts`, which contributes views, editors, and commands to
 // the workbench registry (`src/app/registry.ts`). Keep this list sorted.
 import "./editor/register";
+import "./jobs/register";
 import "./workspace/register";

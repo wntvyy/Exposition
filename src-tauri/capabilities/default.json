@@ -33,6 +33,14 @@
     "allow-settings-get",
     "allow-settings-update",
     "allow-project-settings-get",
-    "allow-project-settings-update"
+    "allow-project-settings-update",
+    "allow-job-list",
+    "allow-job-output",
+    "allow-job-cancel",
+    "allow-toolchains-list",
+    "allow-toolchains-refresh",
+    "allow-trust-status",
+    "allow-trust-grant",
+    "allow-trust-revoke"
   ]
 }

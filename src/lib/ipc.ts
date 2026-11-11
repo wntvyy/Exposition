@@ -16,16 +16,22 @@ import type { DocumentOpened } from "../bindings/DocumentOpened";
 import type { DocumentState } from "../bindings/DocumentState";
 import type { EditOrigin } from "../bindings/EditOrigin";
 import type { FileEntry } from "../bindings/FileEntry";
+import type { JobEvent } from "../bindings/JobEvent";
+import type { JobId } from "../bindings/JobId";
+import type { JobSummary } from "../bindings/JobSummary";
 import type { LineEnding } from "../bindings/LineEnding";
+import type { OutputPage } from "../bindings/OutputPage";
 import type { ProjectSettings } from "../bindings/ProjectSettings";
 import type { ProjectSettingsState } from "../bindings/ProjectSettingsState";
 import type { RecentProject } from "../bindings/RecentProject";
 import type { RecoveryEntry } from "../bindings/RecoveryEntry";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
 import type { SaveAllOutcome } from "../bindings/SaveAllOutcome";
+import type { ToolchainInfo } from "../bindings/ToolchainInfo";
 import type { TransactionError } from "../bindings/TransactionError";
 import type { TransactionOutcome } from "../bindings/TransactionOutcome";
 import type { TransactionRequest } from "../bindings/TransactionRequest";
+import type { TrustStatus } from "../bindings/TrustStatus";
 import type { WorkspaceEvent } from "../bindings/WorkspaceEvent";
 import type { WorkspaceInfo } from "../bindings/WorkspaceInfo";
 import type { WorkspacePath } from "../bindings/WorkspacePath";
@@ -72,6 +78,19 @@ export const commands = {
   projectSettingsGet: () => invoke<ProjectSettingsState>("project_settings_get"),
   projectSettingsUpdate: (settings: ProjectSettings) =>
     invoke<ProjectSettings>("project_settings_update", { settings }),
+
+  jobList: () => invoke<JobSummary[]>("job_list"),
+  /** Retained output chunks after sequence number `after` (exclusive), oldest first. */
+  jobOutput: (job: JobId, after: number | null, maxBytes?: number) =>
+    invoke<OutputPage>("job_output", { job, after, maxBytes: maxBytes ?? null }),
+  /** Resolves false when the job had already finished. */
+  jobCancel: (job: JobId) => invoke<boolean>("job_cancel", { job }),
+  toolchainsList: () => invoke<ToolchainInfo[]>("toolchains_list"),
+  toolchainsRefresh: () => invoke<ToolchainInfo[]>("toolchains_refresh"),
+  trustStatus: (root: string) => invoke<TrustStatus>("trust_status", { root }),
+  /** Only call from the explicit trust dialog (`requestWorkspaceTrust`). */
+  trustGrant: (root: string) => invoke<TrustStatus>("trust_grant", { root }),
+  trustRevoke: (root: string) => invoke<TrustStatus>("trust_revoke", { root }),
 };
 
 export const events = {
@@ -83,6 +102,11 @@ export const events = {
   /** Workspace events: folder opened/closed, file changes, reloads, disk conflicts, recovery. */
   workspace: (handler: (event: WorkspaceEvent) => void): Promise<UnlistenFn> =>
     listen<WorkspaceEvent>("workspace:event", (e) => handler(e.payload)),
+  /** Every job lifecycle event (queued, started, output, cancel requested, finished). */
+  jobs: (handler: (event: JobEvent) => void): Promise<UnlistenFn> =>
+    listen<JobEvent>("jobs:event", (e) => handler(e.payload)),
+  /** The frontend fell behind; re-read the job list. */
+  jobsResync: (handler: () => void): Promise<UnlistenFn> => listen("jobs:resync", () => handler()),
 };
 
 export function isCommandError(value: unknown): value is CommandError {

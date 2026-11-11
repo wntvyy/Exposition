@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 exposition-core = { path = "crates/exposition-core" }
 exposition-workspace = { path = "crates/exposition-workspace" }
+exposition-execution = { path = "crates/exposition-execution" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,6 +23,16 @@ sha2 = "0.10"
 tracing = "0.1"
 tempfile = "3"
 notify = "8.2"
+regex = "1"
+# Execution service OS integration (process-tree containment).
+libc = "0.2"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
