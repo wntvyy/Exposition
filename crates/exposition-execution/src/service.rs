@@ -926,7 +926,7 @@ impl Inner {
                         return Err(JobRefusal {
                             code: RefusalCode::UntrustedWorkspace,
                             message: format!(
-                                "workspace {} is not trusted. Trusted native execution runs with your account's privileges; trust the workspace to allow it, or use restricted execution",
+                                "Workspace {} is not trusted. Trusted native execution runs with your account's privileges; trust the workspace to allow it, or use restricted execution",
                                 workspace.display()
                             ),
                             workspace_root: Some(workspace.display().to_string()),

@@ -38,6 +38,10 @@ async fn discovery_reports_every_catalog_tool_with_versions_or_guidance() {
         }
     }
     // Probes are jobs of kind Probe that needed no workspace trust.
+    for job in f.service.list().into_iter().filter(|j| j.kind == JobKind::Probe) {
+        let ms = job.info.result.as_ref().map(|r| r.duration_ms).unwrap_or_default();
+        eprintln!("probe {:<45} {ms:>6} ms", job.info.label);
+    }
     let probes = f.service.list().into_iter().filter(|j| j.kind == JobKind::Probe).count();
     assert!(probes > 0 || tools.iter().all(|t| t.path.is_none()));
     // Cached until refreshed.

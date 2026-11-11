@@ -42,6 +42,8 @@ pub fn run() {
             execution::trust_revoke,
             #[cfg(debug_assertions)]
             execution::dev_start_probe_job,
+            #[cfg(debug_assertions)]
+            execution::dev_start_workspace_job,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

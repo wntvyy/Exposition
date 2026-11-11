@@ -8,7 +8,8 @@
 // `dev_start_probe_job` command, and Python (the probe is a Python parent that
 // spawns a sleeping Python grandchild).
 import { execFileSync } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const PROBE_LOG_LIMIT = 16 * 1024;
@@ -141,12 +142,43 @@ export default async function executionJobs({ launchApp, artifactsDir, assert })
 
     // --- Trust commands validate and persist (granting is a UI-dialog action).
     const trustTarget = join(app.dataDir, "trust-target");
-    await import("node:fs/promises").then((fs) => fs.mkdir(trustTarget, { recursive: true }));
+    await mkdir(trustTarget, { recursive: true });
     assert.equal((await invoke(page, "trust_status", { root: trustTarget })).trusted, false);
     assert.equal((await invoke(page, "trust_grant", { root: trustTarget })).trusted, true);
     assert.equal((await invoke(page, "trust_revoke", { root: trustTarget })).trusted, false);
     const broad = await rejection(page, "trust_grant", { root: trustTarget.slice(0, 3) });
     assert.equal(broad?.code, "trust.tooBroad");
+
+    // --- An untrusted workspace never executes; trust needs the explicit dialog.
+    const workspace = join(app.dataDir, "untrusted-project");
+    const marker = join(workspace, "exposition-dev-ran.txt");
+    await mkdir(workspace, { recursive: true });
+    const refusedId = await invoke(page, "dev_start_workspace_job", { root: workspace });
+    const refusedRow = panel.locator(`li.exp-job-row[data-job-id="${refusedId}"]`);
+    await refusedRow.locator('[data-testid="job-status"][data-status="failedToStart"]').waitFor({ timeout: 15_000 });
+    assert.ok(!existsSync(marker), "an untrusted workspace must not execute");
+    const refusedJob = (await invoke(page, "job_list")).find((j) => j.info.id === refusedId);
+    assert.equal(refusedJob.refusal.code, "untrustedWorkspace");
+    assert.equal(refusedJob.info.startedAtMs, null);
+    evidence.untrustedRefusal = refusedJob.refusal;
+    await refusedRow.locator(".exp-job-select").click();
+    const dialog = page.getByTestId("trust-dialog");
+    await page.getByRole("button", { name: "Trust workspace…" }).click();
+    await dialog.waitFor();
+    assert.ok((await dialog.getByTestId("trust-root").innerText()).endsWith("untrusted-project"));
+    await page.screenshot({ path: join(artifactsDir, "trust-dialog.png") });
+    await dialog.getByRole("button", { name: /Don.t trust/ }).click();
+    await dialog.waitFor({ state: "detached" });
+    assert.equal((await invoke(page, "trust_status", { root: workspace })).trusted, false, "declining keeps it untrusted");
+    await page.getByRole("button", { name: "Trust workspace…" }).click();
+    await dialog.getByRole("button", { name: "Trust workspace", exact: true }).click();
+    await dialog.waitFor({ state: "detached" });
+    assert.equal((await invoke(page, "trust_status", { root: workspace })).trusted, true);
+    const allowedId = await invoke(page, "dev_start_workspace_job", { root: workspace });
+    await panel
+      .locator(`li.exp-job-row[data-job-id="${allowedId}"] [data-testid="job-status"][data-status="succeeded"]`)
+      .waitFor({ timeout: 30_000 });
+    assert.ok(existsSync(marker), "the trusted workspace job ran");
 
     // --- Toolchains view lists real tools with versions and guidance.
     await page.getByRole("tab", { name: "Toolchains" }).click();

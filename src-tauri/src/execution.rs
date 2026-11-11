@@ -137,6 +137,37 @@ while True:
     Ok(state.execution.launch_application(spec))
 }
 
+/// DEV-ONLY (debug builds): register `root` as an open workspace (a stand-in
+/// for project opening) and launch a fixed native job there that writes
+/// `exposition-dev-ran.txt`. Used to demonstrate that an untrusted workspace
+/// never executes until the user grants trust in the dialog.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_start_workspace_job(state: State<'_, AppState>, root: String) -> Result<JobId, CommandError> {
+    use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobSpec};
+    validate_root(&root)?;
+    let canonical = state
+        .execution
+        .register_workspace_root(std::path::Path::new(&root))
+        .map_err(|e| CommandError::new("workspace.invalidRoot", e.to_string()))?;
+    let spec = JobSpec {
+        label: "Dev workspace job".into(),
+        program: "python".into(),
+        args: vec![
+            "-E".into(),
+            "-c".into(),
+            "open('exposition-dev-ran.txt', 'w').write('ran'); print('workspace job ran')".into(),
+        ],
+        environment: EnvironmentSpec::default(),
+        working_directory: canonical.display().to_string(),
+        policy: ExecutionPolicy::TrustedNative,
+        timeout_ms: Some(60_000),
+        log_limit_bytes: None,
+        stdin: None,
+    };
+    Ok(state.execution.launch(spec))
+}
+
 /// Forward job events to the webview in order.
 pub fn forward_events(app: AppHandle) {
     let mut rx = app.state::<AppState>().execution.subscribe();
@@ -159,5 +190,10 @@ pub fn forward_events(app: AppHandle) {
 #[cfg(debug_assertions)]
 pub fn add_dev_capability(app: &AppHandle) -> tauri::Result<()> {
     use tauri::ipc::CapabilityBuilder;
-    app.add_capability(CapabilityBuilder::new("dev-execution-probe").window("main").permission("allow-dev-start-probe-job"))
+    app.add_capability(
+        CapabilityBuilder::new("dev-execution-probe")
+            .window("main")
+            .permission("allow-dev-start-probe-job")
+            .permission("allow-dev-start-workspace-job"),
+    )
 }

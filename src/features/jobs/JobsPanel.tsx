@@ -4,7 +4,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { JobSummary } from "../../bindings/JobSummary";
 import type { OutputStream } from "../../bindings/OutputStream";
 import { EMPTY_OUTPUT, formatDuration, isActive, jobDurationMs, jobStatus } from "./model";
-import { cancelJob, selectJob, startJobsTracking, useJobs } from "./store";
+import { cancelJob, refreshJobs, selectJob, startJobsTracking, useJobs } from "./store";
+import { requestWorkspaceTrust } from "./trust";
 import "./jobs.css";
 
 function useNow(active: boolean): number {
@@ -172,6 +173,21 @@ function JobDetail({ job, now }: { job: JobSummary; now: number }) {
       {status.detail && (
         <p className={status.tone === "danger" ? "exp-error" : "exp-muted"} data-testid="job-status-detail">
           {status.detail}
+        </p>
+      )}
+      {job.refusal?.code === "untrustedWorkspace" && job.refusal.workspaceRoot && (
+        <p>
+          <button
+            type="button"
+            className="exp-button"
+            onClick={() => {
+              const root = job.refusal?.workspaceRoot;
+              if (root) void requestWorkspaceTrust(root).then(() => refreshJobs());
+            }}
+          >
+            Trust workspace…
+          </button>{" "}
+          <span className="exp-muted">Nothing was run. Trusting lets future jobs in this workspace run natively.</span>
         </p>
       )}
       <div className="exp-toolbar" role="group" aria-label="Output options">

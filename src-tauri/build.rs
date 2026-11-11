@@ -22,7 +22,7 @@ const COMMANDS: &[&str] = &[
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,
 /// granted only by a capability added at runtime in debug builds, and are not
 /// part of release `COMMANDS` or `capabilities/`.
-const DEV_COMMANDS: &[&str] = &["dev_start_probe_job"];
+const DEV_COMMANDS: &[&str] = &["dev_start_probe_job", "dev_start_workspace_job"];
 
 fn main() {
     let debug = std::env::var("PROFILE").as_deref() == Ok("debug");
