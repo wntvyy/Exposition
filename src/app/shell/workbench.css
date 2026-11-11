@@ -1,0 +1,299 @@
+/* Workbench shell layout. Uses tokens only. */
+
+.wb {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--color-surface-base);
+  color: var(--color-text);
+}
+
+.wb-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.wb-columns,
+.wb-rows {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Regions that F6 can focus show an inset ring when the region itself has focus. */
+[data-region]:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-width));
+}
+
+.wb-region {
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--color-surface-sunken);
+}
+
+/* ---------- Activity rail ---------- */
+
+.wb-rail {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  justify-content: space-between;
+  width: var(--activity-rail-width);
+  padding: var(--space-1) 0;
+  border-right: var(--border-width) solid var(--color-border);
+  background: var(--color-surface-base);
+}
+.wb-rail__group {
+  align-items: center;
+  gap: var(--space-1);
+}
+.wb-rail__button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-subtle);
+  cursor: default;
+}
+.wb-rail__button[data-hovered] {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+.wb-rail__button[data-pressed] {
+  background: var(--color-surface-active);
+}
+.wb-rail__button[data-selected] {
+  color: var(--color-text);
+}
+.wb-rail__group:first-child .wb-rail__button[data-selected]::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--color-accent);
+}
+.wb-rail__group--end .wb-rail__button[data-selected] {
+  background: var(--color-surface-selected);
+}
+.wb-rail__button[data-focus-visible] {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-width));
+}
+
+/* ---------- View containers (sidebar, panel, auxiliary) ---------- */
+
+.wb-view-container {
+  height: 100%;
+}
+.wb-view-container__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.wb-view-container--tabbed {
+  display: flex;
+  flex-direction: column;
+}
+.wb-view-container__tabbar {
+  display: flex;
+  align-items: center;
+  flex: none;
+  min-height: var(--pane-header-height);
+  padding-right: var(--space-1);
+  border-bottom: var(--border-width) solid var(--color-border);
+}
+.wb-view-container__tabs {
+  flex: 1;
+  min-width: 0;
+  border-bottom: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.wb-view-container__actions {
+  display: flex;
+  gap: var(--space-0-5);
+}
+
+.wb-panel {
+  border-top: 0;
+}
+
+/* ---------- Editor area ---------- */
+
+.wb-editor-area {
+  height: 100%;
+  background: var(--color-surface);
+}
+.wb-editor-area__groups {
+  height: 100%;
+}
+.wb-editor-group {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  background: var(--color-surface);
+}
+.wb-editor-group__tabs {
+  flex: 1;
+  min-height: 0;
+}
+.wb-editor-group__header {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  height: var(--tab-height);
+  border-bottom: var(--border-width) solid var(--color-border);
+  background: var(--color-surface-sunken);
+}
+.wb-editor-group__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+  flex: none;
+}
+.wb-editor-group__panel {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+.wb-editor-group__panel[data-inert] {
+  display: none;
+}
+.wb-editor-empty__keys {
+  margin-left: var(--space-2);
+}
+
+/* ---------- Status bar ---------- */
+
+.wb-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+  height: var(--statusbar-height);
+  padding: 0 var(--space-2);
+  border-top: var(--border-width) solid var(--color-border);
+  background: var(--color-statusbar-bg);
+  color: var(--color-statusbar-text);
+  font-size: var(--font-size-sm);
+}
+.wb-statusbar__side {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.wb-statusbar__side--end {
+  justify-content: flex-end;
+}
+.wb-statusbar__item {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  white-space: nowrap;
+}
+.wb-inline-error {
+  color: var(--color-danger-text);
+}
+
+/* ---------- Command palette ---------- */
+
+.wb-palette-overlay {
+  padding-top: 10vh;
+  background: transparent;
+}
+.wb-palette {
+  width: min(600px, calc(100vw - var(--space-8)));
+}
+.wb-palette__dialog {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  outline: none;
+}
+.wb-palette__field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: var(--space-2);
+  border-bottom: var(--border-width) solid var(--color-border);
+}
+.wb-palette__icon {
+  position: absolute;
+  left: calc(var(--space-2) + var(--space-2));
+  color: var(--color-text-subtle);
+  pointer-events: none;
+}
+.wb-palette__input {
+  width: 100%;
+  height: var(--control-height-lg);
+  padding: 0 var(--space-2) 0 calc(var(--space-2) + 16px + var(--space-2));
+  border: var(--border-width) solid var(--color-focus-ring);
+  border-radius: var(--radius-md);
+  outline: var(--border-width) solid var(--color-focus-ring);
+  outline-offset: 0;
+  background: var(--color-field);
+  color: var(--color-text);
+  font-size: var(--font-size-lg);
+  user-select: text;
+}
+.wb-palette__input::placeholder {
+  color: var(--color-text-subtle);
+}
+.wb-palette__list {
+  max-height: min(420px, 56vh);
+  overflow: auto;
+  padding: var(--space-1);
+  outline: none;
+}
+.wb-palette__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 28px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: default;
+  outline: none;
+}
+.wb-palette__item[data-focused] {
+  background: var(--color-accent-subtle);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+.wb-palette__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-palette__label mark {
+  background: transparent;
+  color: var(--color-accent-text);
+  font-weight: var(--font-weight-semibold);
+}
+.wb-palette__category {
+  color: var(--color-text-muted);
+}
+.wb-palette__keys {
+  flex: none;
+}
+.wb-palette__empty {
+  padding: var(--space-4);
+  color: var(--color-text-muted);
+  text-align: center;
+}
