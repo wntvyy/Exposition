@@ -1,7 +1,14 @@
-/* Bootstrap styles. The UI owner replaces these with the shared token system. */
-:root {
-  color-scheme: light dark;
-  font-family: system-ui, "Segoe UI", sans-serif;
+/*
+ * Global base styles. Element selectors (low specificity) so shared component
+ * classes always win regardless of stylesheet order; the only class rule is the
+ * Monaco hidden-input override below.
+ * Tokens live in src/ui/tokens.css; components in src/ui/components/*.css.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 html,
@@ -9,116 +16,96 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  overflow: hidden;
 }
 
-.bootstrap {
-  padding: 24px;
+body {
+  background: var(--color-surface-base);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Desktop app: text in chrome is not selectable unless a surface opts in. */
+  user-select: none;
 }
 
-/* Interim workbench (src/App.tsx) until the UI owner's shell lands. */
-.interim-shell {
-  display: grid;
-  grid-template-columns: minmax(200px, 280px) 1fr;
-  grid-template-rows: 1fr auto;
-  height: 100%;
-}
-
-.interim-sidebar {
-  grid-row: 1;
-  overflow: auto;
-  border-right: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
-}
-
-.interim-view h2 {
-  margin: 0;
-  padding: 6px 8px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.interim-editors {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-}
-
-.interim-tabs {
-  display: flex;
-  overflow-x: auto;
-  border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
-}
-
-.interim-tab {
-  display: flex;
-  font-size: 13px;
-}
-
-.interim-tab button {
-  border: none;
-  background: transparent;
-  color: inherit;
-  padding: 6px 8px;
+input,
+textarea,
+select,
+button {
   font: inherit;
+  color: inherit;
 }
 
-.interim-tab[data-active="true"] {
-  background: color-mix(in srgb, CanvasText 8%, transparent);
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
 }
 
-.interim-editor {
-  flex: 1;
-  min-height: 0;
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--font-code);
 }
 
-.interim-muted {
-  padding: 16px;
-  opacity: 0.7;
+a {
+  color: var(--color-accent-text);
 }
 
-.interim-status {
-  grid-column: 1 / -1;
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 2px 8px;
-  font-size: 12px;
-  border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+::selection {
+  background: var(--color-selection);
+  color: var(--color-text);
 }
 
-.interim-notifications {
-  position: fixed;
-  right: 12px;
-  bottom: 32px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-width: 380px;
-  z-index: 500;
+:focus {
+  outline: none;
 }
 
-.interim-notification {
-  padding: 8px 12px;
-  border-radius: 6px;
-  background: Canvas;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 25%);
-  font-size: 13px;
-  border-left: 4px solid #0f6cbd;
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
-.interim-notification[data-tone="danger"] {
-  border-left-color: #c50f1f;
+/* Monaco's hidden text input receives focus; the caret is its focus indicator. */
+.monaco-editor .native-edit-context,
+.monaco-editor .inputarea {
+  outline: none !important;
 }
 
-.interim-notification[data-tone="warning"] {
-  border-left-color: #e6a700;
+/* Thin, theme-aware scrollbars (no arrow buttons). Setting the standard
+   scrollbar-width/scrollbar-color on an element disables these styles. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
 
-.interim-notification[data-tone="success"] {
-  border-left-color: #107c10;
+::-webkit-scrollbar-thumb {
+  background: var(--color-scrollbar);
+  border: 2px solid transparent;
+  border-radius: var(--radius-full);
+  background-clip: padding-box;
 }
 
-.interim-notification p {
-  margin: 4px 0;
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-scrollbar-hover);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0ms !important;
+  }
 }
