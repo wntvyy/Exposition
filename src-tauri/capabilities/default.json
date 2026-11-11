@@ -12,6 +12,26 @@
     "allow-document-state",
     "allow-document-apply",
     "allow-document-undo",
-    "allow-document-redo"
+    "allow-document-redo",
+    "allow-workspace-open",
+    "allow-workspace-close",
+    "allow-workspace-current",
+    "allow-workspace-recent",
+    "allow-workspace-forget-recent",
+    "allow-workspace-list-dir",
+    "allow-document-open",
+    "allow-document-close",
+    "allow-document-save",
+    "allow-document-save-all",
+    "allow-document-reload",
+    "allow-document-keep-buffer",
+    "allow-document-normalize-line-endings",
+    "allow-recovery-list",
+    "allow-recovery-restore",
+    "allow-recovery-discard",
+    "allow-settings-get",
+    "allow-settings-update",
+    "allow-project-settings-get",
+    "allow-project-settings-update"
   ]
 }

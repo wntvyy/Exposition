@@ -5,16 +5,30 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { AppInfo } from "../bindings/AppInfo";
+import type { AppSettings } from "../bindings/AppSettings";
+import type { AppSettingsState } from "../bindings/AppSettingsState";
 import type { CommandError } from "../bindings/CommandError";
 import type { DocumentChanged } from "../bindings/DocumentChanged";
 import type { DocumentEvent } from "../bindings/DocumentEvent";
 import type { DocumentId } from "../bindings/DocumentId";
 import type { DocumentInfo } from "../bindings/DocumentInfo";
+import type { DocumentOpened } from "../bindings/DocumentOpened";
 import type { DocumentState } from "../bindings/DocumentState";
 import type { EditOrigin } from "../bindings/EditOrigin";
+import type { FileEntry } from "../bindings/FileEntry";
+import type { LineEnding } from "../bindings/LineEnding";
+import type { ProjectSettings } from "../bindings/ProjectSettings";
+import type { ProjectSettingsState } from "../bindings/ProjectSettingsState";
+import type { RecentProject } from "../bindings/RecentProject";
+import type { RecoveryEntry } from "../bindings/RecoveryEntry";
+import type { RestoreOutcome } from "../bindings/RestoreOutcome";
+import type { SaveAllOutcome } from "../bindings/SaveAllOutcome";
 import type { TransactionError } from "../bindings/TransactionError";
 import type { TransactionOutcome } from "../bindings/TransactionOutcome";
 import type { TransactionRequest } from "../bindings/TransactionRequest";
+import type { WorkspaceEvent } from "../bindings/WorkspaceEvent";
+import type { WorkspaceInfo } from "../bindings/WorkspaceInfo";
+import type { WorkspacePath } from "../bindings/WorkspacePath";
 
 export const commands = {
   appInfo: () => invoke<AppInfo>("app_info"),
@@ -26,6 +40,38 @@ export const commands = {
     invoke<DocumentChanged>("document_undo", { document, origin }),
   documentRedo: (document: DocumentId, origin: EditOrigin) =>
     invoke<DocumentChanged>("document_redo", { document, origin }),
+
+  // Workspace (folder, files, saves, recovery, settings). Errors are `CommandError`s.
+  /** Open an absolute folder path (from the folder dialog) as the workspace. */
+  workspaceOpen: (path: string) => invoke<WorkspaceInfo>("workspace_open", { path }),
+  workspaceClose: () => invoke<void>("workspace_close"),
+  workspaceCurrent: () => invoke<WorkspaceInfo | null>("workspace_current"),
+  workspaceRecent: () => invoke<RecentProject[]>("workspace_recent"),
+  workspaceForgetRecent: (path: string) => invoke<RecentProject[]>("workspace_forget_recent", { path }),
+  /** List one folder (`null` = root): directories first; hidden build/VCS folders omitted. */
+  workspaceListDir: (path: WorkspacePath | null) => invoke<FileEntry[]>("workspace_list_dir", { path }),
+  /** Open a project file as a document, or return the already open document. */
+  documentOpen: (path: WorkspacePath) => invoke<DocumentOpened>("document_open", { path }),
+  /** Close a document, discarding unsaved changes and their recovery journal. */
+  documentClose: (document: DocumentId) => invoke<void>("document_close", { document }),
+  /** Save; refuses with `file.modifiedOnDisk` unless `overwrite`. */
+  documentSave: (document: DocumentId, overwrite = false) =>
+    invoke<DocumentInfo>("document_save", { document, overwrite }),
+  documentSaveAll: () => invoke<SaveAllOutcome>("document_save_all"),
+  /** Replace the buffer with the file on disk (undoable `external` transaction). */
+  documentReload: (document: DocumentId) => invoke<DocumentInfo>("document_reload", { document }),
+  /** Resolve a disk conflict by keeping the buffer (the next save overwrites disk). */
+  documentKeepBuffer: (document: DocumentId) => invoke<void>("document_keep_buffer", { document }),
+  documentNormalizeLineEndings: (document: DocumentId, lineEnding: LineEnding) =>
+    invoke<TransactionOutcome | null>("document_normalize_line_endings", { document, lineEnding }),
+  recoveryList: () => invoke<RecoveryEntry[]>("recovery_list"),
+  recoveryRestore: (id: string) => invoke<RestoreOutcome>("recovery_restore", { id }),
+  recoveryDiscard: (id: string) => invoke<RecoveryEntry[]>("recovery_discard", { id }),
+  settingsGet: () => invoke<AppSettingsState>("settings_get"),
+  settingsUpdate: (settings: AppSettings) => invoke<AppSettings>("settings_update", { settings }),
+  projectSettingsGet: () => invoke<ProjectSettingsState>("project_settings_get"),
+  projectSettingsUpdate: (settings: ProjectSettings) =>
+    invoke<ProjectSettings>("project_settings_update", { settings }),
 };
 
 export const events = {
@@ -34,6 +80,9 @@ export const events = {
     listen<DocumentEvent>("documents:event", (e) => handler(e.payload)),
   /** The frontend fell behind; re-read state of every attached document. */
   documentsResync: (handler: () => void): Promise<UnlistenFn> => listen("documents:resync", () => handler()),
+  /** Workspace events: folder opened/closed, file changes, reloads, disk conflicts, recovery. */
+  workspace: (handler: (event: WorkspaceEvent) => void): Promise<UnlistenFn> =>
+    listen<WorkspaceEvent>("workspace:event", (e) => handler(e.payload)),
 };
 
 export function isCommandError(value: unknown): value is CommandError {

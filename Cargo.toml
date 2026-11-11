@@ -21,6 +21,7 @@ uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 tracing = "0.1"
 tempfile = "3"
+notify = "8.2"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
