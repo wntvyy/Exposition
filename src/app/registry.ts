@@ -68,12 +68,22 @@ export interface CommandContribution {
   run: () => void | Promise<void>;
 }
 
+/** An item in the status bar. */
+export interface StatusItemContribution {
+  id: string;
+  alignment: "left" | "right";
+  /** Lower numbers sort first within an alignment. */
+  order?: number;
+  render: () => ReactNode;
+}
+
 type Listener = () => void;
 
 class Registry {
   private views = new Map<string, ViewContribution>();
   private editors = new Map<string, EditorContribution>();
   private commands = new Map<string, CommandContribution>();
+  private statusItems = new Map<string, StatusItemContribution>();
   private listeners = new Set<Listener>();
   private version = 0;
 
@@ -87,6 +97,16 @@ class Registry {
 
   registerCommand(command: CommandContribution): () => void {
     return this.add(this.commands, command);
+  }
+
+  registerStatusItem(item: StatusItemContribution): () => void {
+    return this.add(this.statusItems, item);
+  }
+
+  statusItemsAt(alignment: "left" | "right"): StatusItemContribution[] {
+    return [...this.statusItems.values()]
+      .filter((item) => item.alignment === alignment)
+      .sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
   }
 
   viewsAt(location: ViewLocation): ViewContribution[] {
