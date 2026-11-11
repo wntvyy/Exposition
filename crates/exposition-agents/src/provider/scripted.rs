@@ -6,12 +6,14 @@
 //! task loop, tools, persistence, review, and UI are exercised for real. It
 //! cannot establish live model behavior.
 //!
-//! A script is a list of turns; the turn used for a request is the number of
-//! assistant messages already in the history. Strings of the form
+//! A script is a list of turns, used in order: the n-th model request of a
+//! task (across runs, including canceled ones) gets turn n. Strings of the form
 //! `"$ref:<tool_use_id>/<json-pointer>"` inside tool inputs are replaced with
 //! the value at that pointer in the earlier tool result (parsed as JSON), so a
 //! script can use the revision returned by `read_file`.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -44,7 +46,7 @@ pub struct ScriptTurn {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ScriptStep {
     Text(String),
     Thinking(String),
@@ -79,11 +81,13 @@ pub enum ScriptStep {
 
 pub struct ScriptedProvider {
     script: Script,
+    /// Requests served for the task so far (shared across runs).
+    requests: Arc<AtomicUsize>,
 }
 
 impl ScriptedProvider {
-    pub fn new(script: Script) -> Self {
-        Self { script }
+    pub fn new(script: Script, requests: Arc<AtomicUsize>) -> Self {
+        Self { script, requests }
     }
 }
 
@@ -135,7 +139,7 @@ impl Provider for ScriptedProvider {
         sink: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<ProviderResponse, ProviderError> {
-        let index = request.messages.iter().filter(|m| m.role == "assistant").count();
+        let index = self.requests.fetch_add(1, Ordering::SeqCst);
         let turn =
             self.script.turns.get(index).ok_or_else(|| {
                 ProviderError::InvalidRequest(format!("{LABEL}: the script has no turn {}", index + 1))
@@ -152,7 +156,7 @@ impl Provider for ScriptedProvider {
             match step {
                 ScriptStep::Text(text) => {
                     for (i, word) in text.split_inclusive(' ').enumerate() {
-                        if i > 0 {
+                        if i > 0 && chunk_delay > 0 {
                             pause(chunk_delay, cancel).await?;
                         }
                         sink(StreamEvent::TextDelta(word.to_owned()));
@@ -194,12 +198,18 @@ impl Provider for ScriptedProvider {
                 }
             }
         }
-        let stop_reason = stop_reason
+        let mut stop_reason = stop_reason
             .or_else(|| turn.stop_reason.clone())
             .unwrap_or_else(|| if used_tools { "tool_use".into() } else { "end_turn".into() });
         let input_chars: usize =
             request.messages.iter().map(|m| Value::Array(m.content.clone()).to_string().len()).sum();
         let output_chars = Value::Array(content.clone()).to_string().len();
+        let mut output_tokens = (output_chars / 4) as u64 + 1;
+        // Like the real API: output beyond max_tokens is cut off.
+        if output_tokens > u64::from(request.max_tokens) && stop_reason != "refusal" {
+            output_tokens = u64::from(request.max_tokens);
+            stop_reason = "max_tokens".into();
+        }
         Ok(ProviderResponse {
             model,
             content,
@@ -207,7 +217,7 @@ impl Provider for ScriptedProvider {
             stop_details,
             usage: Usage {
                 input_tokens: (input_chars / 4 + request.system.len() / 4) as u64,
-                output_tokens: (output_chars / 4) as u64 + 1,
+                output_tokens,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
             },

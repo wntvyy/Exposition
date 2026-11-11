@@ -101,7 +101,7 @@ struct Inner {
 #[derive(Default)]
 struct ScriptState {
     queue: VecDeque<crate::provider::scripted::Script>,
-    by_task: HashMap<TaskId, crate::provider::scripted::Script>,
+    by_task: HashMap<TaskId, (crate::provider::scripted::Script, Arc<std::sync::atomic::AtomicUsize>)>,
 }
 
 struct Running {
@@ -294,7 +294,7 @@ impl AgentService {
         )?;
         self.spawn(id.clone(), provider);
         let summary = self.inner.summary(&id)?;
-        self.inner.emit(AgentEvent::TaskChanged { task: summary.clone() });
+        self.inner.emit(AgentEvent::TaskChanged { task: Box::new(summary.clone()) });
         Ok(summary)
     }
 
@@ -320,7 +320,7 @@ impl AgentService {
         self.inner.store.update_task(id, &TaskStatus::Queued, &row.usage)?;
         self.spawn(id.clone(), provider);
         let summary = self.inner.summary(id)?;
-        self.inner.emit(AgentEvent::TaskChanged { task: summary.clone() });
+        self.inner.emit(AgentEvent::TaskChanged { task: Box::new(summary.clone()) });
         self.inner.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
         Ok(summary)
     }
@@ -494,17 +494,18 @@ impl Inner {
             return Err(AgentError::new("agents.scriptedUnavailable", "The scripted provider is disabled."));
         }
         let mut scripts = lock(&self.scripts);
-        let script = match scripts.by_task.get(task) {
-            Some(script) => script.clone(),
+        let (script, requests) = match scripts.by_task.get(task) {
+            Some(entry) => entry.clone(),
             None => {
                 let script = scripts.queue.pop_front().ok_or_else(|| {
                     AgentError::new("agents.noScript", "No development script is loaded for the scripted provider.")
                 })?;
-                scripts.by_task.insert(task.clone(), script.clone());
-                script
+                let entry = (script, Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+                scripts.by_task.insert(task.clone(), entry.clone());
+                entry
             }
         };
-        Ok(Arc::new(crate::provider::scripted::ScriptedProvider::new(script)))
+        Ok(Arc::new(crate::provider::scripted::ScriptedProvider::new(script, requests)))
     }
 
     #[cfg(not(debug_assertions))]
@@ -549,7 +550,7 @@ impl Inner {
     fn review_changed(&self, id: &TaskId) {
         self.emit(AgentEvent::ReviewChanged { task_id: id.clone() });
         if let Ok(summary) = self.summary(id) {
-            self.emit(AgentEvent::TaskChanged { task: summary });
+            self.emit(AgentEvent::TaskChanged { task: Box::new(summary) });
         }
     }
 
@@ -680,7 +681,7 @@ impl Inner {
         }
         lock(&inner.running).remove(&id);
         if let Ok(summary) = inner.summary(&id) {
-            inner.emit(AgentEvent::TaskChanged { task: summary });
+            inner.emit(AgentEvent::TaskChanged { task: Box::new(summary) });
         }
     }
 
@@ -771,7 +772,7 @@ impl Run<'_> {
             tracing::error!("failed to persist task status: {e}");
         }
         if let Ok(summary) = self.inner.summary(&self.id) {
-            self.inner.emit(AgentEvent::TaskChanged { task: summary });
+            self.inner.emit(AgentEvent::TaskChanged { task: Box::new(summary) });
         }
     }
 
@@ -982,9 +983,16 @@ impl Run<'_> {
             });
             let output = match self.execute_one(tool_use_id, name, input, invalid, &mut budget_hit).await {
                 Ok(output) => output,
-                Err(interrupt) => {
+                Err((interrupt, partial)) => {
                     let stopped = ToolOutput::error("Not executed: the task stopped.");
-                    for (id, n, i) in &calls[index..] {
+                    let mut rest = &calls[index..];
+                    if let Some(output) = partial {
+                        // The tool had started; record what it reported.
+                        let status = if output.is_error { ToolCallStatus::Failed } else { ToolCallStatus::Succeeded };
+                        self.record_call(tool_use_id, turn, name, input, status, Some(&output));
+                        rest = &calls[index + 1..];
+                    }
+                    for (id, n, i) in rest {
                         self.record_call(id, turn, n, i, ToolCallStatus::NotRun, Some(&stopped));
                     }
                     self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
@@ -1021,7 +1029,7 @@ impl Run<'_> {
         input: &Value,
         invalid: &HashMap<String, String>,
         budget_hit: &mut Option<TaskStatus>,
-    ) -> Result<ToolOutput, Interrupt> {
+    ) -> Result<ToolOutput, (Interrupt, Option<ToolOutput>)> {
         if let Some(raw) = invalid.get(tool_use_id) {
             return Ok(ToolOutput::error_with(
                 "The tool input was not valid JSON, so the tool was not run. Send the call again with valid input.",
@@ -1064,10 +1072,13 @@ impl Run<'_> {
                     ApprovalOutcome::Declined => {
                         return Ok(ToolOutput::error("The user declined this action. Do not retry it unchanged."));
                     }
-                    ApprovalOutcome::Canceled => return Err(Interrupt::Canceled),
+                    ApprovalOutcome::Canceled => return Err((Interrupt::Canceled, None)),
                 }
             }
         };
+        if self.cancel.is_cancelled() {
+            return Err((Interrupt::Canceled, None));
+        }
         if call.is_process() {
             self.usage.commands += 1;
         }
@@ -1082,11 +1093,20 @@ impl Run<'_> {
             services: inner.services.as_ref(),
             store: &inner.store,
         };
-        tokio::select! {
-            output = exec::run(call, &env, &mut self.seen, tool_use_id, policy, cancel.clone()) => Ok(output),
-            _ = self.cancel.cancelled() => { cancel.cancel(); Err(Interrupt::Canceled) }
-            _ = tokio::time::sleep(wall) => { cancel.cancel(); Err(Interrupt::WallTime) }
-        }
+        // A tool that is still running when the task is canceled (or the time
+        // budget ends) has its own token canceled and gets a short grace period
+        // to stop its process and report; its outcome is recorded as it is.
+        let tool = exec::run(call, &env, &mut self.seen, tool_use_id, policy, cancel.clone());
+        tokio::pin!(tool);
+        let interrupt = tokio::select! {
+            biased;
+            output = &mut tool => return Ok(output),
+            _ = self.cancel.cancelled() => Interrupt::Canceled,
+            _ = tokio::time::sleep(wall) => Interrupt::WallTime,
+        };
+        cancel.cancel();
+        let output = tokio::time::timeout(Duration::from_secs(5), &mut tool).await.ok();
+        Err((interrupt, output))
     }
 
     fn env(&self) -> ToolEnv<'_> {

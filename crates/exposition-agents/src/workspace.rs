@@ -322,7 +322,7 @@ pub fn decode_text(bytes: &[u8]) -> Option<LoadedText> {
 }
 
 fn decode_utf16(bytes: &[u8], read: fn([u8; 2]) -> u16) -> Option<String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     let units = bytes.chunks_exact(2).map(|pair| read([pair[0], pair[1]]));

@@ -460,7 +460,7 @@ pub struct TaskDetail {
 pub enum AgentEvent {
     /// Status, usage, or review counters changed.
     TaskChanged {
-        task: TaskSummary,
+        task: Box<TaskSummary>,
     },
     /// Persisted transcript changed; re-read the task detail.
     TranscriptChanged {
