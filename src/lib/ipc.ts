@@ -5,6 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { AppInfo } from "../bindings/AppInfo";
+import type { AttachArtifactRequest } from "../bindings/AttachArtifactRequest";
+import type { AttachArtifactResult } from "../bindings/AttachArtifactResult";
 import type { CommandError } from "../bindings/CommandError";
 import type { DocumentChanged } from "../bindings/DocumentChanged";
 import type { DocumentEvent } from "../bindings/DocumentEvent";
@@ -12,15 +14,24 @@ import type { DocumentId } from "../bindings/DocumentId";
 import type { DocumentInfo } from "../bindings/DocumentInfo";
 import type { DocumentState } from "../bindings/DocumentState";
 import type { EditOrigin } from "../bindings/EditOrigin";
+import type { EnvironmentReport } from "../bindings/EnvironmentReport";
+import type { ExecuteRequest } from "../bindings/ExecuteRequest";
 import type { JobEvent } from "../bindings/JobEvent";
 import type { JobId } from "../bindings/JobId";
 import type { JobSummary } from "../bindings/JobSummary";
 import type { OutputPage } from "../bindings/OutputPage";
+import type { ResearchEvent } from "../bindings/ResearchEvent";
+import type { RunManifest } from "../bindings/RunManifest";
+import type { RunOutputPage } from "../bindings/RunOutputPage";
+import type { RunSummary } from "../bindings/RunSummary";
+import type { SessionInfo } from "../bindings/SessionInfo";
+import type { StartSessionRequest } from "../bindings/StartSessionRequest";
 import type { ToolchainInfo } from "../bindings/ToolchainInfo";
 import type { TransactionError } from "../bindings/TransactionError";
 import type { TransactionOutcome } from "../bindings/TransactionOutcome";
 import type { TransactionRequest } from "../bindings/TransactionRequest";
 import type { TrustStatus } from "../bindings/TrustStatus";
+import type { WorkspaceStatus } from "../bindings/WorkspaceStatus";
 
 export const commands = {
   appInfo: () => invoke<AppInfo>("app_info"),
@@ -45,6 +56,30 @@ export const commands = {
   /** Only call from the explicit trust dialog (`requestWorkspaceTrust`). */
   trustGrant: (root: string) => invoke<TrustStatus>("trust_grant", { root }),
   trustRevoke: (root: string) => invoke<TrustStatus>("trust_revoke", { root }),
+
+  // Research (M4). Trust is never asserted here: it comes from the execution service.
+  /** TEMPORARY until the workspace service owns the open project root. */
+  researchWorkspaceSet: (root: string) => invoke<WorkspaceStatus>("research_workspace_set", { root }),
+  researchWorkspace: () => invoke<WorkspaceStatus | null>("research_workspace"),
+  researchEnvironments: (refresh: boolean, extraInterpreters?: string[]) =>
+    invoke<EnvironmentReport>("research_environments", { refresh, extraInterpreters: extraInterpreters ?? null }),
+  researchSessionStart: (request: StartSessionRequest) => invoke<SessionInfo>("research_session_start", { request }),
+  researchSessions: () => invoke<SessionInfo[]>("research_sessions"),
+  researchSessionInterrupt: (sessionId: string) => invoke<SessionInfo>("research_session_interrupt", { sessionId }),
+  researchSessionRestart: (sessionId: string) => invoke<SessionInfo>("research_session_restart", { sessionId }),
+  researchSessionShutdown: (sessionId: string) => invoke<void>("research_session_shutdown", { sessionId }),
+  researchExecute: (request: ExecuteRequest) => invoke<RunSummary>("research_execute", { request }),
+  researchRunCancel: (runId: string) => invoke<void>("research_run_cancel", { runId }),
+  researchRuns: () => invoke<RunSummary[]>("research_runs"),
+  researchRun: (runId: string) => invoke<RunManifest>("research_run", { runId }),
+  /** Retained output entries after sequence number `after` (exclusive). */
+  researchRunOutput: (runId: string, after: number | null, limit?: number) =>
+    invoke<RunOutputPage>("research_run_output", { runId, after, limit: limit ?? null }),
+  /** Raw artifact bytes, fetched on demand for display (never pushed in events). */
+  researchArtifact: (runId: string, artifactId: string) =>
+    invoke<ArrayBuffer>("research_artifact", { runId, artifactId }),
+  /** Format-owned insert/update of a figure or table in an open document. */
+  artifactAttach: (request: AttachArtifactRequest) => invoke<AttachArtifactResult>("artifact_attach", { request }),
 };
 
 export const events = {
@@ -58,6 +93,11 @@ export const events = {
     listen<JobEvent>("jobs:event", (e) => handler(e.payload)),
   /** The frontend fell behind; re-read the job list. */
   jobsResync: (handler: () => void): Promise<UnlistenFn> => listen("jobs:resync", () => handler()),
+  /** Research sessions, runs, and bounded run output, in order. */
+  research: (handler: (event: ResearchEvent) => void): Promise<UnlistenFn> =>
+    listen<ResearchEvent>("research:event", (e) => handler(e.payload)),
+  /** The frontend fell behind; re-read sessions and runs. */
+  researchResync: (handler: () => void): Promise<UnlistenFn> => listen("research:resync", () => handler()),
 };
 
 export function isCommandError(value: unknown): value is CommandError {
