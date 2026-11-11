@@ -73,6 +73,50 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
     state = await documentState(page, mainId);
     assert.equal(state.info.revision > state.info.savedRevision, true, "undo is a new revision");
 
+    // --- edits from another origin reach Monaco without echo -------------------
+    const before = await documentState(page, mainId);
+    await invoke(page, "document_apply", {
+      request: {
+        id: "agent-e2e-1",
+        origin: { kind: "agent", taskId: "e2e" },
+        edits: [{ document: mainId, baseRevision: before.info.revision, patches: [{ range: { start: 0, end: 0 }, text: "// agent\n" }] }],
+        undo: { kind: "newGroup" },
+        conflict: "reject",
+        label: "agent edit",
+        selection: null,
+      },
+    });
+    const viewText = async () =>
+      (await editorLocator(page, "main.typ").locator(".view-lines").innerText()).replaceAll(" ", " ");
+    await waitFor(async () => (await viewText()).startsWith("// agent"), { message: "agent edit shown in Monaco" });
+    await new Promise((r) => setTimeout(r, 300));
+    const afterAgent = await documentState(page, mainId);
+    assert.equal(afterAgent.info.revision, before.info.revision + 1, "no echo transaction from the view");
+    // Typing after a remote edit lands where the caret is (end of document).
+    await page.keyboard.type("!");
+    await waitForText(page, mainId, `// agent\n${before.text}!`);
+    // Shared undo: the typed char, then the agent edit.
+    await page.keyboard.press("Control+Z");
+    await waitForText(page, mainId, `// agent\n${before.text}`);
+    await page.keyboard.press("Control+Z");
+    await waitForText(page, mainId, before.text, "undo reverts the agent edit through the shared history");
+
+    // --- IME composition commits as one undo group -------------------------------
+    const cdp = await page.context().newCDPSession(page);
+    const composeBase = (await documentState(page, mainId)).text;
+    await page.keyboard.type(" ");
+    await waitForText(page, mainId, `${composeBase} `);
+    await cdp.send("Input.imeSetComposition", { text: "k", selectionStart: 1, selectionEnd: 1 });
+    await cdp.send("Input.imeSetComposition", { text: "かん", selectionStart: 2, selectionEnd: 2 });
+    await cdp.send("Input.imeSetComposition", { text: "漢字", selectionStart: 2, selectionEnd: 2 });
+    await cdp.send("Input.insertText", { text: "漢字" });
+    await waitForText(page, mainId, `${composeBase} 漢字`, "composed text committed");
+    await page.keyboard.press("Control+Z");
+    await waitForText(page, mainId, `${composeBase} `, "one undo removes the whole composition");
+    await page.keyboard.press("Control+Z");
+    await waitForText(page, mainId, composeBase);
+    await cdp.detach();
+
     // --- close (clean, after saving) and reopen ----------------------------
     await page.keyboard.press("Control+S");
     await waitFor(async () => (await tabDirty(page, "main.typ")) === "false", { message: "saved" });

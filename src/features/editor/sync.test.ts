@@ -392,15 +392,23 @@ describe("UndoGrouper", () => {
     expect(enter).not.toEqual(afterPaste);
   });
 
-  it("keeps an IME composition in one group", () => {
+  it("keeps an IME composition (updates and final commit) in its own group", () => {
     const g = new UndoGrouper();
+    const typed = g.classify([ins(0, " ")], 0);
     g.setComposing(true);
-    const k1 = g.classify([ins(0, "k")], 0);
-    const k2 = g.classify([rep(0, 1, "か")], 50);
-    const k3 = g.classify([rep(0, 1, "漢字")], 3000);
+    const k1 = g.classify([ins(1, "k")], 10);
+    const k2 = g.classify([rep(1, 2, "かん")], 50);
+    const k3 = g.classify([rep(1, 3, "漢字")], 3000);
+    g.reset(); // cursor events during composition do not split it
     g.setComposing(false);
-    expect(k1).toEqual(k2);
-    expect(k2).toEqual(k3);
+    const commit = g.classify([rep(1, 3, "漢字")], 3010);
+    expect(k1.kind).toBe("merge");
+    expect(k1).not.toEqual(typed);
+    expect(k2).toEqual(k1);
+    expect(k3).toEqual(k1);
+    expect(commit).toEqual(k1);
+    // Typing after the composition continues normally.
+    expect(g.classify([ins(3, "x")], 3020).kind).toBe("merge");
   });
 });
 

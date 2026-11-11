@@ -8,7 +8,7 @@
 // - Tracks dirty state for tabs, disk conflicts, save errors, and close guards.
 // - Closes the service document when its editor tab closes.
 import { editors, useEditors } from "../../app/editors";
-import { notify } from "../../app/notifications";
+import { dismiss, notify } from "../../app/notifications";
 import type { DiskConflict } from "../../bindings/DiskConflict";
 import type { DocumentChanged } from "../../bindings/DocumentChanged";
 import type { DocumentEvent } from "../../bindings/DocumentEvent";
@@ -155,6 +155,7 @@ export class DocumentHandle {
 
   setSaveError(message: string | null) {
     this.saveError = message;
+    if (message === null) dismiss(`save-${this.id}`);
     this.changed();
   }
 
@@ -341,6 +342,7 @@ function start() {
       }
       case "conflictResolved":
         handles.get(event.document)?.setConflict(null);
+        dismiss(`conflict-${event.document}`);
         break;
       case "documentReloaded": {
         const handle = handles.get(event.document);
