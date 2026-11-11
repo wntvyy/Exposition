@@ -1,0 +1,21 @@
+% LuaLaTeX-only variant: OpenType text and math fonts (fontspec, unicode-math).
+\documentclass[11pt]{article}
+\usepackage{amsmath}
+\usepackage{fontspec}
+\usepackage{unicode-math}
+\setmainfont{Latin Modern Roman}
+\setmathfont{Latin Modern Math}
+
+\begin{document}
+
+\section{Unicode input}
+
+Direct Unicode input: café, naïve, and Grüße; ligatures in official
+workflows; ``quotes'' and dashes -- like --- these.
+Inline math $a^2 + b_i \leq \alpha$ and directly typed $α + β ≤ γ$.
+\begin{equation}
+  \int_0^1 f(x)\,dx = \sum_{k=1}^{n} \frac{1}{k^2} \neq 0
+\end{equation}
+Bold $\mathbf{v}$ and blackboard $\mathbb{R}$ end the text.
+
+\end{document}

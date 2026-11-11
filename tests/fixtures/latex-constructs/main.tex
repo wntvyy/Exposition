@@ -1,0 +1,32 @@
+\documentclass{article}
+\usepackage{amsmath,amssymb}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\project}{Exposition}
+
+\begin{document}
+
+\section{Constructs}
+
+Plain prose with \textsc{Small Caps}, \texttt{typewriter text}, and a \verb|verb{x}| item.
+A user macro expands to \project{} here, and a tie~joins words.
+
+\begin{itemize}
+  \item First item with text.
+  \item[--] Custom label item.
+\end{itemize}
+
+\begin{tabular}{lr}
+  Name & Value \\
+  alpha & 1.5 \\
+\end{tabular}
+
+Fractions and roots: $\frac{a}{b} + \sqrt{x^2+1} \in \R$ and
+$\left( \sum_{k=0}^{\infty} \frac{1}{k!} \right) = e$.
+\begin{align}
+  f(x) &= \int_0^1 g(t)\,dt \\
+  \nabla \cdot \mathbf{v} &= \partial_t \rho \neq 0
+\end{align}
+Text inside math: $x \text{ if } y > 0$ and $\operatorname{tr}(A) = \sin\theta$.
+Quotes ``nested `single' inside'' and an ellipsis\ldots{} at the end.
+
+\end{document}

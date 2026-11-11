@@ -12,6 +12,7 @@ publish = false
 exposition-core = { path = "crates/exposition-core" }
 exposition-workspace = { path = "crates/exposition-workspace" }
 exposition-execution = { path = "crates/exposition-execution" }
+exposition-tex = { path = "crates/exposition-tex" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,6 +33,10 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_JobObjects",
   "Win32_System_Threading",
 ] }
+# PDF rendering and glyph-level interpretation (TeX page mapping).
+hayro = "0.9"
+flate2 = "1"
+unicode-normalization = "0.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
