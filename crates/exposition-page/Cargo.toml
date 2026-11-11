@@ -1,0 +1,20 @@
+[package]
+name = "exposition-page"
+description = "Format-neutral exact-page editing: hit testing, caret/selection, navigation, and format-aware input to source patches."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+exposition-core.workspace = true
+exposition-workspace.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ts-rs.workspace = true
+typst-syntax.workspace = true
+unicode-segmentation.workspace = true
+
+[lints]
+workspace = true
