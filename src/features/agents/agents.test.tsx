@@ -16,9 +16,9 @@ vi.mock("../../lib/ipc", () => ({
   errorMessage: (e: unknown) => String(e),
 }));
 
-const { budgetRows, statusLabel, toolSummary } = await import("./format");
+const { budgetRows, statusLabel, toolStatusLabel, toolSummary } = await import("./format");
 const { buildScope, DEFAULT_BUDGETS } = await import("./TaskComposer");
-const { initialAgentsState, mergeDetail, reduceEvent, useAgents } = await import("./store");
+const { finishedNotification, initialAgentsState, mergeDetail, reduceEvent, useAgents } = await import("./store");
 const { TaskView } = await import("./TaskView");
 
 function summary(overrides: Partial<TaskSummary> = {}): TaskSummary {
@@ -85,15 +85,28 @@ describe("event reducer", () => {
     expect(next.patch.tasks?.map((t) => t.id)).toEqual(["task-2", "task-1"]);
   });
 
-  it("drops the streamed draft once the persisted transcript arrives", () => {
-    const state = {
+  it("notifies only when a running task finishes", () => {
+    const running = summary();
+    expect(finishedNotification(undefined, summary({ status: { kind: "completed" } }))).toBeUndefined();
+    expect(finishedNotification(running, summary({ status: { kind: "completed" } }))?.tone).toBe("success");
+    expect(finishedNotification(running, summary({ status: { kind: "canceled" } }))).toBeUndefined();
+    const failed = finishedNotification(running, summary({ status: { kind: "failed", message: "network error" } }));
+    expect(failed).toMatchObject({ tone: "danger", body: "network error" });
+    expect(finishedNotification(summary({ status: { kind: "completed" } }), summary({ status: { kind: "completed" } }))).toBeUndefined();
+  });
+
+  it("drops the streamed draft only once it has been persisted", () => {
+    const streaming = {
       ...initialAgentsState,
       drafts: { "task-1": { turn: 1, text: "partial", thinking: "", activeTool: null } },
     };
-    const finished = mergeDetail(state, { summary: summary({ status: { kind: "completed" } }), transcript: [], approvals: [] });
+    const detail = { summary: summary(), transcript: [], approvals: [] };
+    // A detail read while the turn is still streaming keeps the draft.
+    expect(mergeDetail(streaming, detail).drafts?.["task-1"]?.text).toBe("partial");
+    const stored = { ...streaming, ...reduceEvent(streaming, { kind: "transcriptChanged", taskId: "task-1" }).patch };
+    expect(mergeDetail(stored, detail).drafts?.["task-1"]?.text).toBe("");
+    const finished = mergeDetail(streaming, { ...detail, summary: summary({ status: { kind: "completed" } }) });
     expect(finished.drafts?.["task-1"]).toBeUndefined();
-    const running = mergeDetail(state, { summary: summary(), transcript: [], approvals: [] });
-    expect(running.drafts?.["task-1"]?.text).toBe("");
   });
 });
 
@@ -102,7 +115,11 @@ describe("formatting", () => {
     expect(statusLabel({ kind: "budgetExceeded", budget: "toolCalls", detail: "" }).label).toBe(
       "Stopped: tool-call budget",
     );
-    expect(statusLabel({ kind: "refused", category: "cyber", explanation: null }).tone).toBe("danger");
+    expect(statusLabel({ kind: "refused", category: "cyber", explanation: null }).status).toBe("failed");
+    expect(statusLabel({ kind: "completed" })).toEqual({ status: "succeeded", label: "Task completed" });
+    expect(toolStatusLabel("failed", '{"error":"Lean checking is not available in this build of Exposition"}').status).toBe(
+      "unavailable",
+    );
     const rows = budgetRows(summary());
     expect(rows.find((r) => r.key === "input")?.used).toBe(5000);
     expect(rows.find((r) => r.key === "time")?.text).toBe("1:05 of 30:00");
@@ -158,7 +175,7 @@ describe("task view", () => {
     expect(screen.getByText("Reading main.typ.")).toBeTruthy();
     expect(screen.getByText("Streaming now")).toBeTruthy();
     expect(screen.getByText("Needs approval")).toBeTruthy();
-    expect(screen.getByLabelText("Budget usage")).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "Tool calls" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Approve" }));

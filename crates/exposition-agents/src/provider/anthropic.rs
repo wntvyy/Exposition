@@ -40,6 +40,13 @@ pub const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 /// Per-request output ceiling for streamed agent turns.
 pub const MAX_TOKENS_PER_TURN: u32 = 64_000;
 
+/// Whether `model` accepts the server-side `fallbacks` parameter (Opus 5 and
+/// later Opus, Fable/Mythos 5.x, Sonnet 5.5). Other models (e.g. Haiku 5.5)
+/// reject it, so it is only sent where it is supported.
+pub fn supports_server_fallbacks(model: &str) -> bool {
+    ["claude-opus-5", "claude-fable-5", "claude-mythos-5", "claude-sonnet-5-5"].iter().any(|p| model.starts_with(p))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     pub max_retries: u32,
@@ -113,7 +120,7 @@ impl AnthropicProvider {
             .collect();
         let messages: Vec<Value> =
             request.messages.iter().map(|m| json!({"role": m.role, "content": m.content})).collect();
-        json!({
+        let mut body = json!({
             "model": self.model,
             "max_tokens": request.max_tokens.min(MAX_TOKENS_PER_TURN),
             "stream": true,
@@ -122,10 +129,13 @@ impl AnthropicProvider {
             "tool_choice": {"type": "auto"},
             "thinking": {"type": "adaptive", "display": "summarized"},
             "output_config": {"effort": self.effort.as_str()},
-            "fallbacks": "default",
             "cache_control": {"type": "ephemeral"},
             "messages": messages,
-        })
+        });
+        if supports_server_fallbacks(&self.model) {
+            body["fallbacks"] = json!("default");
+        }
+        body
     }
 
     fn redact(&self, text: &str) -> String {
@@ -151,12 +161,15 @@ impl AnthropicProvider {
         sink: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<ProviderResponse, (ProviderError, bool)> {
-        let send = self
+        let mut builder = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
             .header("x-api-key", self.api_key.expose())
-            .header("anthropic-version", API_VERSION)
-            .header("anthropic-beta", FALLBACK_BETA)
+            .header("anthropic-version", API_VERSION);
+        if supports_server_fallbacks(&self.model) {
+            builder = builder.header("anthropic-beta", FALLBACK_BETA);
+        }
+        let send = builder
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .body(body.to_vec())
@@ -346,6 +359,10 @@ mod tests {
         assert_eq!(body["tools"][0]["strict"], true);
         assert_eq!(body["tools"][0]["eager_input_streaming"], true);
         assert!(body.get("temperature").is_none());
+        let haiku =
+            AnthropicProvider::new(Secret::new(KEY.to_owned()), "claude-haiku-5-5".into(), Effort::Low).unwrap();
+        assert!(haiku.request_body(&request()).get("fallbacks").is_none());
+        assert!(supports_server_fallbacks("claude-opus-5-5") && supports_server_fallbacks("claude-sonnet-5-5"));
         assert!(!body.to_string().contains(KEY));
         assert!(!format!("{provider:?}").contains(KEY));
     }

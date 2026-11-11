@@ -7,8 +7,13 @@ import type { PermissionProfile } from "../../bindings/PermissionProfile";
 import type { TaskStatus } from "../../bindings/TaskStatus";
 import type { TaskSummary } from "../../bindings/TaskSummary";
 import type { ToolCallStatus } from "../../bindings/ToolCallStatus";
+import type { Status } from "../../ui/components";
 
-export type StatusTone = "neutral" | "progress" | "success" | "warning" | "danger";
+/** A `StatusPill` status plus a specific label. */
+export interface PillState {
+  status: Status;
+  label: string;
+}
 
 export function isActive(status: TaskStatus): boolean {
   return status.kind === "queued" || status.kind === "running" || status.kind === "awaitingApproval";
@@ -23,41 +28,45 @@ const BUDGET_NAMES: Record<BudgetKind, string> = {
   commands: "command",
 };
 
-export function statusLabel(status: TaskStatus): { label: string; tone: StatusTone } {
+/** Task status in the shared status vocabulary, with a specific label. */
+export function statusLabel(status: TaskStatus): PillState {
   switch (status.kind) {
     case "queued":
-      return { label: "Queued", tone: "progress" };
+      return { status: "running", label: "Queued" };
     case "running":
-      return { label: "Running", tone: "progress" };
+      return { status: "running", label: "Agent working" };
     case "awaitingApproval":
-      return { label: "Needs approval", tone: "warning" };
+      return { status: "warning", label: "Needs approval" };
     case "completed":
-      return { label: "Completed", tone: "success" };
+      return { status: "succeeded", label: "Task completed" };
     case "canceled":
-      return { label: "Canceled", tone: "neutral" };
+      return { status: "canceled", label: "Canceled" };
     case "budgetExceeded":
-      return { label: `Stopped: ${BUDGET_NAMES[status.budget]} budget`, tone: "warning" };
+      return { status: "warning", label: `Stopped: ${BUDGET_NAMES[status.budget]} budget` };
     case "refused":
-      return { label: "Declined by provider", tone: "danger" };
+      return { status: "failed", label: "Declined by provider" };
     case "failed":
-      return { label: "Failed", tone: "danger" };
+      return { status: "failed", label: "Task failed" };
     case "interrupted":
-      return { label: "Interrupted", tone: "warning" };
+      return { status: "canceled", label: "Interrupted" };
   }
 }
 
-export function toolStatusLabel(status: ToolCallStatus): string {
+/** Tool call status; unavailable services are shown as unavailable, not failed. */
+export function toolStatusLabel(status: ToolCallStatus, result: string | null = null): PillState {
   switch (status) {
     case "running":
-      return "running";
+      return { status: "running", label: "Running" };
     case "awaitingApproval":
-      return "waiting for approval";
+      return { status: "warning", label: "Waiting for approval" };
     case "succeeded":
-      return "done";
+      return { status: "succeeded", label: "Done" };
     case "failed":
-      return "failed";
+      return result?.includes("not available in this build")
+        ? { status: "unavailable", label: "Unavailable" }
+        : { status: "failed", label: "Failed" };
     case "notRun":
-      return "not run";
+      return { status: "canceled", label: "Not run" };
   }
 }
 

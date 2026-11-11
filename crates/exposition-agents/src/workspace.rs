@@ -429,6 +429,32 @@ mod tests {
         assert!(matches!(LocalProjectFiles::open(root), Err(FileError::InvalidRoot(_))));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn refuses_junction_escapes() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(outside.path())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !made {
+            eprintln!("skipped: could not create a junction");
+            return;
+        }
+        let files = LocalProjectFiles::open(dir.path()).unwrap();
+        assert!(matches!(files.read_text(&p("link/secret.txt")), Err(FileError::OutsideRoot(_))));
+        assert!(matches!(files.create_text(&p("link/new.txt"), "x"), Err(FileError::OutsideRoot(_))));
+        assert!(!outside.path().join("new.txt").exists());
+        let listed = files.list(None, true, 100).unwrap();
+        assert!(listed.entries.iter().all(|e| !e.path.starts_with("link")), "{:?}", listed.entries);
+    }
+
     #[cfg(unix)]
     #[test]
     fn refuses_symlink_escapes() {

@@ -1,4 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
+import { FolderOpen, Play } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
 
 import type { Budgets } from "../../bindings/Budgets";
@@ -8,6 +9,7 @@ import type { PermissionProfile } from "../../bindings/PermissionProfile";
 import type { TaskScope } from "../../bindings/TaskScope";
 import { editors } from "../../app/editors";
 import { commands } from "../../lib/ipc";
+import { Banner, Button, Section, Select, TextField } from "../../ui/components";
 import { CONSENT_LABELS, EXECUTION_LABELS, PERMISSION_LABELS } from "./format";
 import { agents, useAgents } from "./store";
 
@@ -51,25 +53,54 @@ export function buildScope(kind: ScopeKind, files: string, document: string): Ta
   return paths.length ? { kind: "files", paths } : null;
 }
 
-function NumberField(props: { label: string; value: number; min: number; onChange: (v: number) => void }) {
+/** Multi-line text input with a visible label (native textarea: IME safe). */
+export function TextArea(props: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  rows?: number;
+  placeholder?: string;
+  code?: boolean;
+  testId?: string;
+}) {
   const id = useId();
   return (
-    <div className="agents-field agents-field-inline">
-      <label htmlFor={id}>{props.label}</label>
-      <input
+    <div className="ui-field">
+      <label className="ui-field__label" htmlFor={id}>
+        {props.label}
+      </label>
+      <textarea
         id={id}
-        type="number"
-        min={props.min}
+        className="ui-input agents-textarea"
+        rows={props.rows ?? 3}
         value={props.value}
-        onChange={(e) => props.onChange(Math.max(props.min, Number(e.target.value) || props.min))}
+        placeholder={props.placeholder}
+        spellCheck={!props.code}
+        data-code={props.code || undefined}
+        onChange={(e) => props.onChange(e.target.value)}
+        data-testid={props.testId}
       />
     </div>
   );
 }
 
+function NumberField(props: { label: string; value: number; min: number; onChange: (v: number) => void }) {
+  return (
+    <TextField
+      label={props.label}
+      type="number"
+      inputMode="numeric"
+      value={String(props.value)}
+      onChange={(raw) => props.onChange(Math.max(props.min, Number(raw) || props.min))}
+    />
+  );
+}
+
+const option = <K extends string>(labels: Record<K, string>) =>
+  (Object.keys(labels) as K[]).map((id) => ({ id, label: labels[id] }));
+
 export function TaskComposer() {
   const status = useAgents((s) => s.status);
-  const ids = { prompt: useId(), folder: useId(), scope: useId(), files: useId(), doc: useId(), perm: useId(), exec: useId(), consent: useId() };
   const [prompt, setPrompt] = useState("");
   const [folder, setFolder] = useState(rememberedFolder);
   const [scopeKind, setScopeKind] = useState<ScopeKind>("workspace");
@@ -90,20 +121,12 @@ export function TaskComposer() {
     if (typeof picked === "string") setFolder(picked);
   }
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
+  async function submit(event?: FormEvent) {
+    event?.preventDefault();
     if (!canStart || !scope) return;
     setBusy(true);
     const task = await agents.run(() =>
-      commands.agentsTaskCreate({
-        prompt,
-        workspaceRoot: folder.trim(),
-        scope,
-        permission,
-        execution,
-        consent,
-        budgets,
-      }),
+      commands.agentsTaskCreate({ prompt, workspaceRoot: folder.trim(), scope, permission, execution, consent, budgets }),
     );
     setBusy(false);
     if (task) {
@@ -114,97 +137,60 @@ export function TaskComposer() {
   }
 
   return (
-    <form className="agents-composer" onSubmit={submit} aria-label="New agent task" data-testid="agents-composer">
-      <div className="agents-field">
-        <label htmlFor={ids.prompt}>Request</label>
-        <textarea
-          id={ids.prompt}
-          rows={5}
-          value={prompt}
-          placeholder="Describe what the agent should do in this project."
-          onChange={(e) => setPrompt(e.target.value)}
-          data-testid="agents-prompt"
-        />
-      </div>
-      <div className="agents-field">
-        <label htmlFor={ids.folder}>Project folder</label>
-        <div className="agents-row">
-          <input
-            id={ids.folder}
-            type="text"
-            value={folder}
-            spellCheck={false}
-            onChange={(e) => setFolder(e.target.value)}
-            data-testid="agents-folder"
-          />
-          <button type="button" className="agents-button" onClick={() => void browse()}>
-            Browse…
-          </button>
-        </div>
-      </div>
-      <div className="agents-field">
-        <label htmlFor={ids.scope}>Scope</label>
-        <select
-          id={ids.scope}
-          value={scopeKind}
-          onChange={(e) => setScopeKind(e.target.value as ScopeKind)}
-          data-testid="agents-scope"
+    <form className="agents-stack" onSubmit={submit} aria-label="New agent task" data-testid="agents-composer">
+      {!providerReady && status && (
+        <Banner
+          tone="warning"
+          title="The model provider is not configured"
+          actions={
+            <Button size="sm" onPress={() => agents.openSettings(true)}>
+              Provider settings
+            </Button>
+          }
         >
-          <option value="workspace">Whole project</option>
-          <option value="document">One document</option>
-          <option value="files">Selected files and folders</option>
-        </select>
+          Add an Anthropic API key before starting a task. It is stored only in {status.credentialStore}.
+        </Banner>
+      )}
+      <TextArea
+        label="Request"
+        rows={5}
+        value={prompt}
+        placeholder="Describe what the agent should do in this project."
+        onChange={setPrompt}
+        testId="agents-prompt"
+      />
+      <div className="agents-row">
+        <TextField label="Project folder" code value={folder} onChange={setFolder} className="agents-grow" data-testid="agents-folder" />
+        <Button icon={FolderOpen} onPress={() => void browse()}>
+          Browse…
+        </Button>
       </div>
+      <Select
+        label="Scope"
+        value={scopeKind}
+        onChange={setScopeKind}
+        options={[
+          { id: "workspace", label: "Whole project" },
+          { id: "document", label: "One document" },
+          { id: "files", label: "Selected files and folders" },
+        ]}
+        data-testid="agents-scope"
+      />
       {scopeKind === "document" && (
-        <div className="agents-field">
-          <label htmlFor={ids.doc}>Document (relative to the project folder)</label>
-          <input id={ids.doc} type="text" value={document} spellCheck={false} onChange={(e) => setDocument(e.target.value)} />
-        </div>
+        <TextField label="Document (relative to the project folder)" code value={document} onChange={setDocument} />
       )}
-      {scopeKind === "files" && (
-        <div className="agents-field">
-          <label htmlFor={ids.files}>Files and folders, one per line</label>
-          <textarea id={ids.files} rows={3} value={files} spellCheck={false} onChange={(e) => setFiles(e.target.value)} />
-        </div>
-      )}
-      <div className="agents-field">
-        <label htmlFor={ids.perm}>Document changes</label>
-        <select
-          id={ids.perm}
-          value={permission}
-          onChange={(e) => setPermission(e.target.value as PermissionProfile)}
-          data-testid="agents-permission"
-        >
-          {(Object.keys(PERMISSION_LABELS) as PermissionProfile[]).map((p) => (
-            <option key={p} value={p}>
-              {PERMISSION_LABELS[p]}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="agents-field">
-        <label htmlFor={ids.exec}>Commands and code</label>
-        <select id={ids.exec} value={execution} onChange={(e) => setExecution(e.target.value as ExecutionMode)}>
-          {(Object.keys(EXECUTION_LABELS) as ExecutionMode[]).map((m) => (
-            <option key={m} value={m}>
-              {EXECUTION_LABELS[m]}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="agents-field">
-        <label htmlFor={ids.consent}>Content sent to the model provider</label>
-        <select id={ids.consent} value={consent} onChange={(e) => setConsent(e.target.value as ContextConsent)}>
-          {(Object.keys(CONSENT_LABELS) as ContextConsent[]).map((c) => (
-            <option key={c} value={c}>
-              {CONSENT_LABELS[c]}
-            </option>
-          ))}
-        </select>
-      </div>
-      <details className="agents-budgets">
-        <summary>Budgets</summary>
-        <div className="agents-budget-grid">
+      {scopeKind === "files" && <TextArea label="Files and folders, one per line" code value={files} onChange={setFiles} />}
+      <Select
+        label="Document changes"
+        value={permission}
+        onChange={setPermission}
+        options={option(PERMISSION_LABELS)}
+        data-testid="agents-permission"
+      />
+      <Select label="Commands and code" value={execution} onChange={setExecution} options={option(EXECUTION_LABELS)} />
+      <Select label="Content sent to the model provider" value={consent} onChange={setConsent} options={option(CONSENT_LABELS)} />
+      <Section title="Budgets" collapsible defaultExpanded={false}>
+        <div className="agents-grid">
           <NumberField label="Model turns" min={1} value={budgets.maxTurns} onChange={(v) => setBudgets({ ...budgets, maxTurns: v })} />
           <NumberField label="Tool calls" min={0} value={budgets.maxToolCalls} onChange={(v) => setBudgets({ ...budgets, maxToolCalls: v })} />
           <NumberField label="Commands" min={0} value={budgets.maxCommands} onChange={(v) => setBudgets({ ...budgets, maxCommands: v })} />
@@ -221,23 +207,21 @@ export function TaskComposer() {
             onChange={(v) => setBudgets({ ...budgets, maxWallMs: v * 60000 })}
           />
         </div>
-      </details>
-      {!providerReady && (
-        <p className="agents-hint">
-          Add an API key in{" "}
-          <button type="button" className="agents-link" onClick={() => agents.openSettings(true)}>
-            provider settings
-          </button>{" "}
-          before starting a task.
-        </p>
-      )}
-      <div className="agents-actions">
-        <button type="submit" className="agents-button agents-button-primary" disabled={!canStart} data-testid="agents-start">
-          {busy ? "Starting…" : "Start task"}
-        </button>
-        <button type="button" className="agents-button" onClick={() => agents.show("tasks")}>
+      </Section>
+      <div className="agents-row">
+        <Button variant="ghost" onPress={() => agents.show("tasks")}>
           Cancel
-        </button>
+        </Button>
+        <Button
+          variant="primary"
+          icon={Play}
+          isDisabled={!canStart}
+          isPending={busy}
+          onPress={() => void submit()}
+          data-testid="agents-start"
+        >
+          Start task
+        </Button>
       </div>
     </form>
   );

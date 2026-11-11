@@ -7,7 +7,10 @@ import type { ProviderStatus } from "../../bindings/ProviderStatus";
 import type { TaskDetail } from "../../bindings/TaskDetail";
 import type { TaskId } from "../../bindings/TaskId";
 import type { TaskSummary } from "../../bindings/TaskSummary";
+import type { Notification } from "../../app/notifications";
+import { notify } from "../../app/notifications";
 import { commands, errorMessage, events } from "../../lib/ipc";
+import { isActive, statusLabel } from "./format";
 
 export type PanelView = "tasks" | "compose" | "task" | "review";
 
@@ -18,6 +21,8 @@ export interface StreamDraft {
   thinking: string;
   /** Name of the tool that is currently running, if any. */
   activeTool: string | null;
+  /** The streamed output has been persisted; drop it on the next detail read. */
+  persisted?: boolean;
 }
 
 export interface AgentsState {
@@ -57,6 +62,35 @@ export interface EventEffect {
   patch: Partial<AgentsState>;
   /** Task whose persisted detail should be re-read. */
   refetch: TaskId | null;
+  /** Announce a finished task (the user may not be looking at the panel). */
+  notification?: Omit<Notification, "id"> & { id: string };
+}
+
+/** Notification for a task that just stopped running; `undefined` otherwise. */
+export function finishedNotification(previous: TaskSummary | undefined, task: TaskSummary): EventEffect["notification"] {
+  if (!previous || !isActive(previous.status) || isActive(task.status)) return undefined;
+  const { label } = statusLabel(task.status);
+  const id = `agents-${task.id}`;
+  const review = task.pendingReview > 0 ? ` ${task.pendingReview} file${task.pendingReview === 1 ? "" : "s"} to review.` : "";
+  switch (task.status.kind) {
+    case "completed":
+      return { id, tone: "success", title: `${label}: ${task.title}`, body: review.trim() || undefined };
+    case "canceled":
+      return undefined;
+    case "budgetExceeded":
+      return { id, tone: "warning", title: `${label}: ${task.title}`, body: task.status.detail + review };
+    case "failed":
+      return { id, tone: "danger", title: `${label}: ${task.title}`, body: task.status.message };
+    case "refused":
+      return {
+        id,
+        tone: "danger",
+        title: `${label}: ${task.title}`,
+        body: task.status.explanation ?? "The model provider declined this request.",
+      };
+    default:
+      return { id, tone: "warning", title: `${label}: ${task.title}` };
+  }
 }
 
 /** Pure reducer for `agents:event` (exported for tests). */
@@ -64,12 +98,14 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
   switch (event.kind) {
     case "taskChanged": {
       const detail = state.details[event.task.id];
+      const previous = state.tasks.find((t) => t.id === event.task.id);
       return {
         patch: {
           tasks: upsertTask(state.tasks, event.task),
           ...(detail ? { details: { ...state.details, [event.task.id]: { ...detail, summary: event.task } } } : {}),
         },
         refetch: null,
+        notification: finishedNotification(previous, event.task),
       };
     }
     case "streamStarted":
@@ -105,12 +141,18 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
       const draft = state.drafts[event.taskId];
       const activeTool = event.kind === "toolCallStarted" ? event.name : null;
       return {
-        patch: draft ? { drafts: { ...state.drafts, [event.taskId]: { ...draft, activeTool } } } : {},
+        patch: draft ? { drafts: { ...state.drafts, [event.taskId]: { ...draft, activeTool, persisted: true } } } : {},
         refetch: event.taskId,
       };
     }
-    case "transcriptChanged":
-      return { patch: {}, refetch: event.taskId };
+    case "transcriptChanged": {
+      // Emitted after the streamed message is stored (never mid-stream).
+      const draft = state.drafts[event.taskId];
+      return {
+        patch: draft ? { drafts: { ...state.drafts, [event.taskId]: { ...draft, persisted: true } } } : {},
+        refetch: event.taskId,
+      };
+    }
     case "approvalRequested":
       return { patch: {}, refetch: event.approval.taskId };
     case "approvalResolved":
@@ -128,8 +170,9 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
 }
 
 /**
- * Merge a freshly read detail. The persisted transcript now contains what was
- * streamed, so the draft text is dropped (a running tool name is kept).
+ * Merge a freshly read detail. Once the streamed output has been persisted the
+ * transcript contains it, so the draft text is dropped (a running tool name is
+ * kept); a draft that is still streaming is left alone.
  */
 export function mergeDetail(state: AgentsState, detail: TaskDetail): Partial<AgentsState> {
   const id = detail.summary.id;
@@ -137,8 +180,8 @@ export function mergeDetail(state: AgentsState, detail: TaskDetail): Partial<Age
   const drafts = { ...state.drafts };
   if (draft) {
     const running = detail.summary.status.kind === "running" || detail.summary.status.kind === "awaitingApproval";
-    if (running) drafts[id] = { ...draft, text: "", thinking: "" };
-    else delete drafts[id];
+    if (!running) delete drafts[id];
+    else if (draft.persisted) drafts[id] = { ...draft, text: "", thinking: "" };
   }
   return { details: { ...state.details, [id]: detail }, drafts, tasks: upsertTask(state.tasks, detail.summary) };
 }
@@ -167,8 +210,9 @@ async function refetch(id: TaskId): Promise<void> {
 let initialized: Promise<void> | null = null;
 
 function handleEvent(event: AgentEvent) {
-  const { patch, refetch: id } = reduceEvent(useAgents.getState(), event);
+  const { patch, refetch: id, notification } = reduceEvent(useAgents.getState(), event);
   if (Object.keys(patch).length) useAgents.setState(patch);
+  if (notification) notify(notification);
   if (id && (useAgents.getState().details[id] || useAgents.getState().selected === id)) void refetch(id);
 }
 

@@ -1,3 +1,4 @@
+import { ArrowLeft, Check, ExternalLink, Undo2 } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type { FileDiff } from "../../bindings/FileDiff";
@@ -5,12 +6,20 @@ import type { FileReview } from "../../bindings/FileReview";
 import type { ReviewActionResult } from "../../bindings/ReviewActionResult";
 import type { TaskId } from "../../bindings/TaskId";
 import type { TaskReview } from "../../bindings/TaskReview";
+import { editors } from "../../app/editors";
 import { commands } from "../../lib/ipc";
+import { Banner, Button, EmptyState, IconButton, LoadingState, StatusPill, type Status } from "../../ui/components";
 import { DiffView } from "./DiffView";
 import { isActive } from "./format";
 import { agents, useAgents } from "./store";
 
-const STATE_LABELS = { pending: "Pending review", accepted: "Kept", reverted: "Reverted" } as const;
+export const REVIEW_PREFIX = "agents-review:";
+
+const STATES: Record<FileReview["state"], { status: Status; label: string }> = {
+  pending: { status: "warning", label: "Pending review" },
+  accepted: { status: "succeeded", label: "Kept" },
+  reverted: { status: "canceled", label: "Reverted" },
+};
 
 function FileRow(props: {
   file: FileReview;
@@ -20,45 +29,42 @@ function FileRow(props: {
   onAction: (action: "accept" | "revert") => void;
 }) {
   const { file } = props;
-  const tone = file.state === "pending" ? "warning" : file.state === "accepted" ? "success" : "neutral";
+  const state = STATES[file.state];
+  const editedSince =
+    file.state === "pending" && file.currentRevision !== null && file.tipRevision !== null && file.currentRevision > file.tipRevision;
   return (
-    <li className={`agents-review-file${props.selected ? " is-selected" : ""}`} data-testid="agents-review-file" data-path={file.path}>
-      <button type="button" className="agents-review-file-name" aria-pressed={props.selected} onClick={props.onSelect}>
-        <code>{file.path}</code>
-        <span className="agents-muted">
-          {file.kind === "created" ? "created" : `${file.changeCount} change${file.changeCount === 1 ? "" : "s"}`}
+    <li className="agents-review-file" data-selected={props.selected || undefined} data-testid="agents-review-file" data-path={file.path}>
+      <button type="button" className="agents-review-file__name" aria-pressed={props.selected} onClick={props.onSelect}>
+        <code className="agents-code">{file.path}</code>
+        <span className="agents-muted agents-small">
+          {file.kind === "created" ? "created by the agent" : `${file.changeCount} change${file.changeCount === 1 ? "" : "s"}`}
+          {editedSince ? " · edited since" : ""}
         </span>
       </button>
-      <span className={`agents-badge agents-tone-${tone}`}>{STATE_LABELS[file.state]}</span>
-      {file.entangled && <span className="agents-badge agents-tone-danger">Overlapping edits</span>}
-      {file.currentRevision !== null && file.tipRevision !== null && file.currentRevision > file.tipRevision && file.state === "pending" && (
-        <span className="agents-muted">edited since</span>
-      )}
-      <span className="agents-actions">
-        <button
-          type="button"
-          className="agents-button"
-          disabled={props.disabled || file.state !== "pending"}
-          onClick={() => props.onAction("accept")}
-        >
+      <StatusPill status={state.status} label={state.label} size="sm" />
+      {file.entangled && <StatusPill status="failed" label="Overlapping edits" size="sm" />}
+      <span className="agents-row">
+        <Button size="sm" variant="ghost" icon={Check} isDisabled={props.disabled || file.state !== "pending"} onPress={() => props.onAction("accept")}>
           Keep
-        </button>
-        <button
-          type="button"
-          className="agents-button"
-          disabled={props.disabled || file.state === "reverted"}
-          onClick={() => props.onAction("revert")}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={Undo2}
+          isDisabled={props.disabled || file.state === "reverted"}
+          onPress={() => props.onAction("revert")}
           data-testid="agents-revert-file"
         >
           Revert
-        </button>
+        </Button>
       </span>
-      {file.message && <p className="agents-muted agents-review-message">{file.message}</p>}
+      {file.message && <p className="agents-muted agents-small agents-review-file__message">{file.message}</p>}
     </li>
   );
 }
 
-export function ReviewView({ id }: { id: TaskId }) {
+/** Per-file review of a task's changes: Monaco diff, keep, revert. */
+export function ReviewView({ id, inEditor = false }: { id: TaskId; inEditor?: boolean }) {
   const version = useAgents((s) => s.reviewVersions[id] ?? 0);
   const task = useAgents((s) => s.details[id]?.summary ?? s.tasks.find((t) => t.id === id));
   const [review, setReview] = useState<TaskReview | null>(null);
@@ -103,64 +109,84 @@ export function ReviewView({ id }: { id: TaskId }) {
     if (r) setReview(r);
   }
 
+  if (!review) return <LoadingState title="Loading changes…" />;
+  const title = task?.title ?? id;
+
   return (
-    <article className="agents-review" aria-label="Review changes" data-testid="agents-review">
-      <header className="agents-task-header">
-        <h3 className="agents-task-heading">Review: {task?.title ?? id}</h3>
-        <div className="agents-header-actions">
-          <button type="button" className="agents-button" onClick={() => agents.show("task", id)}>
-            Back to task
-          </button>
-          <button type="button" className="agents-button" disabled={busy || running} onClick={() => void act("accept", null)}>
-            Keep all
-          </button>
-          <button
-            type="button"
-            className="agents-button agents-button-danger"
-            disabled={busy || running}
-            onClick={() => void act("revert", null)}
-            data-testid="agents-revert-all"
+    <article className="agents-stack" data-in-editor={inEditor || undefined} aria-label={`Review: ${title}`} data-testid="agents-review">
+      <div className="agents-heading">
+        {!inEditor && <IconButton icon={ArrowLeft} size="sm" aria-label="Back to task" onPress={() => agents.show("task", id)} />}
+        <h3 className="agents-heading__title">Review: {title}</h3>
+      </div>
+      <div className="agents-row">
+        <Button size="sm" icon={Check} isDisabled={busy || running || review.files.length === 0} onPress={() => void act("accept", null)}>
+          Keep all
+        </Button>
+        <Button
+          size="sm"
+          icon={Undo2}
+          isDisabled={busy || running || review.files.length === 0}
+          onPress={() => void act("revert", null)}
+          data-testid="agents-revert-all"
+        >
+          Revert all
+        </Button>
+        {!inEditor && (
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={ExternalLink}
+            onPress={() => editors.open({ key: `${REVIEW_PREFIX}${id}`, title: `Review: ${title}` })}
+            data-testid="agents-review-in-editor"
           >
-            Revert all
-          </button>
-        </div>
-      </header>
-      {running && <p className="agents-hint">The task is still running; cancel it before reverting.</p>}
-      {review?.checkpoint && (
-        <p className="agents-muted">
-          Checkpoint recorded {new Date(review.checkpoint.createdAtMs).toLocaleString()} with{" "}
-          {review.checkpoint.documents.length} open document{review.checkpoint.documents.length === 1 ? "" : "s"}.
-          Changes are applied to open documents and are not saved until you save them.
+            Open in editor area
+          </Button>
+        )}
+      </div>
+      {running && (
+        <Banner tone="info" title="The task is still running">
+          Cancel it before reverting; changes keep arriving while it runs.
+        </Banner>
+      )}
+      {review.checkpoint && (
+        <p className="agents-muted agents-small">
+          Checkpoint recorded {new Date(review.checkpoint.createdAtMs).toLocaleString()} ({review.checkpoint.documents.length} open
+          document{review.checkpoint.documents.length === 1 ? "" : "s"}). Changes apply to open documents and are not saved until
+          you save them.
         </p>
       )}
       {results.length > 0 && (
         <ul className="agents-results" role="status" data-testid="agents-review-results">
           {results.map((r) => (
-            <li key={r.path} className={r.ok ? "agents-tone-success" : "agents-tone-danger"}>
-              <code>{r.path}</code>: {r.message}
+            <li key={r.path}>
+              <StatusPill status={r.ok ? "succeeded" : "failed"} label={r.ok ? "Done" : "Refused"} size="sm" /> <code className="agents-code">{r.path}</code>:{" "}
+              {r.message}
             </li>
           ))}
         </ul>
       )}
-      {review && review.files.length === 0 && <p className="agents-muted">This task has not changed any files.</p>}
-      <ul className="agents-review-files" aria-label="Changed files">
-        {review?.files.map((file) => (
-          <FileRow
-            key={file.path}
-            file={file}
-            selected={file.path === selected}
-            disabled={busy || running}
-            onSelect={() => setSelected(file.path)}
-            onAction={(action) => void act(action, file.path)}
-          />
-        ))}
-      </ul>
+      {review.files.length === 0 ? (
+        <EmptyState title="No changes" description="This task has not changed any files." fill={false} />
+      ) : (
+        <ul className="agents-review-files" aria-label="Changed files">
+          {review.files.map((file) => (
+            <FileRow
+              key={file.path}
+              file={file}
+              selected={file.path === selected}
+              disabled={busy || running}
+              onSelect={() => setSelected(file.path)}
+              onAction={(action) => void act(action, file.path)}
+            />
+          ))}
+        </ul>
+      )}
       {diff && (
-        <section aria-label={`Diff of ${diff.path}`} className="agents-diff-section">
-          <p className="agents-muted agents-diff-legend">
+        <section aria-label={`Diff of ${diff.path}`} className="agents-stack agents-diff-section">
+          <p className="agents-muted agents-small">
             Left: {diff.path} without this task's changes · Right: after the task's latest change
           </p>
-          <DiffView diff={diff} />
+          <DiffView diff={diff} height={inEditor ? "fill" : 360} />
         </section>
       )}
     </article>

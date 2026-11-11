@@ -1,28 +1,26 @@
 import { useEffect, useRef } from "react";
 
 import type { FileDiff } from "../../bindings/FileDiff";
-import { monaco } from "../../lib/monaco";
+import { editorDefaults, monaco } from "../../lib/monaco";
 
 function languageId(language: string): string {
   return monaco.languages.getLanguages().some((l) => l.id === language) ? language : "plaintext";
 }
 
-/** Read-only Monaco diff of a task's change to one file. */
-export function DiffView({ diff }: { diff: FileDiff }) {
+/** Read-only Monaco diff of a task's change to one file (follows the app theme). */
+export function DiffView({ diff, height = 360 }: { diff: FileDiff; height?: number | "fill" }) {
   const host = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const element = host.current;
     if (!element) return;
     const editor = monaco.editor.createDiffEditor(element, {
+      ...editorDefaults,
       readOnly: true,
       originalEditable: false,
-      automaticLayout: true,
       renderSideBySide: true,
       useInlineViewWhenSpaceIsLimited: true,
       renderSideBySideInlineBreakpoint: 700,
-      minimap: { enabled: false },
-      scrollBeyondLastLine: false,
       wordWrap: "on",
       diffWordWrap: "on",
       ariaLabel: `Changes to ${diff.path}`,
@@ -38,5 +36,13 @@ export function DiffView({ diff }: { diff: FileDiff }) {
     };
   }, [diff]);
 
-  return <div className="agents-diff" ref={host} data-testid="agents-diff" />;
+  return (
+    <div
+      className="agents-diff"
+      data-fill={height === "fill" || undefined}
+      style={height === "fill" ? undefined : { height }}
+      ref={host}
+      data-testid="agents-diff"
+    />
+  );
 }

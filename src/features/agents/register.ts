@@ -1,24 +1,28 @@
-// Agent feature registration: the agent panel (auxiliary view), the review
+// Agent feature registration: the Agent view (auxiliary region), the review
 // editor (`agents-review:<taskId>` resources), commands, and a status item.
 import { Bot } from "lucide-react";
 import { createElement, useEffect } from "react";
-import { createRoot } from "react-dom/client";
 
 import type { EditorProps } from "../../app/registry";
 import { registry } from "../../app/registry";
-import { commands } from "../../lib/ipc";
+import { layout } from "../../app/layout";
+import { StatusPill } from "../../ui/components";
 import { AgentPanel } from "./AgentPanel";
 import { isActive } from "./format";
-import { ReviewView } from "./ReviewView";
+import { REVIEW_PREFIX, ReviewView } from "./ReviewView";
 import { agents, useAgents } from "./store";
 
-export const REVIEW_PREFIX = "agents-review:";
+export const AGENT_VIEW_ID = "agents.panel";
 
 function ReviewEditor({ resource }: EditorProps) {
   useEffect(() => {
     void agents.init();
   }, []);
-  return createElement(ReviewView, { id: resource.key.slice(REVIEW_PREFIX.length) });
+  return createElement(
+    "div",
+    { className: "agents agents-editor" },
+    createElement(ReviewView, { id: resource.key.slice(REVIEW_PREFIX.length), inEditor: true }),
+  );
 }
 
 function AgentStatusItem() {
@@ -27,13 +31,21 @@ function AgentStatusItem() {
   useEffect(() => {
     void agents.init();
   }, []);
-  if (!running && !review) return null;
-  const parts = [running ? `${running} agent task${running === 1 ? "" : "s"} running` : "", review ? `${review} to review` : ""];
-  return createElement("span", { className: "agents-status-item" }, parts.filter(Boolean).join(" · "));
+  if (running) {
+    return createElement(StatusPill, { status: "running", size: "sm", label: `Agent: ${running} running` });
+  }
+  if (review) {
+    return createElement(StatusPill, { status: "warning", size: "sm", label: `Agent: ${review} to review` });
+  }
+  return null;
+}
+
+function showAgent() {
+  layout.showView("auxiliary", AGENT_VIEW_ID);
 }
 
 registry.registerView({
-  id: "agents.panel",
+  id: AGENT_VIEW_ID,
   location: "auxiliary",
   title: "Agent",
   icon: Bot,
@@ -53,14 +65,30 @@ registry.registerCommand({
   id: "agents.newTask",
   title: "New Agent Task",
   category: "Agent",
-  run: () => agents.show("compose"),
+  run: () => {
+    showAgent();
+    agents.show("compose");
+  },
+});
+
+registry.registerCommand({
+  id: "agents.showTasks",
+  title: "Show Agent Tasks",
+  category: "Agent",
+  run: () => {
+    showAgent();
+    agents.show("tasks", null);
+  },
 });
 
 registry.registerCommand({
   id: "agents.providerSettings",
   title: "Agent Provider Settings",
   category: "Agent",
-  run: () => agents.openSettings(true),
+  run: () => {
+    showAgent();
+    agents.openSettings(true);
+  },
 });
 
 registry.registerStatusItem({
@@ -69,25 +97,3 @@ registry.registerStatusItem({
   order: 50,
   render: () => createElement(AgentStatusItem),
 });
-
-// Development builds only: let end-to-end scenarios mount the agent panel in
-// the real app before the workbench shell renders auxiliary views.
-void commands
-  .appInfo()
-  .then((info) => {
-    if (!info.debugBuild) return;
-    const target = window as unknown as { __expositionAgentsDev?: { mountPanel: () => void } };
-    target.__expositionAgentsDev = {
-      mountPanel() {
-        if (document.getElementById("agents-dev-host")) return;
-        const host = document.createElement("div");
-        host.id = "agents-dev-host";
-        host.className = "agents-dev-host";
-        document.body.appendChild(host);
-        createRoot(host).render(createElement(AgentPanel));
-      },
-    };
-  })
-  .catch(() => {
-    // Not running inside the desktop app (e.g. unit tests).
-  });

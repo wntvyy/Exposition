@@ -1,13 +1,16 @@
 // Agent harness in the real app (debug build) with the scripted provider —
 // development only. The scripted provider replaces only the model; the task
-// loop, tools, document service transactions, persistence, review, and UI are
-// the real ones. It cannot establish live model behavior.
+// loop, tools, document service transactions, persistence, review, workbench
+// shell, and UI are the real ones. It cannot establish live model behavior.
 //
 // Covers: credentials dialog (configured / not configured, key never shown),
 // a task editing an open document through a transaction while the user edits
-// concurrently, streamed transcript, approval, Monaco review diff, revert,
-// cancellation, and task history after an app restart.
-import { mkdtemp, writeFile } from "node:fs/promises";
+// concurrently, streamed transcript, approval, Monaco review diff (panel and
+// editor area), revert, cancellation, task history after a restart, no console
+// errors, and reference screenshots in both themes. Screenshots go to
+// test-results/e2e/agents-harness/ and, when EXPOSITION_DEV_HOME is set, to
+// $EXPOSITION_DEV_HOME/ui-reference/agents/.
+import { copyFile, mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,33 +20,52 @@ const FAKE_KEY = "sk-ant-e2e-not-a-real-key-7f3a9c0d1e2b";
 const invoke = (page, cmd, args) =>
   page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args ?? {}]);
 
-async function mountPanel(page) {
-  await page.waitForFunction(() => Boolean(window.__expositionAgentsDev), null, { timeout: 15_000 });
-  await page.evaluate(() => window.__expositionAgentsDev.mountPanel());
-  await page.waitForSelector("[data-testid=agents-panel]");
+function consoleErrors(app) {
+  return app.consoleMessages.filter((m) => m.startsWith("error:") || m.startsWith("pageerror:"));
+}
+
+async function runCommand(page, query) {
+  await page.keyboard.press("Control+Shift+P");
+  const input = page.getByRole("textbox", { name: "Command" });
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  await input.fill(query);
+  await page.locator(".wb-palette__item").first().waitFor({ state: "visible" });
+  await page.keyboard.press("Enter");
+  await input.waitFor({ state: "detached", timeout: 5000 });
+}
+
+async function setTheme(page, theme) {
+  await runCommand(page, theme === "dark" ? "color theme dark" : "color theme light");
+  await page.waitForFunction((t) => document.documentElement.dataset.theme === t, theme);
+  await page.waitForTimeout(250);
+}
+
+async function selectOption(page, scope, label, option) {
+  await scope.getByRole("button", { name: label }).click();
+  await page.getByRole("option", { name: option, exact: true }).click();
 }
 
 async function documentText(page, path) {
   const docs = await invoke(page, "document_list");
   const doc = docs.find((d) => d.path === path);
-  if (!doc) return null;
-  return invoke(page, "document_state", { document: doc.id });
+  return doc ? invoke(page, "document_state", { document: doc.id }) : null;
 }
 
-async function waitForStatus(page, label, timeout = 20_000) {
+async function waitForStatus(page, kind, timeout = 20_000) {
   await page.waitForFunction(
-    (l) => document.querySelector("[data-testid=agents-task-status]")?.textContent === l,
-    label,
+    (k) => document.querySelector("[data-testid=agents-task-status]")?.dataset.status === k,
+    kind,
     { timeout },
   );
 }
 
 async function startTask(page, { prompt, folder, permission }) {
-  await page.click("[data-testid=agents-new-task]");
+  const panel = page.getByTestId("agents-panel");
+  await panel.getByTestId("agents-new-task").click();
   await page.fill("[data-testid=agents-prompt]", prompt);
-  await page.fill("[data-testid=agents-folder]", folder);
-  await page.selectOption("[data-testid=agents-permission]", permission);
-  await page.click("[data-testid=agents-start]");
+  await panel.getByLabel("Project folder").fill(folder);
+  await selectOption(page, panel, /Document changes/, permission);
+  await panel.getByRole("button", { name: "Start task" }).click();
   await page.waitForSelector("[data-testid=agents-task-view]");
 }
 
@@ -54,24 +76,36 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
   const env = { EXPOSITION_CREDENTIAL_NAMESPACE: namespace };
   const evidence = { project, namespace, steps: [] };
   const step = (name, data = {}) => evidence.steps.push({ name, ...data });
+  const shots = [];
+  const shot = async (page, name) => {
+    const path = join(artifactsDir, `${name}.png`);
+    await page.screenshot({ path });
+    shots.push(path);
+  };
 
   let app = await launchApp({ env });
   const dataDir = app.dataDir;
   try {
     const { page } = app;
-    await mountPanel(page);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    // The Agent view is registered in the shell's auxiliary region.
+    const panel = page.getByTestId("agents-panel");
+    await panel.waitFor({ timeout: 15_000 });
+    await setTheme(page, "light");
+    await shot(page, "agents-empty-light");
 
-    // --- Credentials: configured / not configured, the key is never revealed.
-    await page.click("[data-testid=agents-open-settings]");
-    await page.waitForSelector("[data-testid=agents-settings][open]");
+    // --- Credentials: configured / not configured; the key is never revealed.
+    await panel.getByRole("button", { name: "Agent provider settings" }).click();
+    const dialog = page.getByRole("dialog", { name: "Agent provider" });
+    await dialog.waitFor();
     const keyStatus = () => page.textContent("[data-testid=agents-key-status]");
     assert.match(await keyStatus(), /Not configured/);
-    await page.fill("[data-testid=agents-key-input]", FAKE_KEY);
-    await page.click("[data-testid=agents-key-save]");
-    await page.waitForFunction(
-      () => /Configured/.test(document.querySelector("[data-testid=agents-key-status]")?.textContent ?? "") &&
-        !/Not configured/.test(document.querySelector("[data-testid=agents-key-status]")?.textContent ?? ""),
-    );
+    await dialog.getByLabel("API key").fill(FAKE_KEY);
+    await dialog.getByRole("button", { name: "Save key" }).click();
+    await page.waitForFunction(() => {
+      const text = document.querySelector("[data-testid=agents-key-status]")?.textContent ?? "";
+      return text.includes("Configured") && !text.includes("Not configured");
+    });
     const leaks = await page.evaluate((key) => {
       const inputs = [...document.querySelectorAll("input, textarea")].some((el) => el.value.includes(key));
       return { html: document.documentElement.outerHTML.includes(key), inputs };
@@ -80,23 +114,22 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
     assert.equal(status.configured, true);
     assert.ok(!JSON.stringify(status).includes(FAKE_KEY), "provider status must not contain the key");
     assert.deepEqual(leaks, { html: false, inputs: false }, "the key must not appear in the webview after saving");
-    await page.screenshot({ path: join(artifactsDir, "01-key-configured.png") });
-    step("key saved; webview shows Configured only", { credentialStore: status.credentialStore });
-    await page.click("[data-testid=agents-key-remove]");
+    await page.waitForTimeout(200);
+    await shot(page, "agents-settings-configured-light");
+    step("key saved to OS credential storage; webview shows Configured only", { store: status.credentialStore });
+    await dialog.getByRole("button", { name: "Remove" }).click();
     await page.waitForFunction(() =>
-      /Not configured/.test(document.querySelector("[data-testid=agents-key-status]")?.textContent ?? ""),
+      (document.querySelector("[data-testid=agents-key-status]")?.textContent ?? "").includes("Not configured"),
     );
     step("key removed; Not configured");
 
     // Select the development-only scripted provider.
-    await page.selectOption("[data-testid=agents-provider-select]", "scripted");
-    await page.click("[data-testid=agents-settings-save]");
+    await selectOption(page, dialog, /Provider/, "Scripted provider — development only");
+    await dialog.getByRole("button", { name: "Save settings" }).click();
     await page.waitForSelector("[data-testid=agents-settings-message]");
-    await page.click("[data-testid=agents-settings-close]");
-    assert.equal(
-      await page.textContent("[data-testid=agents-provider-chip]"),
-      "Scripted provider — development only",
-    );
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await dialog.waitFor({ state: "detached" });
+    assert.equal(await page.textContent("[data-testid=agents-provider-chip]"), "Scripted provider — development only");
 
     // --- Task A (read-only) opens main.typ in the document service.
     await invoke(page, "agents_dev_load_script", {
@@ -107,8 +140,8 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
         ],
       },
     });
-    await startTask(page, { prompt: "Summarize main.typ", folder: project, permission: "readOnly" });
-    await waitForStatus(page, "Completed");
+    await startTask(page, { prompt: "Summarize main.typ", folder: project, permission: "Read only" });
+    await waitForStatus(page, "completed");
     let state = await documentText(page, "main.typ");
     assert.equal(state.text, MAIN);
     step("task A completed; main.typ open", { revision: state.info.revision });
@@ -162,8 +195,7 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
         ],
       },
     });
-    await startTask(page, { prompt: "Make the cat sentence more precise", folder: project, permission: "reviewEdits" });
-    // The transcript streams: the draft grows while the turn is generated.
+    await startTask(page, { prompt: "Make the cat sentence more precise", folder: project, permission: "Ask before each change" });
     const samples = [];
     for (let i = 0; i < 12; i++) {
       samples.push(
@@ -175,42 +207,46 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
     assert.ok(growing >= 3, `draft should grow while streaming (samples ${samples})`);
     step("transcript streamed", { draftLengths: samples });
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 20_000 });
-    await page.screenshot({ path: join(artifactsDir, "02-approval.png") });
+    await page.waitForTimeout(200);
+    await shot(page, "agents-approval-light");
     state = await documentText(page, "main.typ");
     await userEdit(state.info.revision, state.text.length, "// user keeps typing\n");
-    await page.click("[data-testid=agents-approve]");
-    await waitForStatus(page, "Completed");
+    await panel.getByRole("button", { name: "Approve" }).click();
+    await waitForStatus(page, "completed");
     state = await documentText(page, "main.typ");
     assert.equal(state.text, "// draft\n= Notes\nThe cat sat quietly on the mat.\n// user keeps typing\n");
-    const tasks = await invoke(page, "agents_task_list");
-    const taskB = tasks[0];
+    const taskB = (await invoke(page, "agents_task_list"))[0];
     const detailB = await invoke(page, "agents_task_detail", { task: taskB.id });
     const editCall = detailB.transcript.find((i) => i.kind === "toolCall" && i.name === "edit_document");
     assert.equal(editCall.status, "succeeded");
     assert.ok(JSON.parse(editCall.result).rebased, "the agent edit was rebased over the concurrent user edit");
-    await page.screenshot({ path: join(artifactsDir, "03-task-completed.png") });
+    await shot(page, "agents-task-completed-light");
     step("task B edited the open document through a transaction (rebased over a concurrent user edit)", {
       text: state.text,
       revision: state.info.revision,
     });
 
-    // --- Review: Monaco diff of the task's change, then revert.
-    await page.click("[data-testid=agents-open-review]");
+    // --- Review: Monaco diff in the panel and in the editor area, then revert.
+    await panel.getByRole("button", { name: /Review changes/ }).click();
     await page.waitForSelector("[data-testid=agents-review-file][data-path='main.typ']");
-    await page.waitForSelector("[data-testid=agents-diff] .monaco-diff-editor", { timeout: 20_000 });
+    await page.waitForSelector("[data-testid=agents-panel] [data-testid=agents-diff] .monaco-diff-editor", { timeout: 20_000 });
     const diff = await invoke(page, "agents_review_diff", { task: taskB.id, path: "main.typ" });
     // The user's edit made during approval landed before the agent's edit, so
     // both sides include it; the diff is exactly the agent's change.
     assert.equal(diff.original, "// draft\n= Notes\nThe cat sat on the mat.\n// user keeps typing\n");
     assert.equal(diff.modified, "// draft\n= Notes\nThe cat sat quietly on the mat.\n// user keeps typing\n");
-    await page.waitForTimeout(500);
-    await page.screenshot({ path: join(artifactsDir, "04-review-diff.png") });
-    step("review shows the Monaco diff");
-    await page.click("[data-testid=agents-revert-file]");
-    await page.waitForSelector("[data-testid=agents-review-results]");
+    await panel.getByRole("button", { name: "Open in editor area" }).click();
+    await page.waitForSelector(".agents-editor [data-testid=agents-diff] .monaco-diff-editor", { timeout: 20_000 });
+    await page.waitForTimeout(600);
+    await shot(page, "agents-review-light");
+    await setTheme(page, "dark");
+    await shot(page, "agents-review-dark");
+    await setTheme(page, "light");
+    step("review shows the Monaco diff (panel and editor area)");
+    await panel.getByTestId("agents-review-file").getByRole("button", { name: "Revert" }).click();
+    await page.waitForSelector("[data-testid=agents-panel] [data-testid=agents-review-results]");
     state = await documentText(page, "main.typ");
     assert.equal(state.text, "// draft\n= Notes\nThe cat sat on the mat.\n// user keeps typing\n");
-    await page.screenshot({ path: join(artifactsDir, "05-reverted.png") });
     step("revert restored the text and kept the user's later edit", { text: state.text });
 
     // --- Cancellation while the model is streaming.
@@ -224,15 +260,36 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
         ],
       },
     });
-    await startTask(page, { prompt: "A long task to cancel", folder: project, permission: "readOnly" });
-    await page.waitForFunction(() => (document.querySelector("[data-testid=agents-draft]")?.textContent ?? "").includes("canceled"));
+    await startTask(page, { prompt: "A long task to cancel", folder: project, permission: "Read only" });
+    await page.waitForFunction(() =>
+      (document.querySelector("[data-testid=agents-draft]")?.textContent ?? "").includes("canceled"),
+    );
+    const draftText = await page.textContent("[data-testid=agents-draft]");
+    assert.match(draftText, /Working through a long answer/, "the whole streamed text is shown, from the first word");
+    await shot(page, "agents-running-light");
+    await setTheme(page, "dark");
+    await shot(page, "agents-running-dark");
+    await setTheme(page, "light");
     const canceledAt = Date.now();
-    await page.click("[data-testid=agents-cancel]");
-    await waitForStatus(page, "Canceled", 10_000);
+    await panel.getByRole("button", { name: "Cancel" }).click();
+    await waitForStatus(page, "canceled", 10_000);
     const cancelMs = Date.now() - canceledAt;
     assert.ok(cancelMs < 5000, `cancel took ${cancelMs} ms`);
-    await page.screenshot({ path: join(artifactsDir, "06-canceled.png") });
+    await shot(page, "agents-canceled-light");
     step("canceled mid-stream", { cancelMs });
+
+    // Settings and task list in the dark theme.
+    await setTheme(page, "dark");
+    await panel.getByRole("button", { name: "Tasks", exact: true }).click();
+    await panel.getByTestId("agents-task-list").waitFor();
+    await shot(page, "agents-tasks-dark");
+    await panel.getByRole("button", { name: "Agent provider settings" }).click();
+    await page.getByRole("dialog", { name: "Agent provider" }).waitFor();
+    await page.waitForTimeout(200);
+    await shot(page, "agents-settings-dark");
+    await page.keyboard.press("Escape");
+    await setTheme(page, "light");
+    assert.deepEqual(consoleErrors(app), [], "no console errors");
   } finally {
     await invoke(app.page, "agents_provider_clear_key").catch(() => {});
     await app.close();
@@ -242,22 +299,31 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
   app = await launchApp({ env, dataDir });
   try {
     const { page } = app;
-    await mountPanel(page);
+    const panel = page.getByTestId("agents-panel");
+    await panel.waitFor({ timeout: 15_000 });
     await page.waitForSelector("[data-testid=agents-task-item]");
     const items = await page.$$eval("[data-testid=agents-task-item]", (els) => els.map((e) => e.textContent));
     assert.equal(items.length, 3, `three tasks persisted: ${items}`);
-    assert.match(items.join("|"), /Completed/);
+    assert.match(items.join("|"), /Task completed/);
     assert.match(items.join("|"), /Canceled/);
     const tasks = await invoke(page, "agents_task_list");
     const reviewed = tasks.find((t) => t.title.startsWith("Make the cat"));
     const review = await invoke(page, "agents_review", { task: reviewed.id });
     assert.equal(review.files[0].state, "reverted");
-    await page.screenshot({ path: join(artifactsDir, "07-after-restart.png") });
+    await shot(page, "agents-tasks-after-restart-light");
     step("tasks and review state persisted across restart", { tasks: tasks.map((t) => [t.title, t.status.kind]) });
-    const status = await invoke(page, "agents_provider_status");
-    assert.equal(status.configured, false);
+    assert.equal((await invoke(page, "agents_provider_status")).configured, false);
+    assert.deepEqual(consoleErrors(app), [], "no console errors after restart");
   } finally {
     await app.close();
   }
   await writeFile(join(artifactsDir, "evidence.json"), JSON.stringify(evidence, null, 2));
+
+  const devHome = process.env.EXPOSITION_DEV_HOME;
+  if (devHome) {
+    const target = join(devHome, "ui-reference", "agents");
+    await mkdir(target, { recursive: true });
+    for (const path of shots) await copyFile(path, join(target, path.split(/[\\/]/).pop()));
+    console.log(`copied ${(await readdir(target)).length} screenshots to ${target}`);
+  }
 }
