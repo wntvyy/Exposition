@@ -26,3 +26,17 @@ pub use mapping::{CaretHit, GlyphTarget, PageMapping, UnmappedReason};
 pub use runner::{JobRunner, LocalProcessRunner, ProcessOutput};
 pub use session::TexPageSession;
 pub use toolchain::{TexTool, TexToolchain};
+
+#[cfg(test)]
+mod thread_safety {
+    fn send_sync<T: Send + Sync>() {}
+
+    /// Builds and page sessions can move to and be shared across worker threads.
+    #[test]
+    fn builder_session_and_mappings_are_send_and_sync() {
+        send_sync::<TexBuilder<LocalProcessRunner>>();
+        send_sync::<TexPageSession>();
+        send_sync::<PageMapping>();
+        send_sync::<TexBuild>();
+    }
+}

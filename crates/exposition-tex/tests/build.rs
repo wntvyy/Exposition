@@ -240,3 +240,24 @@ fn writes_outside_the_build_and_process_execution_are_refused() {
         }
     }
 }
+
+#[test]
+fn biblatex_projects_run_biber() {
+    for engine in ENGINES {
+        let Some(h) = common::Harness::new("latex-biblatex", engine) else { continue };
+        if h.builder.toolchain().and_then(|t| t.tool(exposition_tex::TexTool::Biber)).is_none() {
+            eprintln!("SKIPPED: biber not found");
+            return;
+        }
+        let build = h.builder.build(&h.request(BuildMode::Full));
+        assert_eq!(build.result.status, BuildStatus::Succeeded, "{engine:?}: {:#?}", build.result.diagnostics);
+        let tools: Vec<&str> = build.passes.iter().map(|p| p.tool.as_str()).collect();
+        assert!(tools.contains(&"biber"), "{tools:?}");
+        let text = page_text(&build);
+        assert!(text.contains("detail[1]") && text.contains("TheTEXbook"), "{engine:?}: {text}");
+        eprintln!("{engine:?} biblatex: {} ms, passes {:?}", build.result.duration_ms, build.passes);
+        // Unchanged citations and databases: biber is not rerun.
+        let again = h.builder.build(&h.request(BuildMode::Full));
+        assert!(!again.passes.iter().any(|p| p.tool == "biber"), "{:?}", again.passes);
+    }
+}
