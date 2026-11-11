@@ -24,8 +24,17 @@ function StateLayout({
   fill = true,
   className,
   role,
+  media,
   children,
-}: StateBaseProps & { kind: string; icon?: IconComponent | null; role?: string; children?: ReactNode }) {
+}: StateBaseProps & {
+  kind: string;
+  icon?: IconComponent | null;
+  role?: string;
+  /** Replaces the icon (e.g. a spinner). */
+  media?: ReactNode;
+  /** Extra content after the description (e.g. error details). */
+  children?: ReactNode;
+}) {
   const titleId = useId();
   return (
     <div
@@ -35,16 +44,17 @@ function StateLayout({
       role={role}
       aria-labelledby={titleId}
     >
-      {Icon && (
-        <span className="ui-state__icon">
-          <Icon size={24} aria-hidden />
-        </span>
-      )}
-      {children}
+      {media ??
+        (Icon && (
+          <span className="ui-state__icon">
+            <Icon size={24} aria-hidden />
+          </span>
+        ))}
       <p className="ui-state__title" id={titleId}>
         {title}
       </p>
       {description && <div className="ui-state__description">{description}</div>}
+      {children}
       {actions && <div className="ui-state__actions">{actions}</div>}
     </div>
   );
@@ -58,16 +68,17 @@ export function EmptyState({ icon, ...props }: StateBaseProps & { icon?: IconCom
 /** Work in progress that blocks this region. Prefer inline spinners for small, non-blocking updates. */
 export function LoadingState({ title = "Loading…", ...props }: Partial<StateBaseProps>) {
   return (
-    <StateLayout kind="loading" title={title} role="status" {...props}>
-      <Spinner size="lg" aria-hidden />
-    </StateLayout>
+    <StateLayout kind="loading" title={title} role="status" media={<Spinner size="lg" aria-hidden />} {...props} />
   );
 }
 
-/** A failure that prevents showing this region. Include the cause and a recovery action. */
-export function ErrorState({ details, ...props }: StateBaseProps & { details?: string }) {
+/**
+ * A failure that prevents showing this region. Include the cause and a
+ * recovery action. Announced as an alert unless `live` is false.
+ */
+export function ErrorState({ details, live = true, ...props }: StateBaseProps & { details?: string; live?: boolean }) {
   return (
-    <StateLayout kind="error" icon={CircleX} role="alert" {...props}>
+    <StateLayout kind="error" icon={CircleX} role={live ? "alert" : undefined} {...props}>
       {details && <pre className="ui-state__details">{details}</pre>}
     </StateLayout>
   );

@@ -1,6 +1,7 @@
 /*
- * Global base styles. Element selectors only (low specificity) so shared
- * component classes always win regardless of stylesheet order.
+ * Global base styles. Element selectors (low specificity) so shared component
+ * classes always win regardless of stylesheet order; the only class rule is the
+ * Monaco hidden-input override below.
  * Tokens live in src/ui/tokens.css; components in src/ui/components/*.css.
  */
 
@@ -69,6 +70,12 @@ a {
 :focus-visible {
   outline: var(--focus-ring-width) solid var(--color-focus-ring);
   outline-offset: var(--focus-ring-offset);
+}
+
+/* Monaco's hidden text input receives focus; the caret is its focus indicator. */
+.monaco-editor .native-edit-context,
+.monaco-editor .inputarea {
+  outline: none !important;
 }
 
 /* Thin, theme-aware scrollbars (no arrow buttons). Setting the standard

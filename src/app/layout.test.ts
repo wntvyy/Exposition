@@ -73,12 +73,23 @@ describe("layout store", () => {
     expect(layout.isVisible("sidebar")).toBe(false);
   });
 
-  it("hiding an auto-collapsed region keeps it hidden after widening", () => {
+  it("dismissing a force-opened region in a narrow window keeps the saved preference", () => {
     layout.setViewportWidth(760);
     layout.toggle("sidebar"); // force open
-    layout.toggle("sidebar"); // hide again
-    layout.setViewportWidth(1440);
+    layout.toggle("sidebar"); // dismiss
     expect(layout.isVisible("sidebar")).toBe(false);
+    layout.setViewportWidth(1440);
+    expect(layout.isVisible("sidebar")).toBe(true);
+  });
+
+  it("showing a hidden region in a narrow window also restores it when wide", () => {
+    layout.setViewportWidth(1440);
+    layout.setVisible("auxiliary", false);
+    layout.setViewportWidth(900);
+    layout.toggle("auxiliary");
+    expect(layout.isVisible("auxiliary")).toBe(true);
+    layout.setViewportWidth(1440);
+    expect(layout.isVisible("auxiliary")).toBe(true);
   });
 
   it("showView activates a view and reveals its region", () => {

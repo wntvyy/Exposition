@@ -293,7 +293,7 @@ export function UiReference() {
           <IconButton icon={Settings2} aria-label="Settings" isDisabled />
         </Specimen>
         <Specimen label="Toggle buttons">
-          <ToggleButton icon={WrapText} isSelected={wrap} onChange={setWrap}>
+          <ToggleButton icon={WrapText} variant="secondary" isSelected={wrap} onChange={setWrap}>
             Wrap lines
           </ToggleButton>
           <ToggleButton icon={Bold} aria-label="Bold" />
@@ -548,6 +548,7 @@ export function UiReference() {
           </div>
           <div className="ref-state-frame">
             <ErrorState
+              live={false}
               title="Could not render pages"
               description="The compiler exited before producing output."
               details={"error: unknown variable: totl\n  ┌─ main.typ:14:3"}

@@ -143,9 +143,20 @@ export const layout = {
     return visibilityOf(useLayout.getState())[region];
   },
 
+  /**
+   * Show or hide a region. In a window narrow enough to auto-collapse it,
+   * showing force-opens it (and saves "visible"), while hiding only dismisses
+   * it, keeping the saved preference for when the window widens again.
+   */
   setVisible(region: Region, visible: boolean): void {
     const state = useLayout.getState();
-    const forced = { ...state.forced, [region]: visible && autoCollapsed(region, state.viewportWidth) };
+    if (autoCollapsed(region, state.viewportWidth)) {
+      useLayout.setState({ forced: { ...state.forced, [region]: visible } });
+      if (visible) patchRegion(region, { visible });
+      return;
+    }
+    const forced = { ...state.forced };
+    delete forced[region];
     useLayout.setState({ forced });
     patchRegion(region, { visible });
   },

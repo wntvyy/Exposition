@@ -86,6 +86,8 @@ export function IconButton({
 export interface ToggleButtonProps extends Omit<AriaToggleButtonProps, "className" | "children"> {
   icon?: IconComponent;
   size?: ButtonSize;
+  /** `ghost` (default) for toolbars; `secondary` for a bordered standalone toggle. */
+  variant?: "ghost" | "secondary";
   className?: string;
   children?: ReactNode;
   /** Required when there is no visible text. */
@@ -93,9 +95,15 @@ export interface ToggleButtonProps extends Omit<AriaToggleButtonProps, "classNam
 }
 
 /** Two-state button (pressed/unpressed), e.g. "Wrap lines". Selected state uses the accent tint. */
-export function ToggleButton({ icon: Icon, size = "md", className, children, ...props }: ToggleButtonProps) {
+export function ToggleButton({ icon: Icon, size = "md", variant = "ghost", className, children, ...props }: ToggleButtonProps) {
   return (
-    <AriaToggleButton {...props} className={cx("ui-toggle-button", className)} data-size={size}>
+    <AriaToggleButton
+      {...props}
+      className={cx("ui-toggle-button", className)}
+      data-size={size}
+      data-variant={variant}
+      data-icon-only={children === undefined || undefined}
+    >
       {Icon && <Icon size={iconSize(size)} aria-hidden />}
       {children !== undefined && <span className="ui-button__label">{children}</span>}
     </AriaToggleButton>

@@ -218,7 +218,7 @@
   gap: var(--space-3);
 }
 .ref-state-frame {
-  height: 260px;
+  min-height: 300px;
   border: var(--border-width) solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface-sunken);

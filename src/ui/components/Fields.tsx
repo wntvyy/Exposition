@@ -118,7 +118,9 @@ export function Select<K extends Key>({
     >
       {label && <Label className="ui-field__label">{label}</Label>}
       <AriaButton className="ui-select__button">
-        <SelectValue className="ui-select__value" />
+        <SelectValue className="ui-select__value">
+          {({ isPlaceholder, selectedText, defaultChildren }) => (isPlaceholder ? defaultChildren : selectedText)}
+        </SelectValue>
         <ChevronDown size={14} aria-hidden />
       </AriaButton>
       {description && (
