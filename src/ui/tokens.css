@@ -97,6 +97,40 @@
   --color-shadow: rgba(16, 24, 40, 0.14);
   --color-shadow-strong: rgba(16, 24, 40, 0.24);
 
+  /* --- Color: project graph canvas (Graph page, Mathematics, workflow canvases).
+     Node categories: -bg node fill, -border node outline/type stripe and matching
+     edge color (>= 3:1 on the canvas), -text type label (>= 4.5:1 on -bg). The
+     category is also named in text on every node; color is never the only signal. --- */
+  --color-graph-canvas: var(--color-surface-sunken);
+  --color-graph-grid: #d5d9df; /* decorative background dots */
+  --color-graph-structure-bg: #eef0f3;
+  --color-graph-structure-border: #6b7280;
+  --color-graph-structure-text: #4a515c;
+  --color-graph-document-bg: #e6eefc;
+  --color-graph-document-border: #3d6fd6;
+  --color-graph-document-text: #1f50b8;
+  --color-graph-data-bg: #e2f4ed;
+  --color-graph-data-border: #1d8a68;
+  --color-graph-data-text: #11624a;
+  --color-graph-math-bg: #f1ebf9;
+  --color-graph-math-border: #8259d4;
+  --color-graph-math-text: #5a37a6;
+  --color-graph-formal-bg: #fdf0dc;
+  --color-graph-formal-border: #bd6a09;
+  --color-graph-formal-text: #874700;
+  --color-graph-reference-bg: #fbe8f0;
+  --color-graph-reference-border: #c43e70;
+  --color-graph-reference-text: #9a2252;
+  --color-graph-workflow-bg: #e0f3f7;
+  --color-graph-workflow-border: #18849f;
+  --color-graph-workflow-text: #0d5e73;
+  /* Edges by relation family (also distinguished by dash pattern and arrowhead). */
+  --color-graph-edge: #737a86;
+  --color-graph-edge-math: var(--color-graph-math-border);
+  --color-graph-edge-reference: var(--color-graph-reference-border);
+  --color-graph-edge-evidence: var(--color-graph-data-border);
+  --color-graph-edge-formal: var(--color-graph-formal-border);
+
   /* --- Typography --- */
   --font-ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
   --font-code: "Cascadia Code", "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
@@ -238,6 +272,30 @@
   --color-scrollbar-hover: rgba(149, 155, 165, 0.5);
   --color-shadow: rgba(0, 0, 0, 0.35);
   --color-shadow-strong: rgba(0, 0, 0, 0.55);
+
+  --color-graph-grid: #2e3036;
+  --color-graph-structure-bg: #2a2c31;
+  --color-graph-structure-border: #868d98;
+  --color-graph-structure-text: #c9cdd3;
+  --color-graph-document-bg: #1a2a45;
+  --color-graph-document-border: #5b8fea;
+  --color-graph-document-text: #9cc0ff;
+  --color-graph-data-bg: #13302a;
+  --color-graph-data-border: #3fb594;
+  --color-graph-data-text: #7fdcbf;
+  --color-graph-math-bg: #2c2342;
+  --color-graph-math-border: #9d7ae6;
+  --color-graph-math-text: #cdb5ff;
+  --color-graph-formal-bg: #3a2a12;
+  --color-graph-formal-border: #d98c2b;
+  --color-graph-formal-text: #f3bd6d;
+  --color-graph-reference-bg: #3a1b29;
+  --color-graph-reference-border: #dd6491;
+  --color-graph-reference-text: #f5a3c3;
+  --color-graph-workflow-bg: #12303a;
+  --color-graph-workflow-border: #39a9c7;
+  --color-graph-workflow-text: #8bd6ea;
+  --color-graph-edge: #8a909b;
 }
 
 @media (prefers-reduced-motion: reduce) {

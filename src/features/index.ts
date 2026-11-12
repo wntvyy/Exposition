@@ -3,6 +3,7 @@
 // the workbench registry (`src/app/registry.ts`). Keep this list sorted.
 import "./agents/register";
 import "./editor/register";
+import "./graph/register";
 import "./jobs/register";
 import "./lean/register";
 import "./research/register";
