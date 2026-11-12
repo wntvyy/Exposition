@@ -420,6 +420,17 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     await page.locator('[data-testid="page-editor"]').waitFor();
     await settled("page view after split");
 
+    // Builds dispatch by extension (.typ Typst, .md Markdown, .tex TeX): any
+    // other file is refused, not compiled as Typst.
+    await writeFile(join(workspace, "notes.txt"), "#panic(\"compiled a .txt file as Typst\")\n");
+    const txt = await page.evaluate(() =>
+      window.__TAURI_INTERNALS__.invoke("typesetting_build", { entry: "notes.txt" }).then(
+        (ok) => ({ ok: ok?.result?.status ?? true }),
+        (error) => ({ error }),
+      ),
+    );
+    assert.equal(txt.error?.code, "typesetting.unsupported", `typesetting_build(notes.txt) → ${JSON.stringify(txt).slice(0, 200)}`);
+
     // 9. Export PDF from the shown build: same page count and sizes.
     const exported = await invoke("typesetting_export_pdf", { build: await build(), destination: null });
     const pdf = (await readFile(exported.path)).toString("latin1");

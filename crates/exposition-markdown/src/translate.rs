@@ -239,7 +239,35 @@ fn document_args(fm: &FrontMatter) -> String {
             args.push(format!("author: ({},)", names.join(", ")));
         }
     }
+    // The PDF metadata date needs a calendar date; any other `date` value is
+    // shown in the title block only.
+    if let Some((year, month, day)) = fm.scalar("date").and_then(|d| iso_date(&d.value)) {
+        args.push(format!("date: datetime(year: {year}, month: {month}, day: {day})"));
+    }
     args.join(", ")
+}
+
+/// `YYYY-MM-DD` as a valid calendar date.
+fn iso_date(value: &str) -> Option<(u32, u32, u32)> {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    let number = |r: std::ops::Range<usize>| -> Option<u32> {
+        let digits = value.get(r)?;
+        digits.bytes().all(|b| b.is_ascii_digit()).then(|| digits.parse().ok())?
+    };
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    (year >= 1 && (1..=days).contains(&day)).then_some((year, month, day))
 }
 
 impl<'s> Tx<'s> {
@@ -893,6 +921,27 @@ mod tests {
         for bad in ["../../../x.png", "https://example.com/a.png", "C:/x.png", "a\\b.png", "data:image/png;base64,AA"] {
             assert!(resolve_image_path(bad, Some(&doc)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn front_matter_dates_reach_the_pdf_metadata_when_they_are_calendar_dates() {
+        assert_eq!(iso_date("2026-11-12"), Some((2026, 11, 12)));
+        assert_eq!(iso_date(" 2024-02-29 "), Some((2024, 2, 29)));
+        for not_a_date in
+            ["2023-02-29", "2026-13-01", "2026-04-31", "12 November 2026", "2026-1-2", "0000-01-01", "２０２６-01-01"]
+        {
+            assert_eq!(iso_date(not_a_date), None, "{not_a_date}");
+        }
+        let with_date =
+            crate::translate("---\ntitle: T\ndate: 2026-11-12\n---\n\nText.\n", &crate::TranslateOptions::default());
+        assert!(
+            with_date.typst.contains("#set document(title: \"T\", date: datetime(year: 2026, month: 11, day: 12))"),
+            "{}",
+            with_date.typst.lines().take(3).collect::<Vec<_>>().join("\n")
+        );
+        let free_text = crate::translate("---\ndate: Autumn 2026\n---\n\nText.\n", &crate::TranslateOptions::default());
+        assert!(!free_text.typst.contains("#set document("), "free-text dates stay in the title block only");
+        assert!(free_text.typst.contains("Autumn"));
     }
 
     #[test]
