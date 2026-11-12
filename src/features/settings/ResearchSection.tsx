@@ -66,7 +66,9 @@ export function ResearchSection() {
                   <tr key={runtime.id} data-runtime-id={runtime.id} data-language={runtime.language}>
                     <th scope="row">
                       {runtime.displayName}
-                      {runtime.version && <div className="exp-settings__muted">{runtime.version}</div>}
+                      {runtime.version && !runtime.displayName.includes(runtime.version) && (
+                        <div className="exp-settings__muted">{runtime.version}</div>
+                      )}
                     </th>
                     <td>
                       {runtime.availability.kind === "available" ? (

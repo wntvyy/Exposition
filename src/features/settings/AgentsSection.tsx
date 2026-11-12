@@ -46,7 +46,15 @@ export function AgentsSection() {
           <SettingRow label="Model">
             <code className="exp-settings__path">{status.settings.model}</code>
           </SettingRow>
-          <SettingRow label="API key" description={`Stored in ${status.credentialStore}.`} testId="agents-key">
+          <SettingRow
+            label="API key"
+            description={
+              status.configured
+                ? `Stored in ${status.credentialStore}.`
+                : `Set it in Provider settings; it is kept in ${status.credentialStore}.`
+            }
+            testId="agents-key"
+          >
             <StatusPill
               size="sm"
               status={status.configured ? "succeeded" : "unavailable"}
