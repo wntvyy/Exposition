@@ -164,9 +164,11 @@ async fn typst_builds_report_real_success_and_failure_diagnostics() {
     assert_eq!(diagnostic["path"], "main.typ");
     assert_eq!(diagnostic["line"], 3, "{diagnostic}");
     assert!(diagnostic["message"].as_str().unwrap().contains("unknown variable"), "{diagnostic}");
+    // Markdown builds through its declared print profile (in-process, like Typst).
     let (md_err, md) = &out[4];
-    assert!(md_err);
-    assert!(md["error"].as_str().unwrap().contains("Markdown builds is not available in this build"), "{md}");
+    assert!(!md_err, "{md}");
+    assert_eq!(md["status"], "succeeded", "{md}");
+    assert!(md["pages"].as_u64().unwrap() >= 1, "{md}");
     // Typst builds do not count as process launches.
     assert_eq!(task.usage.commands, 0);
 }

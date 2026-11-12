@@ -232,9 +232,16 @@ impl AppToolServices {
         if ok { Ok(value) } else { Err(ServiceError::Outcome(value)) }
     }
 
-    async fn build_typst(&self, request: BuildRequest) -> Result<Value, ServiceError> {
+    /// In-process builds through the typesetting service: Typst, and Markdown
+    /// through its declared print profile.
+    async fn build_typesetting(
+        &self,
+        request: BuildRequest,
+        format: DocumentFormat,
+        engine: Engine,
+    ) -> Result<Value, ServiceError> {
         let typesetting = self.typesetting.clone().ok_or(ServiceError::NotAvailable(ServiceKind::Typesetting))?;
-        let target = BuildTarget { format: DocumentFormat::Typst, engine: Engine::Typst, entry: request.entry };
+        let target = BuildTarget { format, engine, entry: request.entry };
         let record = tokio::task::spawn_blocking(move || typesetting.build(&target))
             .await
             .map_err(|e| ServiceError::Failed(format!("the build stopped unexpectedly: {e}")))?
@@ -501,13 +508,12 @@ impl ToolServices for AppToolServices {
 
     async fn build_document(&self, request: BuildRequest, cancel: CancellationToken) -> Result<Value, ServiceError> {
         match request.entry.extension().map(str::to_ascii_lowercase).as_deref() {
-            Some("typ") => self.build_typst(request).await,
+            Some("typ") => self.build_typesetting(request, DocumentFormat::Typst, Engine::Typst).await,
+            Some("md" | "markdown") => {
+                self.build_typesetting(request, DocumentFormat::Markdown, Engine::MarkdownPrint).await
+            }
             Some("tex" | "ltx") => self.build_latex(request, cancel).await,
-            Some("md" | "markdown") => Err(ServiceError::Unsupported("Markdown builds".into())),
-            _ => Err(ServiceError::Failed(format!(
-                "{} is not a buildable entry (.typ or .tex; Markdown is not wired yet)",
-                request.entry
-            ))),
+            _ => Err(ServiceError::Failed(format!("{} is not a buildable entry (.typ, .md, or .tex)", request.entry))),
         }
     }
 
