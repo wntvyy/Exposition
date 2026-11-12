@@ -65,6 +65,8 @@ export interface GraphCanvasProps {
   onToggleGroup?: (id: string) => void;
   /** Double click on a node. */
   onActivateNode?: (id: string) => void;
+  /** Bump `nonce` to fit the view to `nodes` (all nodes when absent), e.g. after Arrange or navigation. */
+  fitRequest?: { nonce: number; nodes?: string[] };
   /** Extra controls appended to the canvas toolbar. */
   controls?: ReactNode;
   /** Overlay shown when there are no nodes. */
@@ -324,6 +326,28 @@ function CanvasInner(props: GraphCanvasProps) {
       void flow.setViewport(viewport);
     }
   }, [viewport, flow]);
+  const fitNonce = props.fitRequest?.nonce ?? 0;
+  const fitNodes = props.fitRequest?.nodes;
+  useEffect(() => {
+    if (!fitNonce) return;
+    // Two frames: let new positions/nodes reach React Flow's store first.
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => {
+        void flow.fitView({
+          padding: fitNodes ? 0.4 : 0.15,
+          maxZoom: 1,
+          duration: duration(),
+          ...(fitNodes ? { nodes: fitNodes.map((id) => ({ id })) } : {}),
+        });
+      });
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+    };
+    // `fitNodes` is read when the nonce changes.
+  }, [fitNonce, flow]);
   useEffect(() => {
     if (!viewport && initialized && !fitted.current && nodes.length > 0) {
       fitted.current = true;

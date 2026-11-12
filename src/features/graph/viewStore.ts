@@ -248,6 +248,7 @@ export function createViewStore(name: string, scope: ViewScope, options: { saveD
         timer = null;
         await save();
       } else if (saving) await saving;
+      else if (use.getState().save === "error") await save();
     },
   };
 }

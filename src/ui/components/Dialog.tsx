@@ -12,6 +12,7 @@ import { create } from "zustand";
 
 import { Button, type ButtonVariant } from "./Button";
 import { cx } from "./cx";
+import { Popover, type PopoverProps } from "./Menu";
 
 export { DialogTrigger };
 
@@ -63,6 +64,35 @@ export function Dialog({
         </AriaDialog>
       </Modal>
     </ModalOverlay>
+  );
+}
+
+export interface PopoverDialogProps {
+  /** Accessible name (and visible heading unless `hideTitle`). */
+  title: string;
+  hideTitle?: boolean;
+  children: ReactNode;
+  placement?: PopoverProps["placement"];
+  className?: string;
+}
+
+/**
+ * Non-modal dialog in a popover (filters, small pickers). Place inside
+ * `DialogTrigger` after its Button trigger. Escape or clicking outside closes
+ * it and returns focus to the trigger.
+ */
+export function PopoverDialog({ title, hideTitle, children, placement = "bottom start", className }: PopoverDialogProps) {
+  return (
+    <Popover placement={placement} className={cx("ui-popover-dialog", className)}>
+      <AriaDialog className="ui-popover-dialog__dialog" aria-label={hideTitle ? title : undefined}>
+        {!hideTitle && (
+          <Heading slot="title" className="ui-popover-dialog__title">
+            {title}
+          </Heading>
+        )}
+        {children}
+      </AriaDialog>
+    </Popover>
   );
 }
 

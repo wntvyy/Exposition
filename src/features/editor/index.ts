@@ -1,6 +1,7 @@
 // Public API of the source editor for other features (e.g. page editing).
 // Import from "src/features/editor"; registration lives in ./register.
 export { SourceEditor, type SourceEditorProps } from "./SourceEditor";
+export { useActiveSourcePosition, type SourcePosition } from "./cursor";
 export {
   activeHandle,
   attachDocument,

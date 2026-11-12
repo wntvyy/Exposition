@@ -1635,3 +1635,25 @@
   gap: var(--space-0-5);
   min-width: 0;
 }
+
+/* ---------- Popover dialogs ---------- */
+
+.ui-popover-dialog {
+  min-width: 240px;
+  max-width: 360px;
+  padding: var(--space-2) var(--space-3) var(--space-3);
+}
+.ui-popover-dialog__dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  outline: none;
+}
+.ui-popover-dialog__title {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+}
