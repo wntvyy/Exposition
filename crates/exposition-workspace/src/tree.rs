@@ -28,8 +28,9 @@ pub fn is_graph_storage(path: &WorkspacePath) -> bool {
 }
 
 /// List one directory (`None` = the root): directories first, then files, each
-/// sorted case-insensitively. Hidden directories, temporary save files, and
-/// names that are not valid workspace paths are omitted. Links are followed
+/// sorted case-insensitively. Hidden directories, temporary save files, the
+/// project graph's storage, and names that are not valid workspace paths are
+/// omitted. Links are followed
 /// only when their target stays inside the workspace.
 pub fn list_dir(root: &WorkspaceRoot, dir: Option<&WorkspacePath>) -> WorkspaceResult<Vec<FileEntry>> {
     let absolute = match dir {
@@ -53,6 +54,11 @@ pub fn list_dir(root: &WorkspaceRoot, dir: Option<&WorkspacePath>) -> WorkspaceR
             Some(dir) => dir.join(&name),
         };
         let Ok(path) = path else { continue };
+        // The project graph's own database, backups, and set-aside copies are
+        // application storage, not files to open (the folder stays visible).
+        if is_graph_storage(&path) {
+            continue;
+        }
         let Ok(file_type) = entry.file_type() else { continue };
         let mut item = FileEntry { name, path, kind: EntryKind::Other, size: None, link: false, unavailable: None };
         if file_type.is_symlink() {

@@ -40,8 +40,14 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
     for (const hidden of [".git", ".lake", "node_modules", "target"]) assert.ok(!topLevel.includes(hidden), `${hidden} hidden`);
     assert.deepEqual(
       topLevel.filter((p) => p !== "escape"),
-      ["analysis", "chapters", "encoding", "main.typ", "notes.md", "README.txt"],
+      // `.exposition` holds the project graph (created when the folder opens).
+      [".exposition", "analysis", "chapters", "encoding", "main.typ", "notes.md", "README.txt"],
       "directories first, then files, case-insensitive",
+    );
+    const metadata = await invoke(page, "workspace_list_dir", { path: ".exposition" });
+    assert.ok(
+      !metadata.some((e) => e.name.startsWith("graph.sqlite3") || e.name === "graph-backups"),
+      `the graph's own storage is not listed: ${metadata.map((e) => e.name).join(", ")}`,
     );
     const escapeRow = tree.locator('[data-path="escape"]');
     assert.equal(await escapeRow.getAttribute("aria-disabled"), "true", "junction escaping the folder is unavailable");
