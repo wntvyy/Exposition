@@ -76,7 +76,9 @@ pub const PROJECT_DIR: &str = ".exposition";
 pub fn is_graph_storage(path: &WorkspacePath) -> bool {
     let p = path.as_str();
     let Some(rest) = p.strip_prefix(".exposition/") else { return false };
-    rest.starts_with("graph.sqlite3") || rest.starts_with("graph-backups/") || rest.starts_with("graph.damaged")
+    rest.starts_with("graph.sqlite3")
+        || (rest == "graph-backups" || rest.starts_with("graph-backups/"))
+        || rest.starts_with("graph.damaged")
 }
 
 #[derive(Clone, Debug)]

@@ -404,7 +404,10 @@ export default async function researchWorkspace({ launchApp, artifactsDir, asser
     await rp.getByTestId("research-pending-promotions").waitFor({ timeout: 10_000 });
     await shot("research-promotion-pending-light");
     await pending.getByRole("button", { name: "Reconcile now" }).click();
-    await waitFor(tableUsed, { timeout: 15_000, message: "reconciliation records the attachment" });
+    await waitFor(
+      async () => (await tableUsed()) && !(await invoke(page, "graph_operations")).some((o) => o.id === operation),
+      { timeout: 15_000, message: "reconciliation records the attachment and resolves the operation" },
+    );
     const opsAfter = await invoke(page, "graph_operations");
     note(
       "reconciliation-records-without-reapplying",

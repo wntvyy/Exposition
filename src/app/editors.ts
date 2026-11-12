@@ -3,6 +3,7 @@
 // workbench shell renders `useEditors` state. Document text never lives here.
 import { create } from "zustand";
 
+import { EDITOR_PAGE, pages } from "./pages";
 import type { DocumentMode, EditorResource } from "./registry";
 
 export type EditorGroupId = "primary" | "secondary";
@@ -44,6 +45,11 @@ export interface OpenEditorOptions {
   mode?: DocumentMode;
   group?: EditorGroupId;
   preview?: boolean;
+  /**
+   * Show the Editor page (default true): opening a tab from the Research,
+   * Agents, or Graph page reveals it. Pass false to open it in the background.
+   */
+  reveal?: boolean;
 }
 
 /** Resolves true when the editor may close (e.g. after a save/discard prompt). */
@@ -153,6 +159,7 @@ export const editors = {
       });
     }
     change(() => ({ activeGroup: groupId }));
+    if (options.reveal !== false) pages.show(EDITOR_PAGE);
   },
 
   /** Close a resource in every group, honoring its close guard. Resolves false if vetoed. */

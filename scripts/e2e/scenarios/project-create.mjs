@@ -189,7 +189,10 @@ export default async function projectCreate({ launchApp, artifactsDir, assert })
     assert.equal(await graphPageMounted(page), false, "the Graph page was never opened");
     const snapB = await entitiesOf(page, ["researchSpace", "question", "resource", "claim"]);
     const space = snapB.entities.find((e) => e.kind === "researchSpace");
-    assert.ok(space && /^\.exposition\/research\/rs-[a-z0-9]+$/.test(space.key), "a research space");
+    assert.ok(
+      space && /^rs-[0-9a-f]+$/.test(space.key) && space.attributes["research.path"] === `.exposition/research/${space.key}`,
+      `a research space keyed by its id with its folder: ${JSON.stringify(space)}`,
+    );
     assert.ok(snapB.entities.some((e) => e.kind === "question"), "a research question");
     assert.ok(
       snapB.entities.every((e) => e.kind !== "resource" || !e.roles.includes("manuscript") || e.key.startsWith(".exposition/research/")),

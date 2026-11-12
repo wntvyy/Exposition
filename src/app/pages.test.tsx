@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { Network } from "lucide-react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { editors } from "./editors";
 import { resetLayoutForTests, layout } from "./layout";
 import { EDITOR_PAGE, pages, resetPagesForTests, showPageCommandId, usePages } from "./pages";
 import { registry } from "./registry";
@@ -43,6 +44,15 @@ afterEach(() => {
 });
 
 describe("pages", () => {
+  it("opening an editor tab from another page shows the Editor page (unless asked not to)", () => {
+    offs.push(registry.registerPage({ id: "t.research", title: "Research", icon: Network, render: () => null }));
+    pages.show("t.research");
+    act(() => editors.open({ key: "t:bg", title: "background" }, { reveal: false }));
+    expect(usePages.getState().active).toBe("t.research");
+    act(() => editors.open({ key: "t:new", title: "New Project" }));
+    expect(usePages.getState().active).toBe(EDITOR_PAGE);
+  });
+
   it("refuses the reserved editor id and unknown pages", () => {
     expect(() => registry.registerPage({ id: EDITOR_PAGE, title: "x", icon: Network, render: () => null })).toThrow();
     expect(pages.show("nope")).toBe(false);

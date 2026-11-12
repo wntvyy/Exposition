@@ -1509,7 +1509,8 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       });
       await page.keyboard.press("Control+w");
       await invoke(page, "agents_dev_load_script", { script });
-      const jobsMid = (await invoke(page, "job_list")).length;
+      const jobsMidList = await invoke(page, "job_list");
+      const jobsMid = jobsMidList.length;
       const sessionsMid = (await invoke(page, "research_sessions")).length;
       t0 = Date.now();
       await startAgentTask({
@@ -1522,7 +1523,10 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       ({ calls } = await latestTaskCalls());
       assert.equal(calls[0].status, "failed");
       assert.match(calls[0].result, /never falls back/i);
-      assert.equal((await invoke(page, "job_list")).length, jobsMid, "no job was launched");
+      const jobsAfterList = await invoke(page, "job_list");
+      const midIds = new Set(jobsMidList.map((j) => j.info.id));
+      const launched = jobsAfterList.filter((j) => !midIds.has(j.info.id)).map((j) => `${j.info.label} [${j.info.policy?.kind ?? "?"}]`);
+      assert.equal(jobsAfterList.length, jobsMid, `no job was launched; new: ${JSON.stringify(launched)}`);
       assert.equal((await invoke(page, "research_sessions")).length, sessionsMid, "no kernel was started");
       assert.ok(!existsSync(join(root, "restricted-ran.txt")), "nothing ran natively in the project");
       note("refusal", calls[0].result.slice(0, 300));

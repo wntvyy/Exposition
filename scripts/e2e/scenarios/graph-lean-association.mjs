@@ -91,7 +91,10 @@ export default async function graphLeanAssociation({ launchApp, artifactsDir, as
     await dialog.waitFor();
     assert.match(await page.getByTestId("graph-associate-note").innerText(), /not a machine proof that they are equivalent/);
     const select = dialog.locator(".ui-select", { has: page.locator(".ui-field__label", { hasText: "Formal declaration" }) });
-    assert.match(await select.innerText(), new RegExp(DECLARATION.replace(".", "\\.")), "the audited declaration is offered");
+    // Indexing admits every declaration of the project; choose the audited one.
+    await select.getByRole("button").click();
+    await page.getByRole("option", { name: DECLARATION, exact: true }).click();
+    assert.match(await select.innerText(), new RegExp(DECLARATION.replace(".", "\\.")), "the audited declaration is chosen");
     await page.getByRole("textbox", { name: "Note (optional)" }).fill("Both state double 0 = 0");
     await shot("graph-lean-associate-dialog-light");
     await page.getByRole("button", { name: "Record reviewed association" }).click();

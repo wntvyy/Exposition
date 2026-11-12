@@ -143,7 +143,9 @@ pub fn classify(path: &WorkspacePath) -> Admission {
         return Admission::Exclude("a temporary save file");
     }
     if let Some(rest) = p.strip_prefix(".exposition/") {
-        if rest.starts_with("graph.sqlite3") || rest.starts_with("graph-backups/") || rest.starts_with("graph.damaged")
+        if rest.starts_with("graph.sqlite3")
+            || (rest == "graph-backups" || rest.starts_with("graph-backups/"))
+            || rest.starts_with("graph.damaged")
         {
             return Admission::Exclude("the project graph's own storage");
         }

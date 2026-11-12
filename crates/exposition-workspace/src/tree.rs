@@ -24,7 +24,9 @@ pub fn is_ignored(path: &WorkspacePath) -> bool {
 /// The project graph's own files under `.exposition/`.
 pub fn is_graph_storage(path: &WorkspacePath) -> bool {
     let Some(rest) = path.as_str().strip_prefix(".exposition/") else { return false };
-    rest.starts_with("graph.sqlite3") || rest.starts_with("graph-backups/") || rest.starts_with("graph.damaged")
+    rest.starts_with("graph.sqlite3")
+        || (rest == "graph-backups" || rest.starts_with("graph-backups/"))
+        || rest.starts_with("graph.damaged")
 }
 
 /// List one directory (`None` = the root): directories first, then files, each
@@ -155,6 +157,7 @@ mod tests {
         assert!(is_ignored(&WorkspacePath::parse(".exposition/graph.sqlite3").unwrap()));
         assert!(is_ignored(&WorkspacePath::parse(".exposition/graph.sqlite3-journal").unwrap()));
         assert!(is_ignored(&WorkspacePath::parse(".exposition/graph-backups/b1.sqlite3").unwrap()));
+        assert!(is_ignored(&WorkspacePath::parse(".exposition/graph-backups").unwrap()), "the backup folder itself");
         assert!(!is_ignored(&WorkspacePath::parse(".exposition/project.json").unwrap()));
         assert!(!is_ignored(&WorkspacePath::parse(".exposition/research/r/fit.py").unwrap()));
         assert!(!is_ignored(&WorkspacePath::parse("chapters/target.typ").unwrap()));
