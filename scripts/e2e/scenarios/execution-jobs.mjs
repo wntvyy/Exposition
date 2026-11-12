@@ -235,17 +235,42 @@ export default async function executionJobs({ launchApp, artifactsDir, assert })
     const second = await startProbeTree(page);
     evidence.processTreeBeforeAppKill = second.tree;
     process.kill(app.child.pid); // TerminateProcess on exposition.exe only
-    const orphans = await waitFor(
-      "job tree to die with the app",
-      () => {
-        const table = processTable();
-        const alive = second.tree.filter((p) => table.has(p.pid) && table.get(p.pid).name === p.name);
-        return alive.length === 0 ? [] : null;
-      },
-      10_000,
+    // Each process-table snapshot is a PowerShell/CIM query, which itself can
+    // take seconds on a loaded machine; record every snapshot so a miss shows
+    // whether the tree died late or never. Observe up to 60 s; the tree must
+    // be gone within 10 s of the kill as measured by a snapshot that STARTED
+    // after the tree was gone.
+    const killedAt = Date.now();
+    const snapshots = [];
+    let goneAt = null;
+    while (Date.now() - killedAt < 60_000) {
+      const started = Date.now();
+      const table = processTable();
+      const alive = second.tree.filter((p) => table.has(p.pid) && table.get(p.pid).name === p.name);
+      snapshots.push({
+        startedMs: started - killedAt,
+        tookMs: Date.now() - started,
+        alive: alive.map((p) => `${p.pid} ${p.name}`),
+      });
+      if (alive.length === 0) {
+        goneAt = started - killedAt;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    evidence.appKillSnapshots = snapshots;
+    assert.ok(goneAt !== null, `job tree still alive 60 s after the app was killed: ${JSON.stringify(snapshots.at(-1))}`);
+    // The first snapshot that saw the tree gone started at goneAt; the
+    // previous one (if any) still saw it alive.
+    const lastAlive = snapshots.length > 1 ? snapshots.at(-2).startedMs : 0;
+    assert.ok(
+      lastAlive <= 10_000,
+      `job tree was still alive ${lastAlive} ms after the app was killed (gone by ${goneAt} ms): ${JSON.stringify(snapshots)}`,
     );
-    assert.deepEqual(orphans, []);
-    evidence.appKillResult = "all job processes exited after the app process was terminated";
+    evidence.appKillResult =
+      snapshots.length === 1
+        ? `all job processes were gone at the first snapshot after the app was terminated (query took ${snapshots[0].tookMs} ms)`
+        : `all job processes exited after the app process was terminated (last seen alive at ${lastAlive} ms, gone by ${goneAt} ms)`;
   } finally {
     await writeFile(join(artifactsDir, "evidence.json"), JSON.stringify(evidence, null, 2));
     await app.close();
