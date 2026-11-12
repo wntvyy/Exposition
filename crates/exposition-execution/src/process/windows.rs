@@ -18,6 +18,13 @@
 //! Dropping [`Containment`] closes the only job handle; with
 //! `KILL_ON_JOB_CLOSE` the kernel then kills every remaining process — this is
 //! what guarantees cleanup if the application exits or crashes.
+//!
+//! Limitation: a job object contains the processes the child creates itself.
+//! Code running with the user's privileges can ask another service to create a
+//! process for it (WMI `Win32_Process.Create`, the task scheduler, COM
+//! servers); such a process is outside the job and survives cancellation and
+//! application exit. Trusted native execution is therefore not a sandbox; use
+//! restricted (container) execution for untrusted code.
 #![allow(unsafe_code)]
 
 use std::io;

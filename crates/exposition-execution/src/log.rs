@@ -19,7 +19,7 @@ use exposition_core::job::OutputStream;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::credentials::Redactor;
+use crate::credentials::{Redactor, replace_ranges};
 
 /// Default retained bytes per stream.
 pub const DEFAULT_LOG_LIMIT: usize = 1024 * 1024;
@@ -28,6 +28,10 @@ pub const MIN_LOG_LIMIT: usize = 1024;
 pub const MAX_LOG_LIMIT: usize = 64 * 1024 * 1024;
 /// A partial line longer than this is released (minus a held-back tail).
 const MAX_PARTIAL: usize = 16 * 1024;
+/// Recently released raw text kept as context, so a secret split across two
+/// releases (e.g. by an idle pause mid-token) is still found and its
+/// not-yet-emitted part redacted.
+const RELEASED_CONTEXT: usize = 1024;
 
 /// One emitted piece of output. `seq` orders chunks across both streams.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -153,6 +157,8 @@ pub struct StreamCapture {
     carry: Vec<u8>,
     /// Unredacted text not yet released (no trailing newline yet).
     partial: String,
+    /// Tail of recently released raw text (context for cross-release redaction).
+    released: String,
     /// Redacted text awaiting emission.
     ready: String,
     /// Upper bound for `ready`; excess oldest text is dropped.
@@ -162,7 +168,14 @@ pub struct StreamCapture {
 
 impl StreamCapture {
     pub fn new(limit: usize) -> Self {
-        Self { carry: Vec::new(), partial: String::new(), ready: String::new(), ready_cap: limit, dropped: false }
+        Self {
+            carry: Vec::new(),
+            partial: String::new(),
+            released: String::new(),
+            ready: String::new(),
+            ready_cap: limit,
+            dropped: false,
+        }
     }
 
     /// Feed raw bytes from the child.
@@ -171,7 +184,7 @@ impl StreamCapture {
         self.partial.push_str(&text);
         if let Some(pos) = self.partial.rfind('\n') {
             let complete: String = self.partial.drain(..=pos).collect();
-            let redacted = redactor.redact(&complete);
+            let redacted = self.redact_release(&complete, redactor);
             self.enqueue(&redacted);
         }
         if self.partial.len() > MAX_PARTIAL {
@@ -194,7 +207,7 @@ impl StreamCapture {
             return;
         }
         let released: String = self.partial.drain(..cut).collect();
-        let redacted = redactor.redact(&released);
+        let redacted = self.redact_release(&released, redactor);
         self.enqueue(&redacted);
     }
 
@@ -212,14 +225,33 @@ impl StreamCapture {
         std::mem::take(&mut self.dropped)
     }
 
+    /// Redact `text` for release, also catching secrets that began in text
+    /// released earlier: matches are searched in `released + text`, and the
+    /// part of each match that lies in `text` is replaced.
+    fn redact_release(&mut self, text: &str, redactor: &Redactor) -> String {
+        let context = self.released.len();
+        let mut combined = std::mem::take(&mut self.released);
+        combined.push_str(text);
+        let ranges: Vec<(usize, usize)> = redactor
+            .secret_ranges(&combined)
+            .into_iter()
+            .filter(|&(_, end)| end > context)
+            .map(|(start, end)| (start.max(context) - context, end - context))
+            .collect();
+        let keep_from = ceil_to_boundary(&combined, combined.len().saturating_sub(RELEASED_CONTEXT));
+        self.released = combined[keep_from..].to_owned();
+        replace_ranges(text, &ranges)
+    }
+
     fn enqueue(&mut self, text: &str) {
         self.ready.push_str(text);
         if self.ready.len() > self.ready_cap {
-            // Drop oldest queued text, preferably at a line boundary.
-            let excess = self.ready.len() - self.ready_cap;
+            // Drop the oldest queued text, preferably at a line boundary. The
+            // offset is moved to a char boundary before slicing.
+            let excess = ceil_to_boundary(&self.ready, self.ready.len() - self.ready_cap);
             let cut = match self.ready[excess..].find('\n') {
                 Some(offset) => excess + offset + 1,
-                None => ceil_to_boundary(&self.ready, excess),
+                None => excess,
             };
             self.ready.drain(..cut);
             self.dropped = true;
@@ -259,6 +291,7 @@ impl StreamCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::REDACTED as REDACTED_MARK;
 
     fn chunk(seq: u64, stream: OutputStream, text: &str) -> OutputChunk {
         OutputChunk { seq, stream, text: text.into() }
@@ -322,6 +355,51 @@ mod tests {
         assert_eq!(cap.take_ready().as_deref(), Some("αβ\n"));
         cap.push_bytes(&[0xff, b'\n'], &redactor);
         assert_eq!(cap.take_ready().as_deref(), Some("\u{fffd}\n"));
+    }
+
+    /// Regression (review R-m1): dropping queued text sliced at a byte offset
+    /// inside a multi-byte character panicked and wedged the job.
+    #[test]
+    fn queued_multibyte_output_over_the_limit_is_bounded_without_panicking() {
+        let redactor = Redactor::default();
+        for cap in [1024, 1025, 1026] {
+            let mut capture = StreamCapture::new(cap);
+            let text = format!("{}\n", "数学".repeat(2_000));
+            capture.push_bytes(text.as_bytes(), &redactor);
+            capture.push_bytes("\u{fffd}".repeat(3_000).as_bytes(), &redactor);
+            capture.release_partial(&redactor, true);
+            let ready = capture.take_ready().unwrap();
+            assert!(ready.len() <= cap, "cap {cap}: {} bytes", ready.len());
+            assert!(capture.take_dropped());
+        }
+    }
+
+    /// Regression (review R-m1): a secret written as "sk" + pause + the rest
+    /// was released in two pieces and the body escaped redaction.
+    #[test]
+    fn secret_split_by_an_idle_pause_is_still_redacted() {
+        let key = "sk-ant-api03-FAKEFAKEFAKE-test-only-0123456789";
+        let redactor = Redactor::from_host_env([("ANTHROPIC_API_KEY", key)]);
+        for split in [1, 2, 3, 6, 10, 20] {
+            let mut capture = StreamCapture::new(DEFAULT_LOG_LIMIT);
+            let (head, tail) = key.split_at(split);
+            capture.push_bytes(format!("key={head}").as_bytes(), &redactor);
+            capture.release_partial(&redactor, false); // idle flush
+            let mut out = capture.take_ready().unwrap_or_default();
+            capture.push_bytes(format!("{tail}\n").as_bytes(), &redactor);
+            out.push_str(&capture.take_ready().unwrap_or_default());
+            assert!(!out.contains("FAKEFAKE"), "split at {split}: {out:?}");
+            assert!(out.contains(REDACTED_MARK), "split at {split}: {out:?}");
+        }
+        // Pattern-only tokens (not in the host environment) too.
+        let plain = Redactor::default();
+        let mut capture = StreamCapture::new(DEFAULT_LOG_LIMIT);
+        capture.push_bytes(b"token gh", &plain);
+        capture.release_partial(&plain, false);
+        let mut out = capture.take_ready().unwrap_or_default();
+        capture.push_bytes(b"p_abcdefghijklmnopqrstuvwxyz0123456789 end\n", &plain);
+        out.push_str(&capture.take_ready().unwrap_or_default());
+        assert!(!out.contains("abcdefghijklmnop"), "{out:?}");
     }
 
     #[test]
