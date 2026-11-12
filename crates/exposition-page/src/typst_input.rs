@@ -67,6 +67,9 @@ enum Mode {
     Code,
     Raw,
     Comment,
+    /// Inside a definition or show rule (`#let`, function bodies, loops,
+    /// `#set`/`#show`): its content renders where it is used, not here.
+    Definition,
 }
 
 #[derive(Clone, Debug)]
@@ -100,6 +103,8 @@ fn flatten(node: &SyntaxNode, offset: usize, mode: Mode, unit: Option<Range<usiz
         return;
     }
     let inner_mode = match kind {
+        _ if mode == Mode::Definition => Mode::Definition,
+        _ if is_definition(kind) => Mode::Definition,
         SyntaxKind::Markup => Mode::Markup,
         SyntaxKind::Math | SyntaxKind::Equation => Mode::Math,
         SyntaxKind::Raw => Mode::Raw,
@@ -111,11 +116,26 @@ fn flatten(node: &SyntaxNode, offset: usize, mode: Mode, unit: Option<Range<usiz
     let mut child_offset = offset;
     let mut after_hash = false;
     for (i, child) in node.children().enumerate() {
-        let child_mode = if after_hash { Mode::Code } else { inner_mode };
+        let child_mode = if after_hash && inner_mode != Mode::Definition { Mode::Code } else { inner_mode };
         flatten(child, child_offset, child_mode, unit.clone(), i == 0, out);
         after_hash = child.kind() == SyntaxKind::Hash && matches!(inner_mode, Mode::Markup | Mode::Math);
         child_offset += child.len();
     }
+}
+
+/// Nodes whose content is rendered where it is used (or substituted), not
+/// where it is written.
+fn is_definition(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::LetBinding
+            | SyntaxKind::SetRule
+            | SyntaxKind::ShowRule
+            | SyntaxKind::Closure
+            | SyntaxKind::ForLoop
+            | SyntaxKind::WhileLoop
+            | SyntaxKind::ModuleImport
+    )
 }
 
 /// One element of the rendered-text token stream used to verify edits.
@@ -240,6 +260,16 @@ fn tokens_of(root: &SyntaxNode, collapse_math: bool) -> Vec<Token> {
     out
 }
 
+/// How a run of whitespace renders: a paragraph break when it contains a
+/// blank line, otherwise a space (nothing when empty).
+fn whitespace_token(ws: &str) -> Option<Tok> {
+    if ws.is_empty() {
+        return None;
+    }
+    let newlines = ws.chars().filter(|c| *c == '\n').count() + ws.matches('\r').count() - ws.matches("\r\n").count();
+    Some(if newlines >= 2 { Tok::Par } else { Tok::Space })
+}
+
 /// Whether a token lies before an insertion at `p`.
 fn before(token: &Token, p: usize) -> bool {
     match token.tok {
@@ -357,6 +387,7 @@ impl<'a> Doc<'a> {
             Mode::Code => Err(EditRefusal::NotEditable { reason: "code".into() }),
             Mode::Raw => Err(EditRefusal::NotEditable { reason: "raw".into() }),
             Mode::Comment => Err(EditRefusal::NotEditable { reason: "comment".into() }),
+            Mode::Definition => Err(EditRefusal::NotEditable { reason: "definition or show rule".into() }),
             mode => Ok(mode),
         };
         let before = self.leaf_before(p).map(|i| &self.leaves[i]);
@@ -395,17 +426,19 @@ impl<'a> Doc<'a> {
         let mut placed = false;
         let insert_toks = if math { Vec::new() } else { rendered_tokens(inserted) };
         for token in &old {
-            // Typing inside a run of whitespace splits it around the text.
+            // Typing inside a run of whitespace (a space, or a paragraph break
+            // that absorbed a typed trailing space) splits it around the text:
+            // each side renders by its own content.
             if !placed
                 && !math
-                && token.tok == Tok::Space
+                && matches!(token.tok, Tok::Space | Tok::Par)
                 && token.extent.start < at
                 && at < token.extent.end
                 && !contained(token, deletions)
             {
-                expected.push(Tok::Space);
+                expected.extend(whitespace_token(&self.text[token.extent.start..at]));
                 expected.extend(insert_toks.iter().cloned());
-                expected.push(Tok::Space);
+                expected.extend(whitespace_token(&self.text[at..token.extent.end]));
                 placed = true;
                 continue;
             }
@@ -712,6 +745,7 @@ fn classify(leaf: &Leaf) -> Step {
     use SyntaxKind as K;
     match leaf.mode {
         Mode::Code => Step::Refuse("code"),
+        Mode::Definition => Step::Refuse("definition or show rule"),
         Mode::Raw => Step::Refuse("raw"),
         Mode::Comment => Step::Skip,
         Mode::Markup => match leaf.kind {
@@ -794,6 +828,11 @@ fn collect_deletions(
             // structure is selected (handled by the parent).
             _ => {}
         }
+        return Ok(());
+    }
+    // Definitions render nothing where they are written: a selection across
+    // them never deletes them.
+    if is_definition(node.kind()) {
         return Ok(());
     }
     if !is_root && inside {
@@ -974,5 +1013,46 @@ mod tests {
         assert_eq!((text.as_str(), caret), ("a  b", 2));
         let (text, _) = run(&text, caret, ins("x")).unwrap();
         assert_eq!(text, "a x b");
+    }
+
+    /// Type `typed` one keystroke at a time from `at`.
+    fn type_keys(text: &str, at: u32, typed: &str) -> String {
+        let (mut text, mut caret) = (text.to_owned(), at);
+        for ch in typed.chars() {
+            let (next, c) = run(&text, caret, ins(&ch.to_string()))
+                .unwrap_or_else(|e| panic!("{ch:?} refused at {caret} in {text:?}: {e:?}"));
+            (text, caret) = (next, c);
+        }
+        text
+    }
+
+    /// Regression (R-m23 F3): text inside a definition or show rule renders at
+    /// its uses; page input never rewrites it, and selections keep it.
+    #[test]
+    fn definitions_and_show_rules_are_not_edited() {
+        let text = "#let product = [Exposition]\n#show \"secret\": [classified]\n\nUse #product and secret.\n";
+        for at in [text.find("Exposition").unwrap() + 2, text.find("classified").unwrap() + 2] {
+            assert!(matches!(run(text, at as u32, ins("Z")), Err(EditRefusal::NotEditable { .. })));
+            assert!(matches!(run(text, at as u32, PageEditOp::DeleteBackward), Err(EditRefusal::NotEditable { .. })));
+        }
+        // Text written in place stays editable.
+        let at = text.find("Use").unwrap() as u32 + 3;
+        assert_eq!(run(text, at, ins("d")).unwrap().0, text.replace("Use ", "Used "));
+    }
+
+    /// Regression (R-m23 F1): after a space typed at the end of a paragraph
+    /// (which merges into the paragraph break), further keystrokes were refused.
+    #[test]
+    fn appending_words_at_paragraph_end() {
+        let text = "First paragraph ends here.\n\nSecond.\n";
+        let at = text.find("here.").unwrap() as u32 + 5;
+        assert_eq!(type_keys(text, at, " More words."), "First paragraph ends here. More words.\n\nSecond.\n");
+        // At the end of the document and of a CRLF paragraph.
+        assert_eq!(type_keys("End.\n", 4, " Yes"), "End. Yes\n");
+        assert_eq!(type_keys("A.\r\n\r\nB.", 2, " C d"), "A. C d\r\n\r\nB.");
+        // Before a line comment at the end of a line.
+        let text = "Plan here. // note\nNext line.\n";
+        let at = text.find("here.").unwrap() as u32 + 5;
+        assert_eq!(type_keys(text, at, " More."), "Plan here. More. // note\nNext line.\n");
     }
 }

@@ -5,7 +5,7 @@
 //! arrive during a build coalesce into the next build, so typing never waits
 //! for the compiler. Each finished build is emitted as `typesetting:build`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -67,7 +67,9 @@ struct Queue {
 /// Owns the typesetting service and its build thread.
 pub struct TypesettingRuntime {
     pub service: Arc<TypesettingService>,
-    watched: Mutex<BTreeSet<WorkspacePath>>,
+    /// Watched entries with the number of views watching each: an entry is
+    /// rebuilt on changes until its last view unwatches it.
+    watched: Mutex<BTreeMap<WorkspacePath, usize>>,
     queue: Mutex<Queue>,
     wake: Condvar,
 }
@@ -95,10 +97,31 @@ impl TypesettingRuntime {
     pub fn new(service: Arc<TypesettingService>) -> Arc<Self> {
         Arc::new(Self {
             service,
-            watched: Mutex::new(BTreeSet::new()),
+            watched: Mutex::new(BTreeMap::new()),
             queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
         })
+    }
+
+    /// Count one more view watching `entry`.
+    pub fn watch(&self, entry: &WorkspacePath) {
+        *self.watched.lock().unwrap_or_else(|p| p.into_inner()).entry(entry.clone()).or_default() += 1;
+    }
+
+    /// One view stopped watching `entry`; it stays watched while others remain.
+    pub fn unwatch(&self, entry: &WorkspacePath) {
+        let mut watched = self.watched.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(count) = watched.get_mut(entry) {
+            *count -= 1;
+            if *count == 0 {
+                watched.remove(entry);
+            }
+        }
+    }
+
+    /// Number of views watching `entry`.
+    pub fn watchers(&self, entry: &WorkspacePath) -> usize {
+        self.watched.lock().unwrap_or_else(|p| p.into_inner()).get(entry).copied().unwrap_or(0)
     }
 
     fn event_for(&self, record: &BuildRecord) -> BuildEvent {
@@ -119,7 +142,7 @@ impl TypesettingRuntime {
     }
 
     fn request_watched(&self, app: &AppHandle) {
-        let watched: Vec<_> = self.watched.lock().unwrap_or_else(|p| p.into_inner()).iter().cloned().collect();
+        let watched: Vec<_> = self.watched.lock().unwrap_or_else(|p| p.into_inner()).keys().cloned().collect();
         for entry in watched {
             self.request(entry, app);
         }
@@ -226,7 +249,7 @@ pub async fn typesetting_watch(
     if runtime.service.workspace().current().is_none() {
         return Err(CommandError::new("typesetting.noWorkspace", "no workspace is open"));
     }
-    runtime.watched.lock().unwrap_or_else(|p| p.into_inner()).insert(entry.clone());
+    runtime.watch(&entry);
     runtime.request(entry.clone(), &app);
     Ok(runtime.service.latest(&entry).map(|r| runtime.event_for(&r)))
 }
@@ -237,7 +260,7 @@ pub async fn typesetting_unwatch(state: State<'_, AppState>, entry: WorkspacePat
         crate::tex::unwatch(&state, &entry);
         return Ok(());
     }
-    runtime(&state).watched.lock().unwrap_or_else(|p| p.into_inner()).remove(&entry);
+    runtime(&state).unwatch(&entry);
     Ok(())
 }
 
@@ -273,4 +296,34 @@ pub async fn typesetting_export_pdf(
         .await
         .map_err(|e| command_error("typesetting.export", e))?
         .map_err(|e| command_error("typesetting.export", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use exposition_core::path::WorkspacePath;
+    use exposition_typesetting::{Fonts, TypesettingService};
+    use exposition_workspace::{DocumentService, WorkspaceService};
+
+    use super::TypesettingRuntime;
+
+    /// Regression (R-m23 F5): two views watch the same entry; closing one must
+    /// keep the entry watched (rebuilt on edits) for the other.
+    #[test]
+    fn watching_is_counted_per_view() {
+        // No folder is opened, so the data directory is never touched.
+        let documents = Arc::new(DocumentService::new());
+        let workspace = WorkspaceService::new(documents, std::env::temp_dir().join("exposition-unused"));
+        let runtime = TypesettingRuntime::new(Arc::new(TypesettingService::new(workspace, Fonts::embedded_only)));
+        let entry = WorkspacePath::parse("main.typ").unwrap();
+        runtime.watch(&entry);
+        runtime.watch(&entry);
+        runtime.unwatch(&entry);
+        assert_eq!(runtime.watchers(&entry), 1, "the remaining view still watches the entry");
+        runtime.unwatch(&entry);
+        assert_eq!(runtime.watchers(&entry), 0);
+        runtime.unwatch(&entry);
+        assert_eq!(runtime.watchers(&entry), 0, "extra unwatch is harmless");
+    }
 }

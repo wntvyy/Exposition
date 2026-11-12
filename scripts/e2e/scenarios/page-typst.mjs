@@ -5,7 +5,7 @@
 // PDF export. Opens a temporary copy of the fixture project through the real
 // workspace flow (open folder, file tree, mode switcher). Screenshots go to
 // test-results/e2e/page-typst (and reference shots to $EXPOSITION_DEV_HOME).
-import { copyFile, cp, mkdir, mkdtemp, readFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -396,6 +396,122 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     const shown = await page.$$eval('[data-testid="page"]', (els) => els.map((e) => Number(e.dataset.widthPt)));
     for (const [i, b] of boxes.entries()) assert.ok(Math.abs(b[2] - b[0] - shown[i]) < 0.01, "PDF page width matches");
     await shot("10-final");
+
+    // 10. Regressions from the R-m23 review, in the real app.
+    const runCommand = async (query) => {
+      await page.keyboard.press("Control+Shift+P");
+      const palette = page.getByRole("textbox", { name: "Command" });
+      await palette.waitFor({ state: "visible", timeout: 5000 });
+      await palette.fill(query);
+      await page.locator(".wb-palette__item").first().waitFor();
+      await page.keyboard.press("Enter");
+      await palette.waitFor({ state: "detached", timeout: 5000 });
+    };
+    const applySource = async (at, insert) =>
+      invoke("document_apply", {
+        request: {
+          id: `e2e-src-${Date.now()}`,
+          origin: { kind: "source" },
+          edits: [{ document: doc, baseRevision: (await state()).info.revision, patches: [{ range: { start: at, end: at }, text: insert }] }],
+          undo: { kind: "newGroup" },
+          conflict: "reject",
+          label: null,
+          selection: null,
+        },
+      });
+    await page.evaluate(async () => {
+      window.__pageTypstBuilds = [];
+      const internals = window.__TAURI_INTERNALS__;
+      const handler = internals.transformCallback((event) => {
+        window.__pageTypstBuilds.push({ id: event.payload.result.id, entry: event.payload.result.target.entry });
+      });
+      await internals.invoke("plugin:event|listen", { event: "typesetting:build", target: { kind: "Any" }, handler });
+    });
+
+    // F1: append words at the end of a paragraph (after the space every
+    // keystroke used to be refused).
+    {
+      source = await text();
+      const endAt = source.indexOf("marker.") + "marker.".length;
+      const pe = await point(endAt, "upstream", -0.2);
+      await page.mouse.click(pe.x, pe.y);
+      await waitCaretOffset(endAt);
+      await page.keyboard.type(" More words.");
+      await waitCaretOffset(endAt + " More words.".length);
+      assert.ok((await text()).includes("marker. More words.\n"), "F1: words appended at a paragraph end");
+      await settled("F1 appended at paragraph end");
+    }
+
+    // F3: text produced by a #let macro is not editable on the page and a
+    // click on it never edits the definition.
+    {
+      await applySource(0, "#let product = [Exposition Studio]\n");
+      source = await text();
+      await applySource(source.indexOf("More words.") + "More words.".length, " Made with #product today.");
+      await settled("F3 macro added");
+      source = await text();
+      const defStart = source.indexOf("[Exposition Studio]");
+      const rendered = await invoke("page_selection", { build: await build(), path: PATH, start: defStart, end: defStart + 19 });
+      assert.ok(rendered.rects.length > 0, "F3: the macro output is rendered on the page");
+      const r = rendered.rects[0];
+      const hit = await invoke("page_hit_test", { build: await build(), page: r.page, x: r.x + r.width * 0.3, y: r.y + r.height / 2 });
+      assert.equal(hit.nonEditable, "code", "F3: macro output is reported as not editable");
+      const el = page.locator(`[data-testid="page"][data-page="${r.page}"]`);
+      const box = await el.boundingBox();
+      const scale = box.width / Number(await el.getAttribute("data-width-pt"));
+      await page.mouse.click(box.x + (r.x + r.width * 0.3) * scale, box.y + (r.y + r.height / 2) * scale);
+      await page.waitForFunction(() => (document.querySelector('[data-testid="page-message"]')?.textContent ?? "").includes("edit in source"), null, { timeout: 5000 });
+      await page.keyboard.type("Z");
+      await page.waitForTimeout(300);
+      assert.ok((await text()).includes("#let product = [Exposition Studio]\n"), "F3: the definition is never edited from the page");
+      await settled("F3 checked");
+    }
+
+    // F4: opening the page view adopts the newest build even when older
+    // builds of the entry exist, and survives their eviction.
+    {
+      await modeButton("Source").click();
+      await page.locator('[data-testid="page-editor"]').waitFor({ state: "detached", timeout: 10000 });
+      for (let i = 0; i < 16; i++) await writeFile(join(workspace, `other${i}.typ`), `Other ${i}.\n`);
+      await invoke("typesetting_build", { entry: PATH });
+      for (let i = 0; i < 7; i++) await invoke("typesetting_build", { entry: `other${i}.typ` });
+      await modeButton("Page").click();
+      await page.locator('[data-testid="page-editor"]').waitFor();
+      await settled("F4 page view reopened");
+      await page.waitForTimeout(800);
+      const newest = await page.evaluate((p) => window.__pageTypstBuilds.filter((b) => b.entry === p).map((b) => b.id).at(-1), PATH);
+      assert.equal(await build(), newest, "F4: the page view shows the newest build of its entry");
+      for (let i = 7; i < 16; i++) await invoke("typesetting_build", { entry: `other${i}.typ` });
+      const before = app.consoleMessages.length;
+      source = await text();
+      const at = source.indexOf("Offices");
+      const pf = await point(at, "downstream", 0.2);
+      await page.mouse.click(pf.x, pf.y);
+      await waitCaretOffset(at);
+      const errs = app.consoleMessages.slice(before).filter((m) => m.startsWith("pageerror") || m.startsWith("error"));
+      assert.deepEqual(errs, [], "F4: clicking after other builds places the caret without errors");
+    }
+
+    // F5: closing one of two views of the document keeps the other rebuilding.
+    {
+      await runCommand("Split Editor Right");
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid="page-editor"]').length === 2, null, { timeout: 10000 });
+      await runCommand("Close Right Editor Group");
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid="page-editor"]').length === 1, null, { timeout: 10000 });
+      await page.waitForTimeout(300);
+      source = await text();
+      await applySource(source.indexOf("Offices"), "Still ");
+      const revision = (await state()).info.revision;
+      await page.waitForFunction(
+        (r) => {
+          const el = document.querySelector('[data-testid="page-editor"]');
+          return el?.dataset.buildRevision === String(r) && el.dataset.stale === "false";
+        },
+        revision,
+        { timeout: 10000 },
+      );
+      await shot("13-r-m23-regressions");
+    }
 
     console.log(`      pages ${pages}; export ${exported.path}`);
     for (const t of timings) console.log(`      ${t.label}: ${t.ms} ms`);
