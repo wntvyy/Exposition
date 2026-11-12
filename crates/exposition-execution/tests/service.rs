@@ -389,6 +389,39 @@ async fn trusted_native_requires_workspace_trust() {
     assert_eq!(f.service.summary(&revoked).unwrap().refusal.unwrap().code, RefusalCode::UntrustedWorkspace);
 }
 
+/// Every grant and revoke, whichever surface made it, is announced to the
+/// services that cache trust (Lean, TeX page views, research, the webview).
+/// Refused grants announce nothing; the trust store stays authoritative.
+#[tokio::test(flavor = "multi_thread")]
+async fn trust_grants_and_revokes_are_announced() {
+    use exposition_execution::TrustChanged;
+    let f = fixture_with(ExecutionSettings::default(), false);
+    let mut changes = f.service.subscribe_trust();
+    let mut late = f.service.subscribe_trust();
+    let root = f.workspace.display().to_string();
+    let granted = f.service.grant_trust(&root).unwrap();
+    assert_eq!(changes.try_recv().unwrap(), TrustChanged { root: granted.root.clone(), granted: true });
+    // A folder inside the trusted one is covered: consumers re-check their own roots.
+    let inner = f.workspace.join("chapter");
+    std::fs::create_dir_all(&inner).unwrap();
+    assert!(f.service.trust_status(&inner.display().to_string()).unwrap().trusted);
+    let revoked = f.service.revoke_trust(&root).unwrap();
+    assert!(!revoked.trusted);
+    assert_eq!(changes.try_recv().unwrap(), TrustChanged { root: revoked.root.clone(), granted: false });
+    // Every subscriber sees every change, in order.
+    assert!(late.try_recv().unwrap().granted);
+    assert!(!late.try_recv().unwrap().granted);
+    // A refused grant (too broad) or an invalid revoke changes nothing and says nothing.
+    let profile = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap();
+    assert!(f.service.grant_trust(&std::path::PathBuf::from(profile).display().to_string()).is_err());
+    assert!(f.service.revoke_trust(&f.tmp.path().join("missing").display().to_string()).is_err());
+    assert!(changes.try_recv().is_err(), "no announcement for refused changes");
+    // Clones of the service share one channel.
+    let clone = f.service.clone();
+    clone.grant_trust(&root).unwrap();
+    assert!(changes.try_recv().unwrap().granted);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn restricted_backend_unavailable_is_refused_without_native_fallback() {
     // (a) Docker missing (configured path does not exist).

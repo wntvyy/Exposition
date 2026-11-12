@@ -106,7 +106,24 @@ export function startResearchTracking(): void {
     scheduleFlush();
   });
   void events.researchResync(() => void refreshAll());
+  // Trust granted or revoked anywhere (another view's dialog, Settings): the
+  // banner and the environment list (project interpreters are offered only
+  // in a trusted folder) follow. A revoke also stops this folder's sessions
+  // in the service; their state arrives as research events.
+  void events.trustChanged(() => void refreshTrust());
   void refreshAll();
+}
+
+/** Re-read the workspace's trust and, when it changed, the environments. */
+export async function refreshTrust(): Promise<void> {
+  const before = useResearch.getState().workspace;
+  await refreshAll();
+  const after = useResearch.getState().workspace;
+  if (before && after && before.root === after.root && before.trusted !== after.trusted) {
+    // An error shown before the change (e.g. a refused start) no longer applies.
+    useResearch.setState({ error: null });
+    if (useResearch.getState().environments) await loadEnvironments(false);
+  }
 }
 
 export async function refreshAll(): Promise<void> {
@@ -194,8 +211,10 @@ export async function startSession(environmentId: string): Promise<SessionInfo |
     }));
     return session;
   } catch (e) {
-    useResearch.setState({ starting: false, error: errorMessage(e) });
-    if (isCommandError(e) && e.code === "research.notTrusted") void trustWorkspace();
+    // Not trusted: the banner and the trust prompt say so; no stale error text.
+    const notTrusted = isCommandError(e) && e.code === "research.notTrusted";
+    useResearch.setState({ starting: false, error: notTrusted ? null : errorMessage(e) });
+    if (notTrusted) void trustWorkspace();
     return null;
   }
 }

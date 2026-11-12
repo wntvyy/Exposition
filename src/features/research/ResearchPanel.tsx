@@ -37,7 +37,7 @@ import {
 import {
   EMPTY_RUN_OUTPUT,
   ENTRY_PREVIEW_CHARS,
-  attachmentKeys,
+  attachmentsOfKind,
   displayArtifacts,
   documentFormat,
   formatBytes,
@@ -595,7 +595,8 @@ function AttachControls({ run, artifact }: { run: RunSummary; artifact: Artifact
     commands.documentState(selected.document).then(
       (state) => {
         if (!live || !format) return;
-        const found = attachmentKeys(state.text, format);
+        // Only attachments of this artifact's kind: a table never replaces a figure.
+        const found = attachmentsOfKind(state.text, format, what);
         setKeys(found);
         setKey((current) => (current && found.includes(current) ? current : (found[0] ?? null)));
       },
@@ -604,7 +605,7 @@ function AttachControls({ run, artifact }: { run: RunSummary; artifact: Artifact
     return () => {
       live = false;
     };
-  }, [selected, busy]);
+  }, [selected, busy, what]);
 
   if (!open) {
     return (

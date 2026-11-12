@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { RefreshCw, ShieldOff } from "lucide-react";
 
 import type { TrustRuleLocation } from "../../bindings/TrustRuleLocation";
+import { events } from "../../lib/ipc";
 import { Button, EmptyState, ErrorState, LoadingState, StatusPill } from "../../ui/components";
 import { formatGrantedAt } from "./model";
 import { SettingsGroup, SettingsPage } from "./parts";
@@ -26,6 +27,17 @@ export function TrustSection() {
   const error = useSettings((s) => s.trustError);
   useEffect(() => {
     void loadTrust();
+    // A folder trusted (or revoked) from any other view shows up here at once.
+    let unlisten: (() => void) | null = null;
+    let live = true;
+    void events
+      .trustChanged(() => void loadTrust())
+      .then((un) => (live ? (unlisten = un) : un()))
+      .catch(() => {});
+    return () => {
+      live = false;
+      unlisten?.();
+    };
   }, []);
 
   return (

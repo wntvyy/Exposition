@@ -732,3 +732,38 @@ async fn project_interpreters_are_probed_only_when_trusted() {
         }
     }
 }
+
+/// The cached discovery report follows trust: environments discovered while
+/// the project was untrusted (no project interpreters) are rediscovered once
+/// it is trusted, without an explicit refresh, and dropped again on revoke.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cached_environments_follow_trust_changes() {
+    let program_dir = if cfg!(windows) { ".venv/Scripts" } else { ".venv/bin" };
+    let program_name = if cfg!(windows) { "python.exe" } else { "python" };
+    let fx = fixture(false).await;
+    let planted = fx.root.join(program_dir).join(program_name);
+    std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+    std::fs::write(&planted, b"not a real interpreter").unwrap();
+    let venv_probes = || {
+        fx.execution
+            .list()
+            .into_iter()
+            .filter(|job| {
+                let program = job.info.program.to_lowercase();
+                program.contains(".venv") && program.ends_with(program_name)
+            })
+            .count()
+    };
+    fx.service.environments(false).await.unwrap();
+    assert_eq!(venv_probes(), 0, "an untrusted project's interpreter must not run");
+    fx.execution.grant_trust(&fx.root.display().to_string()).unwrap();
+    fx.service.environments(false).await.unwrap();
+    let after_grant = venv_probes();
+    assert!(after_grant > 0, "trusting the project rediscovers its interpreters");
+    // Cached while trust is unchanged.
+    fx.service.environments(false).await.unwrap();
+    assert_eq!(venv_probes(), after_grant);
+    fx.execution.revoke_trust(&fx.root.display().to_string()).unwrap();
+    fx.service.environments(false).await.unwrap();
+    assert_eq!(venv_probes(), after_grant, "nothing from the project runs after the revoke");
+}

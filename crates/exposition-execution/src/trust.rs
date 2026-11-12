@@ -41,6 +41,24 @@ pub struct TrustStatus {
     pub trusted_via: Option<String>,
 }
 
+/// A trust grant or revoke, announced by
+/// [`crate::ExecutionService::subscribe_trust`] whichever surface made it.
+///
+/// It is only a hint to re-check: trust covers descendants, so a consumer
+/// asks [`crate::ExecutionService::trust_status`] for its own folder rather
+/// than comparing paths, and the execution service still checks trust when
+/// it launches anything.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustChanged {
+    /// The directory trusted or revoked (canonical; as stored for a removed
+    /// folder whose trust was revoked).
+    pub root: String,
+    /// `true` for a grant, `false` for a revoke.
+    pub granted: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TrustError {
     #[error(transparent)]

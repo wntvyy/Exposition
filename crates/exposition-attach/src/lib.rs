@@ -15,7 +15,10 @@
 //! | Markdown | `<!-- exposition:begin <key> -->`    | (marker only)   |
 //!
 //! with matching `end` markers. Update refuses when the markers for the key are
-//! missing or ambiguous instead of guessing. Users may edit inside a block (for
+//! missing or ambiguous instead of guessing, and when the block shows the other
+//! kind (a figure is updated only by a figure, a table only by a table; the
+//! block's content decides, the `fig-`/`tab-` key prefix only when the content
+//! is unrecognizable). Users may edit inside a block (for
 //! example the caption); an update without a new caption keeps the caption
 //! source found in the block.
 //!
@@ -106,6 +109,10 @@ pub enum AttachError {
     Unsupported(String),
     #[error("{0}")]
     InvalidTable(String),
+    #[error(
+        "attachment {key} is a {existing}, so a {replacement} cannot update it; update it with a {existing}, or insert the {replacement} as a new attachment"
+    )]
+    KindMismatch { key: String, existing: BlockKind, replacement: BlockKind },
 }
 
 impl AttachError {
@@ -123,7 +130,38 @@ impl AttachError {
             AttachError::ArtifactChanged { .. } => "attach.artifactChanged",
             AttachError::Unsupported(_) => "attach.unsupported",
             AttachError::InvalidTable(_) => "attach.invalidTable",
+            AttachError::KindMismatch { .. } => "attach.kindMismatch",
         }
+    }
+}
+
+/// Whether an attachment block shows a figure or a table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    Figure,
+    Table,
+}
+
+impl BlockKind {
+    /// The kind of an attachment from its key alone: keys this crate derives
+    /// start with `fig-` or `tab-` (a fallback when the content is unrecognizable).
+    fn from_key(key: &str) -> Option<BlockKind> {
+        if key.starts_with("fig-") {
+            Some(BlockKind::Figure)
+        } else if key.starts_with("tab-") {
+            Some(BlockKind::Table)
+        } else {
+            None
+        }
+    }
+}
+
+impl std::fmt::Display for BlockKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BlockKind::Figure => "figure",
+            BlockKind::Table => "table",
+        })
     }
 }
 
@@ -228,6 +266,14 @@ pub fn plan(
             validate_key(attachment_key)?;
             let range = blocks::locate(format, text, attachment_key)?;
             let existing = &text[range.clone()];
+            // A figure is updated only by a figure, a table only by a table.
+            let replacement = if is_table { BlockKind::Table } else { BlockKind::Figure };
+            let kind = blocks::block_kind(format, existing).or_else(|| BlockKind::from_key(attachment_key));
+            if let Some(existing) = kind
+                && existing != replacement
+            {
+                return Err(AttachError::KindMismatch { key: attachment_key.clone(), existing, replacement });
+            }
             let caption = match &request.caption {
                 Some(caption) => Some(Caption::Plain(caption.clone())),
                 None => blocks::extract_caption(format, existing).map(Caption::Raw),

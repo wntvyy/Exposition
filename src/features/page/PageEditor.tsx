@@ -201,6 +201,8 @@ export function PageEditor({ resource, active }: EditorProps) {
   const pill =
     status === "building" ? (
       <StatusPill status="running" label={`Building ${resource.title}`} size="sm" />
+    ) : model.untrustedRoot ? (
+      <StatusPill status="unavailable" label="Not trusted" size="sm" />
     ) : model.failed ? (
       <StatusPill status="failed" label="Build failed" detail={errors} size="sm" />
     ) : model.buildId ? (
@@ -245,6 +247,22 @@ export function PageEditor({ resource, active }: EditorProps) {
         />
         <IconButton aria-label="Export PDF" icon={FileDown} size="sm" isDisabled={!model.buildId} onPress={exportPdf} />
       </Toolbar>
+
+      {model.untrustedRoot && model.pages.length > 0 && (
+        <Banner
+          tone="warning"
+          title="Workspace not trusted"
+          className="page-editor__untrusted"
+          actions={
+            <Button variant="ghost" size="sm" onPress={() => void session.trust()}>
+              Trust workspace…
+            </Button>
+          }
+        >
+          These pages are from the last build. Builds run the compiler with your account&rsquo;s permissions, so the
+          pages are not rebuilt until the workspace is trusted again.
+        </Banner>
+      )}
 
       {model.failed && model.pages.length > 0 && (
         <Banner

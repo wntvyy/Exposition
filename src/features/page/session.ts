@@ -230,10 +230,12 @@ export class PageSession {
     if (this.newestEvent && isOlder(key, this.newestEvent)) return;
     this.newestEvent = key;
     // LaTeX builds run the TeX engine and need a trusted workspace: offer the
-    // shared trust prompt (once per view) instead of building.
+    // shared trust prompt (once per view) instead of building. Trust granted
+    // or revoked anywhere rebuilds watched entries, so this view follows it;
+    // after a revoke (pages already shown) it says so without prompting.
     if (event.refusal?.code === "untrustedWorkspace" && event.refusal.workspaceRoot) {
       this.set({ untrustedRoot: event.refusal.workspaceRoot });
-      if (!this.trustPrompted) {
+      if (!this.trustPrompted && !this.build) {
         this.trustPrompted = true;
         await this.trust();
       }

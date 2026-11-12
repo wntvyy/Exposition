@@ -28,7 +28,7 @@ use crate::settings::{
 use crate::toolchains::{
     Located, Locator, TOOLS, ToolStatus, ToolchainInfo, interpret_probe, is_executable_file, tool,
 };
-use crate::trust::{TrustError, TrustRules, TrustStatus, TrustStore, TrustedRoot};
+use crate::trust::{TrustChanged, TrustError, TrustRules, TrustStatus, TrustStore, TrustedRoot};
 
 /// Default wall-clock limit for batch jobs without `timeout_ms`.
 pub const DEFAULT_BATCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -296,6 +296,8 @@ struct Inner {
     redactor: Arc<Redactor>,
     settings: SettingsStore,
     trust: TrustStore,
+    /// Every grant and revoke, for services that cache trust.
+    trust_events: broadcast::Sender<TrustChanged>,
     roots: Mutex<Roots>,
     table: Mutex<Table>,
     events: broadcast::Sender<JobEvent>,
@@ -350,6 +352,7 @@ impl ExecutionService {
             .register(&probe_dir, RootKind::AppOwned { owner: None })
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         let (events, _) = broadcast::channel(4096);
+        let (trust_events, _) = broadcast::channel(64);
         let instance = docker::instance_label(&exec_dir);
         Ok(Self {
             inner: Arc::new(Inner {
@@ -360,6 +363,7 @@ impl ExecutionService {
                 redactor,
                 settings,
                 trust,
+                trust_events,
                 roots: Mutex::new(roots),
                 table: Mutex::new(Table::default()),
                 events,
@@ -408,12 +412,27 @@ impl ExecutionService {
     }
 
     /// Grant trust. Call only from an explicit user action (trust dialog).
+    /// Announced to [`Self::subscribe_trust`] subscribers.
     pub fn grant_trust(&self, path: &str) -> Result<TrustStatus, TrustError> {
-        self.inner.trust.grant(path)
+        let status = self.inner.trust.grant(path)?;
+        let _ = self.inner.trust_events.send(TrustChanged { root: status.root.clone(), granted: true });
+        Ok(status)
     }
 
+    /// Revoke trust (the folder and anything trusted inside it). Announced to
+    /// [`Self::subscribe_trust`] subscribers, which stop trusted work there.
     pub fn revoke_trust(&self, path: &str) -> Result<TrustStatus, TrustError> {
-        self.inner.trust.revoke(path)
+        let status = self.inner.trust.revoke(path)?;
+        let _ = self.inner.trust_events.send(TrustChanged { root: status.root.clone(), granted: false });
+        Ok(status)
+    }
+
+    /// Trust grants and revokes from any surface, in order. Services that
+    /// cache trust (language servers, page views, research sessions)
+    /// re-check their folders with [`Self::trust_status`] on each; on
+    /// `Lagged`, re-check everything.
+    pub fn subscribe_trust(&self) -> broadcast::Receiver<TrustChanged> {
+        self.inner.trust_events.subscribe()
     }
 
     /// Every stored trusted directory (for the settings UI).

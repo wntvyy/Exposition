@@ -51,4 +51,4 @@ pub use service::{
 };
 pub use settings::{DockerSettings, ExecutionSettings, ExecutionSettingsChange, ExecutionSettingsState, SettingsError};
 pub use toolchains::{Located, ToolSource, ToolStatus, ToolchainInfo};
-pub use trust::{TrustError, TrustRuleLocation, TrustRules, TrustStatus, TrustedRoot};
+pub use trust::{TrustChanged, TrustError, TrustRuleLocation, TrustRules, TrustStatus, TrustedRoot};

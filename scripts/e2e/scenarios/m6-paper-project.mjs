@@ -610,7 +610,10 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
 
     });
 
-    await step("1b", "Trust through the dialog; every surface leaves the untrusted state", async () => {
+    await step("1b", "Trust through the Research dialog; the LaTeX page, Lean, and lean_check follow by themselves", async () => {
+      // Propagation is asserted directly: no surface's own Trust button is
+      // pressed after the grant. Each check is recorded, so one run reports
+      // every surface that did not follow.
       const opened = await invoke(page, "workspace_current");
       const research = page.getByTestId("research-panel");
       const lean = page.getByTestId("lean-panel");
@@ -625,50 +628,52 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       await research.getByText("Workspace not trusted").waitFor({ state: "detached", timeout: 10_000 });
       assert.equal((await invoke(page, "trust_status", { root: opened.root })).trusted, true);
       const trustedAt = Date.now();
+      const followed = (promise) => promise.then(() => true, () => false);
 
-      // The LaTeX page view that was declined before (its tab is still open).
+      // The LaTeX page view declined in 1a (its tab is still open) builds.
       await openFromTree(page, SUPPLEMENT);
       await pageEditor().waitFor({ timeout: 10_000 });
-      const texLeft = await waitFor(async () => (await texUntrusted().count()) === 0, { timeout: 10_000 }).then(
-        () => true,
-        () => false,
-      );
-      softly(texLeft, "DEFECT: the LaTeX page view still shows 'Workspace not trusted' 10 s after the folder was trusted from the Research panel");
-      if (!texLeft) {
-        // What a user does next: that view's own button (the folder is already trusted, so no dialog).
-        await page.getByTestId("page-scroller").getByRole("button", { name: "Trust workspace…" }).click();
+      const texLeft = await followed(texUntrusted().waitFor({ state: "detached", timeout: 15_000 }));
+      softly(texLeft, "the LaTeX page view still shows 'Workspace not trusted' 15 s after the folder was trusted from the Research panel");
+      if (texLeft) {
+        timing("trust -> LaTeX view leaves untrusted", Date.now() - trustedAt);
+        await settled(SUPPLEMENT, "supplement built with pdfLaTeX after trust", 120_000);
+        timing("trust -> LaTeX pages", Date.now() - trustedAt);
+        const pill = await followed(page.locator('[data-testid="build-status"][data-status="succeeded"]').waitFor({ timeout: 15_000 }));
+        softly(pill, "the status bar build item does not show the LaTeX build after trust");
+        await shot("01-trusted-tex-light");
       }
-      await texUntrusted().waitFor({ state: "detached", timeout: 10_000 });
-      const texStart = Date.now();
-      await settled(SUPPLEMENT, "supplement built with pdfLaTeX after trust", 120_000);
-      timing("trust -> LaTeX pages", Date.now() - texStart);
-      await shot("01-trusted-tex-light");
       await page.locator(`[data-editor-key="file:${SUPPLEMENT}"] .ui-editor-tab__close`).click().catch(() => {});
 
-      // Lean: the file was opened while untrusted.
-      await runCommand(page, "show lean infoview", /Show Lean Infoview/);
-      const leanId = await openInEditor(page, LEMMA);
-      const leanLeft = await waitFor(async () => (await lean.getAttribute("data-status")) !== "untrusted", { timeout: 15_000 }).then(
-        () => true,
-        () => false,
+      // Lean followed the grant by itself: its state (read without asking Lean
+      // to do anything) left Untrusted.
+      const leanId = await docIdOf(LEMMA);
+      assert.ok(leanId, `${LEMMA} is open`);
+      const leanStatus = async () => (await invoke(page, "lean_documents")).find((d) => d.document === leanId)?.status.kind;
+      const leanFollowed = await followed(
+        waitFor(async () => (await leanStatus()) !== "untrusted", { timeout: 15_000, message: "Lean leaves Untrusted" }),
       );
-      note("leanPanelAfterTrust", await lean.getAttribute("data-status"));
+      note("leanStatusAfterTrust", await leanStatus());
+      softly(leanFollowed, "Lean still reports Untrusted 15 s after the folder was trusted from the Research panel");
+      // lean_check (the path of the agent tool check_lean) on the file opened
+      // while untrusted: it checks instead of reporting a stale refusal.
       const report = await invoke(page, "lean_check", {
-        request: { target: { kind: "document", document: leanId }, goalsAt: [], timeoutMs: 120_000 },
+        request: { target: { kind: "document", document: leanId }, goalsAt: [], timeoutMs: LEAN_TIMEOUT },
       });
       note("leanCheckAfterTrust", { status: report.status?.kind, checked: report.checked, note: report.note, ms: Date.now() - trustedAt });
       softly(
         report.status?.kind !== "untrusted" && !/is not trusted/.test(report.note ?? ""),
-        `DEFECT: lean_check (the path of the agent tool check_lean) reports the trusted folder as untrusted: ${JSON.stringify(report.status).slice(0, 300)}`,
+        `lean_check (the agent tool check_lean) reports the trusted folder as untrusted: ${JSON.stringify(report.status).slice(0, 300)}`,
       );
-      softly(
-        leanLeft,
-        "DEFECT: the Lean infoview still shows Untrusted 15 s after the folder was trusted (it re-checks trust only on an edit or its own Trust button)",
+      softly(report.checked === true, `lean_check did not check after the grant: ${JSON.stringify(report).slice(0, 400)}`);
+      // The Lean infoview (never clicked since 1a).
+      await runCommand(page, "show lean infoview", /Show Lean Infoview/);
+      await openInEditor(page, LEMMA);
+      const panelLeft = await followed(
+        waitFor(async () => (await lean.getAttribute("data-status")) !== "untrusted", { timeout: 15_000, message: "infoview" }),
       );
-      if ((await lean.getAttribute("data-status")) === "untrusted") {
-        await lean.getByRole("button", { name: "Trust workspace…" }).click();
-      }
-      await waitFor(async () => (await lean.getAttribute("data-status")) !== "untrusted", { timeout: 15_000, message: "Lean leaves Untrusted" });
+      note("leanPanelAfterTrust", await lean.getAttribute("data-status"));
+      softly(panelLeft, "the Lean infoview still shows Untrusted after the folder was trusted from the Research panel");
     });
 
     // ===================================================================== 2
@@ -960,11 +965,39 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
         { timeout: 15_000, message: "table inserted into main.typ" },
       );
       tableKey = attachmentKeys(withTable).find((k) => k !== userFigKey && !keysBefore.includes(k));
-      // Observation: which attachment the table's "Update in document" would replace by default.
-      note(
-        "tableUpdateDefaultKey",
-        await table.getByTestId("research-attach").getByRole("button", { name: /Attachment to update/ }).innerText({ timeout: 5000 }).catch(() => null),
+      // The table's "Update in document" offers and defaults to tables only:
+      // never the agent's or the user's figure.
+      const tableKeySelect = table.getByTestId("research-attach").getByRole("button", { name: /Attachment to update/ });
+      const tableDefault = await waitFor(
+        async () => {
+          const text = await tableKeySelect.innerText({ timeout: 1000 });
+          return text.includes(tableKey) ? text : null;
+        },
+        { timeout: 10_000, message: `the table's update choice defaults to ${tableKey}` },
       );
+      note("tableUpdateDefaultKey", tableDefault.trim());
+      await tableKeySelect.click();
+      const offered = (await page.getByRole("option").allInnerTexts()).map((t) => t.trim());
+      await page.keyboard.press("Escape");
+      assert.deepEqual(offered, [tableKey], "only table attachments are offered for a table");
+      // The attach service refuses a table for a figure, whoever asks.
+      const tableArtifact = await table.getAttribute("data-artifact-id");
+      const paperDoc = await docIdOf(PAPER);
+      const beforeMismatch = await documentState(page, paperDoc);
+      const mismatch = await invokeError(page, "artifact_attach", {
+        request: {
+          document: paperDoc,
+          baseRevision: beforeMismatch.info.revision,
+          runId: firstRun,
+          artifactId: tableArtifact,
+          placement: { kind: "update", attachmentKey: userFigKey },
+          caption: null,
+          attachmentKey: null,
+        },
+      });
+      assert.equal(mismatch.error?.code, "attach.kindMismatch", `table over a figure: ${JSON.stringify(mismatch).slice(0, 300)}`);
+      assert.equal((await documentState(page, paperDoc)).text, beforeMismatch.text, "a refused update changes nothing");
+      note("kindMismatchRefusal", mismatch.error.message);
       assert.ok(withTable.includes('"n^2"') && withTable.includes('"0.5"'), "table cells in Typst markup");
       assert.ok(withTable.includes(`caption: [${typstCaption("Fitted coefficients.")}]`), "table caption");
       assert.ok(withFigure.includes(`caption: [${typstCaption("Least-squares fit of the triangular numbers.")}]`), "figure caption");

@@ -192,6 +192,117 @@ async fn untrusted_workspace_is_refused_until_trusted() {
     h.lean.shutdown().await;
 }
 
+/// Trust granted from anywhere (here straight through the execution service,
+/// as the Research panel's dialog does) reaches Lean without an edit, a
+/// restart, or Lean's own Trust button: the status leaves Untrusted and the
+/// check seam (the agent's `check_lean`) checks instead of reporting a stale
+/// refusal.
+#[tokio::test(flavor = "multi_thread")]
+async fn trust_granted_elsewhere_reaches_lean_without_a_restart() {
+    if !lean_available() {
+        return;
+    }
+    let mut h = harness("lean-basic", Options { trusted: false, ..Options::default() }).await;
+    let doc = h.open("LeanBasic/Proofs.lean");
+    h.wait_for(&doc, NEXT, "untrusted", |s| matches!(s.status, LeanStatus::Untrusted { .. })).await;
+    h.exec.grant_trust(&h.root.display().to_string()).unwrap();
+    // The check seam re-evaluates trust at once.
+    let report = h
+        .lean
+        .check(LeanCheckRequest {
+            target: LeanCheckTarget::Document { document: doc.clone() },
+            goals_at: vec![],
+            timeout_ms: Some(FIRST.as_millis() as u64),
+        })
+        .await
+        .unwrap();
+    assert!(!matches!(report.status, LeanStatus::Untrusted { .. }), "{:?}", report.status);
+    assert!(matches!(report.status, LeanStatus::Errors { revision: 1, .. }), "{:?}", report.status);
+    let state = h.finished(&doc, 1, NEXT).await;
+    assert!(matches!(state.status, LeanStatus::Errors { revision: 1, .. }), "{:?}", state.status);
+    h.lean.shutdown().await;
+}
+
+/// The status alone (no check request) follows a grant: the infoview leaves
+/// Untrusted within moments of the trust dialog closing.
+#[tokio::test(flavor = "multi_thread")]
+async fn trust_grant_alone_starts_the_untrusted_server() {
+    if !lean_available() {
+        return;
+    }
+    let mut h = harness("lean-basic", Options { trusted: false, ..Options::default() }).await;
+    let doc = h.open("LeanBasic/Defs.lean");
+    h.wait_for(&doc, NEXT, "untrusted", |s| matches!(s.status, LeanStatus::Untrusted { .. })).await;
+    h.exec.grant_trust(&h.root.display().to_string()).unwrap();
+    let (left, _) = h
+        .wait_for(&doc, Duration::from_secs(10), "status leaves Untrusted after the grant", |s| {
+            !matches!(s.status, LeanStatus::Untrusted { .. })
+        })
+        .await;
+    assert!(matches!(left.status, LeanStatus::Checking { .. }), "{:?}", left.status);
+    let state = h.finished(&doc, 1, FIRST).await;
+    assert!(matches!(state.status, LeanStatus::Checked { revision: 1, .. }), "{:?}", state.status);
+    h.lean.shutdown().await;
+}
+
+/// Revoking trust stops the running server (it runs project code) at once and
+/// every surface reports Untrusted again: the document status and the check
+/// seam. A later grant brings checking back.
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_trust_stops_the_server_and_reports_untrusted() {
+    if !lean_available() {
+        return;
+    }
+    let mut h = harness("lean-basic", Options::default()).await;
+    let doc = h.open("LeanBasic/Defs.lean");
+    let state = h.finished(&doc, 1, FIRST).await;
+    assert!(matches!(state.status, LeanStatus::Checked { revision: 1, .. }), "{:?}", state.status);
+    let job = state.job.clone().expect("server job");
+    let pid = h.lean.server_pid(doc.clone()).await.expect("server pid");
+
+    h.exec.revoke_trust(&h.root.display().to_string()).unwrap();
+    let (revoked, _) = h
+        .wait_for(&doc, Duration::from_secs(10), "Untrusted after the revoke", |s| {
+            matches!(s.status, LeanStatus::Untrusted { .. })
+        })
+        .await;
+    assert!(revoked.job.is_none(), "no server job is reported: {:?}", revoked.job);
+    // The server process tree is stopped.
+    let exited = tokio::time::timeout(Duration::from_secs(15), h.exec.wait(&job)).await;
+    assert!(exited.is_ok(), "the Lean server job did not finish after the revoke");
+    assert!(h.lean.server_pid(doc.clone()).await.is_none());
+    let alive = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+        .unwrap_or(false);
+    assert!(!alive, "Lean server process {pid} still runs");
+    // The check seam reports the refusal, not the result computed while trusted.
+    let report = h
+        .lean
+        .check(LeanCheckRequest {
+            target: LeanCheckTarget::Document { document: doc.clone() },
+            goals_at: vec![],
+            timeout_ms: Some(5_000),
+        })
+        .await
+        .unwrap();
+    assert!(!report.checked);
+    assert!(matches!(report.status, LeanStatus::Untrusted { .. }), "{:?}", report.status);
+    // An edit while untrusted runs nothing.
+    let r2 = h.replace(&doc, "def double", "def double'");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let state = h.lean.documents().await.into_iter().find(|s| s.document == doc).unwrap();
+    assert!(matches!(state.status, LeanStatus::Untrusted { .. }), "{:?}", state.status);
+    assert!(h.lean.server_pid(doc.clone()).await.is_none());
+
+    // Granting again checks the current revision.
+    h.exec.grant_trust(&h.root.display().to_string()).unwrap();
+    let state = h.finished(&doc, r2, FIRST).await;
+    assert!(!matches!(state.status, LeanStatus::Untrusted { .. }), "{:?}", state.status);
+    h.lean.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn crashed_server_is_detected_and_restarted() {
     if !lean_available() {

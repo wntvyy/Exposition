@@ -10,6 +10,8 @@ import {
   appendEntries,
   applyEvent,
   attachmentKeys,
+  attachmentKind,
+  attachmentsOfKind,
   defaultInsertOffset,
   documentFormat,
   runPill,
@@ -121,5 +123,66 @@ describe("research model", () => {
     const text = "x\n// exposition:begin fig-1\n...\n// exposition:end fig-1\n  // exposition:begin tab-2\r\n";
     expect(attachmentKeys(text, "typst")).toEqual(["fig-1", "tab-2"]);
     expect(attachmentKeys("<!-- exposition:begin fig-9 -->\n", "markdown")).toEqual(["fig-9"]);
+  });
+
+  it("offers only attachments of the artifact's kind for update (content decides, not the key)", () => {
+    const typst = [
+      "// exposition:begin fig-4f769b79",
+      "#figure(",
+      '  image("a.png", width: 80%),',
+      "  caption: [Agent figure, see table(1)],",
+      ") <fig-4f769b79>",
+      "// exposition:end fig-4f769b79",
+      "// exposition:begin tab-1",
+      "#figure(",
+      "  table(",
+      "    columns: 1,",
+      '    table.header("n"),',
+      "  ),",
+      ") <tab-1>",
+      "// exposition:end tab-1",
+      "// exposition:begin fig-results",
+      '#figure(table(columns: 1, "1")) <fig-results>',
+      "// exposition:end fig-results",
+      "",
+    ].join("\n");
+    expect(attachmentKind(typst, "typst", "fig-4f769b79")).toBe("figure");
+    expect(attachmentKind(typst, "typst", "tab-1")).toBe("table");
+    expect(attachmentKind(typst, "typst", "fig-results")).toBe("table");
+    expect(attachmentsOfKind(typst, "typst", "table")).toEqual(["tab-1", "fig-results"]);
+    expect(attachmentsOfKind(typst, "typst", "figure")).toEqual(["fig-4f769b79"]);
+    const latex = [
+      "% exposition:begin tab-2",
+      "\\begin{table}[htbp]",
+      "  \\begin{tabular}{r}",
+      "  \\end{tabular}",
+      "\\end{table}",
+      "% exposition:end tab-2",
+      "% exposition:begin fig-3",
+      "\\begin{figure}[htbp]",
+      "  \\includegraphics{a.png}",
+      "\\end{figure}",
+      "% exposition:end fig-3",
+    ].join("\r\n");
+    expect(attachmentsOfKind(latex, "latex", "table")).toEqual(["tab-2"]);
+    expect(attachmentsOfKind(latex, "latex", "figure")).toEqual(["fig-3"]);
+    const markdown = [
+      "<!-- exposition:begin fig-5 -->",
+      "![A | caption](a.png)",
+      "<!-- exposition:end fig-5 -->",
+      "<!-- exposition:begin tab-6 -->",
+      "| n |",
+      "| ---: |",
+      "| 1 |",
+      "<!-- exposition:end tab-6 -->",
+    ].join("\n");
+    expect(attachmentsOfKind(markdown, "markdown", "figure")).toEqual(["fig-5"]);
+    expect(attachmentsOfKind(markdown, "markdown", "table")).toEqual(["tab-6"]);
+    // Unrecognized content falls back to the generated key prefix; otherwise it is not offered.
+    const edited =
+      "// exposition:begin tab-9\nsomething else\n// exposition:end tab-9\n// exposition:begin mine\n?\n// exposition:end mine\n";
+    expect(attachmentsOfKind(edited, "typst", "table")).toEqual(["tab-9"]);
+    expect(attachmentsOfKind(edited, "typst", "figure")).toEqual([]);
+    expect(attachmentKind(edited, "typst", "mine")).toBeNull();
   });
 });
