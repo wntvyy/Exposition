@@ -13,6 +13,8 @@ document service.
 Local alpha. Windows is the primary verified platform; macOS and Linux are
 structurally supported but unverified. See [docs/capabilities.md](docs/capabilities.md)
 for exactly what works per format and subsystem, and its known limitations.
+[docs/functionality.md](docs/functionality.md) is the complete reference: every
+view, command, IPC endpoint, event, setting, external connection, and stored file.
 
 ## Prerequisites
 
