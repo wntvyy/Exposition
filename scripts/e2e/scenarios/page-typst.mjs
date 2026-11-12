@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
 import { openFromTree, openWorkspace } from "../workspace-helpers.mjs";
+import { waitForAsync } from "../wait.mjs";
 
 const PATH = "main.typ";
 
@@ -57,13 +58,18 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     /** Wait until the shown build covers the current revision (not stale). */
     const settled = async (label) => {
       const started = Date.now();
-      await page.waitForFunction(
-        () => {
+      await waitForAsync(page,
+        async (path) => {
           const el = document.querySelector('[data-testid="page-editor"]');
           const img = document.querySelector('[data-testid="page"] img');
-          return el?.dataset.stale === "false" && el.dataset.build && img?.complete;
+          if (!(el?.dataset.stale === "false" && el.dataset.build && img?.complete)) return false;
+          // The shown build must cover the document's current revision, not
+          // merely be "not stale" before the newest edit has been noticed.
+          const docs = await window.__TAURI_INTERNALS__.invoke("document_list");
+          const doc = docs.find((d) => d.path === path);
+          return !!doc && el.dataset.buildRevision === String(doc.revision);
         },
-        null,
+        PATH,
         { timeout: 15000 },
       );
       timings.push({ label, ms: Date.now() - started });
@@ -200,7 +206,7 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     await shot("05-selection");
     const beforeDelete = await text();
     await page.keyboard.press("Backspace");
-    await page.waitForFunction(
+    await waitForAsync(page,
       async ([d]) => !(await window.__TAURI_INTERNALS__.invoke("document_state", { document: d })).text.includes("plain prose"),
       [doc],
       { timeout: 10000 },
@@ -210,7 +216,7 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     await settled("rebuild after delete");
     await shot("06-deleted");
     await page.keyboard.press("Control+z");
-    await page.waitForFunction(
+    await waitForAsync(page,
       async ([d, t]) => (await window.__TAURI_INTERNALS__.invoke("document_state", { document: d })).text === t,
       [doc, beforeDelete],
       { timeout: 10000 },
@@ -234,7 +240,7 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     await waitCaretOffset(insertAt);
     const long = "This inserted passage is long enough to push the following material further down the page. ".repeat(18);
     await page.keyboard.insertText(long);
-    await page.waitForFunction(
+    await waitForAsync(page,
       async ([d]) => (await window.__TAURI_INTERNALS__.invoke("document_state", { document: d })).text.includes("push the following"),
       [doc],
       { timeout: 10000 },
@@ -369,7 +375,7 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     });
     await page.locator('[data-testid="typst-split"] .monaco-editor .view-lines').click();
     await page.keyboard.press("Control+z");
-    await page.waitForFunction(
+    await waitForAsync(page,
       async ([d]) => !(await window.__TAURI_INTERNALS__.invoke("document_state", { document: d })).text.includes("Busy Offices"),
       [doc],
       { timeout: 10000 },
