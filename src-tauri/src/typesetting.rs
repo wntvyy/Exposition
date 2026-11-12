@@ -12,6 +12,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use exposition_core::build::{BuildResult, BuildTarget, DocumentFormat, Engine, ExportArtifact};
 use exposition_core::document::DocumentEvent;
 use exposition_core::path::WorkspacePath;
+use exposition_execution::JobRefusal;
 use exposition_typesetting::{BuildRecord, BuildTimings, TypesettingService};
 use exposition_workspace::types::WorkspaceEvent;
 use serde::Serialize;
@@ -36,6 +37,9 @@ pub struct BuildEvent {
     /// this build succeeded); its pages stay visible, marked stale, while the
     /// source has errors.
     pub last_good: Option<BuildResult>,
+    /// Why the build was refused (e.g. `untrustedWorkspace` for a LaTeX
+    /// build in an untrusted workspace): the view offers the trust prompt.
+    pub refusal: Option<JobRefusal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -87,6 +91,7 @@ impl TypesettingRuntime {
             result: record.result.clone(),
             timings: record.timings,
             last_good: self.service.last_good(&record.entry).map(|r| r.result.clone()),
+            refusal: None,
         }
     }
 
@@ -195,6 +200,10 @@ pub async fn typesetting_watch(
     state: State<'_, AppState>,
     entry: WorkspacePath,
 ) -> Result<Option<BuildEvent>, CommandError> {
+    // LaTeX entries build through the TeX service (exposition-tex).
+    if crate::tex::is_tex(&entry) {
+        return crate::tex::watch(&state, &entry);
+    }
     if entry.extension() != Some("typ") {
         return Err(CommandError::new("typesetting.unsupported", "only .typ entries can be typeset"));
     }
@@ -209,6 +218,10 @@ pub async fn typesetting_watch(
 
 #[tauri::command]
 pub async fn typesetting_unwatch(state: State<'_, AppState>, entry: WorkspacePath) -> Result<(), CommandError> {
+    if crate::tex::is_tex(&entry) {
+        crate::tex::unwatch(&state, &entry);
+        return Ok(());
+    }
     runtime(&state).watched.lock().unwrap_or_else(|p| p.into_inner()).remove(&entry);
     Ok(())
 }
@@ -216,6 +229,9 @@ pub async fn typesetting_unwatch(state: State<'_, AppState>, entry: WorkspacePat
 /// Build an entry now and return the result.
 #[tauri::command]
 pub async fn typesetting_build(state: State<'_, AppState>, entry: WorkspacePath) -> Result<BuildEvent, CommandError> {
+    if crate::tex::is_tex(&entry) {
+        return crate::tex::build_now(&state, &entry).await;
+    }
     let runtime = Arc::clone(runtime(&state));
     tauri::async_runtime::spawn_blocking(move || {
         let record = runtime.service.build(&target(&entry)).map_err(|e| command_error("typesetting.build", e))?;
@@ -233,6 +249,9 @@ pub async fn typesetting_export_pdf(
     build: String,
     destination: Option<String>,
 ) -> Result<ExportArtifact, CommandError> {
+    if crate::tex::is_tex_build(&build) {
+        return crate::tex::export_pdf(&state, build, destination).await;
+    }
     let runtime = Arc::clone(runtime(&state));
     let destination = destination.map(PathBuf::from);
     tauri::async_runtime::spawn_blocking(move || runtime.service.export_pdf(&build, destination))

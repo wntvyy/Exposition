@@ -131,7 +131,8 @@ pub struct TexTargetStatus {
     pub running: Option<TexBuildMode>,
     pub pending: Option<TexBuildMode>,
     pub last: Option<TexBuildSummary>,
-    /// The latest build with pages (kept while newer builds fail or run).
+    /// The latest successful build with pages (kept while newer builds
+    /// fail or run).
     pub last_good: Option<TexBuildSummary>,
     /// `last_good` no longer reflects the documents: a build is pending or
     /// running, or an open document it compiled has changed since.
@@ -189,6 +190,8 @@ struct Inner {
     idle_full_delay: Option<Duration>,
     keep_builds: usize,
     targets: Mutex<HashMap<TexTargetRef, Arc<Target>>>,
+    /// Entries watched by page views, with the target each builds.
+    watched: Mutex<BTreeMap<WorkspacePath, BuildTarget>>,
     builds: Mutex<BuildStore>,
     events: broadcast::Sender<TexEvent>,
     counter: std::sync::atomic::AtomicU64,
@@ -269,6 +272,7 @@ impl TexService {
                 idle_full_delay: config.idle_full_delay,
                 keep_builds: config.keep_builds.max(1),
                 targets: Mutex::new(HashMap::new()),
+                watched: Mutex::new(BTreeMap::new()),
                 builds: Mutex::new(BuildStore::default()),
                 events,
                 counter: std::sync::atomic::AtomicU64::new(0),
@@ -451,6 +455,59 @@ impl TexService {
                     .flatten()
             })
         })
+    }
+
+    /// The target that builds `entry`: a LaTeX target of
+    /// `.exposition/project.json` with that entry (the default target first),
+    /// else the entry built with pdfLaTeX.
+    pub fn target_for_entry(&self, entry: &WorkspacePath) -> BuildTarget {
+        let fallback = BuildTarget { format: DocumentFormat::Latex, engine: Engine::PdfLatex, entry: entry.clone() };
+        let Ok(state) = self.inner.workspace.project_settings() else { return fallback };
+        let settings = state.settings;
+        let candidates: Vec<_> = settings
+            .targets
+            .iter()
+            .filter(|t| {
+                &t.entry == entry && t.format == DocumentFormat::Latex && TexTool::for_engine(t.engine).is_some()
+            })
+            .collect();
+        let chosen = candidates
+            .iter()
+            .find(|t| settings.default_target.as_deref() == Some(t.name.as_str()))
+            .or_else(|| candidates.first());
+        chosen.map_or(fallback, |t| BuildTarget { format: t.format, engine: t.engine, entry: t.entry.clone() })
+    }
+
+    /// A page view shows `entry`: build it now (draft) and after every
+    /// [`Self::rebuild_watched`]. Returns the target and its latest finished
+    /// build, if any.
+    pub fn watch(&self, entry: &WorkspacePath) -> Result<(BuildTarget, Option<TexTargetStatus>), TexServiceError> {
+        let target = self.target_for_entry(entry);
+        self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).insert(entry.clone(), target.clone());
+        let status = self.status(Some(&target));
+        self.request_build(Some(target.clone()), TexBuildMode::Draft)?;
+        Ok((target, status))
+    }
+
+    pub fn unwatch(&self, entry: &WorkspacePath) {
+        self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).remove(entry);
+    }
+
+    /// Queue draft builds of every watched entry (after a document or file
+    /// change). The target is re-resolved so project setting changes apply.
+    pub fn rebuild_watched(&self) {
+        let entries: Vec<WorkspacePath> =
+            self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).keys().cloned().collect();
+        for entry in entries {
+            let target = self.target_for_entry(&entry);
+            self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).insert(entry, target.clone());
+            let _ = self.request_build(Some(target), TexBuildMode::Draft);
+        }
+    }
+
+    /// The workspace closed: stop watching its entries.
+    pub fn forget_watched(&self) {
+        self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).clear();
     }
 
     /// Stop all workers and cancel running builds (application exit).
@@ -650,12 +707,15 @@ impl Inner {
             if summary.result.status != BuildStatus::Canceled {
                 control.last = Some(stored.clone());
             }
-            if summary.has_output {
+            // Last good: the latest successful build with pages (a build that
+            // TeX recovered from with errors still has pages, but is not good).
+            let good = summary.has_output && summary.result.status == BuildStatus::Succeeded;
+            if good {
                 control.last_good = Some(stored.clone());
             }
             // Stored before the lock is released so a status reader can
             // always fetch the pages of `last_good`.
-            self.store(&target.reference, stored, summary.has_output);
+            self.store(&target.reference, stored, good);
             drop(control);
             let _ =
                 self.events.send(TexEvent::Finished { target: target.reference.clone(), summary: Box::new(summary) });

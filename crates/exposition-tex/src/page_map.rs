@@ -4,8 +4,11 @@
 //! * A cluster is a run of consecutive glyphs with the same target: one
 //!   glyph, an accent drawn over its base (`\'e` in OT1), or the glyphs of one
 //!   atomic unit (`\ldots`, `\sin`).
-//! * Geometry: the glyphs' layout boxes (advance × 0.75 em ascent / 0.25 em
-//!   descent), in points from the top-left of the page.
+//! * Geometry, in points from the top-left of the page: prose uses the glyphs'
+//!   layout boxes (advance × 0.75 em ascent / 0.25 em descent); mathematics
+//!   uses their ink extent (at least a band around the math axis), so that a
+//!   raised script or a stacked limit is its own hit target rather than lying
+//!   inside its base's box.
 //! * Editable clusters carry caret stops at the mapped source boundaries,
 //!   spread across the cluster (a ligature `ffi` has four stops; an atomic
 //!   macro such as `\alpha` or `--` only its two edges). Mathematics refers to
@@ -45,9 +48,20 @@ pub fn build_page_map(pages: &[(PageMapping, (f64, f64))]) -> PageMap {
                 j += 1;
             }
             let glyphs = &mapping.glyphs[i..j];
-            let mut bbox: PageRect = glyphs[0].bbox;
+            let math = matches!(&mapping.targets[i], GlyphTarget::Source { mode: Mode::Math, .. });
+            let glyph_box = |g: &crate::pdf::PageGlyph| -> PageRect {
+                if !math {
+                    return g.bbox;
+                }
+                let band = PageRect::new(g.bbox.x0, g.origin_y - 0.45 * g.size, g.bbox.x1, g.origin_y + 0.05 * g.size);
+                match g.ink {
+                    Some(ink) => PageRect::new(g.bbox.x0, ink.y0.min(band.y0), g.bbox.x1, ink.y1.max(band.y1)),
+                    None => band,
+                }
+            };
+            let mut bbox: PageRect = glyph_box(&glyphs[0]);
             for g in &glyphs[1..] {
-                bbox = bbox.union(&g.bbox);
+                bbox = bbox.union(&glyph_box(g));
             }
             let text: String = glyphs.iter().map(|g| g.text.as_deref().unwrap_or("\u{FFFD}")).collect();
             let baseline = glyphs[0].origin_y;
@@ -104,9 +118,37 @@ pub fn build_page_map(pages: &[(PageMapping, (f64, f64))]) -> PageMap {
             clusters.push(cluster);
             i = j;
         }
+        attach_equation_numbers(&mut clusters, &equations);
         raw_pages.push(RawPage { width: *width, height: *height, clusters });
     }
     PageMap::build(files, equations, raw_pages)
+}
+
+/// Generated text on a display equation's baseline (its number, `(1)`) is
+/// given the display's full vertical band. Its own (narrower) line would
+/// otherwise overlap the display with a centre closer to clicks on raised or
+/// lowered mathematics and capture them; with equal bands the display line,
+/// first in reading order, wins.
+fn attach_equation_numbers(clusters: &mut [Cluster], equations: &[EquationInfo]) {
+    let mut bands: HashMap<u32, (f64, f64, Vec<f64>)> = HashMap::new();
+    for c in clusters.iter() {
+        if let Some(e) = c.equation
+            && equations.get(e as usize).is_some_and(|eq| eq.block)
+        {
+            let band = bands.entry(e).or_insert((f64::INFINITY, f64::NEG_INFINITY, Vec::new()));
+            band.0 = band.0.min(c.top);
+            band.1 = band.1.max(c.bottom);
+            band.2.push(c.baseline);
+        }
+    }
+    for cluster in clusters.iter_mut().filter(|c| c.source.is_none() && c.equation.is_none()) {
+        let display =
+            bands.values().find(|(_, _, baselines)| baselines.iter().any(|b| (b - cluster.baseline).abs() < 0.5));
+        if let Some((top, bottom, _)) = display {
+            cluster.top = *top;
+            cluster.bottom = *bottom;
+        }
+    }
 }
 
 /// Unmapped glyphs stay separate clusters (each is its own hit target).

@@ -13,7 +13,16 @@ import type { EditorProps } from "../../app/registry";
 import type { Motion } from "../../bindings/Motion";
 import type { PageRect } from "../../bindings/PageRect";
 import { commands, errorMessage } from "../../lib/ipc";
-import { Banner, Button, ErrorState, IconButton, LoadingState, StatusPill, Toolbar } from "../../ui/components";
+import {
+  Banner,
+  Button,
+  ErrorState,
+  IconButton,
+  LoadingState,
+  StatusPill,
+  Toolbar,
+  UnavailableState,
+} from "../../ui/components";
 import { summarize, useTypesetting } from "../typesetting/store";
 import { PageSession } from "./session";
 import "./page.css";
@@ -297,7 +306,17 @@ export function PageEditor({ resource, active }: EditorProps) {
           );
         })}
         {model.pages.length === 0 &&
-          (model.failed ? (
+          (model.untrustedRoot ? (
+            <UnavailableState
+              title="Workspace not trusted"
+              description="Pages of this document are built by running its compiler, which runs with your account's permissions. Trust the workspace to build and edit its pages."
+              actions={
+                <Button variant="primary" size="sm" onPress={() => void session.trust()}>
+                  Trust workspace…
+                </Button>
+              }
+            />
+          ) : model.failed ? (
             <ErrorState
               title="The document did not build"
               description={`${errors} — see Problems. Pages appear after the first successful build.`}

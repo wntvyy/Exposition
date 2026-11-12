@@ -20,6 +20,7 @@ import type { PageEditOp } from "../../bindings/PageEditOp";
 import type { PageRect } from "../../bindings/PageRect";
 import { commands, errorMessage, events, newId } from "../../lib/ipc";
 import { openDocument } from "../editor";
+import { requestWorkspaceTrust } from "../jobs/trust";
 import { imageType } from "./images";
 import { RevisionHistory } from "./mapping";
 
@@ -56,6 +57,8 @@ export interface PageViewModel {
   message: PageMessage | null;
   /** Edit-to-render latency of the latest edit (ms), for status display. */
   latencyMs: number | null;
+  /** Builds of this document need workspace trust (LaTeX): the workspace root. */
+  untrustedRoot: string | null;
 }
 
 interface Position {
@@ -102,6 +105,7 @@ export class PageSession {
     composition: "",
     message: null,
     latencyMs: null,
+    untrustedRoot: null,
   };
   private listeners = new Set<() => void>();
   private docId: string | null = null;
@@ -121,6 +125,7 @@ export class PageSession {
   private unlisten: Array<() => void> = [];
   private disposed = false;
   private editAt: { revision: number; time: number } | null = null;
+  private trustPrompted = false;
 
   constructor(readonly path: string) {}
 
@@ -168,6 +173,17 @@ export class PageSession {
 
   async onBuild(event: BuildEvent): Promise<void> {
     if (event.result.target.entry !== this.path || this.disposed) return;
+    // LaTeX builds run the TeX engine and need a trusted workspace: offer the
+    // shared trust prompt (once per view) instead of building.
+    if (event.refusal?.code === "untrustedWorkspace" && event.refusal.workspaceRoot) {
+      this.set({ untrustedRoot: event.refusal.workspaceRoot });
+      if (!this.trustPrompted) {
+        this.trustPrompted = true;
+        await this.trust();
+      }
+      return;
+    }
+    if (this.model.untrustedRoot) this.set({ untrustedRoot: null });
     if (event.result.status.kind === "succeeded") {
       await this.show(event.result);
       this.set({ failed: false, errorCount: 0 });
@@ -507,6 +523,18 @@ export class PageSession {
     this.anchor = null;
     this.group += 1;
     await this.refreshGeometry();
+  }
+
+  /** Ask to trust the workspace; when granted, build again. */
+  async trust(): Promise<boolean> {
+    const root = this.model.untrustedRoot;
+    if (!root) return true;
+    const trusted = await requestWorkspaceTrust(root);
+    if (trusted && !this.disposed) {
+      this.set({ untrustedRoot: null });
+      await commands.typesettingWatch(this.path).catch(() => null);
+    }
+    return trusted;
   }
 
   async exportPdf(): Promise<string> {

@@ -148,6 +148,13 @@ fn latex_pages_are_edited_through_the_shared_core() {
         let text = env.text();
         let two = offset_of(&text, "2 + \\sum");
         assert_eq!(map2.caret_geometry(&path, two, Affinity::Downstream).map(|g| g.mode), Some(EditMode::Math));
+        // A click on the raised exponent itself lands in the exponent, not on
+        // its base (whose layout box would otherwise reach over it).
+        let at_two = map2.caret_geometry(&path, two, Affinity::Downstream).unwrap();
+        let end_two = map2.caret_geometry(&path, two + 1, Affinity::Upstream).unwrap();
+        let x = at_two.x + (end_two.x - at_two.x) * 0.25;
+        let hit = map2.hit_test(at_two.page, x, (at_two.top + at_two.bottom) / 2.0);
+        assert_eq!(hit.caret.map(|c| c.offset), Some(two), "{engine:?}: exponent hit");
         let revision = second.result.sources.iter().find(|s| s.path == path).unwrap().revision.unwrap();
         let outcome = env.edit(revision, TextRange::new(two, two + 1), PageEditOp::Insert { text: "3".into() });
         assert!(matches!(outcome, PageEditOutcome::Applied { .. }), "{outcome:?}");
