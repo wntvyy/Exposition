@@ -445,25 +445,10 @@
   background: var(--color-surface-raised);
 }
 
-.agents-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--font-size-sm);
-  user-select: text;
-}
-
-.agents-table th,
-.agents-table td {
-  padding: var(--space-1) var(--space-2);
-  border-bottom: var(--border-width) solid var(--color-border-subtle);
-  text-align: left;
-  vertical-align: top;
-  overflow-wrap: anywhere;
-}
-
-.agents-table th {
-  font-weight: 600;
-  color: var(--color-text-muted);
+.agents-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
 }
 
 @media (max-width: 860px) {

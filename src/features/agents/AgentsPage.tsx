@@ -14,6 +14,7 @@ import { EDITOR_PAGE, pages, usePages } from "../../app/pages";
 import { notify } from "../../app/notifications";
 import { commands, errorMessage } from "../../lib/ipc";
 import {
+  Badge,
   Banner,
   Button,
   EmptyState,
@@ -100,7 +101,7 @@ function PageTaskList({ kept }: { kept: ReadonlySet<string> }) {
                     {task.pendingReview > 0 && (
                       <StatusPill status="warning" label={`${task.pendingReview} to review`} size="sm" />
                     )}
-                    {kept.has(task.id) && <StatusPill status="idle" label="Kept" size="sm" />}
+                    {kept.has(task.id) && <Badge tone="info">Kept</Badge>}
                     <span className="agents-muted">{relativeTime(task.updatedAtMs)}</span>
                   </span>
                 </button>
@@ -133,7 +134,7 @@ function KeptEntities({ snapshot, error }: { snapshot: GraphSnapshot | null; err
         const known = task ? tasks.find((t) => t.id === task) : undefined;
         return (
           <li key={entity.id} data-testid="agents-kept-entity" data-entity-id={entity.id} data-kind={entity.kind}>
-            <span className="agents-small agents-muted">{kindTitle(entity.kind)}</span> {entity.label}
+            <Badge tone="neutral">{kindTitle(entity.kind)}</Badge> {entity.label}
             {known && (
               <Button size="sm" variant="ghost" onPress={() => agents.setPage({ selected: known.id, composing: false })}>
                 Open task
@@ -271,7 +272,7 @@ export function AgentsPage() {
   const keptIds = keptTaskIds(kept);
   return (
     <div className="agents agents-page" data-testid="agents-page">
-      <aside className="agents-page__list" aria-label="Agent tasks and kept work">
+      <aside className="agents-page__list" aria-label="Agent tasks and kept work" data-region="agents-tasks">
         <div className="agents-row">
           <h2 className="agents-page__title">Agents</h2>
           <Button
@@ -290,7 +291,7 @@ export function AgentsPage() {
           <KeptEntities snapshot={kept} error={keptError} />
         </section>
       </aside>
-      <main className="agents-page__detail">
+      <main className="agents-page__detail" aria-label="Selected agent task" data-region="agents-detail">
         {error && (
           <div data-testid="agents-page-error">
             <Banner

@@ -9,7 +9,7 @@ import type { ProposalState } from "../../bindings/ProposalState";
 import type { SyncState } from "../../bindings/SyncState";
 import type { TaskGraphInfo } from "../../bindings/TaskGraphInfo";
 import type { TaskProposal } from "../../bindings/TaskProposal";
-import { Banner, EmptyState, Section, StatusPill } from "../../ui/components";
+import { Badge, Banner, DataTable, EmptyState, Section, StatusPill, type BadgeTone } from "../../ui/components";
 import { CONSENT_LABELS, type PillState } from "./format";
 
 /** Graph synchronization in the shared status vocabulary. */
@@ -74,45 +74,64 @@ export function graphSummary(context: GraphContext): string {
   }`;
 }
 
+/** Facts about an entity as badges (text always; dashed when provisional). */
+function EntityBadges({ entity }: { entity: ContextEntity }) {
+  const badges: { text: string; tone: BadgeTone; dashed?: boolean }[] = [];
+  if (entity.binding && entity.binding !== "resolved") {
+    badges.push({ text: `binding ${entity.binding}`, tone: entity.binding === "ambiguous" ? "warning" : "neutral", dashed: true });
+  }
+  if (entity.coverage) badges.push({ text: `coverage ${entity.coverage}`, tone: entity.coverage === "pending" ? "stale" : "neutral" });
+  if (entity.lifecycle !== "active") badges.push({ text: entity.lifecycle, tone: "neutral", dashed: true });
+  for (const e of entity.evidence) {
+    badges.push({
+      text: `${e.kind} evidence: ${e.freshness}`,
+      tone: e.freshness === "current" ? "success" : e.freshness === "stale" ? "stale" : "neutral",
+      dashed: e.freshness !== "current",
+    });
+  }
+  if (badges.length === 0) return <span className="agents-muted">—</span>;
+  return (
+    <span className="agents-badges">
+      {badges.map((b, i) => (
+        <Badge key={i} tone={b.tone} dashed={b.dashed}>
+          {b.text}
+        </Badge>
+      ))}
+    </span>
+  );
+}
+
 function ContextEntities({ context }: { context: GraphContext }) {
   return (
-    <table className="agents-table" aria-label="Entities in the task's graph context">
-      <thead>
-        <tr>
-          <th scope="col">Kind</th>
-          <th scope="col">Name as given to the agent</th>
-          <th scope="col">File</th>
-          <th scope="col">State</th>
-        </tr>
-      </thead>
-      <tbody>
-        {context.entities.map((entity) => (
-          <tr key={entity.id} data-testid="agents-graph-entity" data-entity-id={entity.id} data-kind={entity.kind}>
-            <td>{kindTitle(entity.kind)}</td>
-            <td title={entity.id}>
-              {entity.label ?? (
-                <span className="agents-muted" data-testid="agents-graph-withheld">
-                  label withheld (metadata only)
-                </span>
-              )}
-            </td>
-            <td>{entity.path ? <code className="agents-code">{entity.path}</code> : <span className="agents-muted">—</span>}</td>
-            <td className="agents-small">
-              {[
-                entity.binding ? `binding ${entity.binding}` : null,
-                entity.coverage ? `coverage ${entity.coverage}` : null,
-                entity.lifecycle !== "active" ? entity.lifecycle : null,
-                entity.evidence.length
-                  ? `evidence: ${entity.evidence.map((e) => `${e.kind} (${e.freshness})`).join(", ")}`
-                  : null,
-              ]
-                .filter(Boolean)
-                .join(" · ") || "—"}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <DataTable
+      aria-label="Entities in the task's graph context"
+      rows={context.entities}
+      rowKey={(e) => e.id}
+      rowProps={(e) => ({ "data-testid": "agents-graph-entity", "data-entity-id": e.id, "data-kind": e.kind })}
+      columns={[
+        { id: "kind", title: "Kind", width: "16%", sortValue: (e) => e.kind, render: (e) => kindTitle(e.kind) },
+        {
+          id: "name",
+          title: "Name as given to the agent",
+          isRowHeader: true,
+          sortValue: (e) => e.label ?? "",
+          render: (e) =>
+            e.label ?? (
+              <span className="agents-muted" data-testid="agents-graph-withheld">
+                label withheld (metadata only)
+              </span>
+            ),
+        },
+        {
+          id: "file",
+          title: "File",
+          width: "24%",
+          sortValue: (e) => e.path ?? "",
+          render: (e) => (e.path ? <code className="agents-code">{e.path}</code> : <span className="agents-muted">—</span>),
+        },
+        { id: "state", title: "State", width: "28%", render: (e) => <EntityBadges entity={e} /> },
+      ]}
+    />
   );
 }
 
@@ -125,8 +144,12 @@ function ContextRelations({ context }: { context: GraphContext }) {
         <li key={r.id} data-testid="agents-graph-relation" data-status={r.status}>
           <span>{entityName(byId.get(r.from), r.from)}</span> <code className="agents-code">{r.kind}</code>{" "}
           <span>{entityName(byId.get(r.to), r.to)}</span>{" "}
+          <Badge tone={r.status === "suggested" ? "accent" : "neutral"} dashed={r.status === "suggested"}>
+            {r.status}
+          </Badge>{" "}
           <span className="agents-muted agents-small">
-            ({r.status}, {r.origin}){r.note ? ` — ${r.note}` : ""}
+            by {r.origin}
+            {r.note ? ` — ${r.note}` : ""}
           </span>
         </li>
       ))}
