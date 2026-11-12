@@ -28,6 +28,7 @@ pub mod context;
 pub mod propose;
 pub mod query;
 pub mod targets;
+pub mod workflow;
 
 use std::path::Path;
 
@@ -115,6 +116,11 @@ pub struct ContextEntity {
     pub origin: OriginKind,
     /// Source version the graph last recorded for its binding.
     pub version: Option<SourceVersion>,
+    /// Attributes the task may see: path-valued ones (`research.path`) always,
+    /// the others only with content consent. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attributes: Option<std::collections::BTreeMap<String, String>>,
     pub binding: Option<BindingState>,
     /// Extraction coverage of the file (resources).
     pub coverage: Option<CoverageState>,

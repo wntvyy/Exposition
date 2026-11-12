@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use crate::graph::propose::{AGENT_CREATABLE, GraphProposeInput, manual_relations};
 use crate::graph::query::GraphQueryInput;
+use crate::graph::workflow::WorkflowProposeInput;
 use crate::provider::ToolDefinition;
 
 pub const LIST_FILES: &str = "list_files";
@@ -32,6 +33,7 @@ pub const RUN_COMMAND: &str = "run_command";
 pub const INSERT_ARTIFACT: &str = "insert_artifact";
 pub const GRAPH_QUERY: &str = "graph_query";
 pub const GRAPH_PROPOSE: &str = "graph_propose";
+pub const WORKFLOW_PROPOSE: &str = "workflow_propose";
 
 /// The tool list, in a fixed order.
 pub fn definitions() -> Vec<ToolDefinition> {
@@ -240,7 +242,120 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
         },
+        ToolDefinition {
+            name: WORKFLOW_PROPOSE,
+            description: "Save a workflow draft in the project graph: a declarative procedure of registered \
+                operations (steps with typed input/output ports), explicit project-file inputs, typed data \
+                connections or prerequisites, declared outcomes, and an authority ceiling (at most this task's own \
+                permissions). The application validates it against the workflow contract and saves it with its \
+                diagnostics (incomplete drafts are fine); after the user's approval in tasks that review each \
+                change, directly in tasks that apply changes. Drafts are not runnable in this version and nothing \
+                runs. Steps cannot stand in for service-owned results (formal evidence, retained artifacts). Use \
+                \"\", [] and -1 for unused fields.",
+            input_schema: workflow_schema(),
+        },
     ]
+}
+
+/// Strict schema of `workflow_propose` (the workflow definition, flattened).
+fn workflow_schema() -> Value {
+    use exposition_graph::workflow::{OutcomeKind, PortType};
+    let names = |values: Vec<Value>| -> Vec<String> {
+        values.into_iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()
+    };
+    let port_types = names(PortType::ALL.iter().map(|t| serde_json::to_value(t).unwrap_or(Value::Null)).collect());
+    let outcome_kinds = names(
+        [
+            OutcomeKind::TransformedDataset,
+            OutcomeKind::RetainedFigure,
+            OutcomeKind::RetainedTable,
+            OutcomeKind::InvestigationReport,
+            OutcomeKind::AuditEvidence,
+            OutcomeKind::ReviewableProposal,
+            OutcomeKind::ManuscriptPromotion,
+        ]
+        .iter()
+        .map(|k| serde_json::to_value(k).unwrap_or(Value::Null))
+        .collect(),
+    );
+    let operations: Vec<String> = exposition_graph::workflow::operations().into_iter().map(|o| o.id).collect();
+    let mut relations: Vec<&str> = vec![""];
+    relations.extend(exposition_graph::RelationKind::ALL.iter().map(|k| k.as_str()));
+    let strict = |props: Value| {
+        let required: Vec<String> = props.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+        json!({"type": "object", "properties": props, "required": required, "additionalProperties": false})
+    };
+    let id =
+        |what: &str| json!({"type": "string", "description": format!("{what} id: 1–32 letters, digits, '-' or '_'.")});
+    json!({
+        "type": "object",
+        "properties": {
+            "workflow_id": {"type": "string", "description": "\"\" for a new workflow, or the id (wf-…) of a saved one to save a new revision of."},
+            "expected_revision": {"type": "integer", "description": "The saved revision you are revising, or -1."},
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "preset": {"type": "string", "description": "The workflow preset it starts from, or \"\"."},
+            "inputs": {"type": "array", "items": strict(json!({
+                "id": id("Input"),
+                "label": {"type": "string"},
+                "port_type": {"type": "string", "enum": port_types},
+                "path": {"type": "string", "description": "Project file relative to the project root, or \"\" when not chosen yet."},
+                "pinned_hash": {"type": "string", "description": "SHA-256 (hex) to pin the input to, or \"\" for the version at run start."}
+            }))},
+            "steps": {"type": "array", "items": strict(json!({
+                "id": id("Step"),
+                "label": {"type": "string"},
+                "operation": {"type": "string", "enum": operations, "description": "A registered operation."},
+                "version": {"type": "integer", "description": "Operation version (1)."},
+                "parameters": {"type": "array", "items": strict(json!({
+                    "name": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["text", "integer", "boolean"]},
+                    "text": {"type": "string"},
+                    "integer": {"type": "integer"},
+                    "boolean": {"type": "boolean"}
+                }))},
+                "payload": {"anyOf": [
+                    strict(json!({"kind": {"type": "string", "enum": ["none"]}})),
+                    strict(json!({"kind": {"type": "string", "enum": ["code"]}, "language": {"type": "string", "enum": ["python"]}, "source": {"type": "string"}})),
+                    strict(json!({"kind": {"type": "string", "enum": ["prompt"]}, "text": {"type": "string"}}))
+                ]}
+            }))},
+            "connections": {"type": "array", "items": {"anyOf": [
+                strict(json!({
+                    "kind": {"type": "string", "enum": ["data"]},
+                    "from_step": {"type": "string", "description": "Producing step (\"\" when from_input is set)."},
+                    "from_port": {"type": "string"},
+                    "from_input": {"type": "string", "description": "External input id, or \"\"."},
+                    "to_step": {"type": "string"},
+                    "to_port": {"type": "string"}
+                })),
+                strict(json!({"kind": {"type": "string", "enum": ["prerequisite"]}, "before": {"type": "string"}, "after": {"type": "string"}})),
+                strict(json!({
+                    "kind": {"type": "string", "enum": ["annotation"]},
+                    "from": {"type": "string"},
+                    "to": {"type": "string"},
+                    "label": {"type": "string"},
+                    "relation": {"type": "string", "enum": relations}
+                }))
+            ]}},
+            "outcomes": {"type": "array", "items": strict(json!({
+                "id": id("Outcome"),
+                "kind": {"type": "string", "enum": outcome_kinds},
+                "label": {"type": "string"},
+                "step": {"type": "string"},
+                "port": {"type": "string"},
+                "optional": {"type": "boolean"}
+            }))},
+            "ceiling": strict(json!({
+                "execution": {"type": "string", "enum": ["none", "restricted", "trustedNative"]},
+                "model_requests": {"type": "boolean"},
+                "retain_results": {"type": "boolean"},
+                "propose_changes": {"type": "boolean"}
+            }))
+        },
+        "required": ["workflow_id", "expected_revision", "title", "description", "preset", "inputs", "steps", "connections", "outcomes", "ceiling"],
+        "additionalProperties": false
+    })
 }
 
 fn entity_kind_names() -> Vec<&'static str> {
@@ -420,6 +535,7 @@ pub struct RunCommandInput {
 pub enum ToolCall {
     GraphQuery(GraphQueryInput),
     GraphPropose(GraphProposeInput),
+    WorkflowPropose(WorkflowProposeInput),
     ListFiles(ListFilesInput),
     ReadFile(ReadFileInput),
     EditDocument(EditDocumentInput),
@@ -509,6 +625,14 @@ impl ToolCall {
                 Effects {
                     targets: false,
                     ..effects(paths, Exposure::ConsentFiltered, Launch::None, false, None, "A graph query")
+                }
+            }
+            ToolCall::WorkflowPropose(input) => {
+                // Named input files are scope-checked; nothing is read or run.
+                let paths = input.named_paths().into_iter().map(|p| (p, PathUse::Read)).collect();
+                Effects {
+                    targets: false,
+                    ..effects(paths, Exposure::ConsentFiltered, Launch::None, true, None, "A workflow draft")
                 }
             }
             ToolCall::GraphPropose(input) => {
@@ -654,6 +778,11 @@ impl ToolCall {
                 }
                 ToolCall::GraphPropose(parsed)
             }
+            WORKFLOW_PROPOSE => {
+                let parsed: WorkflowProposeInput = typed(input)?;
+                parsed.check_bounds()?;
+                ToolCall::WorkflowPropose(parsed)
+            }
             other => return Err(format!("unknown tool {other:?}")),
         })
     }
@@ -715,7 +844,7 @@ mod tests {
         }
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 12);
     }
 
     #[test]
@@ -743,6 +872,14 @@ mod tests {
             (
                 GRAPH_QUERY,
                 json!({"query": "search", "text": "", "kinds": ["claim"], "entity": "", "path": "", "depth": 1, "limit": 20}),
+            ),
+            (
+                WORKFLOW_PROPOSE,
+                json!({"workflow_id": "", "expected_revision": -1, "title": "Census", "description": "", "preset": "",
+                    "inputs": [{"id": "code", "label": "Code", "port_type": "codeSource", "path": "", "pinned_hash": ""}],
+                    "steps": [{"id": "run", "label": "Run", "operation": "research.pythonBatch", "version": 1, "parameters": [], "payload": {"kind": "none"}}],
+                    "connections": [{"kind": "data", "from_step": "", "from_port": "", "from_input": "code", "to_step": "run", "to_port": "script"}],
+                    "outcomes": [], "ceiling": {"execution": "none", "model_requests": false, "retain_results": false, "propose_changes": false}}),
             ),
             (
                 GRAPH_PROPOSE,

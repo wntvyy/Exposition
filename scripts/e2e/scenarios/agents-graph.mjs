@@ -313,6 +313,80 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
       contextEntities: ctx2.entities.length,
     });
 
+    // --- A workflow draft: approval shows the complete definition; saved as a
+    // draft (incomplete, not runnable); listed as kept in the project graph.
+    const WORKFLOW_TITLE = "Review the claims WORKFLOW-MARK";
+    await invoke(page, "agents_dev_load_script", {
+      script: {
+        turns: [
+          {
+            steps: [
+              tool("wf", "workflow_propose", {
+                workflow_id: "",
+                expected_revision: -1,
+                title: WORKFLOW_TITLE,
+                description: "Summarize the paper's claims for review.",
+                preset: "",
+                inputs: [{ id: "paper", label: "Paper", port_type: "document", path: "main.typ", pinned_hash: "" }],
+                steps: [
+                  {
+                    id: "review",
+                    label: "Review the paper",
+                    operation: "agent.review",
+                    version: 1,
+                    parameters: [],
+                    payload: { kind: "prompt", text: "Summarize the claims." },
+                  },
+                ],
+                connections: [],
+                outcomes: [
+                  { id: "report", kind: "investigationReport", label: "Report", step: "review", port: "report", optional: false },
+                ],
+                ceiling: { execution: "none", model_requests: false, retain_results: false, propose_changes: false },
+              }),
+            ],
+          },
+          { steps: [{ text: "Saved a workflow draft; it is incomplete and not runnable yet." }] },
+        ],
+      },
+    });
+    const taskW = await createTask(page, opened.root, {
+      prompt: "Save a review procedure as a workflow draft",
+      permission: "reviewEdits",
+      consent: "scopeContent",
+    });
+    await waitStatus(page, taskW.id, "awaitingApproval");
+    await agentsPage.locator(`[data-testid=agents-page-task][data-task-id="${taskW.id}"]`).click();
+    await agentsPage.getByRole("tab", { name: /Run/ }).click();
+    await agentsPage.getByTestId("agents-approval").waitFor({ timeout: 15_000 });
+    const wfPayload = await agentsPage.getByTestId("agents-approval-payload").textContent();
+    for (const needle of [WORKFLOW_TITLE, "Definition (complete):", '"operation": {', "Summarize the claims.", "not runnable in this version", "Diagnostics:"]) {
+      assert.ok(wfPayload.includes(needle), `the workflow approval shows ${needle}: ${wfPayload}`);
+    }
+    await shot(page, "agents-graph-workflow-approval-light");
+    await agentsPage.getByTestId("agents-approve").click();
+    await waitDone(page, taskW.id);
+    detail = await invoke(page, "agents_task_detail", { task: taskW.id });
+    const wfResult = resultOf(toolCall(detail, "wf"));
+    assert.equal(wfResult.saved, true, JSON.stringify(wfResult));
+    assert.equal(wfResult.runnable, false);
+    assert.equal(wfResult.state, "incomplete", "saved as an incomplete draft with diagnostics");
+    const listed = (await invoke(page, "workflow_list")).find((w) => w.id === wfResult.workflow);
+    assert.ok(listed, "the draft is a saved workflow");
+    assert.equal(listed.runnable, false);
+    assert.equal(listed.origin.kind, "agent");
+    assert.equal(listed.origin.taskId, taskW.id);
+    // The Agents page lists it among what is kept in the project graph.
+    await gotoPage("Editor");
+    await gotoPage("Agents");
+    await agentsPage.locator(`[data-testid=agents-kept-entity][data-kind=workflow][data-entity-id="${wfResult.entity}"]`).waitFor({
+      timeout: 10_000,
+    });
+    step("workflow_propose: approval showed the complete definition; saved as an incomplete draft, not runnable; listed as kept", {
+      workflow: wfResult.workflow,
+      errors: wfResult.errors,
+    });
+
     // --- Task 3: the graph becomes unavailable while the task waits: legacy
     // file tools pause with agents.graphUnavailable, nothing changes.
     await invoke(page, "agents_dev_load_script", {

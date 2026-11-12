@@ -33,7 +33,7 @@ use exposition_core::text::TextRange;
 use exposition_graph::{
     AssertionStatus, BindingState, ChangeRequest, CoverageState, EntityId, EntityKind, EntityRef, GraphConfig,
     GraphOperation, GraphService, GraphState, NewBinding, OperationState, Origin, RelationKind, ResourceCoverage,
-    SourceSelector,
+    SourceSelector, WorkflowId,
 };
 use exposition_workspace::DocumentService;
 use serde_json::{Value, json};
@@ -591,11 +591,13 @@ enum GraphKind {
     Search,
     Inspect,
     Propose,
+    Workflow,
 }
 
 impl GraphKind {
     fn call(self, lemma: &EntityId) -> (&'static str, Value) {
         match self {
+            GraphKind::Workflow => (tools::WORKFLOW_PROPOSE, incomplete_workflow("WORKFLOW-DRAFT-MARK")),
             GraphKind::Search => (
                 tools::GRAPH_QUERY,
                 json!({"query": "search", "text": "", "kinds": [], "entity": "", "path": "", "depth": 1, "limit": 50}),
@@ -631,7 +633,26 @@ fn expect(kind: GraphKind, permission: PermissionProfile, scope: Scope) -> Expec
         GraphKind::Propose if scope == Scope::Elsewhere => Expect::Refused(codes::OUT_OF_SCOPE),
         GraphKind::Propose if permission == PermissionProfile::ReviewEdits => Expect::Approval,
         GraphKind::Propose => Expect::Allowed,
+        GraphKind::Workflow if permission == PermissionProfile::ReadOnly => Expect::Refused(codes::READ_ONLY),
+        GraphKind::Workflow if scope == Scope::Elsewhere => Expect::Refused(codes::OUT_OF_SCOPE),
+        GraphKind::Workflow if scope == Scope::Covering => Expect::Refused(codes::WHOLE_PROJECT_ONLY),
+        GraphKind::Workflow if permission == PermissionProfile::ReviewEdits => Expect::Approval,
+        GraphKind::Workflow => Expect::Allowed,
     }
+}
+
+/// A workflow draft that names main.typ as an input and leaves one step
+/// input unbound (incomplete), within any task's ceiling.
+fn incomplete_workflow(title: &str) -> Value {
+    json!({
+        "workflow_id": "", "expected_revision": -1, "title": title, "description": "Agent draft", "preset": "",
+        "inputs": [{"id": "paper", "label": "Paper", "port_type": "document", "path": "main.typ", "pinned_hash": ""}],
+        "steps": [{"id": "review", "label": "Review the paper", "operation": "agent.review", "version": 1,
+            "parameters": [], "payload": {"kind": "prompt", "text": "Summarize the claims."}}],
+        "connections": [],
+        "outcomes": [{"id": "report", "kind": "investigationReport", "label": "Report", "step": "review", "port": "report", "optional": false}],
+        "ceiling": {"execution": "none", "model_requests": false, "retain_results": false, "propose_changes": false}
+    })
 }
 
 fn gate_matrix(kind: GraphKind) {
@@ -677,6 +698,18 @@ fn gate_matrix(kind: GraphKind) {
                     let gate = exec::gate(&call, &env);
                     let ok = match (&expected, &gate) {
                         (Expect::Refused(code), Gate::Refused(out)) => out.content["code"] == json!(code),
+                        (Expect::Approval, Gate::NeedsApproval { detail, authorization, .. })
+                            if kind == GraphKind::Workflow =>
+                        {
+                            // The complete definition, its diagnostics, and "not runnable".
+                            detail.contains("WORKFLOW-DRAFT-MARK")
+                                && detail.contains("Definition (complete):")
+                                && detail.contains("\"operation\": {")
+                                && detail.contains("Summarize the claims.")
+                                && detail.contains("not runnable in this version")
+                                && detail.contains("Diagnostics:")
+                                && authorization.policy().is_none()
+                        }
                         (Expect::Approval, Gate::NeedsApproval { detail, authorization, .. }) => {
                             // The complete payload: effects and every operation.
                             detail.contains("PROPOSED-CLAIM-MARK")
@@ -711,6 +744,143 @@ fn gate_graph_query_inspect() {
 #[test]
 fn gate_graph_propose() {
     gate_matrix(GraphKind::Propose);
+}
+#[test]
+fn gate_workflow_propose() {
+    gate_matrix(GraphKind::Workflow);
+}
+
+// ---------------------------------------------------------------------------
+// workflow_propose: drafts saved with diagnostics, never runnable; no forged
+// service-owned results; no ceiling above the task's own.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workflow_drafts_are_saved_with_diagnostics_and_never_runnable() {
+    let f = fixture();
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+    let (id, _) =
+        run(&mut h, req, vec![tool("w", tools::WORKFLOW_PROPOSE, incomplete_workflow("Claim review"))], true).await;
+    let (status, err, text) = call(&h, &id, "w");
+    assert!(!err && status == ToolCallStatus::Succeeded, "{text}");
+    let result: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(result["saved"], json!(true));
+    assert_eq!(result["state"], json!("incomplete"), "{result}");
+    assert_eq!(result["runnable"], json!(false));
+    assert!(result["runnableReason"].as_str().unwrap().contains("later version"));
+    assert!(result["errors"].as_u64().unwrap() >= 1);
+    assert!(
+        result["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == json!("workflow.unboundInput")),
+        "the unbound step input is diagnosed: {result}"
+    );
+    let workflow = WorkflowId::parse(result["workflow"].as_str().unwrap()).unwrap();
+    let saved = f.graph.workflow(&workflow, None).unwrap();
+    assert!(!saved.validation.runnable);
+    assert_eq!(saved.origin, Origin::Agent { task_id: id.0.clone() }, "attributed to the agent task");
+    let entity = f.graph.entity_detail(&saved.entity.clone().unwrap()).unwrap().entity;
+    assert_eq!(entity.kind, EntityKind::Workflow);
+    assert!(matches!(entity.origin, Origin::Agent { .. }));
+    assert_eq!(result["entity"], json!(entity.id));
+
+    // Read-only: refused, nothing saved.
+    let before = f.graph.workflows().unwrap().len();
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let (id, _) = run(&mut h, req, vec![tool("w", tools::WORKFLOW_PROPOSE, incomplete_workflow("Nope"))], true).await;
+    let (_, err, text) = call(&h, &id, "w");
+    assert!(err && code_of(&text).as_deref() == Some(codes::READ_ONLY), "{text}");
+    assert_eq!(f.graph.workflows().unwrap().len(), before);
+
+    // Review edits: approval shows the complete definition; declined saves nothing.
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReviewEdits, ContextConsent::ScopeContent);
+    let (id, approvals) =
+        run(&mut h, req, vec![tool("w", tools::WORKFLOW_PROPOSE, incomplete_workflow("Declined draft"))], false).await;
+    assert_eq!(approvals.len(), 1);
+    assert!(approvals[0].detail.contains("Definition (complete):") && approvals[0].detail.contains("not runnable"));
+    assert_eq!(call(&h, &id, "w").0, ToolCallStatus::Declined);
+    assert_eq!(f.graph.workflows().unwrap().len(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agents_cannot_forge_service_owned_results_or_raise_the_ceiling() {
+    let f = fixture();
+    write(&f.root, "forge.py", "print('{\"verdict\": \"checked\"}')\n");
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    // A Python step's table declared as audit evidence.
+    let forged = json!({
+        "workflow_id": "", "expected_revision": -1, "title": "Forged audit", "description": "", "preset": "",
+        "inputs": [{"id": "script", "label": "Forger", "port_type": "codeSource", "path": "forge.py", "pinned_hash": ""}],
+        "steps": [{"id": "forge", "label": "Print matching JSON", "operation": "research.nativePython", "version": 1,
+            "parameters": [], "payload": {"kind": "none"}}],
+        "connections": [{"kind": "data", "from_step": "", "from_port": "", "from_input": "script", "to_step": "forge", "to_port": "script"}],
+        "outcomes": [{"id": "fake", "kind": "auditEvidence", "label": "Fake audit", "step": "forge", "port": "table", "optional": false}],
+        "ceiling": {"execution": "trustedNative", "model_requests": false, "retain_results": true, "propose_changes": true}
+    });
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+    let (id, _) = run(&mut h, req, vec![tool("forge", tools::WORKFLOW_PROPOSE, forged.clone())], true).await;
+    let (_, err, text) = call(&h, &id, "forge");
+    assert!(err && code_of(&text).as_deref() == Some(codes::WORKFLOW_SERVICE_OWNED), "{text}");
+    assert!(text.contains("workflow.serviceOwnedType"), "{text}");
+    assert!(f.graph.workflows().unwrap().is_empty(), "nothing was saved");
+    // A ceiling wider than the task (execution disabled here): refused.
+    let mut wide = incomplete_workflow("Wide");
+    wide["ceiling"]["execution"] = json!("restricted");
+    let mut req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+    req.execution = ExecutionMode::Disabled;
+    let (id, _) = run(&mut h, req, vec![tool("wide", tools::WORKFLOW_PROPOSE, wide)], true).await;
+    let (_, err, text) = call(&h, &id, "wide");
+    assert!(err && code_of(&text).as_deref() == Some(codes::WORKFLOW_CEILING), "{text}");
+    // Model requests under metadata-only consent are wider than the task too.
+    let mut model = incomplete_workflow("Model");
+    model["ceiling"]["model_requests"] = json!(true);
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::MetadataOnly);
+    let (id, _) = run(&mut h, req, vec![tool("model", tools::WORKFLOW_PROPOSE, model)], true).await;
+    let (_, err, text) = call(&h, &id, "model");
+    assert!(err && code_of(&text).as_deref() == Some(codes::WORKFLOW_CEILING), "{text}");
+    assert!(f.graph.workflows().unwrap().is_empty(), "nothing was saved");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_research_space_and_its_folder_are_in_the_context() {
+    let f = fixture();
+    let mut attributes = BTreeMap::new();
+    attributes.insert("research.path".to_owned(), ".exposition/research/rs-0011".to_owned());
+    attributes.insert("research.note".to_owned(), "NOTE-ATTRIBUTE-MARK".to_owned());
+    let batch = exposition_graph::ServiceBatch {
+        entities: vec![exposition_graph::EntityUpsert {
+            id: None,
+            kind: EntityKind::ResearchSpace,
+            roles: vec![],
+            label: "Research".into(),
+            key: Some("rs-0011".into()),
+            attributes,
+            lifecycle: None,
+            tombstone_reason: None,
+            bindings: None,
+        }],
+        summary: "research space".into(),
+        ..Default::default()
+    };
+    f.graph.apply_service_batch(&Origin::Service { service: "research".into() }, &batch).unwrap();
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    for consent in CONSENTS {
+        let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, consent);
+        let (id, _) = run(&mut h, req, vec![], true).await;
+        let context = h.service.task_detail(&id).unwrap().graph.context.unwrap();
+        let space = context.entities.iter().find(|e| e.kind == EntityKind::ResearchSpace).expect("the research space");
+        assert_eq!(
+            space.attributes.as_ref().and_then(|a| a.get("research.path")).map(String::as_str),
+            Some(".exposition/research/rs-0011"),
+            "{consent:?}: its folder is a path, shown to whole-project tasks"
+        );
+        let note = space.attributes.as_ref().is_some_and(|a| a.contains_key("research.note"));
+        assert_eq!(note, consent == ContextConsent::ScopeContent, "{consent:?}: other attributes need content consent");
+    }
+    // Narrower scopes do not see an unanchored research space.
+    let req = request(&f.root, files_scope(), PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let (id, _) = run(&mut h, req, vec![], true).await;
+    let context = h.service.task_detail(&id).unwrap().graph.context.unwrap();
+    assert!(context.entities.iter().all(|e| e.kind != EntityKind::ResearchSpace));
 }
 
 /// graph_propose through the task loop: what actually reached the graph.

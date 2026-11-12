@@ -43,6 +43,10 @@ pub const MAX_CONTEXT_BYTES: usize = 48 * 1024;
 /// Characters of a label given to the model.
 pub const MAX_LABEL_CHARS: usize = 120;
 const MAX_EVIDENCE_PER_ENTITY: usize = 5;
+const MAX_ATTRIBUTES: usize = 16;
+const MAX_ATTRIBUTE_CHARS: usize = 200;
+/// Attributes whose values are project paths (metadata, like file names).
+const PATH_ATTRIBUTES: [&str; 1] = ["research.path"];
 /// Entities scanned when building a context.
 const SCAN_LIMIT: usize = 4000;
 
@@ -107,6 +111,25 @@ impl<'a> Visibility<'a> {
         (self.content() || path_derived).then(|| truncate_chars(&entity.label, MAX_LABEL_CHARS))
     }
 
+    /// Attributes the task may see. Path-valued attributes (a research space's
+    /// folder) are metadata and shown when the path is in scope; the rest are
+    /// written by people or derived from content and need content consent.
+    pub fn attributes(&self, entity: &Entity) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        for (key, value) in entity.attributes.iter().take(MAX_ATTRIBUTES) {
+            let path_valued = PATH_ATTRIBUTES.contains(&key.as_str());
+            let visible = if path_valued {
+                WorkspacePath::parse(value).is_ok_and(|p| self.whole_project() || self.path(&p))
+            } else {
+                self.content()
+            };
+            if visible {
+                out.insert(key.clone(), truncate_chars(value, MAX_ATTRIBUTE_CHARS));
+            }
+        }
+        out
+    }
+
     pub fn relation(&self, relation: &Relation) -> ContextRelation {
         ContextRelation {
             id: relation.id.clone(),
@@ -155,6 +178,7 @@ impl<'a> Visibility<'a> {
             revision: entity.revision,
             origin: OriginKind::of(&entity.origin),
             version: binding.and_then(|b| b.version.clone()),
+            attributes: Some(self.attributes(entity)).filter(|a| !a.is_empty()),
             binding: binding.map(|b| b.state),
             coverage,
             evidence,
@@ -248,6 +272,20 @@ pub fn operations(spec: &TaskSpec, services: &dyn ToolServices) -> Vec<ContextOp
         op("edit_document", changes.0, changes.1),
         op("create_file", changes.0, changes.1),
         op("insert_artifact", changes.0, changes.1),
+        op(
+            "workflow_propose",
+            changes.0 && whole,
+            match spec.permission {
+                PermissionProfile::ReadOnly => "refused: the task is read-only",
+                _ if !whole => "refused: needs a task scoped to the whole project",
+                PermissionProfile::ReviewEdits => {
+                    "saves a workflow draft after the user's approval; drafts are not runnable in this version"
+                }
+                PermissionProfile::AutoApply => {
+                    "saves a workflow draft directly; drafts are not runnable in this version"
+                }
+            },
+        ),
         op(
             "build_document",
             content,
