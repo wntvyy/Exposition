@@ -9,7 +9,8 @@
 // spawns a sleeping Python grandchild).
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const PROBE_LOG_LIMIT = 16 * 1024;
@@ -157,7 +158,12 @@ export default async function executionJobs({ launchApp, artifactsDir, assert })
     assert.equal(badId?.code, "job.invalidId");
 
     // --- Trust commands validate and persist (granting is a UI-dialog action).
-    const trustTarget = join(app.dataDir, "trust-target");
+    // Project folders live outside the app's data folder, which can never be
+    // trusted or opened (it holds trust.json and settings.json).
+    const projects = await mkdtemp(join(tmpdir(), "xp-exec-"));
+    assert.equal((await rejection(page, "trust_grant", { root: app.dataDir }))?.code, "trust.tooBroad");
+    assert.equal((await rejection(page, "trust_grant", { root: join(app.dataDir, "execution") }))?.code, "trust.tooBroad");
+    const trustTarget = join(projects, "trust-target");
     await mkdir(trustTarget, { recursive: true });
     assert.equal((await invoke(page, "trust_status", { root: trustTarget })).trusted, false);
     assert.equal((await invoke(page, "trust_grant", { root: trustTarget })).trusted, true);
@@ -166,7 +172,7 @@ export default async function executionJobs({ launchApp, artifactsDir, assert })
     assert.equal(broad?.code, "trust.tooBroad");
 
     // --- An untrusted workspace never executes; trust needs the explicit dialog.
-    const workspace = join(app.dataDir, "untrusted-project");
+    const workspace = join(projects, "untrusted-project");
     const marker = join(workspace, "exposition-dev-ran.txt");
     await mkdir(workspace, { recursive: true });
     const refusedId = await invoke(page, "dev_start_workspace_job", { root: workspace });
