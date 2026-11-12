@@ -9,6 +9,7 @@ import type { TaskSummary } from "../../bindings/TaskSummary";
 const ipc = vi.hoisted(() => ({
   agentsTaskDetail: vi.fn(),
   agentsProviderClearKey: vi.fn(),
+  agentsProviderSetKey: vi.fn(),
   agentsReview: vi.fn(),
   agentsReviewDiff: vi.fn(),
 }));
@@ -219,6 +220,32 @@ describe("provider settings", () => {
     ipc.agentsProviderClearKey.mockReset();
     ipc.agentsProviderClearKey.mockResolvedValue({ ...status, configured: false });
     useAgents.setState({ settingsOpen: true, status });
+  });
+
+  it("takes the key out of the form before saving it, and back only if saving fails", async () => {
+    const key = "sk-ant-unit-test-not-a-real-key-7c1d";
+    let finish: (value: ProviderStatus | null) => void = () => {};
+    ipc.agentsProviderSetKey.mockReset();
+    ipc.agentsProviderSetKey.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
+    render(<ProviderSettingsDialog />);
+    const field = screen.getByLabelText(/API key/) as HTMLInputElement;
+    fireEvent.change(field, { target: { value: key } });
+    fireEvent.click(screen.getByTestId("agents-key-save"));
+    // The provider event can report "Configured" before the save call returns:
+    // by then the key must already be gone from the form and the DOM.
+    expect(ipc.agentsProviderSetKey).toHaveBeenCalledWith(key);
+    expect((screen.getByLabelText(/API key/) as HTMLInputElement).value).toBe("");
+    expect(document.documentElement.outerHTML.includes(key)).toBe(false);
+    await act(async () => finish({ ...status, configured: true }));
+    await screen.findByText("API key saved to the credential store.");
+    expect(document.documentElement.outerHTML.includes(key)).toBe(false);
+
+    // A failed save gives the key back so the user can retry.
+    ipc.agentsProviderSetKey.mockReset();
+    ipc.agentsProviderSetKey.mockRejectedValue(new Error("credential store unavailable"));
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: key } });
+    fireEvent.click(screen.getByTestId("agents-key-save"));
+    await waitFor(() => expect((screen.getByLabelText(/API key/) as HTMLInputElement).value).toBe(key));
   });
 
   it("asks before removing the stored key; Keep is focused and Escape keeps it", async () => {

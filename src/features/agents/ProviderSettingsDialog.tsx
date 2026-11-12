@@ -41,14 +41,20 @@ export function ProviderSettingsDialog() {
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function saveKey() {
-    if (!key.trim()) return;
-    setBusy(true);
-    const next = await agents.run(() => commands.agentsProviderSetKey(key));
-    setBusy(false);
+    const value = key;
+    if (!value.trim()) return;
+    // Take the key out of the form before saving: the provider event can
+    // report "Configured" before this call returns, and the key must not stay
+    // in the webview meanwhile. A failed save gives it back for a retry.
     setKey("");
+    setBusy(true);
+    const next = await agents.run(() => commands.agentsProviderSetKey(value));
+    setBusy(false);
     if (next) {
       agents.setStatus(next);
       setMessage("API key saved to the credential store.");
+    } else {
+      setKey(value);
     }
   }
 
