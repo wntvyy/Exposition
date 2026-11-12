@@ -437,6 +437,41 @@ impl WorkspaceService {
         Ok(DocumentOpened { state, conflict })
     }
 
+    /// Create a new text file inside the open folder and open it as a
+    /// document. Never overwrites: refused when the file exists or a document
+    /// with that path is open. The path is validated like every write (inside
+    /// the root, no link escapes); missing folders are created; the file is
+    /// written atomically as UTF-8.
+    pub fn create_document(&self, path: &WorkspacePath, text: &str) -> WorkspaceResult<DocumentOpened> {
+        let exists = || WorkspaceError::new("file.exists", format!("{path} already exists."));
+        if text.len() as u64 > MAX_TEXT_BYTES {
+            return Err(too_large(path, text.len() as u64));
+        }
+        {
+            let _io = lock(&self.io);
+            let root = self.root()?;
+            if self.documents.find_by_path(path).is_some() {
+                return Err(exists());
+            }
+            let target = root.resolve_for_write(path)?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| WorkspaceError::io(path, &e))?;
+            }
+            // Reserve the name first so an existing file is never replaced, then
+            // write the content atomically over the (empty) reservation.
+            match fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(exists()),
+                Err(e) => return Err(WorkspaceError::io(path, &e)),
+            }
+            if let Err(e) = write_atomic(&target, text.as_bytes()) {
+                let _ = fs::remove_file(&target);
+                return Err(WorkspaceError::new("file.writeFailed", format!("{path} could not be created: {e}.")));
+            }
+        }
+        self.open_document(path)
+    }
+
     /// Close a document. Closing discards its unsaved changes and recovery journal.
     pub fn close_document(&self, id: &DocumentId) -> WorkspaceResult<()> {
         let info = self.documents.info(id)?;

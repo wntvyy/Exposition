@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use exposition_agents::credentials::KeyringStore;
-use exposition_agents::tools::execution::ExecutionToolServices;
+use exposition_agents::tools::execution::AppToolServices;
 use exposition_agents::{AgentConfig, AgentService};
 use exposition_core::path::WorkspacePath;
 use exposition_execution::{ExecutionConfig, ExecutionService};
@@ -59,20 +59,6 @@ impl AppState {
         std::thread::spawn(|| {
             Fonts::with_system();
         });
-        let agents = AgentService::new(AgentConfig {
-            database: Some(data_dir.join("agents.sqlite3")),
-            documents: Arc::clone(&documents),
-            workspace: Some(Arc::clone(&workspace)),
-            credentials: Arc::new(KeyringStore::new(credential_namespace().as_deref())),
-            // Agent commands and Python run as jobs on the shared execution
-            // service; builds and Lean checks report "not available" until the
-            // typesetting and Lean services are integrated.
-            services: Arc::new(ExecutionToolServices::new(execution.clone())),
-            runtime: tauri::async_runtime::handle().inner().clone(),
-            allow_scripted: cfg!(debug_assertions),
-            anthropic_base_url: None,
-            retry: None,
-        })?;
         let mut research_config = ResearchConfig::new(
             data_dir.clone(),
             Arc::new(ExecutionLauncher::new(execution.clone())),
@@ -80,6 +66,26 @@ impl AppState {
         );
         research_config.source_reader = Some(Arc::new(WorkspaceSources(Arc::clone(&workspace))));
         let research = Arc::new(ResearchService::new(research_config));
+        let agents = AgentService::new(AgentConfig {
+            database: Some(data_dir.join("agents.sqlite3")),
+            documents: Arc::clone(&documents),
+            workspace: Some(Arc::clone(&workspace)),
+            credentials: Arc::new(KeyringStore::new(credential_namespace().as_deref())),
+            // Agent tools call the same services people use: Typst and LaTeX
+            // builds, research sessions (agent-owned), and execution jobs. Lean
+            // checks report "not available" until the Lean service lands.
+            services: Arc::new(
+                AppToolServices::new(execution.clone())
+                    .with_workspace(Arc::clone(&workspace))
+                    .with_typesetting(Arc::clone(&typesetting.service))
+                    .with_tex(tex.clone())
+                    .with_research(Arc::clone(&research)),
+            ),
+            runtime: tauri::async_runtime::handle().inner().clone(),
+            allow_scripted: cfg!(debug_assertions),
+            anthropic_base_url: None,
+            retry: None,
+        })?;
         Ok(Self { documents, workspace, execution, research, tex, typesetting, data_dir, agents })
     }
 }

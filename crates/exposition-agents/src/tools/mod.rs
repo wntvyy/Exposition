@@ -26,6 +26,7 @@ pub const BUILD_DOCUMENT: &str = "build_document";
 pub const RUN_PYTHON: &str = "run_python";
 pub const CHECK_LEAN: &str = "check_lean";
 pub const RUN_COMMAND: &str = "run_command";
+pub const INSERT_ARTIFACT: &str = "insert_artifact";
 
 /// The tool list, in a fixed order.
 pub fn definitions() -> Vec<ToolDefinition> {
@@ -107,15 +108,36 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: BUILD_DOCUMENT,
-            description: "Typeset a document (Typst, LaTeX/LuaLaTeX, or Markdown) from the current editor state and \
-                report the real diagnostics and page count. Use it to check that your changes build; report its \
-                result honestly.",
+            description: "Typeset a document (Typst .typ or LaTeX .tex) from the current editor state, unsaved \
+                changes included, and report the real status, diagnostics with locations, and page count. Use it to \
+                check that your changes build; report its result honestly, including failures.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "entry": {"type": "string", "description": "Entry file relative to the project root, e.g. main.typ or paper.tex."}
+                    "entry": {"type": "string", "description": "Entry file relative to the project root, e.g. main.typ or paper.tex."},
+                    "engine": {"type": "string", "enum": ["auto", "pdflatex", "lualatex"], "description": "LaTeX engine; auto uses the project's setting (ignored for Typst)."}
                 },
-                "required": ["entry"],
+                "required": ["entry", "engine"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: INSERT_ARTIFACT,
+            description: "Insert a figure or table produced by a research run (an artifact listed in a run_python \
+                result) into a Typst, LaTeX, or Markdown document using the format's own figure/table markup and a \
+                stable attachment key, or update an earlier insertion by its key. The change is applied to the open \
+                document like an edit and is reviewable.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Document relative to the project root."},
+                    "run_id": {"type": "string", "description": "Run id from run_python."},
+                    "artifact_id": {"type": "string", "description": "Artifact id from that run."},
+                    "after_text": {"type": "string", "description": "Exact text, unique in the current document, after which to insert; empty inserts at the end. Ignored when updating."},
+                    "caption": {"type": "string", "description": "Caption text; empty for none (an update keeps the existing caption)."},
+                    "update_key": {"type": "string", "description": "Attachment key of an earlier insertion to update; empty to insert."}
+                },
+                "required": ["path", "run_id", "artifact_id", "after_text", "caption", "update_key"],
                 "additionalProperties": false
             }),
         },
@@ -204,6 +226,18 @@ pub struct CreateFileInput {
 #[serde(deny_unknown_fields)]
 pub struct BuildDocumentInput {
     pub entry: String,
+    pub engine: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InsertArtifactInput {
+    pub path: String,
+    pub run_id: String,
+    pub artifact_id: String,
+    pub after_text: String,
+    pub caption: String,
+    pub update_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -234,6 +268,7 @@ pub enum ToolCall {
     EditDocument(EditDocumentInput),
     CreateFile(CreateFileInput),
     BuildDocument(BuildDocumentInput),
+    InsertArtifact(InsertArtifactInput),
     RunPython(RunPythonInput),
     CheckLean(CheckLeanInput),
     RunCommand(RunCommandInput),
@@ -256,7 +291,14 @@ impl ToolCall {
                 ToolCall::EditDocument(parsed)
             }
             CREATE_FILE => ToolCall::CreateFile(typed(input)?),
-            BUILD_DOCUMENT => ToolCall::BuildDocument(typed(input)?),
+            BUILD_DOCUMENT => {
+                let parsed: BuildDocumentInput = typed(input)?;
+                if !matches!(parsed.engine.as_str(), "auto" | "pdflatex" | "lualatex") {
+                    return Err("engine must be auto, pdflatex, or lualatex".into());
+                }
+                ToolCall::BuildDocument(parsed)
+            }
+            INSERT_ARTIFACT => ToolCall::InsertArtifact(typed(input)?),
             RUN_PYTHON => ToolCall::RunPython(typed(input)?),
             CHECK_LEAN => ToolCall::CheckLean(typed(input)?),
             RUN_COMMAND => ToolCall::RunCommand(typed(input)?),
@@ -264,16 +306,21 @@ impl ToolCall {
         })
     }
 
-    /// Whether the call launches a process (counted against the command budget).
+    /// Whether the call launches a process (counted against the command
+    /// budget). Typst builds run in-process; LaTeX builds run TeX tools.
     pub fn is_process(&self) -> bool {
-        matches!(
-            self,
-            ToolCall::BuildDocument(_) | ToolCall::RunPython(_) | ToolCall::CheckLean(_) | ToolCall::RunCommand(_)
-        )
+        match self {
+            ToolCall::BuildDocument(input) => {
+                let entry = input.entry.to_ascii_lowercase();
+                entry.ends_with(".tex") || entry.ends_with(".ltx")
+            }
+            ToolCall::RunPython(_) | ToolCall::CheckLean(_) | ToolCall::RunCommand(_) => true,
+            _ => false,
+        }
     }
 
     pub fn changes_documents(&self) -> bool {
-        matches!(self, ToolCall::EditDocument(_) | ToolCall::CreateFile(_))
+        matches!(self, ToolCall::EditDocument(_) | ToolCall::CreateFile(_) | ToolCall::InsertArtifact(_))
     }
 }
 
@@ -307,7 +354,7 @@ mod tests {
             object_schemas_are_strict(&def.input_schema, def.name);
         }
         names.dedup();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 9);
     }
 
     #[test]
@@ -324,7 +371,11 @@ mod tests {
             (LIST_FILES, json!({"path": "", "recursive": true})),
             (EDIT_DOCUMENT, json!({"path": "a", "base_revision": 2, "edits": [{"old_text": "x", "new_text": "y"}]})),
             (CREATE_FILE, json!({"path": "a", "content": ""})),
-            (BUILD_DOCUMENT, json!({"entry": "main.typ"})),
+            (BUILD_DOCUMENT, json!({"entry": "main.typ", "engine": "auto"})),
+            (
+                INSERT_ARTIFACT,
+                json!({"path": "main.typ", "run_id": "r", "artifact_id": "a", "after_text": "", "caption": "", "update_key": ""}),
+            ),
             (RUN_PYTHON, json!({"code": "print(1)"})),
             (CHECK_LEAN, json!({"path": "Main.lean"})),
             (RUN_COMMAND, json!({"program": "latexmk", "args": ["-pdf"], "working_directory": ""})),

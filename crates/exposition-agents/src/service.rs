@@ -693,6 +693,8 @@ impl Inner {
         if let Some((status, usage)) = status {
             inner.finish(&id, &status, &usage);
         }
+        // Release what the services hold for this run (agent research sessions).
+        inner.services.task_finished(&id.0).await;
         lock(&inner.running).remove(&id);
         if let Ok(summary) = inner.summary(&id) {
             inner.emit(AgentEvent::TaskChanged { task: Box::new(summary) });

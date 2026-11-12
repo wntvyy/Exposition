@@ -490,3 +490,76 @@ async fn watcher_reloads_clean_buffers_and_reports_file_changes() {
         .count();
     assert_eq!(live, 1);
 }
+
+#[test]
+fn create_document_writes_a_new_file_and_opens_it_without_overwriting() {
+    let f = fixture();
+    let opened = f
+        .service
+        .create_document(
+            &wp("figures/new.typ"),
+            "#figure[]
+",
+        )
+        .unwrap();
+    assert_eq!(
+        opened.state.text,
+        "#figure[]
+"
+    );
+    assert_eq!(
+        fs::read_to_string(f.file("figures/new.typ")).unwrap(),
+        "#figure[]
+"
+    );
+    assert_eq!(opened.state.info.saved_revision, Some(opened.state.info.revision));
+    // Existing files and open documents are never overwritten.
+    let err = f.service.create_document(&wp("main.typ"), "x").unwrap_err();
+    assert_eq!(err.code, "file.exists");
+    assert_eq!(
+        fs::read(f.file("main.typ")).unwrap(),
+        b"= Title
+
+Body.
+"
+    );
+    assert_eq!(f.service.create_document(&wp("figures/new.typ"), "y").unwrap_err().code, "file.exists");
+    // The new document saves without a spurious external-change conflict.
+    let id = opened.state.info.id;
+    edit(
+        &f.service,
+        &id,
+        vec![TextPatch::insert(
+            0, "// note
+",
+        )],
+    );
+    f.service.save_document(&id, false).unwrap();
+    assert_eq!(
+        fs::read_to_string(f.file("figures/new.typ")).unwrap(),
+        "// note
+#figure[]
+"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn create_document_refuses_link_escapes() {
+    let f = fixture();
+    let outside = tempfile::tempdir().unwrap();
+    let link = f.project().join("out");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(outside.path())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !made {
+        return;
+    }
+    let err = f.service.create_document(&wp("out/escape.txt"), "x").unwrap_err();
+    assert_eq!(err.code, "path.outsideWorkspace", "{err:?}");
+    assert!(!outside.path().join("escape.txt").exists());
+}

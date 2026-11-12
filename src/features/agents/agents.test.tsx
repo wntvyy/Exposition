@@ -128,6 +128,7 @@ describe("formatting", () => {
   it("summarizes tool inputs and builds scopes", () => {
     expect(toolSummary("edit_document", { path: "main.typ", edits: [{}, {}] })).toBe("main.typ (2 edits)");
     expect(toolSummary("run_command", { program: "latexmk", args: ["-pdf", "a.tex"] })).toBe("latexmk -pdf a.tex");
+    expect(toolSummary("insert_artifact", { path: "main.typ", artifact_id: "fig-1" })).toBe("main.typ ← fig-1");
     expect(buildScope("files", "a.typ\nchapters, \n", "")).toEqual({ kind: "files", paths: ["a.typ", "chapters"] });
     expect(buildScope("document", "", " ")).toBeNull();
     expect(buildScope("workspace", "", "")).toEqual({ kind: "workspace" });

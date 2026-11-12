@@ -597,7 +597,7 @@ async fn unavailable_services_report_clearly_and_are_never_faked() {
     let h = harness();
     let script = json!({"turns": [
         {"steps": [
-            {"toolUse": {"id": "b", "name": "build_document", "input": {"entry": "main.typ"}}},
+            {"toolUse": {"id": "b", "name": "build_document", "input": {"entry": "main.typ", "engine": "auto"}}},
             {"toolUse": {"id": "p", "name": "run_python", "input": {"code": "print(1+1)"}}},
             {"toolUse": {"id": "l", "name": "check_lean", "input": {"path": "main.typ"}}},
             {"toolUse": {"id": "c", "name": "run_command", "input": {"program": "ls", "args": [], "working_directory": ""}}}
