@@ -203,3 +203,129 @@ async fn docker_interactive_session_round_trips() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
+
+/// The application dies (here: only its docker client is killed, as the job
+/// object does when the application exits): the container must stop by
+/// itself, without the service's cleanup.
+#[tokio::test(flavor = "multi_thread")]
+async fn docker_container_stops_when_its_client_dies() {
+    let Some(image) = image() else { return };
+    let f = docker_fixture(&image);
+    let id = f.service.launch(node(&f, "setInterval(() => console.log('tick'), 200)"));
+    f.wait_stdout(&id, Duration::from_secs(60), |t| t.contains("tick")).await;
+    assert!(container_listed(&id.0), "container should be running");
+    let client = f.service.summary(&id).and_then(|s| s.pid).expect("docker client pid");
+    // TerminateProcess on the client alone: no `docker kill`, no `docker rm`.
+    let killed = if cfg!(windows) {
+        std::process::Command::new("taskkill").args(["/PID", &client.to_string(), "/F"]).status()
+    } else {
+        std::process::Command::new("kill").args(["-9", &client.to_string()]).status()
+    };
+    assert!(killed.map(|s| s.success()).unwrap_or(false), "killed the docker client");
+    let started = Instant::now();
+    while container_running(&id.0) {
+        assert!(started.elapsed() < Duration::from_secs(15), "the container outlived its client");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    eprintln!("container stopped {:?} after its client died", started.elapsed());
+    let _ = f.service.wait(&id).await;
+}
+
+fn container_running(job_id: &str) -> bool {
+    let name = format!("name=^exposition-{job_id}$");
+    let out = std::process::Command::new("docker").args(["ps", "-q", "--filter", &name]).output().expect("docker ps");
+    !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+}
+
+/// The time limit holds inside the container, even with nobody left outside
+/// to enforce it: the docker client is run directly, its stdin held open, and
+/// nothing ever kills it.
+#[tokio::test(flavor = "multi_thread")]
+async fn docker_time_limit_is_enforced_inside_the_container() {
+    use exposition_execution::docker::{ContainerStdin, RunPlan, TIME_LIMIT_GRACE, run_args};
+    let Some(image) = image() else { return };
+    let f = docker_fixture(&image);
+    let out_dir = f.tmp.path().join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let env_file = f.tmp.path().join("container.env");
+    std::fs::write(&env_file, "").unwrap();
+    let job_id = format!("timelimit-{}", std::process::id());
+    let settings = exposition_execution::DockerSettings::default();
+    let args = run_args(&RunPlan {
+        job_id: &job_id,
+        instance: "test-time-limit",
+        image: &image,
+        settings: &settings,
+        mount_root: &f.workspace,
+        workdir_components: Vec::new(),
+        out_dir: &out_dir,
+        env_file: &env_file,
+        program: "node",
+        args: &["-e".into(), "setInterval(() => {}, 1000)".into()],
+        stdin: ContainerStdin::Batch { input_dir: None },
+        time_limit: Some(Duration::from_secs(1)),
+    });
+    let started = Instant::now();
+    let mut child = std::process::Command::new("docker")
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("docker run");
+    let _stdin = child.stdin.take();
+    let limit = Duration::from_secs(1) + TIME_LIMIT_GRACE;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let elapsed = started.elapsed();
+            eprintln!("container ended after {elapsed:?} with {status:?}");
+            assert!(elapsed >= limit, "ended before its time limit");
+            assert!(!status.success(), "the program was killed, not finished");
+            break;
+        }
+        if started.elapsed() > limit + Duration::from_secs(30) {
+            let _ = std::process::Command::new("docker").args(["rm", "-f", &format!("exposition-{job_id}")]).status();
+            panic!("the container outlived its time limit");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(!container_listed(&job_id));
+}
+
+/// Containers an earlier session of the same data directory left running are
+/// removed by the startup sweep; other containers are left alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn docker_startup_sweep_removes_containers_left_by_an_earlier_session() {
+    let Some(image) = image() else { return };
+    let f = docker_fixture(&image);
+    let stale = format!("exposition-stale-{}", std::process::id());
+    let other = format!("exposition-other-{}", std::process::id());
+    for (name, instance) in [(&stale, f.service.docker_instance().to_owned()), (&other, "another-instance".to_owned())]
+    {
+        let status = std::process::Command::new("docker")
+            .args(["run", "-d", "--rm", "--pull=never", "--network=none", &format!("--name={name}")])
+            .arg("--label=org.exposition.managed=1")
+            .arg(format!("--label=org.exposition.instance={instance}"))
+            .args(["--entrypoint=node", &image, "-e", "setInterval(() => {}, 1000)"])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let listed = |name: &str| {
+        let out = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("name=^{name}$")])
+            .output()
+            .unwrap();
+        !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+    };
+    assert!(listed(&stale) && listed(&other));
+    assert_eq!(f.service.sweep_stale_containers(), Ok(1));
+    let gone = !listed(&stale);
+    let kept = listed(&other);
+    let _ = std::process::Command::new("docker").args(["rm", "-f", &other]).status();
+    assert!(gone, "the earlier session's container was removed");
+    assert!(kept, "another data directory's container was left alone");
+    // Swept once: a later call does nothing (a running job is never touched).
+    assert_eq!(f.service.sweep_stale_containers(), Ok(0));
+}

@@ -23,7 +23,7 @@ use exposition_workspace::WorkspaceService;
 use typst_layout::PagedDocument;
 
 use crate::fonts::Fonts;
-use crate::snapshot::{BuildSnapshot, sha256_hex};
+use crate::snapshot::{BuildSnapshot, ReadFilter, sha256_hex};
 use crate::typst_adapter::{self, COMPILER, TypstCompiler};
 
 /// Recent build records retained (beyond the last good one per entry).
@@ -161,6 +161,22 @@ impl TypesettingService {
 
     /// Compile `entry` now from a fresh snapshot (open buffers override disk).
     pub fn build(&self, target: &BuildTarget) -> Result<Arc<BuildRecord>, TypesettingError> {
+        self.build_with(target, None)
+    }
+
+    /// Compile `entry` reading only the files `filter` allows (an agent task's
+    /// scope): any other file reads as "access denied", so neither the output
+    /// nor the diagnostics can carry its content. The record is returned but
+    /// not retained for page views, which always build the whole project.
+    pub fn build_scoped(&self, target: &BuildTarget, filter: ReadFilter) -> Result<Arc<BuildRecord>, TypesettingError> {
+        self.build_with(target, Some(filter))
+    }
+
+    fn build_with(
+        &self,
+        target: &BuildTarget,
+        filter: Option<ReadFilter>,
+    ) -> Result<Arc<BuildRecord>, TypesettingError> {
         // Typst, and Markdown through its print profile (translated to Typst).
         let markdown = match (target.format, target.engine) {
             (DocumentFormat::Typst, Engine::Typst) => false,
@@ -169,6 +185,11 @@ impl TypesettingService {
         };
         let started = Instant::now();
         let snapshot = BuildSnapshot::capture(&self.workspace).map_err(|_| TypesettingError::NoWorkspace)?;
+        let retain = filter.is_none();
+        let snapshot = match filter {
+            Some(filter) => snapshot.with_filter(filter),
+            None => snapshot,
+        };
         let context = self.context_for(snapshot.root());
         let snapshot_ms = started.elapsed().as_secs_f64() * 1000.0;
         let output = if markdown {
@@ -232,6 +253,9 @@ impl TypesettingService {
             texts: snapshot.buffer_texts().into_iter().collect(),
             timings: BuildTimings { snapshot_ms, compile_ms: output.compile_ms, map_ms: output.map_ms, total_ms },
         });
+        if !retain {
+            return Ok(record);
+        }
         let mut store = self.store.lock().unwrap_or_else(|p| p.into_inner());
         store.recent.push_back(Arc::clone(&record));
         while store.recent.len() > RECENT_BUILDS {

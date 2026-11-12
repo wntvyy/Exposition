@@ -42,9 +42,11 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
+use super::scope;
 use super::services::{
     BuildRequest, CommandRequest, LatexEngine, LeanRequest, PythonRequest, ServiceError, ServiceKind, ToolServices,
 };
+use crate::model::TaskScope;
 
 /// Default wall-clock limit for one agent-launched process.
 const JOB_TIMEOUT_MS: u64 = 10 * 60 * 1000;
@@ -242,15 +244,30 @@ impl AppToolServices {
     ) -> Result<Value, ServiceError> {
         let typesetting = self.typesetting.clone().ok_or(ServiceError::NotAvailable(ServiceKind::Typesetting))?;
         let target = BuildTarget { format, engine, entry: request.entry };
-        let record = tokio::task::spawn_blocking(move || typesetting.build(&target))
-            .await
-            .map_err(|e| ServiceError::Failed(format!("the build stopped unexpectedly: {e}")))?
-            .map_err(|e| ServiceError::Failed(e.to_string()))?;
+        // A task scoped to part of the project builds with reads confined to
+        // its scope; other files read as "access denied".
+        let filter = (request.scope != TaskScope::Workspace).then(|| scope::read_filter(request.root, request.scope));
+        let record = tokio::task::spawn_blocking(move || match filter {
+            Some(filter) => typesetting.build_scoped(&target, filter),
+            None => typesetting.build(&target),
+        })
+        .await
+        .map_err(|e| ServiceError::Failed(format!("the build stopped unexpectedly: {e}")))?
+        .map_err(|e| ServiceError::Failed(e.to_string()))?;
         self.report(&record.result)
     }
 
     async fn build_latex(&self, request: BuildRequest, cancel: CancellationToken) -> Result<Value, ServiceError> {
         let tex = self.tex.clone().ok_or_else(|| ServiceError::Unsupported("LaTeX builds".into()))?;
+        // TeX runs natively and can read any file the user can: only a launch
+        // the user approved (trusted native) may run.
+        if request.policy != Some(ExecutionPolicy::TrustedNative) {
+            return Err(ServiceError::Failed(
+                "LaTeX builds run TeX natively with your account's privileges and need the user's approval; nothing \
+                 was run."
+                    .into(),
+            ));
+        }
         let engine = match request.engine {
             LatexEngine::PdfLatex => Engine::PdfLatex,
             LatexEngine::LuaLatex => Engine::LuaLatex,

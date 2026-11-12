@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright-core";
 
+import { appEnvironment } from "./app-env.mjs";
+
 export const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 
 /**
@@ -145,13 +147,16 @@ async function launchOnce(executable, dataDir, webviewDir, options) {
 
   const logs = [];
   const child = spawn(executable, [], {
-    env: {
-      ...process.env,
-      EXPOSITION_DATA_DIR: dataDir,
-      WEBVIEW2_USER_DATA_FOLDER: webviewDir,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
-      ...options.env,
-    },
+    // Never the real credential entry unless the launch asks for it (live-*).
+    env: appEnvironment(
+      process.env,
+      {
+        EXPOSITION_DATA_DIR: dataDir,
+        WEBVIEW2_USER_DATA_FOLDER: webviewDir,
+        WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
+      },
+      options,
+    ),
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });

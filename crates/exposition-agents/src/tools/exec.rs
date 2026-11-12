@@ -1,13 +1,22 @@
-//! Tool execution: gating (scope, permission profile, execution mode,
-//! consent, service availability) and the tool implementations.
+//! Tool execution: the central gate and the tool implementations.
+//!
+//! Every call passes [`gate`], which applies one set of rules (project
+//! binding, scope on the requested and the resolved path, content consent,
+//! process launch per execution mode, approvals) to the effects the call
+//! declares ([`crate::tools::Effects`]). Only the gate creates the
+//! [`Authorization`] that [`run`] requires; after an approval, [`confirm`]
+//! checks again that the call is still exactly what the user approved, in
+//! the task's own project.
 //!
 //! Agent document changes go through the document service as transactions
 //! with `EditOrigin::Agent` and `ConflictPolicy::RebaseDisjoint`; reads prefer
 //! open buffers over disk. Nothing here bypasses an open buffer.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use exposition_core::artifact::ArtifactRecord;
 use exposition_core::document::{
     ConflictPolicy, DocumentEdit, DocumentId, EditOrigin, TextPatch, TransactionError, TransactionId,
     TransactionRequest, UndoBehavior,
@@ -20,14 +29,16 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::services::{
-    BuildRequest, CommandRequest, LatexEngine, LeanRequest, PythonRequest, ServiceError, ServiceKind, ToolServices,
+    BuildRequest, CommandRequest, LatexEngine, LeanRequest, PythonRequest, ServiceError, ToolServices,
 };
 use super::{
-    CreateFileInput, EditDocumentInput, InsertArtifactInput, ListFilesInput, ReadFileInput, RunCommandInput, ToolCall,
+    CreateFileInput, EditDocumentInput, Exposure, InsertArtifactInput, Launch, ListFilesInput, PathUse, ReadFileInput,
+    RunCommandInput, ToolCall, scope,
 };
 use crate::model::{ContextConsent, ExecutionMode, PermissionProfile, TaskId, TaskScope, TaskSpec};
 use crate::review::{self, EditRecord};
 use crate::store::Store;
+use crate::tools;
 use crate::workspace::{self, FileError, ProjectFiles};
 
 /// Largest file text sent to the model in one read.
@@ -102,41 +113,87 @@ impl ToolOutput {
     }
 }
 
+/// Stable codes of the gate's refusals, in the `code` field of the tool result
+/// (next to the human-readable `error`).
+pub mod codes {
+    /// A path (as requested or as resolved) is outside the task's scope.
+    pub const OUT_OF_SCOPE: &str = "agents.outOfScope";
+    /// A path resolves outside the project folder.
+    pub const OUTSIDE_PROJECT: &str = "agents.outsideProject";
+    pub const INVALID_PATH: &str = "agents.invalidPath";
+    /// The tool can read beyond any scope; the task is not scoped to the whole project.
+    pub const WHOLE_PROJECT_ONLY: &str = "agents.wholeProjectOnly";
+    /// The task's consent allows only file names and metadata.
+    pub const METADATA_ONLY: &str = "agents.metadataOnly";
+    pub const READ_ONLY: &str = "agents.readOnly";
+    pub const EXECUTION_DISABLED: &str = "agents.executionDisabled";
+    /// A native-only tool in a restricted-only task.
+    pub const NATIVE_NOT_ALLOWED: &str = "agents.nativeNotAllowed";
+    /// Restricted execution required, no restricted backend.
+    pub const RESTRICTED_UNAVAILABLE: &str = "agents.restrictedUnavailable";
+    /// Native execution is not possible here (e.g. the folder is not trusted).
+    pub const NATIVE_REFUSED: &str = "agents.nativeRefused";
+    pub const SERVICE_UNAVAILABLE: &str = "agents.serviceUnavailable";
+    /// The project switched (before running, or while waiting for approval).
+    pub const PROJECT_CHANGED: &str = "agents.projectChanged";
+    /// What the call would do changed while it waited for approval.
+    pub const CHANGED_SINCE_APPROVAL: &str = "agents.changedSinceApproval";
+}
+
+/// A refusal with its stable code.
+fn refusal(code: &str, message: impl Into<String>) -> ToolOutput {
+    ToolOutput::error_with(message, json!({"code": code}))
+}
+
+/// The application's permission to run one call, bound to the task's project
+/// folder. Only [`gate`] (and [`confirm`], after an approval) creates one, and
+/// [`run`] requires it: no tool runs without passing the gate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Authorization {
+    policy: Option<ExecutionPolicy>,
+    /// The task's canonical project folder when the call was gated.
+    root: PathBuf,
+    /// Exactly what the user was shown, when the call waits for approval.
+    approved: Option<String>,
+    /// An artifact insertion planned (and shown) at the gate.
+    insertion: Option<PlannedInsertion>,
+}
+
+impl Authorization {
+    /// Execution policy for a process launch (`None` for in-process tools).
+    pub fn policy(&self) -> Option<&ExecutionPolicy> {
+        self.policy.as_ref()
+    }
+}
+
+/// An artifact insertion as planned when it was shown for approval.
+#[derive(Debug, Clone, PartialEq)]
+struct PlannedInsertion {
+    key: String,
+    /// Text of each patch, in order.
+    texts: Vec<String>,
+}
+
 /// Decision before running a call.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Gate {
-    Allowed { policy: Option<ExecutionPolicy> },
-    NeedsApproval { title: String, detail: String, policy: Option<ExecutionPolicy> },
+    Allowed(Authorization),
+    /// The user must approve first; `detail` is the complete payload (nothing
+    /// truncated) of what will run or change.
+    NeedsApproval {
+        title: String,
+        detail: String,
+        authorization: Authorization,
+    },
     Refused(ToolOutput),
 }
 
 fn parse_path(raw: &str) -> Result<WorkspacePath, ToolOutput> {
-    WorkspacePath::parse(raw).map_err(|e| ToolOutput::error(format!("invalid path {raw:?}: {e}")))
+    WorkspacePath::parse(raw).map_err(|e| refusal(codes::INVALID_PATH, format!("invalid path {raw:?}: {e}")))
 }
 
 fn parse_dir(raw: &str) -> Result<Option<WorkspacePath>, ToolOutput> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "." || trimmed == "./" { Ok(None) } else { parse_path(trimmed).map(Some) }
-}
-
-fn out_of_scope(path: &WorkspacePath, scope: &TaskScope) -> ToolOutput {
-    ToolOutput::error(format!(
-        "{path} is outside this task's scope ({}). The application refused the access; work within the scope.",
-        scope.describe()
-    ))
-}
-
-fn read_only() -> ToolOutput {
-    ToolOutput::error("This task is read-only: the user did not allow document changes. Describe the change instead.")
-}
-
-/// Whether listing `dir` can show anything inside the scope.
-fn dir_visible(dir: Option<&WorkspacePath>, scope: &TaskScope) -> bool {
-    let Some(dir) = dir else { return true };
-    if scope.allows(dir) {
-        return true;
-    }
-    scoped_paths(scope).iter().any(|p| p.as_str().starts_with(&format!("{}/", dir.as_str())))
+    if tools::is_root(raw) { Ok(None) } else { parse_path(raw.trim()).map(Some) }
 }
 
 fn scoped_paths(scope: &TaskScope) -> Vec<WorkspacePath> {
@@ -152,237 +209,462 @@ fn entry_visible(path: &str, scope: &TaskScope) -> bool {
     scope.allows(&parsed) || scoped_paths(scope).iter().any(|p| p.as_str().starts_with(&format!("{path}/")))
 }
 
-fn truncate(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_owned();
-    }
-    let mut end = limit;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}… ({} more bytes)", &text[..end], text.len() - end)
-}
-
-/// Decide whether `call` may run, and whether it needs the user's approval.
-pub fn gate(call: &ToolCall, env: &ToolEnv<'_>) -> Gate {
-    let spec = env.spec;
-    if let Err(reason) = workspace::check_root(env.workspace, env.files.root()) {
-        return Gate::Refused(ToolOutput::error(reason));
-    }
-    match call {
-        ToolCall::ListFiles(input) => match parse_dir(&input.path) {
-            Ok(dir) if dir_visible(dir.as_ref(), &spec.scope) => Gate::Allowed { policy: None },
-            Ok(Some(dir)) => Gate::Refused(out_of_scope(&dir, &spec.scope)),
-            Ok(None) => Gate::Allowed { policy: None },
-            Err(e) => Gate::Refused(e),
-        },
-        ToolCall::ReadFile(input) => {
-            let path = match parse_path(&input.path) {
-                Ok(p) => p,
-                Err(e) => return Gate::Refused(e),
-            };
-            if !spec.scope.allows(&path) {
-                return Gate::Refused(out_of_scope(&path, &spec.scope));
-            }
-            if spec.consent == ContextConsent::MetadataOnly {
-                return Gate::Refused(ToolOutput::error(
-                    "The user's context consent for this task allows only file names and metadata to be sent to \
-                     the model provider, so file content cannot be read.",
-                ));
-            }
-            Gate::Allowed { policy: None }
-        }
-        ToolCall::EditDocument(input) => {
-            if spec.permission == PermissionProfile::ReadOnly {
-                return Gate::Refused(read_only());
-            }
-            let path = match parse_path(&input.path) {
-                Ok(p) => p,
-                Err(e) => return Gate::Refused(e),
-            };
-            if !spec.scope.allows(&path) {
-                return Gate::Refused(out_of_scope(&path, &spec.scope));
-            }
-            if spec.permission == PermissionProfile::ReviewEdits {
-                let mut detail = format!("Edit {path} (based on revision {}):\n", input.base_revision);
-                for (i, edit) in input.edits.iter().enumerate() {
-                    detail.push_str(&format!(
-                        "\n#{}\n- {}\n+ {}\n",
-                        i + 1,
-                        truncate(&edit.old_text, 1500).replace('\n', "\n  "),
-                        truncate(&edit.new_text, 1500).replace('\n', "\n  ")
-                    ));
-                }
-                return Gate::NeedsApproval { title: format!("Apply edits to {path}"), detail, policy: None };
-            }
-            Gate::Allowed { policy: None }
-        }
-        ToolCall::CreateFile(input) => {
-            if spec.permission == PermissionProfile::ReadOnly {
-                return Gate::Refused(read_only());
-            }
-            let path = match parse_path(&input.path) {
-                Ok(p) => p,
-                Err(e) => return Gate::Refused(e),
-            };
-            if !spec.scope.allows(&path) {
-                return Gate::Refused(out_of_scope(&path, &spec.scope));
-            }
-            if spec.permission == PermissionProfile::ReviewEdits {
-                return Gate::NeedsApproval {
-                    title: format!("Create {path}"),
-                    detail: format!("Create {path} with content:\n\n{}", truncate(&input.content, 4000)),
-                    policy: None,
-                };
-            }
-            Gate::Allowed { policy: None }
-        }
-        ToolCall::BuildDocument(input) => {
-            let path = match parse_path(&input.entry) {
-                Ok(p) => p,
-                Err(e) => return Gate::Refused(e),
-            };
-            if !spec.scope.allows(&path) {
-                return Gate::Refused(out_of_scope(&path, &spec.scope));
-            }
-            if !env.services.available(ServiceKind::Typesetting) {
-                return Gate::Refused(ToolOutput::error(
-                    ServiceError::NotAvailable(ServiceKind::Typesetting).to_string(),
-                ));
-            }
-            // Typst compiles in-process; LaTeX runs TeX tools, so it needs process
-            // execution allowed for the task (the TeX service also requires trust).
-            if call.is_process()
-                && (spec.execution == ExecutionMode::Disabled || spec.permission == PermissionProfile::ReadOnly)
-            {
-                return Gate::Refused(execution_disabled());
-            }
-            Gate::Allowed { policy: None }
-        }
-        ToolCall::InsertArtifact(input) => {
-            if spec.permission == PermissionProfile::ReadOnly {
-                return Gate::Refused(read_only());
-            }
-            let path = match parse_path(&input.path) {
-                Ok(p) => p,
-                Err(e) => return Gate::Refused(e),
-            };
-            if !spec.scope.allows(&path) {
-                return Gate::Refused(out_of_scope(&path, &spec.scope));
-            }
-            if !env.services.available(ServiceKind::Research) {
-                return Gate::Refused(ToolOutput::error(ServiceError::NotAvailable(ServiceKind::Research).to_string()));
-            }
-            if spec.permission == PermissionProfile::ReviewEdits {
-                let action = if input.update_key.is_empty() {
-                    format!("Insert artifact {} of run {} into {path}", input.artifact_id, input.run_id)
-                } else {
-                    format!(
-                        "Update attachment {} in {path} with artifact {} of run {}",
-                        input.update_key, input.artifact_id, input.run_id
-                    )
-                };
-                let detail = if input.caption.is_empty() {
-                    action.clone()
-                } else {
-                    format!("{action}\nCaption: {}", input.caption)
-                };
-                return Gate::NeedsApproval { title: action, detail, policy: None };
-            }
-            Gate::Allowed { policy: None }
-        }
-        ToolCall::RunPython(input) => process_gate(env, ServiceKind::Research, || {
-            (
-                "Run Python code".into(),
-                format!("Run in this task's separate research session:\n\n{}", truncate(&input.code, 4000)),
-            )
-        }),
-        ToolCall::CheckLean(input) => {
-            let path = match parse_path(&input.path) {
-                Ok(p) => p,
-                Err(e) => return Gate::Refused(e),
-            };
-            if !spec.scope.allows(&path) {
-                return Gate::Refused(out_of_scope(&path, &spec.scope));
-            }
-            if spec.execution == ExecutionMode::Restricted {
-                return Gate::Refused(ToolOutput::error(
-                    "Lean checks run the project's toolchain natively, which this task does not allow (restricted \
-                     execution only). Nothing was run.",
-                ));
-            }
-            process_gate(env, ServiceKind::Lean, || {
-                (
-                    format!("Check {path} with Lean"),
-                    format!("Check {path} with the project's Lean toolchain (lake serve)"),
-                )
-            })
-        }
-        ToolCall::RunCommand(input) => {
-            if spec.scope != TaskScope::Workspace {
-                return Gate::Refused(ToolOutput::error(
-                    "Commands can affect any file, so they are only available for tasks scoped to the whole project.",
-                ));
-            }
-            if let Err(e) = parse_dir(&input.working_directory) {
-                return Gate::Refused(e);
-            }
-            process_gate(env, ServiceKind::Execution, || {
-                let wd = if input.working_directory.is_empty() { "." } else { input.working_directory.as_str() };
-                (
-                    format!("Run {}", input.program),
-                    format!("Program: {}\nArguments: {:?}\nWorking folder: {wd}", input.program, input.args),
-                )
-            })
-        }
-    }
+fn read_only() -> ToolOutput {
+    refusal(
+        codes::READ_ONLY,
+        "This task is read-only: the user did not allow document changes. Describe the change instead.",
+    )
 }
 
 fn execution_disabled() -> ToolOutput {
-    ToolOutput::error("Process execution is disabled for this task by the user.")
+    refusal(codes::EXECUTION_DISABLED, "Process execution is disabled for this task by the user.")
 }
 
-fn process_gate(env: &ToolEnv<'_>, kind: ServiceKind, describe: impl FnOnce() -> (String, String)) -> Gate {
+fn project_changed(reason: &str) -> ToolOutput {
+    refusal(
+        codes::PROJECT_CHANGED,
+        format!("The project changed: {reason} This task acts only on its own project folder, so nothing was done."),
+    )
+}
+
+/// Check one path a call names: valid, and in the task's scope both as
+/// requested and as resolved (links and aliases followed).
+fn check_path(env: &ToolEnv<'_>, raw: &str, path_use: PathUse) -> Result<(), ToolOutput> {
+    let scope = &env.spec.scope;
+    let root = env.files.root();
+    let checked = match path_use {
+        PathUse::Folder => scope::check_dir(root, scope, parse_dir(raw)?.as_ref()),
+        PathUse::Read | PathUse::Write | PathUse::Create => scope::check(root, scope, &parse_path(raw)?).map(|_| ()),
+    };
+    checked.map_err(|e| refusal(e.code(), e.message(scope)))
+}
+
+/// Decide whether `call` may run, and whether it needs the user's approval.
+///
+/// The rules apply to the call's declared [`Effects`], in this order:
+/// 1. the task's folder is the open project (calls act only on their own project);
+/// 2. a change is refused for a read-only task;
+/// 3. every named path is valid and in scope, as requested and as resolved;
+/// 4. what the result can carry to the model: content needs the user's content
+///    consent; content beyond the scope (processes, TeX, Lean) needs a task
+///    scoped to the whole project as well;
+/// 5. processes never start with execution disabled or read-only, and
+///    native-only tools never start in a restricted-only task;
+/// 6. the service exists;
+/// 7. tool-specific preparation (an inserted artifact's own scope check and
+///    the exact text shown for approval);
+/// 8. restricted launches need the restricted backend (never downgraded);
+///    native launches need a trusted folder and the user's approval of the
+///    complete payload; changes in a review-edits task need approval too.
+pub fn gate(call: &ToolCall, env: &ToolEnv<'_>) -> Gate {
+    match decide(call, env) {
+        Ok(gate) => gate,
+        Err(refusal) => Gate::Refused(refusal),
+    }
+}
+
+fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     let spec = env.spec;
-    if spec.permission == PermissionProfile::ReadOnly || spec.execution == ExecutionMode::Disabled {
-        return Gate::Refused(execution_disabled());
+    let root = env.files.root();
+    workspace::check_root(env.workspace, root).map_err(ToolOutput::error)?;
+    let effects = call.effects();
+    if effects.changes && spec.permission == PermissionProfile::ReadOnly {
+        return Err(read_only());
     }
-    if !env.services.available(kind) {
-        return Gate::Refused(ToolOutput::error(ServiceError::NotAvailable(kind).to_string()));
+    for (raw, path_use) in &effects.paths {
+        check_path(env, raw, *path_use)?;
     }
-    match spec.execution {
-        ExecutionMode::Disabled => Gate::Refused(execution_disabled()),
-        ExecutionMode::Restricted => match env.services.restricted_backend() {
-            Some(backend) => Gate::Allowed { policy: Some(ExecutionPolicy::Restricted { backend }) },
-            None => Gate::Refused(ToolOutput::error(
-                "This task only allows unattended execution inside the restricted (container) backend, which is not \
-                 available. Exposition never falls back to running it natively; the user can choose per-command \
-                 approval instead.",
-            )),
-        },
-        ExecutionMode::ApproveEach => {
-            if let Some(reason) = env.services.native_refusal(env.files.root()) {
-                return Gate::Refused(ToolOutput::error(reason));
+    match effects.exposes {
+        Exposure::Metadata => {}
+        Exposure::ScopedContent => require_content_consent(spec, effects.what)?,
+        Exposure::Unconfined => {
+            if spec.scope != TaskScope::Workspace {
+                return Err(refusal(
+                    codes::WHOLE_PROJECT_ONLY,
+                    format!(
+                        "{} can read any file of the project (and natively any file your account can read), so it is \
+                     only available for tasks scoped to the whole project. Nothing was run.",
+                        effects.what
+                    ),
+                ));
             }
-            let (title, detail) = describe();
-            Gate::NeedsApproval {
-                title,
-                detail: format!("{detail}\n\nRuns natively with your account's privileges."),
-                policy: Some(ExecutionPolicy::TrustedNative),
-            }
+            require_content_consent(spec, effects.what)?;
         }
     }
+    if effects.launch != Launch::None {
+        if spec.permission == PermissionProfile::ReadOnly || spec.execution == ExecutionMode::Disabled {
+            return Err(execution_disabled());
+        }
+        if effects.launch == Launch::NativeOnly && spec.execution == ExecutionMode::Restricted {
+            return Err(refusal(
+                codes::NATIVE_NOT_ALLOWED,
+                format!(
+                    "{} runs natively with your account's privileges, which this task does not allow (restricted \
+                 sandbox only; there is no restricted backend for it). Nothing was run.",
+                    effects.what
+                ),
+            ));
+        }
+    }
+    if let Some(kind) = effects.service
+        && !env.services.available(kind)
+    {
+        return Err(refusal(codes::SERVICE_UNAVAILABLE, ServiceError::NotAvailable(kind).to_string()));
+    }
+    let insertion = match call {
+        ToolCall::InsertArtifact(input) => prepare_insertion(env, input)?,
+        _ => None,
+    };
+    let policy = match (effects.launch, spec.execution) {
+        (Launch::None, _) => None,
+        (_, ExecutionMode::Disabled) => return Err(execution_disabled()),
+        (_, ExecutionMode::Restricted) => match env.services.restricted_backend() {
+            Some(backend) => Some(ExecutionPolicy::Restricted { backend }),
+            None => {
+                return Err(refusal(
+                    codes::RESTRICTED_UNAVAILABLE,
+                    "This task only allows unattended execution inside the restricted (container) backend, which is \
+                     not available. Exposition never falls back to running it natively; the user can choose \
+                     per-command approval instead.",
+                ));
+            }
+        },
+        (_, ExecutionMode::ApproveEach) => {
+            if let Some(reason) = env.services.native_refusal(root) {
+                return Err(ToolOutput::error_with(
+                    reason.clone(),
+                    json!({"code": codes::NATIVE_REFUSED, "status": "refused", "reason": reason}),
+                ));
+            }
+            Some(ExecutionPolicy::TrustedNative)
+        }
+    };
+    let native = policy == Some(ExecutionPolicy::TrustedNative);
+    let review = effects.changes && spec.permission == PermissionProfile::ReviewEdits;
+    let mut authorization = Authorization { policy, root: root.to_path_buf(), approved: None, insertion: None };
+    if !(native || review) {
+        authorization.insertion = insertion.map(|(planned, _)| planned);
+        return Ok(Gate::Allowed(authorization));
+    }
+    let (title, mut detail) = describe(call, insertion.as_ref().map(|(_, shown)| shown.as_str()));
+    if native {
+        detail.push_str("\n\nRuns natively with your account's privileges.");
+    }
+    authorization.insertion = insertion.map(|(planned, _)| planned);
+    authorization.approved = Some(detail.clone());
+    Ok(Gate::NeedsApproval { title, detail, authorization })
 }
 
-/// Run an allowed (and, if needed, approved) call.
+fn require_content_consent(spec: &TaskSpec, what: &str) -> Result<(), ToolOutput> {
+    if spec.consent == ContextConsent::MetadataOnly {
+        return Err(refusal(
+            codes::METADATA_ONLY,
+            format!(
+                "The user's context consent for this task allows only file names and metadata to be sent to the model \
+             provider. {what} returns file content or results derived from it, so it was refused."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// After the user approved: the call runs only as approved, in the task's own
+/// project. The gate is evaluated again; it must still ask for exactly the
+/// approval the user gave (an insertion re-planned on a changed document, a
+/// revoked trust, or a switched project refuses the call).
+pub fn confirm(call: &ToolCall, env: &ToolEnv<'_>, approved: Authorization) -> Result<Authorization, ToolOutput> {
+    if let Err(reason) = workspace::check_root(env.workspace, &approved.root) {
+        return Err(project_changed(&reason));
+    }
+    if env.files.root() != approved.root {
+        return Err(project_changed("the task's folder is not the folder the action was approved for."));
+    }
+    match gate(call, env) {
+        Gate::Refused(output) => Err(output),
+        Gate::NeedsApproval { authorization, .. } if authorization.approved == approved.approved => Ok(authorization),
+        Gate::Allowed(_) | Gate::NeedsApproval { .. } => Err(refusal(
+            codes::CHANGED_SINCE_APPROVAL,
+            "What this action would do changed while it waited for approval (for example, the document or the \
+             artifact changed). Nothing was done; call the tool again so the user can approve the current version.",
+        )),
+    }
+}
+
+/// Characters that are invisible, or reorder the text around them, in the
+/// approval view.
+fn hidden(c: char, next: Option<char>) -> bool {
+    match c {
+        '\n' | '\t' => false,
+        '\r' => next != Some('\n'),
+        c if c.is_control() => true,
+        // The escape's own opening bracket, so a literal "⟨U+…⟩" is never mistaken for an escape.
+        '\u{27E8}' => true,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' | '\u{3164}'
+        | '\u{FEFF}' | '\u{FFA0}' => true,
+        '\u{180B}'..='\u{180F}'
+        | '\u{200B}'..='\u{200F}'
+        | '\u{2028}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}'
+        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0000}'..='\u{E0FFF}' => true,
+        _ => false,
+    }
+}
+
+/// A payload as shown for approval: complete, with invisible and
+/// direction-changing characters written as ⟨U+XXXX⟩, so what the user reads
+/// is exactly what runs or changes.
+pub fn shown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if hidden(c, chars.peek().copied()) {
+            out.push_str(&format!("⟨U+{:04X}⟩", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Title and complete detail of an approval request.
+fn describe(call: &ToolCall, insertion: Option<&str>) -> (String, String) {
+    let (title, detail) = match call {
+        ToolCall::EditDocument(input) => {
+            let mut detail = format!(
+                "Edit {} (based on revision {}), {} replacement(s):\n",
+                input.path,
+                input.base_revision,
+                input.edits.len()
+            );
+            for (i, edit) in input.edits.iter().enumerate() {
+                detail.push_str(&format!(
+                    "\n#{}\n- {}\n+ {}\n",
+                    i + 1,
+                    shown(&edit.old_text).replace('\n', "\n  "),
+                    shown(&edit.new_text).replace('\n', "\n  ")
+                ));
+            }
+            (format!("Apply edits to {}", input.path), detail)
+        }
+        ToolCall::CreateFile(input) => (
+            format!("Create {}", input.path),
+            format!("Create {} with content ({} bytes):\n\n{}", input.path, input.content.len(), shown(&input.content)),
+        ),
+        ToolCall::InsertArtifact(input) => {
+            let action = if input.update_key.is_empty() {
+                format!("Insert artifact {} of run {} into {}", input.artifact_id, input.run_id, input.path)
+            } else {
+                format!(
+                    "Update attachment {} in {} with artifact {} of run {}",
+                    input.update_key, input.path, input.artifact_id, input.run_id
+                )
+            };
+            let mut detail = action.clone();
+            if !input.caption.is_empty() {
+                detail.push_str(&format!("\nCaption: {}", shown(&input.caption)));
+            }
+            if let Some(text) = insertion {
+                detail.push_str(&format!("\n\n{text}"));
+            }
+            (action, detail)
+        }
+        ToolCall::BuildDocument(input) => (
+            format!("Build {} with LaTeX", input.entry),
+            format!(
+                "Build {} with {} (TeX tools as the project needs them, e.g. latexmk and biber). TeX can read any \
+                 file your account can read, and the build log and diagnostics are returned to the agent.",
+                input.entry,
+                match input.engine.as_str() {
+                    "lualatex" => "LuaLaTeX",
+                    "pdflatex" => "pdfLaTeX",
+                    _ => "the project's LaTeX engine",
+                }
+            ),
+        ),
+        ToolCall::RunPython(input) => (
+            "Run Python code".to_owned(),
+            format!(
+                "Run in this task's separate research session ({} bytes):\n\n{}",
+                input.code.len(),
+                shown(&input.code)
+            ),
+        ),
+        ToolCall::CheckLean(input) => (
+            format!("Check {} with Lean", input.path),
+            format!("Check {} with the project's Lean toolchain (lake serve)", input.path),
+        ),
+        ToolCall::RunCommand(input) => {
+            let wd = if tools::is_root(&input.working_directory) { "." } else { input.working_directory.as_str() };
+            let args: Vec<String> = input.args.iter().map(|a| format!("{a:?}")).collect();
+            (
+                format!("Run {}", input.program),
+                format!(
+                    "Program: {}\nArguments: [{}]\nWorking folder: {}",
+                    shown(&format!("{:?}", input.program)),
+                    shown(&args.join(", ")),
+                    shown(wd)
+                ),
+            )
+        }
+        ToolCall::ListFiles(_) | ToolCall::ReadFile(_) => (String::new(), String::new()),
+    };
+    let detail = if detail.contains("⟨U+") {
+        format!(
+            "{detail}\n\nNote: invisible or direction-changing characters are shown as ⟨U+XXXX⟩; they are part of \
+             what runs or changes."
+        )
+    } else {
+        detail
+    };
+    (title, detail)
+}
+
+/// The text of `path` now: its open buffer, or the file on disk (without
+/// opening it), with the document and revision when it is open.
+/// A document's text, with its id and revision when it is open.
+type CurrentText = (Arc<str>, Option<(DocumentId, u64)>);
+
+fn current_text(env: &ToolEnv<'_>, path: &WorkspacePath) -> Result<CurrentText, ToolOutput> {
+    if let Some(id) = env.documents.find_by_path(path)
+        && let Ok(snapshot) = env.documents.snapshot(&id)
+    {
+        return Ok((snapshot.text, Some((id, snapshot.revision))));
+    }
+    if let Some(workspace) = env.workspace
+        && let Ok(snapshot) = workspace.snapshot()
+        && let Ok(input) = snapshot.read(path)
+        && let Some(text) = input.text
+    {
+        let open = input.document.zip(input.revision);
+        return Ok((text, open));
+    }
+    let loaded = env.files.read_text(path).map_err(file_error)?;
+    Ok((Arc::from(loaded.text), None))
+}
+
+/// The artifact an insertion uses must itself be in the task's scope (it
+/// becomes readable in the document); for approval, plan the exact text now.
+fn prepare_insertion(
+    env: &ToolEnv<'_>,
+    input: &InsertArtifactInput,
+) -> Result<Option<(PlannedInsertion, String)>, ToolOutput> {
+    let artifact = env
+        .services
+        .research_artifact(&input.run_id, &input.artifact_id)
+        .map_err(|e| ToolOutput::error(e.to_string()))?;
+    let source = artifact
+        .path
+        .as_ref()
+        .ok_or_else(|| ToolOutput::error("The artifact is not stored in the project, so it cannot be inserted."))?;
+    scope::check(env.files.root(), &env.spec.scope, source).map_err(|e| {
+        refusal(
+            e.code(),
+            format!(
+                "The artifact file {source} is not in this task's scope ({}), so its content cannot be inserted. {}",
+                env.spec.scope.describe(),
+                e.message(&env.spec.scope)
+            ),
+        )
+    })?;
+    if env.spec.permission != PermissionProfile::ReviewEdits {
+        return Ok(None);
+    }
+    let path = parse_path(&input.path)?;
+    let (text, open) = current_text(env, &path)?;
+    let (document, revision) = open.unwrap_or_else(|| (DocumentId("preview".into()), 0));
+    let plan = plan_insertion(env, input, &path, artifact.clone(), &document, revision, &text, None)?;
+    let texts: Vec<String> =
+        plan.transaction.edits.iter().flat_map(|e| e.patches.iter().map(|p| p.text.clone())).collect();
+    let placement = if !input.update_key.is_empty() {
+        format!("Replaces the block of attachment {}.", input.update_key)
+    } else if input.after_text.is_empty() {
+        "Inserted at the end of the document.".to_owned()
+    } else {
+        format!("Inserted after:\n  {}", shown(&input.after_text).replace('\n', "\n  "))
+    };
+    let shown_text = format!(
+        "Artifact: {:?} {source} ({}, {} bytes)\n{placement}\n\nText that will be inserted (attachment key {}):\n\n{}",
+        artifact.kind,
+        artifact.media_type,
+        artifact.size_bytes,
+        plan.attachment_key,
+        texts.iter().map(|t| shown(t)).collect::<Vec<_>>().join("\n…\n")
+    );
+    Ok(Some((PlannedInsertion { key: plan.attachment_key, texts }, shown_text)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_insertion(
+    env: &ToolEnv<'_>,
+    input: &InsertArtifactInput,
+    path: &WorkspacePath,
+    artifact: ArtifactRecord,
+    document: &DocumentId,
+    revision: u64,
+    text: &str,
+    key: Option<String>,
+) -> Result<exposition_attach::AttachPlan, ToolOutput> {
+    use exposition_core::artifact::{AttachArtifactRequest, AttachmentPlacement, RunId};
+    let format = exposition_attach::Format::from_path(path)
+        .ok_or_else(|| ToolOutput::error(format!("{path} is not a Typst, LaTeX, or Markdown document.")))?;
+    let placement = if input.update_key.is_empty() {
+        let offset = if input.after_text.is_empty() {
+            text.len()
+        } else {
+            let mut matches = text.match_indices(input.after_text.as_str());
+            let Some((start, _)) = matches.next() else {
+                return Err(ToolOutput::error(format!("after_text was not found in {path}; read the file again.")));
+            };
+            if matches.next().is_some() {
+                return Err(ToolOutput::error("after_text occurs more than once; include more surrounding text."));
+            }
+            start + input.after_text.len()
+        };
+        let offset =
+            exposition_core::text::byte_to_utf16(text, offset).map_err(|e| ToolOutput::error(e.to_string()))?;
+        AttachmentPlacement::Insert { offset: offset as u32 }
+    } else {
+        AttachmentPlacement::Update { attachment_key: input.update_key.clone() }
+    };
+    let request = AttachArtifactRequest {
+        document: document.clone(),
+        base_revision: revision,
+        artifact,
+        run: Some(RunId(input.run_id.clone())),
+        placement,
+        caption: (!input.caption.is_empty()).then(|| input.caption.clone()),
+        attachment_key: key,
+        origin: EditOrigin::Agent { task_id: env.task_id.0.clone() },
+    };
+    let content = exposition_attach::load_content(env.files.root(), format, path, &request.artifact)
+        .map_err(|e| ToolOutput::error(e.to_string()))?;
+    exposition_attach::plan(
+        &exposition_attach::PlanInput { format, document, document_path: path, revision, text },
+        &request,
+        &content,
+    )
+    .map_err(|e| ToolOutput::error(e.to_string()))
+}
+
+/// Run a call the gate allowed (and, if needed, the user approved), bound to
+/// the project folder it was authorized for.
 pub async fn run(
     call: ToolCall,
     env: &ToolEnv<'_>,
     seen: &mut SeenTexts,
     tool_use_id: &str,
-    policy: Option<ExecutionPolicy>,
+    authorization: Authorization,
     cancel: CancellationToken,
 ) -> ToolOutput {
+    if env.files.root() != authorization.root {
+        return project_changed("the task's folder is not the folder the action was authorized for.");
+    }
+    if let Err(reason) = workspace::check_root(env.workspace, &authorization.root) {
+        return project_changed(&reason);
+    }
+    let Authorization { policy, insertion, .. } = authorization;
     let result = match call {
         ToolCall::ListFiles(input) => list_files(env, input),
         ToolCall::ReadFile(input) => read_file(env, seen, input),
@@ -395,15 +677,19 @@ pub async fn run(
                     "lualatex" => LatexEngine::LuaLatex,
                     _ => LatexEngine::Auto,
                 };
-                service_result(
-                    env.services
-                        .build_document(BuildRequest { entry, engine, task_id: env.task_id.0.clone() }, cancel)
-                        .await,
-                )
+                let request = BuildRequest {
+                    entry,
+                    engine,
+                    task_id: env.task_id.0.clone(),
+                    root: env.files.root().to_path_buf(),
+                    scope: env.spec.scope.clone(),
+                    policy,
+                };
+                service_result(env.services.build_document(request, cancel).await)
             }
             Err(e) => Err(e),
         },
-        ToolCall::InsertArtifact(input) => insert_artifact(env, seen, tool_use_id, input),
+        ToolCall::InsertArtifact(input) => insert_artifact(env, seen, tool_use_id, input, insertion),
         ToolCall::RunPython(input) => {
             let Some(policy) = policy else { return ToolOutput::error("missing execution policy") };
             service_result(
@@ -734,66 +1020,35 @@ fn record_applied(
 
 /// Insert or update a research artifact with the format-owned attachment
 /// transform (the same one the research panel uses), as an agent edit that is
-/// recorded for review.
+/// recorded for review. An insertion the user approved applies exactly the
+/// text that was shown, or nothing.
 fn insert_artifact(
     env: &ToolEnv<'_>,
     seen: &mut SeenTexts,
     tool_use_id: &str,
     input: InsertArtifactInput,
+    approved: Option<PlannedInsertion>,
 ) -> Result<ToolOutput, ToolOutput> {
-    use exposition_core::artifact::{AttachArtifactRequest, AttachmentPlacement, RunId};
     let path = parse_path(&input.path)?;
-    let format = exposition_attach::Format::from_path(&path)
-        .ok_or_else(|| ToolOutput::error(format!("{path} is not a Typst, LaTeX, or Markdown document.")))?;
     let artifact = env
         .services
         .research_artifact(&input.run_id, &input.artifact_id)
         .map_err(|e| ToolOutput::error(e.to_string()))?;
     let id = workspace::open_document_in(env.workspace, env.documents, env.files, &path).map_err(file_error)?;
     let snapshot = env.documents.snapshot(&id).map_err(|e| ToolOutput::error(e.to_string()))?;
-    let placement = if input.update_key.is_empty() {
-        let offset = if input.after_text.is_empty() {
-            snapshot.text.len()
-        } else {
-            let mut matches = snapshot.text.match_indices(input.after_text.as_str());
-            let Some((start, _)) = matches.next() else {
-                return Err(ToolOutput::error(format!("after_text was not found in {path}; read the file again.")));
-            };
-            if matches.next().is_some() {
-                return Err(ToolOutput::error("after_text occurs more than once; include more surrounding text."));
-            }
-            start + input.after_text.len()
-        };
-        let offset = exposition_core::text::byte_to_utf16(&snapshot.text, offset)
-            .map_err(|e| ToolOutput::error(e.to_string()))?;
-        AttachmentPlacement::Insert { offset: offset as u32 }
-    } else {
-        AttachmentPlacement::Update { attachment_key: input.update_key.clone() }
-    };
-    let request = AttachArtifactRequest {
-        document: id.clone(),
-        base_revision: snapshot.revision,
-        artifact,
-        run: Some(RunId(input.run_id.clone())),
-        placement,
-        caption: (!input.caption.is_empty()).then(|| input.caption.clone()),
-        attachment_key: None,
-        origin: EditOrigin::Agent { task_id: env.task_id.0.clone() },
-    };
-    let content = exposition_attach::load_content(env.files.root(), format, &path, &request.artifact)
-        .map_err(|e| ToolOutput::error(e.to_string()))?;
-    let plan = exposition_attach::plan(
-        &exposition_attach::PlanInput {
-            format,
-            document: &id,
-            document_path: &path,
-            revision: snapshot.revision,
-            text: &snapshot.text,
-        },
-        &request,
-        &content,
-    )
-    .map_err(|e| ToolOutput::error(e.to_string()))?;
+    let key = approved.as_ref().map(|a| a.key.clone()).filter(|_| input.update_key.is_empty());
+    let plan = plan_insertion(env, &input, &path, artifact, &id, snapshot.revision, &snapshot.text, key)?;
+    if let Some(approved) = &approved {
+        let texts: Vec<&str> =
+            plan.transaction.edits.iter().flat_map(|e| e.patches.iter().map(|p| p.text.as_str())).collect();
+        if texts != approved.texts.iter().map(String::as_str).collect::<Vec<_>>() {
+            return Err(refusal(
+                codes::CHANGED_SINCE_APPROVAL,
+                "The text to insert is no longer the text the user approved (the document or the artifact changed \
+                 meanwhile). Nothing was inserted; call the tool again so the user can approve the current version.",
+            ));
+        }
+    }
     let outcome = env.documents.apply(plan.transaction.clone()).map_err(|e| {
         ToolOutput::error(format!("The attachment was not applied: {e}. Read the file again and retry."))
     })?;
@@ -822,11 +1077,15 @@ fn create_file(
     let exists = || ToolOutput::error(format!("{path} already exists; use read_file and edit_document to change it."));
     let opened = match env.workspace {
         // The workspace service creates the file (never overwriting) and opens it.
-        Some(workspace) => match workspace.create_document(&path, &input.content) {
-            Ok(opened) => Some(opened.state.info.id),
-            Err(e) if e.code == "file.exists" => return Err(exists()),
-            Err(e) => return Err(ToolOutput::error(e.message)),
-        },
+        Some(workspace) => {
+            // In the open project, which must still be the task's.
+            workspace::check_root(Some(workspace), env.files.root()).map_err(|reason| project_changed(&reason))?;
+            match workspace.create_document(&path, &input.content) {
+                Ok(opened) => Some(opened.state.info.id),
+                Err(e) if e.code == "file.exists" => return Err(exists()),
+                Err(e) => return Err(ToolOutput::error(e.message)),
+            }
+        }
         None => {
             if env.documents.find_by_path(&path).is_some() || env.files.exists(&path).map_err(file_error)? {
                 return Err(exists());
@@ -880,5 +1139,16 @@ mod tests {
         );
         assert_eq!(resolve_edits("", &input(&[("", "hello")])).unwrap(), vec![TextPatch::insert(0, "hello")]);
         assert!(resolve_edits("abc", &input(&[("", "hello")])).is_err());
+    }
+
+    #[test]
+    fn approval_payloads_show_every_character_unambiguously() {
+        assert_eq!(shown("a\tb\r\nc\n"), "a\tb\r\nc\n", "tabs, CRLF, and newlines stay as they are");
+        assert_eq!(shown("x\u{202E}y\u{200B}z\u{0007}"), "x⟨U+202E⟩y⟨U+200B⟩z⟨U+0007⟩");
+        assert_eq!(shown("lone\rreturn"), "lone⟨U+000D⟩return");
+        // A literal escape-looking text cannot pass for an escape.
+        assert_eq!(shown("⟨U+0041⟩"), "⟨U+27E8⟩U+0041⟩");
+        let long = "y = 2\n".repeat(10_000);
+        assert_eq!(shown(&long), long, "nothing is truncated");
     }
 }

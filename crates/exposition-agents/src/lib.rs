@@ -16,6 +16,8 @@ pub mod review;
 pub mod service;
 pub mod store;
 pub mod tools;
+#[cfg(windows)]
+pub mod wincred;
 pub mod workspace;
 
 pub use model::*;

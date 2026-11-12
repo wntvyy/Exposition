@@ -26,8 +26,10 @@ export interface StreamDraft {
   turn: number;
   text: string;
   thinking: string;
-  /** Name of the tool that is currently running, if any. */
+  /** Name of the tool the agent is on, if any. */
   activeTool: string | null;
+  /** Whether that tool runs or waits for the user's approval (default running). */
+  activeToolStatus?: "running" | "awaitingApproval";
   /** The streamed output has been persisted; drop it on the next detail read. */
   persisted?: boolean;
 }
@@ -182,7 +184,14 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
       const draft = state.drafts[event.taskId];
       const activeTool = event.kind === "toolCallStarted" ? event.name : null;
       return {
-        patch: draft ? { drafts: { ...state.drafts, [event.taskId]: { ...draft, activeTool, persisted: true } } } : {},
+        patch: draft
+          ? {
+              drafts: {
+                ...state.drafts,
+                [event.taskId]: { ...draft, activeTool, activeToolStatus: "running", persisted: true },
+              },
+            }
+          : {},
         refetch: event.taskId,
       };
     }
@@ -195,12 +204,33 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
       };
     }
     case "approvalRequested": {
-      const { taskId, title } = event.approval;
+      const { taskId, title, tool } = event.approval;
       const task = state.tasks.find((t) => t.id === taskId)?.title;
-      return { patch: {}, refetch: taskId, notification: approvalNotification(taskId, title, task) };
+      // The tool has not started: it waits for the user.
+      const draft = state.drafts[taskId];
+      const waiting = draft ? { ...draft, activeTool: tool, activeToolStatus: "awaitingApproval" as const } : null;
+      return {
+        patch: waiting ? { drafts: { ...state.drafts, [taskId]: waiting } } : {},
+        refetch: taskId,
+        notification: approvalNotification(taskId, title, task),
+      };
     }
-    case "approvalResolved":
-      return { patch: {}, refetch: event.taskId, dismiss: [approvalNotificationId(event.taskId)] };
+    case "approvalResolved": {
+      // Approved: it runs now. Declined (or canceled): it will not run.
+      const draft = state.drafts[event.taskId];
+      const next = draft
+        ? event.approved
+          ? { ...draft, activeToolStatus: "running" as const }
+          : { ...draft, activeTool: null, activeToolStatus: undefined }
+        : null;
+      return {
+        patch: next ? { drafts: { ...state.drafts, [event.taskId]: next } } : {},
+        refetch: event.taskId,
+        dismiss: [approvalNotificationId(event.taskId)],
+      };
+    }
+    case "providerChanged":
+      return { patch: { status: event.status }, refetch: null };
     case "reviewChanged":
       return {
         patch: {

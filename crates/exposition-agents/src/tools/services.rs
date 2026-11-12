@@ -16,6 +16,8 @@ use exposition_core::path::WorkspacePath;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::model::TaskScope;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceKind {
     Typesetting,
@@ -99,6 +101,14 @@ pub struct BuildRequest {
     pub entry: WorkspacePath,
     pub engine: LatexEngine,
     pub task_id: String,
+    /// Canonical project root of the task.
+    pub root: PathBuf,
+    /// The task's scope: an in-process build reads only files in it.
+    pub scope: TaskScope,
+    /// Execution policy for builds that launch processes (LaTeX): set only by
+    /// the gate, `TrustedNative` only after the user approved the launch.
+    /// `None` for in-process builds; a LaTeX build without it is refused.
+    pub policy: Option<ExecutionPolicy>,
 }
 
 #[async_trait]

@@ -153,7 +153,7 @@ fn file_error(path: &WorkspacePath, error: ReadError) -> FileError {
     match error.code.as_str() {
         // Report workspace-relative paths only.
         "path.notFound" | "path.brokenLink" => FileError::NotFound(PathBuf::from(path.as_str())),
-        "path.outsideWorkspace" | "file.permissionDenied" => FileError::AccessDenied,
+        "path.outsideWorkspace" | "file.permissionDenied" | crate::snapshot::OUTSIDE_SCOPE => FileError::AccessDenied,
         "file.isDirectory" => FileError::IsDirectory,
         _ => FileError::Other(Some(error.message.into())),
     }

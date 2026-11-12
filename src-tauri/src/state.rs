@@ -49,6 +49,14 @@ impl AppState {
             execution_config.tool_cache_dir = Some(PathBuf::from(dir));
         }
         let execution = ExecutionService::with_config(execution_config)?;
+        // Remove restricted containers an earlier session left behind (e.g. the
+        // app was killed while one ran); the first restricted job waits for it.
+        let sweeper = execution.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = sweeper.sweep_stale_containers() {
+                eprintln!("could not remove containers left by an earlier session: {e}");
+            }
+        });
         let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
         let (lean, lean_actor) = LeanService::new(execution.clone(), Arc::clone(&workspace), LeanConfig::default());
         tauri::async_runtime::spawn(lean_actor);
@@ -105,19 +113,39 @@ fn resolve_data_dir(app: &AppHandle) -> Result<PathBuf, Box<dyn std::error::Erro
     Ok(app.path().app_local_data_dir()?)
 }
 
-/// Development builds may isolate the credential entry (e2e runs) with
-/// `EXPOSITION_CREDENTIAL_NAMESPACE`; release builds always use the real entry.
+/// Credential entry namespace of development builds that did not ask for one.
+const DEVELOPMENT_NAMESPACE: &str = "development";
+/// Set to `1` to let a development build use the real credential entry (only
+/// the live provider scenarios do).
+const REAL_CREDENTIAL_OPT_IN: &str = "EXPOSITION_USE_REAL_CREDENTIAL";
+
+/// Which credential entry this process uses. Release builds always use the
+/// real entry and ignore both variables. Development builds never read the
+/// user's real key unless explicitly told to: they use
+/// `EXPOSITION_CREDENTIAL_NAMESPACE` when set (e2e runs), else the real entry
+/// only with `EXPOSITION_USE_REAL_CREDENTIAL=1`, else a development entry.
 fn credential_namespace() -> Option<String> {
     #[cfg(debug_assertions)]
     {
-        std::env::var("EXPOSITION_CREDENTIAL_NAMESPACE")
-            .ok()
-            .filter(|ns| !ns.is_empty() && ns.len() <= 64 && ns.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        namespace_for(|name| std::env::var(name).ok())
     }
     #[cfg(not(debug_assertions))]
     {
         None
     }
+}
+
+#[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
+fn namespace_for(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let requested = var("EXPOSITION_CREDENTIAL_NAMESPACE")
+        .filter(|ns| !ns.is_empty() && ns.len() <= 64 && ns.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    if requested.is_some() {
+        return requested;
+    }
+    if var(REAL_CREDENTIAL_OPT_IN).as_deref() == Some("1") {
+        return None;
+    }
+    Some(DEVELOPMENT_NAMESPACE.to_owned())
 }
 
 /// Research reads run inputs through the workspace snapshot, like builds do.
@@ -134,5 +162,51 @@ impl SourceReader for WorkspaceSources {
             content_hash: input.content_hash,
             root: snapshot.root().to_path_buf(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A development build started without credential variables (`npm run
+    /// dev`, or an e2e run whose scenario sets no namespace) must not read the
+    /// user's real key.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn development_builds_use_a_development_entry_by_default() {
+        let set = |name: &str| std::env::var_os(name).is_some();
+        if set("EXPOSITION_CREDENTIAL_NAMESPACE") || set("EXPOSITION_USE_REAL_CREDENTIAL") {
+            eprintln!("SKIPPED: a credential variable is set in this test's environment");
+            return;
+        }
+        assert_eq!(credential_namespace().as_deref(), Some("development"));
+    }
+
+    #[test]
+    fn namespace_resolution() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| (*v).to_owned())
+        };
+        assert_eq!(namespace_for(env(&[])).as_deref(), Some(DEVELOPMENT_NAMESPACE));
+        assert_eq!(namespace_for(env(&[("EXPOSITION_USE_REAL_CREDENTIAL", "1")])), None, "explicit opt-in");
+        assert_eq!(
+            namespace_for(env(&[("EXPOSITION_USE_REAL_CREDENTIAL", "yes")])).as_deref(),
+            Some(DEVELOPMENT_NAMESPACE)
+        );
+        assert_eq!(
+            namespace_for(env(&[
+                ("EXPOSITION_CREDENTIAL_NAMESPACE", "e2e-1"),
+                ("EXPOSITION_USE_REAL_CREDENTIAL", "1")
+            ]))
+            .as_deref(),
+            Some("e2e-1"),
+            "a namespace wins over the opt-in"
+        );
+        assert_eq!(
+            namespace_for(env(&[("EXPOSITION_CREDENTIAL_NAMESPACE", "bad ns!")])).as_deref(),
+            Some(DEVELOPMENT_NAMESPACE),
+            "an invalid namespace never falls back to the real entry"
+        );
     }
 }

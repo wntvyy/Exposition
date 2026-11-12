@@ -9,6 +9,7 @@ import type { TranscriptItem } from "../../bindings/TranscriptItem";
 import { commands } from "../../lib/ipc";
 import { Banner, Button, IconButton, LoadingState, ProgressBar, Section, StatusPill } from "../../ui/components";
 import {
+  activeToolLabel,
   budgetRows,
   CONSENT_LABELS,
   EXECUTION_LABELS,
@@ -76,8 +77,38 @@ function OutcomeBanner({ status }: { status: TaskStatus }) {
   }
 }
 
+/** Size of an approval payload, so the user knows how much there is to review. */
+export function payloadSize(text: string): string {
+  const lines = text.split("\n").length;
+  const bytes = new TextEncoder().encode(text).length;
+  return `${lines.toLocaleString()} ${lines === 1 ? "line" : "lines"} · ${bytes.toLocaleString()} ${bytes === 1 ? "byte" : "bytes"}`;
+}
+
+/**
+ * Whether an element's content overflows it (it scrolls). Re-measured when
+ * `content` changes and when the element is resized.
+ */
+function useOverflows(content: string) {
+  const ref = useRef<HTMLPreElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => setOverflows(el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [content]);
+  return [ref, overflows] as const;
+}
+
 function Approval({ approval }: { approval: ApprovalRequest }) {
   const [busy, setBusy] = useState(false);
+  // A payload that scrolls is a tab stop, so it can be read with the keyboard;
+  // a short one is not, and Tab goes straight to Approve.
+  const [payloadRef, scrolls] = useOverflows(approval.detail);
   async function resolve(approved: boolean) {
     setBusy(true);
     await agents.run(() => commands.agentsApprovalResolve(approval.taskId, approval.id, approved));
@@ -86,9 +117,22 @@ function Approval({ approval }: { approval: ApprovalRequest }) {
   return (
     <section className="agents-approval agents-stack" aria-label={`Approval needed: ${approval.title}`} data-testid="agents-approval">
       <Banner tone="warning" title={approval.title}>
-        The agent is waiting for your decision. Nothing is applied until you approve.
+        The agent is waiting for your decision. Nothing is applied until you approve. Below is the complete content of
+        what will run or change; scroll to review all of it.
       </Banner>
-      <pre className="agents-pre">{approval.detail}</pre>
+      <p className="agents-small agents-muted" data-testid="agents-approval-size">
+        {payloadSize(approval.detail)} · complete, nothing omitted
+      </p>
+      <pre
+        ref={payloadRef}
+        className="agents-pre agents-approval__payload"
+        tabIndex={scrolls ? 0 : undefined}
+        role="region"
+        aria-label={`Complete content to approve: ${approval.title}`}
+        data-testid="agents-approval-payload"
+      >
+        {approval.detail}
+      </pre>
       <div className="agents-row">
         <Button size="sm" variant="primary" icon={Check} isDisabled={busy} onPress={() => void resolve(true)} data-testid="agents-approve">
           Approve
@@ -158,7 +202,7 @@ function Draft({ draft }: { draft: StreamDraft }) {
         </details>
       )}
       {draft.text && <p className="agents-msg__text">{draft.text}</p>}
-      {draft.activeTool && <StatusPill status="running" label={`Running ${draft.activeTool}`} size="sm" />}
+      {draft.activeTool && <StatusPill {...activeToolLabel(draft.activeTool, draft.activeToolStatus ?? "running")} size="sm" />}
       {!draft.text && !draft.thinking && !draft.activeTool && <StatusPill status="running" label="Thinking" size="sm" />}
     </div>
   );

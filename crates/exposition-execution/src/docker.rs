@@ -8,18 +8,36 @@
 //!   --cpus=C --user=<non-root uid:gid> --init --tmpfs=/tmp:...
 //!   --mount=type=bind,source=<root>,target=/workspace,readonly
 //!   --mount=type=bind,source=<job out dir>,target=/out
+//!   [--mount=type=bind,source=<job input dir>,target=/exposition-input,readonly]
 //!   --workdir=/workspace/<cwd relative to root> --env-file=<constructed env>
-//!   --name=exposition-<job> --label=... --log-driver=none [-i]
-//!   --entrypoint=<program> <image> <args...>
+//!   --name=exposition-<job> --label=... --log-driver=none -i
+//!   --entrypoint=/bin/sh <image> -c <supervisor script> exposition-job <program> <args...>
 //! ```
 //!
 //! The image must be configured explicitly and present locally; the job is
 //! refused otherwise. There is never a fallback to native execution. The
 //! `docker` client itself runs natively (contained in a job object) with a
 //! clean environment; cancel/timeout kills the client tree AND the container
-//! (`docker kill`), and `--rm` removes it. Containers left behind by a crashed
-//! session of the same data directory are removed before the next restricted
-//! job.
+//! (`docker kill`), and `--rm` removes it.
+//!
+//! A container must not outlive the application. The supervisor script (POSIX
+//! `sh`, see [`supervisor_script`]) runs the program with `exec`, so it is
+//! the init process's only child, after starting two watchers:
+//! - the job's stdin pipe is held open by the application for the job's whole
+//!   life and is never written; the program reads its own input from a
+//!   read-only file instead. When the application exits or is killed, the
+//!   docker client dies with it (job object), Docker closes the container's
+//!   stdin (`-i`, stdin-once), and the watcher kills the program, which stops
+//!   and removes the container;
+//! - when the job has a time limit, `sleep` + `kill` ends the program once the
+//!   limit (plus a short grace) has passed, even if nothing outside is left
+//!   to enforce it.
+//!
+//! Image requirement: `/bin/sh` (POSIX) and `sleep` (for the time limit). If
+//! `sleep` is missing only the in-container time limit is lost.
+//! Containers of this data directory left behind by an earlier session are
+//! removed at application start ([`remove_stale`]) and before the first
+//! restricted job.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -38,12 +56,10 @@ pub const LABEL_MANAGED: &str = "org.exposition.managed";
 pub const LABEL_JOB: &str = "org.exposition.job";
 pub const LABEL_INSTANCE: &str = "org.exposition.instance";
 
-/// Image references: registry/name:tag@digest characters only, never an option.
+/// Whether `image` is a valid reference: the full grammar of
+/// [`validate_image_reference`], the one check used everywhere.
 pub fn valid_image_ref(image: &str) -> bool {
-    !image.is_empty()
-        && image.len() <= 255
-        && image.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && image.chars().all(|c| c.is_ascii_alphanumeric() || "_.-/:@".contains(c))
+    validate_image_reference(image).is_ok()
 }
 
 /// Longest repository name Docker accepts (`NameTotalLengthMax`).
@@ -184,6 +200,25 @@ pub fn container_name(job_id: &str) -> String {
     format!("exposition-{safe}")
 }
 
+/// How the container's stdin is used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerStdin<'a> {
+    /// Batch job: stdin is the liveness pipe (held open by the application,
+    /// never written). The program's input is the file `stdin` in this host
+    /// directory (mounted read-only), or empty.
+    Batch { input_dir: Option<&'a Path> },
+    /// Interactive job: stdin is the program's own input stream.
+    Interactive,
+}
+
+/// Where a batch job's input directory is mounted.
+pub const INPUT_MOUNT: &str = "/exposition-input";
+/// Name of the input file inside the input directory.
+pub const INPUT_FILE: &str = "stdin";
+/// Grace added to a job's time limit inside the container, so the
+/// application's own timeout normally ends the job first.
+pub const TIME_LIMIT_GRACE: Duration = Duration::from_secs(5);
+
 pub struct RunPlan<'a> {
     pub job_id: &'a str,
     pub instance: &'a str,
@@ -198,8 +233,32 @@ pub struct RunPlan<'a> {
     pub env_file: &'a Path,
     pub program: &'a str,
     pub args: &'a [String],
-    /// Keep stdin attached (`-i`).
-    pub stdin: bool,
+    pub stdin: ContainerStdin<'a>,
+    /// The job's time limit, enforced inside the container as well.
+    pub time_limit: Option<Duration>,
+}
+
+/// The container's entrypoint script (POSIX `sh -c`, program and arguments
+/// in `"$@"`): ties the container's lifetime to the application and to the
+/// job's time limit, then `exec`s the program.
+pub fn supervisor_script(stdin: ContainerStdin<'_>, time_limit: Option<Duration>) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    if let ContainerStdin::Batch { .. } = stdin {
+        // EOF on the liveness pipe: the application (or its docker client) is gone.
+        lines.push("exec 3<&0".into());
+        lines.push("(while IFS= read -r _ <&3; do :; done; kill -9 $$) >/dev/null 2>&1 &".into());
+    }
+    if let Some(limit) = time_limit {
+        let seconds = (limit + TIME_LIMIT_GRACE).as_secs_f64().ceil() as u64;
+        // `&&`: a missing `sleep` must not kill the job at once.
+        lines.push(format!("(sleep {seconds} && kill -9 $$) </dev/null >/dev/null 2>&1 &"));
+    }
+    lines.push(match stdin {
+        ContainerStdin::Batch { input_dir: Some(_) } => format!("exec \"$@\" <{INPUT_MOUNT}/{INPUT_FILE} 3<&-"),
+        ContainerStdin::Batch { input_dir: None } => "exec \"$@\" </dev/null 3<&-".to_owned(),
+        ContainerStdin::Interactive => "exec \"$@\"".to_owned(),
+    });
+    lines.join("\n")
 }
 
 /// Arguments for the `docker` client.
@@ -231,6 +290,14 @@ pub fn run_args(plan: &RunPlan<'_>) -> Vec<String> {
             csv_field(&format!("source={}", plan.mount_root.display()))
         ),
         format!("--mount=type=bind,{},target=/out", csv_field(&format!("source={}", plan.out_dir.display()))),
+    ];
+    if let ContainerStdin::Batch { input_dir: Some(dir) } = plan.stdin {
+        args.push(format!(
+            "--mount=type=bind,{},target={INPUT_MOUNT},readonly",
+            csv_field(&format!("source={}", dir.display()))
+        ));
+    }
+    args.extend([
         format!("--workdir={workdir}"),
         format!("--env-file={}", plan.env_file.display()),
         format!("--name={}", container_name(plan.job_id)),
@@ -238,12 +305,16 @@ pub fn run_args(plan: &RunPlan<'_>) -> Vec<String> {
         format!("--label={LABEL_JOB}={}", plan.job_id),
         format!("--label={LABEL_INSTANCE}={}", plan.instance),
         "--log-driver=none".into(),
-    ];
-    if plan.stdin {
-        args.push("-i".into());
-    }
-    args.push(format!("--entrypoint={}", plan.program));
-    args.push(plan.image.to_owned());
+        // Always attached: stdin is the liveness pipe or the program's input.
+        "-i".into(),
+        "--entrypoint=/bin/sh".into(),
+        plan.image.to_owned(),
+        "-c".into(),
+        supervisor_script(plan.stdin, plan.time_limit),
+        // `$0` of the script; the program and its arguments follow as `"$@"`.
+        "exposition-job".into(),
+        plan.program.to_owned(),
+    ]);
     args.extend(plan.args.iter().cloned());
     args
 }
@@ -336,15 +407,22 @@ pub fn kill_container(docker: &Path, job_id: &str, env: &Environment, cwd: &Path
 }
 
 /// Remove containers of this data directory left by an earlier session.
-pub fn remove_stale(docker: &Path, instance: &str, env: &Environment, cwd: &Path) {
+/// Returns how many were removed, or why the engine could not be asked.
+pub fn remove_stale(docker: &Path, instance: &str, env: &Environment, cwd: &Path) -> Result<usize, String> {
     let filter = format!("label={LABEL_INSTANCE}={instance}");
-    if let Ok(out) = helper(docker, &["ps", "-aq", "--filter", &filter], env, cwd, Duration::from_secs(20)) {
-        for id in out.stdout.split_whitespace() {
-            if id.chars().all(|c| c.is_ascii_hexdigit()) {
-                let _ = helper(docker, &["rm", "-f", id], env, cwd, Duration::from_secs(20));
-            }
+    let out = helper(docker, &["ps", "-aq", "--filter", &filter], env, cwd, Duration::from_secs(20))?;
+    if out.code != Some(0) {
+        return Err(out.stderr.lines().next().unwrap_or("docker ps failed").trim().to_owned());
+    }
+    let mut removed = 0;
+    for id in out.stdout.split_whitespace() {
+        if id.chars().all(|c| c.is_ascii_hexdigit())
+            && helper(docker, &["rm", "-f", id], env, cwd, Duration::from_secs(20)).is_ok_and(|o| o.code == Some(0))
+        {
+            removed += 1;
         }
     }
+    Ok(removed)
 }
 
 /// Whether a container for the job currently exists (for tests/diagnostics).
@@ -377,13 +455,27 @@ mod tests {
     #[test]
     fn image_and_program_validation() {
         assert!(valid_image_ref("node:26-trixie-slim"));
-        assert!(valid_image_ref("ghcr.io/org/img@sha256:abc"));
+        assert!(valid_image_ref("ghcr.io/org/img@sha256:0123456789abcdef0123456789abcdef"));
+        assert!(!valid_image_ref("ghcr.io/org/img@sha256:abc"), "a digest needs at least 32 hex digits");
         assert!(!valid_image_ref("--privileged"));
         assert!(!valid_image_ref("img; rm -rf /"));
         assert!(!valid_image_ref(""));
         assert!(valid_container_program("node"));
         assert!(valid_container_program("/usr/bin/python3"));
         assert!(!valid_container_program("--privileged"));
+    }
+
+    /// Launch and settings accept exactly the same images: references the
+    /// old character-set check let through are refused at launch too.
+    #[test]
+    fn one_image_validator_for_settings_and_launch() {
+        for loose_but_invalid in ["Python:3.13", "img::tag", "img:", "a..b", "img/", "img:tag:other", "a_-b"] {
+            assert!(validate_image_reference(loose_but_invalid).is_err(), "{loose_but_invalid}");
+            assert!(!valid_image_ref(loose_but_invalid), "{loose_but_invalid} must be refused at launch too");
+        }
+        for valid in ["python:3.13-slim", "ghcr.io/org/img:v1", "localhost:5000/img:latest"] {
+            assert!(valid_image_ref(valid) && validate_image_reference(valid).is_ok(), "{valid}");
+        }
     }
 
     #[test]
@@ -478,7 +570,8 @@ mod tests {
             env_file: Path::new(r"C:\data\jobs\job-1\container.env"),
             program: "node",
             args: &["-e".into(), "1".into()],
-            stdin: false,
+            stdin: ContainerStdin::Batch { input_dir: None },
+            time_limit: Some(Duration::from_secs(600)),
         });
         for required in [
             "--rm",
@@ -489,13 +582,53 @@ mod tests {
             "--security-opt=no-new-privileges",
             "--user=65534:65534",
             "--workdir=/workspace/src",
-            "--entrypoint=node",
+            "--init",
+            "-i",
+            "--entrypoint=/bin/sh",
         ] {
             assert!(args.iter().any(|a| a == required), "missing {required}: {args:?}");
         }
         assert!(args.iter().any(|a| a == r#"--mount=type=bind,"source=C:\work\a,b",target=/workspace,readonly"#));
+        assert!(!args.iter().any(|a| a.contains(INPUT_MOUNT)), "no input mount without input");
         let image_at = args.iter().position(|a| a == "node:26-trixie-slim").unwrap();
-        assert_eq!(&args[image_at + 1..], ["-e", "1"]);
-        assert!(!args.iter().any(|a| a == "-i"));
+        assert_eq!(args[image_at + 1], "-c");
+        assert_eq!(&args[image_at + 3..], ["exposition-job", "node", "-e", "1"]);
+        let script = &args[image_at + 2];
+        assert!(script.contains("read -r _ <&3") && script.contains("kill -9 $$"), "{script}");
+        assert!(script.contains("sleep 605 && kill -9 $$"), "time limit plus grace: {script}");
+        assert!(script.ends_with("exec \"$@\" </dev/null 3<&-"), "{script}");
+    }
+
+    #[test]
+    fn supervisor_script_variants() {
+        let input = Path::new(r"C:\data\jobs\job-1\in");
+        let batch = supervisor_script(ContainerStdin::Batch { input_dir: Some(input) }, None);
+        assert!(batch.starts_with("exec 3<&0\n"), "{batch}");
+        assert!(!batch.contains("sleep"), "no time limit: {batch}");
+        assert!(batch.ends_with("exec \"$@\" </exposition-input/stdin 3<&-"), "{batch}");
+        let interactive = supervisor_script(ContainerStdin::Interactive, Some(Duration::from_millis(1500)));
+        assert!(!interactive.contains("<&3"), "interactive stdin is the program's: {interactive}");
+        assert!(interactive.contains("sleep 7 && kill -9 $$"), "{interactive}");
+        assert!(interactive.ends_with("exec \"$@\""), "{interactive}");
+        let settings = DockerSettings::default();
+        let args = run_args(&RunPlan {
+            job_id: "job-2",
+            instance: "abc",
+            image: "python:3.13-slim",
+            settings: &settings,
+            mount_root: Path::new(r"C:\work"),
+            workdir_components: Vec::new(),
+            out_dir: Path::new(r"C:\data\jobs\job-2\out"),
+            env_file: Path::new(r"C:\data\jobs\job-2\container.env"),
+            program: "python",
+            args: &["-".into()],
+            stdin: ContainerStdin::Batch { input_dir: Some(input) },
+            time_limit: None,
+        });
+        assert!(
+            args.iter()
+                .any(|a| a == r"--mount=type=bind,source=C:\data\jobs\job-1\in,target=/exposition-input,readonly"),
+            "{args:?}"
+        );
     }
 }

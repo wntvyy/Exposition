@@ -221,8 +221,26 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     assert.ok(growing >= 3, `draft should grow while streaming (samples ${samples})`);
     step("transcript streamed", { draftLengths: samples });
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 20_000 });
+    // While the edit waits for approval, every surface says so (nothing says "Running").
+    await page.waitForFunction(() => {
+      const panelEl = document.querySelector("[data-testid=agents-panel]");
+      const task = panelEl?.querySelector("[data-testid=agents-task-status]")?.textContent;
+      const draft = panelEl?.querySelector("[data-testid=agents-draft] .ui-status-pill")?.textContent;
+      const tool = panelEl?.querySelector("[data-testid=agents-tool-call][data-tool=edit_document] summary .ui-status-pill")?.textContent;
+      const bar = document.querySelector("[data-status-item='agents.status']")?.textContent;
+      return (
+        task === "Waiting for approval" &&
+        draft === "Waiting for approval: edit_document" &&
+        tool === "Waiting for approval" &&
+        bar === "Agent: waiting for approval"
+      );
+    }, null, { timeout: 10_000 });
+    step("approval pending: task, draft, tool call, and status bar all read 'Waiting for approval'");
     await page.waitForTimeout(200);
     await shot(page, "agents-approval-light");
+    await setTheme(page, "dark");
+    await shot(page, "agents-approval-dark");
+    await setTheme(page, "light");
     state = await documentText(page, "main.typ");
     await userEdit(state.info.revision, state.text.length, "// user keeps typing\n");
     await panel.getByRole("button", { name: "Approve" }).click();

@@ -70,8 +70,9 @@ impl RunState {
     }
 
     /// Register a file the helper wrote. The file must be a direct child of this
-    /// run's artifact directory; size and hash are recomputed here.
-    pub fn register_file(&mut self, file: &HelperFile) -> Option<ArtifactRecord> {
+    /// run's artifact directory; size and hash are recomputed here. Text
+    /// artifacts (HTML, SVG, CSV, JSON) are redacted like stream output first.
+    pub fn register_file(&mut self, file: &HelperFile, redact: &dyn Fn(&str) -> String) -> Option<ArtifactRecord> {
         let dir = self.output_dir.as_ref()?;
         if !valid_output_name(&file.name) {
             return None;
@@ -86,7 +87,7 @@ impl RunState {
         if !metadata.is_file() || metadata.len() > ARTIFACT_SIZE_LIMIT {
             return None;
         }
-        let bytes = std::fs::read(&canonical).ok()?;
+        let bytes = redact_text_artifact(&canonical, std::fs::read(&canonical).ok()?, redact).ok()?;
         let kind = match file.role.as_str() {
             "image" => ArtifactKind::Figure,
             "table" => ArtifactKind::Table,
@@ -186,6 +187,40 @@ fn valid_output_name(name: &str) -> bool {
         && matches!(extension, "png" | "jpg" | "gif" | "svg" | "html" | "csv")
 }
 
+/// Media types whose content is text a secret can be written into verbatim.
+fn is_text_media(media_type: &str) -> bool {
+    media_type.starts_with("text/") || matches!(media_type, "image/svg+xml" | "application/json")
+}
+
+/// Kernel output written to a text artifact (an HTML display, an SVG figure, a
+/// CSV table) is untrusted text like stream output: secrets are replaced
+/// before it is registered, stored, or shown. The replacement is plain text
+/// ("[REDACTED]"), so markup around it renders unchanged. The file is
+/// rewritten (through a temporary file in the same folder) only when
+/// something was redacted. Returns the bytes the artifact now holds.
+pub(crate) fn redact_text_artifact(
+    path: &Path,
+    bytes: Vec<u8>,
+    redact: &dyn Fn(&str) -> String,
+) -> std::io::Result<Vec<u8>> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    if !is_text_media(media_type_for(name)) {
+        return Ok(bytes);
+    }
+    let Ok(text) = std::str::from_utf8(&bytes) else { return Ok(bytes) };
+    let redacted = redact(text);
+    if redacted == text {
+        return Ok(bytes);
+    }
+    let temp = path.with_file_name(format!(".{name}.redacting"));
+    std::fs::write(&temp, redacted.as_bytes())?;
+    if let Err(e) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+    Ok(redacted.into_bytes())
+}
+
 pub fn media_type_for(name: &str) -> &'static str {
     match name.rsplit('.').next().unwrap_or("") {
         "png" => "image/png",
@@ -208,6 +243,36 @@ pub fn artifact_belongs_to_run(path: &WorkspacePath, run_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_artifacts_are_redacted_and_binary_ones_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let redact = |text: &str| text.replace("sk-ant-api03-SECRET", "[REDACTED]");
+        let html = "<table><tr><td><b>sk-ant-api03-SECRET</b></td></tr></table>";
+        let path = dir.path().join("output-1.html");
+        std::fs::write(&path, html).unwrap();
+        let bytes = redact_text_artifact(&path, html.as_bytes().to_vec(), &redact).unwrap();
+        let expected = "<table><tr><td><b>[REDACTED]</b></td></tr></table>";
+        assert_eq!(bytes, expected.as_bytes());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected, "the stored file is redacted");
+        let svg = "<svg><text>sk-ant-api03-SECRET</text></svg>";
+        let svg_path = dir.path().join("output-2.svg");
+        std::fs::write(&svg_path, svg).unwrap();
+        redact_text_artifact(&svg_path, svg.as_bytes().to_vec(), &redact).unwrap();
+        assert!(!std::fs::read_to_string(&svg_path).unwrap().contains("SECRET"));
+        // Binary images are not text: untouched, even if the bytes happen to match.
+        let png = b"\x89PNGsk-ant-api03-SECRET".to_vec();
+        let png_path = dir.path().join("output-3.png");
+        std::fs::write(&png_path, &png).unwrap();
+        assert_eq!(redact_text_artifact(&png_path, png.clone(), &redact).unwrap(), png);
+        // Nothing to redact: the file is not rewritten.
+        let clean = "<p>fine</p>";
+        let clean_path = dir.path().join("output-4.html");
+        std::fs::write(&clean_path, clean).unwrap();
+        assert_eq!(redact_text_artifact(&clean_path, clean.as_bytes().to_vec(), &redact).unwrap(), clean.as_bytes());
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 4, "no temporary file left: {names:?}");
+    }
 
     #[test]
     fn output_names_are_restricted() {

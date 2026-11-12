@@ -1115,9 +1115,11 @@ impl Session {
             }
             HelperEvent::Display { run_id, output_type, execution_count, text, files } => {
                 let artifacts = {
+                    // Text artifacts are kernel output too: redacted like streams.
+                    let redact = |text: &str| shared.config.launcher.redact(text);
                     let mut runs = lock(&shared.runs);
                     let Some(run) = runs.get_mut(&run_id) else { return };
-                    files.iter().filter_map(|f| run.register_file(f)).map(|a| a.id).collect()
+                    files.iter().filter_map(|f| run.register_file(f, &redact)).map(|a| a.id).collect()
                 };
                 if files.iter().any(|f| f.truncated) {
                     self.push_output(

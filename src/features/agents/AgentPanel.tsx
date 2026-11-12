@@ -3,6 +3,7 @@ import { useEffect } from "react";
 
 import { Banner, Button, IconButton, Toolbar } from "../../ui/components";
 import { ProviderSettingsDialog } from "./ProviderSettingsDialog";
+import { providerLabel } from "./format";
 import { ReviewView } from "./ReviewView";
 import { agents, useAgents } from "./store";
 import { TaskComposer } from "./TaskComposer";
@@ -14,13 +15,14 @@ function ProviderLabel() {
   const status = useAgents((s) => s.status);
   if (!status) return null;
   const scripted = status.settings.provider === "scripted";
-  const text = scripted
-    ? "Scripted provider — development only"
-    : status.configured
-      ? `Claude · ${status.settings.model}`
-      : "Provider not configured";
+  const { text, ready } = providerLabel(status);
   return (
-    <span className="agents-provider" data-scripted={scripted || undefined} data-testid="agents-provider-chip">
+    <span
+      className="agents-provider"
+      data-scripted={scripted || undefined}
+      data-ready={ready}
+      data-testid="agents-provider-chip"
+    >
       {text}
     </span>
   );

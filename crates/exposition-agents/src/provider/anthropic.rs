@@ -98,6 +98,9 @@ impl AnthropicProvider {
             // Idle limit between stream chunks (the API sends periodic pings).
             .read_timeout(Duration::from_secs(300))
             .user_agent(concat!("Exposition/", env!("CARGO_PKG_VERSION")))
+            // Never follow a redirect: it would re-send the API key header and
+            // the request body (document context) to wherever it points.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ProviderError::Network(format!("cannot create HTTP client: {e}")))?;
         Ok(Self { client, base_url: base_url.trim_end_matches('/').to_owned(), api_key, model, effort, retry })
@@ -257,6 +260,10 @@ impl AnthropicProvider {
             403 => ProviderError::Authentication(format!("permission denied: {message}")),
             429 => ProviderError::RateLimited { retry_after_ms, message },
             529 => ProviderError::Overloaded(message),
+            300..=399 => ProviderError::InvalidRequest(format!(
+                "the provider answered with a redirect (HTTP {status}); Exposition does not follow redirects, so \
+                 nothing was sent to another address"
+            )),
             400 | 402 | 404 | 413 | 422 => ProviderError::InvalidRequest(message),
             500..=599 => ProviderError::Server { status, message },
             _ => ProviderError::InvalidRequest(format!("unexpected HTTP {status}: {message}")),

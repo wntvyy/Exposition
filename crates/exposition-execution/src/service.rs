@@ -609,6 +609,62 @@ impl ExecutionService {
         }
     }
 
+    /// The label that marks this data directory's restricted containers.
+    pub fn docker_instance(&self) -> &str {
+        &self.inner.instance
+    }
+
+    /// Remove restricted-backend containers that an earlier session of this
+    /// data directory left behind (for example when the application was
+    /// killed while a container ran). Call once at application start, off the
+    /// main thread; the first restricted job waits for it. Does nothing when no
+    /// container image is configured (no restricted job can have run).
+    pub fn sweep_stale_containers(&self) -> Result<usize, String> {
+        let settings = self.inner.settings.get();
+        if settings.docker.image.is_none() {
+            return Ok(0);
+        }
+        // The same tool-location rule as every other use: a configured Docker
+        // path that is now project content is never run.
+        let refuse = |path: &Path| self.inner.override_problem(path);
+        let docker = match (Locator { host: &self.inner.host, settings: &settings, refuse_override: Some(&refuse) })
+            .locate("docker")
+        {
+            Located::Found { path, .. } => path,
+            _ => return Err("Docker was not found".into()),
+        };
+        let client_spec = EnvironmentSpec {
+            inherit: DOCKER_CLIENT_ENV.iter().map(|s| s.to_string()).collect(),
+            set: Default::default(),
+        };
+        let temp = PathBuf::new();
+        let mut env = build_environment(
+            &client_spec,
+            &EnvContext {
+                host: &self.inner.host,
+                redactor: &self.inner.redactor,
+                temp_dir: &temp,
+                path_dirs: &[docker.parent().map(Path::to_path_buf).unwrap_or_default()],
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let temp_text = self.inner.probe_dir.display().to_string();
+        if cfg!(windows) {
+            env.insert("TEMP", temp_text.clone());
+            env.insert("TMP", temp_text);
+        } else {
+            env.insert("TMPDIR", temp_text);
+        }
+        let mut cleaned = self.inner.docker_cleaned.locked();
+        if *cleaned {
+            // A restricted job already swept (and may be running now).
+            return Ok(0);
+        }
+        let removed = docker::remove_stale(&docker, &self.inner.instance, &env, &self.inner.probe_dir)?;
+        *cleaned = true;
+        Ok(removed)
+    }
+
     /// Images present locally, for choosing the restricted-execution image.
     /// Runs `docker image ls` as an application probe (fixed arguments, clean
     /// environment, application-owned directory). Never pulls anything.
@@ -1268,6 +1324,17 @@ impl Inner {
                         format!("restricted execution is unavailable: {message} The job was not run natively."),
                     )
                 };
+                // The image is checked with the same grammar settings use (a
+                // hand-edited settings file gets no looser check here).
+                let Some(image) = settings.docker.image.clone() else {
+                    return Err(unavailable(
+                        "no container image is configured. Set execution.docker.image to an image present locally (`docker image ls`)."
+                            .into(),
+                    ));
+                };
+                if let Err(reason) = docker::validate_image_reference(&image) {
+                    return Err(unavailable(format!("the configured image is not valid: {reason}.")));
+                }
                 let refuse = |path: &Path| self.override_problem(path);
                 let docker_path = match (Locator {
                     host: &self.host,
@@ -1289,15 +1356,6 @@ impl Inner {
                     }
                 };
                 let docker_path = validate_executable(&docker_path.display().to_string())?;
-                let Some(image) = settings.docker.image.clone() else {
-                    return Err(unavailable(
-                        "no container image is configured. Set execution.docker.image to an image present locally (`docker image ls`)."
-                            .into(),
-                    ));
-                };
-                if !docker::valid_image_ref(&image) {
-                    return Err(unavailable(format!("configured image `{image}` is not a valid image reference.")));
-                }
                 if !docker::valid_container_program(&spec.program) {
                     return Err(JobRefusal::new(
                         RefusalCode::ProgramRefused,
@@ -1569,8 +1627,7 @@ impl Inner {
             {
                 let mut cleaned = self.docker_cleaned.locked();
                 if !*cleaned {
-                    docker::remove_stale(&docker_path, &self.instance, &client_env, &self.probe_dir);
-                    *cleaned = true;
+                    *cleaned = docker::remove_stale(&docker_path, &self.instance, &client_env, &self.probe_dir).is_ok();
                 }
             }
             if let Err(message) = docker::preflight(&docker_path, &launch.image, &client_env, &self.probe_dir) {
@@ -1583,8 +1640,20 @@ impl Inner {
             }
             let out_dir = docker::out_dir(&job_dir);
             let env_file = job_dir.join("container.env");
-            if let Err(e) =
-                std::fs::create_dir_all(&out_dir).and_then(|_| docker::write_env_file(&env_file, &launch.container_env))
+            // A batch job's input is a read-only file in the container: its
+            // stdin is the liveness pipe (see `docker::supervisor_script`).
+            let input_dir = job_dir.join("in");
+            let input = match &prepared.stdin {
+                StdinMode::Data(data) => Some(data.as_str()),
+                _ => None,
+            };
+            if let Err(e) = std::fs::create_dir_all(&out_dir)
+                .and_then(|_| docker::write_env_file(&env_file, &launch.container_env))
+                .and_then(|_| match input {
+                    Some(data) => std::fs::create_dir_all(&input_dir)
+                        .and_then(|_| std::fs::write(input_dir.join(docker::INPUT_FILE), data)),
+                    None => Ok(()),
+                })
             {
                 return fail(
                     self,
@@ -1593,7 +1662,11 @@ impl Inner {
                     format!("could not prepare container files: {e}"),
                 );
             }
-            let stdin = !matches!(prepared.stdin, StdinMode::Null);
+            let stdin = match prepared.stdin {
+                StdinMode::Interactive => docker::ContainerStdin::Interactive,
+                StdinMode::Data(_) => docker::ContainerStdin::Batch { input_dir: Some(&input_dir) },
+                StdinMode::Null => docker::ContainerStdin::Batch { input_dir: None },
+            };
             prepared.args = docker::run_args(&docker::RunPlan {
                 job_id: &job.id.0,
                 instance: &self.instance,
@@ -1606,6 +1679,7 @@ impl Inner {
                 program: &launch.program,
                 args: &launch.args,
                 stdin,
+                time_limit: prepared.timeout,
             });
             docker_ctx = Some((docker_path, client_env));
         }
@@ -1620,7 +1694,9 @@ impl Inner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(match prepared.stdin {
-                StdinMode::Null => Stdio::null(),
+                // A restricted job's stdin is always a pipe: the liveness pipe
+                // of a batch container, or an interactive job's input.
+                StdinMode::Null if docker_ctx.is_none() => Stdio::null(),
                 _ => Stdio::piped(),
             });
         let (mut child, containment) = match spawn_contained(&mut command) {
@@ -1654,9 +1730,13 @@ impl Inner {
             let _ = tx.send(Ok(Some(pid)));
         }
 
-        // stdin
+        // stdin. A batch container's liveness pipe is held (never written)
+        // until the job ends: if this process dies, the pipe closes and the
+        // container stops itself.
+        let mut liveness = None;
         if let Some(mut stdin) = child.stdin.take() {
             match std::mem::replace(&mut prepared.stdin, StdinMode::Null) {
+                StdinMode::Data(_) | StdinMode::Null if docker_ctx.is_some() => liveness = Some(stdin),
                 StdinMode::Data(data) => {
                     std::thread::spawn(move || {
                         let _ = stdin.write_all(data.as_bytes());
@@ -1727,6 +1807,7 @@ impl Inner {
             }
         };
         let _ = child.wait();
+        drop(liveness);
         // The tree was killed (or the primary exited and the rest was
         // killed): wait, bounded, until the OS reports it empty, so a caller
         // waiting for `stopped` (a trust revoke) knows nothing still runs.

@@ -8,6 +8,7 @@ import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { scenarioUsesRealCredential } from "./app-env.mjs";
 import { launchApp, REPO_ROOT } from "./app.mjs";
 
 const scenariosDir = join(import.meta.dirname, "scenarios");
@@ -33,8 +34,11 @@ for (const name of selected) {
   // runner, so each app records its last state (screenshot + console tail)
   // just before it closes. On failure these files are the evidence.
   let launched = 0;
-  const launchWithLastState = async (options) => {
-    const app = await launchApp(options);
+  // Only live-* scenarios (named explicitly) may use the real credential entry;
+  // every other launch uses a namespaced development entry.
+  const realCredential = scenarioUsesRealCredential(name);
+  const launchWithLastState = async (options = {}) => {
+    const app = await launchApp({ ...options, realCredential });
     const n = ++launched;
     const close = app.close.bind(app);
     app.close = async () => {

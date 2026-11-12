@@ -4,8 +4,16 @@
 //! Credential Manager, macOS Keychain, Linux keyutils). It is never written to
 //! project files, the task database, logs, events, or child-process
 //! environments, and the webview only ever learns whether a key is configured.
+//!
+//! On Windows the key is kept on this machine only (local-machine persistence,
+//! not the roaming "enterprise" persistence the keyring crate uses); a key
+//! saved by an earlier version is moved there, byte for byte, the first time
+//! it is read. Code running as the same user (trusted native kernels,
+//! commands, builds) can still read it through the Credential Manager API.
 
 use std::sync::Mutex;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CredentialError {
@@ -66,6 +74,9 @@ pub fn normalize_api_key(raw: &str) -> Result<String, CredentialError> {
 pub struct KeyringStore {
     service: String,
     user: String,
+    /// The stored key's persistence was checked (Windows).
+    #[cfg(windows)]
+    persistence_checked: AtomicBool,
 }
 
 impl KeyringStore {
@@ -75,7 +86,30 @@ impl KeyringStore {
             Some(ns) if !ns.is_empty() => format!("{KEYRING_SERVICE}.{ns}"),
             _ => KEYRING_SERVICE.to_owned(),
         };
-        Self { service, user: KEYRING_USER.to_owned() }
+        Self {
+            service,
+            user: KEYRING_USER.to_owned(),
+            #[cfg(windows)]
+            persistence_checked: AtomicBool::new(false),
+        }
+    }
+
+    /// The Credential Manager target name (keyring's `user.service`).
+    #[cfg(windows)]
+    pub fn target(&self) -> String {
+        format!("{}.{}", self.user, self.service)
+    }
+
+    /// Keep a key saved with roaming persistence (earlier versions) on this
+    /// machine only. Runs once per store; failures leave the key as it was.
+    #[cfg(windows)]
+    fn keep_on_this_machine(&self) {
+        if self.persistence_checked.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if let Err(code) = crate::wincred::keep_on_this_machine(&self.target()) {
+            tracing::warn!("could not change the stored key's persistence (Win32 error {code}); it stays as it was");
+        }
     }
 
     fn entry(&self) -> Result<keyring::Entry, CredentialError> {
@@ -105,6 +139,8 @@ impl SecretStore for KeyringStore {
     }
 
     fn get(&self) -> Result<Option<Secret>, CredentialError> {
+        #[cfg(windows)]
+        self.keep_on_this_machine();
         match self.entry()?.get_password() {
             Ok(value) => Ok(Some(Secret(value))),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -113,7 +149,27 @@ impl SecretStore for KeyringStore {
     }
 
     fn set(&self, secret: &str) -> Result<(), CredentialError> {
-        self.entry()?.set_password(secret).map_err(|e| CredentialError::Unavailable(describe_error(&e)))
+        // Windows: written in keyring's layout, but kept on this machine only.
+        #[cfg(windows)]
+        {
+            match crate::wincred::write_password(
+                &self.target(),
+                secret,
+                &self.user,
+                "Exposition provider API key",
+                crate::wincred::PERSIST_LOCAL_MACHINE,
+            ) {
+                Ok(true) => Ok(()),
+                Ok(false) => {
+                    Err(CredentialError::Unavailable("the key did not read back as saved; try saving it again".into()))
+                }
+                Err(code) => Err(CredentialError::Unavailable(format!("the credential store reported error {code}"))),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            self.entry()?.set_password(secret).map_err(|e| CredentialError::Unavailable(describe_error(&e)))
+        }
     }
 
     fn delete(&self) -> Result<(), CredentialError> {
