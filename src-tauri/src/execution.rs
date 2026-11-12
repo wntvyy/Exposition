@@ -105,7 +105,13 @@ pub async fn trust_grant(state: State<'_, AppState>, root: String) -> Result<Tru
 #[tauri::command]
 pub async fn trust_revoke(state: State<'_, AppState>, root: String) -> Result<TrustStatus, CommandError> {
     validate_root(&root)?;
-    state.execution.revoke_trust(&root).map_err(trust_error)
+    let execution = state.execution.clone();
+    // Revoking waits (bounded) until the folder's trusted process trees are
+    // gone; keep that wait off the async runtime threads.
+    tauri::async_runtime::spawn_blocking(move || execution.revoke_trust(&root))
+        .await
+        .map_err(|e| CommandError::new("trust.internal", e.to_string()))?
+        .map_err(trust_error)
 }
 
 /// DEV-ONLY (debug builds): start a fixed process tree — a Python parent that
