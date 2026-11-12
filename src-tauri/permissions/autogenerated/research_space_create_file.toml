@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-space-create-file"
+description = "Enables the research_space_create_file command without any pre-configured scope."
+commands.allow = ["research_space_create_file"]
+
+[[permission]]
+identifier = "deny-research-space-create-file"
+description = "Denies the research_space_create_file command without any pre-configured scope."
+commands.deny = ["research_space_create_file"]

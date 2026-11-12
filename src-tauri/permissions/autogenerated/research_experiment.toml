@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-experiment"
+description = "Enables the research_experiment command without any pre-configured scope."
+commands.allow = ["research_experiment"]
+
+[[permission]]
+identifier = "deny-research-experiment"
+description = "Denies the research_experiment command without any pre-configured scope."
+commands.deny = ["research_experiment"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lean-record-evidence"
+description = "Enables the lean_record_evidence command without any pre-configured scope."
+commands.allow = ["lean_record_evidence"]
+
+[[permission]]
+identifier = "deny-lean-record-evidence"
+description = "Denies the lean_record_evidence command without any pre-configured scope."
+commands.deny = ["lean_record_evidence"]

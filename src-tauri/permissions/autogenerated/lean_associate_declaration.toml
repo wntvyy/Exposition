@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lean-associate-declaration"
+description = "Enables the lean_associate_declaration command without any pre-configured scope."
+commands.allow = ["lean_associate_declaration"]
+
+[[permission]]
+identifier = "deny-lean-associate-declaration"
+description = "Denies the lean_associate_declaration command without any pre-configured scope."
+commands.deny = ["lean_associate_declaration"]

@@ -39,6 +39,8 @@ pub fn run() {
             execution::add_dev_capability(app.handle())?;
             #[cfg(debug_assertions)]
             agents::add_dev_capability(app.handle())?;
+            #[cfg(debug_assertions)]
+            research::add_dev_capability(app.handle())?;
             research::forward_events(app.handle().clone());
             graph::forward_events(app.handle().clone());
             app.state::<AppState>().typesetting.start(app.handle().clone());
@@ -156,6 +158,26 @@ pub fn run() {
             graph::graph_view_delete,
             graph::graph_recover,
             graph::graph_operations,
+            research::research_space,
+            research::research_space_enable,
+            research::research_listing,
+            research::research_space_create_file,
+            research::research_space_import,
+            research::research_retain,
+            research::research_result_state,
+            research::research_experiment_save,
+            research::research_experiment,
+            research::research_promotion_prepare,
+            research::research_promotion_approve,
+            research::research_promotion_cancel,
+            research::research_promotions,
+            research::research_promotion_reconcile,
+            #[cfg(debug_assertions)]
+            research::research_dev_fail_next_graph_write,
+            lean::lean_audit_record,
+            lean::lean_record_evidence,
+            lean::lean_associate_declaration,
+            lean::lean_declaration_evidence,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

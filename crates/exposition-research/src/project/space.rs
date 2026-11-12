@@ -339,7 +339,7 @@ impl ResearchProject {
                 _ => {}
             }
         }
-        listing.experiments.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        listing.experiments.sort_by_key(|e| e.label.to_lowercase());
         // Retained results: every resource with the artifact role.
         for e in self.entities_of(&[EntityKind::Resource], 5000)? {
             if e.lifecycle == Lifecycle::Tombstoned || !e.roles.contains(&ResourceRole::Artifact) {
@@ -435,7 +435,7 @@ impl ResearchProject {
                 request.name
             )));
         }
-        workspace.create_document(&path, "").map_err(|e| ResearchError::coded(&e.code, e.message))?;
+        workspace.create_document(&path, "").map_err(|e| ResearchError::coded(e.code, e.message))?;
         let entity = self.admit_member(&space, &path, Some(&crate::helper::sha256_hex(b"")))?;
         Ok(SpaceFile {
             name: request.name.clone(),

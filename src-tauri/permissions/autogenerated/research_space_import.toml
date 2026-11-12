@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-space-import"
+description = "Enables the research_space_import command without any pre-configured scope."
+commands.allow = ["research_space_import"]
+
+[[permission]]
+identifier = "deny-research-space-import"
+description = "Denies the research_space_import command without any pre-configured scope."
+commands.deny = ["research_space_import"]

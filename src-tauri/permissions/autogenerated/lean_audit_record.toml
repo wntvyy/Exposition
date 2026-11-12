@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lean-audit-record"
+description = "Enables the lean_audit_record command without any pre-configured scope."
+commands.allow = ["lean_audit_record"]
+
+[[permission]]
+identifier = "deny-lean-audit-record"
+description = "Denies the lean_audit_record command without any pre-configured scope."
+commands.deny = ["lean_audit_record"]

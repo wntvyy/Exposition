@@ -43,6 +43,9 @@ pub struct ResearchProject {
     promotions: promotion::Promotions,
 }
 
+/// (kind, from, to, status override, note) of a relation research adds.
+pub(crate) type NewRelation = (RelationKind, EntityId, EntityId, Option<AssertionStatus>, Option<String>);
+
 pub(crate) fn origin() -> Origin {
     Origin::Service { service: SERVICE.into() }
 }
@@ -147,11 +150,7 @@ impl ResearchProject {
     }
 
     /// Add relations observed/asserted by research (duplicates are skipped).
-    fn add_relations(
-        &self,
-        relations: Vec<(RelationKind, EntityId, EntityId, Option<AssertionStatus>, Option<String>)>,
-        summary: &str,
-    ) -> Result<u64, ResearchError> {
+    fn add_relations(&self, relations: Vec<NewRelation>, summary: &str) -> Result<u64, ResearchError> {
         if relations.is_empty() {
             return Ok(self.graph.with_store(|s| Ok(s.revision()?))?);
         }

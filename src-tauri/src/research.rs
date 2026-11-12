@@ -11,12 +11,21 @@ use std::path::PathBuf;
 use exposition_core::artifact::{
     ArtifactKind, AttachArtifactOutcome, AttachArtifactRequest, AttachmentPlacement, RunId,
 };
-use exposition_core::document::{DocumentId, EditOrigin};
+use std::sync::Arc;
+
+use exposition_core::document::{DocumentEvent, DocumentId, EditOrigin};
+use exposition_core::path::WorkspacePath;
+use exposition_graph::{EntityId, OperationId};
+use exposition_research::project::types::{
+    CreateSpaceFileRequest, ExperimentDetail, ExperimentInput, ImportOutcome, ImportRequest, PromotionOutcome,
+    PromotionPreview, PromotionRequest, PromotionsState, ReconcileOutcome, ResearchListing, ResearchSpaceInfo,
+    RetainOutcome, RetainRequest, SetResultStateRequest, SpaceFile,
+};
 use exposition_research::types::{
     EnvironmentReport, ExecuteRequest, RunManifest, RunOutputPage, RunSource, RunSummary, SessionInfo, SessionOwner,
     WorkspaceStatus,
 };
-use exposition_research::{ResearchError, StartSessionRequest};
+use exposition_research::{ResearchError, ResearchProject, StartSessionRequest};
 use exposition_workspace::types::WorkspaceEvent;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Response;
@@ -72,6 +81,11 @@ pub struct ResearchStartRequest {
 pub struct ResearchExecuteRequest {
     pub session_id: String,
     pub source: RunSource,
+    /// Project files the code reads (e.g. an experiment's declared inputs),
+    /// pinned by content in the run's inputs when it is dispatched.
+    #[serde(default)]
+    #[ts(optional)]
+    pub declared_inputs: Option<Vec<WorkspacePath>>,
 }
 
 /// Insert or update a run's figure/table in an open document. The webview
@@ -167,11 +181,11 @@ pub async fn research_execute(
     request: ResearchExecuteRequest,
 ) -> Result<RunSummary, CommandError> {
     sync_workspace(&state)?;
-    Ok(state.research.execute(ExecuteRequest {
-        session_id: request.session_id,
-        source: request.source,
-        requester: SessionOwner::User,
-    })?)
+    let declared = request.declared_inputs.unwrap_or_default();
+    Ok(state.research.execute_with_inputs(
+        ExecuteRequest { session_id: request.session_id, source: request.source, requester: SessionOwner::User },
+        &declared,
+    )?)
 }
 
 #[tauri::command]
@@ -242,9 +256,185 @@ pub async fn artifact_attach(
     Ok(AttachArtifactResult { outcome, warnings })
 }
 
+// ---- research in the project graph ------------------------------------------
+
+/// Run a blocking research-project operation off the async executor.
+async fn project<T, F>(state: &State<'_, AppState>, f: F) -> Result<T, CommandError>
+where
+    T: Send + 'static,
+    F: FnOnce(&ResearchProject) -> Result<T, ResearchError> + Send + 'static,
+{
+    sync_workspace(state)?;
+    let project = Arc::clone(&state.research_project);
+    tauri::async_runtime::spawn_blocking(move || f(&project))
+        .await
+        .map_err(|e| CommandError::new("internal.task", format!("Research task failed: {e}")))?
+        .map_err(CommandError::from)
+}
+
+/// The project's research space, if Research is enabled (no side effects).
+#[tauri::command]
+pub async fn research_space(state: State<'_, AppState>) -> Result<Option<ResearchSpaceInfo>, CommandError> {
+    project(&state, |p| p.space()).await
+}
+
+/// Enable Research: one typed research space and its folders. Launches nothing.
+#[tauri::command]
+pub async fn research_space_enable(state: State<'_, AppState>) -> Result<ResearchSpaceInfo, CommandError> {
+    project(&state, |p| p.enable()).await
+}
+
+/// The Research explorer: groups over actual resource identities.
+#[tauri::command]
+pub async fn research_listing(state: State<'_, AppState>) -> Result<ResearchListing, CommandError> {
+    project(&state, |p| p.listing()).await
+}
+
+/// Create an empty research file (through the document service).
+#[tauri::command]
+pub async fn research_space_create_file(
+    state: State<'_, AppState>,
+    request: CreateSpaceFileRequest,
+) -> Result<SpaceFile, CommandError> {
+    let workspace = Arc::clone(&state.workspace);
+    project(&state, move |p| p.create_file(&workspace, &request)).await
+}
+
+/// Import a file the person chose: an explicit copy (with recorded origin) or
+/// a read-only reference.
+#[tauri::command]
+pub async fn research_space_import(
+    state: State<'_, AppState>,
+    request: ImportRequest,
+) -> Result<ImportOutcome, CommandError> {
+    project(&state, move |p| p.import(&request)).await
+}
+
+/// Keep / archive / discard a run's figure, table, or data output.
+#[tauri::command]
+pub async fn research_retain(
+    state: State<'_, AppState>,
+    request: RetainRequest,
+) -> Result<RetainOutcome, CommandError> {
+    project(&state, move |p| p.retain(&request)).await
+}
+
+/// Change the lifecycle of a retained result (never deletes anything).
+#[tauri::command]
+pub async fn research_result_state(
+    state: State<'_, AppState>,
+    request: SetResultStateRequest,
+) -> Result<RetainOutcome, CommandError> {
+    project(&state, move |p| p.set_result_state(&request)).await
+}
+
+#[tauri::command]
+pub async fn research_experiment_save(
+    state: State<'_, AppState>,
+    input: ExperimentInput,
+) -> Result<ExperimentDetail, CommandError> {
+    project(&state, move |p| p.save_experiment(&input)).await
+}
+
+#[tauri::command]
+pub async fn research_experiment(
+    state: State<'_, AppState>,
+    entity: EntityId,
+) -> Result<ExperimentDetail, CommandError> {
+    project(&state, move |p| p.experiment(&entity)).await
+}
+
+/// Review step of a promotion: the exact markup, target revision, and digest.
+#[tauri::command]
+pub async fn research_promotion_prepare(
+    state: State<'_, AppState>,
+    request: PromotionRequest,
+) -> Result<PromotionPreview, CommandError> {
+    project(&state, move |p| p.prepare_promotion(&request)).await
+}
+
+/// Apply a reviewed promotion (refused if the document or artifact changed).
+#[tauri::command]
+pub async fn research_promotion_approve(
+    state: State<'_, AppState>,
+    promotion: String,
+) -> Result<PromotionOutcome, CommandError> {
+    project(&state, move |p| p.approve_promotion(&promotion)).await
+}
+
+#[tauri::command]
+pub async fn research_promotion_cancel(state: State<'_, AppState>, promotion: String) -> Result<bool, CommandError> {
+    project(&state, move |p| Ok(p.cancel_promotion(&promotion))).await
+}
+
+/// Promotions needing reconciliation and attachments research follows.
+#[tauri::command]
+pub async fn research_promotions(state: State<'_, AppState>) -> Result<PromotionsState, CommandError> {
+    project(&state, |p| p.promotions()).await
+}
+
+/// Reconcile an interrupted promotion against the actual document.
+#[tauri::command]
+pub async fn research_promotion_reconcile(
+    state: State<'_, AppState>,
+    operation: OperationId,
+) -> Result<ReconcileOutcome, CommandError> {
+    project(&state, move |p| p.reconcile_promotion(&operation)).await
+}
+
+/// Debug builds only (tests): make the next promotion's graph write fail, to
+/// exercise the pending-reconciliation path in the real application. The
+/// command is compiled, listed (`DEV_COMMANDS`), and granted only in debug builds.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn research_dev_fail_next_graph_write(state: State<'_, AppState>) -> Result<(), CommandError> {
+    state.research_project.fail_next_graph_write();
+    Ok(())
+}
+
+/// Grant the debug-only research command (never present in release builds).
+#[cfg(debug_assertions)]
+pub fn add_dev_capability(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::ipc::CapabilityBuilder;
+    app.add_capability(
+        CapabilityBuilder::new("dev-research-faults")
+            .window("main")
+            .permission("allow-research-dev-fail-next-graph-write"),
+    )
+}
+
+/// Follow promoted attachments as documents change (undo, redo, edits).
+fn follow_documents(app: AppHandle) {
+    let mut rx = app.state::<AppState>().documents.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let document = match rx.recv().await {
+                Ok(DocumentEvent::Changed(change)) => change.document,
+                Ok(_) => continue,
+                Err(RecvError::Lagged(_)) => {
+                    let project = Arc::clone(&app.state::<AppState>().research_project);
+                    let _ = tauri::async_runtime::spawn_blocking(move || project.load_promotions()).await;
+                    continue;
+                }
+                Err(RecvError::Closed) => break,
+            };
+            let state = app.state::<AppState>();
+            let Ok(snapshot) = state.documents.snapshot(&document) else { continue };
+            let Some(path) = snapshot.path.clone() else { continue };
+            if !state.research_project.follows(&path) {
+                continue;
+            }
+            let project = Arc::clone(&state.research_project);
+            let text = snapshot.text.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || project.observe_text(&path, &text, false)).await;
+        }
+    });
+}
+
 /// Forward research events to the webview in order, and follow the workspace
 /// service's open folder.
 pub fn forward_events(app: AppHandle) {
+    follow_documents(app.clone());
     let mut workspace_rx = app.state::<AppState>().workspace.subscribe();
     let workspace_app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -253,6 +443,10 @@ pub fn forward_events(app: AppHandle) {
                 Ok(WorkspaceEvent::Opened { .. } | WorkspaceEvent::Closed) | Err(RecvError::Lagged(_)) => {
                     let state = workspace_app.state::<AppState>();
                     if sync_workspace(&state).is_ok() {
+                        // Interrupted promotions are marked for reconciliation
+                        // (never re-run); followed attachments are re-checked.
+                        let project = Arc::clone(&state.research_project);
+                        let _ = tauri::async_runtime::spawn_blocking(move || project.load_promotions()).await;
                         let _ = workspace_app.emit(RESEARCH_RESYNC, ());
                     }
                 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-promotion-reconcile"
+description = "Enables the research_promotion_reconcile command without any pre-configured scope."
+commands.allow = ["research_promotion_reconcile"]
+
+[[permission]]
+identifier = "deny-research-promotion-reconcile"
+description = "Denies the research_promotion_reconcile command without any pre-configured scope."
+commands.deny = ["research_promotion_reconcile"]

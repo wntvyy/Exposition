@@ -393,6 +393,145 @@ pub fn associate(
     })
 }
 
+/// Which declaration to associate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum DeclarationRef {
+    /// A declaration of an open Lean document's last audit (its evidence is
+    /// recorded from that audit first).
+    Audited { document: exposition_core::document::DocumentId, name: String },
+    /// An existing formal-declaration entity.
+    Entity { entity: EntityId },
+}
+
+/// `lean_associate_declaration` request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LeanAssociateRequest {
+    pub declaration: DeclarationRef,
+    /// A statement, definition, assumption, or mathematical object.
+    pub target: EntityId,
+    /// Why the correspondence holds (≤ 500 characters, optional).
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct LeanAssociation {
+    pub association: FormalAssociation,
+    /// Evidence recorded from the audit (for `Audited` references).
+    pub evidence: Option<EvidenceOutcomeReport>,
+}
+
+/// One evidence record with its applicability to the current text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceView {
+    pub evidence: Evidence,
+    /// Never `current`: the audit does not fingerprint dependencies.
+    pub freshness: exposition_graph::Freshness,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AssociationView {
+    pub relation: RelationId,
+    pub target: exposition_graph::Entity,
+    pub status: AssertionStatus,
+    pub note: Option<String>,
+}
+
+/// A formal declaration of a file with its evidence history and associations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclarationEvidence {
+    pub entity: EntityId,
+    pub name: String,
+    /// Newest first.
+    pub evidence: Vec<EvidenceView>,
+    pub associations: Vec<AssociationView>,
+}
+
+/// SHA-256 (hex) of text, as the Lean service hashes the text it checks.
+pub fn text_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Applicability of formal evidence to the file's current text.
+pub fn formal_freshness(evidence: &Evidence, current_digest: Option<&str>) -> exposition_graph::Freshness {
+    use exposition_graph::Freshness;
+    let Some(formal) = &evidence.formal else {
+        return Freshness::Unknown { reason: "not formal evidence".into() };
+    };
+    match current_digest {
+        Some(digest) if digest != formal.source_digest => Freshness::Stale {
+            reasons: vec![format!(
+                "{} changed since revision {} was checked; this is a historical record of that text",
+                formal.source_path,
+                formal.revision.map(|r| r.to_string()).unwrap_or_else(|| "?".into())
+            )],
+        },
+        Some(_) => Freshness::Unknown {
+            reason: "the text is unchanged, but the audit does not fingerprint the declaration's dependencies; changes in imported modules are not detected".into(),
+        },
+        None => Freshness::Unknown { reason: "the file's current text is not available".into() },
+    }
+}
+
+/// Formal declarations bound to `path`, their evidence (with freshness
+/// against `current_digest`), and their `formalizes` associations.
+pub fn declaration_evidence(
+    graph: &GraphService,
+    path: &WorkspacePath,
+    current_digest: Option<&str>,
+) -> GraphResult<Vec<DeclarationEvidence>> {
+    graph.with_store(|store| {
+        let mut ids: Vec<EntityId> = store.bindings_at_path(path)?.into_iter().map(|b| b.entity).collect();
+        ids.sort();
+        ids.dedup();
+        let mut out = Vec::new();
+        for entity in store.entities(&ids)? {
+            if entity.kind != EntityKind::FormalDeclaration || entity.lifecycle == Lifecycle::Tombstoned {
+                continue;
+            }
+            let mut evidence: Vec<Evidence> = store
+                .evidence_for_subject(&entity.id)?
+                .into_iter()
+                .filter(|e| e.kind == EvidenceKind::FormalCheck)
+                .collect();
+            evidence.sort_by_key(|e| std::cmp::Reverse(e.recorded_at_ms));
+            evidence.truncate(50);
+            let mut associations = Vec::new();
+            for r in store.relations_from(&entity.id)? {
+                if r.kind != RelationKind::Formalizes || r.status == AssertionStatus::Rejected {
+                    continue;
+                }
+                if let Some(target) = store.entity(&r.to)? {
+                    associations.push(AssociationView { relation: r.id, target, status: r.status, note: r.note });
+                }
+            }
+            out.push(DeclarationEvidence {
+                name: entity.key.clone().unwrap_or_else(|| entity.label.clone()),
+                entity: entity.id,
+                evidence: evidence
+                    .into_iter()
+                    .map(|e| EvidenceView { freshness: formal_freshness(&e, current_digest), evidence: e })
+                    .collect(),
+                associations,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,6 +724,14 @@ mod tests {
         assert_eq!(next.recorded[0].entity, first.recorded[0].entity);
         let history = graph.entity_detail(&first.recorded[0].entity).unwrap();
         assert_eq!(history.evidence.len(), 2, "old evidence stays as history");
+
+        // Evidence views: the newer audit matches the current text (unknown,
+        // not current); the older one is a historical record (stale).
+        let views = declaration_evidence(&graph, &r.path, Some(&later.content_hash)).unwrap();
+        let a = views.iter().find(|v| v.name == "Main.a").unwrap();
+        assert_eq!(a.evidence.len(), 2);
+        assert!(matches!(a.evidence[0].freshness, Freshness::Unknown { .. }), "{:?}", a.evidence[0].freshness);
+        assert!(matches!(a.evidence[1].freshness, Freshness::Stale { .. }), "{:?}", a.evidence[1].freshness);
     }
 
     #[test]

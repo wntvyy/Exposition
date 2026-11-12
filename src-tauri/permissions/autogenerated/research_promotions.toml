@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-promotions"
+description = "Enables the research_promotions command without any pre-configured scope."
+commands.allow = ["research_promotions"]
+
+[[permission]]
+identifier = "deny-research-promotions"
+description = "Denies the research_promotions command without any pre-configured scope."
+commands.deny = ["research_promotions"]
