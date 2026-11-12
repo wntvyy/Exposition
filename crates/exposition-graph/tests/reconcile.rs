@@ -513,3 +513,135 @@ fn attaching_labels_operations_an_earlier_session_left_pending() {
     svc.attach(&root);
     assert_eq!(svc.journal().get(&root, &current.id).unwrap().state, OperationState::Pending);
 }
+
+const PAPER: &str = "\\documentclass{article}\n\\begin{document}\n\\section{Main}\n\\begin{lemma}\\label{lem:a}\nA.\n\\end{lemma}\n\\begin{proof}\nTrivial.\n\\end{proof}\n\\begin{theorem}\\label{thm:b}\nBy Lemma~\\ref{lem:a} and \\cite{knuth}.\n\\end{theorem}\n\\end{document}\n";
+
+fn by_key(p: &Project, kind: EntityKind, key: &str) -> Option<Entity> {
+    p.all(kind).into_iter().find(|e| e.key.as_deref() == Some(key) && e.lifecycle != Lifecycle::Tombstoned)
+}
+
+#[test]
+fn extracted_mathematics_keeps_references_proofs_and_dependencies_apart() {
+    let p = project(&[("paper.tex", PAPER), ("refs.bib", "@book{knuth, title = {The TeXbook}}\n")]);
+    p.full();
+    let lemma = by_key(&p, EntityKind::Lemma, "lem:a").unwrap();
+    let theorem = by_key(&p, EntityKind::Theorem, "thm:b").unwrap();
+    let knuth = by_key(&p, EntityKind::Reference, "knuth").unwrap();
+    let t = p.svc.entity_detail(&theorem.id).unwrap();
+    assert!(t.outgoing.iter().any(|r| r.kind == RelationKind::References && r.to == lemma.id));
+    assert!(t.outgoing.iter().any(|r| r.kind == RelationKind::References && r.to == knuth.id));
+    assert!(!t.outgoing.iter().any(|r| r.kind == RelationKind::DependsOn), "a reference is not a dependency");
+    assert!(t.outgoing.iter().any(|r| r.kind == RelationKind::AnchoredIn));
+    let math = p.svc.math_overview().unwrap();
+    let row = |id: &EntityId| math.rows.iter().find(|r| &r.entity.id == id).unwrap().clone();
+    assert_eq!(row(&lemma.id).informal, InformalState::ProofLinked, "the proof following the lemma targets it");
+    assert_eq!(row(&theorem.id).informal, InformalState::NoProof);
+    assert_eq!(row(&theorem.id).verdict, None, "no formal evidence: no verdict");
+    // Impact of changing the lemma: the citing theorem needs a citation check.
+    let report =
+        p.svc.impact(&ImpactRequest { entities: vec![lemma.id.clone()], max_depth: None, max_items: None }).unwrap();
+    let item = report.items.iter().find(|i| i.entity.id == theorem.id).unwrap();
+    assert_eq!(item.action, ImpactAction::CitationReview);
+    // Impact of changing the file: its declarations are listed (informational).
+    let file = p.resource("paper.tex").unwrap();
+    let report =
+        p.svc.impact(&ImpactRequest { entities: vec![file.id.clone()], max_depth: None, max_items: None }).unwrap();
+    assert!(report.items.iter().any(|i| i.entity.id == lemma.id && i.action == ImpactAction::Informational));
+}
+
+#[test]
+fn duplicate_labels_are_ambiguous_and_counted_not_merged() {
+    let p = project(&[("paper.tex", PAPER)]);
+    p.full();
+    let lemma = by_key(&p, EntityKind::Lemma, "lem:a").unwrap();
+    // A second lemma with the same label.
+    write(
+        &p.root,
+        "paper.tex",
+        &PAPER.replace("\\begin{theorem}", "\\begin{lemma}\\label{lem:a}\nB.\n\\end{lemma}\n\\begin{theorem}"),
+    );
+    p.paths(&["paper.tex"]);
+    let detail = p.svc.entity_detail(&lemma.id).unwrap();
+    assert_eq!(detail.entity.lifecycle, Lifecycle::Active, "the known entity is kept");
+    assert_eq!(detail.bindings[0].state, BindingState::Ambiguous);
+    assert_eq!(p.all(EntityKind::Lemma).len(), 1, "no second entity is created for a duplicate name");
+    let coverage =
+        detail.coverage.or_else(|| p.svc.entity_detail(&p.resource("paper.tex").unwrap().id).unwrap().coverage);
+    assert!(coverage.unwrap().unresolved >= 1);
+    // The duplicate removed again: resolved, same identity.
+    write(&p.root, "paper.tex", PAPER);
+    p.paths(&["paper.tex"]);
+    let detail = p.svc.entity_detail(&lemma.id).unwrap();
+    assert_eq!(detail.bindings[0].state, BindingState::Resolved);
+}
+
+#[test]
+fn removed_declarations_are_tombstoned_and_curated_declaration_bindings_go_missing() {
+    let p = project(&[("paper.tex", PAPER)]);
+    p.full();
+    let theorem = by_key(&p, EntityKind::Theorem, "thm:b").unwrap();
+    // A person's claim bound to the theorem's declaration.
+    let out = p.user(vec![
+        create("k", EntityKind::Claim, "My reading of theorem B"),
+        GraphOperation::BindSource {
+            entity: EntityRef::Temp { temp_id: "k".into() },
+            binding: NewBinding {
+                path: wp("paper.tex"),
+                selector: SourceSelector::Declaration {
+                    syntax: "latex.env:theorem".into(),
+                    name: Some("thm:b".into()),
+                    ordinal: None,
+                },
+                range: None,
+            },
+        },
+    ]);
+    let ApplyOutcome::Applied { created, .. } = out else { panic!() };
+    let claim = created[0].id.clone();
+    p.svc.reconcile(&ReconcileOptions { scope: Scope::Paths(vec![wp("paper.tex")]), force: true }).unwrap();
+    assert_eq!(p.svc.entity_detail(&claim).unwrap().bindings[0].state, BindingState::Resolved);
+    // The theorem is deleted from the source.
+    let start = PAPER.find("\\begin{theorem}").unwrap();
+    let end = PAPER.find("\\end{theorem}").unwrap() + "\\end{theorem}\n".len();
+    write(&p.root, "paper.tex", &format!("{}{}", &PAPER[..start], &PAPER[end..]));
+    p.paths(&["paper.tex"]);
+    let gone = p.entity(&theorem.id);
+    assert_eq!(gone.lifecycle, Lifecycle::Tombstoned, "an extracted declaration whose referent vanished");
+    let c = p.svc.entity_detail(&claim).unwrap();
+    assert_eq!(c.entity.lifecycle, Lifecycle::Active, "a curated entity keeps its identity");
+    assert_eq!(c.bindings[0].state, BindingState::Missing);
+    // Restored (e.g. undo + save): the same identity comes back.
+    write(&p.root, "paper.tex", PAPER);
+    p.paths(&["paper.tex"]);
+    assert_eq!(by_key(&p, EntityKind::Theorem, "thm:b").unwrap().id, theorem.id);
+    assert_eq!(p.svc.entity_detail(&claim).unwrap().bindings[0].state, BindingState::Resolved);
+}
+
+#[test]
+fn attachment_blocks_admit_their_artifact_and_undo_removes_the_observed_use() {
+    let base = "= Results\n\nIntro.\n";
+    let block = "// exposition:begin fig-run1\n#figure(\n  image(\".exposition/artifacts/run-1/output-0.png\", width: 80%),\n  caption: [Fit],\n) <fig-run1>\n// exposition:end fig-run1\n";
+    let p = project(&[("main.typ", base), (".exposition/artifacts/run-1/output-0.png", "png-bytes")]);
+    p.full();
+    assert!(p.resource(".exposition/artifacts/run-1/output-0.png").is_none(), "generated outputs are not scanned");
+    write(&p.root, "main.typ", &format!("{base}{block}"));
+    p.paths(&["main.typ"]);
+    let artifact = p.resource(".exposition/artifacts/run-1/output-0.png").expect("admitted by the attachment");
+    assert!(artifact.roles.contains(&ResourceRole::Artifact), "{:?}", artifact.roles);
+    let main = p.resource("main.typ").unwrap();
+    let uses = |p: &Project| {
+        p.svc
+            .entity_detail(&main.id)
+            .unwrap()
+            .outgoing
+            .into_iter()
+            .filter(|r| r.kind == RelationKind::UsesAsset && r.to == artifact.id)
+            .count()
+    };
+    assert_eq!(uses(&p), 1);
+    // Undo/revert of the insertion: the block is gone, so is the observed use.
+    write(&p.root, "main.typ", base);
+    p.paths(&["main.typ"]);
+    assert_eq!(uses(&p), 0);
+    assert_eq!(p.entity(&artifact.id).lifecycle, Lifecycle::Active, "the retained artifact stays a resource");
+}

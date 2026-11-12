@@ -538,6 +538,17 @@ export default async function graphCore({ launchApp, artifactsDir, assert, fixtu
     timings.generatedProject.monacoKeystrokeDuringReindexMs = { median: median(busy), max: Math.max(...busy), samples: busy.length };
     assert.ok(median(busy) < 250, `typing stays responsive while reindexing (${median(busy)} ms)`);
     await shot("05-generated");
+    // A cold index again, with a new graph database but files the system
+    // has already read once (the first open above read 3,000 files written
+    // seconds earlier by another process).
+    await call("document_close", { document: chapter }).catch(() => {});
+    await call("workspace_close");
+    await rm(join(big, ".exposition"), { recursive: true, force: true });
+    started = Date.now();
+    await call("workspace_open", { path: big });
+    await synchronized("generated project re-indexed from scratch", 120_000);
+    timings.generatedProject.coldIndexWithReadFilesMs = Date.now() - started;
+    timings.generatedProject.workingSetAfterMb = workingSetMb(app.child.pid);
   } catch (error) {
     await shot("failure").catch(() => {});
     throw error;
