@@ -585,3 +585,38 @@ async fn interactive_eof_and_redacted_copy() {
     let refused = f.service.launch_interactive(bad, InteractiveOptions::default()).await;
     assert!(matches!(refused, Err(r) if matches!(r.outcome, JobOutcome::FailedToStart { .. })));
 }
+
+/// Trust compares folders by identity as well as by name: a folder trusted
+/// under one name is revoked under another, and its own data folder cannot
+/// be trusted at all.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn trust_follows_the_folder_not_its_spelling() {
+    let f = fixture_with(ExecutionSettings::default(), false);
+    let plain = f.workspace.display().to_string();
+    let plain = plain.strip_prefix(r"\?\").unwrap_or(&plain).to_owned();
+    let alias = format!(r"\localhost\{}${}", &plain[..1], &plain[2..]);
+    // The service's own data folder (trust.json, settings.json, job output).
+    assert!(f.service.grant_trust(&f.data_dir.display().to_string()).is_err());
+    assert!(f.service.grant_trust(&f.data_dir.join("execution").display().to_string()).is_err());
+    if !std::path::Path::new(&alias).is_dir() {
+        eprintln!("SKIPPED: the local administrative share is not reachable");
+        return;
+    }
+    // Trusted through the share, the folder is trusted under its own name.
+    f.service.grant_trust(&alias).unwrap();
+    assert!(f.service.trust_status(&plain).unwrap().trusted);
+    let inner = f.workspace.join("chapter");
+    std::fs::create_dir_all(&inner).unwrap();
+    assert!(f.service.trust_status(&inner.display().to_string()).unwrap().trusted);
+    // Revoked under its own name, the share entry goes too.
+    f.service.revoke_trust(&plain).unwrap();
+    assert!(!f.service.trust_status(&alias).unwrap().trusted);
+    assert!(!f.service.trust_status(&plain).unwrap().trusted);
+    assert!(f.service.trusted_roots().is_empty(), "{:?}", f.service.trusted_roots());
+    // The data folder through the share is refused as well.
+    let data = f.data_dir.display().to_string();
+    let data = data.strip_prefix(r"\?\").unwrap_or(&data).to_owned();
+    let data_alias = format!(r"\localhost\{}${}", &data[..1], &data[2..]);
+    assert!(f.service.grant_trust(&data_alias).is_err());
+}

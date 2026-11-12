@@ -106,6 +106,24 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE.sub("", text)
 
 
+def cwd_code(language: str, path: str) -> str | None:
+    """Kernel source that changes into `path`, or None when the kernel needs
+    none (Python kernels inherit the launch directory).
+
+    The path is passed as data (its UTF-8 bytes in hex or decimal), never
+    spliced into a string literal: a folder name may hold quotes, `$(...)`
+    (Julia interpolation), backslashes, or anything else.
+    """
+    data = path.encode("utf-8")
+    language = language.strip().lower()
+    if language == "julia":
+        return f'cd(String(hex2bytes("{data.hex()}")))'
+    if language == "r":
+        values = ", ".join(str(b) for b in data)
+        return f'local({{ p <- rawToChar(as.raw(c({values}))); Encoding(p) <- "UTF-8"; setwd(p) }})'
+    return None
+
+
 def package_version(name: str) -> str | None:
     try:
         from importlib import metadata
@@ -675,11 +693,7 @@ class KernelHost:
         """
         if self.kc is None or not self.cwd:
             return
-        path = self.cwd.replace("\\", "/").replace('"', "")
-        code = {
-            "r": f'setwd("{path}")',
-            "julia": f'cd("{path}")',
-        }.get(language.strip().lower())
+        code = cwd_code(language, self.cwd)
         if code is None:
             return
         try:

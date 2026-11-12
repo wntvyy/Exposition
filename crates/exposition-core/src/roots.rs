@@ -22,15 +22,35 @@
 //! Comparison is component-wise and ASCII case-insensitive on Windows, and
 //! ignores the `\\?\` verbatim prefix. Locations come from the environment and
 //! are also compared in canonical form when they exist (8.3 short names,
-//! junctions). Pure `std`; callers should pass canonical paths.
+//! junctions) and by file identity ([`crate::identity`]): the same folder under
+//! another name (the local administrative share `\\localhost\C$\Users\me`,
+//! `\\127.0.0.1\C$\...`, `\\?\UNC\localhost\C$\...`, `\\localhost\ADMIN$`) is
+//! refused like the folder itself. Callers should pass canonical paths.
 
 use std::path::{Component, Path, PathBuf};
+
+use crate::identity::{FileIdentity, file_identity, identity_chain};
 
 /// A refused location and how to describe it to the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Location {
     pub path: PathBuf,
     pub description: &'static str,
+    /// Identities of the location and of each of its ancestors, nearest
+    /// first (empty when it does not exist).
+    chain: Vec<FileIdentity>,
+}
+
+impl Location {
+    fn new(path: PathBuf, description: &'static str) -> Self {
+        let chain = if file_identity(&path).is_some() { identity_chain(&path) } else { Vec::new() };
+        Location { path, description, chain }
+    }
+
+    /// The location's own identity.
+    fn identity(&self) -> Option<FileIdentity> {
+        self.chain.first().copied()
+    }
 }
 
 /// The locations used by [`too_broad_reason_in`].
@@ -53,7 +73,7 @@ impl BroadDirs {
         let mut dirs = BroadDirs::default();
         let mut personal = |path: Option<PathBuf>, description: &'static str| {
             if let Some(path) = path.filter(|p| p.is_absolute()) {
-                dirs.personal.push(Location { path, description });
+                dirs.personal.push(Location::new(path, description));
             }
         };
         if cfg!(windows) {
@@ -92,7 +112,7 @@ impl BroadDirs {
 
         let mut system = |path: Option<PathBuf>, description: &'static str| {
             if let Some(path) = path.filter(|p| p.is_absolute()) {
-                dirs.system.push(Location { path, description });
+                dirs.system.push(Location::new(path, description));
             }
         };
         if cfg!(windows) {
@@ -116,7 +136,7 @@ impl BroadDirs {
                 .iter()
                 .filter_map(|l| {
                     let canonical = std::fs::canonicalize(&l.path).ok()?;
-                    (!same(&canonical, &l.path)).then_some(Location { path: canonical, description: l.description })
+                    (!same(&canonical, &l.path)).then(|| Location::new(canonical, l.description))
                 })
                 .collect();
             list.extend(extra);
@@ -162,6 +182,34 @@ pub fn too_broad_reason_in(path: &Path, dirs: &BroadDirs) -> Option<String> {
             } else {
                 format!("{shown} contains {} ({})", loc.description, loc.path.display())
             });
+        }
+    }
+    too_broad_by_identity(path, &shown, dirs)
+}
+
+/// The same rules by file identity: `path` may name a refused folder (or a
+/// folder above one, or inside a system folder) under another name.
+fn too_broad_by_identity(path: &Path, shown: &str, dirs: &BroadDirs) -> Option<String> {
+    let own = file_identity(path)?;
+    let chain = identity_chain(path);
+    let named = |loc: &Location| format!("{} ({})", loc.description, loc.path.display());
+    for loc in &dirs.system {
+        if loc.identity() == Some(own) {
+            return Some(format!("{shown} is {}; system folders cannot be a workspace", named(loc)));
+        }
+        if loc.identity().is_some_and(|id| chain.contains(&id)) {
+            return Some(format!("{shown} is inside {}; system folders cannot be a workspace", named(loc)));
+        }
+        if loc.chain.contains(&own) {
+            return Some(format!("{shown} contains {}", named(loc)));
+        }
+    }
+    for loc in &dirs.personal {
+        if loc.identity() == Some(own) {
+            return Some(format!("{shown} is {}", named(loc)));
+        }
+        if loc.chain.contains(&own) {
+            return Some(format!("{shown} contains {}", named(loc)));
         }
     }
     None
@@ -323,5 +371,46 @@ mod tests {
             }
             assert_eq!(too_broad_reason_in(&home.join("some-project-folder"), &dirs), None);
         }
+    }
+
+    /// The same refused folders through the local administrative share (and
+    /// its verbatim form), which text comparison cannot relate to them.
+    #[cfg(windows)]
+    #[test]
+    fn administrative_share_aliases_of_refused_folders_are_refused() {
+        let dirs = BroadDirs::from_env();
+        let profile = PathBuf::from(std::env::var("USERPROFILE").unwrap());
+        let system = PathBuf::from(std::env::var("SystemRoot").unwrap());
+        let share = |path: &Path, host: &str| {
+            let text = path.display().to_string();
+            PathBuf::from(format!(r"\{host}\{}${}", &text[..1], &text[2..]))
+        };
+        let project = std::env::temp_dir().join(format!("exposition-roots-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&project).unwrap();
+        let project = std::fs::canonicalize(&project).unwrap();
+        let project_plain = PathBuf::from(project.display().to_string().trim_start_matches(r"\?\"));
+        if !share(&profile, "localhost").is_dir() {
+            eprintln!("SKIPPED: the local administrative share is not reachable");
+            return;
+        }
+        for alias in [
+            share(&profile, "localhost"),
+            share(&profile, "127.0.0.1"),
+            share(profile.parent().unwrap(), "localhost"),
+            PathBuf::from(format!(
+                r"\?\UNC\localhost\{}${}",
+                &profile.display().to_string()[..1],
+                &profile.display().to_string()[2..]
+            )),
+            share(&system, "localhost"),
+            share(&system.join("System32"), "localhost"),
+            share(&system.join("System32").join("drivers"), "localhost"),
+            PathBuf::from(r"\localhost\ADMIN$"),
+        ] {
+            assert!(too_broad_reason_in(&alias, &dirs).is_some(), "{} was accepted", alias.display());
+        }
+        // A specific project folder stays allowed under any name.
+        assert_eq!(too_broad_reason_in(&share(&project_plain, "localhost"), &dirs), None);
+        std::fs::remove_dir_all(&project).unwrap();
     }
 }

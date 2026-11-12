@@ -25,6 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use exposition_core::identity::{FileIdentity, file_identity, identity_chain};
 use exposition_core::roots::{BroadDirs, too_broad_reason_in};
 
 use crate::paths::{PathError, canonical_directory, is_within, same_path};
@@ -126,6 +127,18 @@ struct TrustFile {
 struct Entry {
     path: PathBuf,
     granted_at_ms: Option<u64>,
+    /// File identity when stored or loaded, so the same folder reached under
+    /// another name (e.g. `\\localhost\C$\...`) is recognized.
+    identity: Option<FileIdentity>,
+    /// Why the entry trusts nothing (too broad under the current rules).
+    ignored: Option<String>,
+}
+
+/// A folder that may never be trusted, nor anything above or inside it.
+struct Protected {
+    path: PathBuf,
+    /// Identities of the folder and its ancestors, nearest first.
+    chain: Vec<FileIdentity>,
 }
 
 fn now_ms() -> u64 {
@@ -137,8 +150,18 @@ pub struct TrustStore {
     roots: RwLock<Vec<Entry>>,
     /// Broad personal/system locations (from the environment at load time).
     broad: BroadDirs,
-    /// Additional directories that may never be trusted, nor anything above them.
-    too_broad: Vec<PathBuf>,
+    /// Additional directories (the application's own data) that may never
+    /// be trusted, nor anything above or inside them.
+    too_broad: Vec<Protected>,
+}
+
+fn protected(dirs: Vec<PathBuf>) -> Vec<Protected> {
+    dirs.into_iter()
+        .map(|path| {
+            let chain = if file_identity(&path).is_some() { identity_chain(&path) } else { Vec::new() };
+            Protected { path, chain }
+        })
+        .collect()
 }
 
 impl TrustStore {
@@ -150,39 +173,80 @@ impl TrustStore {
                 let granted = f.granted_at_ms;
                 f.roots
                     .into_iter()
-                    .map(|r| Entry { granted_at_ms: granted.get(&r).copied(), path: PathBuf::from(r) })
-                    .collect()
+                    .map(|r| {
+                        let path = PathBuf::from(&r);
+                        Entry {
+                            granted_at_ms: granted.get(&r).copied(),
+                            identity: file_identity(&path),
+                            path,
+                            ignored: None,
+                        }
+                    })
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        Self { path: Some(path), roots: RwLock::new(roots), broad: BroadDirs::from_env(), too_broad }
+        let store = Self {
+            path: Some(path),
+            roots: RwLock::new(roots),
+            broad: BroadDirs::from_env(),
+            too_broad: protected(too_broad),
+        };
+        {
+            let mut roots = store.roots.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for entry in roots.iter_mut() {
+                entry.ignored = store.too_broad_reason(&entry.path);
+            }
+        }
+        store
     }
 
     pub fn in_memory(too_broad: Vec<PathBuf>) -> Self {
-        Self { path: None, roots: RwLock::new(Vec::new()), broad: BroadDirs::from_env(), too_broad }
+        Self {
+            path: None,
+            roots: RwLock::new(Vec::new()),
+            broad: BroadDirs::from_env(),
+            too_broad: protected(too_broad),
+        }
     }
 
-    /// Why a canonical directory may not be trusted, if it may not.
+    /// Why a canonical directory may not be trusted, if it may not. Folders
+    /// are compared by text and by file identity, so another name for a
+    /// refused folder is refused too.
     pub fn too_broad_reason(&self, canonical: &Path) -> Option<String> {
         too_broad_reason_in(canonical, &self.broad).or_else(|| {
-            self.too_broad.iter().find(|b| is_within(b, canonical)).map(|b| {
-                if same_path(b, canonical) {
-                    format!("{} may not be trusted", canonical.display())
-                } else {
-                    format!("{} contains {}, which may not be trusted", canonical.display(), b.display())
+            let shown = canonical.display();
+            let own = file_identity(canonical);
+            let mut chain: Option<Vec<FileIdentity>> = None;
+            self.too_broad.iter().find_map(|b| {
+                let same = same_path(&b.path, canonical) || (own.is_some() && b.chain.first() == own.as_ref());
+                if same {
+                    return Some(format!("{shown} may not be trusted"));
                 }
+                if is_within(&b.path, canonical) || own.is_some_and(|id| b.chain.contains(&id)) {
+                    return Some(format!("{shown} contains {}, which may not be trusted", b.path.display()));
+                }
+                let inside = is_within(canonical, &b.path)
+                    || b.chain
+                        .first()
+                        .is_some_and(|id| chain.get_or_insert_with(|| identity_chain(canonical)).contains(id));
+                inside.then(|| format!("{shown} is inside {}, which may not be trusted", b.path.display()))
             })
         })
     }
 
-    /// Trust status of a canonical directory.
+    /// Trust status of a canonical directory: trusted when it is (by name or
+    /// by file identity) a trusted directory or inside one.
     pub fn status_of(&self, canonical: &Path) -> TrustStatus {
         let roots = self.roots.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Entries that are too broad (e.g. persisted by an older version) never count.
-        let via = roots
-            .iter()
-            .map(|r| &r.path)
-            .filter(|r| is_within(canonical, r) && self.too_broad_reason(r).is_none())
-            .min_by_key(|r| r.components().count());
+        let usable = || roots.iter().filter(|r| r.ignored.is_none());
+        let mut via = usable().filter(|r| is_within(canonical, &r.path)).min_by_key(|r| r.path.components().count());
+        if via.is_none() && usable().any(|r| r.identity.is_some()) {
+            let chain = identity_chain(canonical);
+            // Outermost first, like the name comparison above.
+            via = chain.iter().rev().find_map(|id| usable().find(|r| r.identity.as_ref() == Some(id)));
+        }
+        let via = via.map(|r| &r.path);
         TrustStatus {
             root: canonical.display().to_string(),
             trusted: via.is_some(),
@@ -205,8 +269,12 @@ impl TrustStore {
         }
         {
             let mut roots = self.roots.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !roots.iter().any(|r| same_path(&r.path, &canonical)) {
-                roots.push(Entry { path: canonical.clone(), granted_at_ms: Some(now_ms()) });
+            let identity = file_identity(&canonical);
+            let known = roots.iter().any(|r| {
+                same_path(&r.path, &canonical) || (identity.is_some() && r.identity == identity && r.ignored.is_none())
+            });
+            if !known {
+                roots.push(Entry { path: canonical.clone(), granted_at_ms: Some(now_ms()), identity, ignored: None });
             }
             self.persist(&roots)?;
         }
@@ -234,8 +302,14 @@ impl TrustStore {
             Err(error) => return Err(error.into()),
         };
         {
+            // Every entry that is the folder or inside it, under any name.
+            let target = file_identity(&canonical);
             let mut roots = self.roots.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-            roots.retain(|r| !is_within(&r.path, &canonical));
+            roots.retain(|r| {
+                let inside = is_within(&r.path, &canonical)
+                    || target.is_some_and(|id| r.identity == Some(id) || identity_chain(&r.path).contains(&id));
+                !inside
+            });
             self.persist(&roots)?;
         }
         Ok(self.status_of(&canonical))
@@ -250,7 +324,7 @@ impl TrustStore {
                 path: r.path.display().to_string(),
                 granted_at_ms: r.granted_at_ms,
                 exists: r.path.is_dir(),
-                ignored_reason: self.too_broad_reason(&r.path),
+                ignored_reason: r.ignored.clone(),
             })
             .collect()
     }
@@ -276,7 +350,7 @@ impl TrustStore {
                 .system
                 .iter()
                 .map(|l| (l.path.as_path(), l.description))
-                .chain(self.too_broad.iter().map(|p| (p.as_path(), "a protected folder"))),
+                .chain(self.too_broad.iter().map(|p| (p.path.as_path(), "Exposition's own data folder"))),
         );
         TrustRules { summary: TRUST_RULE_SUMMARY.to_owned(), personal, system }
     }

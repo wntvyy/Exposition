@@ -273,13 +273,25 @@ pub enum Located {
     BadOverride {
         path: String,
     },
+    /// A settings override may not be used now (e.g. it lies inside the open
+    /// project, which never chooses what Exposition runs).
+    RefusedOverride {
+        path: String,
+        reason: String,
+    },
     NotFound,
 }
+
+/// Why a configured tool location may not be used now (`None`: it may).
+pub type RefuseOverride<'a> = dyn Fn(&Path) -> Option<String> + Sync + 'a;
 
 /// Finds tool executables without running anything.
 pub struct Locator<'a> {
     pub host: &'a HostEnv,
     pub settings: &'a ExecutionSettings,
+    /// Why a configured tool location may not be used right now, checked on
+    /// every use (a location can become project content after it was set).
+    pub refuse_override: Option<&'a RefuseOverride<'a>>,
 }
 
 fn exe_name(base: &str) -> String {
@@ -457,11 +469,13 @@ impl Locator<'_> {
         let base_id = def.component_of.unwrap_or(def.id);
         if let Some(raw) = self.settings.tool_paths.get(base_id) {
             let path = PathBuf::from(raw);
-            return if path.is_absolute() && is_executable_file(&path) {
-                Located::Found { path, source: ToolSource::Override }
-            } else {
-                Located::BadOverride { path: raw.clone() }
-            };
+            if !(path.is_absolute() && is_executable_file(&path)) {
+                return Located::BadOverride { path: raw.clone() };
+            }
+            if let Some(reason) = self.refuse_override.and_then(|refuse| refuse(&path)) {
+                return Located::RefusedOverride { path: raw.clone(), reason };
+            }
+            return Located::Found { path, source: ToolSource::Override };
         }
         let name = exe_name(def.exe);
         for dir in self.known_dirs(def.exe) {
@@ -574,7 +588,7 @@ mod tests {
         let mut settings = ExecutionSettings::default();
         settings.tool_paths.insert("pdflatex".into(), exe.display().to_string());
         settings.tool_paths.insert("python".into(), tmp.path().join("nope.exe").display().to_string());
-        let locator = Locator { host: &host, settings: &settings };
+        let locator = Locator { host: &host, settings: &settings, refuse_override: None };
         assert_eq!(locator.locate("pdflatex"), Located::Found { path: exe, source: ToolSource::Override });
         assert!(matches!(locator.locate("python"), Located::BadOverride { .. }));
         assert!(matches!(locator.locate("python-jupyter"), Located::BadOverride { .. }), "components follow base");
@@ -590,7 +604,7 @@ mod tests {
         std::fs::write(stub_dir.join(exe_name("git")), "x").unwrap();
         let host = HostEnv::from_pairs([("PATH", stub_dir.display().to_string())]);
         let settings = ExecutionSettings::default();
-        let locator = Locator { host: &host, settings: &settings };
+        let locator = Locator { host: &host, settings: &settings, refuse_override: None };
         assert!(locator.path_dirs("python").is_empty());
         assert_eq!(locator.path_dirs("git").len(), 1);
     }

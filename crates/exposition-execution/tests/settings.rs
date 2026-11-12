@@ -186,3 +186,72 @@ async fn docker_listing_includes_local_image() {
     assert_eq!(job.kind, exposition_execution::JobKind::Probe);
     assert!(!job.info.args.iter().any(|a| a == "pull"));
 }
+
+/// The local administrative share of a project path (`\localhost\C$\...`),
+/// when the share is reachable.
+#[cfg(windows)]
+fn admin_share(path: &std::path::Path) -> Option<String> {
+    let text = path.display().to_string();
+    let text = text.strip_prefix(r"\?\").unwrap_or(&text).to_owned();
+    if text.as_bytes().get(1) != Some(&b':') {
+        return None;
+    }
+    let share = format!(r"\localhost\{}${}", &text[..1], &text[2..]);
+    std::path::Path::new(&share).exists().then_some(share)
+}
+
+/// A tool location inside the open project is refused under any name of
+/// that folder, including the local administrative share.
+#[cfg(windows)]
+#[test]
+fn tool_locations_in_the_project_are_refused_under_any_name() {
+    let f = fixture_with(ExecutionSettings::default(), false);
+    let in_project = f.workspace.join("tools").join("git.exe");
+    std::fs::create_dir_all(in_project.parent().unwrap()).unwrap();
+    std::fs::copy(testproc(), &in_project).unwrap();
+    let Some(alias) = admin_share(&in_project) else {
+        eprintln!("SKIPPED: the local administrative share is not reachable");
+        return;
+    };
+    let error = f.service.apply_settings_change(tool_path("git", Some(&alias))).unwrap_err();
+    assert!(error.to_string().contains("inside the open project"), "{alias}: {error}");
+    assert!(f.service.settings().tool_paths.is_empty());
+}
+
+/// A location is checked whenever it is used, not only when it is set: one
+/// set while its folder was not open is refused (and never probed) once that
+/// folder is opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_location_that_became_project_content_is_not_used() {
+    let f = fixture_with(ExecutionSettings::default(), false);
+    let name = if cfg!(windows) { "git.exe" } else { "git" };
+    let in_project = f.workspace.join("tools").join(name);
+    std::fs::create_dir_all(in_project.parent().unwrap()).unwrap();
+    std::fs::copy(testproc(), &in_project).unwrap();
+    // The project is closed when the location is set.
+    f.service.unregister_root(&f.workspace);
+    f.service.apply_settings_change(tool_path("git", Some(&in_project.display().to_string()))).unwrap();
+    assert!(matches!(f.service.locate_tool("git"), Located::Found { source: ToolSource::Override, .. }));
+    // It is opened again (untrusted).
+    f.service.register_workspace_root(&f.workspace).unwrap();
+    match f.service.locate_tool("git") {
+        Located::RefusedOverride { reason, .. } => assert!(reason.contains("inside the open project"), "{reason}"),
+        other => panic!("the project's executable is still usable: {other:?}"),
+    }
+    let tools = f.service.refresh_toolchains().await;
+    let git = tools.iter().find(|t| t.id == "git").unwrap();
+    assert_eq!(git.status, ToolStatus::Broken, "{git:?}");
+    let probed: Vec<_> = f
+        .service
+        .list()
+        .into_iter()
+        .filter(|j| j.info.program.to_lowercase().contains(&name.to_lowercase()) && j.info.program.contains("tools"))
+        .collect();
+    assert!(probed.is_empty(), "the project's executable was probed: {probed:?}");
+    // A job asking for the tool by id is refused too.
+    let mut spec = spec_in(f.service.probe_dir(), &[]);
+    spec.program = "git".into();
+    let id = f.service.launch_application(spec);
+    let result = f.service.wait(&id).await.unwrap();
+    assert!(matches!(result.outcome, exposition_core::job::JobOutcome::FailedToStart { .. }), "{result:?}");
+}

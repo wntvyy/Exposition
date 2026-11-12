@@ -9,6 +9,7 @@
 pub mod artifact;
 pub mod build;
 pub mod document;
+pub mod identity;
 pub mod job;
 pub mod path;
 pub mod roots;

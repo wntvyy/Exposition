@@ -80,6 +80,50 @@ class TableGridTests(unittest.TestCase):
         self.assertEqual(host.strip_ansi("\x1b[0;31mValueError\x1b[0m: x"), "ValueError: x")
 
 
+class WorkingDirectoryCodeTests(unittest.TestCase):
+    """The workspace root reaches R and Julia kernels as data, never as code:
+    folder names may contain quotes, `$(...)`, backslashes, and any script."""
+
+    PATHS = [
+        r"C:\Users\me\jl$(touch(join(['P','W','N'])))",
+        'C:\\Users\\me\\say "hi"; system("calc")',
+        "C:\\Users\\me\\back\\slash\\${x}\\é ü 中文 🙂",
+        "/home/me/it's $(rm -rf ~) `id` \\n",
+    ]
+
+    def test_r_and_julia_get_the_path_as_bytes(self) -> None:
+        for path in self.PATHS:
+            for language in ("r", "julia", "R", " Julia "):
+                code = host.cwd_code(language, path)
+                self.assertIsNotNone(code, language)
+                # Nothing from the path appears in the source: only the fixed
+                # wrapper, digits, hex, and separators.
+                self.assertNotIn("$", code)
+                self.assertNotIn("touch", code)
+                self.assertNotIn('"hi"', code)
+                self.assertNotIn("\\", code)
+                self.assertEqual(self._decode(language.strip().lower(), code), path, code)
+
+    def test_python_kernels_get_no_code(self) -> None:
+        for path in self.PATHS:
+            self.assertIsNone(host.cwd_code("python", path))
+            self.assertIsNone(host.cwd_code("", path))
+
+    @staticmethod
+    def _decode(language: str, code: str) -> str:
+        import re
+
+        if language == "julia":
+            match = re.fullmatch(r'cd\(String\(hex2bytes\("([0-9a-f]*)"\)\)\)', code)
+            assert match, code
+            return bytes.fromhex(match.group(1)).decode("utf-8")
+        match = re.fullmatch(
+            r'local\(\{ p <- rawToChar\(as\.raw\(c\(([0-9, ]*)\)\)\); Encoding\(p\) <- "UTF-8"; setwd\(p\) \}\)', code
+        )
+        assert match, code
+        return bytes(int(b) for b in match.group(1).split(", ")).decode("utf-8")
+
+
 class Helper:
     """A real helper process speaking the JSON-lines protocol."""
 

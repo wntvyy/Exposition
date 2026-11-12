@@ -335,7 +335,9 @@ impl WorkspaceService {
     /// unchanged; opening another closes the current one first (journals of
     /// its unsaved buffers are kept for recovery).
     pub fn open_workspace(&self, path: &Path) -> WorkspaceResult<WorkspaceInfo> {
-        let root = WorkspaceRoot::open(path)?;
+        // The application's own data (recovery journals, settings, trust) is
+        // never a project: its files would become editable documents.
+        let root = WorkspaceRoot::open_excluding(path, &self.data_dir)?;
         let already_open = lock(&self.state).open.as_ref().is_some_and(|o| o.root.path() == root.path());
         if !already_open {
             self.close_workspace();

@@ -6,7 +6,8 @@
 // build (bibliography resolved), and validates command input.
 //
 // Requires TeX (pdflatex + bibtex) discoverable by the execution service.
-import { readFile, writeFile, mkdir, cp } from "node:fs/promises";
+import { readFile, writeFile, mkdir, mkdtemp, cp } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const invoke = (page, cmd, args) => page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args]);
@@ -36,7 +37,8 @@ export default async function texBuild({ launchApp, artifactsDir, fixture, asser
   const evidence = {};
   try {
     const { page } = app;
-    const project = join(app.dataDir, "paper");
+    // Outside the app's data folder, which is never a project.
+    const project = join(await mkdtemp(join(tmpdir(), "xp-tex-")), "paper");
     await cp(fixture("latex-basic"), project, { recursive: true });
     await mkdir(join(project, ".exposition"), { recursive: true });
     await writeFile(

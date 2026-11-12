@@ -59,6 +59,46 @@ impl WorkspaceRoot {
         Ok(Self { canonical })
     }
 
+    /// [`Self::open`], also refusing `protected` (the application's own data
+    /// directory: recovery journals, trust and execution settings) when the
+    /// folder is it, lies inside it, or contains it. Compared by name and by
+    /// file identity, so no other name for it is accepted either.
+    pub fn open_excluding(path: &Path, protected: &Path) -> WorkspaceResult<Self> {
+        let root = Self::open(path)?;
+        let protected = fs::canonicalize(protected).unwrap_or_else(|_| protected.to_path_buf());
+        let related = |a: &Path, b: &Path| {
+            Self::starts_with_ignore_case(a, b) || exposition_core::identity::within_by_identity(a, b)
+        };
+        if related(&root.canonical, &protected) || related(&protected, &root.canonical) {
+            return Err(WorkspaceError::new(
+                "workspace.tooBroad",
+                format!(
+                    "{} is or contains Exposition's own data folder ({}), which is never a project. Open a specific project folder instead.",
+                    root.display_path(),
+                    display_path(&protected)
+                ),
+            ));
+        }
+        Ok(root)
+    }
+
+    /// `path` equals `ancestor` or lies beneath it (component-wise; ASCII case
+    /// is ignored on Windows).
+    fn starts_with_ignore_case(path: &Path, ancestor: &Path) -> bool {
+        let key = |p: &Path| -> Vec<String> {
+            let text = display_path(p);
+            Path::new(&text)
+                .components()
+                .map(|c| {
+                    let part = c.as_os_str().to_string_lossy().into_owned();
+                    if cfg!(windows) { part.to_lowercase() } else { part }
+                })
+                .collect()
+        };
+        let (p, a) = (key(path), key(ancestor));
+        a.len() <= p.len() && p[..a.len()] == a[..]
+    }
+
     /// The canonical root path.
     pub fn path(&self) -> &Path {
         &self.canonical
