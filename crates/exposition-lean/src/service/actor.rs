@@ -1379,6 +1379,12 @@ impl Actor {
         // Stopping servers finish through `Stopped`; only a running server crashed.
         let Some(running) = server.running() else { return };
         let job = running.job.clone();
+        // A trust revoke stops the folder's jobs before it is announced: this
+        // server did not crash, its folder is no longer trusted.
+        if let Err(workspace_root) = self.workspace_trusted() {
+            self.untrust(&key, workspace_root);
+            return;
+        }
         let outcome = match result.map(|r| r.outcome) {
             Some(JobOutcome::Exited { code }) => format!("The Lean server exited unexpectedly with code {code}."),
             Some(JobOutcome::Terminated { description }) => format!("The Lean server was terminated ({description})."),

@@ -422,6 +422,55 @@ async fn trust_grants_and_revokes_are_announced() {
     assert!(changes.try_recv().unwrap().granted);
 }
 
+/// Revoking trust stops every running trusted job of that folder (batch and
+/// interactive, in the folder or in an application directory bound to it)
+/// before `revoke_trust` returns: no consumer has to notice the change for
+/// the folder's code to stop. Jobs of other trusted folders keep running.
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_trust_kills_the_folders_running_jobs_before_returning() {
+    let f = fixture();
+    // An application directory bound to the project (like the LaTeX mirror
+    // or a kernel directory) follows the project's trust.
+    let bound = f.tmp.path().join("bound");
+    std::fs::create_dir_all(&bound).unwrap();
+    f.service.register_app_dir(&bound, Some(&f.workspace)).unwrap();
+    // Another trusted project is not affected.
+    let other = f.tmp.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let other = f.service.register_workspace_root(&other).unwrap();
+    f.service.grant_trust(&other.display().to_string()).unwrap();
+
+    let batch = f.service.launch(f.spec(&["tree", "2", "120"]));
+    let in_bound = f.service.launch(spec_in(&bound, &["tree", "1", "120"]));
+    let session =
+        f.service.launch_interactive(f.spec(&["tree", "0", "120"]), InteractiveOptions::default()).await.unwrap();
+    let elsewhere = f.service.launch(spec_in(&other, &["tree", "0", "120"]));
+    let batch_tree = pids(&f.wait_stdout(&batch, Duration::from_secs(20), |t| pids(t).len() == 3).await);
+    let bound_tree = pids(&f.wait_stdout(&in_bound, Duration::from_secs(20), |t| pids(t).len() == 2).await);
+    let other_tree = pids(&f.wait_stdout(&elsewhere, Duration::from_secs(20), |t| pids(t).len() == 1).await);
+    let session_pid = session.pid.expect("interactive pid");
+    let doomed: Vec<u32> = batch_tree.iter().chain(&bound_tree).copied().chain([session_pid]).collect();
+    assert!(doomed.iter().all(|p| alive(*p)), "running before the revoke: {doomed:?}");
+
+    let mut changes = f.service.subscribe_trust();
+    f.service.revoke_trust(&f.workspace.display().to_string()).unwrap();
+    // Checked right after the call returns, without waiting.
+    let living: Vec<u32> = doomed.iter().copied().filter(|p| alive(*p)).collect();
+    assert!(living.is_empty(), "processes of the revoked folder still run after revoke_trust returned: {living:?}");
+    assert!(!changes.try_recv().unwrap().granted, "announced after the jobs were stopped");
+    for id in [&batch, &in_bound, &session.id] {
+        let result = f.service.wait(id).await.unwrap();
+        assert_eq!(result.outcome, JobOutcome::Canceled, "{id:?}");
+        let log = f.service.output_text(id, OutputStream::Stderr).unwrap();
+        assert!(log.contains("canceled: workspace trust revoked"), "{id:?} log: {log:?}");
+    }
+    // The other trusted folder's job keeps running.
+    assert!(other_tree.iter().all(|p| alive(*p)), "a job of another trusted folder was stopped");
+    assert!(f.service.result(&elsewhere).is_none());
+    f.service.cancel(&elsewhere);
+    f.service.wait(&elsewhere).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn restricted_backend_unavailable_is_refused_without_native_fallback() {
     // (a) Docker missing (configured path does not exist).
