@@ -419,6 +419,8 @@ export default async function projectCreate({ launchApp, artifactsDir, assert })
       assert.equal(await readFile(join(objectiveRoot, "notes", "plan.md"), "utf8"), "# Plan\n\nResearch question: does the gap concentrate?\n");
       assert.equal((await invoke(page, "trust_status", { root: (await invoke(page, "workspace_current")).root })).trusted, false);
       assert.equal(await graphPageMounted(page), false);
+      // The previous project's workflow draft tab no longer edits it.
+      await page.getByTestId("workflow-detached").waitFor({ timeout: 10_000 });
       await shot(page, "objective-task-light");
       step("F: objective path created an empty project and ran the agent task there", { task: task.id });
       assert.deepEqual(consoleErrors(app), [], "no console errors");

@@ -1,7 +1,7 @@
 // Workflow drafts: compatible-only binding choices and structural edits, and
 // the draft editor (live Rust validation mocked at the feature's IPC
 // boundary): never runnable, diagnostics shown, saving creates a revision.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OperationContract } from "../../bindings/OperationContract";
@@ -36,6 +36,11 @@ vi.mock("./CodePayloadEditor", () => ({
 }));
 vi.mock("../../app/editors", () => ({ editors: editorsMock }));
 vi.mock("../../app/notifications", () => notifications);
+const workspaceInfo = vi.hoisted(() => ({ root: "/work/lean" }));
+vi.mock("../workspace/store", async () => {
+  const { create } = await import("zustand");
+  return { useWorkspace: create(() => ({ info: { root: workspaceInfo.root, name: "lean", recovery: [] } })) };
+});
 vi.mock("../../lib/ipc", () => ({
   errorMessage: (e: unknown) => (typeof e === "object" && e && "message" in e ? String(e.message) : String(e)),
 }));
@@ -43,6 +48,7 @@ vi.mock("../../lib/ipc", () => ({
 const model = await import("./model");
 const actions = await import("./actions");
 const { WorkflowEditor } = await import("./WorkflowEditor");
+const { useWorkspace } = await import("../workspace/store");
 
 const runner = { id: "r", title: "Runner", containment: "applicationService" as const, allows: [], available: false, availability: "Workflow execution arrives in a later version of Exposition." };
 const contracts: OperationContract[] = [
@@ -141,6 +147,7 @@ const saved = (revision: number, def: WorkflowDefinition, errors = 0): SavedWork
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useWorkspace.setState({ info: { root: "/work/lean", name: "lean", recovery: [] } } as never);
   wfIpc.operations.mockResolvedValue(contracts);
   wfIpc.get.mockResolvedValue(saved(1, audit));
   wfIpc.validate.mockResolvedValue(validation(0));
@@ -220,5 +227,14 @@ describe("WorkflowEditor", () => {
     await waitFor(() => expect(screen.getByTestId("workflow-editor").getAttribute("data-revision")).toBe("2"));
     expect(screen.getByTestId("workflow-status").getAttribute("data-runnable")).toBe("false");
     expect(editorsMock.registerCloseGuard).toHaveBeenCalledWith("workflow:wf-1", expect.any(Function));
+  });
+
+  it("stops editing a draft whose project is no longer open", async () => {
+    render(<WorkflowEditor resource={{ key: "workflow:wf-1", title: "Formal audit" }} mode="source" active />);
+    await screen.findByTestId("workflow-status");
+    act(() => useWorkspace.setState({ info: { root: "/work/other", name: "other", recovery: [] } } as never));
+    const detached = await screen.findByTestId("workflow-detached");
+    expect(detached.textContent).toMatch(/belongs to \/work\/lean/);
+    expect(screen.queryByTestId("workflow-save")).toBeNull();
   });
 });

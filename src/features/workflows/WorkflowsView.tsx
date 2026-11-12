@@ -9,6 +9,7 @@ import type { WorkflowPresetInfo } from "../../bindings/WorkflowPresetInfo";
 import type { WorkflowSummary } from "../../bindings/WorkflowSummary";
 import { errorMessage } from "../../lib/ipc";
 import { Banner, Button, EmptyState, ErrorState, StatusPill } from "../../ui/components";
+import { useWorkspace } from "../workspace/store";
 import { workflowCommands } from "./ipc";
 import { workflowKey } from "./model";
 import { importDraft, newDraftFromPreset } from "./actions";
@@ -20,6 +21,7 @@ export function WorkflowsView(_props: EditorProps) {
   const [text, setText] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const id = useId();
+  const root = useWorkspace((s) => s.info?.root ?? null);
 
   const refresh = async () => {
     try {
@@ -33,7 +35,7 @@ export function WorkflowsView(_props: EditorProps) {
   };
   useEffect(() => {
     void refresh();
-  }, []);
+  }, [root]);
 
   if (error) return <ErrorState title="Workflow drafts are unavailable" description={error} actions={<Button onPress={() => void refresh()}>Retry</Button>} />;
   return (

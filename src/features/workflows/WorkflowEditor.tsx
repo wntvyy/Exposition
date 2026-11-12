@@ -35,7 +35,9 @@ import {
   Select,
   StatusPill,
   TextField,
+  UnavailableState,
 } from "../../ui/components";
+import { useWorkspace } from "../workspace/store";
 import { CodePayloadEditor } from "./CodePayloadEditor";
 import { workflowCommands } from "./ipc";
 import {
@@ -382,6 +384,9 @@ export function WorkflowEditor({ resource }: EditorProps) {
   const [newStep, setNewStep] = useState<string | null>(null);
   const [newInput, setNewInput] = useState<PortType>("dataset");
   const [newOutcome, setNewOutcome] = useState<OutcomeKind>("retainedFigure");
+  // A draft belongs to the project it was opened in.
+  const [projectRoot, setProjectRoot] = useState<string | null>(null);
+  const currentRoot = useWorkspace((s) => s.info?.root ?? null);
 
   const load = useCallback(async () => {
     try {
@@ -390,6 +395,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
       setDraft(workflow.definition);
       setValidation(workflow.validation);
       setContracts(ops);
+      setProjectRoot(useWorkspace.getState().info?.root ?? null);
       setLoadError(null);
       editors.setTitle(resource.key, workflow.definition.title || "Workflow draft");
     } catch (error) {
@@ -466,6 +472,17 @@ export function WorkflowEditor({ resource }: EditorProps) {
     );
   }
   if (!draft || !saved) return <LoadingState title="Loading the workflow draft…" />;
+  if (projectRoot !== null && currentRoot !== projectRoot) {
+    return (
+      <div className="xp-wf" data-testid="workflow-detached">
+        <UnavailableState
+          title="This draft's project is not open"
+          description={`“${saved.definition.title}” belongs to ${projectRoot}. Reopen that project to edit or save it.`}
+          actions={<Button onPress={() => void editors.close(resource.key)}>Close</Button>}
+        />
+      </div>
+    );
+  }
 
   const errors = diagnostics.filter((d) => d.severity === "error").length;
   return (
