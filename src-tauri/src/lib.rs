@@ -9,6 +9,7 @@ mod error;
 mod execution;
 mod research;
 mod state;
+mod tex;
 mod workspace;
 
 use tauri::{Manager, RunEvent};
@@ -25,6 +26,7 @@ pub fn run() {
             documents::forward_events(app.handle().clone());
             workspace::start(app.handle().clone());
             execution::forward_events(app.handle().clone());
+            tex::forward_events(app.handle().clone());
             agents::forward_events(app.handle().clone());
             #[cfg(debug_assertions)]
             execution::add_dev_capability(app.handle())?;
@@ -82,6 +84,11 @@ pub fn run() {
             execution::trust_status,
             execution::trust_grant,
             execution::trust_revoke,
+            tex::tex_build,
+            tex::tex_status,
+            tex::tex_cancel,
+            tex::tex_page_image,
+            tex::tex_page_map,
             #[cfg(debug_assertions)]
             execution::dev_start_probe_job,
             #[cfg(debug_assertions)]
@@ -109,6 +116,7 @@ pub fn run() {
             // Kill every supervised process tree before exiting. (If the app
             // crashes instead, job-object kill-on-close does the same.)
             if let RunEvent::Exit = event {
+                app.state::<AppState>().tex.shutdown();
                 app.state::<AppState>().execution.shutdown();
             }
         });

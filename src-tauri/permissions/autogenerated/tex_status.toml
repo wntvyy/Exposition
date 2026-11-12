@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tex-status"
+description = "Enables the tex_status command without any pre-configured scope."
+commands.allow = ["tex_status"]
+
+[[permission]]
+identifier = "deny-tex-status"
+description = "Denies the tex_status command without any pre-configured scope."
+commands.deny = ["tex_status"]

@@ -95,6 +95,7 @@ impl Harness {
             buffers: self.documents.snapshots(),
             mode,
             tounicode: false,
+            workspace: None,
         }
     }
 

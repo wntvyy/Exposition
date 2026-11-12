@@ -943,6 +943,7 @@ dependencies = [
  "exposition-core",
  "exposition-execution",
  "exposition-research",
+ "exposition-tex",
  "exposition-workspace",
  "serde",
  "serde_json",
@@ -1040,6 +1041,7 @@ name = "exposition-tex"
 version = "0.1.0"
 dependencies = [
  "exposition-core",
+ "exposition-execution",
  "exposition-workspace",
  "flate2",
  "hayro",
@@ -1048,6 +1050,8 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "ts-rs",
  "unicode-normalization",
 ]
 

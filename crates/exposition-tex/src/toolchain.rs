@@ -68,6 +68,15 @@ impl TexToolchain {
         candidates.into_iter().find_map(|dir| Self::in_dir(&dir))
     }
 
+    /// A toolchain from individually located tools (e.g. the execution
+    /// service's locator, which honours settings overrides). `None` when no
+    /// engine is present.
+    pub fn from_tools(tools: BTreeMap<TexTool, PathBuf>) -> Option<Self> {
+        let engine = tools.get(&TexTool::PdfLatex).or_else(|| tools.get(&TexTool::LuaLatex))?;
+        let bin_dir = engine.parent()?.to_path_buf();
+        Some(Self { bin_dir, tools })
+    }
+
     /// The toolchain in exactly `bin_dir`, if it contains at least one engine.
     pub fn in_dir(bin_dir: &Path) -> Option<Self> {
         let mut tools = BTreeMap::new();

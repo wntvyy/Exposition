@@ -8,6 +8,7 @@ use exposition_core::path::WorkspacePath;
 use exposition_execution::{ExecutionConfig, ExecutionService};
 use exposition_research::launcher::ExecutionLauncher;
 use exposition_research::{ResearchConfig, ResearchService, ResolvedSource, SourceReader};
+use exposition_tex::{TexService, TexServiceConfig};
 use exposition_workspace::{DocumentService, WorkspaceService};
 use tauri::{AppHandle, Manager};
 
@@ -20,6 +21,8 @@ pub struct AppState {
     pub execution: ExecutionService,
     /// Research sessions, runs, and provenance (M4). Launches through `execution`.
     pub research: Arc<ResearchService>,
+    /// LaTeX/LuaLaTeX builds (through `execution`) and their pages.
+    pub tex: TexService,
     /// Application data directory (settings, recovery, session metadata).
     pub data_dir: PathBuf,
     /// Agent tasks (provider, task loop, review); task history in `agents.sqlite3`.
@@ -39,6 +42,12 @@ impl AppState {
         }
         let execution = ExecutionService::with_config(execution_config)?;
         let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
+        let tex = TexService::new(
+            execution.clone(),
+            Arc::clone(&workspace),
+            tauri::async_runtime::handle().inner().clone(),
+            TexServiceConfig::new(&data_dir),
+        )?;
         let agents = AgentService::new(AgentConfig {
             database: Some(data_dir.join("agents.sqlite3")),
             documents: Arc::clone(&documents),
@@ -60,7 +69,7 @@ impl AppState {
         );
         research_config.source_reader = Some(Arc::new(WorkspaceSources(Arc::clone(&workspace))));
         let research = Arc::new(ResearchService::new(research_config));
-        Ok(Self { documents, workspace, execution, research, data_dir, agents })
+        Ok(Self { documents, workspace, execution, research, tex, data_dir, agents })
     }
 }
 

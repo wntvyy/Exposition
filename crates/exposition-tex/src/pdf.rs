@@ -21,7 +21,8 @@ use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
 use serde::{Deserialize, Serialize};
 
 /// An axis-aligned rectangle in page points (top-left origin).
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, rename = "TexPageRect")]
 #[serde(rename_all = "camelCase")]
 pub struct PageRect {
     pub x0: f64,
@@ -76,7 +77,8 @@ impl PageRect {
 }
 
 /// One glyph drawn on a page, in content-stream (= TeX shipout) order.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, rename = "TexPageGlyph")]
 #[serde(rename_all = "camelCase")]
 pub struct PageGlyph {
     /// Index of the glyph within its page, in drawing order.
