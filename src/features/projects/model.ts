@@ -80,23 +80,6 @@ export function presetRequest(
 }
 
 /**
- * The agent task that organizes a project created from an objective. The
- * task runs in the new project only; it asks for a proposal, allows a
- * research-only project, and excludes installs and code execution.
- */
-export function objectivePrompt(objective: string): string {
-  return [
-    `New project objective: ${objective.trim()}`,
-    "",
-    "This folder is a new, empty Exposition project created for this objective. Propose a suitable organization and then create it with your file and project-graph tools:",
-    "- the files and folders it needs (a manuscript only if the objective calls for one; a research-only project is fine),",
-    "- a research space with sources, data, and notes when the work is computational or exploratory,",
-    "- meaningful entities and typed relations (questions, claims, definitions, experiments, collections) and workflow drafts where useful.",
-    "Explain the organization briefly before creating it. Do not install software and do not run code.",
-  ].join("\n");
-}
-
-/**
  * Availability of what a blueprint declares, on this computer (null while
  * discovery has not answered). Lean is checked against the exact toolchain
  * the blueprint's `lean-toolchain` names.

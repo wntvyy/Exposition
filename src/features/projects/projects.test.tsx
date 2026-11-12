@@ -21,17 +21,16 @@ const projectIpc = vi.hoisted(() => ({
   creationStatus: vi.fn(),
   creationResolve: vi.fn(),
 }));
-const ipc = vi.hoisted(() => ({ agentsTaskCreate: vi.fn() }));
+const generation = vi.hoisted(() => ({ startProjectGeneration: vi.fn() }));
 const notifications = vi.hoisted(() => ({ notify: vi.fn(), dismiss: vi.fn() }));
 const editorsMock = vi.hoisted(() => ({ open: vi.fn(), close: vi.fn(async () => true), all: vi.fn(() => []), setDirty: vi.fn() }));
 const pagesMock = vi.hoisted(() => ({ show: vi.fn(() => false), active: vi.fn(() => "editor") }));
 const layoutMock = vi.hoisted(() => ({ showView: vi.fn() }));
 const workspace = vi.hoisted(() => ({ openWorkspace: vi.fn(async () => true), loadDir: vi.fn() }));
-const agentsMock = vi.hoisted(() => ({ init: vi.fn(async () => {}), show: vi.fn() }));
 
 vi.mock("./ipc", () => ({ projectCommands: projectIpc }));
+vi.mock("../agents/generation", () => generation);
 vi.mock("../../lib/ipc", () => ({
-  commands: ipc,
   events: { workspace: async () => () => {} },
   errorMessage: (e: unknown) => (typeof e === "object" && e && "message" in e ? String(e.message) : String(e)),
 }));
@@ -41,7 +40,6 @@ vi.mock("../../app/pages", () => ({ EDITOR_PAGE: "editor", pages: pagesMock }));
 vi.mock("../../app/layout", () => ({ layout: layoutMock }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("../editor/documentClient", () => ({ fileKey: (p: string) => `file:${p}` }));
-vi.mock("../agents/store", () => ({ AGENT_VIEW_ID: "agents.panel", agents: agentsMock }));
 vi.mock("../workspace/store", async () => {
   const { create } = await import("zustand");
   return {
@@ -181,12 +179,6 @@ describe("model", () => {
     expect(installed[0]).toMatchObject({ available: true, guidance: null });
   });
 
-  it("writes an objective prompt that allows research-only projects and forbids installs and execution", () => {
-    const prompt = model.objectivePrompt("Study random graphs");
-    expect(prompt).toContain("Study random graphs");
-    expect(prompt).toMatch(/research-only project is fine/);
-    expect(prompt).toMatch(/Do not install software and do not run code/);
-  });
 });
 
 describe("preset path", () => {
@@ -248,8 +240,8 @@ function useStoreError() {
 }
 
 describe("objective path", () => {
-  it("creates an empty project and starts a whole-project agent task with no commands by default", async () => {
-    ipc.agentsTaskCreate.mockResolvedValue({ id: "task-9" });
+  it("creates an empty project, then starts the agent service's generation task there", async () => {
+    generation.startProjectGeneration.mockResolvedValue({ id: "task-9" });
     await store.loadCatalog();
     store.setOptions({ mode: "objective", objective: "Study the spectral gap of random graphs", permission: "autoApply" });
     store.setLocation("C:\\work\\gap-study");
@@ -258,17 +250,20 @@ describe("objective path", () => {
     expect(projectIpc.presetBlueprint).toHaveBeenLastCalledWith(
       expect.objectContaining({ preset: "empty", purpose: "Study the spectral gap of random graphs" }),
     );
-    expect(ipc.agentsTaskCreate).toHaveBeenCalledWith({
-      prompt: expect.stringContaining("Study the spectral gap of random graphs"),
+    expect(generation.startProjectGeneration).toHaveBeenCalledWith({
+      objective: "Study the spectral gap of random graphs",
       workspaceRoot: "C:\\work\\spectral-gaps",
-      scope: { kind: "workspace" },
       permission: "autoApply",
       execution: "disabled",
-      consent: null,
-      budgets: null,
+      show: "page",
     });
-    expect(layoutMock.showView).toHaveBeenCalledWith("auxiliary", "agents.panel");
-    expect(agentsMock.show).toHaveBeenCalledWith("task", "task-9");
+    // The project is created and opened before the task starts.
+    expect(projectIpc.create.mock.invocationCallOrder[0]!).toBeLessThan(
+      generation.startProjectGeneration.mock.invocationCallOrder[0]!,
+    );
+    expect(workspace.openWorkspace.mock.invocationCallOrder[0]!).toBeLessThan(
+      generation.startProjectGeneration.mock.invocationCallOrder[0]!,
+    );
   });
 
   it("needs an objective", async () => {

@@ -394,7 +394,9 @@ export default async function projectCreate({ launchApp, artifactsDir, assert })
       await page.waitForSelector('[data-testid="project-destination-status"][data-ok="true"]');
       await selectOption(page, page.getByRole("button", { name: /Document changes/ }).locator(".."), "Apply changes, review afterwards");
       await page.getByTestId("objective-create").click();
-      await page.waitForSelector("[data-testid=agents-task-view]", { timeout: 30_000 });
+      // The task is shown on the Agents page.
+      await page.waitForFunction(() => document.querySelector('[data-page="agents"]')?.hidden === false, null, { timeout: 30_000 });
+      await page.getByTestId("agents-page-task-detail").waitFor({ timeout: 30_000 });
       const tasks = await waitFor(
         async () => {
           const list = await invoke(page, "agents_task_list");
@@ -412,7 +414,7 @@ export default async function projectCreate({ launchApp, artifactsDir, assert })
       assert.equal(spec.execution, "disabled", "no commands by default");
       assert.equal(spec.permission, "autoApply", "the permission chosen on the page");
       assert.match(spec.prompt, /spectral gap of random regular graphs/);
-      assert.match(spec.prompt, /research-only project is fine/);
+      assert.match(spec.prompt, /research-only/, "a research-only organization is allowed");
       assert.match(spec.workspaceRoot.toLowerCase(), /gap-concentration$/);
       assert.equal((await invoke(page, "workspace_current")).name, "gap-concentration");
       assert.ok(existsSync(join(objectiveRoot, ".exposition", "graph.sqlite3")), "the empty project has its graph");
@@ -420,7 +422,7 @@ export default async function projectCreate({ launchApp, artifactsDir, assert })
       assert.equal((await invoke(page, "trust_status", { root: (await invoke(page, "workspace_current")).root })).trusted, false);
       assert.equal(await graphPageMounted(page), false);
       // The previous project's workflow draft tab no longer edits it.
-      await page.getByTestId("workflow-detached").waitFor({ timeout: 10_000 });
+      await page.getByTestId("workflow-detached").waitFor({ state: "attached", timeout: 10_000 });
       await shot(page, "objective-task-light");
       step("F: objective path created an empty project and ran the agent task there", { task: task.id });
       assert.deepEqual(consoleErrors(app), [], "no console errors");

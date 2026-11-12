@@ -394,10 +394,13 @@ fn source_ok(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, ':' | '.' | '_' | '-'))
 }
 
+/// `main` (the single research space agents create by convention) or `rs-`
+/// followed by 4–32 lowercase letters or digits (what presets mint).
 pub fn research_id_ok(id: &str) -> bool {
-    id.strip_prefix("rs-").is_some_and(|rest| {
-        (4..=32).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-    })
+    id == "main"
+        || id.strip_prefix("rs-").is_some_and(|rest| {
+            (4..=32).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
 }
 
 /// The kind each reference resolves to (for endpoint rules).
@@ -491,7 +494,7 @@ pub fn validate_blueprint(bp: &ProjectBlueprint) -> BlueprintValidation {
             if !research_id_ok(&r.id) {
                 err(
                     "blueprint.research",
-                    "the research space id must be rs- followed by 4–32 lowercase letters or digits".into(),
+                    "the research space id must be `main` or rs- followed by 4–32 lowercase letters or digits".into(),
                     Some(&r.id),
                 );
             }

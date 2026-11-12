@@ -22,8 +22,8 @@ import type { PresetCatalog } from "../../bindings/PresetCatalog";
 import type { ProjectBlueprint } from "../../bindings/ProjectBlueprint";
 import type { ProjectCreated } from "../../bindings/ProjectCreated";
 import type { ResearchRuntime } from "../../bindings/ResearchRuntime";
-import { commands, errorMessage, events } from "../../lib/ipc";
-import { AGENT_VIEW_ID, agents } from "../agents/store";
+import { errorMessage, events } from "../../lib/ipc";
+import { startProjectGeneration } from "../agents/generation";
 import { fileKey } from "../editor/documentClient";
 import { FILES_VIEW_ID, loadDir, openWorkspace, ROOT, useWorkspace } from "../workspace/store";
 import { projectCommands } from "./ipc";
@@ -32,7 +32,6 @@ import {
   folderNameFor,
   joinPath,
   NEW_PROJECT_KEY,
-  objectivePrompt,
   parentOf,
   presetRequest,
   setupKey,
@@ -309,8 +308,9 @@ export async function createFromPreset(): Promise<ProjectCreated | null> {
 }
 
 /**
- * Objective path: create an empty project, open it, and start a normal agent
- * task there (whole project, chosen permission, no commands by default).
+ * Objective path: create an empty project, open it (its graph attaches), and
+ * start the agent service's project-generation task there — an ordinary
+ * whole-project task with the chosen permission and no commands by default.
  */
 export async function createFromObjective(): Promise<ProjectCreated | null> {
   const state = useProjects.getState();
@@ -339,18 +339,13 @@ export async function createFromObjective(): Promise<ProjectCreated | null> {
   await editors.close(NEW_PROJECT_KEY);
   try {
     const info = useWorkspace.getState().info;
-    const task = await commands.agentsTaskCreate({
-      prompt: objectivePrompt(objective),
+    await startProjectGeneration({
+      objective,
       workspaceRoot: info?.root ?? created.root,
-      scope: { kind: "workspace" },
       permission: state.permission,
       execution: state.execution,
-      consent: null,
-      budgets: null,
+      show: "page",
     });
-    await agents.init();
-    if (!pages.show("agents")) layout.showView("auxiliary", AGENT_VIEW_ID);
-    agents.show("task", task.id);
     notify({
       tone: "success",
       title: `Created ${created.title}`,
