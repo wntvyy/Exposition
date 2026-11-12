@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | App | Exposition 0.1.0 (`org.exposition.desktop`), Tauri 2: Rust core (`src-tauri/`, `crates/`) + React/TypeScript workbench (`src/`) |
-| Commit | `6c90ce1` (main; inventory taken at `c4669a5`, updated for the two later merges: Lean audit hardening and the final agents fixes) |
+| Commit | `c8fdca6` (main; inventory taken at `c4669a5`, updated for the later merges: Lean audit hardening, the final agents fixes, credential persistence, `live-restricted`) |
 | Date | 2026-11-12 |
 | Platform | Windows 11 x64 verified; macOS/Linux structurally supported, unverified |
 | Status | Local alpha; NSIS per-user installer, not code-signed |
@@ -879,3 +879,5 @@ All counts were read from `c4669a5` (working tree clean); the two later merges (
 | Gate refusal codes / agent error codes | 13 / 22 | `pub const` in `pub mod codes` (`tools/exec.rs`); unique `"agents.*"` strings in `service.rs` + `src-tauri/src/agents.rs` |
 | Settings keys | 27 | Fields of `AppSettings`/`FilesSettings`/`EditorSettings`, `ProjectSettings`, `ExecutionSettings`/`DockerSettings`, `ProviderSettings`, trust file; frontend keys from `readStored`/`writeStored`/`sessionStorage` callers |
 | e2e scenarios | 32 | `ls scripts/e2e/scenarios/*.mjs`; `run.mjs` loads all and skips `live-*` unless named |
+
+**Final acceptance run (main `c8fdca6`, 2026-11-12, Windows 11 x64).** `npm run check` 9/9 (1033 Rust tests, 9 ignored; 231 frontend tests). Debug app: default e2e 24/24 including `m6-paper-project` 16/16; reviewer scenarios by name all pass with no defect (`review-m5-agents`, `review-sec-*`, the M2/M3 reviewer's seven scenarios at `f6404c2`). Release: NSIS installer 26.63 MiB; silent per-user install (`/S /D=…`) in 3.2 s without elevation. Against the installed app: 23 of 26 scenarios pass; the 3 that fail need development-only commands or the scripted provider, which the release refuses by design (`execution-jobs`, `settings`, `review-sec-render`). Scenarios that save or remove a key are never run against a release build (it always uses the real credential entry). Installed `m6-paper-project`: every step passes except the two that need an agent (draft; unattended Docker run), which the live scenarios cover against the installed app with the real provider: `live-restricted` 19/19 (at `c8fdca6`) and `live-agents` 20/20 (at `f6404c2`). Silent uninstall removes the program folder, the uninstall entry and the Start Menu shortcut; Tauri's uninstaller keeps `HKCU\Software\exposition\Exposition` (the install path) and the app data unless its "delete app data" option is chosen.
