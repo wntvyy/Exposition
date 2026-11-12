@@ -7,11 +7,17 @@
 //! and its project. Starting a server or installing a toolchain requires
 //! workspace trust (enforced by the execution service).
 
+use std::sync::Arc;
+
 use exposition_core::document::DocumentId;
 use exposition_core::job::JobId;
+use exposition_graph::GraphError;
+use exposition_lean::evidence::{
+    self, DeclarationEvidence, DeclarationRef, EvidenceOutcomeReport, LeanAssociateRequest, LeanAssociation,
+};
 use exposition_lean::{
-    LeanCheckReport, LeanCheckRequest, LeanCheckTarget, LeanDocumentState, LeanError, LeanGoals, LeanHover,
-    LeanLocation, LeanProjectInfo,
+    LeanAuditRecord, LeanCheckReport, LeanCheckRequest, LeanCheckTarget, LeanDocumentState, LeanError, LeanGoals,
+    LeanHover, LeanLocation, LeanProjectInfo,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
@@ -109,6 +115,134 @@ pub async fn lean_check(state: State<'_, AppState>, request: LeanCheckRequest) -
     }
     let request = LeanCheckRequest { timeout_ms: request.timeout_ms.map(|t| t.min(MAX_CHECK_TIMEOUT_MS)), ..request };
     state.lean.check(request).await
+}
+
+// ---- formal evidence in the project graph -------------------------------------
+
+fn graph_error(e: GraphError) -> LeanError {
+    LeanError::new(&e.code, e.message)
+}
+
+/// The audit record of a document, as the Lean service keeps it.
+async fn audit_record(state: &State<'_, AppState>, document: &DocumentId) -> Result<LeanAuditRecord, LeanError> {
+    validate_document(document)?;
+    state.lean.audit_record(document.clone()).await?.ok_or_else(|| {
+        LeanError::new(
+            "lean.noAudit",
+            "No revision of this file has a finished axiom audit (it has errors, is not trusted, or is still being checked).",
+        )
+    })
+}
+
+/// Whether `revision` of `document` is its saved text.
+fn saved(state: &AppState, document: &DocumentId, revision: u64) -> bool {
+    state.documents.info(document).ok().is_some_and(|info| info.saved_revision == Some(revision))
+}
+
+/// The axiom audit of the last finished revision of an open Lean document:
+/// every declaration it reported, with statements, axioms, and verdicts.
+#[tauri::command]
+pub async fn lean_audit_record(
+    state: State<'_, AppState>,
+    document: DocumentId,
+) -> Result<Option<LeanAuditRecord>, LeanError> {
+    validate_document(&document)?;
+    state.lean.audit_record(document).await
+}
+
+/// Record service-owned formal evidence for declarations of the document's
+/// last audit (exactly what the audit reported; unlisted names are refused).
+#[tauri::command]
+pub async fn lean_record_evidence(
+    state: State<'_, AppState>,
+    document: DocumentId,
+    declarations: Vec<String>,
+) -> Result<EvidenceOutcomeReport, LeanError> {
+    if declarations.is_empty() || declarations.len() > 200 || declarations.iter().any(|d| d.len() > 1024) {
+        return Err(LeanError::new("lean.invalidRequest", "name 1–200 declarations"));
+    }
+    let record = audit_record(&state, &document).await?;
+    let saved = saved(&state, &document, record.revision);
+    let graph = Arc::clone(&state.graph);
+    tauri::async_runtime::spawn_blocking(move || {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        evidence::record_evidence(&graph, &record, &declarations, saved, now)
+    })
+    .await
+    .map_err(|e| LeanError::new("internal.task", e.to_string()))?
+    .map_err(graph_error)
+}
+
+/// Record a person's reviewed association of a formal declaration with an
+/// informal statement, definition, assumption, or object (`formalizes`,
+/// accepted). A correspondence assertion, not a proof of equivalence; the
+/// verifier's verdict stays a separate evidence record. For an audited
+/// declaration its evidence is recorded from the audit first.
+#[tauri::command]
+pub async fn lean_associate_declaration(
+    state: State<'_, AppState>,
+    request: LeanAssociateRequest,
+) -> Result<LeanAssociation, LeanError> {
+    if request.note.as_ref().is_some_and(|n| n.len() > 500) {
+        return Err(LeanError::new("lean.invalidRequest", "the note is longer than 500 characters"));
+    }
+    let audited = match &request.declaration {
+        DeclarationRef::Audited { document, name } => {
+            let record = audit_record(&state, document).await?;
+            let saved = saved(&state, document, record.revision);
+            Some((record, name.clone(), saved))
+        }
+        DeclarationRef::Entity { .. } => None,
+    };
+    let graph = Arc::clone(&state.graph);
+    tauri::async_runtime::spawn_blocking(move || {
+        let (declaration, report) = match (&request.declaration, audited) {
+            (DeclarationRef::Entity { entity }, _) => (entity.clone(), None),
+            (_, Some((record, name, saved))) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let report = evidence::record_evidence(&graph, &record, std::slice::from_ref(&name), saved, now)
+                    .map_err(graph_error)?;
+                let Some(recorded) = report.recorded.first() else {
+                    let reason = report.refused.first().map(|r| r.reason.clone()).unwrap_or_default();
+                    return Err(LeanError::new("lean.notAudited", reason));
+                };
+                (recorded.entity.clone(), Some(report))
+            }
+            _ => unreachable!("audited references carry a record"),
+        };
+        let association =
+            evidence::associate(&graph, &declaration, &request.target, request.note.clone()).map_err(graph_error)?;
+        Ok(LeanAssociation { association, evidence: report })
+    })
+    .await
+    .map_err(|e| LeanError::new("internal.task", e.to_string()))?
+}
+
+/// Formal declarations of an open Lean document with their evidence history
+/// (freshness against the current text) and reviewed associations.
+#[tauri::command]
+pub async fn lean_declaration_evidence(
+    state: State<'_, AppState>,
+    document: DocumentId,
+) -> Result<Vec<DeclarationEvidence>, LeanError> {
+    validate_document(&document)?;
+    let snapshot = state
+        .documents
+        .snapshot(&document)
+        .map_err(|_| LeanError::new("lean.unknownDocument", "That document is not open."))?;
+    let Some(path) = snapshot.path.clone() else { return Ok(Vec::new()) };
+    let digest = evidence::text_digest(&snapshot.text);
+    let graph = Arc::clone(&state.graph);
+    tauri::async_runtime::spawn_blocking(move || evidence::declaration_evidence(&graph, &path, Some(&digest)))
+        .await
+        .map_err(|e| LeanError::new("internal.task", e.to_string()))?
+        .map_err(graph_error)
 }
 
 /// Forward Lean events to the webview in order.

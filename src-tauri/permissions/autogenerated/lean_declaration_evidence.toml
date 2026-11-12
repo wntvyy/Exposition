@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lean-declaration-evidence"
+description = "Enables the lean_declaration_evidence command without any pre-configured scope."
+commands.allow = ["lean_declaration_evidence"]
+
+[[permission]]
+identifier = "deny-lean-declaration-evidence"
+description = "Denies the lean_declaration_evidence command without any pre-configured scope."
+commands.deny = ["lean_declaration_evidence"]

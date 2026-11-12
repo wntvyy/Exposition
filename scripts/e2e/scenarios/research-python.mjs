@@ -81,6 +81,10 @@ async function attach(page, { document, caption, mode }) {
     await update.waitFor();
     await update.click();
   }
+  // Reviewed promotion: the exact markup, target revision, and digest are shown; approve.
+  await group.getByTestId("research-promotion-review").waitFor({ timeout: 15_000 });
+  await group.getByRole("button", { name: mode === "insert" ? "Approve insertion" : "Approve update" }).click();
+  await group.getByTestId("research-promotion-review").waitFor({ state: "detached", timeout: 15_000 });
 }
 
 export default async function researchPython({ launchApp, artifactsDir, fixture, assert }) {
@@ -116,7 +120,7 @@ export default async function researchPython({ launchApp, artifactsDir, fixture,
     });
     assert.equal(refused.error?.code, "research.notTrusted", "kernels are refused in an untrusted workspace");
 
-    await runCommand(page, "Show Research", /Show Research/);
+    await runCommand(page, "Show Research Panel", /Show Research Panel/);
     const panel = page.getByTestId("research-panel");
     await panel.waitFor({ timeout: 15_000 });
     // Give the panel room for output (keyboard resize, 5% per step) and hide the auxiliary region.

@@ -473,7 +473,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
   }
 
   async function startResearchSession() {
-    await runCommand(page, "Show Research", /Show Research/);
+    await runCommand(page, "Show Research Panel", /Show Research Panel/);
     await page.getByTestId("research-panel").waitFor({ timeout: 15_000 });
     const started = Date.now();
     await page.getByRole("button", { name: "Start session" }).click();
@@ -503,6 +503,10 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       }
       await group.getByRole("button", { name: "Update in document" }).click();
     }
+    // Reviewed promotion: approve the exact markup shown.
+    await group.getByTestId("research-promotion-review").waitFor({ timeout: 15_000 });
+    await group.getByRole("button", { name: mode === "insert" ? "Approve insertion" : "Approve update" }).click();
+    await group.getByTestId("research-promotion-review").waitFor({ state: "detached", timeout: 15_000 });
   }
 
   // ---- agent helpers ----------------------------------------------------------
@@ -549,7 +553,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       paperId = await docIdOf(PAPER);
 
       // Research: banner, and kernels are refused.
-      await runCommand(page, "Show Research", /Show Research/);
+      await runCommand(page, "Show Research Panel", /Show Research Panel/);
       const research = page.getByTestId("research-panel");
       await research.waitFor({ timeout: 15_000 });
       await research.getByText("Workspace not trusted").waitFor({ timeout: 15_000 });
@@ -608,7 +612,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       const lean = page.getByTestId("lean-panel");
       const texUntrusted = () => page.getByTestId("page-scroller").getByText("Workspace not trusted", { exact: true });
       // Trust through the shared dialog (from the Research panel).
-      await runCommand(page, "Show Research", /Show Research/);
+      await runCommand(page, "Show Research Panel", /Show Research Panel/);
       await research.getByRole("button", { name: "Trust workspace…" }).click();
       await page.getByTestId("trust-dialog").waitFor();
       await page.waitForTimeout(300);
@@ -1372,7 +1376,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
     // ===================================================================== 7e
     await step("7e", "Failure: untrusted rendered output (kernel HTML/SVG) stays inert", async () => {
       if (!sessionReady) await startResearchSession();
-      await runCommand(page, "Show Research", /Show Research/);
+      await runCommand(page, "Show Research Panel", /Show Research Panel/);
       await page.getByTestId("research-code").waitFor({ timeout: 15_000 });
       const workspaceBefore = await invoke(page, "workspace_current");
       const titleBefore = await page.title();
@@ -1571,7 +1575,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
         el.scrollTop = el.scrollHeight / 3;
       });
       await runCommand(page, "Show Agent Tasks", /Show Agent Tasks/);
-      await runCommand(page, "Show Research", /Show Research/);
+      await runCommand(page, "Show Research Panel", /Show Research Panel/);
       if (rerun) await page.locator(`[data-testid="research-history"] [data-run-id="${rerun}"]`).click({ timeout: 5000 }).catch(() => {});
       await shot("08-final-light");
       await setTheme(page, "dark");

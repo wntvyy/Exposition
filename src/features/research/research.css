@@ -334,3 +334,301 @@
   gap: var(--space-1-5);
   font-size: var(--font-size-sm);
 }
+
+/* ---- Retention, execution labels, promotion review -------------------------- */
+
+.exp-research__retain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.exp-research__mode {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+  min-height: var(--control-height-sm);
+  border-radius: var(--radius-full);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+  border: var(--border-width) solid var(--color-warning-border);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+.exp-research__modes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-top: var(--border-width) solid var(--color-border);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.exp-research__mode-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.exp-promotion {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.exp-promotion__where {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.exp-promotion__markup {
+  margin: 0;
+  padding: var(--space-2);
+  max-height: 240px;
+  overflow: auto;
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  background: var(--color-surface-sunken);
+  border: var(--border-width) solid var(--color-border);
+  border-left: 3px solid var(--color-success-border);
+  border-radius: var(--radius-md);
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.exp-promotion__markup--old {
+  border-left-color: var(--color-danger-border);
+}
+
+/* ---- Graph inspection --------------------------------------------------------- */
+
+.exp-graph {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.exp-graph__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  user-select: text;
+}
+
+.exp-graph__relation {
+  color: var(--color-text);
+}
+
+.exp-graph__badge {
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  border: var(--border-width) solid var(--color-border-strong);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.exp-graph__badge[data-status="suggested"] {
+  border-style: dashed;
+}
+
+.exp-graph__evidence {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1) 0;
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+}
+
+.exp-graph__evidence-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.exp-graph__pins {
+  margin: 0;
+  padding-left: var(--space-4);
+  color: var(--color-text-muted);
+}
+
+.exp-graph code,
+.exp-promotion code,
+.exp-rinspector code {
+  font-family: var(--font-code);
+  user-select: text;
+}
+
+/* ---- Research page ---------------------------------------------------------------- */
+
+.exp-rpage {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--color-surface);
+}
+
+.exp-rpage .exp-muted {
+  color: var(--color-text-muted);
+}
+
+.exp-rpage__header {
+  display: flex;
+  flex-direction: column;
+  border-bottom: var(--border-width) solid var(--color-border);
+  background: var(--color-surface-sunken);
+}
+
+.exp-rpage__heading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3) 0;
+}
+
+.exp-rpage__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.exp-rpage__heading code {
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+  user-select: text;
+}
+
+.exp-rpage__body {
+  flex: 1;
+  min-height: 0;
+}
+
+.exp-rpage__explorer,
+.exp-rpage__inspector {
+  height: 100%;
+  overflow: auto;
+  background: var(--color-surface-sunken);
+}
+
+.exp-rpage__inspector {
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.exp-rpage__inspector > * {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.exp-rpage__work {
+  height: 100%;
+}
+
+.exp-rpage__sources {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.exp-rpage__tabs {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.exp-rpage__tabbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  background: var(--color-surface-sunken);
+  border-bottom: var(--border-width) solid var(--color-border);
+}
+
+.exp-rpage__run {
+  display: flex;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+}
+
+.exp-rpage__panel {
+  flex: 1;
+  min-height: 0;
+}
+
+.exp-rpage__panel[hidden],
+.exp-rpage__panel[inert] {
+  display: none;
+}
+
+.exp-rpage__output {
+  border-top: var(--border-width) solid var(--color-border);
+}
+
+.exp-rpage__note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.exp-rexplorer {
+  display: flex;
+  flex-direction: column;
+}
+
+.exp-rexplorer__toolbar {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-bottom: var(--border-width) solid var(--color-border);
+}
+
+.exp-rinspector__title {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.exp-rinspector__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+/* Files explorer subsection */
+.xp-files__research {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.xp-files__research-note {
+  margin: 0;
+  padding: 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}

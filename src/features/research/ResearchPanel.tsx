@@ -30,16 +30,13 @@ import {
   Select,
   Spinner,
   StatusPill,
-  TextField,
   Toolbar,
   UnavailableState,
 } from "../../ui/components";
 import {
   EMPTY_RUN_OUTPUT,
   ENTRY_PREVIEW_CHARS,
-  attachmentsOfKind,
   displayArtifacts,
-  documentFormat,
   formatBytes,
   formatClock,
   formatDuration,
@@ -48,11 +45,12 @@ import {
   sessionPill,
   stripAnsi,
 } from "./model";
+import { ExecutionLabel } from "./ExecutionLabel";
+import { PromotionControls, RetainControls } from "./Promotion";
+import { startSpaceTracking } from "./space";
 import {
   artifactText,
   artifactUrl,
-  attachArtifact,
-  attachTargets,
   cancelRun,
   interruptSession,
   loadEnvironments,
@@ -67,7 +65,6 @@ import {
   trustWorkspace,
   useResearch,
   userSession,
-  type AttachTarget,
 } from "./store";
 import { parseHtmlTable, type Grid } from "./table";
 import "./research.css";
@@ -91,6 +88,7 @@ export function ResearchPanel() {
 
   useEffect(() => {
     startResearchTracking();
+    startSpaceTracking();
     if (!useResearch.getState().environments) void loadEnvironments(false);
   }, []);
 
@@ -169,7 +167,7 @@ function environmentLabel(env: RuntimeEnvironment): string {
   return env.availability.kind === "available" ? env.displayName : `${env.displayName} — unavailable`;
 }
 
-function SessionBar() {
+export function SessionBar() {
   const workspace = useResearch((s) => s.workspace);
   const environments = useResearch((s) => s.environments);
   const selected = useResearch((s) => s.selectedEnvironment);
@@ -239,6 +237,7 @@ function SessionBar() {
           <IconButton icon={Power} size="sm" aria-label="Stop session" onPress={() => void stopSession()} />
         </>
       )}
+      <ExecutionLabel />
       <span className="exp-research__root" title={workspace?.root}>
         <code>{workspace?.root}</code>
       </span>
@@ -246,7 +245,7 @@ function SessionBar() {
   );
 }
 
-function EnvironmentNotice() {
+export function EnvironmentNotice() {
   const environments = useResearch((s) => s.environments);
   const selected = useResearch((s) => s.selectedEnvironment);
   const session = useResearch((s) => userSession(s));
@@ -307,7 +306,7 @@ function EnvironmentNotice() {
   return null;
 }
 
-function CodeInput() {
+export function CodeInput() {
   const code = useResearch((s) => s.code);
   const session = useResearch((s) => userSession(s));
   const area = useRef<HTMLTextAreaElement>(null);
@@ -354,7 +353,7 @@ function CodeInput() {
   );
 }
 
-function RunOutputView() {
+export function RunOutputView() {
   const runId = useResearch((s) => s.selectedRun);
   const run = useResearch((s) => s.runs.find((r) => r.id === s.selectedRun));
   const output = useResearch((s) => (s.selectedRun ? s.outputs[s.selectedRun] : undefined)) ?? EMPTY_RUN_OUTPUT;
@@ -491,7 +490,8 @@ function FigureView({ run, figure }: { run: RunSummary; figure: ArtifactRecord }
       <figcaption className="exp-muted">
         {figure.path} · {figure.mediaType} · {formatBytes(figure.sizeBytes)}
       </figcaption>
-      <AttachControls run={run} artifact={figure} />
+      <RetainControls run={run} artifact={figure} />
+      <PromotionControls run={run} artifact={figure} />
     </figure>
   );
 }
@@ -556,117 +556,13 @@ function TableView({ run, table, html }: { run: RunSummary; table: ArtifactRecor
           {grid.truncated && <p className="exp-muted">Showing 200 of {grid.totalRows} rows.</p>}
         </div>
       )}
-      <AttachControls run={run} artifact={table} />
+      <RetainControls run={run} artifact={table} />
+      <PromotionControls run={run} artifact={table} />
     </div>
   );
 }
 
-function AttachControls({ run, artifact }: { run: RunSummary; artifact: ArtifactRecord }) {
-  const [open, setOpen] = useState(false);
-  const [targets, setTargets] = useState<AttachTarget[] | null>(null);
-  const [target, setTarget] = useState<string | null>(null);
-  const [keys, setKeys] = useState<string[]>([]);
-  const [key, setKey] = useState<string | null>(null);
-  const [caption, setCaption] = useState("");
-  const [busy, setBusy] = useState(false);
-  const what = artifact.kind === "table" ? "table" : "figure";
-
-  useEffect(() => {
-    if (!open) return;
-    let live = true;
-    attachTargets().then(
-      (list) => {
-        if (!live) return;
-        setTargets(list);
-        setTarget((current) => current ?? list[0]?.document ?? null);
-      },
-      () => live && setTargets([]),
-    );
-    return () => {
-      live = false;
-    };
-  }, [open]);
-
-  const selected = targets?.find((t) => t.document === target) ?? null;
-  useEffect(() => {
-    if (!selected) return;
-    let live = true;
-    const format = documentFormat(selected.path);
-    commands.documentState(selected.document).then(
-      (state) => {
-        if (!live || !format) return;
-        // Only attachments of this artifact's kind: a table never replaces a figure.
-        const found = attachmentsOfKind(state.text, format, what);
-        setKeys(found);
-        setKey((current) => (current && found.includes(current) ? current : (found[0] ?? null)));
-      },
-      () => live && setKeys([]),
-    );
-    return () => {
-      live = false;
-    };
-  }, [selected, busy, what]);
-
-  if (!open) {
-    return (
-      <div className="exp-research__attach">
-        <Button size="sm" variant="ghost" onPress={() => setOpen(true)}>
-          Insert or update in document…
-        </Button>
-      </div>
-    );
-  }
-  const act = async (mode: { kind: "insert" } | { kind: "update"; key: string }) => {
-    if (!selected) return;
-    setBusy(true);
-    await attachArtifact({ run, artifact, target: selected, mode, caption: caption || null });
-    setBusy(false);
-  };
-  return (
-    <div className="exp-research__attach" data-testid="research-attach" role="group" aria-label={`Attach this ${what}`}>
-      {targets === null ? (
-        <Spinner size="sm" aria-label="Loading documents" />
-      ) : targets.length === 0 ? (
-        <p className="exp-muted">Open a Typst, LaTeX, or Markdown document to insert this {what}.</p>
-      ) : (
-        <>
-          <Select<string>
-            label="Document"
-            options={targets.map((t) => ({ id: t.document, label: t.path }))}
-            value={target}
-            onChange={setTarget}
-          />
-          <TextField
-            label="Caption"
-            value={caption}
-            onChange={setCaption}
-            placeholder={keys.length ? "Leave empty to keep the existing caption on update" : `Caption for the ${what}`}
-          />
-          <div className="exp-research__attach-actions">
-            <Button size="sm" variant="primary" isPending={busy} onPress={() => void act({ kind: "insert" })}>
-              Insert into document
-            </Button>
-            {keys.length > 0 && (
-              <>
-                <Select<string>
-                  aria-label="Attachment to update"
-                  options={keys.map((k) => ({ id: k, label: k }))}
-                  value={key}
-                  onChange={setKey}
-                />
-                <Button size="sm" isPending={busy} isDisabled={!key} onPress={() => key && void act({ kind: "update", key })}>
-                  Update in document
-                </Button>
-              </>
-            )}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-function Provenance({ run }: { run: RunSummary }) {
+export function Provenance({ run }: { run: RunSummary }) {
   const [manifest, setManifest] = useState<RunManifest | null>(null);
   const finished = !isActiveRun(run);
   useEffect(() => {
@@ -700,7 +596,14 @@ function Provenance({ run }: { run: RunSummary }) {
           <code title={manifest.code.sha256}>sha256 {manifest.code.sha256.slice(0, 16)}…</code>
         </dd>
         {manifest.record.inputs.map((input) => (
-          <InputFact key={input.path} path={input.path} revision={input.revision} hash={input.contentHash} />
+          <InputFact
+            key={input.path}
+            path={input.path}
+            revision={input.revision}
+            hash={input.contentHash}
+            unsaved={manifest.unsavedInputs.includes(input.path)}
+            code={manifest.code.text !== null && origin.kind !== "input" && "path" in origin && origin.path === input.path}
+          />
         ))}
         <dt>Kernel</dt>
         <dd>
@@ -728,11 +631,23 @@ function Provenance({ run }: { run: RunSummary }) {
   );
 }
 
-function InputFact({ path, revision, hash }: { path: string; revision: number | null; hash: string | null }) {
+function InputFact({
+  path,
+  revision,
+  hash,
+  unsaved,
+  code,
+}: {
+  path: string;
+  revision: number | null;
+  hash: string | null;
+  unsaved: boolean;
+  code: boolean;
+}) {
   return (
     <>
       <dt>Input</dt>
-      <dd>
+      <dd data-testid="research-input" data-path={path} data-unsaved={unsaved ? "true" : "false"}>
         <code>{path}</code>
         {revision !== null && ` · revision ${revision}`}
         {hash && (
@@ -741,6 +656,10 @@ function InputFact({ path, revision, hash }: { path: string; revision: number | 
             <code title={hash}>{hash.slice(0, 23)}…</code>
           </>
         )}
+        {unsaved &&
+          (code
+            ? " · unsaved buffer (its exact text is kept in the run manifest)"
+            : " · unsaved buffer (only its digest is recorded)")}
       </dd>
     </>
   );
@@ -758,7 +677,7 @@ function ArtifactFact({ artifact }: { artifact: ArtifactRecord }) {
   );
 }
 
-function RunHistory() {
+export function RunHistory() {
   const runs = useResearch((s) => s.runs);
   const selected = useResearch((s) => s.selectedRun);
   const visible = useMemo(() => runs.slice(0, 200), [runs]);

@@ -25,6 +25,7 @@ import {
 import { handleFor } from "../editor";
 import { requestWorkspaceTrust } from "../jobs/trust";
 import { CheckedDeclarations } from "./CheckedDeclarations";
+import { AuditedDeclarations, useDeclarationEvidence } from "./FormalEvidence";
 import { revealInEditor } from "./leanMonaco";
 import { statusSentence, statusView } from "./status";
 import { startLeanTracking, useLean } from "./store";
@@ -172,7 +173,10 @@ export function LeanPanel() {
   const active = useActiveEditor();
   const path = active?.resource.path;
   const state = useLean((s) => (path ? Object.values(s.docs).find((d) => d.path === path) : undefined));
+  return <LeanInfoview path={path} state={state} />;
+}
 
+function LeanInfoview({ path, state }: { path: string | undefined; state: LeanDocumentState | undefined }) {
   if (!path || !path.endsWith(".lean")) {
     return (
       <EmptyState
@@ -185,7 +189,11 @@ export function LeanPanel() {
   if (!state) {
     return <EmptyState icon={FileCode2} title="Waiting for Lean" description={`${path} is not tracked by Lean yet.`} />;
   }
+  return <LeanDocumentView state={state} />;
+}
 
+function LeanDocumentView({ state }: { state: LeanDocumentState }) {
+  const formal = useDeclarationEvidence(state);
   const status = state.status;
   const view = statusView(status);
   const toolchain = state.toolchain;
@@ -330,7 +338,16 @@ export function LeanPanel() {
       )}
 
       {status.kind === "checked" && (
-        <CheckedDeclarations state={state} declarations={status.declarations} total={status.declarationCount} />
+        <CheckedDeclarations
+          state={state}
+          declarations={status.declarations}
+          total={status.declarationCount}
+          audit={formal?.audit ?? null}
+          evidence={formal?.declarations}
+        />
+      )}
+      {status.kind !== "checked" && formal?.audit && (
+        <AuditedDeclarations state={state} audit={formal.audit} evidence={formal.declarations} />
       )}
 
       {axiomUses.length > 0 && (

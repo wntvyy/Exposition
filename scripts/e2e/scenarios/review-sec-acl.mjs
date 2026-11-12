@@ -93,16 +93,18 @@ export default async function reviewSecAcl({ launchApp, artifactsDir }) {
   record("INFO", "core/plugin grants", pluginGrants.join(", "));
 
   // The debug-only runtime capabilities are created only under cfg(debug_assertions).
-  for (const file of ["execution.rs", "agents.rs"]) {
+  for (const file of ["execution.rs", "agents.rs", "research.rs"]) {
     const text = await readFile(join(tauriDir, "src", file), "utf8");
     const gated = /#\[cfg\(debug_assertions\)\]\s*pub fn add_dev_capability/.test(text);
     check(`${file}-add_dev_capability-is-debug-only`, gated);
   }
   check(
     "lib.rs-add_dev_capability-calls-are-debug-only",
-    [...libRs.matchAll(/add_dev_capability/g)].length === 2 &&
+    [...libRs.matchAll(/add_dev_capability/g)].length === 3 &&
+      [...libRs.matchAll(/#\[cfg\(debug_assertions\)\]\s*[a-z_]+::add_dev_capability/g)].length === 3 &&
       /#\[cfg\(debug_assertions\)\]\s*execution::add_dev_capability/.test(libRs) &&
-      /#\[cfg\(debug_assertions\)\]\s*agents::add_dev_capability/.test(libRs),
+      /#\[cfg\(debug_assertions\)\]\s*agents::add_dev_capability/.test(libRs) &&
+      /#\[cfg\(debug_assertions\)\]\s*research::add_dev_capability/.test(libRs),
   );
   const stateRs = await readFile(join(tauriDir, "src", "state.rs"), "utf8");
   check(

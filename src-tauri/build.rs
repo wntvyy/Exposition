@@ -114,6 +114,25 @@ const COMMANDS: &[&str] = &[
     "graph_view_delete",
     "graph_recover",
     "graph_operations",
+    // Research in the project graph (src/research.rs) and Lean evidence (src/lean.rs).
+    "research_space",
+    "research_space_enable",
+    "research_listing",
+    "research_space_create_file",
+    "research_space_import",
+    "research_retain",
+    "research_result_state",
+    "research_experiment_save",
+    "research_experiment",
+    "research_promotion_prepare",
+    "research_promotion_approve",
+    "research_promotion_cancel",
+    "research_promotions",
+    "research_promotion_reconcile",
+    "lean_audit_record",
+    "lean_record_evidence",
+    "lean_associate_declaration",
+    "lean_declaration_evidence",
     // Agents and the project graph (src/agents.rs).
     "agents_task_keep_investigation",
     "agents_task_create_generation",
@@ -122,7 +141,13 @@ const COMMANDS: &[&str] = &[
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,
 /// granted only by a capability added at runtime in debug builds, and are not
 /// part of release `COMMANDS` or `capabilities/`.
-const DEV_COMMANDS: &[&str] = &["dev_start_probe_job", "dev_start_workspace_job", "agents_dev_load_script"];
+const DEV_COMMANDS: &[&str] = &[
+    "dev_start_probe_job",
+    "dev_start_workspace_job",
+    "agents_dev_load_script",
+    // Fault injection for the promotion pending-reconciliation e2e (src/research.rs).
+    "research_dev_fail_next_graph_write",
+];
 
 fn main() {
     let debug = std::env::var("PROFILE").as_deref() == Ok("debug");

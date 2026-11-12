@@ -395,7 +395,7 @@ export default async function reviewSecRender({ launchApp, artifactsDir, fixture
 
     // ============================================================ research
     await phase("research", async () => {
-      await runCommand(page, "Show Research", /Show Research/);
+      await runCommand(page, "Show Research Panel", /Show Research Panel/);
       await page.getByTestId("research-panel").waitFor({ timeout: 15_000 });
       await page.getByRole("button", { name: "Start session" }).click();
       await page.locator('[data-testid="research-session-status"][data-state="idle"]').waitFor({ timeout: 120_000 });

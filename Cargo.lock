@@ -1327,6 +1327,7 @@ version = "0.1.0"
 dependencies = [
  "exposition-core",
  "exposition-execution",
+ "exposition-graph",
  "exposition-workspace",
  "serde",
  "serde_json",
@@ -1374,8 +1375,10 @@ dependencies = [
 name = "exposition-research"
 version = "0.1.0"
 dependencies = [
+ "exposition-attach",
  "exposition-core",
  "exposition-execution",
+ "exposition-graph",
  "exposition-workspace",
  "serde",
  "serde_json",

@@ -46,6 +46,9 @@ pub enum ResearchError {
     HelperGone,
     #[error("{0}")]
     Io(String),
+    /// A refusal with its own stable code (graph, retention, promotion).
+    #[error("{message}")]
+    Coded { code: String, message: String },
 }
 
 impl ResearchError {
@@ -71,10 +74,21 @@ impl ResearchError {
             ResearchError::Timeout(_) => "research.timeout".into(),
             ResearchError::HelperGone => "research.helperGone".into(),
             ResearchError::Io(_) => "research.io".into(),
+            ResearchError::Coded { code, .. } => code.clone(),
         }
+    }
+
+    pub fn coded(code: &str, message: impl Into<String>) -> Self {
+        ResearchError::Coded { code: code.to_owned(), message: message.into() }
     }
 
     pub(crate) fn io(context: &str, error: std::io::Error) -> Self {
         ResearchError::Io(format!("{context}: {error}"))
+    }
+}
+
+impl From<exposition_graph::GraphError> for ResearchError {
+    fn from(e: exposition_graph::GraphError) -> Self {
+        ResearchError::Coded { code: e.code, message: e.message }
     }
 }

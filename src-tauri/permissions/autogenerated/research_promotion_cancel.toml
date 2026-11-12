@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-promotion-cancel"
+description = "Enables the research_promotion_cancel command without any pre-configured scope."
+commands.allow = ["research_promotion_cancel"]
+
+[[permission]]
+identifier = "deny-research-promotion-cancel"
+description = "Denies the research_promotion_cancel command without any pre-configured scope."
+commands.deny = ["research_promotion_cancel"]

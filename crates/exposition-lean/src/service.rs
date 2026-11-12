@@ -158,6 +158,10 @@ enum Msg {
     DropTemp {
         doc: DocumentId,
     },
+    AuditRecord {
+        document: DocumentId,
+        reply: Reply<Result<Option<LeanAuditRecord>, LeanError>>,
+    },
     ServerPid {
         document: DocumentId,
         reply: Reply<Option<u32>>,
@@ -398,6 +402,14 @@ impl LeanService {
     /// project with `elan toolchain install` (a trusted job). Returns the job.
     pub async fn install_toolchain(&self, document: DocumentId) -> Result<JobId, LeanError> {
         self.ask(|reply| Msg::Install { document, reply }).await?
+    }
+
+    /// The axiom audit of the last revision of `document` that finished with
+    /// one (its declarations, their statements, axioms, and verdicts), as the
+    /// service computed it. `None` when no revision has been audited (errors,
+    /// not trusted, still checking) or the audit could not certify the file.
+    pub async fn audit_record(&self, document: DocumentId) -> Result<Option<LeanAuditRecord>, LeanError> {
+        self.ask(|reply| Msg::AuditRecord { document, reply }).await?
     }
 
     /// The process id of the server serving `document` (diagnostics/tests).

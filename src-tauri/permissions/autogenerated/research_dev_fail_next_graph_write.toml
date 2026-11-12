@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-dev-fail-next-graph-write"
+description = "Enables the research_dev_fail_next_graph_write command without any pre-configured scope."
+commands.allow = ["research_dev_fail_next_graph_write"]
+
+[[permission]]
+identifier = "deny-research-dev-fail-next-graph-write"
+description = "Denies the research_dev_fail_next_graph_write command without any pre-configured scope."
+commands.deny = ["research_dev_fail_next_graph_write"]

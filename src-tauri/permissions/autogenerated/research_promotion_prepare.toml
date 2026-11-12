@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-promotion-prepare"
+description = "Enables the research_promotion_prepare command without any pre-configured scope."
+commands.allow = ["research_promotion_prepare"]
+
+[[permission]]
+identifier = "deny-research-promotion-prepare"
+description = "Denies the research_promotion_prepare command without any pre-configured scope."
+commands.deny = ["research_promotion_prepare"]

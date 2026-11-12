@@ -9,7 +9,7 @@ use exposition_execution::{ExecutionConfig, ExecutionService};
 use exposition_graph::{GraphConfig, GraphService};
 use exposition_lean::{LeanConfig, LeanService};
 use exposition_research::launcher::ExecutionLauncher;
-use exposition_research::{ResearchConfig, ResearchService, ResolvedSource, SourceReader};
+use exposition_research::{ResearchConfig, ResearchProject, ResearchService, ResolvedSource, SourceReader};
 use exposition_tex::{TexService, TexServiceConfig};
 use exposition_typesetting::{Fonts, TypesettingService};
 use exposition_workspace::{DocumentService, WorkspaceService};
@@ -39,6 +39,9 @@ pub struct AppState {
     /// The project graph (`.exposition/graph.sqlite3`): attached for every
     /// open project, whether or not a graph view is open.
     pub graph: Arc<GraphService>,
+    /// Research in the project graph: research space, retained outcomes,
+    /// experiments, reviewed promotion into manuscripts.
+    pub research_project: Arc<ResearchProject>,
 }
 
 impl AppState {
@@ -124,7 +127,21 @@ impl AppState {
             // targets through the project graph.
             graph: Some(Arc::clone(&graph)),
         })?;
-        Ok(Self { documents, workspace, execution, lean, research, tex, typesetting, data_dir, agents, graph })
+        let research_project =
+            Arc::new(ResearchProject::new(Arc::clone(&graph), Arc::clone(&research), Arc::clone(&documents)));
+        Ok(Self {
+            documents,
+            workspace,
+            execution,
+            lean,
+            research,
+            tex,
+            typesetting,
+            data_dir,
+            agents,
+            graph,
+            research_project,
+        })
     }
 }
 
