@@ -12,7 +12,7 @@ import { copyFile, cp, mkdir, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
-import { openFromTree, openWorkspace } from "../workspace-helpers.mjs";
+import { openFromTree } from "../workspace-helpers.mjs";
 
 const PATH = "main.md";
 
@@ -45,7 +45,8 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
   const timings = [];
 
   try {
-    await openWorkspace(page, workspace);
+    await invoke("workspace_open", { path: workspace });
+    await page.locator(`[data-testid="file-tree"] [data-path="${PATH}"]`).waitFor({ timeout: 10000 });
     await openFromTree(page, PATH);
     const modeButton = (label) => page.locator(".ui-segmented__item", { hasText: label }).first();
     await modeButton("Page").waitFor({ timeout: 10000 });
@@ -78,6 +79,18 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
       return editor.getAttribute("data-build");
     };
     const build = () => editor.getAttribute("data-build");
+    /** Wait for a build newer than `previous` to be shown and settled. */
+    const rebuilt = async (previous, label) => {
+      await page.waitForFunction(
+        (p) => {
+          const b = document.querySelector('[data-testid="page-editor"]')?.dataset.build;
+          return b && b !== p;
+        },
+        previous,
+        { timeout: 15000 },
+      );
+      return settled(label);
+    };
     const selection = async (start, end) => (await invoke("page_selection", { build: await build(), path: PATH, start, end })).text;
 
     /** Screen point of a source offset (center of the caret line), via the page map. */
@@ -85,13 +98,18 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
       const g = await invoke("page_caret", { build: await build(), path: PATH, offset, affinity });
       assert.ok(g, `no geometry for offset ${offset}`);
       const el = page.locator(`[data-testid="page"][data-page="${g.page}"]`);
-      await el.evaluate((pageEl, top) => {
-        const scroller = pageEl.closest('[data-testid="page-scroller"]');
-        const scale = pageEl.getBoundingClientRect().width / Number(pageEl.dataset.widthPt);
-        const y = pageEl.getBoundingClientRect().top + top * scale;
-        const view = scroller.getBoundingClientRect();
-        scroller.scrollTop += y - (view.top + view.height / 2);
-      }, g.top);
+      // Scroll the target into the middle of the page view (both axes: the
+      // split view is narrower than the zoomed page).
+      await el.evaluate(
+        (pageEl, [top, left]) => {
+          const scroller = pageEl.closest('[data-testid="page-scroller"]');
+          const scale = pageEl.getBoundingClientRect().width / Number(pageEl.dataset.widthPt);
+          const view = scroller.getBoundingClientRect();
+          scroller.scrollTop += pageEl.getBoundingClientRect().top + top * scale - (view.top + view.height / 2);
+          scroller.scrollLeft += pageEl.getBoundingClientRect().left + left * scale - (view.left + view.width / 2);
+        },
+        [g.top, g.x],
+      );
       const box = await el.boundingBox();
       const scale = box.width / Number(await el.getAttribute("data-width-pt"));
       return { x: box.x + (g.x + dx) * scale, y: box.y + ((g.top + g.bottom) / 2) * scale, g, scale };
@@ -132,13 +150,14 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
     const at = original.indexOf("second paragraph") + 3;
     await clickAt(at);
     assert.equal(await page.locator('[data-testid="page-mode"]').textContent(), "Text");
+    const beforeTyping = await build();
     const typed = "a $5 `x` & #1 ";
     await typeChars(typed);
     const escaped = "a \\$5 \\`x\\` & #1 ";
     await waitCaretOffset(at + escaped.length);
     const afterTyping = await text();
     assert.equal(afterTyping, original.slice(0, at) + escaped + original.slice(at), "exact Markdown patch at the click");
-    await settled("rebuild after typing");
+    await rebuilt(beforeTyping, "rebuild after typing");
     assert.equal(await selection(at, at + escaped.length), typed, "the page renders the typed text where it was typed");
     await shot("02-typed-escapes");
 
@@ -154,13 +173,13 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
     assert.equal(await selection(final, final + 8), "# Final", "rendered as text, not a heading");
 
     // 3. Change an exponent inside inline math: select the `2` of `\alpha^2`
-    //    (click before it, Shift+Right) and type 3.
+    //    (click at its right edge, Shift+Left) and type 3.
     source = await text();
     const two = source.indexOf("\\alpha^2") + 7;
-    await clickAt(two, "downstream", 0.2);
+    await clickAt(two + 1, "upstream", -0.3);
     assert.equal(await page.locator('[data-testid="page-mode"]').textContent(), "Math");
-    await page.keyboard.press("Shift+ArrowRight");
-    await waitCaretOffset(two + 1);
+    await page.keyboard.press("Shift+ArrowLeft");
+    await waitCaretOffset(two);
     await page.keyboard.type("3");
     await waitCaretOffset(two + 1);
     source = await text();
@@ -201,6 +220,7 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
     };
     const tableBefore = await geometry("circle constant");
     const captionBefore = await geometry("A small test figure");
+    const beforeInsertion = await build();
     const insertAt = source.indexOf("Characters such as");
     await clickAt(insertAt, "downstream", 0.2);
     const long = "This inserted passage is long enough to push the following material further down the page. ".repeat(8);
@@ -210,7 +230,7 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
       [doc],
       { timeout: 10000 },
     );
-    await settled("rebuild after large insertion");
+    await rebuilt(beforeInsertion, "rebuild after large insertion");
     const tableAfter = await geometry("circle constant");
     const captionAfter = await geometry("A small test figure");
     assert.ok(tableAfter.page > tableBefore.page || tableAfter.y > tableBefore.y + 20, `table moved: ${JSON.stringify([tableBefore, tableAfter])}`);
@@ -224,6 +244,7 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
     source = await text();
     const unsupportedAt = source.indexOf("Final paragraph") - 3;
     const construct = "\\color{red}{x}";
+    const beforeUnsupported = await build();
     await invoke("document_apply", {
       request: {
         id: "e2e-unsupported",
@@ -241,7 +262,7 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
         selection: null,
       },
     });
-    await settled("rebuild with unsupported math");
+    await rebuilt(beforeUnsupported, "rebuild with unsupported math");
     source = await text();
     const markerAt = source.indexOf(construct);
     assert.equal(await selection(markerAt, markerAt + construct.length), construct, "marker text on the page");
@@ -258,8 +279,20 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
     await page.locator('[data-testid="typst-split"] [data-testid="source-editor"] .monaco-editor').waitFor({ timeout: 10000 });
     await page.locator('[data-testid="typst-split"] [data-testid="page-editor"]').waitFor();
     await settled("split view shown");
+    // Zoom out until the page fits the narrower pane (a zoomed page wider
+    // than the pane is centred and its left part cannot be scrolled to).
+    for (let i = 0; i < 6; i++) {
+      const fits = await page.evaluate(() => {
+        const scroller = document.querySelector('[data-testid="typst-split"] [data-testid="page-scroller"]');
+        const pageEl = scroller?.querySelector('[data-testid="page"]');
+        return Boolean(pageEl) && pageEl.getBoundingClientRect().width <= scroller.getBoundingClientRect().width;
+      });
+      if (fits) break;
+      await page.locator('[data-testid="typst-split"]').getByRole("button", { name: "Zoom out" }).click();
+      await page.waitForTimeout(200);
+    }
     source = await text();
-    const splitAt = source.indexOf("Nested ordered item");
+    const splitAt = source.indexOf("Introduction");
     await clickAt(splitAt, "downstream", 0.2);
     await page.keyboard.type("Busy ");
     await waitCaretOffset(splitAt + 5);
@@ -268,7 +301,7 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
         () =>
           (document.querySelector('[data-testid="typst-split"] .monaco-editor .view-lines')?.textContent ?? "")
             .replace(/ /g, " ")
-            .includes("Busy Nested"),
+            .includes("Busy Introduction"),
         null,
         { timeout: 10000 },
       )
@@ -280,12 +313,12 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
     await page.locator('[data-testid="typst-split"] .monaco-editor .view-lines').click();
     await page.keyboard.press("Control+z");
     await page.waitForFunction(
-      async ([d]) => !(await window.__TAURI_INTERNALS__.invoke("document_state", { document: d })).text.includes("Busy Nested"),
+      async ([d]) => !(await window.__TAURI_INTERNALS__.invoke("document_state", { document: d })).text.includes("Busy Introduction"),
       [doc],
       { timeout: 10000 },
     );
     await settled("rebuild after Monaco undo");
-    assert.equal(await selection(splitAt, splitAt + 6), "Nested", "the page shows the source-side undo");
+    assert.equal(await selection(splitAt, splitAt + 12), "Introduction", "the page shows the source-side undo");
     await modeButton("Page").click();
     await page.locator('[data-testid="page-editor"]').waitFor();
     await settled("page view after split");
@@ -295,24 +328,43 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
     const exported = await invoke("typesetting_export_pdf", { build: await build(), destination: null });
     assert.ok(exported.path.endsWith("main.pdf"), exported.path);
     const pdf = (await readFile(exported.path)).toString("latin1");
-    const pdfPages = [...pdf.matchAll(/\/Type\/Page(?!s)/g)].length;
+    // Page objects only (not /Pages or /PageLabel), and the page tree's count.
+    const pdfPages = [...pdf.matchAll(/\/Type\s*\/Page(?![A-Za-z])/g)].length;
     assert.equal(pdfPages, pages, "PDF page count equals rendered pages");
+    const counts = [...pdf.matchAll(/\/Type\s*\/Pages[^>]*?\/Count\s+(\d+)|\/Count\s+(\d+)[^>]*?\/Type\s*\/Pages/g)];
+    if (counts.length) assert.equal(Number(counts[0][1] ?? counts[0][2]), pages, "page tree count");
     const boxes = [...pdf.matchAll(/\/MediaBox\[([^\]]+)\]/g)].map((m) => m[1].trim().split(/\s+/).map(Number));
     const shown = await page.$$eval('[data-testid="page"]', (els) => els.map((e) => Number(e.dataset.widthPt)));
     assert.equal(boxes.length, pages, "one media box per page");
     for (const [i, b] of boxes.entries()) assert.ok(Math.abs(b[2] - b[0] - shown[i]) < 0.01, "PDF page width matches");
 
-    // 9. In-app build latency (warm): build timings reported by the service.
-    const warm = [];
-    for (let i = 0; i < 5; i++) warm.push((await invoke("typesetting_build", { entry: PATH })).timings);
-    const median = (xs) => xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)];
-    const pill = await page.locator('[data-testid="page-build-status"]').textContent();
+    // 9. In-app latency: one keystroke on the page until the new page is
+    //    shown (wall clock), and the page editor's own edit-to-render figure.
+    source = await text();
+    const latencyAt = source.indexOf("line break.") + "line break".length;
+    await clickAt(latencyAt, "upstream", -0.3);
+    const keystroke = [];
+    const pills = [];
+    for (let i = 0; i < 8; i++) {
+      const previous = await build();
+      const started = Date.now();
+      await page.keyboard.type("z");
+      await rebuilt(previous, `latency keystroke ${i + 1}`);
+      keystroke.push(Date.now() - started);
+      pills.push(await page.locator('[data-testid="page-build-status"]').textContent());
+    }
+    assert.ok((await text()).includes("line breakzzzzzzzz."), "keystrokes reached the source");
+    const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+    const service = (await invoke("typesetting_build", { entry: PATH })).timings;
     await shot("09-final");
 
     console.log(`      pages ${pages}; export ${exported.path}`);
     console.log(
-      `      warm build (service): total ${median(warm.map((t) => t.totalMs)).toFixed(1)} ms ` +
-        `(translate+compile ${median(warm.map((t) => t.compileMs)).toFixed(1)} ms, map ${median(warm.map((t) => t.mapMs)).toFixed(1)} ms); status pill: ${pill}`,
+      `      keystroke -> new page shown: median ${median(keystroke)} ms (${keystroke.join(", ")}); ` +
+        `editor edit-to-render: ${pills.map((p) => p.replace(/[^0-9]/g, "")).filter(Boolean).join(", ")} ms`,
+    );
+    console.log(
+      `      service build (unchanged rebuild): total ${service.totalMs.toFixed(1)} ms, translate+compile ${service.compileMs.toFixed(1)} ms, page map ${service.mapMs.toFixed(1)} ms`,
     );
     for (const t of timings) console.log(`      ${t.label}: ${t.ms} ms`);
     if (process.env.EXPOSITION_DEV_HOME) {
