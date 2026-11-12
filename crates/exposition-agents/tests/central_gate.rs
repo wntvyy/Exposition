@@ -1025,3 +1025,146 @@ async fn approval_shows_hidden_characters_and_long_payloads_completely() {
     assert_eq!(ran.len(), 1);
     assert!(ran[0].request.contains("tail-END"), "the code that ran is the code that was shown");
 }
+
+// ---------------------------------------------------------------------------
+// A call refused when its approval is checked again is recorded as finished.
+// ---------------------------------------------------------------------------
+
+/// Records calls like [`Recorder`]; the artifact record it reports changes
+/// after the first lookup (as if the run's output were rewritten).
+struct ChangingArtifact {
+    inner: Arc<Recorder>,
+    lookups: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl ToolServices for ChangingArtifact {
+    fn available(&self, kind: ServiceKind) -> bool {
+        self.inner.available(kind)
+    }
+    fn restricted_backend(&self) -> Option<String> {
+        self.inner.restricted_backend()
+    }
+    async fn build_document(&self, r: BuildRequest, c: CancellationToken) -> Result<Value, ServiceError> {
+        self.inner.build_document(r, c).await
+    }
+    async fn run_python(&self, r: PythonRequest, c: CancellationToken) -> Result<Value, ServiceError> {
+        self.inner.run_python(r, c).await
+    }
+    async fn check_lean(&self, r: LeanRequest, c: CancellationToken) -> Result<Value, ServiceError> {
+        self.inner.check_lean(r, c).await
+    }
+    async fn run_command(&self, r: CommandRequest, c: CancellationToken) -> Result<Value, ServiceError> {
+        self.inner.run_command(r, c).await
+    }
+    fn research_artifact(&self, _run: &str, _artifact: &str) -> Result<ArtifactRecord, ServiceError> {
+        let n = self.lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut record = artifact();
+        if n > 0 {
+            record.size_bytes += 1;
+        }
+        Ok(record)
+    }
+}
+
+/// After the user approves, the gate runs again. A call it refuses then (the
+/// project switched, or what the call would do changed) did not run: its
+/// final state is Failed with the refusal code, never Running or Succeeded,
+/// and nothing changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_refused_when_its_approval_is_checked_again_is_recorded_failed_with_its_code() {
+    use exposition_workspace::WorkspaceService;
+    let dir = project();
+    let other = tempfile::tempdir().unwrap();
+    std::fs::write(other.path().join("main.typ"), MAIN).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let documents = Arc::new(DocumentService::new());
+    let workspace = WorkspaceService::new(Arc::clone(&documents), data.path().join("workspace"));
+    let recorder = Recorder::new();
+    let services =
+        Arc::new(ChangingArtifact { inner: recorder.clone(), lookups: std::sync::atomic::AtomicUsize::new(0) });
+    let service = AgentService::new(AgentConfig {
+        database: None,
+        documents: Arc::clone(&documents),
+        workspace: Some(Arc::clone(&workspace)),
+        credentials: Arc::new(MemoryStore::default()),
+        services,
+        runtime: tokio::runtime::Handle::current(),
+        allow_scripted: true,
+        anthropic_base_url: None,
+        retry: None,
+    })
+    .unwrap();
+    service
+        .update_settings(ProviderSettings { provider: ProviderKind::Scripted, ..ProviderSettings::default() })
+        .unwrap();
+    let mut events = service.subscribe();
+    // (permission, execution, call, switch projects while waiting, expected code)
+    let cases = [
+        (
+            PermissionProfile::AutoApply,
+            ExecutionMode::ApproveEach,
+            json!({"toolUse": {"id": "t", "name": "run_python", "input": {"code": "print(1)"}}}),
+            true,
+            "agents.projectChanged",
+        ),
+        (
+            PermissionProfile::ReviewEdits,
+            ExecutionMode::Disabled,
+            json!({"toolUse": {"id": "t", "name": "insert_artifact", "input": {"path": "main.typ", "run_id": "run-1", "artifact_id": "fig", "after_text": "", "caption": "", "update_key": ""}}}),
+            false,
+            "agents.changedSinceApproval",
+        ),
+    ];
+    for (permission, execution, step, switch, code) in cases {
+        workspace.open_workspace(dir.path()).unwrap();
+        service.load_script(json!({"turns": [{"steps": [step]}, {"steps": [{"text": "done"}]}]})).unwrap();
+        let task = service
+            .create_task(CreateTaskRequest {
+                prompt: "recheck".into(),
+                workspace_root: dir.path().display().to_string(),
+                scope: TaskScope::Workspace,
+                permission,
+                execution,
+                consent: Some(ContextConsent::ScopeContent),
+                budgets: None,
+            })
+            .unwrap();
+        let approval = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Ok(AgentEvent::ApprovalRequested { approval }) = events.recv().await {
+                    break approval;
+                }
+            }
+        })
+        .await
+        .expect("approval requested");
+        if switch {
+            workspace.open_workspace(other.path()).unwrap();
+        }
+        service.resolve_approval(&task.id, &approval.id, true).unwrap();
+        service.join(&task.id).await;
+        let (status, is_error, result) = service
+            .task_detail(&task.id)
+            .unwrap()
+            .transcript
+            .into_iter()
+            .find_map(|item| match item {
+                TranscriptItem::ToolCall { status, is_error, result, .. } => Some((status, is_error, result)),
+                _ => None,
+            })
+            .expect("the call is in the transcript");
+        let result = result.unwrap_or_default();
+        assert_eq!(status, ToolCallStatus::Failed, "{}: {result}", approval.tool);
+        assert!(is_error);
+        assert!(result.contains(&format!("\"code\":\"{code}\"")), "{}: {result}", approval.tool);
+        assert!(recorder.take().is_empty(), "{}: nothing ran", approval.tool);
+        assert_eq!(std::fs::read_to_string(dir.path().join("main.typ")).unwrap(), MAIN);
+        if let Some(id) = documents.find_by_path(&p("main.typ")) {
+            assert_eq!(documents.state(&id).unwrap().text, MAIN, "{}: the document is unchanged", approval.tool);
+        }
+        for info in documents.list() {
+            let _ = workspace.close_document(&info.id);
+        }
+    }
+}
