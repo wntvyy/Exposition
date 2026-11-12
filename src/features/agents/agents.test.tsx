@@ -175,7 +175,8 @@ describe("task view", () => {
     expect(screen.getByRole("log", { name: "Transcript" })).toBeTruthy();
     expect(screen.getByText("Reading main.typ.")).toBeTruthy();
     expect(screen.getByText("Streaming now")).toBeTruthy();
-    expect(screen.getByText("Needs approval")).toBeTruthy();
+    // Task status and the tool call say the same thing.
+    expect(screen.getAllByText("Waiting for approval")).toHaveLength(2);
     expect(screen.getByRole("progressbar", { name: "Tool calls" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
     await act(async () => {

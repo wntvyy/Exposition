@@ -9,6 +9,7 @@ import type { TranscriptItem } from "../../bindings/TranscriptItem";
 import { commands } from "../../lib/ipc";
 import { Banner, Button, IconButton, LoadingState, ProgressBar, Section, StatusPill } from "../../ui/components";
 import {
+  activeToolLabel,
   budgetRows,
   CONSENT_LABELS,
   EXECUTION_LABELS,
@@ -176,7 +177,7 @@ function Draft({ draft }: { draft: StreamDraft }) {
         </details>
       )}
       {draft.text && <p className="agents-msg__text">{draft.text}</p>}
-      {draft.activeTool && <StatusPill status="running" label={`Running ${draft.activeTool}`} size="sm" />}
+      {draft.activeTool && <StatusPill {...activeToolLabel(draft.activeTool, draft.activeToolStatus ?? "running")} size="sm" />}
       {!draft.text && !draft.thinking && !draft.activeTool && <StatusPill status="running" label="Thinking" size="sm" />}
     </div>
   );

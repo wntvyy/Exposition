@@ -8,7 +8,7 @@ import { registry } from "../../app/registry";
 import { layout } from "../../app/layout";
 import { StatusPill } from "../../ui/components";
 import { AgentPanel } from "./AgentPanel";
-import { isActive } from "./format";
+import { isActive, waitingLabel } from "./format";
 import { REVIEW_PREFIX, ReviewView } from "./ReviewView";
 import { AGENT_VIEW_ID, agents, openApproval, useAgents } from "./store";
 
@@ -35,7 +35,7 @@ export function AgentStatusItem() {
   if (waiting) {
     // A task is blocked on the user: attention style, and a button that opens
     // the (oldest) pending approval wherever the Agent view is.
-    const label = waiting === 1 ? "Agent: approval needed" : `Agent: ${waiting} approvals needed`;
+    const label = waitingLabel(waiting);
     return createElement(
       "button",
       {
