@@ -153,6 +153,22 @@ const RELATION_FAMILY: Record<BindingRelationFamily, RelationFamily> = {
   formal: "formal",
 };
 
+/** The vocabulary's forward readings, used only before the vocabulary has loaded (display). */
+export const READINGS: Record<RelationKind, string> = {
+  contains: "contains",
+  memberOf: "is a member of",
+  anchoredIn: "is declared in",
+  imports: "imports",
+  usesAsset: "uses",
+  dependsOn: "depends on",
+  assumes: "assumes",
+  proofOf: "is a proof of",
+  references: "references",
+  evidenceFor: "is evidence for",
+  derivedFrom: "is derived from",
+  formalizes: "formalizes",
+};
+
 /** Display-only reverse readings (the vocabulary gives the forward reading). */
 const INVERSE: Record<RelationKind, string> = {
   contains: "is in",
@@ -167,6 +183,18 @@ const INVERSE: Record<RelationKind, string> = {
   evidenceFor: "is supported by",
   derivedFrom: "has derivative",
   formalizes: "is formalized by",
+};
+
+const FALLBACK_FAMILY: Partial<Record<RelationKind, RelationFamily>> = {
+  imports: "resource",
+  usesAsset: "resource",
+  dependsOn: "math",
+  assumes: "math",
+  proofOf: "math",
+  references: "citation",
+  evidenceFor: "evidence",
+  derivedFrom: "evidence",
+  formalizes: "formal",
 };
 
 export function indexVocabulary(vocabulary: Vocabulary): VocabularyIndex {
@@ -229,8 +257,8 @@ export function relationDisplay(index: VocabularyIndex | null, kind: RelationKin
   return (
     index?.relationKinds.get(kind) ?? {
       kind,
-      family: "structure",
-      reading: humanize(kind).toLowerCase(),
+      family: FALLBACK_FAMILY[kind] ?? "structure",
+      reading: READINGS[kind] ?? humanize(kind).toLowerCase(),
       inverse: INVERSE[kind] ?? `${humanize(kind).toLowerCase()} (inverse)`,
       rule: "",
       endpoints: new Set(),

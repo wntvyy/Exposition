@@ -20,7 +20,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .xp-tree {
@@ -67,7 +67,7 @@
 }
 
 .xp-recent__name {
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .xp-recent__path {
@@ -99,7 +99,7 @@
 }
 
 .xp-recovery__path {
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   overflow-wrap: anywhere;
 }
 

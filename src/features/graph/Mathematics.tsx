@@ -43,6 +43,7 @@ import { coverageSentence } from "./status";
 import { canWrite, useGraph } from "./store";
 import { useGraphLoad } from "./useGraphData";
 import { arrange, ViewCanvas } from "./ViewCanvas";
+import { AssociateDeclarationAction } from "./AssociateDeclaration";
 import type { ViewStore } from "./viewStore";
 
 type MathMode = "dependencies" | "verification";
@@ -255,11 +256,16 @@ function MathSections({
   row,
   vocabulary,
   onSelectEntity,
+  declarations,
+  canWrite,
 }: {
   detail: EntityDetail;
   row: MathRow | undefined;
   vocabulary: VocabularyIndex | null;
   onSelectEntity: (id: string) => void;
+  /** Formal declaration entities in the project (association candidates). */
+  declarations: Entity[];
+  canWrite: boolean;
 }) {
   const neighbors = new Map(detail.neighbors.map((n) => [n.id, n]));
   const proofs = detail.incoming.filter((r) => r.kind === "proofOf");
@@ -303,7 +309,7 @@ function MathSections({
               <>
                 <p>Associated formal declarations:</p>
                 {relationList(formalizations, (r) => r.from, "graph-formalization")}
-                <p className="xp-muted">
+                <p className="xp-muted" data-testid="graph-correspondence-note">
                   An association, even a reviewed one, records a correspondence; it is not a machine proof that the
                   declaration and this statement are equivalent.
                 </p>
@@ -311,6 +317,9 @@ function MathSections({
             ) : (
               <p className="xp-muted">No formal declaration is associated with this item.</p>
             ))}
+          {detail.entity.kind !== "formalDeclaration" && (
+            <AssociateDeclarationAction target={detail.entity} declarations={declarations} canWrite={canWrite} />
+          )}
           {row?.verdict ? (
             <p>
               Verifier verdict: <StatusPill size="sm" status={VERDICT_VIEW[row.verdict].status} label={VERDICT_VIEW[row.verdict].label} />{" "}
@@ -359,6 +368,7 @@ export function Mathematics({ store }: { store: ViewStore }) {
   const rowsById = useMemo(() => new Map((data?.rows ?? []).map((r) => [r.entity.id, r])), [data]);
   const entities = useMemo(() => new Map((data?.rows ?? []).map((r) => [r.entity.id, r.entity])), [data]);
   const relations = useMemo(() => new Map((data?.relations ?? []).map((r) => [r.id, r])), [data]);
+  const declarations = useMemo(() => (data?.rows ?? []).map((r) => r.entity).filter((e) => e.kind === "formalDeclaration" && e.lifecycle === "active"), [data]);
   const quickIds = useMemo(() => new Set((data?.rows ?? []).filter((r) => matchesQuick(r, quick)).map((r) => r.entity.id)), [data, quick]);
   const projection = useMemo(() => {
     if (!data || !view) return null;
@@ -504,7 +514,16 @@ export function Mathematics({ store }: { store: ViewStore }) {
         <InspectorPanel open={inspectorOpen} onClose={() => setInspectorOpen(false)}>
           {selectedEntity ? (
             <EntityInspector key={selectedEntity} entityId={selectedEntity} vocabulary={vocabulary} actions={actions}>
-              {(detail) => <MathSections detail={detail} row={rowsById.get(selectedEntity)} vocabulary={vocabulary} onSelectEntity={selectEntity} />}
+              {(detail) => (
+                <MathSections
+                  detail={detail}
+                  row={rowsById.get(selectedEntity)}
+                  vocabulary={vocabulary}
+                  onSelectEntity={selectEntity}
+                  declarations={declarations}
+                  canWrite={writable}
+                />
+              )}
             </EntityInspector>
           ) : selectedRelation ? (
             <RelationInspector relation={selectedRelation} entities={entities} vocabulary={vocabulary} actions={actions} />

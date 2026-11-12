@@ -9,7 +9,9 @@ import type { ProposalState } from "../../bindings/ProposalState";
 import type { SyncState } from "../../bindings/SyncState";
 import type { TaskGraphInfo } from "../../bindings/TaskGraphInfo";
 import type { TaskProposal } from "../../bindings/TaskProposal";
+import type { AssertionStatus } from "../../bindings/AssertionStatus";
 import { Badge, Banner, DataTable, EmptyState, Section, StatusPill, type BadgeTone } from "../../ui/components";
+import { relationDisplay, STATUS_LABELS } from "../graph/model";
 import { CONSENT_LABELS, type PillState } from "./format";
 
 /** Graph synchronization in the shared status vocabulary. */
@@ -74,6 +76,17 @@ export function graphSummary(context: GraphContext): string {
   }`;
 }
 
+const EVIDENCE_KIND: Record<string, string> = {
+  computational: "Computational",
+  formalCheck: "Formal check",
+  review: "Review",
+  build: "Build",
+  literature: "Literature",
+};
+
+/** Relation status tones shared with the Graph page (accepted solid; others dashed). */
+const STATUS_TONE: Record<AssertionStatus, BadgeTone> = { accepted: "neutral", suggested: "accent", observed: "info", rejected: "neutral" };
+
 /** Facts about an entity as badges (text always; dashed when provisional). */
 function EntityBadges({ entity }: { entity: ContextEntity }) {
   const badges: { text: string; tone: BadgeTone; dashed?: boolean }[] = [];
@@ -83,9 +96,10 @@ function EntityBadges({ entity }: { entity: ContextEntity }) {
   if (entity.coverage) badges.push({ text: `coverage ${entity.coverage}`, tone: entity.coverage === "pending" ? "stale" : "neutral" });
   if (entity.lifecycle !== "active") badges.push({ text: entity.lifecycle, tone: "neutral", dashed: true });
   for (const e of entity.evidence) {
+    // Current evidence is a fact, not a verification: neutral like the Graph page; stale/unknown never green.
     badges.push({
-      text: `${e.kind} evidence: ${e.freshness}`,
-      tone: e.freshness === "current" ? "success" : e.freshness === "stale" ? "stale" : "neutral",
+      text: `${EVIDENCE_KIND[e.kind] ?? e.kind} evidence: ${e.freshness}`,
+      tone: e.freshness === "stale" ? "stale" : "neutral",
       dashed: e.freshness !== "current",
     });
   }
@@ -142,10 +156,13 @@ function ContextRelations({ context }: { context: GraphContext }) {
     <ul className="agents-list" aria-label="Relations in the task's graph context">
       {context.relations.map((r) => (
         <li key={r.id} data-testid="agents-graph-relation" data-status={r.status}>
-          <span>{entityName(byId.get(r.from), r.from)}</span> <code className="agents-code">{r.kind}</code>{" "}
+          <span>{entityName(byId.get(r.from), r.from)}</span>{" "}
+          <span className="agents-muted" data-kind={r.kind}>
+            {relationDisplay(null, r.kind).reading}
+          </span>{" "}
           <span>{entityName(byId.get(r.to), r.to)}</span>{" "}
-          <Badge tone={r.status === "suggested" ? "accent" : "neutral"} dashed={r.status === "suggested"}>
-            {r.status}
+          <Badge tone={STATUS_TONE[r.status]} dashed={r.status !== "accepted"}>
+            {STATUS_LABELS[r.status]}
           </Badge>{" "}
           <span className="agents-muted agents-small">
             by {r.origin}

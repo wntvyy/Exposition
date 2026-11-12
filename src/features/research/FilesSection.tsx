@@ -67,7 +67,7 @@ export function ResearchFilesSection() {
           onExpandedChange={(keys) => setExpanded(new Set([...keys].map(String)))}
           onAction={(key) => {
             const k = String(key);
-            if (k.startsWith("rgroup:")) {
+            if (k.startsWith("rgroup:") || k.startsWith("rmore:")) {
               revealInResearch(null);
               return;
             }
@@ -85,9 +85,15 @@ export function ResearchFilesSection() {
               data-research-group={g.id}
               trailing={<span className="xp-tree-note">{g.items.length}</span>}
             >
-              {g.items.slice(0, MAX_SHOWN).map(({ item, title }) => (
-                <TreeItem key={itemKey(item)} id={itemKey(item)} title={title} data-research-item={itemKey(item)} />
-              ))}
+              {[
+                ...g.items.slice(0, MAX_SHOWN).map(({ item, title }) => (
+                  <TreeItem key={itemKey(item)} id={itemKey(item)} title={title} data-research-item={itemKey(item)} />
+                )),
+                // Long groups are cut here; say so instead of hiding the rest silently.
+                ...(g.items.length > MAX_SHOWN
+                  ? [<TreeItem key={`rmore:${g.id}`} id={`rmore:${g.id}`} title={`${g.items.length - MAX_SHOWN} more in Research…`} />]
+                  : []),
+              ]}
             </TreeItem>
           ))}
         </Tree>

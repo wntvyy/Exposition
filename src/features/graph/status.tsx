@@ -1,5 +1,6 @@
 // Shared graph status displays: synchronization freshness and extraction
 // coverage. Pending or unavailable synchronization is never shown as current.
+// Wording matches the Agents page's graph context ("Graph synchronized" etc.).
 import type { CoverageSummary } from "../../bindings/CoverageSummary";
 import type { GraphFreshness } from "../../bindings/GraphFreshness";
 import { Badge, StatusPill } from "../../ui/components";
@@ -13,10 +14,11 @@ export function FreshnessPill({ freshness }: { freshness: GraphFreshness }) {
       case "reconciling":
         return <StatusPill size="sm" status="running" label="Reconciling" detail={freshness.pending ? `${freshness.pending} files` : undefined} />;
       case "pending":
+        // Same wording and treatment as the Agents page: answers may lag the sources (stale).
         return freshness.pending > 0 ? (
-          <StatusPill size="sm" status="warning" label="Not yet synchronized" detail={`${freshness.pending} pending`} />
+          <StatusPill size="sm" status="stale" label="Reconciliation pending" detail={`${freshness.pending} files`} />
         ) : (
-          <StatusPill size="sm" status="warning" label={freshness.checkpointMs === null ? "Not yet reconciled" : "Not yet synchronized"} />
+          <StatusPill size="sm" status="stale" label={freshness.checkpointMs === null ? "Not yet reconciled" : "Reconciliation pending"} />
         );
       case "unavailable":
         return <StatusPill size="sm" status="unavailable" label="Synchronization unavailable" />;

@@ -101,7 +101,7 @@ export function ResearchPanel() {
           description="Open a project folder to run Python, R, or Julia next to your paper. Runs, figures, and tables are recorded in the project's .exposition folder."
           actions={
             <Button variant="primary" icon={FolderOpen} onPress={() => void openProjectFolder()}>
-              Open folder…
+              Open Folder…
             </Button>
           }
         />

@@ -259,7 +259,7 @@
 
 .agents-approval__payload:focus-visible {
   outline: var(--focus-ring-width) solid var(--color-focus-ring);
-  outline-offset: 1px;
+  outline-offset: var(--focus-ring-offset);
 }
 
 .agents-notice {
@@ -400,14 +400,14 @@
 .agents-page__title {
   margin: 0;
   font-size: var(--font-size-lg);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   overflow-wrap: anywhere;
 }
 
 .agents-page__subtitle {
   margin: 0;
   font-size: var(--font-size-xs);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--color-text-muted);
