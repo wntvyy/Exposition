@@ -58,7 +58,7 @@ use exposition_core::build::{
 use exposition_core::document::DocumentId;
 use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobOutcome, JobSpec};
 use exposition_core::path::WorkspacePath;
-use exposition_core::text::{LineColumn, LineIndex, TextRange};
+use exposition_core::text::{LineColumn, LineIndex, TextRange, utf16_len};
 use exposition_execution::JobRefusal;
 use exposition_workspace::{DocumentSnapshot, WorkspaceSnapshot};
 use sha2::{Digest, Sha256};
@@ -429,6 +429,8 @@ impl<R: JobRunner> TexBuilder<R> {
         let aux_path = out_dir.join(format!("{job_name}.aux"));
         let pdf_path = out_dir.join(format!("{job_name}.pdf"));
         let _ = std::fs::remove_file(&pdf_path);
+        // (A log left by an earlier build must not pass for this run's.)
+        let _ = std::fs::remove_file(&log_path);
 
         type Stop = (BuildStatus, Option<JobRefusal>);
         let run_engine = |passes: &mut Vec<PassRecord>| -> Result<ProcessOutput, Stop> {
@@ -519,6 +521,32 @@ impl<R: JobRunner> TexBuilder<R> {
         let log = read_lossy(&log_path);
         let mut diagnostics = diagnostics_from_log(&log, &snapshot);
         diagnostics.extend(diagnostics_extra);
+        // Every TeX engine writes a log that starts with its banner; a program
+        // that does not (a wrong tool location) is not a TeX engine.
+        if !log.starts_with("This is ") {
+            let exit = match last.exit_code() {
+                Some(code) => format!("exited with code {code}"),
+                None => "stopped".to_owned(),
+            };
+            let mut hints = vec![format!(
+                "Check the {} location in Settings → Tool locations, or clear it to use the TeX installation found on this computer.",
+                engine_tool.name()
+            )];
+            let output = format!("{}\n{}", last.stdout, last.stderr);
+            hints.extend(
+                output.lines().map(str::trim).filter(|l| !l.is_empty()).take(3).map(|l| format!("Output: {l}")),
+            );
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                message: format!(
+                    "{} ({}) did not run as a TeX engine: it {exit} without writing a TeX log.",
+                    engine_tool.name(),
+                    engine_path.display()
+                ),
+                location: None,
+                hints,
+            });
+        }
         if mirrored.skipped > 0 {
             diagnostics.push(Diagnostic {
                 severity: Severity::Info,
@@ -907,7 +935,24 @@ fn clean_dots(path: &str) -> String {
 
 fn diagnostics_from_log(log: &str, snapshot: &BuildSnapshot) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+    // Characters a font cannot show, per font, in order of first report.
+    let mut missing: Vec<(String, Vec<String>)> = Vec::new();
     for message in parse_log(log) {
+        if message.kind == LogMessageKind::MissingCharacter {
+            if let Some((character, font)) = crate::log::missing_character(&message.message) {
+                let index = match missing.iter().position(|(f, _)| *f == font) {
+                    Some(i) => i,
+                    None => {
+                        missing.push((font, Vec::new()));
+                        missing.len() - 1
+                    }
+                };
+                if !missing[index].1.contains(&character) {
+                    missing[index].1.push(character);
+                }
+            }
+            continue;
+        }
         let mut hints = message.context.clone();
         let location = match (&message.file, message.lines) {
             (Some(file), Some((l0, l1))) => match snapshot.resolve(file) {
@@ -930,7 +975,41 @@ fn diagnostics_from_log(log: &str, snapshot: &BuildSnapshot) -> Vec<Diagnostic> 
         }
         out.push(Diagnostic { severity: message.severity, message: message.message, location, hints });
     }
+    for (font, characters) in missing {
+        out.push(missing_characters_diagnostic(&font, &characters, snapshot));
+    }
     out
+}
+
+/// One warning per font listing the characters it cannot show (they are left
+/// out of the page silently by the engine), located at the first source
+/// occurrence of one of them.
+fn missing_characters_diagnostic(font: &str, characters: &[String], snapshot: &BuildSnapshot) -> Diagnostic {
+    const LISTED: usize = 12;
+    let mut list = characters.iter().take(LISTED).map(String::as_str).collect::<Vec<_>>().join(" ");
+    if characters.len() > LISTED {
+        list.push_str(&format!(" and {} more", characters.len() - LISTED));
+    }
+    let location = characters.iter().find_map(|character| {
+        snapshot.files.iter().find_map(|(path, file)| {
+            let text = file.text.as_ref()?;
+            let at = text.find(character.as_str())?;
+            let start = utf16_len(&text[..at]) as u32;
+            Some(SourceLocation {
+                path: path.clone(),
+                range: TextRange::new(start, start + utf16_len(character) as u32),
+            })
+        })
+    });
+    Diagnostic {
+        severity: Severity::Warning,
+        message: format!("Missing characters: the font {font} has no {list}; they are not shown on the page."),
+        location,
+        hints: vec![
+            "Use a font that has these characters (with LuaLaTeX: \\usepackage{fontspec} and \\setmainfont{...}), or remove them."
+                .into(),
+        ],
+    }
 }
 
 /// UTF-16 range covering 1-based lines `l0..=l1`.

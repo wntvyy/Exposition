@@ -413,3 +413,31 @@ fn entry_names_tex_would_interpret_are_rejected() {
         assert!(build.passes.is_empty(), "{name}: no engine may run");
     }
 }
+
+/// R-m23 F7: a program configured as the engine that is not a TeX engine
+/// fails with an explanation (not "failed, 0 errors").
+#[cfg(windows)]
+#[test]
+fn a_wrong_engine_executable_is_explained() {
+    let Some(h) = common::Harness::new("latex-basic", Engine::LuaLatex) else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("lualatex.exe");
+    let system = std::env::var_os("SystemRoot").map(std::path::PathBuf::from).unwrap_or("C:\\Windows".into());
+    std::fs::copy(system.join("System32").join("where.exe"), &fake).unwrap();
+    let mut tools = std::collections::BTreeMap::new();
+    tools.insert(exposition_tex::TexTool::LuaLatex, fake.clone());
+    // A successful build first leaves a log behind in the build directory.
+    let good = h.builder.build(&h.request(BuildMode::Draft));
+    assert_eq!(good.result.status, BuildStatus::Succeeded);
+    h.builder.set_toolchain(TexToolchain::from_tools(tools));
+    let build = h.builder.build(&h.request(BuildMode::Draft));
+    assert_eq!(build.result.status, BuildStatus::Failed);
+    let explained = build
+        .result
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == Severity::Error && d.message.contains("did not run as a TeX engine"))
+        .unwrap_or_else(|| panic!("no explanation: {:#?}", build.result.diagnostics));
+    assert!(explained.message.contains("lualatex"), "{}", explained.message);
+    assert!(explained.hints.iter().any(|h| h.contains("Settings")), "{:?}", explained.hints);
+}

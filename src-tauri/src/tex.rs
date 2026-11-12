@@ -42,6 +42,7 @@ fn service_error(error: TexServiceError) -> CommandError {
         TexServiceError::NoOutput => "tex.noOutput",
         TexServiceError::NoSuchPage(_) => "tex.noSuchPage",
         TexServiceError::InvalidScale(_) => "tex.invalidScale",
+        TexServiceError::InvalidDestination(_) => "tex.invalidDestination",
         TexServiceError::Io(_) => "tex.io",
     };
     CommandError::new(code, error.to_string())

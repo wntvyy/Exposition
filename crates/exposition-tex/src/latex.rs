@@ -362,6 +362,7 @@ fn text_symbol(name: &str) -> Option<&'static str> {
         "textasciicircum" => "^",
         "textbar" => "|",
         "textless" => "<",
+        "textquotedbl" => "\"",
         "textgreater" => ">",
         "pounds" | "textsterling" => "£",
         "textbullet" => "•",
@@ -779,11 +780,12 @@ impl Parser<'_> {
         let c = rest.chars().next().expect("literal at end");
         if ctx.mode == Mode::Math {
             self.pos += c.len_utf8();
+            self.absorb_combining_marks();
             let text = match c {
                 '-' => "−".to_owned(),
                 '\'' => "′".to_owned(),
                 '*' => "∗".to_owned(),
-                other => other.to_string(),
+                _ => self.src[start..self.pos].to_owned(),
             };
             self.emit(ctx, &text, start..self.pos);
             return;
@@ -806,11 +808,29 @@ impl Parser<'_> {
             ("’", 1)
         } else {
             self.pos += c.len_utf8();
-            self.emit(ctx, &c.to_string(), start..self.pos);
+            self.absorb_combining_marks();
+            let text = self.src[start..self.pos].to_owned();
+            self.emit(ctx, &text, start..self.pos);
             return;
         };
         self.pos += len;
         self.emit(ctx, text, start..self.pos);
+    }
+
+    /// Combining marks after a character render with it (`e` + U+0301 is
+    /// one `é`): they belong to its unit.
+    fn absorb_combining_marks(&mut self) {
+        while let Some(c) = self.peek().filter(|&c| unicode_normalization::char::is_combining_mark(c)) {
+            self.pos += c.len_utf8();
+        }
+    }
+
+    /// An empty group right after a symbol command (`\ldots{}`,
+    /// `\textasciitilde{}`) only terminates it: it belongs to its unit.
+    fn absorb_empty_group(&mut self) {
+        if self.src[self.pos..].starts_with("{}") {
+            self.pos += 2;
+        }
     }
 
     /// Handle a control sequence (backslash already consumed). Returns true
@@ -984,10 +1004,12 @@ impl Parser<'_> {
             }
             n if ctx.mode == Mode::Math && math_symbol(n).is_some() => {
                 let text = math_symbol(n).unwrap_or_default();
+                self.absorb_empty_group();
                 self.emit(ctx, text, start..self.pos);
             }
             n if text_symbol(n).is_some() => {
                 let text = text_symbol(n).unwrap_or_default();
+                self.absorb_empty_group();
                 self.emit(ctx, text, start..self.pos);
             }
             n if silent(n) => {}
@@ -1176,12 +1198,34 @@ const TYPED_MATH_MACROS: &[&str] = &[
 /// is passed through: LuaLaTeX accepts it; pdfLaTeX accepts what the
 /// document's input encoding supports.
 pub fn escape_insertion(text: &str, mode: Mode) -> String {
+    escape_insertion_after(text, mode, None)
+}
+
+/// [`escape_insertion`] for text typed right after the character `before`
+/// (which decides between an opening and a closing quotation mark).
+///
+/// In prose, characters that the default OT1 font encoding of pdfLaTeX
+/// typesets as other glyphs are inserted as commands every encoding (OT1, T1,
+/// TU) shows as typed: `<` `>` `|` become `\textless{}` `\textgreater{}`
+/// `\textbar{}`. OT1 has no straight double quote at all (and
+/// `\textquotedbl` is an error there), so `"` becomes TeX's opening ``` `` ```
+/// at the start of a word and closing `''` otherwise, as LaTeX typesets
+/// quotations in every engine.
+pub fn escape_insertion_after(text: &str, mode: Mode, before: Option<char>) -> String {
     let mut out = String::with_capacity(text.len());
+    let mut previous = before;
     for c in text.chars() {
+        let opening =
+            previous.is_none_or(|p| p.is_whitespace() || matches!(p, '(' | '[' | '{' | '~' | '“' | '‘' | '`'));
+        previous = Some(c);
         match (mode, c) {
             (Mode::Text, '\\') => out.push_str("\\textbackslash{}"),
             (Mode::Text, '~') => out.push_str("\\textasciitilde{}"),
             (Mode::Text, '^') => out.push_str("\\textasciicircum{}"),
+            (Mode::Text, '<') => out.push_str("\\textless{}"),
+            (Mode::Text, '>') => out.push_str("\\textgreater{}"),
+            (Mode::Text, '|') => out.push_str("\\textbar{}"),
+            (Mode::Text, '"') => out.push_str(if opening { "``" } else { "''" }),
             (_, '{' | '}' | '$' | '&' | '%' | '#') | (Mode::Text, '_') => {
                 out.push('\\');
                 out.push(c);
@@ -1285,6 +1329,13 @@ mod tests {
             r"50\% of \{x\} \& \$y\_1\$ \textasciitilde{} \textasciicircum{}"
         );
         assert_eq!(escape_insertion("a\\b", Mode::Text), r"a\textbackslash{}b");
+        // Shown as typed in every font encoding (OT1 has no < > | glyphs at
+        // those positions and no straight double quote).
+        assert_eq!(escape_insertion("a<b>c|d", Mode::Text), r"a\textless{}b\textgreater{}c\textbar{}d");
+        assert_eq!(escape_insertion(r#""q" x"#, Mode::Text), r"``q'' x");
+        assert_eq!(escape_insertion_after("\"", Mode::Text, Some('d')), "''");
+        assert_eq!(escape_insertion_after("\"", Mode::Text, Some(' ')), "``");
+        assert_eq!(escape_insertion("a<b", Mode::Math), "a<b");
         assert_eq!(escape_insertion("x_1^2 + α ≤ β", Mode::Math), r"x_1^2 + \alpha  \leq  \beta ");
         assert_eq!(escape_insertion("ε", Mode::Math), r"\varepsilon ");
         // What is inserted typesets as what was typed.

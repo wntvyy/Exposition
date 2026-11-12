@@ -64,6 +64,13 @@ pub fn build_page_map(pages: &[(PageMapping, (f64, f64))]) -> PageMap {
                 bbox = bbox.union(&glyph_box(g));
             }
             let text: String = glyphs.iter().map(|g| g.text.as_deref().unwrap_or("\u{FFFD}")).collect();
+            // One source unit drawn with several glyphs (an OT1 accent and its
+            // letter) copies as the composed character.
+            let text = if glyphs.len() > 1 && joinable(&mapping.targets[i]) {
+                crate::normalize::display_text(&text)
+            } else {
+                text
+            };
             let baseline = glyphs[0].origin_y;
             let cluster = match &mapping.targets[i] {
                 GlyphTarget::Source { path, range, boundaries, mode, construct, equation, .. } => {

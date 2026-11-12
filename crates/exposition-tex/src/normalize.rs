@@ -69,6 +69,43 @@ pub fn spacing_accent_to_combining(c: char) -> Option<char> {
     })
 }
 
+/// The text of the glyphs that typeset one source unit, as it should be
+/// copied: an accent that TeX built from a spacing accent glyph and a letter
+/// (pdfLaTeX with OT1 fonts draws `é` as `´` + `e`, `ï` as `¨` + `ı`) becomes
+/// the composed letter. Other text is returned NFC-normalized.
+pub fn display_text(glyphs: &str) -> String {
+    let chars: Vec<char> = glyphs.chars().collect();
+    let mut out = String::with_capacity(glyphs.len());
+    let undotted = |c: char| match c {
+        'ı' => 'i',
+        'ȷ' => 'j',
+        c => c,
+    };
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match spacing_accent_to_combining(c) {
+            // Accent drawn before its letter.
+            Some(mark) if next.is_some_and(char::is_alphabetic) => {
+                out.push(undotted(next.unwrap_or(c)));
+                out.push(mark);
+                i += 2;
+            }
+            // Accent drawn after its letter (cedilla, ogonek).
+            Some(mark) if out.chars().next_back().is_some_and(char::is_alphabetic) => {
+                out.push(mark);
+                i += 1;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out.nfc().collect()
+}
+
 /// Fold one character to its comparison representative.
 fn fold(c: char) -> char {
     let cp = c as u32;
@@ -113,6 +150,10 @@ fn fold(c: char) -> char {
         'ℴ' => 'o',
         '−' | '‐' | '‑' | '‒' => '-',
         '"' => '”',
+        // OT1 typesets `\textasciitilde` and `\textasciicircum` with the
+        // spacing accent glyphs.
+        '˜' => '~',
+        'ˆ' => '^',
         '⋅' | '∙' => '·',
         '•' => '·',
         '∶' => ':',
@@ -152,6 +193,20 @@ mod tests {
         assert_eq!(s("ϵ"), s("ε"));
         assert_eq!(s("…"), "...");
         assert_eq!(s("ℝ"), "R");
+    }
+
+    /// R-m23 F12: OT1 accent + letter glyph pairs copy as the composed letter.
+    #[test]
+    fn accent_glyph_pairs_display_as_composed_letters() {
+        assert_eq!(display_text("´e"), "é");
+        assert_eq!(display_text("¨ı"), "ï");
+        assert_eq!(display_text("ˆo"), "ô");
+        assert_eq!(display_text("c¸"), "ç");
+        // Lone symbols and ordinary text are unchanged.
+        assert_eq!(display_text("^"), "^");
+        assert_eq!(display_text("~"), "~");
+        assert_eq!(display_text("ﬁ"), "ﬁ");
+        assert_eq!(display_text("e\u{301}"), "é");
     }
 
     #[test]

@@ -20,7 +20,7 @@ import type { PageEditOp } from "../../bindings/PageEditOp";
 import type { PageRect } from "../../bindings/PageRect";
 import { commands, errorMessage, events, isCommandError, newId } from "../../lib/ipc";
 import { openDocument } from "../editor";
-import { requestWorkspaceTrust } from "../jobs/trust";
+import { onWorkspaceTrusted, requestWorkspaceTrust } from "../jobs/trust";
 import { buildSequence, isOlder } from "./buildOrder";
 import { imageType } from "./images";
 import { RevisionHistory } from "./mapping";
@@ -181,7 +181,7 @@ export class PageSession {
         unBuilds();
         return;
       }
-      this.unlisten.push(unDocuments, unBuilds);
+      this.unlisten.push(unDocuments, unBuilds, onWorkspaceTrusted(() => void this.trustGranted()));
       // Open (or join) the document through the workspace, sharing the one
       // document handle with the source editor.
       const handle = await openDocument(this.path);
@@ -690,11 +690,25 @@ export class PageSession {
     const root = this.model.untrustedRoot;
     if (!root) return true;
     const trusted = await requestWorkspaceTrust(root);
-    if (trusted && !this.disposed) {
-      this.set({ untrustedRoot: null });
-      await commands.typesettingWatch(this.path).catch(() => null);
-    }
+    if (trusted) await this.rebuildTrusted();
     return trusted;
+  }
+
+  /** A folder was trusted elsewhere (another view, the Research or Jobs panel). */
+  private async trustGranted(): Promise<void> {
+    const root = this.model.untrustedRoot;
+    if (!root || this.disposed) return;
+    const status = await commands.trustStatus(root).catch(() => null);
+    if (status?.trusted) await this.rebuildTrusted();
+  }
+
+  private async rebuildTrusted(): Promise<void> {
+    if (this.disposed || !this.model.untrustedRoot) return;
+    this.set({ untrustedRoot: null });
+    // Request the build again; watches are counted per view, and this view
+    // already holds one from when it opened.
+    await commands.typesettingWatch(this.path).catch(() => null);
+    await commands.typesettingUnwatch(this.path).catch(() => null);
   }
 
   async exportPdf(): Promise<string> {

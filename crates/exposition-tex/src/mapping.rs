@@ -334,11 +334,11 @@ fn merge_window(into: &mut Window, from: &Window) {
 }
 
 /// Map one page. `page_index` is 0-based.
-pub fn map_page(page_index: u32, glyphs: Vec<PageGlyph>, synctex: &SyncTex, sources: &SourceSet) -> PageMapping {
+pub fn map_page(page_index: u32, mut glyphs: Vec<PageGlyph>, synctex: &SyncTex, sources: &SourceSet) -> PageMapping {
     let mut targets = vec![GlyphTarget::Unmapped { reason: UnmappedReason::NoSourceLine }; glyphs.len()];
     let mut expected_units = BTreeSet::new();
     let mut matched_units = BTreeSet::new();
-    let clusters = build_clusters(&glyphs);
+    let mut clusters = build_clusters(&glyphs);
 
     if let Some(sheet) = synctex.sheet(page_index + 1) {
         let index = SheetIndex::new(sheet, sources);
@@ -372,6 +372,50 @@ pub fn map_page(page_index: u32, glyphs: Vec<PageGlyph>, synctex: &SyncTex, sour
             );
         }
         assign_targets(&clusters, &cluster_units, &glyphs, sources, &windows, &mut targets);
+        // Mapped glyphs whose Unicode the PDF does not reveal (or an OT1
+        // accent glyph standing for a typed `~`/`^`) take the text of their
+        // source unit, so copying gives what was typed.
+        let unknown = |g: &PageGlyph| g.text.as_deref().is_none_or(|t| t.is_empty() || t == "\u{FFFD}");
+        for (ci, cluster) in clusters.iter_mut().enumerate() {
+            let Some((file, units)) = &cluster_units[ci] else { continue };
+            let text: String = units.iter().map(|&u| sources.files[*file].model.units[u].text.as_str()).collect();
+            let accent_for_ascii = cluster.glyphs.len() == 1
+                && matches!(
+                    (glyphs[cluster.glyphs[0]].text.as_deref(), text.as_str()),
+                    (Some("˜"), "~") | (Some("ˆ"), "^")
+                );
+            if accent_for_ascii || cluster.glyphs.iter().all(|&g| unknown(&glyphs[g])) {
+                for (k, &g) in cluster.glyphs.iter().enumerate() {
+                    glyphs[g].text = Some(if k == 0 { text.clone() } else { String::new() });
+                }
+                cluster.chars = comparison_chars(&text);
+            }
+        }
+    }
+    // Rules recorded as glyphs (see `pdf::RULE_FONT`) stay only where they
+    // typeset a source character.
+    if glyphs.iter().any(|g| g.font == crate::pdf::RULE_FONT) {
+        let keep: Vec<bool> =
+            glyphs.iter().zip(&targets).map(|(g, t)| g.font != crate::pdf::RULE_FONT || t.is_mapped()).collect();
+        let mut renumbered = vec![usize::MAX; glyphs.len()];
+        let mut next = 0;
+        for (i, kept) in keep.iter().enumerate() {
+            if *kept {
+                renumbered[i] = next;
+                next += 1;
+            }
+        }
+        clusters.retain_mut(|c| {
+            c.glyphs.retain(|&g| keep[g]);
+            c.glyphs.iter_mut().for_each(|g| *g = renumbered[*g]);
+            !c.glyphs.is_empty()
+        });
+        let kept: Vec<(PageGlyph, GlyphTarget)> =
+            glyphs.into_iter().zip(targets).zip(&keep).filter(|(_, k)| **k).map(|(pair, _)| pair).collect();
+        (glyphs, targets) = kept.into_iter().unzip();
+        for (i, g) in glyphs.iter_mut().enumerate() {
+            g.index = i as u32;
+        }
     }
 
     // Glyphs without Unicode are never mappable.
@@ -419,7 +463,10 @@ fn build_clusters(glyphs: &[PageGlyph]) -> Vec<Cluster> {
                 continue;
             }
         }
-        clusters.push(Cluster { glyphs: vec![i], chars: comparison_chars(&text) });
+        // A glyph without Unicode still takes part in the alignment as an
+        // unknown character (see `lcs_align`).
+        let chars = if text.is_empty() { vec!['\u{FFFD}'] } else { comparison_chars(&text) };
+        clusters.push(Cluster { glyphs: vec![i], chars });
         i += 1;
     }
     clusters
@@ -713,6 +760,20 @@ fn lcs_align(pending: &[usize], clusters: &[Cluster], units: &[usize], file: &So
             j += 1;
         }
     }
+    // Glyphs whose Unicode the PDF does not reveal (U+FFFD, e.g. pdfLaTeX's
+    // OT1 `\$`, characters a font lacks) between two matches pair one to one
+    // with an equally long run of unmatched source characters there.
+    let mut filled: Vec<(usize, usize)> = Vec::with_capacity(pairs.len());
+    for (k, &(ai, bj)) in pairs.iter().enumerate() {
+        filled.push((ai, bj));
+        if let Some(&(na, nb)) = pairs.get(k + 1) {
+            let gap = na - ai - 1;
+            if gap > 0 && nb - bj - 1 == gap && a[ai + 1..na].iter().all(|(ch, _)| *ch == '\u{FFFD}') {
+                filled.extend((1..=gap).map(|d| (ai + d, bj + d)));
+            }
+        }
+    }
+    let pairs = filled;
     // Drop isolated single-character matches surrounded by gaps on both sides
     // (typically generated digits matching a stray source digit).
     let keep: Vec<bool> = pairs
