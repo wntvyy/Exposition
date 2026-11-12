@@ -14,6 +14,7 @@ import {
   attachmentsOfKind,
   defaultInsertOffset,
   documentFormat,
+  mergeSnapshot,
   runPill,
   sessionPill,
   type ResearchModel,
@@ -123,6 +124,29 @@ describe("research model", () => {
     const text = "x\n// exposition:begin fig-1\n...\n// exposition:end fig-1\n  // exposition:begin tab-2\r\n";
     expect(attachmentKeys(text, "typst")).toEqual(["fig-1", "tab-2"]);
     expect(attachmentKeys("<!-- exposition:begin fig-9 -->\n", "markdown")).toEqual(["fig-9"]);
+  });
+
+  it("a snapshot never replaces state that events changed while it was fetched", () => {
+    const crashed = { ...session({ kind: "crashed", reason: "The kernel process exited." }), id: "s1" };
+    const detached = {
+      ...session({ kind: "detached", reason: "Workspace trust was revoked; this session's kernel was stopped." }),
+      id: "s1",
+    };
+    // The snapshot was read while the session was briefly crashed; the
+    // detach event arrived before the snapshot did.
+    const changedDuringFetch = new Set(["s1"]);
+    const merged = mergeSnapshot([detached], [crashed], (s) => s.id, (id) => changedDuringFetch.has(id));
+    expect(merged).toEqual([detached]);
+    // Untouched items take the snapshot; items removed by an event stay removed.
+    const other = { ...session({ kind: "idle" }), id: "s2" };
+    const otherNow = { ...session({ kind: "busy" }), id: "s2" };
+    expect(mergeSnapshot([], [crashed, other], (s) => s.id, (id) => id === "s1")).toEqual([other]);
+    expect(mergeSnapshot([detached, other], [crashed, otherNow], (s) => s.id, (id) => id === "s1")).toEqual([
+      detached,
+      otherNow,
+    ]);
+    // An item an event added during the fetch is kept even if the snapshot predates it.
+    expect(mergeSnapshot([detached], [], (s) => s.id, (id) => id === "s1")).toEqual([detached]);
   });
 
   it("offers only attachments of the artifact's kind for update (content decides, not the key)", () => {

@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -329,6 +329,9 @@ struct Inner {
     trust: TrustStore,
     /// Every grant and revoke, for services that cache trust.
     trust_events: broadcast::Sender<TrustChanged>,
+    /// Bumped by every grant and revoke, after the trust store changed and
+    /// before a revoke stops any job (see [`ExecutionService::trust_generation`]).
+    trust_generation: AtomicU64,
     roots: Mutex<Roots>,
     table: Mutex<Table>,
     events: broadcast::Sender<JobEvent>,
@@ -395,6 +398,7 @@ impl ExecutionService {
                 settings,
                 trust,
                 trust_events,
+                trust_generation: AtomicU64::new(0),
                 roots: Mutex::new(roots),
                 table: Mutex::new(Table::default()),
                 events,
@@ -446,6 +450,7 @@ impl ExecutionService {
     /// Announced to [`Self::subscribe_trust`] subscribers.
     pub fn grant_trust(&self, path: &str) -> Result<TrustStatus, TrustError> {
         let status = self.inner.trust.grant(path)?;
+        self.inner.trust_generation.fetch_add(1, Ordering::SeqCst);
         let _ = self.inner.trust_events.send(TrustChanged { root: status.root.clone(), granted: true });
         Ok(status)
     }
@@ -461,6 +466,7 @@ impl ExecutionService {
     /// no trust and are not affected.
     pub fn revoke_trust(&self, path: &str) -> Result<TrustStatus, TrustError> {
         let status = self.inner.trust.revoke(path)?;
+        self.inner.trust_generation.fetch_add(1, Ordering::SeqCst);
         self.stop_untrusted_jobs(&status.root);
         let _ = self.inner.trust_events.send(TrustChanged { root: status.root.clone(), granted: false });
         Ok(status)
@@ -492,6 +498,14 @@ impl ExecutionService {
         for job in &doomed {
             job.wait_stopped(deadline.saturating_duration_since(Instant::now()));
         }
+    }
+
+    /// A counter bumped by every grant and revoke. It changes before a revoke
+    /// stops the folder's jobs, so an owner that sees one of its processes
+    /// die can tell (with one atomic read, before the trust event reaches it)
+    /// that trust changed and re-check it instead of reporting a crash.
+    pub fn trust_generation(&self) -> u64 {
+        self.inner.trust_generation.load(Ordering::SeqCst)
     }
 
     /// Trust grants and revokes from any surface, in order. Services that

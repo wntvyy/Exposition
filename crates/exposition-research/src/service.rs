@@ -373,8 +373,8 @@ impl ResearchService {
                 root: display_path(&session.root),
             });
         }
-        if self.shared.config.launcher.workspace_trusted(&session.root) == Some(false) {
-            session.detach("Workspace trust was revoked; this session's kernel was stopped.");
+        if session.trust_revoked() {
+            session.detach(TRUST_REVOKED);
             return Err(ResearchError::NotTrusted);
         }
         let (code, origin, inputs) = self.resolve_source(&session, &request.source)?;
@@ -654,7 +654,14 @@ struct Session {
     state: Mutex<SessionMut>,
     pending: Mutex<HashMap<u64, Pending>>,
     next_request: AtomicU64,
+    /// Serializes state announcements so the last one sent always describes
+    /// the latest state (a snapshot taken on one thread cannot be sent after
+    /// a newer one taken on another).
+    emitting: Mutex<()>,
 }
+
+/// Why a session of a folder whose trust was revoked stopped.
+const TRUST_REVOKED: &str = "Workspace trust was revoked; this session's kernel was stopped.";
 
 impl Session {
     fn new(shared: &Arc<Shared>, env: RuntimeEnvironment, owner: SessionOwner, root: PathBuf) -> Arc<Self> {
@@ -686,7 +693,15 @@ impl Session {
             }),
             pending: Mutex::new(HashMap::new()),
             next_request: AtomicU64::new(1),
+            emitting: Mutex::new(()),
         })
+    }
+
+    /// The session's folder is no longer trusted (a revoke from any surface).
+    /// A revoke kills the helper and kernel before anything else hears of it,
+    /// so every path that sees them die asks this first.
+    fn trust_revoked(&self) -> bool {
+        self.shared().and_then(|shared| shared.config.launcher.workspace_trusted(&self.root)) == Some(false)
     }
 
     fn shared(&self) -> Option<Arc<Shared>> {
@@ -717,12 +732,22 @@ impl Session {
 
     fn emit_changed(&self) {
         if let Some(shared) = self.shared() {
+            let _order = lock(&self.emitting);
             shared.emit(ResearchEvent::SessionChanged { session: self.info() });
         }
     }
 
+    /// Change state, except out of Detached or Stopped: those are final (a
+    /// restart failing after a trust revoke must not turn Detached into
+    /// Crashed).
     fn set_state(&self, state: SessionState) {
-        lock(&self.state).state = state;
+        {
+            let mut current = lock(&self.state);
+            if matches!(current.state, SessionState::Stopped | SessionState::Detached { .. }) {
+                return;
+            }
+            current.state = state;
+        }
         self.emit_changed();
     }
 
@@ -828,7 +853,9 @@ impl Session {
                 started.get("transportEncryption").and_then(Value::as_str).unwrap_or("none").to_owned();
             state.interrupt_mode = started.get("interrupt").and_then(Value::as_str).unwrap_or("none").to_owned();
             state.generation += 1;
-            state.state = SessionState::Idle;
+            if !matches!(state.state, SessionState::Stopped | SessionState::Detached { .. }) {
+                state.state = SessionState::Idle;
+            }
         }
         self.emit_changed();
     }
@@ -869,36 +896,41 @@ impl Session {
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let Some(session) = session.upgrade() else { return };
-                let (stale, stopped, control) = {
-                    let state = lock(&session.state);
-                    let watched = matches!(
-                        state.state,
-                        SessionState::Idle | SessionState::Busy | SessionState::Restarting | SessionState::Starting
-                    );
-                    (
-                        watched && state.io.is_some() && state.last_seen.elapsed() > timeout,
-                        matches!(state.state, SessionState::Stopped),
-                        state.io.as_ref().map(|io| io.control.clone()),
-                    )
-                };
-                if stopped {
+                if !session.watchdog_tick(timeout) {
                     return;
-                }
-                if stale {
-                    session.crash("The research helper stopped responding and was stopped. Restart the session.");
-                    if let Some(control) = control {
-                        control.kill_tree();
-                    }
-                }
-                // Trust revoked for the session's folder: stop its kernel.
-                let untrusted =
-                    session.shared().and_then(|shared| shared.config.launcher.workspace_trusted(&session.root))
-                        == Some(false);
-                if untrusted && session.is_live() {
-                    session.detach("Workspace trust was revoked; this session's kernel was stopped.");
                 }
             }
         });
+    }
+
+    /// One watchdog check; false once the session is stopped for good.
+    fn watchdog_tick(self: &Arc<Self>, timeout: Duration) -> bool {
+        let (stale, stopped, control) = {
+            let state = lock(&self.state);
+            let watched = matches!(
+                state.state,
+                SessionState::Idle | SessionState::Busy | SessionState::Restarting | SessionState::Starting
+            );
+            (
+                watched && state.io.is_some() && state.last_seen.elapsed() > timeout,
+                matches!(state.state, SessionState::Stopped),
+                state.io.as_ref().map(|io| io.control.clone()),
+            )
+        };
+        if stopped {
+            return false;
+        }
+        if stale {
+            self.crash("The research helper stopped responding and was stopped. Restart the session.");
+            if let Some(control) = control {
+                control.kill_tree();
+            }
+        }
+        // Trust revoked for the session's folder: stop its kernel.
+        if self.is_live() && self.trust_revoked() {
+            self.detach(TRUST_REVOKED);
+        }
+        true
     }
 
     /// True while the session has (or is getting) a kernel.
@@ -1010,13 +1042,7 @@ impl Session {
             let _ = tx.send(Err(ResearchError::HelperGone));
         }
         let stopped = matches!(lock(&self.state).state, SessionState::Stopped | SessionState::Detached { .. });
-        // A trust revoke stops the folder's jobs (this helper among them)
-        // before it is announced: the session is detached, not crashed.
-        let revoked =
-            self.shared().and_then(|shared| shared.config.launcher.workspace_trusted(&self.root)) == Some(false);
-        if !stopped && revoked {
-            self.detach("Workspace trust was revoked; this session's kernel was stopped.");
-        } else if !stopped {
+        if !stopped {
             let detail = match code.flatten() {
                 Some(code) => format!(" (exit code {code})"),
                 None => String::new(),
@@ -1025,8 +1051,15 @@ impl Session {
         }
     }
 
-    /// Mark the session crashed, failing the active run and canceling queued runs.
+    /// Mark the session crashed, failing the active run and canceling queued
+    /// runs. In a folder whose trust was revoked the helper and kernel were
+    /// killed by the revoke, whichever way their death was noticed: the
+    /// session is detached for trust instead.
     fn crash(self: &Arc<Self>, reason: &str) {
+        if self.trust_revoked() {
+            self.detach(TRUST_REVOKED);
+            return;
+        }
         let (active, queued) = {
             let mut state = lock(&self.state);
             if matches!(
@@ -1126,7 +1159,9 @@ impl Session {
                     )
                 };
                 let status_text = status;
-                let status = if canceled {
+                // A run lost because a trust revoke killed its kernel was canceled, not failed.
+                let revoked = status_text == "lost" && self.trust_revoked();
+                let status = if canceled || revoked {
                     RunStatus::Canceled
                 } else {
                     match status_text.as_str() {
@@ -1147,6 +1182,7 @@ impl Session {
                     }
                 };
                 let notice = match (stream_dropped, files_dropped) {
+                    _ if revoked => Some(TRUST_REVOKED.to_owned()),
                     (0, 0) => None,
                     _ => Some(format!(
                         "Output limit reached: {stream_dropped} characters and {files_dropped} files were not kept."
@@ -1609,6 +1645,229 @@ mod tests {
         assert_eq!(display_path(Path::new(r"\\?\C:\Users\x\project")), r"C:\Users\x\project");
         assert_eq!(display_path(Path::new(r"\\?\UNC\server\share\p")), r"\\server\share\p");
         assert_eq!(display_path(Path::new("/home/x/p")), "/home/x/p");
+    }
+
+    // ---- trust revocation races ----------------------------------------
+    //
+    // A revoke kills the session's helper and kernel (the execution service
+    // stops the folder's jobs) and the session notices through several paths
+    // in any order: the helper reporting its kernel died, the helper's stdout
+    // closing, the watchdog seeing the folder untrusted, or a restart in
+    // flight failing. Whatever the order, the session must end Detached with
+    // the trust reason and never pass through Crashed.
+
+    use std::sync::atomic::AtomicBool;
+
+    use crate::launcher::{ExitInfo, InputClosed, LaunchFuture, ProbeOutput};
+
+    const KERNEL_DIED: &str = r#"{"type":"event","event":"kernel_died","exitCode":1,"runs":[]}"#;
+
+    struct FakeLauncher {
+        trusted: AtomicBool,
+        /// Held by a test to keep a relaunch in flight.
+        launch_gate: tokio::sync::Mutex<()>,
+        launching: tokio::sync::Notify,
+    }
+
+    impl KernelProcessLauncher for FakeLauncher {
+        fn launch_interactive(&self, _spec: JobSpec) -> LaunchFuture<'_> {
+            Box::pin(async move {
+                self.launching.notify_one();
+                let _gate = self.launch_gate.lock().await;
+                Err(LaunchError::Untrusted("the workspace is not trusted".into()))
+            })
+        }
+        fn run_probe(&self, _spec: &JobSpec) -> Result<ProbeOutput, LaunchError> {
+            Err(LaunchError::Refused("no probes in this test".into()))
+        }
+        fn run_project_probe(&self, _spec: &JobSpec) -> Result<ProbeOutput, LaunchError> {
+            Err(LaunchError::Refused("no probes in this test".into()))
+        }
+        fn workspace_trusted(&self, _root: &Path) -> Option<bool> {
+            Some(self.trusted.load(Ordering::SeqCst))
+        }
+    }
+
+    /// The helper and kernel were killed: the process has exited.
+    struct DeadProcess;
+
+    impl ProcessControl for DeadProcess {
+        fn kill_tree(&self) {}
+        fn try_wait(&self) -> Option<ExitInfo> {
+            Some(ExitInfo { code: Some(1) })
+        }
+    }
+
+    struct ClosedInput;
+
+    impl LineSink for ClosedInput {
+        fn send_line(&self, _line: &str) -> Result<(), InputClosed> {
+            Err(InputClosed)
+        }
+    }
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        launcher: Arc<FakeLauncher>,
+        _service: ResearchService,
+        session: Arc<Session>,
+        events: broadcast::Receiver<ResearchEvent>,
+    }
+
+    impl Fixture {
+        /// A live (idle) session of a trusted folder whose helper was just killed.
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("project");
+            std::fs::create_dir_all(&root).unwrap();
+            let launcher = Arc::new(FakeLauncher {
+                trusted: AtomicBool::new(true),
+                launch_gate: tokio::sync::Mutex::new(()),
+                launching: tokio::sync::Notify::new(),
+            });
+            let config =
+                ResearchConfig::new(dir.path().join("data"), launcher.clone(), Arc::new(DocumentService::new()));
+            let service = ResearchService::new(config);
+            service.set_workspace(&root, true).unwrap();
+            let env = RuntimeEnvironment {
+                id: "python:test".into(),
+                language: RuntimeLanguage::Python,
+                display_name: "Python (test)".into(),
+                executable: None,
+                version: None,
+                kernel: None,
+                host_interpreter: Some("python".into()),
+                packages: Vec::new(),
+                kernel_environment: BTreeMap::new(),
+                availability: Availability::Available,
+            };
+            let root = service.workspace_root().unwrap();
+            let session = Session::new(&service.shared, env, SessionOwner::User, root);
+            lock(&service.shared.sessions).insert(session.id.clone(), session.clone());
+            {
+                let mut state = lock(&session.state);
+                state.state = SessionState::Idle;
+                state.epoch = 1;
+                state.io = Some(HelperIo { input: Arc::new(ClosedInput), control: Arc::new(DeadProcess) });
+            }
+            let events = service.subscribe();
+            Fixture { _dir: dir, launcher, _service: service, session, events }
+        }
+
+        fn revoke(&self) {
+            self.launcher.trusted.store(false, Ordering::SeqCst);
+        }
+
+        fn kernel_died(&self) {
+            self.session.on_line(KERNEL_DIED, 1);
+        }
+
+        fn helper_exited(&self) {
+            self.session.on_helper_exit(1);
+        }
+
+        fn watchdog(&self) {
+            self.session.watchdog_tick(Duration::from_secs(20));
+        }
+
+        /// Every state the session announced, in order.
+        fn announced(&mut self) -> Vec<SessionState> {
+            let mut states = Vec::new();
+            while let Ok(event) = self.events.try_recv() {
+                if let ResearchEvent::SessionChanged { session } = event {
+                    states.push(session.state);
+                }
+            }
+            states
+        }
+
+        fn assert_detached_for_trust(&mut self, order: &str) {
+            let announced = self.announced();
+            assert!(
+                !announced.iter().any(|s| matches!(s, SessionState::Crashed { .. })),
+                "{order}: the session passed through Crashed: {announced:?}"
+            );
+            let last = announced.last().cloned();
+            for state in [Some(self.session.info().state), last] {
+                match state {
+                    Some(SessionState::Detached { reason }) => {
+                        assert!(reason.contains("trust was revoked"), "{order}: {reason}")
+                    }
+                    other => panic!("{order}: expected Detached for trust, got {other:?} (announced {announced:?})"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revoke_then_kernel_death_then_helper_exit_then_watchdog() {
+        let mut f = Fixture::new();
+        f.revoke();
+        f.kernel_died();
+        f.helper_exited();
+        f.watchdog();
+        f.assert_detached_for_trust("kernel death first");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revoke_then_helper_exit_then_kernel_death() {
+        let mut f = Fixture::new();
+        f.revoke();
+        f.helper_exited();
+        f.kernel_died();
+        f.watchdog();
+        f.assert_detached_for_trust("helper exit first");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revoke_then_watchdog_first() {
+        let mut f = Fixture::new();
+        f.revoke();
+        f.watchdog();
+        f.kernel_died();
+        f.helper_exited();
+        f.assert_detached_for_trust("watchdog first");
+    }
+
+    /// The kernel died while the folder was still trusted (a real crash),
+    /// then trust was revoked: the session ends Detached for trust.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn death_seen_before_the_revoke_still_ends_detached_for_trust() {
+        let mut f = Fixture::new();
+        f.kernel_died();
+        assert!(matches!(f.session.info().state, SessionState::Crashed { .. }), "a real crash is reported");
+        f.announced();
+        f.revoke();
+        f.helper_exited();
+        f.watchdog();
+        f.assert_detached_for_trust("death before the revoke");
+    }
+
+    /// A restart in flight when trust is revoked fails afterwards; its failure
+    /// must not replace the Detached state with Crashed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restart_failing_after_the_revoke_keeps_the_trust_reason() {
+        let mut f = Fixture::new();
+        let gate = f.launcher.launch_gate.lock().await;
+        let launching = f.launcher.launching.notified();
+        let session = f.session.clone();
+        let restart = tokio::spawn(async move { session.restart().await });
+        launching.await;
+        f.revoke();
+        f.watchdog();
+        drop(gate);
+        assert!(restart.await.unwrap().is_err());
+        let announced = f.announced();
+        let after_revoke: Vec<_> =
+            announced.iter().skip_while(|s| !matches!(s, SessionState::Detached { .. })).cloned().collect();
+        assert!(
+            !after_revoke.iter().any(|s| matches!(s, SessionState::Crashed { .. })),
+            "Crashed after the trust detach: {announced:?}"
+        );
+        match f.session.info().state {
+            SessionState::Detached { reason } => assert!(reason.contains("trust was revoked"), "{reason}"),
+            other => panic!("expected Detached for trust, got {other:?}"),
+        }
     }
 
     #[test]
