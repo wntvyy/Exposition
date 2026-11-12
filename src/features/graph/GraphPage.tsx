@@ -148,7 +148,7 @@ export function GraphPage() {
       </header>
       {status?.freshness.state === "pending" && readable && (
         <Banner
-          tone={status.freshness.pending > 0 ? "warning" : "info"}
+          tone={status.freshness.pending > 0 ? "stale" : "info"}
           title={
             status.freshness.pending > 0
               ? `${status.freshness.pending} changed ${status.freshness.pending === 1 ? "file is" : "files are"} waiting to be reconciled`

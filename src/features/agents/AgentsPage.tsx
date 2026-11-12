@@ -3,7 +3,7 @@
 // transcripts, approvals, and reviews are shared; this page only adds its own
 // navigation (selected task, section, filter), so moving between Editor and
 // Agents never duplicates a task or loses an approval or review.
-import { Archive, Bot, BookmarkCheck, ListTodo, Network, PanelRight, Plus, Square } from "lucide-react";
+import { Archive, Bot, BookmarkCheck, FolderOpen, ListTodo, Network, PanelRight, Plus, Square } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import type { GraphSnapshot } from "../../bindings/GraphSnapshot";
@@ -12,6 +12,7 @@ import type { TaskSummary } from "../../bindings/TaskSummary";
 import { layout } from "../../app/layout";
 import { EDITOR_PAGE, pages, usePages } from "../../app/pages";
 import { notify } from "../../app/notifications";
+import { registry } from "../../app/registry";
 import { commands, errorMessage } from "../../lib/ipc";
 import {
   Badge,
@@ -276,7 +277,7 @@ export function AgentsPage() {
         <div className="agents-row">
           <h2 className="agents-page__title">Agents</h2>
           <Button
-            variant="primary"
+            variant={workspace ? "primary" : "secondary"}
             size="sm"
             icon={Plus}
             onPress={() => agents.setPage({ composing: true })}
@@ -315,13 +316,24 @@ export function AgentsPage() {
           />
         ) : page.selected ? (
           <TaskDetailSections id={page.selected} kept={keptIds.has(page.selected)} onKept={() => void refreshKept()} />
+        ) : !workspace ? (
+          <EmptyState
+            icon={FolderOpen}
+            title="No folder open"
+            description="Agent tasks work on an open project folder, through the same documents as your editors. Open a folder to start or continue tasks."
+            actions={
+              <Button variant="primary" icon={FolderOpen} onPress={() => void registry.runCommand("workspace.openFolder")}>
+                Open Folder…
+              </Button>
+            }
+          />
         ) : (
           <EmptyState
             icon={Bot}
             title="Select a task"
             description="Tasks from the Agent panel and this page are the same tasks. Select one to see its run, the graph context it was given, the graph changes it proposed, and its reviewable changes."
             actions={
-              <Button variant="primary" icon={Plus} onPress={() => agents.setPage({ composing: true })}>
+              <Button icon={Plus} onPress={() => agents.setPage({ composing: true })}>
                 New task
               </Button>
             }

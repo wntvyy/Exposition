@@ -501,7 +501,7 @@
 .exp-rpage__title {
   margin: 0;
   font-size: var(--font-size-lg);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .exp-rpage__heading code {
@@ -511,6 +511,49 @@
 }
 
 .exp-rpage__body {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Narrow windows: the inspector is an overlay drawer at the right of the body. */
+.exp-rpage__main {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.exp-rpage__drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  flex-direction: column;
+  width: min(340px, 90%);
+  border-left: var(--border-width) solid var(--color-border);
+  background: var(--color-surface-sunken);
+  box-shadow: var(--shadow-2);
+}
+.exp-rpage__drawer-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--pane-header-height);
+  padding: 0 var(--space-1) 0 var(--space-3);
+  border-bottom: var(--border-width) solid var(--color-border);
+}
+.exp-rpage__drawer-title {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+}
+.exp-rpage__drawer > .exp-rpage__inspector {
   flex: 1;
   min-height: 0;
 }
@@ -609,7 +652,7 @@
   align-items: center;
   gap: var(--space-2);
   font-size: var(--font-size-lg);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   overflow-wrap: anywhere;
 }
 
