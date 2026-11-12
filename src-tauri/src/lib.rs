@@ -10,11 +10,13 @@ mod execution;
 mod graph;
 mod lean;
 mod page;
+mod projects;
 mod research;
 mod settings;
 mod state;
 mod tex;
 mod typesetting;
+mod workflows;
 mod workspace;
 
 use tauri::{Manager, RunEvent};
@@ -181,6 +183,22 @@ pub fn run() {
             graph::graph_reconcile,
             graph::graph_backup,
             graph::graph_backups,
+            projects::project_presets,
+            projects::project_capabilities,
+            projects::project_preset_blueprint,
+            projects::project_blueprint_validate,
+            projects::project_check_destination,
+            projects::project_create,
+            projects::project_creation_status,
+            projects::project_creation_resolve,
+            workflows::workflow_operations,
+            workflows::workflow_presets,
+            workflows::workflow_from_preset,
+            workflows::workflow_validate,
+            workflows::workflow_save,
+            workflows::workflow_import,
+            workflows::workflow_list,
+            workflows::workflow_get,
             agents::agents_task_keep_investigation,
             agents::agents_task_create_generation,
         ])

@@ -464,6 +464,11 @@ impl Plan {
 struct Known {
     entity: Entity,
     anchor: KnownAnchor,
+    /// A formal declaration the Lean service admitted from an audit (not by
+    /// this extractor). The extractor adopts it by name instead of creating
+    /// a second identity, but never tombstones it when it does not see it
+    /// (macro-generated or only in an unsaved buffer).
+    adoptable: bool,
 }
 
 /// The outcome of matching one changed file.
@@ -1272,7 +1277,8 @@ impl<'a> Planner<'a> {
                 continue;
             }
             let Some(e) = self.entity(&b.entity)? else { continue };
-            if !is_extracted_declaration(&e) {
+            let adoptable = is_adoptable_declaration(&e);
+            if !is_extracted_declaration(&e) && !adoptable {
                 continue;
             }
             let SourceSelector::Declaration { syntax, name, .. } = &b.selector else { continue };
@@ -1287,7 +1293,7 @@ impl<'a> Planner<'a> {
                 scope,
                 tombstoned: e.lifecycle == Lifecycle::Tombstoned,
             };
-            let k = Known { entity: e, anchor };
+            let k = Known { entity: e, anchor, adoptable };
             if k.anchor.tombstoned { tombs.push(k) } else { live.push(k) }
         }
         tombs.sort_by_key(|k| std::cmp::Reverse(k.entity.updated_at_ms));
@@ -1305,6 +1311,9 @@ impl<'a> Planner<'a> {
         let mut new_by_name: HashMap<(String, EntityKind), Vec<(usize, usize)>> = HashMap::new();
         for (fi, fm) in matches.iter().enumerate() {
             for &k in &fm.matching.unmatched_known {
+                if fm.known[k].adoptable {
+                    continue;
+                }
                 if let Some(n) = &fm.known[k].anchor.name {
                     gone_by_name.entry((n.clone(), fm.known[k].anchor.kind)).or_default().push((fi, k));
                 }
@@ -1417,6 +1426,28 @@ impl<'a> Planner<'a> {
             // Removed declarations.
             let removed = matches[fi].matching.unmatched_known.clone();
             for k in removed {
+                if matches[fi].known[k].adoptable {
+                    // Admitted by the Lean audit; the extractor not seeing it
+                    // (macros, unsaved text) does not remove it. Once adopted
+                    // (bound by this extractor), it is reported missing here.
+                    let id = matches[fi].known[k].entity.id.clone();
+                    let mut bindings = self.bindings_of(&id)?;
+                    let mut changed = false;
+                    for b in bindings.iter_mut().filter(|b| b.path == path) {
+                        let audit_bound = matches!(&b.selector, SourceSelector::Declaration { syntax, .. } if syntax == LEAN_AUDIT_SYNTAX);
+                        if !audit_bound && b.state != BindingState::Missing {
+                            b.state = BindingState::Missing;
+                            b.range = None;
+                            b.detail =
+                                Some(format!("No longer declared literally in {path} (known from a Lean audit)."));
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        self.set_bindings(&id, bindings);
+                    }
+                    continue;
+                }
                 let e = matches[fi].known[k].entity.clone();
                 let e = self.entity(&e.id)?.unwrap_or(e);
                 let renamed_kind = decls.iter().any(|d| d.name.is_some() && d.name == matches[fi].known[k].anchor.name);
@@ -1699,6 +1730,18 @@ fn sorted_roles(roles: &[ResourceRole]) -> Vec<ResourceRole> {
 /// An entity created by an extractor for a declaration (not a resource or folder).
 pub(crate) fn is_extracted_declaration(e: &Entity) -> bool {
     matches!(e.origin, Origin::Extracted { .. }) && !matches!(e.kind, EntityKind::Resource | EntityKind::Folder)
+}
+
+/// Selector syntax the Lean service uses for declarations it admits from an
+/// audit (see `exposition-lean`'s evidence module).
+pub(crate) const LEAN_AUDIT_SYNTAX: &str = "lean.declaration";
+
+/// A live formal declaration the Lean service admitted from an audit: the
+/// extractor adopts it by qualified name (one identity per declaration).
+pub(crate) fn is_adoptable_declaration(e: &Entity) -> bool {
+    e.kind == EntityKind::FormalDeclaration
+        && e.lifecycle != Lifecycle::Tombstoned
+        && matches!(&e.origin, Origin::Service { service } if service == "lean")
 }
 
 /// A LaTeX main file: a line starting with `\documentclass` (not commented out).

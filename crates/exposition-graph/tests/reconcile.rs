@@ -708,3 +708,71 @@ fn two_live_identities_for_one_file_are_never_left_in_place() {
     assert_eq!(gone.lifecycle, Lifecycle::Tombstoned);
     assert!(gone.tombstone_reason.unwrap().contains(kept.id.as_str()));
 }
+
+/// A formal declaration the Lean service admitted from an audit (e.g. of an
+/// unsaved buffer) is adopted by the extractor by qualified name: one
+/// identity per declaration. A service-admitted declaration the extractor
+/// does not see is never tombstoned by reconciliation.
+#[test]
+fn audit_admitted_lean_declarations_are_adopted_not_duplicated() {
+    let p = project(&[("Main.lean", "-- empty for now\n")]);
+    p.full();
+    let lean = Origin::Service { service: "lean".into() };
+    let decl = |name: &str| EntityUpsert {
+        id: None,
+        kind: EntityKind::FormalDeclaration,
+        roles: vec![],
+        label: name.into(),
+        key: Some(name.into()),
+        attributes: BTreeMap::new(),
+        lifecycle: None,
+        tombstone_reason: None,
+        bindings: Some(vec![SourceBinding {
+            entity: EntityId::mint(),
+            path: wp("Main.lean"),
+            selector: SourceSelector::Declaration {
+                syntax: "lean.declaration".into(),
+                name: Some(name.into()),
+                ordinal: None,
+            },
+            range: None,
+            version: None,
+            fingerprint: None,
+            state: BindingState::Unresolved,
+            detail: None,
+        }]),
+    };
+    let out = p
+        .svc
+        .apply_service_batch(
+            &lean,
+            &ServiceBatch {
+                entities: vec![decl("Foo.bar"), decl("Foo.generated")],
+                summary: "audit".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (audited, generated) = (out.entity_ids[0].clone(), out.entity_ids[1].clone());
+    // The declaration is saved later; the extractor sees `Foo.bar` but not the macro-generated one.
+    write(&p.root, "Main.lean", "namespace Foo\ntheorem bar : True := trivial\nend Foo\n");
+    p.paths(&["Main.lean"]);
+    let named: Vec<Entity> = p
+        .all(EntityKind::FormalDeclaration)
+        .into_iter()
+        .filter(|e| e.key.as_deref() == Some("Foo.bar") && e.lifecycle == Lifecycle::Active)
+        .collect();
+    assert_eq!(named.len(), 1, "one identity: {named:?}");
+    assert_eq!(named[0].id, audited, "the audit-admitted entity is adopted");
+    let binding = p.svc.entity_detail(&audited).unwrap().bindings.remove(0);
+    assert_eq!(binding.state, BindingState::Resolved, "bound by the extractor now: {binding:?}");
+    assert_eq!(p.entity(&generated).lifecycle, Lifecycle::Active, "not seen by the extractor, not tombstoned");
+    // Re-running keeps one identity.
+    p.full();
+    let again = p
+        .all(EntityKind::FormalDeclaration)
+        .into_iter()
+        .filter(|e| e.key.as_deref() == Some("Foo.bar") && e.lifecycle == Lifecycle::Active)
+        .count();
+    assert_eq!(again, 1);
+}

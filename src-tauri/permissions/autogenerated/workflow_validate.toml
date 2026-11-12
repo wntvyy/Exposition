@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workflow-validate"
+description = "Enables the workflow_validate command without any pre-configured scope."
+commands.allow = ["workflow_validate"]
+
+[[permission]]
+identifier = "deny-workflow-validate"
+description = "Denies the workflow_validate command without any pre-configured scope."
+commands.deny = ["workflow_validate"]

@@ -149,7 +149,7 @@ pub struct ExperimentSummary {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkflowSummary {
+pub struct ResearchWorkflowItem {
     pub entity: EntityId,
     pub label: String,
     pub lifecycle: Lifecycle,
@@ -169,7 +169,7 @@ pub struct ResearchListing {
     /// Retained results (active first, then archived, then discarded).
     pub results: Vec<RetainedResult>,
     /// Saved workflow definitions (read-only here).
-    pub workflows: Vec<WorkflowSummary>,
+    pub workflows: Vec<ResearchWorkflowItem>,
     /// More files exist than were listed.
     pub truncated: bool,
     pub graph_revision: Option<u64>,

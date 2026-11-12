@@ -13,7 +13,7 @@ use exposition_workspace::WorkspaceService;
 
 use super::types::{
     CreateSpaceFileRequest, ExperimentSummary, ExternalReference, ImportMode, ImportOrigin, ImportOutcome,
-    ImportRequest, ResearchListing, ResearchSpaceInfo, RetainedResult, SpaceFile, SpaceGroup, WorkflowSummary,
+    ImportRequest, ResearchListing, ResearchSpaceInfo, ResearchWorkflowItem, RetainedResult, SpaceFile, SpaceGroup,
 };
 use super::{ResearchProject, label, now_ms, origin};
 use crate::error::ResearchError;
@@ -356,7 +356,7 @@ impl ResearchProject {
         listing.results.sort_by(|a, b| rank(a.lifecycle).cmp(&rank(b.lifecycle)).then(b.path.cmp(&a.path)));
         for e in self.entities_of(&[EntityKind::Workflow], 500)? {
             if e.lifecycle != Lifecycle::Tombstoned {
-                listing.workflows.push(WorkflowSummary { entity: e.id, label: e.label, lifecycle: e.lifecycle });
+                listing.workflows.push(ResearchWorkflowItem { entity: e.id, label: e.label, lifecycle: e.lifecycle });
             }
         }
         Ok(())

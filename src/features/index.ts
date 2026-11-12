@@ -9,7 +9,9 @@ import "./lean/register";
 import "./research/register";
 import "./settings/register";
 import "./page/register";
+import "./projects/register";
 import "./typesetting/register";
+import "./workflows/register";
 import "./workspace/register";
 
 export {};

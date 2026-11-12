@@ -2,9 +2,9 @@
 import type { ExperimentSummary } from "./ExperimentSummary";
 import type { ExternalReference } from "./ExternalReference";
 import type { ResearchSpaceInfo } from "./ResearchSpaceInfo";
+import type { ResearchWorkflowItem } from "./ResearchWorkflowItem";
 import type { RetainedResult } from "./RetainedResult";
 import type { SpaceFile } from "./SpaceFile";
-import type { WorkflowSummary } from "./WorkflowSummary";
 
 /**
  * Everything the Research explorer shows.
@@ -17,7 +17,7 @@ results: Array<RetainedResult>,
 /**
  * Saved workflow definitions (read-only here).
  */
-workflows: Array<WorkflowSummary>, 
+workflows: Array<ResearchWorkflowItem>, 
 /**
  * More files exist than were listed.
  */

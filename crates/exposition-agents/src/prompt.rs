@@ -108,9 +108,9 @@ pub fn project_generation(objective: &str) -> String {
          Exposition's metadata; its project graph is attached and nearly empty.\n\
          - Choose an organization that suits the objective. A project does not need a manuscript: research-only, \
          computational, and formal (Lean) projects are all fine.\n\
-         - Create the authored files it needs with create_file (notes, manuscripts, scripts, data descriptions). Put \
-         managed research sources under .exposition/research/main/ (for example sources/, data/, experiments/, \
-         results/).\n\
+         - Create the authored files it needs with create_file (notes, manuscripts, scripts, data descriptions). When the \
+         graph context lists a research space, put managed research code, data, and notes in its folder (its \
+         research.path attribute, e.g. .exposition/research/rs-…/sources, data, notes).\n\
          - Record the meaningful entities (questions, claims, definitions, experiments, findings, collections, \
          references) and their typed relations with graph_propose, binding each entity to the file that holds its \
          text.\n\

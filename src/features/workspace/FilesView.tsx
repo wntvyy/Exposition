@@ -1,11 +1,12 @@
 // Files sidebar: open-folder empty state with recent projects, recovery
 // entries from an earlier session, and the lazily loaded, keyboard-accessible
 // file tree (shared Tree component).
-import { File, FileWarning, Folder, FolderOpen, FolderPlus, Link2, RefreshCw, Unlink, X } from "lucide-react";
+import { File, FilePlus2, FileWarning, Folder, FolderOpen, FolderPlus, Link2, RefreshCw, Unlink, X } from "lucide-react";
 import type { ReactNode } from "react";
 
 import type { FileEntry } from "../../bindings/FileEntry";
 import { notify } from "../../app/notifications";
+import { registry } from "../../app/registry";
 import type { RecoveryEntry } from "../../bindings/RecoveryEntry";
 import { ResearchFilesSection } from "../research/FilesSection";
 import {
@@ -50,9 +51,17 @@ function EmptyFolder() {
         title="No folder open"
         description="Open a project folder to browse and edit its files."
         actions={
-          <Button variant="primary" icon={FolderPlus} isPending={opening} onPress={() => void openFolderDialog()}>
-            Open Folder…
-          </Button>
+          <>
+            <Button variant="primary" icon={FolderPlus} isPending={opening} onPress={() => void openFolderDialog()}>
+              Open Folder…
+            </Button>
+            {/* Project creation (src/features/projects) contributes this command. */}
+            {registry.command("projects.new") && (
+              <Button icon={FilePlus2} onPress={() => void registry.runCommand("projects.new")} data-testid="files-new-project">
+                New Project…
+              </Button>
+            )}
+          </>
         }
       />
       {error && (
