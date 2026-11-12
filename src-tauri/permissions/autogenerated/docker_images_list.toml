@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-docker-images-list"
+description = "Enables the docker_images_list command without any pre-configured scope."
+commands.allow = ["docker_images_list"]
+
+[[permission]]
+identifier = "deny-docker-images-list"
+description = "Denies the docker_images_list command without any pre-configured scope."
+commands.deny = ["docker_images_list"]

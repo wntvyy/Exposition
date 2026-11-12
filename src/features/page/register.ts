@@ -12,6 +12,17 @@ registry.registerEditor({
   component: TypstEditor,
 });
 
+// LaTeX (.tex) documents: the same Source/Page/Split composition; pages come
+// from pdfLaTeX/LuaLaTeX builds (exposition-tex) through the shared flow.
+registry.registerEditor({
+  id: "latex.document",
+  priority: 10,
+  matches: (resource) =>
+    resource.key.startsWith("file:") && (resource.path?.toLowerCase().endsWith(".tex") ?? false),
+  modes: ["source", "page", "split"],
+  component: TypstEditor,
+});
+
 // Markdown: the same composition (one document, Monaco source, exact page)
 // over the Markdown print profile's builds.
 registry.registerEditor({

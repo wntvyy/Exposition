@@ -42,6 +42,109 @@ pub struct ExecutionSettings {
     pub max_concurrent_jobs: Option<u32>,
 }
 
+/// One validated change to [`ExecutionSettings`] (the only way the UI changes
+/// them). Deliberately narrow: container limits and the container user are not
+/// changeable from the webview, so a compromised page cannot weaken isolation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ExecutionSettingsChange {
+    /// Set (`Some`, a Docker image reference already present locally) or clear
+    /// the restricted-execution image.
+    DockerImage { image: Option<String> },
+    /// Set (`Some`, an absolute path to an existing executable) or clear
+    /// (`None`, back to discovery) the location of a catalog tool.
+    ToolPath { tool: String, path: Option<String> },
+}
+
+/// Execution settings plus what the settings UI may change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionSettingsState {
+    pub settings: ExecutionSettings,
+    /// Tool ids whose location can be overridden (kernel components follow
+    /// their interpreter and are not listed).
+    pub overridable_tools: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SettingsError {
+    #[error("unknown tool `{0}`")]
+    UnknownTool(String),
+    #[error("{0}")]
+    InvalidImage(String),
+    #[error("{0}")]
+    InvalidToolPath(String),
+    #[error("could not save execution settings: {0}")]
+    Io(String),
+}
+
+impl SettingsError {
+    /// Stable machine-readable code for IPC errors.
+    pub fn code(&self) -> &'static str {
+        match self {
+            SettingsError::UnknownTool(_) => "settings.unknownTool",
+            SettingsError::InvalidImage(_) => "settings.invalidImage",
+            SettingsError::InvalidToolPath(_) => "settings.invalidToolPath",
+            SettingsError::Io(_) => "settings.io",
+        }
+    }
+}
+
+/// Validate a tool location override: an absolute path without `..` to an
+/// existing file (not a folder) that the execution service would run. On
+/// Windows that means a `.exe`; `.bat`/`.cmd` (re-parsed by cmd.exe), `cmd.exe`
+/// itself, and scripts such as `.ps1` are refused. Returns the trimmed path.
+pub fn check_tool_override(raw: &str) -> Result<PathBuf, SettingsError> {
+    let invalid = |message: String| Err(SettingsError::InvalidToolPath(message));
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return invalid("Enter the full path of the tool's executable.".into());
+    }
+    if trimmed.len() > 4096 || trimmed.contains('\0') {
+        return invalid("That is not a valid file path.".into());
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return invalid(format!(
+            "{trimmed} is not an absolute path. Enter the full path of the executable{}.",
+            if cfg!(windows) { r", e.g. C:\Tools\bin\tool.exe" } else { ", e.g. /usr/local/bin/tool" }
+        ));
+    }
+    if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return invalid(format!("{trimmed} may not contain `..`; enter the executable's direct path."));
+    }
+    #[cfg(windows)]
+    {
+        let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        if ext == "bat" || ext == "cmd" || name == "cmd.exe" {
+            return invalid(format!(
+                "{trimmed} is run by cmd.exe, which re-parses arguments as a shell command line. Choose the tool's real .exe instead."
+            ));
+        }
+        if ext == "ps1" {
+            return invalid(format!(
+                "{trimmed} is a PowerShell script. Exposition runs programs directly, never through a shell; choose the tool's real .exe instead."
+            ));
+        }
+        if ext != "exe" {
+            return invalid(format!("{trimmed} is not a Windows executable (.exe)."));
+        }
+    }
+    let Ok(link) = std::fs::symlink_metadata(&path) else {
+        return invalid(format!("{trimmed} does not exist."));
+    };
+    if link.is_dir() || std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+        return invalid(format!("{trimmed} is a folder; choose the executable file inside it."));
+    }
+    if !crate::toolchains::is_executable_file(&path) {
+        return invalid(format!("{trimmed} is not a file."));
+    }
+    Ok(path)
+}
+
 /// Load/save of [`ExecutionSettings`] (`<data>/execution/settings.json`).
 pub struct SettingsStore {
     path: Option<PathBuf>,
@@ -112,5 +215,63 @@ mod tests {
         let partial = SettingsStore::load(path);
         assert_eq!(partial.get().docker.user, "65534:65534");
         assert_eq!(partial.get().docker.image.as_deref(), Some("x"));
+    }
+
+    fn refused(raw: &str) -> String {
+        match check_tool_override(raw) {
+            Err(SettingsError::InvalidToolPath(message)) => message,
+            other => panic!("{raw:?} should be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_override_validation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join(if cfg!(windows) { "tool.exe" } else { "tool" });
+        std::fs::write(&exe, "x").unwrap();
+        assert_eq!(check_tool_override(&format!("  {}  ", exe.display())).unwrap(), exe);
+
+        assert!(refused("").contains("full path"));
+        assert!(refused("tool.exe").contains("not an absolute path"));
+        assert!(refused("a\0b").contains("not a valid"));
+        let missing = tmp.path().join(if cfg!(windows) { "missing.exe" } else { "missing" });
+        assert!(refused(&missing.display().to_string()).contains("does not exist"));
+        let dotdot =
+            format!("{}{}..{}{}", tmp.path().display(), std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR, "x");
+        assert!(refused(&dotdot).contains(".."));
+        let folder = tmp.path().join(if cfg!(windows) { "dir.exe" } else { "dir" });
+        std::fs::create_dir(&folder).unwrap();
+        assert!(refused(&folder.display().to_string()).contains("folder"));
+
+        #[cfg(windows)]
+        {
+            for (name, expect) in [
+                ("run.cmd", "cmd.exe"),
+                ("run.bat", "cmd.exe"),
+                ("RUN.CMD", "cmd.exe"),
+                ("script.ps1", "PowerShell"),
+                ("script.py", "not a Windows executable"),
+                ("noext", "not a Windows executable"),
+            ] {
+                let file = tmp.path().join(name);
+                std::fs::write(&file, "x").unwrap();
+                let message = refused(&file.display().to_string());
+                assert!(message.contains(expect), "{name}: {message}");
+            }
+            let cmd = std::path::Path::new(&std::env::var("SystemRoot").unwrap()).join("System32").join("cmd.exe");
+            assert!(refused(&cmd.display().to_string()).contains("cmd.exe"));
+        }
+    }
+
+    #[test]
+    fn settings_change_wire_format() {
+        let change: ExecutionSettingsChange =
+            serde_json::from_str(r#"{"kind":"toolPath","tool":"python","path":null}"#).unwrap();
+        assert_eq!(change, ExecutionSettingsChange::ToolPath { tool: "python".into(), path: None });
+        let change: ExecutionSettingsChange =
+            serde_json::from_str(r#"{"kind":"dockerImage","image":"python:3.13-slim"}"#).unwrap();
+        assert_eq!(change, ExecutionSettingsChange::DockerImage { image: Some("python:3.13-slim".into()) });
+        // Container limits and the user cannot be changed through this type.
+        assert!(serde_json::from_str::<ExecutionSettingsChange>(r#"{"kind":"dockerUser","user":"0:0"}"#).is_err());
     }
 }

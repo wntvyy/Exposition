@@ -1,31 +1,34 @@
 //! pdfLaTeX / LuaLaTeX build adapter.
 //!
-//! # Snapshot strategy (overlay + TEXINPUTS)
+//! # Snapshot strategy (project mirror + TEXINPUTS)
 //!
 //! A build compiles one immutable snapshot of the project including unsaved
 //! buffers, without writing into the project:
 //!
-//! * Every open document with a workspace path is materialized, byte for
-//!   byte, into an application-owned overlay `<work>/src/<path>` that is
-//!   recreated for each build (so it holds exactly the snapshot's buffers).
-//! * The engine runs with its working directory in the overlay (at the entry
-//!   file's directory) and `TEXINPUTS` = overlay dir, project dir, then the
-//!   distribution default. Relative `\input`, `\include`, and
-//!   `\includegraphics` paths therefore resolve to the buffer version when
-//!   one exists and to the project file otherwise.
+//! * An application-owned mirror `<build root>/mirror-<project>` holds a copy
+//!   of the project tree with every open document that has a workspace path
+//!   written over its file, byte for byte as it would be saved (see
+//!   [`crate::mirror`]; it is synchronized incrementally before each build
+//!   and shared by the project's targets, as builds are serialized).
+//! * The engine runs with its working directory in the mirror at the entry
+//!   file's directory, and `TEXINPUTS` = that directory, the same directory
+//!   in the project, then the distribution default. Relative `\input`,
+//!   `\include`, and `\includegraphics` names, including explicitly relative
+//!   ones (`./x`, `../x`, which TeX opens from the working directory only),
+//!   therefore resolve exactly as in the project, to the buffer version when
+//!   one exists. Files the mirror leaves out (size limits, links) are still
+//!   found in the project through `TEXINPUTS` unless explicitly relative.
 //! * All engine output goes to `<work>/out` (`-output-directory`), never to
 //!   the project. `.aux`/`.bbl` persist between builds so a single draft pass
 //!   resolves references from the previous full build.
 //! * After each build the PDF, SyncTeX, and log are copied into
 //!   `<work>/builds/<build-id>/`, which is never modified afterwards: page
 //!   views and mappings refer to that directory.
-//! * The `-recorder` file lists every input actually read; project files are
-//!   hashed (and `.tex` texts retained) right after the run, which yields the
-//!   snapshot's `SourceRevision`s and content-derived `SnapshotId`.
-//!   Limitation: a project file that is not open in a buffer is read from
-//!   disk by the engine; if it changes *during* the run the recorded hash may
-//!   not match what the engine read. Copying the whole project would remove
-//!   that window at the cost of per-build copying.
+//! * The `-recorder` file lists every input actually read; those files are
+//!   hashed (and `.tex` texts retained) from the mirror right after the run,
+//!   which yields the snapshot's `SourceRevision`s and content-derived
+//!   `SnapshotId`. (A file read through the project fallback is hashed from
+//!   the project; if it changes *during* the run the hash may not match.)
 //!
 //! # Security
 //!
@@ -62,6 +65,7 @@ use sha2::{Digest, Sha256};
 
 use crate::log::{LogMessageKind, parse_log, rerun_requested};
 use crate::mapping::SourceSet;
+use crate::mirror::MirrorBuffer;
 use crate::pdf::PdfDocument;
 use crate::runner::{JobRunner, ProcessOutput};
 use crate::synctex::SyncTex;
@@ -99,7 +103,7 @@ pub struct TexBuildRequest {
     pub workspace: Option<WorkspaceSnapshot>,
 }
 
-/// An open buffer materialized into the overlay.
+/// An open buffer materialized into the mirror.
 struct Buffer {
     bytes: Arc<[u8]>,
     text: Arc<str>,
@@ -341,25 +345,23 @@ impl<R: JobRunner> TexBuilder<R> {
         // Work directory for this (project, entry, engine).
         let key = short_hash(&format!("{}|{}|{:?}", project_root.display(), target.entry, target.engine));
         let work = self.build_root.join(&key);
-        let overlay_root = work.join("src");
+        let overlay_root = self.build_root.join(format!("mirror-{}", short_hash(&project_root.display().to_string())));
         let out_dir = work.join("out");
-        if let Err(e) = prepare_dirs(&overlay_root, &out_dir, &project_root) {
+        if let Err(e) = prepare_dirs(&out_dir, &project_root) {
             return self.early(request, id, BuildStatus::Error { message: format!("build directory: {e}") });
         }
 
-        // Materialize buffers (bytes exactly as they would be saved).
+        // Mirror the project with the buffers (bytes exactly as they would be
+        // saved) over it.
         let buffers = collect_buffers(request);
-        for (path, buffer) in &buffers {
-            let file = path.components().fold(overlay_root.clone(), |p, c| p.join(c));
-            if let Some(parent) = file.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                return self.early(request, id, BuildStatus::Error { message: format!("overlay: {e}") });
+        let placed: Vec<MirrorBuffer<'_>> =
+            buffers.iter().map(|(path, buffer)| MirrorBuffer { path, bytes: &buffer.bytes }).collect();
+        let mirrored = match crate::mirror::sync(&project_root, &overlay_root, &placed) {
+            Ok(stats) => stats,
+            Err(e) => {
+                return self.early(request, id, BuildStatus::Error { message: format!("project mirror: {e}") });
             }
-            if let Err(e) = std::fs::write(&file, &buffer.bytes) {
-                return self.early(request, id, BuildStatus::Error { message: format!("overlay: {e}") });
-            }
-        }
+        };
         let entry_dir = target.entry.parent();
         let in_dir =
             |root: &Path| entry_dir.iter().flat_map(|d| d.components()).fold(root.to_path_buf(), |p, c| p.join(c));
@@ -517,6 +519,21 @@ impl<R: JobRunner> TexBuilder<R> {
         let log = read_lossy(&log_path);
         let mut diagnostics = diagnostics_from_log(&log, &snapshot);
         diagnostics.extend(diagnostics_extra);
+        if mirrored.skipped > 0 {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Info,
+                message: format!(
+                    "{} project files were not copied for the build (larger than {} MiB, or more than {} files).",
+                    mirrored.skipped,
+                    crate::mirror::MAX_FILE_BYTES >> 20,
+                    crate::mirror::MAX_FILES
+                ),
+                location: None,
+                hints: vec![
+                    "They are still found by name, but not through explicitly relative paths (./ or ../).".into(),
+                ],
+            });
+        }
         let has_errors = diagnostics.iter().any(|d| d.severity == Severity::Error);
 
         // Freeze outputs.
@@ -553,7 +570,8 @@ impl<R: JobRunner> TexBuilder<R> {
                         index: i as u32,
                         width_pt: w,
                         height_pt: h,
-                        render_ref: format!("tex-build:{}/page/{i}", id.0),
+                        // `<build id>-p<index>`: plain characters, as page views require.
+                        render_ref: format!("{}-p{i}", id.0),
                     });
                 }
             }
@@ -769,9 +787,16 @@ impl<R: JobRunner> TexBuilder<R> {
                 continue;
             }
             let is_text = matches!(path.extension(), Some("tex" | "ltx" | "sty" | "cls" | "bib" | "bbx" | "cbx"));
-            // Through the workspace's checked reads when building a workspace
+            // The mirror copy the engine read (it holds no links), else
+            // through the workspace's checked reads when building a workspace
             // snapshot (no traversal or link escapes), else the project folder.
+            let mirrored = path.components().fold(overlay_root.to_path_buf(), |p, c| p.join(c));
             let (content_hash, text) = match workspace {
+                _ if mirrored.is_file() => {
+                    let Ok(bytes) = std::fs::read(&mirrored) else { continue };
+                    let text = if is_text { String::from_utf8(bytes.clone()).ok().map(Arc::from) } else { None };
+                    (hex_sha256(&bytes), text)
+                }
                 Some(workspace) => {
                     let Ok(input) = workspace.read(&path) else { continue };
                     (input.content_hash, input.text.filter(|_| is_text))
@@ -924,11 +949,7 @@ fn line_range(text: &str, l0: u32, l1: u32) -> Option<TextRange> {
     Some(TextRange::new(start as u32, end as u32))
 }
 
-fn prepare_dirs(overlay_root: &Path, out_dir: &Path, project_root: &Path) -> std::io::Result<()> {
-    if overlay_root.exists() {
-        std::fs::remove_dir_all(overlay_root)?;
-    }
-    std::fs::create_dir_all(overlay_root)?;
+fn prepare_dirs(out_dir: &Path, project_root: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(out_dir)?;
     // `\include{dir/file}` writes `dir/file.aux` into the output directory.
     mirror_dirs(project_root, out_dir, 0)?;

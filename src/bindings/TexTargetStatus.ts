@@ -8,7 +8,8 @@ import type { TexTargetRef } from "./TexTargetRef";
  */
 export type TexTargetStatus = { target: TexTargetRef, running: TexBuildMode | null, pending: TexBuildMode | null, last: TexBuildSummary | null, 
 /**
- * The latest build with pages (kept while newer builds fail or run).
+ * The latest successful build with pages (kept while newer builds
+ * fail or run).
  */
 lastGood: TexBuildSummary | null, 
 /**

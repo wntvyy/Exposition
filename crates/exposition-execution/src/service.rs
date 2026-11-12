@@ -16,16 +16,19 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use ts_rs::TS;
 
 use crate::credentials::Redactor;
-use crate::docker;
+use crate::docker::{self, DockerImage, DockerListError};
 use crate::env::{EnvContext, Environment, HostEnv, build_container_environment, build_environment};
 use crate::log::{DEFAULT_LOG_LIMIT, OutputPage, RingLog, StreamCapture, page};
-use crate::paths::{PathError, RootKind, Roots, canonical_directory, canonicalize};
+use crate::paths::{PathError, RootKind, Roots, canonical_directory, canonicalize, is_within};
 use crate::process::{Containment, outcome_from_status, spawn_contained};
-use crate::settings::{ExecutionSettings, SettingsStore};
+use crate::settings::{
+    ExecutionSettings, ExecutionSettingsChange, ExecutionSettingsState, SettingsError, SettingsStore,
+    check_tool_override,
+};
 use crate::toolchains::{
     Located, Locator, TOOLS, ToolStatus, ToolchainInfo, interpret_probe, is_executable_file, tool,
 };
-use crate::trust::{TrustError, TrustStatus, TrustStore};
+use crate::trust::{TrustError, TrustRules, TrustStatus, TrustStore, TrustedRoot};
 
 /// Default wall-clock limit for batch jobs without `timeout_ms`.
 pub const DEFAULT_BATCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -37,6 +40,9 @@ const PROBE_LOG_LIMIT: u64 = 64 * 1024;
 const MAX_FINISHED_JOBS: usize = 500;
 /// Concurrent interactive sessions.
 const MAX_INTERACTIVE: usize = 16;
+/// Host variables the docker client may inherit (engine connection only).
+const DOCKER_CLIENT_ENV: &[&str] =
+    &["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"];
 /// Supervisor poll interval; output is flushed at most every `FLUSH_INTERVAL`
 /// (so at most 10 output events per stream per second, 20 per job).
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -410,8 +416,153 @@ impl ExecutionService {
         self.inner.trust.revoke(path)
     }
 
+    /// Every stored trusted directory (for the settings UI).
+    pub fn trusted_roots(&self) -> Vec<TrustedRoot> {
+        self.inner.trust.list()
+    }
+
+    /// Which directories may be trusted, with this computer's locations.
+    pub fn trust_rules(&self) -> TrustRules {
+        self.inner.trust.rules()
+    }
+
     pub fn settings(&self) -> ExecutionSettings {
         self.inner.settings.get()
+    }
+
+    /// Settings plus the tool ids whose location may be overridden.
+    pub fn settings_state(&self) -> ExecutionSettingsState {
+        ExecutionSettingsState {
+            settings: self.settings(),
+            overridable_tools: TOOLS.iter().filter(|t| t.component_of.is_none()).map(|t| t.id.to_owned()).collect(),
+        }
+    }
+
+    /// Apply one validated settings change (the settings UI path; see
+    /// [`ExecutionSettingsChange`]). Images must match Docker's reference
+    /// grammar; tool overrides must be existing executables the service would
+    /// run. Changing a tool location invalidates cached toolchain information.
+    pub fn apply_settings_change(
+        &self,
+        change: ExecutionSettingsChange,
+    ) -> Result<ExecutionSettingsState, SettingsError> {
+        let io = |e: std::io::Error| SettingsError::Io(e.to_string());
+        match change {
+            ExecutionSettingsChange::DockerImage { image } => {
+                let image = match image.as_deref().map(str::trim) {
+                    None | Some("") => None,
+                    Some(image) => {
+                        docker::validate_image_reference(image).map_err(SettingsError::InvalidImage)?;
+                        Some(image.to_owned())
+                    }
+                };
+                self.update_settings(|s| s.docker.image = image).map_err(io)?;
+            }
+            ExecutionSettingsChange::ToolPath { tool: id, path } => {
+                if tool(&id).is_none_or(|t| t.component_of.is_some()) {
+                    return Err(SettingsError::UnknownTool(id));
+                }
+                match path {
+                    None => {
+                        self.update_settings(|s| {
+                            s.tool_paths.remove(&id);
+                        })
+                        .map_err(io)?;
+                    }
+                    Some(raw) => {
+                        let path = check_tool_override(&raw)?;
+                        // Same gate as job launch, so an accepted override is runnable.
+                        validate_executable(&path.display().to_string())
+                            .map_err(|refusal| SettingsError::InvalidToolPath(refusal.message))?;
+                        self.check_override_location(&path)?;
+                        self.update_settings(|s| {
+                            s.tool_paths.insert(id, path.display().to_string());
+                        })
+                        .map_err(io)?;
+                    }
+                }
+                // Best effort: a refresh in progress replaces the cache itself.
+                if let Ok(mut cache) = self.inner.toolchains.try_lock() {
+                    *cache = None;
+                }
+            }
+        }
+        Ok(self.settings_state())
+    }
+
+    /// Tool probes run without workspace trust, so a tool location may not be
+    /// project content (an open workspace) or job output (the execution data
+    /// directory): either would let files Exposition did not install choose
+    /// what runs.
+    fn check_override_location(&self, path: &Path) -> Result<(), SettingsError> {
+        let resolved = canonicalize(path).ok().or_else(|| {
+            let parent = canonicalize(path.parent()?).ok()?;
+            Some(parent.join(path.file_name()?))
+        });
+        let Some(resolved) = resolved else { return Ok(()) };
+        let shown = path.display();
+        if let Some(root) = self.inner.roots.locked().workspace_roots().find(|r| is_within(&resolved, r)) {
+            return Err(SettingsError::InvalidToolPath(format!(
+                "{shown} is inside the open project {}. Project files never choose which programs Exposition runs; use an installed copy of the tool.",
+                root.display()
+            )));
+        }
+        if is_within(&resolved, &self.inner.exec_dir) {
+            return Err(SettingsError::InvalidToolPath(format!(
+                "{shown} is inside Exposition's execution data folder (job output); use an installed copy of the tool."
+            )));
+        }
+        Ok(())
+    }
+
+    /// Images present locally, for choosing the restricted-execution image.
+    /// Runs `docker image ls` as an application probe (fixed arguments, clean
+    /// environment, application-owned directory). Never pulls anything.
+    pub async fn docker_images(&self) -> Result<Vec<DockerImage>, DockerListError> {
+        let settings = self.inner.settings.get();
+        let docker = match (Locator { host: &self.inner.host, settings: &settings }).locate("docker") {
+            Located::Found { path, .. } => path,
+            Located::BadOverride { path } => {
+                return Err(DockerListError::NotFound(format!(
+                    "the configured Docker path {path} is not an executable"
+                )));
+            }
+            Located::NotFound => {
+                return Err(DockerListError::NotFound(
+                    "Docker was not found. Install Docker Desktop (https://docs.docker.com/desktop/) to use restricted execution."
+                        .into(),
+                ));
+            }
+        };
+        let spec = JobSpec {
+            label: "List local Docker images".into(),
+            program: docker.display().to_string(),
+            args: docker::IMAGE_LIST_ARGS.iter().map(|a| a.to_string()).collect(),
+            environment: EnvironmentSpec {
+                inherit: DOCKER_CLIENT_ENV.iter().map(|s| s.to_string()).collect(),
+                set: Default::default(),
+            },
+            working_directory: self.inner.probe_dir.display().to_string(),
+            policy: ExecutionPolicy::TrustedNative,
+            timeout_ms: Some(30_000),
+            log_limit_bytes: Some(4 * 1024 * 1024),
+            stdin: None,
+        };
+        let id = self.submit(spec, JobKind::Probe);
+        let outcome = self.wait(&id).await.map(|r| r.outcome).unwrap_or(JobOutcome::Canceled);
+        let stdout = self.output_text(&id, OutputStream::Stdout).unwrap_or_default();
+        let stderr = self.output_text(&id, OutputStream::Stderr).unwrap_or_default();
+        let first = |text: &str| text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no details").to_owned();
+        match outcome {
+            JobOutcome::Exited { code: 0 } => Ok(docker::parse_image_list(&stdout)),
+            JobOutcome::Exited { .. } => Err(DockerListError::Unreachable(format!(
+                "the Docker engine is not reachable ({}). Start Docker Desktop and retry.",
+                first(&stderr)
+            ))),
+            JobOutcome::FailedToStart { reason } => Err(DockerListError::Failed(reason)),
+            JobOutcome::TimedOut => Err(DockerListError::Failed("docker image ls did not finish within 30 s".into())),
+            other => Err(DockerListError::Failed(format!("docker image ls ended unexpectedly: {other:?}"))),
+        }
     }
 
     pub fn update_settings(&self, change: impl FnOnce(&mut ExecutionSettings)) -> std::io::Result<ExecutionSettings> {
@@ -991,16 +1142,7 @@ impl Inner {
                 let container_env = build_container_environment(&spec.environment, &self.host, &self.redactor)
                     .map_err(|e| JobRefusal::new(RefusalCode::EnvironmentRefused, e.to_string()))?;
                 let client_spec = EnvironmentSpec {
-                    inherit: [
-                        "DOCKER_HOST",
-                        "DOCKER_CONTEXT",
-                        "DOCKER_CONFIG",
-                        "DOCKER_CERT_PATH",
-                        "DOCKER_TLS_VERIFY",
-                    ]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
+                    inherit: DOCKER_CLIENT_ENV.iter().map(|s| s.to_string()).collect(),
                     set: Default::default(),
                 };
                 let temp = PathBuf::new();

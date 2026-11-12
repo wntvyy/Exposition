@@ -22,6 +22,8 @@ pub enum SessionError {
 /// Rendering and mapping access to one build's immutable output.
 pub struct TexPageSession {
     pub pdf: PdfDocument,
+    /// The PDF as produced (for export after the output directory is pruned).
+    pub pdf_bytes: std::sync::Arc<[u8]>,
     pub synctex: SyncTex,
     pub sources: SourceSet,
 }
@@ -31,10 +33,12 @@ impl TexPageSession {
         let output = build.output.as_ref().ok_or(SessionError::NoOutput)?;
         let snapshot = build.snapshot.as_ref().ok_or(SessionError::NoOutput)?;
         let synctex_path = output.synctex.as_ref().ok_or(SessionError::NoSyncTex)?;
-        let pdf = PdfDocument::open(std::fs::read(&output.pdf)?)?;
+        let bytes = std::fs::read(&output.pdf)?;
+        let pdf_bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(bytes.as_slice());
+        let pdf = PdfDocument::open(bytes)?;
         let synctex = SyncTex::read(synctex_path)?;
         let sources = snapshot.source_set(&synctex);
-        Ok(Self { pdf, synctex, sources })
+        Ok(Self { pdf, pdf_bytes, synctex, sources })
     }
 
     pub fn page_count(&self) -> usize {

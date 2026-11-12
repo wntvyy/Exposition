@@ -10,6 +10,8 @@ publish.workspace = true
 exposition-core.workspace = true
 exposition-workspace.workspace = true
 exposition-execution.workspace = true
+# Format-neutral page editing core only (no Typst input rules).
+exposition-page = { path = "../exposition-page", default-features = false }
 tokio.workspace = true
 ts-rs.workspace = true
 serde.workspace = true
