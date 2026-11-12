@@ -31,7 +31,9 @@ export interface AssociateDeclarationDialogProps {
 }
 
 export function AssociateDeclarationDialog({ target, declarations, onClose, onAssociated }: AssociateDeclarationDialogProps) {
-  const [declaration, setDeclaration] = useState<string | null>(declarations[0]?.id ?? null);
+  // Preselect only an unambiguous choice: with several declarations the
+  // person picks one (a default would nudge toward a wrong correspondence).
+  const [declaration, setDeclaration] = useState<string | null>(declarations.length === 1 ? declarations[0]!.id : null);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

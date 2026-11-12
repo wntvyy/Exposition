@@ -453,6 +453,12 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     );
     status = await invoke(page, "agents_provider_status");
     assert.equal(status.configured, false);
+    // The disabled Remove button cannot keep focus; the dialog moves it to the
+    // key field on the next frame. Press Escape once focus is in the dialog,
+    // as a keyboard user would.
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll('[role="dialog"]')].some((d) => d.contains(document.activeElement)),
+    );
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "detached", timeout: 5000 });
     step("Remove asks (alertdialog, Keep focused); Escape keeps the key; Remove key removes it");

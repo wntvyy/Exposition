@@ -40,6 +40,14 @@ describe("Associate a Lean declaration", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("with several declarations, nothing is preselected: the person chooses", () => {
+    const other = entity("d0", "formalDeclaration", "LeanBasic.add_comm'", { key: "LeanBasic.add_comm'" });
+    render(<AssociateDeclarationDialog target={theorem} declarations={[other, decl]} onClose={vi.fn()} />);
+    const record = screen.getByRole("button", { name: "Record reviewed association" });
+    expect(record.hasAttribute("disabled") || record.hasAttribute("data-disabled")).toBe(true);
+    expect(lean.associate).not.toHaveBeenCalled();
+  });
+
   it("is offered only for statements and similar targets, and explains when no declaration exists", () => {
     render(<AssociateDeclarationAction target={theorem} declarations={[]} canWrite />);
     const button = screen.getByTestId("graph-associate-button");
