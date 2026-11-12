@@ -763,6 +763,86 @@ impl GraphService {
         Ok(id)
     }
 
+    // ----- resources -----
+
+    /// The resource entity of a project file, if the graph knows it (any
+    /// lifecycle except tombstoned).
+    pub fn resource(&self, path: &WorkspacePath) -> GraphResult<Option<Entity>> {
+        self.with_store(|store| {
+            Ok(store
+                .entities_by_key(EntityKind::Resource, path.as_str())?
+                .into_iter()
+                .find(|e| e.lifecycle != Lifecycle::Tombstoned))
+        })
+    }
+
+    /// Resolve the resource identity of an existing project file, admitting
+    /// it when the inclusion policy allows (`explicit` also admits generated
+    /// outputs that are being retained or attached). The file must exist in
+    /// the project (callers resolve the path through the workspace first and
+    /// pass its current content hash when known). Excluded paths fail with
+    /// `graph.excluded` and the policy's reason.
+    pub fn ensure_resource(
+        &self,
+        path: &WorkspacePath,
+        content_hash: Option<&str>,
+        explicit: bool,
+        service: &str,
+    ) -> GraphResult<Entity> {
+        let roles = match crate::admission::classify(path) {
+            crate::admission::Admission::Admit(roles) => roles,
+            crate::admission::Admission::OnRequest(roles) if explicit => roles,
+            crate::admission::Admission::OnRequest(_) => {
+                return Err(GraphError::new(
+                    "graph.excluded",
+                    format!(
+                        "{path} is a generated output; it becomes a project resource when it is retained or attached"
+                    ),
+                ));
+            }
+            crate::admission::Admission::Exclude(reason) => {
+                return Err(GraphError::new("graph.excluded", format!("{path} is not a project resource: {reason}")));
+            }
+        };
+        if let Some(existing) = self.resource(path)? {
+            return Ok(existing);
+        }
+        let origin = Origin::Service { service: service.to_owned() };
+        let binding = crate::model::SourceBinding {
+            entity: EntityId::mint(),
+            path: path.clone(),
+            selector: crate::model::SourceSelector::WholeFile,
+            range: None,
+            version: content_hash.map(|h| crate::model::SourceVersion {
+                content_hash: h.to_owned(),
+                revision: None,
+                saved: true,
+            }),
+            fingerprint: None,
+            state: if content_hash.is_some() { BindingState::Resolved } else { BindingState::Unresolved },
+            detail: None,
+        };
+        let batch = ServiceBatch {
+            entities: vec![validate::EntityUpsert {
+                id: None,
+                kind: EntityKind::Resource,
+                roles,
+                label: crate::store::truncate(path.file_name(), 200),
+                key: Some(path.as_str().to_owned()),
+                attributes: BTreeMap::new(),
+                lifecycle: None,
+                tombstone_reason: None,
+                bindings: Some(vec![binding]),
+            }],
+            summary: format!("Admit {path}"),
+            ..Default::default()
+        };
+        let outcome = self.apply_service_batch(&origin, &batch)?;
+        let id =
+            outcome.entity_ids.first().cloned().ok_or_else(|| GraphError::new("graph.storage", "admission failed"))?;
+        self.with_store(|s| s.entity(&id)?.ok_or_else(|| GraphError::new("graph.storage", "admission failed")))
+    }
+
     // ----- views -----
 
     pub fn views(&self) -> GraphResult<Vec<GraphViewSummary>> {

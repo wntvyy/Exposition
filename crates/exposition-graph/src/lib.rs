@@ -16,6 +16,7 @@
 //! - [`service`]: [`GraphService`], one graph context per open project.
 //! - [`journal`]: app-owned journal of cross-service operations.
 
+pub mod admission;
 pub mod ids;
 pub mod journal;
 pub mod model;
@@ -26,6 +27,7 @@ pub mod store;
 pub mod validate;
 pub mod vocabulary;
 
+pub use admission::{Admission, classify};
 pub use ids::{EntityId, EvidenceId, OperationId, ProjectId, ProposalId, RelationId, ViewId, WorkflowId};
 pub use journal::{OperationJournal, OperationKind, OperationRecord, OperationState};
 pub use model::*;
