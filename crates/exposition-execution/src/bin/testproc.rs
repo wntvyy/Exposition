@@ -10,7 +10,11 @@
 //! - `exit <code>`: exit with the given code.
 //! - `print <text>` / `eprint <text>`: write text (plus newline) to stdout/stderr.
 //! - `flood <bytes>`: write roughly that many bytes of 100-byte lines to stdout.
+//! - `flood-cjk <bytes>` / `flood-binary <bytes>`: one large write of 3-byte
+//!   UTF-8 characters / of invalid UTF-8 bytes, without newlines.
 //! - `sleep <secs>`: sleep.
+//! - `--version`: print `<exe stem> (fake) version 4.12.0` and append
+//!   `<exe stem> --version` to `invocations.log` beside the executable.
 //! - `echo-lines`: echo each stdin line as `echo: <line>` until EOF.
 //! - `stdin-count`: read stdin to EOF and print the byte count.
 
@@ -78,6 +82,33 @@ fn main() {
                 written += line.len();
             }
             let _ = out.flush();
+        }
+        "flood-cjk" | "flood-binary" => {
+            // One large write of 3-byte UTF-8 characters, or of invalid UTF-8.
+            let total: usize = arg(&args, 1).parse().unwrap_or(1024);
+            let data: Vec<u8> = if arg(&args, 0) == "flood-cjk" {
+                "数学".repeat(total / 6 + 1).into_bytes()
+            } else {
+                (0..total).map(|i| [0xff, 0xfe, 0x80, b'a'][i % 4]).collect()
+            };
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(&data);
+            let _ = out.flush();
+        }
+        "--version" => {
+            // Stand-in for a tool's version query (e.g. a fake elan layout):
+            // report the name we were invoked as and log the invocation next
+            // to the executable.
+            let stem = me.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            println!("{stem} (fake) version 4.12.0");
+            if let Some(dir) = me.parent() {
+                let mut log = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("invocations.log"))
+                    .expect("invocation log");
+                let _ = writeln!(log, "{stem} --version");
+            }
         }
         "sleep" => std::thread::sleep(secs(arg(&args, 1))),
         "echo-lines" => {

@@ -267,6 +267,32 @@ async fn logs_are_bounded_and_paged() {
     assert_eq!(seen, retained.len());
 }
 
+/// Regression (review R-m1): multi-byte or binary output exceeding the log
+/// limit between two flushes panicked the reader, wedged the job, and leaked
+/// its concurrency slot. Python-independent variant of the reviewer's tests.
+#[tokio::test(flavor = "multi_thread")]
+async fn non_ascii_and_binary_floods_complete_bounded_without_starving_the_queue() {
+    let settings = ExecutionSettings { max_concurrent_jobs: Some(1), ..Default::default() };
+    let f = fixture_with(settings, true);
+    for mode in ["flood-cjk", "flood-binary"] {
+        let mut spec = f.spec(&[mode, "3000000"]);
+        spec.log_limit_bytes = Some(64 * 1024 + 1);
+        let id = f.service.launch(spec);
+        let result = tokio::time::timeout(Duration::from_secs(60), f.service.wait(&id))
+            .await
+            .unwrap_or_else(|_| panic!("{mode}: job wedged in state {:?}", f.service.summary(&id).map(|s| s.state)))
+            .unwrap();
+        assert_eq!(result.outcome, JobOutcome::Exited { code: 0 }, "{mode}");
+        assert!(result.output_truncated, "{mode}");
+        assert!(f.stdout(&id).len() <= 64 * 1024 + 1, "{mode}: {}", f.stdout(&id).len());
+        assert!(f.service.output(&id, None, 4096).is_some());
+    }
+    // The single concurrency slot was released.
+    let next = f.service.launch(f.spec(&["exit", "0"]));
+    let result = tokio::time::timeout(Duration::from_secs(20), f.service.wait(&next)).await.expect("queue starved");
+    assert_eq!(result.unwrap().outcome, JobOutcome::Exited { code: 0 });
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn output_events_are_rate_limited() {
     let f = fixture();

@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use exposition_core::job::{
@@ -142,7 +142,8 @@ pub struct ExecutionConfig {
     pub host_env: HostEnv,
     /// In-memory settings instead of `<data>/execution/settings.json`.
     pub settings: Option<ExecutionSettings>,
-    /// Directories that may never be trusted wholesale (home, system dirs).
+    /// Additional directories that may never be trusted, nor anything above
+    /// them — on top of the built-in rules of `exposition_core::roots`.
     pub too_broad_to_trust: Option<Vec<PathBuf>>,
     /// Persistent cache for self-extracting tools (default
     /// `<data_dir>/execution/cache`). Shared by all native jobs.
@@ -201,18 +202,18 @@ struct Control {
 
 impl Control {
     fn request(&self) {
-        *self.cancel.lock().expect("cancel lock") = true;
+        *self.cancel.locked() = true;
         self.wake.notify_all();
     }
 
     fn requested(&self) -> bool {
-        *self.cancel.lock().expect("cancel lock")
+        *self.cancel.locked()
     }
 
     /// Wait until canceled or the timeout passes; returns whether canceled.
     fn wait(&self, timeout: Duration) -> bool {
-        let guard = self.cancel.lock().expect("cancel lock");
-        let (guard, _) = self.wake.wait_timeout_while(guard, timeout, |c| !*c).expect("cancel lock");
+        let guard = self.cancel.locked();
+        let (guard, _) = self.wake.wait_timeout_while(guard, timeout, |c| !*c).unwrap_or_else(PoisonError::into_inner);
         *guard
     }
 }
@@ -253,7 +254,7 @@ struct Job {
 
 impl Job {
     fn summary(&self) -> JobSummary {
-        let m = self.state.lock().expect("job state");
+        let m = self.state.locked();
         JobSummary {
             info: JobInfo {
                 id: self.id.clone(),
@@ -336,7 +337,7 @@ impl ExecutionService {
             Some(s) => SettingsStore::in_memory(s),
             None => SettingsStore::load(exec_dir.join("settings.json")),
         };
-        let too_broad = config.too_broad_to_trust.unwrap_or_else(|| default_too_broad(&host));
+        let too_broad = config.too_broad_to_trust.unwrap_or_default();
         let trust = TrustStore::load(exec_dir.join("trust.json"), too_broad);
         let mut roots = Roots::default();
         roots
@@ -371,11 +372,11 @@ impl ExecutionService {
     /// Register an opened project directory; returns its canonical path. Jobs
     /// may run inside it; native jobs additionally need it to be trusted.
     pub fn register_workspace_root(&self, path: &Path) -> Result<PathBuf, PathError> {
-        self.inner.roots.lock().expect("roots").register(path, RootKind::Workspace)
+        self.inner.roots.locked().register(path, RootKind::Workspace)
     }
 
     pub fn unregister_root(&self, path: &Path) {
-        self.inner.roots.lock().expect("roots").unregister(path);
+        self.inner.roots.locked().unregister(path);
     }
 
     /// Register an application-owned directory (build output, scratch). Pass the
@@ -383,7 +384,7 @@ impl ExecutionService {
     /// `None` makes it usable only by application probes.
     pub fn register_app_dir(&self, path: &Path, owner: Option<&Path>) -> Result<PathBuf, PathError> {
         let owner = owner.map(|o| canonicalize(o).unwrap_or_else(|_| o.to_path_buf()));
-        self.inner.roots.lock().expect("roots").register(path, RootKind::AppOwned { owner })
+        self.inner.roots.locked().register(path, RootKind::AppOwned { owner })
     }
 
     /// The application-owned directory used for version probes.
@@ -441,7 +442,10 @@ impl ExecutionService {
     /// Launch and wait for the result.
     pub async fn run(&self, spec: JobSpec) -> JobResult {
         let id = self.launch(spec);
-        self.wait(&id).await.expect("job just submitted")
+        match self.wait(&id).await {
+            Some(result) => result,
+            None => lost_result(id),
+        }
     }
 
     /// Launch a long-lived interactive job (stdin kept open; stdout delivered
@@ -474,20 +478,24 @@ impl ExecutionService {
         let inner = self.inner.clone();
         let worker_job = job.clone();
         inner.active_workers.fetch_add(1, Ordering::SeqCst);
-        std::thread::Builder::new()
-            .name(format!("exec-{}", job.id.0))
-            .spawn(move || {
-                let session = Session {
-                    stdin_rx: Some(input_rx),
-                    stdout_tx: Some(output_tx),
-                    log_mode: options.stdout_log,
-                    started: Some(started_tx),
-                };
-                inner.run_job(&worker_job, prepared, session);
-                inner.interactive.fetch_sub(1, Ordering::SeqCst);
-                inner.active_workers.fetch_sub(1, Ordering::SeqCst);
-            })
-            .expect("spawn job thread");
+        let spawned = std::thread::Builder::new().name(format!("exec-{}", job.id.0)).spawn(move || {
+            // Released even if supervision panics.
+            let _slot = WorkerGuard { inner: inner.clone(), batch_slot: false, interactive_slot: true };
+            let session = Session {
+                stdin_rx: Some(input_rx),
+                stdout_tx: Some(output_tx),
+                log_mode: options.stdout_log,
+                started: Some(started_tx),
+            };
+            inner.supervise(&worker_job, prepared, session);
+        });
+        if let Err(e) = spawned {
+            self.inner.interactive.fetch_sub(1, Ordering::SeqCst);
+            self.inner.active_workers.fetch_sub(1, Ordering::SeqCst);
+            let refusal =
+                JobRefusal::new(RefusalCode::SpawnFailed, format!("could not start a supervisor thread: {e}"));
+            return Err(self.inner.finish_refused(&job, refusal));
+        }
         match started_rx.await {
             Ok(Ok(pid)) => Ok(InteractiveJob {
                 id: job.id.clone(),
@@ -496,7 +504,7 @@ impl ExecutionService {
                 output: InteractiveOutput { rx: output_rx, buffer: Vec::new() },
             }),
             Ok(Err(result)) => Err(result),
-            Err(_) => Err(self.wait(&job.id).await.expect("job registered")),
+            Err(_) => Err(self.wait(&job.id).await.unwrap_or_else(|| lost_result(job.id.clone()))),
         }
     }
 
@@ -505,7 +513,7 @@ impl ExecutionService {
             Ok((job, prepared)) => {
                 let id = job.id.clone();
                 {
-                    let mut table = self.inner.table.lock().expect("job table");
+                    let mut table = self.inner.table.locked();
                     table.queue.push_back((job, prepared));
                 }
                 Inner::schedule(&self.inner);
@@ -554,7 +562,7 @@ impl ExecutionService {
             done,
         });
         {
-            let mut table = inner.table.lock().expect("job table");
+            let mut table = inner.table.locked();
             table.jobs.insert(id.clone(), job.clone());
             table.order.push_back(id.clone());
             evict_finished(&mut table);
@@ -566,7 +574,7 @@ impl ExecutionService {
         }
         match inner.prepare(spec, kind) {
             Ok(prepared) => {
-                job.state.lock().expect("job state").program_display = prepared.display_program();
+                job.state.locked().program_display = prepared.display_program();
                 Ok((job, prepared))
             }
             Err(refusal) => Err(inner.finish_refused(&job, refusal)),
@@ -582,18 +590,18 @@ impl ExecutionService {
     /// Wait for a job's result. `None` for an unknown (or evicted) id.
     pub async fn wait(&self, id: &JobId) -> Option<JobResult> {
         let mut rx = {
-            let table = self.inner.table.lock().expect("job table");
+            let table = self.inner.table.locked();
             table.jobs.get(id)?.done.subscribe()
         };
         rx.wait_for(|r| r.is_some()).await.ok()?.clone()
     }
 
     pub fn result(&self, id: &JobId) -> Option<JobResult> {
-        self.job(id)?.state.lock().expect("job state").result.clone()
+        self.job(id)?.state.locked().result.clone()
     }
 
     fn job(&self, id: &JobId) -> Option<Arc<Job>> {
-        self.inner.table.lock().expect("job table").jobs.get(id).cloned()
+        self.inner.table.locked().jobs.get(id).cloned()
     }
 
     pub fn summary(&self, id: &JobId) -> Option<JobSummary> {
@@ -603,7 +611,7 @@ impl ExecutionService {
     /// All retained jobs, oldest first.
     pub fn list(&self) -> Vec<JobSummary> {
         let jobs: Vec<Arc<Job>> = {
-            let table = self.inner.table.lock().expect("job table");
+            let table = self.inner.table.locked();
             table.order.iter().filter_map(|id| table.jobs.get(id).cloned()).collect()
         };
         jobs.iter().map(|j| j.summary()).collect()
@@ -612,15 +620,15 @@ impl ExecutionService {
     /// A page of retained output after sequence number `after`.
     pub fn output(&self, id: &JobId, after: Option<u64>, max_bytes: usize) -> Option<OutputPage> {
         let job = self.job(id)?;
-        let complete = job.state.lock().expect("job state").result.is_some();
-        let out = job.output.lock().expect("job output");
+        let complete = job.state.locked().result.is_some();
+        let out = job.output.locked();
         Some(page(&out.stdout, &out.stderr, after, max_bytes.max(1), complete))
     }
 
     /// All retained (redacted) text of one stream.
     pub fn output_text(&self, id: &JobId, stream: OutputStream) -> Option<String> {
         let job = self.job(id)?;
-        let out = job.output.lock().expect("job output");
+        let out = job.output.locked();
         Some(match stream {
             OutputStream::Stdout => out.stdout.text(),
             OutputStream::Stderr => out.stderr.text(),
@@ -631,12 +639,12 @@ impl ExecutionService {
     pub fn cancel(&self, id: &JobId) -> bool {
         let Some(job) = self.job(id) else { return false };
         let queued = {
-            let mut table = self.inner.table.lock().expect("job table");
+            let mut table = self.inner.table.locked();
             let position = table.queue.iter().position(|(j, _)| j.id == *id);
             position.and_then(|p| table.queue.remove(p))
         };
         {
-            let mut m = job.state.lock().expect("job state");
+            let mut m = job.state.locked();
             if m.result.is_some() {
                 return false;
             }
@@ -656,7 +664,7 @@ impl ExecutionService {
     /// Called on application exit; job-object kill-on-close covers crashes.
     pub fn shutdown(&self) {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
-        let jobs: Vec<Arc<Job>> = self.inner.table.lock().expect("job table").jobs.values().cloned().collect();
+        let jobs: Vec<Arc<Job>> = self.inner.table.locked().jobs.values().cloned().collect();
         for job in jobs {
             self.cancel(&job.id);
         }
@@ -762,31 +770,10 @@ impl Prepared {
     }
 }
 
-fn default_too_broad(host: &HostEnv) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    for var in ["USERPROFILE", "HOME", "SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "APPDATA", "LOCALAPPDATA"] {
-        if let Some(v) = host.get(var)
-            && let Ok(p) = canonicalize(Path::new(v))
-        {
-            dirs.push(p);
-        }
-    }
-    if let Some(profile) = host.get("USERPROFILE").or_else(|| host.get("HOME")) {
-        for sub in ["Desktop", "Documents", "Downloads"] {
-            if let Ok(p) = canonicalize(&Path::new(profile).join(sub)) {
-                dirs.push(p);
-            }
-        }
-    }
-    dirs
-}
-
 fn evict_finished(table: &mut Table) {
     while table.order.len() > MAX_FINISHED_JOBS {
-        let Some(position) = table
-            .order
-            .iter()
-            .position(|id| table.jobs.get(id).is_none_or(|j| j.state.lock().expect("job state").result.is_some()))
+        let Some(position) =
+            table.order.iter().position(|id| table.jobs.get(id).is_none_or(|j| j.state.locked().result.is_some()))
         else {
             break;
         };
@@ -886,7 +873,7 @@ impl Inner {
         let settings = self.settings.get();
         let cwd = canonical_directory(&spec.working_directory)
             .map_err(|e| JobRefusal::new(RefusalCode::InvalidWorkingDirectory, e.to_string()))?;
-        let root = self.roots.lock().expect("roots").containing(&cwd).cloned().ok_or_else(|| {
+        let root = self.roots.locked().containing(&cwd).cloned().ok_or_else(|| {
             JobRefusal::new(
                 RefusalCode::OutsideAllowedRoots,
                 format!(
@@ -1059,7 +1046,7 @@ impl Inner {
         };
         loop {
             let next = {
-                let mut table = this.table.lock().expect("job table");
+                let mut table = this.table.locked();
                 if table.running >= max {
                     None
                 } else {
@@ -1072,33 +1059,63 @@ impl Inner {
             };
             let Some((job, prepared)) = next else { break };
             let inner = this.clone();
+            let worker_job = job.clone();
             inner.active_workers.fetch_add(1, Ordering::SeqCst);
-            std::thread::Builder::new()
-                .name(format!("exec-{}", job.id.0))
-                .spawn(move || {
-                    inner.run_job(&job, prepared, Session::batch());
-                    inner.table.lock().expect("job table").running -= 1;
-                    inner.active_workers.fetch_sub(1, Ordering::SeqCst);
-                    Inner::schedule(&inner);
-                })
-                .expect("spawn job thread");
+            let spawned = std::thread::Builder::new().name(format!("exec-{}", job.id.0)).spawn(move || {
+                // Releases the concurrency slot and schedules the next job even
+                // if supervision panics.
+                let _slot = WorkerGuard { inner: inner.clone(), batch_slot: true, interactive_slot: false };
+                inner.supervise(&worker_job, prepared, Session::batch());
+            });
+            if let Err(e) = spawned {
+                this.table.locked().running -= 1;
+                this.active_workers.fetch_sub(1, Ordering::SeqCst);
+                let refusal =
+                    JobRefusal::new(RefusalCode::SpawnFailed, format!("could not start a supervisor thread: {e}"));
+                this.finish_refused(&job, refusal);
+            }
+        }
+    }
+
+    /// Run [`Inner::run_job`], converting a panic into a terminal result. The
+    /// process tree is killed while unwinding (the containment's drop closes
+    /// the job object, which has kill-on-close), so a supervisor bug can never
+    /// leave a job running forever or a waiter waiting forever.
+    fn supervise(self: &Arc<Self>, job: &Arc<Job>, prepared: Prepared, session: Session) {
+        self.supervised(job, || self.run_job(job, prepared, session));
+    }
+
+    fn supervised(self: &Arc<Self>, job: &Arc<Job>, body: impl FnOnce()) {
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            remove_job_dir(&self.exec_dir.join("jobs").join(&job.id.0));
+            self.finish(
+                job,
+                JobOutcome::Terminated {
+                    description: format!("stopped by an internal error in the execution service: {message}"),
+                },
+            );
         }
     }
 
     fn finish_refused(&self, job: &Arc<Job>, refusal: JobRefusal) -> JobResult {
         let reason = refusal.message.clone();
-        job.state.lock().expect("job state").refusal = Some(refusal);
+        job.state.locked().refusal = Some(refusal);
         self.finish(job, JobOutcome::FailedToStart { reason })
     }
 
     /// Record the result, emit `Finished`, wake waiters.
     fn finish(&self, job: &Arc<Job>, outcome: JobOutcome) -> JobResult {
         let truncated = {
-            let out = job.output.lock().expect("job output");
+            let out = job.output.locked();
             out.stdout.truncated() || out.stderr.truncated()
         };
         let result = {
-            let mut m = job.state.lock().expect("job state");
+            let mut m = job.state.locked();
             if let Some(existing) = &m.result {
                 return existing.clone();
             }
@@ -1117,7 +1134,7 @@ impl Inner {
     fn flush(&self, job: &Job, release_idle: bool) {
         let mut events = Vec::new();
         {
-            let mut out = job.output.lock().expect("job output");
+            let mut out = job.output.locked();
             let out = &mut *out;
             let idle = !out.dirty;
             out.dirty = false;
@@ -1147,7 +1164,7 @@ impl Inner {
 
     fn final_flush(&self, job: &Job) {
         {
-            let mut out = job.output.lock().expect("job output");
+            let mut out = job.output.locked();
             out.cap_out.release_partial(&self.redactor, true);
             out.cap_err.release_partial(&self.redactor, true);
         }
@@ -1156,7 +1173,7 @@ impl Inner {
 
     fn note(&self, job: &Job, stream: OutputStream, text: &str) {
         {
-            let mut out = job.output.lock().expect("job output");
+            let mut out = job.output.locked();
             let cap = match stream {
                 OutputStream::Stdout => &mut out.cap_out,
                 OutputStream::Stderr => &mut out.cap_err,
@@ -1211,7 +1228,7 @@ impl Inner {
             let docker_path = prepared.program.clone();
             let client_env = prepared.env.clone();
             {
-                let mut cleaned = self.docker_cleaned.lock().expect("docker cleanup");
+                let mut cleaned = self.docker_cleaned.locked();
                 if !*cleaned {
                     docker::remove_stale(&docker_path, &self.instance, &client_env, &self.probe_dir);
                     *cleaned = true;
@@ -1281,7 +1298,7 @@ impl Inner {
         let pid = child.id();
         let start = Instant::now();
         {
-            let mut m = job.state.lock().expect("job state");
+            let mut m = job.state.locked();
             m.started = Some(start);
             m.started_at_ms = Some(now_ms());
             m.pid = Some(pid);
@@ -1381,7 +1398,7 @@ impl Inner {
             }
         }
         if session.log_mode == ProtocolLog::Summary && job.kind == JobKind::Interactive {
-            let bytes = job.output.lock().expect("job output").protocol_bytes;
+            let bytes = job.output.locked().protocol_bytes;
             self.note(job, OutputStream::Stdout, &format!("[protocol stdout total: {bytes} bytes]\n"));
         }
         self.final_flush(job);
@@ -1400,6 +1417,9 @@ impl Inner {
     ) {
         let redactor = self.redactor.clone();
         std::thread::spawn(move || {
+            // Signals the supervisor even if this thread panics.
+            let _done = DoneSignal(done);
+            let mut capture_failed = false;
             let mut buffer = vec![0u8; 16 * 1024];
             let is_protocol = protocol.is_some();
             let log_copy = protocol.as_ref().is_none_or(|(_, mode)| *mode == ProtocolLog::RedactedCopy);
@@ -1417,20 +1437,102 @@ impl Inner {
                 {
                     owner = None;
                 }
-                let mut out = job.output.lock().expect("job output");
-                out.dirty = true;
-                if is_protocol {
-                    out.protocol_bytes += n as u64;
+                if capture_failed {
+                    continue; // keep draining so the child never blocks
                 }
-                if log_copy {
+                // A bug in capture must not stop draining or wedge the job.
+                let captured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut out = job.output.locked();
+                    out.dirty = true;
+                    if is_protocol {
+                        out.protocol_bytes += n as u64;
+                    }
+                    if log_copy {
+                        match stream {
+                            OutputStream::Stdout => out.cap_out.push_bytes(bytes, &redactor),
+                            OutputStream::Stderr => out.cap_err.push_bytes(bytes, &redactor),
+                        }
+                    }
+                }));
+                if captured.is_err() {
+                    capture_failed = true;
+                    let mut out = job.output.locked();
+                    let note = "
+[output capture stopped after an internal error; the process keeps running]
+";
                     match stream {
-                        OutputStream::Stdout => out.cap_out.push_bytes(bytes, &redactor),
-                        OutputStream::Stderr => out.cap_err.push_bytes(bytes, &redactor),
+                        OutputStream::Stdout => out.stdout.mark_truncated(),
+                        OutputStream::Stderr => out.stderr.mark_truncated(),
+                    }
+                    let seq = out.next_seq;
+                    out.next_seq += 1;
+                    let chunk = crate::log::OutputChunk { seq, stream, text: note.into() };
+                    match stream {
+                        OutputStream::Stdout => out.stdout.push(chunk),
+                        OutputStream::Stderr => out.stderr.push(chunk),
                     }
                 }
             }
-            let _ = done.send(());
         });
+    }
+}
+
+/// Poison-tolerant locking: a panic elsewhere must never make job state
+/// unreadable (the data stays consistent enough to report and finish).
+trait Locked<T> {
+    fn locked(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> Locked<T> for Mutex<T> {
+    fn locked(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Tells the supervisor that an output reader ended (also when it panicked).
+struct DoneSignal(std::sync::mpsc::Sender<()>);
+
+impl Drop for DoneSignal {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
+/// Releases a worker's accounting when its thread ends, including by panic:
+/// the batch concurrency slot (then schedules the next queued job), the
+/// interactive session count, and the active-worker count used by shutdown.
+struct WorkerGuard {
+    inner: Arc<Inner>,
+    batch_slot: bool,
+    interactive_slot: bool,
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        if self.batch_slot {
+            let mut table = self.inner.table.locked();
+            table.running = table.running.saturating_sub(1);
+        }
+        if self.interactive_slot {
+            self.inner.interactive.fetch_sub(1, Ordering::SeqCst);
+        }
+        self.inner.active_workers.fetch_sub(1, Ordering::SeqCst);
+        if self.batch_slot && !std::thread::panicking() {
+            Inner::schedule(&self.inner);
+        } else if self.batch_slot {
+            // Scheduling spawns threads; do it outside the unwinding frame.
+            let inner = self.inner.clone();
+            let _ = std::thread::Builder::new().spawn(move || Inner::schedule(&inner));
+        }
+    }
+}
+
+fn lost_result(id: JobId) -> JobResult {
+    JobResult {
+        id,
+        outcome: JobOutcome::Terminated { description: "the job record is no longer available".into() },
+        duration_ms: 0,
+        output_truncated: false,
     }
 }
 
@@ -1524,4 +1626,84 @@ fn remove_job_dir(job_dir: &Path) {
 /// Components of `path` below `root` (both canonical).
 fn relative_components(path: &Path, root: &Path) -> Vec<String> {
     path.components().skip(root.components().count()).map(|c| c.as_os_str().to_string_lossy().into_owned()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn service() -> (tempfile::TempDir, ExecutionService) {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = ExecutionService::with_config(ExecutionConfig {
+            data_dir: tmp.path().join("data"),
+            host_env: HostEnv::from_pairs(std::env::vars()),
+            settings: Some(ExecutionSettings::default()),
+            too_broad_to_trust: Some(vec![]),
+            tool_cache_dir: None,
+        })
+        .unwrap();
+        (tmp, service)
+    }
+
+    fn probe_spec(service: &ExecutionService) -> JobSpec {
+        JobSpec {
+            label: "unit".into(),
+            program: std::env::current_exe().unwrap().display().to_string(),
+            args: vec![],
+            environment: EnvironmentSpec::default(),
+            working_directory: service.probe_dir().display().to_string(),
+            policy: ExecutionPolicy::TrustedNative,
+            timeout_ms: None,
+            log_limit_bytes: None,
+            stdin: None,
+        }
+    }
+
+    /// Regression (review R-m1): a panic while supervising must still give the
+    /// job a terminal result, so waiters resolve and nothing stays "running".
+    #[tokio::test]
+    async fn a_supervisor_panic_still_finishes_the_job() {
+        let (_tmp, service) = service();
+        let (job, _prepared) = service.register(&probe_spec(&service), JobKind::Application).unwrap();
+        service.inner.supervised(&job, || panic!("injected supervisor failure"));
+        let result = tokio::time::timeout(Duration::from_secs(5), service.wait(&job.id)).await.unwrap().unwrap();
+        let JobOutcome::Terminated { description } = result.outcome else { panic!("{result:?}") };
+        assert!(description.contains("injected supervisor failure"), "{description}");
+        assert_eq!(service.summary(&job.id).unwrap().state, JobState::Finished);
+    }
+
+    /// Regression (review R-m1): a worker that panics releases its concurrency
+    /// slot, so queued jobs still start.
+    #[test]
+    fn a_panicking_worker_releases_its_slot() {
+        let (_tmp, service) = service();
+        let inner = service.inner.clone();
+        inner.table.locked().running = 1;
+        inner.active_workers.fetch_add(1, Ordering::SeqCst);
+        let worker = std::thread::spawn(move || {
+            let _slot = WorkerGuard { inner, batch_slot: true, interactive_slot: false };
+            panic!("injected worker failure");
+        });
+        assert!(worker.join().is_err());
+        assert_eq!(service.inner.table.locked().running, 0);
+        assert_eq!(service.inner.active_workers.load(Ordering::SeqCst), 0);
+    }
+
+    /// Regression (review R-m1): a poisoned output lock made every later
+    /// `output()` call (the `job_output` command) panic.
+    #[test]
+    fn output_reads_survive_a_poisoned_lock() {
+        let (_tmp, service) = service();
+        let (job, _prepared) = service.register(&probe_spec(&service), JobKind::Application).unwrap();
+        let poisoner = job.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.output.lock().unwrap();
+            panic!("poison the output lock");
+        })
+        .join();
+        assert!(job.output.is_poisoned());
+        assert!(service.output(&job.id, None, 1024).is_some());
+        assert!(service.output_text(&job.id, OutputStream::Stdout).is_some());
+        assert!(service.cancel(&job.id) || service.result(&job.id).is_some());
+    }
 }
