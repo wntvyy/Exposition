@@ -173,18 +173,20 @@ impl Redactor {
 
     /// Replace every secret occurrence with [`REDACTED`].
     pub fn redact(&self, text: &str) -> String {
-        let mut out = text.to_owned();
+        replace_ranges(text, &self.secret_ranges(text))
+    }
+
+    /// Byte ranges of every secret occurrence (literal values and token
+    /// shapes), sorted and merged. Range ends are char boundaries.
+    pub fn secret_ranges(&self, text: &str) -> Vec<(usize, usize)> {
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
         for literal in &self.literals {
-            if out.contains(literal.as_str()) {
-                out = out.replace(literal.as_str(), REDACTED);
-            }
+            ranges.extend(text.match_indices(literal.as_str()).map(|(start, m)| (start, start + m.len())));
         }
         for pattern in &self.patterns {
-            if pattern.is_match(&out) {
-                out = pattern.replace_all(&out, REDACTED).into_owned();
-            }
+            ranges.extend(pattern.find_iter(text).map(|m| (m.start(), m.end())));
         }
-        out
+        merge_ranges(ranges)
     }
 
     /// Largest prefix length of `text` (a char boundary) that can be redacted
@@ -223,6 +225,35 @@ impl Redactor {
         }
         cut
     }
+}
+
+/// Sort and merge overlapping or touching ranges.
+pub fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// Replace each (sorted, disjoint, char-boundary) range with [`REDACTED`].
+pub fn replace_ranges(text: &str, ranges: &[(usize, usize)]) -> String {
+    if ranges.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for &(start, end) in ranges {
+        out.push_str(&text[at..start]);
+        out.push_str(REDACTED);
+        at = end;
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 impl Default for Redactor {

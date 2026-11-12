@@ -11,6 +11,7 @@ pub mod build;
 pub mod document;
 pub mod job;
 pub mod path;
+pub mod roots;
 pub mod text;
 
 pub use text::{TextError, TextRange};

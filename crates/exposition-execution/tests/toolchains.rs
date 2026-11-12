@@ -111,3 +111,89 @@ async fn python_with_jupyter_runs_under_the_clean_environment() {
     assert!(lines[1].contains(&id.0), "python temp dir is the per-job dir: {out}");
     assert_eq!(lines[2], "False");
 }
+
+/// Discovery must never run elan's `lean`/`lake` shims (they select and may
+/// DOWNLOAD toolchains) and must not change the installed toolchains. Uses a
+/// fake elan layout whose executables log every invocation.
+#[tokio::test(flavor = "multi_thread")]
+async fn lean_discovery_never_runs_elan_shims_or_installs_toolchains() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elan = tmp.path().join("elan");
+    let exe = |name: &str| if cfg!(windows) { format!("{name}.exe") } else { name.to_owned() };
+    let bin = elan.join("bin");
+    let old = elan.join("toolchains").join("leanprover--lean4---v4.9.0").join("bin");
+    let new = elan.join("toolchains").join("leanprover--lean4---v4.12.0").join("bin");
+    for dir in [&bin, &old, &new] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    for name in ["elan", "lean", "lake"] {
+        std::fs::copy(testproc(), bin.join(exe(name))).unwrap();
+    }
+    for dir in [&old, &new] {
+        for name in ["lean", "lake"] {
+            std::fs::copy(testproc(), dir.join(exe(name))).unwrap();
+        }
+    }
+    let listing = |dir: &std::path::Path| -> Vec<String> {
+        let mut names: Vec<String> =
+            std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    };
+    let toolchains_before = listing(&elan.join("toolchains"));
+
+    // The shims are also first on PATH, and no real elan can be found.
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let system = std::env::var("SystemRoot")
+        .map(|r| format!("{sep}{}", std::path::Path::new(&r).join("System32").display()))
+        .unwrap_or_default();
+    let host = exposition_execution::env::HostEnv::from_pairs(
+        std::env::vars()
+            .filter(|(k, _)| !["ELAN_HOME", "PATH", "Path", "USERPROFILE", "HOME"].contains(&k.as_str()))
+            .chain([
+                ("ELAN_HOME".to_string(), elan.display().to_string()),
+                ("PATH".to_string(), format!("{}{system}", bin.display())),
+                ("USERPROFILE".to_string(), tmp.path().join("profile").display().to_string()),
+                ("HOME".to_string(), tmp.path().join("profile").display().to_string()),
+            ]),
+    );
+    let service = exposition_execution::ExecutionService::with_config(exposition_execution::ExecutionConfig {
+        data_dir: tmp.path().join("data"),
+        host_env: host,
+        settings: Some(exposition_execution::ExecutionSettings::default()),
+        too_broad_to_trust: Some(vec![]),
+        tool_cache_dir: Some(std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("exposition-tool-cache")),
+    })
+    .unwrap();
+    let tools = service.refresh_toolchains().await;
+    let get = |id: &str| tools.iter().find(|t| t.id == id).unwrap().clone();
+    for id in ["lean", "lake"] {
+        let tool = get(id);
+        assert_eq!(tool.status, ToolStatus::Available, "{tool:?}");
+        assert_eq!(
+            tool.path.as_deref(),
+            Some(&*new.join(exe(id)).display().to_string()),
+            "highest installed toolchain"
+        );
+    }
+    assert_eq!(get("elan").path.as_deref(), Some(&*bin.join(exe("elan")).display().to_string()));
+    assert_eq!(get("elan").status, ToolStatus::Available);
+
+    let shim_log = std::fs::read_to_string(bin.join("invocations.log")).unwrap_or_default();
+    assert_eq!(
+        shim_log.lines().collect::<Vec<_>>(),
+        ["elan --version"],
+        "only `elan --version` may run in ELAN_HOME/bin"
+    );
+    let toolchain_log = std::fs::read_to_string(new.join("invocations.log")).unwrap();
+    assert!(toolchain_log.contains("lean --version") && toolchain_log.contains("lake --version"), "{toolchain_log}");
+    assert_eq!(listing(&elan.join("toolchains")), toolchains_before, "toolchains changed during discovery");
+    assert!(!old.join("invocations.log").exists());
+
+    // Jobs that name `lean` get the toolchain binary, and elan's shim directory
+    // is not on the constructed PATH.
+    match service.locate_tool("lean") {
+        exposition_execution::Located::Found { path, .. } => assert!(path.starts_with(&new)),
+        other => panic!("{other:?}"),
+    }
+}
