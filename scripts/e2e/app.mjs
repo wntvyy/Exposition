@@ -14,7 +14,12 @@ import { chromium } from "playwright-core";
 
 export const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 
+/**
+ * The app under test: `EXPOSITION_E2E_EXECUTABLE` (e.g. an installed or release
+ * build) or the debug build from `npm run build:app`.
+ */
 export function defaultExecutable() {
+  if (process.env.EXPOSITION_E2E_EXECUTABLE) return process.env.EXPOSITION_E2E_EXECUTABLE;
   const name = process.platform === "win32" ? "exposition.exe" : "exposition";
   return join(REPO_ROOT, "target", "debug", name);
 }
