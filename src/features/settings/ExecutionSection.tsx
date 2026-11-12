@@ -37,7 +37,7 @@ function DockerGroup() {
     <SettingsGroup
       title="Restricted execution (Docker)"
       testId="settings-docker"
-      description="Agent-generated and other untrusted code runs in a locked-down container. When Docker or the image is unavailable, restricted runs are refused; they never fall back to running on this computer."
+      description="Restricted runs, such as commands of agent tasks set to restricted execution, happen in a locked-down container. When Docker or the image is unavailable, restricted runs are refused; they never fall back to running on this computer."
     >
       <SettingRow label="Docker" testId="docker-status">
         <div className="exp-settings__stack">

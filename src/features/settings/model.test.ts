@@ -12,6 +12,7 @@ import {
   dockerAvailability,
   formatGrantedAt,
   imageOptions,
+  nestedTrustedRoots,
   imageState,
   isSectionId,
   restrictedGuarantees,
@@ -153,6 +154,14 @@ describe("docker", () => {
 });
 
 describe("trust", () => {
+  it("names the trusted folders a revocation also covers", () => {
+    const all = [String.raw`C:\Users`, String.raw`C:\Users\me\paper`, String.raw`C:\users\me\Thesis`, String.raw`C:\Users2\x`];
+    expect(nestedTrustedRoots(String.raw`C:\Users`, all)).toEqual([String.raw`C:\Users\me\paper`, String.raw`C:\users\me\Thesis`]);
+    expect(nestedTrustedRoots(String.raw`C:\Users\\`, all)).toHaveLength(2);
+    expect(nestedTrustedRoots("/home/me", ["/home/me/a", "/home/meow", "/home/me"])).toEqual(["/home/me/a"]);
+    expect(nestedTrustedRoots(String.raw`C:\Users\me\paper`, all)).toEqual([]);
+  });
+
   it("formats grant times and admits missing ones", () => {
     expect(formatGrantedAt(null)).toBe("Date not recorded");
     expect(formatGrantedAt(Date.UTC(2026, 10, 11, 12, 0), "en-US")).toContain("2026");

@@ -459,7 +459,7 @@ impl ExecutionService {
                 self.update_settings(|s| s.docker.image = image).map_err(io)?;
             }
             ExecutionSettingsChange::ToolPath { tool: id, path } => {
-                if !tool(&id).is_some_and(|t| t.component_of.is_none()) {
+                if tool(&id).is_none_or(|t| t.component_of.is_some()) {
                     return Err(SettingsError::UnknownTool(id));
                 }
                 match path {

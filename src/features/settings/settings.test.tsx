@@ -114,6 +114,27 @@ describe("Trusted folders", () => {
   });
 });
 
+describe("Trusted folders: nested", () => {
+  it("names trusted folders inside the one being revoked", async () => {
+    ipc.trustList.mockResolvedValue({
+      ...trustList,
+      roots: [
+        { path: "C:\\papers", grantedAtMs: 1, exists: true, ignoredReason: null },
+        { path: "C:\\papers\\thesis", grantedAtMs: 2, exists: true, ignoredReason: null },
+      ],
+    });
+    render(<TrustSection />);
+    await screen.findAllByTestId("trusted-folder");
+    ui.confirm.mockResolvedValueOnce("cancel");
+    fireEvent.click(screen.getByRole("button", { name: "Revoke trust for C:\\papers" }));
+    await waitFor(() => expect(ui.confirm).toHaveBeenCalledTimes(1));
+    cleanup();
+    render(<>{ui.confirm.mock.calls[0]![0].message}</>);
+    expect(screen.getByText(/inside it are revoked too/)).toBeTruthy();
+    expect(screen.getByText("C:\\papers\\thesis")).toBeTruthy();
+  });
+});
+
 describe("Execution", () => {
   it("shows the server's refusal for a tool location and keeps the dialog open", async () => {
     render(<ExecutionSection />);

@@ -13,7 +13,7 @@ import { notify } from "../../app/notifications";
 import { commands, errorMessage } from "../../lib/ipc";
 import { confirm } from "../../ui/components";
 import { loadToolchains } from "../jobs/store";
-import type { SectionId } from "./model";
+import { nestedTrustedRoots, type SectionId } from "./model";
 
 export interface SettingsState {
   section: SectionId;
@@ -117,8 +117,15 @@ export async function setToolPath(tool: string, path: string | null): Promise<st
   return null;
 }
 
-/** Ask, then revoke trust for a listed folder. Resolves true when revoked. */
+/**
+ * Ask, then revoke trust for a listed folder (and, as the service does, any
+ * trusted folder inside it, which the prompt names). Resolves true when revoked.
+ */
 export async function revokeTrust(root: TrustedRoot): Promise<boolean> {
+  const nested = nestedTrustedRoots(
+    root.path,
+    (useSettings.getState().trust?.roots ?? []).map((r) => r.path),
+  );
   const choice = await confirm<"cancel" | "revoke">({
     title: "Revoke trust for this folder?",
     message: (
@@ -128,6 +135,18 @@ export async function revokeTrust(root: TrustedRoot): Promise<boolean> {
           Builds, kernels, and commands in this folder will no longer run on this computer until you trust it again
           (Exposition asks when an action needs it). Processes that are already running are not stopped.
         </p>
+        {nested.length > 0 && (
+          <>
+            <p>Trusted folders inside it are revoked too:</p>
+            <ul className="exp-settings__locations">
+              {nested.map((p) => (
+                <li key={p}>
+                  <code className="exp-settings__path">{p}</code>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
       </div>
     ),
     actions: [

@@ -128,6 +128,19 @@ export function restrictedGuarantees(docker: DockerSettings): string[] {
 
 // ---------- Trust ----------
 
+/**
+ * Other listed folders inside `target`: revoking a folder also revokes
+ * everything trusted beneath it. Paths are canonical (as stored by the
+ * service); comparison ignores case, as Windows does.
+ */
+export function nestedTrustedRoots(target: string, all: string[]): string[] {
+  const base = target.replace(/[\\/]+$/, "").toLowerCase();
+  return all.filter((p) => {
+    const lower = p.toLowerCase();
+    return lower !== base && (lower.startsWith(`${base}\\`) || lower.startsWith(`${base}/`));
+  });
+}
+
 export function formatGrantedAt(ms: number | null, locale?: string): string {
   if (ms === null) return "Date not recorded";
   return new Date(ms).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" });
