@@ -375,8 +375,7 @@ export default async function researchPython({ launchApp, artifactsDir, fixture,
       const page1 = await invoke(page, "research_run_output", { runId: run.id, after: null, limit: 100 });
       const text = page1.entries.filter((e) => e.item.kind === "stream").map((e) => e.item.text).join("");
       assert.equal(text.trim(), expected, `${language} output`);
-      console.log(`${language}: ${env.displayName} ran "${code.split("
-").pop()}" -> ${text.trim()}`);
+      console.log(`${language}: ${env.displayName} ran "${code.split("\n").pop()}" -> ${text.trim()}`);
       await invoke(page, "research_session_shutdown", { sessionId: other.id });
     }
 
