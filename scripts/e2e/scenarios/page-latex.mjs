@@ -88,7 +88,7 @@ export default async function pageLatex({ launchApp, artifactsDir, assert, fixtu
       await shot(`${tag}-00-trust-prompt`);
       await dialog.getByRole("button", { name: /Don.t trust/ }).click();
       await dialog.waitFor({ state: "detached" });
-      await page.getByText("Workspace not trusted").waitFor({ timeout: 5000 });
+      await page.getByTestId("page-scroller").getByText("Workspace not trusted", { exact: true }).waitFor({ timeout: 5000 });
       assert.equal((await engineJobs()).length, jobsBefore, "declined: still no engine job");
       assert.equal((await invoke("trust_status", { root: info.root })).trusted, false);
       // The status item reports the refusal, not a failed build.
