@@ -1,4 +1,4 @@
-import { Command as CommandIcon, Monitor, Moon, PanelBottom, PanelLeft, PanelRight, Settings, Shapes, Sun } from "lucide-react";
+import { Command as CommandIcon, Monitor, Moon, PanelBottom, PanelLeft, PanelRight, Settings, Shapes, SlidersHorizontal, Sun } from "lucide-react";
 import { ToggleButton as AriaToggleButton } from "react-aria-components";
 
 import { MenuTrigger, Menu, MenuItem, MenuSection, MenuSeparator, SubmenuTrigger } from "../../ui/components/Menu";
@@ -88,11 +88,17 @@ export function ActivityRail() {
             aria-label="Manage"
             onAction={(key) => {
               if (key === "palette") void registry.runCommand("workbench.action.showCommands");
+              if (key === "settings" && registry.command("workbench.action.openSettings")) {
+                void registry.runCommand("workbench.action.openSettings");
+              }
               if (key === "reference") void registry.runCommand("workbench.action.showUiReference");
             }}
           >
             <MenuItem id="palette" icon={CommandIcon} keybinding="Mod+Shift+P">
               Command Palette…
+            </MenuItem>
+            <MenuItem id="settings" icon={SlidersHorizontal} keybinding="Mod+,">
+              Settings…
             </MenuItem>
             <SubmenuTrigger>
               <MenuItem id="theme" icon={preference === "dark" ? Moon : preference === "light" ? Sun : Monitor} hasSubmenu>

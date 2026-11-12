@@ -1,8 +1,10 @@
-// Problems panel: diagnostics of the latest build of each watched entry,
+// Problems panel: diagnostics of the latest build of each watched entry plus
+// every source published to the app's problems contract (e.g. Lean checks),
 // linked to their source ranges.
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CircleCheck, CircleX, Info } from "lucide-react";
 
+import { useProblems } from "../../app/problems";
 import type { Diagnostic } from "../../bindings/Diagnostic";
 import { commands } from "../../lib/ipc";
 import { EmptyState } from "../../ui/components";
@@ -25,12 +27,35 @@ export function lineColumn(text: string, offset: number): { line: number; column
 
 const ICONS = { error: CircleX, warning: AlertTriangle, info: Info } as const;
 
+interface ProblemRow {
+  diagnostic: Diagnostic;
+  /** Source label (e.g. "Lean"); build diagnostics have none. */
+  label: string | null;
+  reveal: () => void;
+}
+
+function revealBuildDiagnostic(diagnostic: Diagnostic) {
+  const loc = diagnostic.location;
+  if (loc) requestReveal(loc.path, loc.range.start);
+}
+
 export function ProblemsPanel() {
   const entries = useTypesetting((s) => s.entries);
-  const diagnostics = useMemo(
-    () => Object.values(entries).flatMap((e) => e.latest?.result.diagnostics ?? []),
-    [entries],
-  );
+  const sources = useProblems((s) => s.sources);
+  const rows = useMemo<ProblemRow[]>(() => {
+    const build = Object.values(entries)
+      .flatMap((e) => e.latest?.result.diagnostics ?? [])
+      .map((diagnostic) => ({ diagnostic, label: null, reveal: () => revealBuildDiagnostic(diagnostic) }));
+    const published = Object.values(sources).flatMap((source) =>
+      source.diagnostics.map((diagnostic) => ({
+        diagnostic,
+        label: source.label,
+        reveal: () => source.reveal(diagnostic),
+      })),
+    );
+    return [...build, ...published];
+  }, [entries, sources]);
+  const diagnostics = useMemo(() => rows.map((r) => r.diagnostic), [rows]);
   const key = JSON.stringify(diagnostics);
   const [positions, setPositions] = useState<Map<number, string>>(new Map());
 
@@ -62,13 +87,17 @@ export function ProblemsPanel() {
   if (diagnostics.length === 0) {
     return (
       <div data-testid="problems-panel" className="problems-empty">
-        <EmptyState icon={CircleCheck} title="No problems" description="Build diagnostics of open documents appear here." />
+        <EmptyState
+          icon={CircleCheck}
+          title="No problems"
+          description="Build and proof-checking diagnostics of open documents appear here."
+        />
       </div>
     );
   }
   return (
     <ul className="problems" data-testid="problems-panel" aria-label="Problems">
-      {diagnostics.map((diagnostic: Diagnostic, i) => {
+      {rows.map(({ diagnostic, label, reveal }, i) => {
         const Icon = ICONS[diagnostic.severity];
         const loc = diagnostic.location;
         return (
@@ -79,9 +108,11 @@ export function ProblemsPanel() {
               data-severity={diagnostic.severity}
               data-testid="problem"
               disabled={!loc}
-              onClick={() => loc && requestReveal(loc.path, loc.range.start)}
+              data-source={label ?? "build"}
+              onClick={() => loc && reveal()}
             >
               <Icon size={14} className="problems__icon" aria-label={diagnostic.severity} />
+              {label && <span className="problems__source">{label}</span>}
               <span className="problems__message">{diagnostic.message}</span>
               {loc && <span className="problems__location">{positions.get(i) ?? loc.path}</span>}
             </button>

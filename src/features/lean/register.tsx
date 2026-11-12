@@ -9,12 +9,28 @@ import { notify } from "../../app/notifications";
 import { registry } from "../../app/registry";
 import { commands, errorMessage } from "../../lib/ipc";
 import { StatusPill } from "../../ui/components";
-import { goToDefinition, installLeanMonaco } from "./leanMonaco";
+import { publishProblems } from "../../app/problems";
+import { goToDefinition, installLeanMonaco, revealInEditor } from "./leanMonaco";
 import { LEAN_VIEW_ID, LeanPanel, installToolchain, trustAndRestart } from "./LeanPanel";
 import { statusView } from "./status";
 import { leanStateForPath, startLeanTracking, useLean } from "./store";
 
 installLeanMonaco();
+
+// Publish Lean diagnostics to the shared Problems view.
+let publishedDocs: unknown = null;
+useLean.subscribe((state) => {
+  if (state.docs === publishedDocs) return;
+  publishedDocs = state.docs;
+  publishProblems({
+    id: "lean",
+    label: "Lean",
+    diagnostics: Object.values(state.docs).flatMap((doc) => doc.diagnostics),
+    reveal: (diagnostic) => {
+      if (diagnostic.location) void revealInEditor(diagnostic.location.path, { range: diagnostic.location.range });
+    },
+  });
+});
 
 function LeanStatusItem() {
   useEffect(() => startLeanTracking(), []);

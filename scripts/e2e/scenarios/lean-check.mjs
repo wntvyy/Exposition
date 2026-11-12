@@ -93,6 +93,13 @@ export default async function leanCheck({ launchApp, artifactsDir, assert, fixtu
     assert.match(await page.getByTestId("lean-status").innerText(), /1 error/);
     assert.match(await page.getByTestId("lean-status-sentence").innerText(), /revision 1/);
     assert.match(await page.getByTestId("lean-status-item").innerText(), /Lean: 1 error/);
+    // The shared Problems view lists the Lean error with its source.
+    await page.getByRole("tab", { name: /Problems/ }).click();
+    const leanProblem = page.locator('[data-testid="problem"][data-source="Lean"]');
+    await leanProblem.first().waitFor({ timeout: 10000 });
+    assert.equal(await leanProblem.first().getAttribute("data-severity"), "error");
+    assert.match(await leanProblem.first().innerText(), /Lean/);
+    assert.match(await leanProblem.first().innerText(), /LeanBasic\/Proofs\.lean:\d+:\d+/);
     await waitFor(async () => /Lean \(version 4\.35\.0/.test(await page.getByTestId("lean-toolchain").innerText()), {
       timeout: 60000,
       message: "toolchain version",
