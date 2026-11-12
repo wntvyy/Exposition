@@ -284,10 +284,18 @@ impl Driver {
             return;
         }
         for p in paths {
-            if crate::service::is_graph_storage(&p) {
+            // The graph's own storage, run records, and tooling/cache folders
+            // never hold project resources: changes there need no pass.
+            let excluded_dir = p.components().any(|c| crate::admission::EXCLUDED_DIRS.contains(&c))
+                || p.as_str() == ".exposition/runs"
+                || p.as_str().starts_with(".exposition/runs/");
+            if crate::service::is_graph_storage(&p) || excluded_dir {
                 continue;
             }
             self.paths.insert(p);
+        }
+        if self.paths.is_empty() && !self.full {
+            return;
         }
         if self.paths.len() > FULL_SCAN_THRESHOLD {
             self.full = true;

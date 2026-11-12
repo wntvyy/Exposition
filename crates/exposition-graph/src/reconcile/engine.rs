@@ -370,8 +370,26 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
+    /// Nothing to write (e.g. a pass over paths that hold no project files).
+    fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+            && self.bindings.is_empty()
+            && self.add.is_empty()
+            && self.remove.is_empty()
+            && self.coverage.is_empty()
+            && self.stamps.is_empty()
+            && self.remove_coverage.is_empty()
+            && self.index.is_empty()
+            && self.remove_index.is_empty()
+            && self.wanted.is_empty()
+            && self.delta.is_empty()
+    }
+
     /// Write the plan in one transaction. Returns the graph revision after it.
     fn write(&self, store: &mut GraphStore) -> StoreResult<u64> {
+        if self.is_empty() {
+            return store.revision();
+        }
         let w = Writer::new(store.transaction()?);
         for e in &self.entities {
             w.put_entity(e)?;
