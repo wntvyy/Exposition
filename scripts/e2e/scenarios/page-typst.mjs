@@ -403,9 +403,18 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
       const palette = page.getByRole("textbox", { name: "Command" });
       await palette.waitFor({ state: "visible", timeout: 5000 });
       await palette.fill(query);
-      await page.locator(".wb-palette__item").first().waitFor();
-      await page.keyboard.press("Enter");
-      await palette.waitFor({ state: "detached", timeout: 5000 });
+      // Wait until the filtered list ranks the command first, then run it
+      // (Enter on a list that is still filtering does nothing).
+      await page.waitForFunction(
+        (q) => (document.querySelector(".wb-palette__item")?.textContent ?? "").toLowerCase().includes(q.toLowerCase()),
+        query,
+        { timeout: 5000 },
+      );
+      for (let i = 0; i < 3; i++) {
+        await page.keyboard.press("Enter");
+        if (await palette.waitFor({ state: "detached", timeout: 1500 }).then(() => true, () => false)) return;
+      }
+      throw new Error(`the command palette did not run "${query}"`);
     };
     const applySource = async (at, insert) =>
       invoke("document_apply", {

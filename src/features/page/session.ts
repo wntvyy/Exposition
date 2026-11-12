@@ -95,6 +95,11 @@ function isUnknownBuild(error: unknown): boolean {
   return isCommandError(error) && (error.code === "page.unknownBuild" || error.code === "page.noMap");
 }
 
+/** Stale retries per keystroke (each waits for a newer revision's event). */
+const MAX_STALE_RETRIES = 20;
+/** How long a stale keystroke waits for the concurrent change's event. */
+const EVENT_WAIT_MS = 3000;
+
 export class PageSession {
   private model: PageViewModel = {
     phase: "attaching",
@@ -118,6 +123,12 @@ export class PageSession {
   private listeners = new Set<() => void>();
   private docId: string | null = null;
   private docRevision = 0;
+  /** Highest revision whose change (history step) this view has received. */
+  private eventRevision = 0;
+  private revisionWaiters: Array<{ revision: number; resolve: (received: boolean) => void }> = [];
+  /** Text typed on the page that could not be applied; typing stays paused
+   *  (and keeps collecting) until the caret is placed again. */
+  private unapplied: string | null = null;
   private build: BuildResult | null = null;
   private buildRevision = 0;
   private caret: (Position & { affinity: Affinity }) | null = null;
@@ -178,6 +189,7 @@ export class PageSession {
       if (!current()) return;
       this.docId = handle.id;
       this.docRevision = info.info.revision;
+      this.eventRevision = info.info.revision;
       this.set({ phase: "ready", documentId: handle.id });
       // Each view counts as one watcher of its entry (unwatched on detach).
       const latest = await commands.typesettingWatch(this.path);
@@ -197,6 +209,7 @@ export class PageSession {
   detach(): void {
     this.attachGen += 1;
     this.disposed = true;
+    for (const waiter of this.revisionWaiters.splice(0)) waiter.resolve(false);
     for (const un of this.unlisten) un();
     this.unlisten = [];
     if (this.watching) {
@@ -277,7 +290,9 @@ export class PageSession {
         this.urls.delete(ref);
       }
     }
-    this.history.prune(revision);
+    // Keep the revision steps the caret and anchor still need: a page edit's
+    // reply or a stale retry can leave them older than the shown build.
+    this.history.prune(Math.min(revision, this.caret?.revision ?? revision, this.anchor?.revision ?? revision));
     let latencyMs = this.model.latencyMs;
     if (this.editAt && revision >= this.editAt.revision) {
       latencyMs = performance.now() - this.editAt.time;
@@ -298,6 +313,12 @@ export class PageSession {
     const change: DocumentChanged = event;
     this.history.add({ previous: change.previousRevision, revision: change.revision, patches: change.patches });
     this.docRevision = Math.max(this.docRevision, change.revision);
+    this.eventRevision = Math.max(this.eventRevision, change.revision);
+    this.revisionWaiters = this.revisionWaiters.filter((waiter) => {
+      if (waiter.revision > this.eventRevision) return true;
+      waiter.resolve(true);
+      return false;
+    });
     const ownChange = change.transaction !== null && this.own.has(change.transaction);
     const restore = change.change !== "edit" && change.origin.kind === "page" ? change.selection?.[0] : undefined;
     if (restore) {
@@ -433,6 +454,7 @@ export class PageSession {
       this.anchor = null;
     }
     this.caret = { ...position, affinity: hit.caret.affinity };
+    this.unapplied = null;
     this.goalX = null;
     this.group += 1;
     this.set({ message });
@@ -514,7 +536,20 @@ export class PageSession {
 
   private async sendEdit(op: PageEditOp, attempt: number): Promise<void> {
     if (!this.docId) return;
-    this.syncPositions();
+    // Typing is paused after a refusal: keep collecting (never apply at a
+    // guessed position) until the user places the caret again.
+    if (this.unapplied !== null) {
+      this.refuseTyping(op);
+      return;
+    }
+    if (!this.syncPositions()) {
+      // A change the caret must be mapped over has not been received yet:
+      // wait for it; refuse explicitly only if it never arrives.
+      if (!(await this.waitForEvents(this.docRevision, EVENT_WAIT_MS)) || !this.syncPositions()) {
+        this.refuseTyping(op);
+        return;
+      }
+    }
     const caret = this.caret;
     if (!caret) {
       this.set({ message: { tone: "info", text: "Click in the text to place the caret" } });
@@ -535,13 +570,13 @@ export class PageSession {
       switch (outcome.kind) {
         case "applied":
           this.docRevision = Math.max(this.docRevision, outcome.revision);
-          this.caret = { offset: outcome.caret, revision: outcome.revision, affinity: "downstream" };
+          this.caret = this.landCaret(outcome.caret, outcome.revision);
           this.anchor = null;
           this.goalX = null;
           this.set({ message: null, stale: true });
           break;
         case "unchanged":
-          this.caret = { offset: outcome.caret, revision: outcome.revision, affinity: "downstream" };
+          this.caret = this.landCaret(outcome.caret, outcome.revision);
           this.anchor = null;
           break;
         case "refused": {
@@ -550,14 +585,15 @@ export class PageSession {
           break;
         }
         case "stale":
-          // Our offsets refer to an older revision: wait for the change events,
-          // map the caret forward, and retry once.
-          this.docRevision = Math.max(this.docRevision, outcome.currentRevision);
-          if (attempt < 3) {
-            await new Promise((r) => setTimeout(r, 15 * (attempt + 1)));
+          // A concurrent change landed that this view has not received yet:
+          // wait for its change event, map the caret over it, and send the
+          // keystroke again. Each retry waits for a newer revision, so it
+          // makes progress; without the event the keystroke is refused
+          // explicitly instead of being dropped.
+          if (attempt < MAX_STALE_RETRIES && (await this.waitForEvents(outcome.currentRevision, EVENT_WAIT_MS))) {
             await this.sendEdit(op, attempt + 1);
           } else {
-            this.set({ message: { tone: "warning", text: "The document changed; click to place the caret again" } });
+            this.refuseTyping(op);
           }
           return;
       }
@@ -567,6 +603,46 @@ export class PageSession {
       setTimeout(() => this.own.delete(id), 5000);
     }
     await this.refreshGeometry();
+  }
+
+  /** The caret after an edit applied as `revision`. Change events of newer,
+   *  concurrent edits may have arrived before the reply: express the caret in
+   *  the newest received revision instead of moving it back. */
+  private landCaret(offset: number, revision: number): Position & { affinity: Affinity } {
+    if (this.eventRevision > revision) {
+      const mapped = this.history.forward(offset, revision, this.eventRevision, "downstream");
+      if (mapped !== null) return { offset: mapped, revision: this.eventRevision, affinity: "downstream" };
+    }
+    return { offset, revision, affinity: "downstream" };
+  }
+
+  /** Resolves true once change events up to `revision` were received. */
+  private waitForEvents(revision: number, timeoutMs: number): Promise<boolean> {
+    if (this.eventRevision >= revision) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const waiter = { revision, resolve };
+      this.revisionWaiters.push(waiter);
+      setTimeout(() => {
+        const i = this.revisionWaiters.indexOf(waiter);
+        if (i >= 0) {
+          this.revisionWaiters.splice(i, 1);
+          resolve(false);
+        }
+      }, timeoutMs);
+    });
+  }
+
+  /** Refuse a page edit explicitly, keeping its text visible as unapplied. */
+  private refuseTyping(op: PageEditOp): void {
+    const text = op.kind === "insert" ? op.text : op.kind === "paragraphBreak" ? "\u21b5" : "";
+    this.unapplied = (this.unapplied ?? "") + text;
+    const what = this.unapplied ? `“${this.unapplied}” was not applied` : "an edit was not applied";
+    this.set({
+      message: {
+        tone: "warning",
+        text: `Typing paused: the document changed under the caret, so ${what}. Click to place the caret and type again.`,
+      },
+    });
   }
 
   async undo(redo = false): Promise<void> {
@@ -601,6 +677,7 @@ export class PageSession {
   /** Place the caret at a source offset of the current revision (problems panel). */
   async reveal(offset: number): Promise<void> {
     this.caret = { offset, revision: this.docRevision, affinity: "downstream" };
+    this.unapplied = null;
     this.anchor = null;
     this.group += 1;
     await this.refreshGeometry();
