@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workflow-from-preset"
+description = "Enables the workflow_from_preset command without any pre-configured scope."
+commands.allow = ["workflow_from_preset"]
+
+[[permission]]
+identifier = "deny-workflow-from-preset"
+description = "Denies the workflow_from_preset command without any pre-configured scope."
+commands.deny = ["workflow_from_preset"]

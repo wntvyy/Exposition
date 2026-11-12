@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-preset-blueprint"
+description = "Enables the project_preset_blueprint command without any pre-configured scope."
+commands.allow = ["project_preset_blueprint"]
+
+[[permission]]
+identifier = "deny-project-preset-blueprint"
+description = "Denies the project_preset_blueprint command without any pre-configured scope."
+commands.deny = ["project_preset_blueprint"]

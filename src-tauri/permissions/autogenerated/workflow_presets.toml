@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workflow-presets"
+description = "Enables the workflow_presets command without any pre-configured scope."
+commands.allow = ["workflow_presets"]
+
+[[permission]]
+identifier = "deny-workflow-presets"
+description = "Denies the workflow_presets command without any pre-configured scope."
+commands.deny = ["workflow_presets"]

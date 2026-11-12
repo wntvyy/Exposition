@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-check-destination"
+description = "Enables the project_check_destination command without any pre-configured scope."
+commands.allow = ["project_check_destination"]
+
+[[permission]]
+identifier = "deny-project-check-destination"
+description = "Denies the project_check_destination command without any pre-configured scope."
+commands.deny = ["project_check_destination"]

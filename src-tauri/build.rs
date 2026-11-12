@@ -114,6 +114,22 @@ const COMMANDS: &[&str] = &[
     "graph_view_delete",
     "graph_recover",
     "graph_operations",
+    // Project creation and workflow drafts (src/projects.rs, src/workflows.rs).
+    "project_presets",
+    "project_preset_blueprint",
+    "project_blueprint_validate",
+    "project_check_destination",
+    "project_create",
+    "project_creation_status",
+    "project_creation_resolve",
+    "workflow_operations",
+    "workflow_presets",
+    "workflow_from_preset",
+    "workflow_validate",
+    "workflow_save",
+    "workflow_import",
+    "workflow_list",
+    "workflow_get",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

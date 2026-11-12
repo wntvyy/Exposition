@@ -112,6 +112,21 @@
     "allow-graph-view-save",
     "allow-graph-view-delete",
     "allow-graph-recover",
-    "allow-graph-operations"
+    "allow-graph-operations",
+    "allow-project-presets",
+    "allow-project-preset-blueprint",
+    "allow-project-blueprint-validate",
+    "allow-project-check-destination",
+    "allow-project-create",
+    "allow-project-creation-status",
+    "allow-project-creation-resolve",
+    "allow-workflow-operations",
+    "allow-workflow-presets",
+    "allow-workflow-from-preset",
+    "allow-workflow-validate",
+    "allow-workflow-save",
+    "allow-workflow-import",
+    "allow-workflow-list",
+    "allow-workflow-get"
   ]
 }

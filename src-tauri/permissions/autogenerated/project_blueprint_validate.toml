@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-blueprint-validate"
+description = "Enables the project_blueprint_validate command without any pre-configured scope."
+commands.allow = ["project_blueprint_validate"]
+
+[[permission]]
+identifier = "deny-project-blueprint-validate"
+description = "Denies the project_blueprint_validate command without any pre-configured scope."
+commands.deny = ["project_blueprint_validate"]
