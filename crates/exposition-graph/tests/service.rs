@@ -332,3 +332,22 @@ fn graph_storage_paths_are_recognised() {
     assert!(!is_graph_storage(&p(".exposition/project.json")));
     assert!(!is_graph_storage(&p(".exposition/research/r1/fit.py")));
 }
+
+#[test]
+fn ensure_resource_admits_by_policy_once_and_refuses_excluded_paths() {
+    let (_d, _p, svc) = service();
+    let p = |s: &str| exposition_core::path::WorkspacePath::parse(s).unwrap();
+    let a = svc.ensure_resource(&p("paper/main.tex"), Some("abc"), false, "test").unwrap();
+    assert_eq!(a.kind, EntityKind::Resource);
+    assert_eq!(a.roles, vec![ResourceRole::Manuscript]);
+    let again = svc.ensure_resource(&p("paper/main.tex"), Some("abc"), false, "test").unwrap();
+    assert_eq!(a.id, again.id, "one identity per file");
+    assert_eq!(
+        svc.ensure_resource(&p(".exposition/runs/run-1.json"), None, true, "test").unwrap_err().code,
+        "graph.excluded"
+    );
+    let out = p(".exposition/artifacts/run-1/output-0.png");
+    assert_eq!(svc.ensure_resource(&out, None, false, "test").unwrap_err().code, "graph.excluded");
+    let kept = svc.ensure_resource(&out, Some("h"), true, "research").unwrap();
+    assert_eq!(kept.roles, vec![ResourceRole::Artifact]);
+}
