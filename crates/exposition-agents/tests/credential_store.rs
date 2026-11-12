@@ -87,3 +87,77 @@ fn a_saved_key_is_kept_on_this_machine_and_readable_by_keyring() {
     assert_eq!(ns.persist(), None);
     assert!(store.get().unwrap().is_none());
 }
+
+/// The stored key is redacted by its literal value, whatever its shape: it is
+/// registered with the redactor when saved or loaded and forgotten when
+/// cleared. The fake key has no known token shape (no `sk-ant-` prefix).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_stored_key_is_redacted_by_value_whatever_its_shape() {
+    use exposition_agents::credentials::{ObservedStore, PROVIDER_KEY_SECRET};
+    use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobOutcome, JobSpec, OutputStream};
+    use exposition_execution::{ExecutionConfig, ExecutionService, ExecutionSettings};
+
+    const PLAIN_KEY: &str = "Zq9plainKeyNoKnownShape7f3a2b1c";
+    let ns = Namespace::new("redact");
+    let data = tempfile::tempdir().unwrap();
+    let service = |dir: &std::path::Path| {
+        let mut config = ExecutionConfig::new(dir);
+        config.settings = Some(ExecutionSettings::default());
+        config.too_broad_to_trust = Some(Vec::new());
+        ExecutionService::with_config(config).unwrap()
+    };
+    let observed = |execution: &ExecutionService| {
+        let redactor = execution.clone();
+        ObservedStore::new(
+            KeyringStore::new(Some(&ns.name)),
+            Box::new(move |key| redactor.register_secret(PROVIDER_KEY_SECRET, key)),
+        )
+    };
+    let execution = service(&data.path().join("a"));
+    assert_eq!(execution.redact(PLAIN_KEY), PLAIN_KEY, "setup: no token pattern matches this key");
+
+    // Saved: redacted from now on.
+    let store = observed(&execution);
+    store.set(PLAIN_KEY).unwrap();
+    assert_eq!(execution.redact(&format!("key={PLAIN_KEY}.")), "key=[REDACTED].");
+
+    // A process that prints it: its output and arguments are redacted.
+    if let exposition_execution::Located::Found { path: python, .. } = execution.locate_tool("python") {
+        let project = tempfile::tempdir().unwrap();
+        let root = execution.register_workspace_root(project.path()).unwrap();
+        execution.grant_trust(&root.display().to_string()).unwrap();
+        let result = execution
+            .run(JobSpec {
+                label: "print".into(),
+                program: python.display().to_string(),
+                args: vec!["-c".into(), "import sys; print('printed:' + sys.argv[1])".into(), PLAIN_KEY.into()],
+                environment: EnvironmentSpec::default(),
+                working_directory: root.display().to_string(),
+                policy: ExecutionPolicy::TrustedNative,
+                timeout_ms: Some(60_000),
+                log_limit_bytes: None,
+                stdin: None,
+            })
+            .await;
+        assert_eq!(result.outcome, JobOutcome::Exited { code: 0 });
+        let stdout = execution.output_text(&result.id, OutputStream::Stdout).unwrap_or_default();
+        assert!(stdout.contains("printed:[REDACTED]") && !stdout.contains(PLAIN_KEY), "{stdout}");
+        let listed = format!("{:?}", execution.list());
+        assert!(!listed.contains(PLAIN_KEY), "job listings redact it");
+    } else {
+        eprintln!("SKIPPED the process part: python was not found");
+    }
+
+    // The next start: loading the stored key registers it again.
+    let next = service(&data.path().join("b"));
+    assert_eq!(next.redact(PLAIN_KEY), PLAIN_KEY);
+    let loaded = observed(&next);
+    assert_eq!(loaded.get().unwrap().map(|s| s.expose().to_owned()).as_deref(), Some(PLAIN_KEY));
+    assert_eq!(next.redact(PLAIN_KEY), "[REDACTED]");
+
+    // Cleared: forgotten.
+    loaded.delete().unwrap();
+    assert_eq!(next.redact(PLAIN_KEY), PLAIN_KEY);
+    assert!(store.get().unwrap().is_none());
+    assert_eq!(execution.redact(PLAIN_KEY), PLAIN_KEY, "a read that finds no key forgets it too");
+}

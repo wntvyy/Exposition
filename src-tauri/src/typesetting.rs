@@ -85,14 +85,15 @@ fn target_of(entry: &WorkspacePath) -> Option<BuildTarget> {
     Some(BuildTarget { format, engine, entry: entry.clone() })
 }
 
-/// The in-process build target of `entry` (`.typ` Typst, `.md` the Markdown
-/// print profile), or the error every typesetting command reports for a file
-/// no format builds. `.tex` entries go to the TeX service before this.
+/// The in-process build target of `entry` (`.typ` Typst, `.md`/`.markdown`
+/// the Markdown print profile), or the error every typesetting command reports
+/// for a file no format builds. `.tex` entries go to the TeX service before
+/// this.
 fn target(entry: &WorkspacePath) -> Result<BuildTarget, CommandError> {
     target_of(entry).ok_or_else(|| {
         CommandError::new(
             "typesetting.unsupported",
-            format!("{entry} cannot be typeset: only .typ, .md and .tex entries can be built"),
+            format!("{entry} cannot be typeset: only .typ, .md, .markdown and .tex entries can be built"),
         )
     })
 }
@@ -341,6 +342,13 @@ mod tests {
         assert_eq!((typst.format, typst.engine), (DocumentFormat::Typst, Engine::Typst));
         let markdown = target("README.md").unwrap();
         assert_eq!((markdown.format, markdown.engine), (DocumentFormat::Markdown, Engine::MarkdownPrint));
+        // The message lists exactly the extensions that are dispatched.
+        let long = target("notes/Intro.markdown").unwrap();
+        assert_eq!((long.format, long.engine), (DocumentFormat::Markdown, Engine::MarkdownPrint));
+        let message = target("notes.txt").unwrap_err().message;
+        for listed in [".typ", ".md", ".markdown", ".tex"] {
+            assert!(message.contains(listed), "{message}");
+        }
         for refused in ["notes.txt", "figure.pdf", "Makefile", "main.typ.bak", "data.json"] {
             let error = target(refused).unwrap_err();
             assert_eq!(error.code, "typesetting.unsupported", "{refused}");

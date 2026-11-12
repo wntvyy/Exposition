@@ -109,15 +109,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: BUILD_DOCUMENT,
-            description: "Typeset a document (Typst .typ or LaTeX .tex) from the current editor state, unsaved \
-                changes included, and report the real status, diagnostics with locations, and page count. Use it to \
-                check that your changes build; report its result honestly, including failures. A Typst or Markdown \
-                build reads only files in the task's scope; a LaTeX build runs TeX natively, so it needs a task \
-                scoped to the whole project and the user's approval.",
+            description: "Typeset a document (Typst .typ, Markdown .md or .markdown through its print profile, or \
+                LaTeX .tex) from the current editor state, unsaved changes included, and report the real status, \
+                diagnostics with locations, and page count. Use it to check that your changes build; report its \
+                result honestly, including failures. A Typst or Markdown build reads only files in the task's scope; \
+                a LaTeX build runs TeX natively, so it needs a task scoped to the whole project and the user's \
+                approval.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "entry": {"type": "string", "description": "Entry file relative to the project root, e.g. main.typ or paper.tex."},
+                    "entry": {"type": "string", "description": "Entry file relative to the project root, e.g. main.typ, notes.md, or paper.tex."},
                     "engine": {"type": "string", "enum": ["auto", "pdflatex", "lualatex"], "description": "LaTeX engine; auto uses the project's setting (ignored for Typst)."}
                 },
                 "required": ["entry", "engine"],

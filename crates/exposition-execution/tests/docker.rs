@@ -329,3 +329,40 @@ async fn docker_startup_sweep_removes_containers_left_by_an_earlier_session() {
     // Swept once: a later call does nothing (a running job is never touched).
     assert_eq!(f.service.sweep_stale_containers(), Ok(0));
 }
+
+/// A restricted job's input (its stdin, e.g. approved agent code) is a file
+/// in the job folder; it is removed when the job ends, whatever the outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn docker_job_input_is_removed_on_every_outcome() {
+    let Some(image) = image() else { return };
+    let f = docker_fixture(&image);
+    let jobs = std::fs::canonicalize(f.data_dir.join("execution")).unwrap().join("jobs");
+    let with_input = |script: &str, timeout_ms: u64| {
+        let mut spec = node(&f, "");
+        spec.args = vec!["-e".into(), script.into()];
+        spec.stdin = Some("INPUT-MARKER approved code\n".into());
+        spec.timeout_ms = Some(timeout_ms);
+        spec
+    };
+    let input_of = |id: &exposition_core::job::JobId| jobs.join(&id.0).join("in");
+
+    // Finished: the program read its input.
+    let id = f.service.launch(with_input("process.stdin.on('data', d => process.stdout.write(d))", 120_000));
+    let result = f.service.wait(&id).await.unwrap();
+    assert_eq!(result.outcome, JobOutcome::Exited { code: 0 }, "{}", f.stdout(&id));
+    assert!(f.stdout(&id).contains("INPUT-MARKER"), "the program got its input");
+    assert!(!input_of(&id).exists(), "finished: input removed");
+
+    // Canceled while running.
+    let id = f.service.launch(with_input("setInterval(() => console.log('tick'), 200)", 120_000));
+    f.wait_stdout(&id, Duration::from_secs(60), |t| t.contains("tick")).await;
+    assert!(input_of(&id).join("stdin").exists(), "the input exists while the job runs");
+    assert!(f.service.cancel(&id));
+    assert_eq!(f.service.wait(&id).await.unwrap().outcome, JobOutcome::Canceled);
+    assert!(!input_of(&id).exists(), "canceled: input removed");
+
+    // Timed out.
+    let id = f.service.launch(with_input("setInterval(() => console.log('tick'), 200)", 6_000));
+    assert_eq!(f.service.wait(&id).await.unwrap().outcome, JobOutcome::TimedOut);
+    assert!(!input_of(&id).exists(), "timed out: input removed");
+}

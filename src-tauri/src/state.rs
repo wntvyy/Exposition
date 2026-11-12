@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use exposition_agents::credentials::KeyringStore;
+use exposition_agents::credentials::{KeyringStore, ObservedStore, PROVIDER_KEY_SECRET, SecretStore};
 use exposition_agents::tools::execution::AppToolServices;
 use exposition_agents::{AgentConfig, AgentService};
 use exposition_core::path::WorkspacePath;
@@ -79,11 +79,27 @@ impl AppState {
         );
         research_config.source_reader = Some(Arc::new(WorkspaceSources(Arc::clone(&workspace))));
         let research = Arc::new(ResearchService::new(research_config));
+        // The stored provider key is redacted from every job, kernel, log, and
+        // artifact by its literal value (whatever its shape) once it is known:
+        // loaded now, and again whenever it is read, saved, or cleared.
+        let credentials: Arc<dyn SecretStore> = {
+            let redactor = execution.clone();
+            Arc::new(ObservedStore::new(
+                KeyringStore::new(credential_namespace().as_deref()),
+                Box::new(move |key| redactor.register_secret(PROVIDER_KEY_SECRET, key)),
+            ))
+        };
+        {
+            let credentials = Arc::clone(&credentials);
+            std::thread::spawn(move || {
+                let _ = credentials.get();
+            });
+        }
         let agents = AgentService::new(AgentConfig {
             database: Some(data_dir.join("agents.sqlite3")),
             documents: Arc::clone(&documents),
             workspace: Some(Arc::clone(&workspace)),
-            credentials: Arc::new(KeyringStore::new(credential_namespace().as_deref())),
+            credentials: credentials.clone(),
             // Agent tools call the same services people use: Typst and LaTeX
             // builds, research sessions (agent-owned), Lean checks, and
             // execution jobs.

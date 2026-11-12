@@ -8,10 +8,13 @@
 //!    about the mistake.
 //! 2. [`Redactor`]: every byte of retained or emitted output passes through it.
 //!    It replaces the literal values of credential-like variables found in the
-//!    application's own environment, plus well-known token shapes
-//!    (`sk-ant-...`, `ghp_...`, `github_pat_...`, AWS key ids, ...).
+//!    application's own environment, secrets the application registers while
+//!    it runs (the stored provider API key, whatever its shape), plus
+//!    well-known token shapes (`sk-ant-...`, `ghp_...`, `github_pat_...`, AWS
+//!    key ids, ...).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, RwLock};
 
 use regex::Regex;
 
@@ -116,12 +119,43 @@ const TOKEN_PATTERNS: &[&str] = &[
 ];
 
 /// Redacts secret values and token shapes from text.
-#[derive(Debug)]
 pub struct Redactor {
-    /// Literal secret values (and each line of multi-line values), longest first
-    /// so a value that contains another is replaced whole.
-    literals: Vec<String>,
+    /// Literal secrets from the host environment.
+    base: Vec<String>,
+    /// Secrets registered at run time, by name.
+    registered: RwLock<BTreeMap<String, Vec<String>>>,
+    /// Every literal secret (and each line of multi-line values), longest
+    /// first so a value that contains another is replaced whole.
+    literals: RwLock<Arc<Vec<String>>>,
     patterns: Vec<Regex>,
+}
+
+/// Never prints the secrets themselves.
+impl std::fmt::Debug for Redactor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Redactor")
+            .field("literals", &self.literal_count())
+            .field("patterns", &self.patterns.len())
+            .finish()
+    }
+}
+
+/// The literal forms of a secret value: trimmed, and each line of a
+/// multi-line value (output is redacted line by line).
+fn literal_forms(value: &str) -> Vec<String> {
+    let mut forms = Vec::new();
+    let trimmed = value.trim();
+    if trimmed.len() >= MIN_LITERAL_SECRET_LEN {
+        forms.push(trimmed.to_owned());
+    }
+    if value.contains('\n') {
+        for line in value.lines().map(str::trim) {
+            if line.len() >= MIN_LITERAL_SECRET_LEN {
+                forms.push(line.to_owned());
+            }
+        }
+    }
+    forms
 }
 
 impl Redactor {
@@ -139,36 +173,59 @@ impl Redactor {
     }
 
     pub fn with_literals<I: IntoIterator<Item = String>>(values: I) -> Self {
-        let mut set = BTreeSet::new();
-        for value in values {
-            let trimmed = value.trim();
-            if trimmed.len() >= MIN_LITERAL_SECRET_LEN {
-                set.insert(trimmed.to_owned());
-            }
-            // Output is redacted line by line, so multi-line secrets (PEM keys,
-            // JSON service accounts) are also matched per line.
-            if value.contains('\n') {
-                for line in value.lines().map(str::trim) {
-                    if line.len() >= MIN_LITERAL_SECRET_LEN {
-                        set.insert(line.to_owned());
-                    }
+        // Multi-line secrets (PEM keys, JSON service accounts) are also
+        // matched per line.
+        let base: Vec<String> = values.into_iter().flat_map(|v| literal_forms(&v)).collect();
+        let patterns = TOKEN_PATTERNS.iter().map(|p| Regex::new(p).expect("token pattern compiles")).collect();
+        let redactor = Self {
+            base,
+            registered: RwLock::new(BTreeMap::new()),
+            literals: RwLock::new(Arc::new(Vec::new())),
+            patterns,
+        };
+        redactor.rebuild();
+        redactor
+    }
+
+    fn rebuild(&self) {
+        let registered = self.registered.read().unwrap_or_else(|p| p.into_inner());
+        let set: BTreeSet<&String> = self.base.iter().chain(registered.values().flatten()).collect();
+        let mut literals: Vec<String> = set.into_iter().cloned().collect();
+        literals.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        *self.literals.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(literals);
+    }
+
+    /// Register (`Some`) or forget (`None`) a secret the application holds at
+    /// run time, under a name of its choosing. Its value is redacted from all
+    /// output from now on, whatever its shape.
+    pub fn register(&self, name: &str, value: Option<&str>) {
+        {
+            let mut registered = self.registered.write().unwrap_or_else(|p| p.into_inner());
+            match value.map(literal_forms) {
+                Some(forms) if !forms.is_empty() => {
+                    registered.insert(name.to_owned(), forms);
+                }
+                _ => {
+                    registered.remove(name);
                 }
             }
         }
-        let mut literals: Vec<String> = set.into_iter().collect();
-        literals.sort_by_key(|s| std::cmp::Reverse(s.len()));
-        let patterns = TOKEN_PATTERNS.iter().map(|p| Regex::new(p).expect("token pattern compiles")).collect();
-        Self { literals, patterns }
+        self.rebuild();
+    }
+
+    fn current_literals(&self) -> Arc<Vec<String>> {
+        Arc::clone(&self.literals.read().unwrap_or_else(|p| p.into_inner()))
     }
 
     /// Number of literal secrets known (for diagnostics; never the values).
     pub fn literal_count(&self) -> usize {
-        self.literals.len()
+        self.current_literals().len()
     }
 
     /// True when the text matches a token shape or contains a known secret.
     pub fn contains_secret(&self, text: &str) -> bool {
-        self.literals.iter().any(|l| text.contains(l.as_str())) || self.patterns.iter().any(|p| p.is_match(text))
+        self.current_literals().iter().any(|l| text.contains(l.as_str()))
+            || self.patterns.iter().any(|p| p.is_match(text))
     }
 
     /// Replace every secret occurrence with [`REDACTED`].
@@ -180,7 +237,7 @@ impl Redactor {
     /// shapes), sorted and merged. Range ends are char boundaries.
     pub fn secret_ranges(&self, text: &str) -> Vec<(usize, usize)> {
         let mut ranges: Vec<(usize, usize)> = Vec::new();
-        for literal in &self.literals {
+        for literal in self.current_literals().iter() {
             ranges.extend(text.match_indices(literal.as_str()).map(|(start, m)| (start, start + m.len())));
         }
         for pattern in &self.patterns {
@@ -204,7 +261,7 @@ impl Redactor {
         }
         // A suffix of `text` (3+ bytes; shorter fragments reveal nothing useful)
         // that is a proper prefix of a literal secret.
-        for literal in &self.literals {
+        for literal in self.current_literals().iter() {
             let max = literal.len().saturating_sub(1).min(text.len());
             for len in (3..=max).rev() {
                 let start = text.len() - len;
@@ -265,6 +322,24 @@ impl Default for Redactor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registered_secrets_are_redacted_whatever_their_shape_until_forgotten() {
+        let r = Redactor::from_host_env([("ANTHROPIC_API_KEY", "host-env-secret-value-1")]);
+        let key = "Zq9plainKeyNoKnownShape7f3a2b1c";
+        assert_eq!(r.redact(&format!("k={key}")), format!("k={key}"), "unknown shapes are not caught by pattern");
+        r.register("provider", Some(key));
+        assert_eq!(r.redact(&format!("k={key} h=host-env-secret-value-1")), "k=[REDACTED] h=[REDACTED]");
+        assert!(r.contains_secret(key));
+        // A split secret is held back until it can be redacted whole.
+        assert_eq!(r.safe_release_len("out Zq9plainKey"), 4);
+        assert!(!format!("{r:?}").contains(key), "Debug never shows secrets");
+        r.register("provider", Some("another-plain-key-value-99"));
+        assert_eq!(r.redact(key), key, "a replaced value is no longer a secret");
+        r.register("provider", None);
+        assert_eq!(r.redact("another-plain-key-value-99"), "another-plain-key-value-99");
+        assert_eq!(r.redact("host-env-secret-value-1"), "[REDACTED]", "host secrets stay");
+    }
 
     #[test]
     fn credential_names_are_detected() {

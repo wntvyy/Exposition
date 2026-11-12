@@ -17,8 +17,8 @@
 //! The image must be configured explicitly and present locally; the job is
 //! refused otherwise. There is never a fallback to native execution. The
 //! `docker` client itself runs natively (contained in a job object) with a
-//! clean environment; cancel/timeout kills the client tree AND the container
-//! (`docker kill`), and `--rm` removes it.
+//! clean environment; cancel/timeout kills the client tree AND removes the
+//! container (`docker rm -f`, which stops it first).
 //!
 //! A container must not outlive the application. The supervisor script (POSIX
 //! `sh`, see [`supervisor_script`]) runs the program with `exec`, so it is
@@ -446,6 +446,11 @@ pub fn instance_label(data_dir: &Path) -> String {
 
 pub fn out_dir(job_dir: &Path) -> PathBuf {
     job_dir.join("out")
+}
+
+/// Host directory of a batch job's input file (mounted at [`INPUT_MOUNT`]).
+pub fn input_dir(job_dir: &Path) -> PathBuf {
+    job_dir.join("in")
 }
 
 #[cfg(test)]
