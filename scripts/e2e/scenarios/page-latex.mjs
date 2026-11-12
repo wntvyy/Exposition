@@ -91,6 +91,8 @@ export default async function pageLatex({ launchApp, artifactsDir, assert, fixtu
       await page.getByText("Workspace not trusted").waitFor({ timeout: 5000 });
       assert.equal((await engineJobs()).length, jobsBefore, "declined: still no engine job");
       assert.equal((await invoke("trust_status", { root: info.root })).trusted, false);
+      // The status item reports the refusal, not a failed build.
+      await page.locator('[data-testid="build-status"][data-status="untrusted"]').waitFor({ timeout: 5000 });
       await shot(`${tag}-01-untrusted`);
       await page.getByRole("button", { name: "Trust workspace…" }).click();
       await dialog.waitFor();
@@ -191,7 +193,7 @@ export default async function pageLatex({ launchApp, artifactsDir, assert, fixtu
     const a1 = await point(two, "downstream", 1);
     await page.mouse.click(a1.x, a1.y);
     await waitCaretOffset(two);
-    assert.equal(await page.locator('[data-testid="page-mode"]').textContent(), "Math");
+    await page.locator(`[data-testid="page-mode"]`, { hasText: "Math" }).waitFor({ timeout: 5000 });
     // Extend over the (small, raised) exponent with the keyboard.
     await page.keyboard.press("Shift+ArrowRight");
     await waitCaretOffset(two + 1);
