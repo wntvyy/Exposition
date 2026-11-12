@@ -86,6 +86,7 @@ function Diagnostics({ items }: { items: BlueprintDiagnostic[] }) {
 function Location() {
   const location = useProjects((s) => s.location);
   const destination = useProjects((s) => s.destination);
+  const acceptTrusted = useProjects((s) => s.acceptTrusted);
   return (
     <section className="xp-proj__group" aria-label="Location">
       <h3 className="xp-proj__group-title">Location</h3>
@@ -116,6 +117,17 @@ function Location() {
               : `The empty folder ${destination.path} will be used.`
             : destination.message}
         </p>
+      )}
+      {destination?.ok && destination.trustedVia && (
+        <Banner tone="warning" title="This location is inside a trusted folder">
+          <span data-testid="project-trusted-location">
+            {destination.trustedVia} is trusted, so Exposition's native tools (Lean, LaTeX, research kernels) may run this
+            project's files there. Creating the project does not change trust.
+          </span>
+          <Checkbox isSelected={acceptTrusted} onChange={(v) => setOptions({ acceptTrusted: v })}>
+            Create the project inside this trusted folder
+          </Checkbox>
+        </Banner>
       )}
     </section>
   );
@@ -321,6 +333,7 @@ export function NewProjectView(_props: EditorProps) {
   const preview = useProjects((s) => s.preview);
   const destination = useProjects((s) => s.destination);
   const objective = useProjects((s) => s.objective);
+  const acceptTrusted = useProjects((s) => s.acceptTrusted);
 
   useEffect(() => {
     void loadCatalog();
@@ -334,7 +347,7 @@ export function NewProjectView(_props: EditorProps) {
     );
   }
   if (!catalog) return <LoadingState title="Loading presets…" />;
-  const ready = Boolean(destination?.ok);
+  const ready = Boolean(destination?.ok) && (!destination?.trustedVia || acceptTrusted);
   const canCreate = mode === "preset" ? ready && Boolean(preview?.valid) : ready && objective.trim().length > 0;
   return (
     <div className="xp-proj" data-testid="new-project" data-mode={mode}>
@@ -362,7 +375,7 @@ export function NewProjectView(_props: EditorProps) {
           </Banner>
         )}
         <p className="xp-proj__muted" data-testid="project-authorization">
-          Creating a project writes only its starting files and records its structure. It does not trust the folder, run any code, install anything, or send anything to a model provider.
+          Creating a project writes only its starting files and records its structure. It does not grant trust, run any code, install anything, or send anything to a model provider.
         </p>
         <footer className="xp-proj__footer">
           {mode === "preset" ? (

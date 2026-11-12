@@ -212,10 +212,10 @@ export default async function projectCreate({ launchApp, artifactsDir, assert })
     assert.equal(preview.valid, false);
     assert.ok(preview.diagnostics.some((d) => d.code === "blueprint.path" && /would leave the project folder/.test(d.message)));
     const hostileRoot = join(parent, "hostile");
-    let refused = await invokeError(page, "project_create", { request: { destination: hostileRoot, blueprint: JSON.stringify(traversal) } });
+    let refused = await invokeError(page, "project_create", { request: { destination: hostileRoot, blueprint: JSON.stringify(traversal), acceptTrustedLocation: false } });
     assert.equal(refused.error?.code, "blueprint.invalid");
     const trusting = { ...paperBlueprint, trust: { grant: true }, onOpen: "run" };
-    refused = await invokeError(page, "project_create", { request: { destination: hostileRoot, blueprint: JSON.stringify(trusting) } });
+    refused = await invokeError(page, "project_create", { request: { destination: hostileRoot, blueprint: JSON.stringify(trusting), acceptTrustedLocation: false } });
     assert.equal(refused.error?.code, "blueprint.invalid");
     assert.match(refused.error.message, /unknown field `trust`/);
     assert.ok(!existsSync(hostileRoot), "nothing was created for an invalid blueprint");
@@ -225,16 +225,42 @@ export default async function projectCreate({ launchApp, artifactsDir, assert })
     assert.equal(broad.ok, false);
     assert.match(broad.message, /profile|users|Documents|Desktop/i);
     refused = await invokeError(page, "project_create", {
-      request: { destination: join(dataDir, "inside-data"), blueprint: JSON.stringify(paperBlueprint) },
+      request: { destination: join(dataDir, "inside-data"), blueprint: JSON.stringify(paperBlueprint), acceptTrustedLocation: false },
     });
     assert.equal(refused.error?.code, "workspace.tooBroad");
     assert.ok(!existsSync(join(dataDir, "inside-data")));
     const occupied = join(parent, "occupied");
     await mkdir(occupied);
     await writeFile(join(occupied, "main.typ"), "my own work");
-    refused = await invokeError(page, "project_create", { request: { destination: occupied, blueprint: JSON.stringify(paperBlueprint) } });
+    refused = await invokeError(page, "project_create", { request: { destination: occupied, blueprint: JSON.stringify(paperBlueprint), acceptTrustedLocation: false } });
     assert.equal(refused.error?.code, "project.notEmpty");
     assert.equal(await readFile(join(occupied, "main.typ"), "utf8"), "my own work");
+    // A folder that already holds a project graph is not a "new" project.
+    const existing = await invoke(page, "project_check_destination", { destination: paperRoot });
+    assert.equal(existing.ok, false);
+    assert.match(existing.message, /already holds an Exposition project/);
+    // Inside a trusted folder, native tools may run the project's files:
+    // creation there needs explicit acknowledgement (and changes no trust).
+    await invoke(page, "trust_grant", { root: parent });
+    const trustedRoot = join(parent, "inside-trusted");
+    const trustedCheck = await invoke(page, "project_check_destination", { destination: trustedRoot });
+    assert.equal(trustedCheck.ok, true);
+    assert.ok(trustedCheck.trustedVia, "the covering trusted folder is reported");
+    refused = await invokeError(page, "project_create", {
+      request: { destination: trustedRoot, blueprint: JSON.stringify(paperBlueprint), acceptTrustedLocation: false },
+    });
+    assert.equal(refused.error?.code, "project.trustedLocation");
+    assert.ok(!existsSync(trustedRoot), "nothing created without the acknowledgement");
+    await runCommand(page, "File: New Project", /File: ?New Project…$/);
+    await view.waitFor();
+    await page.getByTestId("project-location").locator("input").fill(trustedRoot);
+    await page.getByTestId("project-trusted-location").waitFor();
+    await page.waitForSelector('[data-testid="project-preview"][data-valid="true"]');
+    assert.equal(await page.getByTestId("project-create").isDisabled(), true, "Create waits for the acknowledgement");
+    await shot(page, "new-project-trusted-location-light");
+    await page.getByRole("checkbox", { name: /Create the project inside this trusted folder/ }).check({ force: true });
+    assert.equal(await page.getByTestId("project-create").isDisabled(), false);
+    await invoke(page, "trust_revoke", { root: parent });
     // The page shows a refused location and keeps Create disabled.
     await runCommand(page, "File: New Project", /File: ?New Project…$/);
     await view.waitFor();
@@ -263,7 +289,7 @@ export default async function projectCreate({ launchApp, artifactsDir, assert })
       // Fire and forget: the app aborts after the second file (simulated crash).
       await page.evaluate(
         ([destination, blueprint]) => {
-          void window.__TAURI_INTERNALS__.invoke("project_create", { request: { destination, blueprint } }).catch(() => {});
+          void window.__TAURI_INTERNALS__.invoke("project_create", { request: { destination, blueprint, acceptTrustedLocation: false } }).catch(() => {});
         },
         [leanRoot, JSON.stringify(leanBlueprint)],
       );

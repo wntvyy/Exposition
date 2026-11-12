@@ -7,4 +7,8 @@ export type ProjectCreated = { root: string, operation: OperationId, title: stri
 /**
  * What to open (Editor file, Research page, or files).
  */
-entry: BlueprintEntry, };
+entry: BlueprintEntry, 
+/**
+ * The project lies inside this (already) trusted folder.
+ */
+trustedVia: string | null, };

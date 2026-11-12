@@ -240,7 +240,7 @@ impl GraphService {
         self.save_definition(origin, &request, context, true)
     }
 
-    fn save_definition(
+    pub(crate) fn save_definition(
         &self,
         origin: &Origin,
         request: &SaveWorkflowRequest,

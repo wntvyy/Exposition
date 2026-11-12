@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::materialize::{CreationAction, CreationFileState, Creator, precheck};
+use super::materialize::{CreationAction, CreationFileState, Creator, Provenance, precheck};
 use super::presets::{
     COMPUTATIONAL, EMPTY, LEAN, ManuscriptFormat, PAPER, PAPER_COMPUTATION, PAPER_LEAN, ProjectPresetRequest, RESEARCH,
     ResearchRuntime, blueprint,
@@ -269,11 +269,11 @@ fn fixture() -> Fixture {
 fn create(f: &Fixture, bp: &ProjectBlueprint) -> (crate::ids::OperationId, super::materialize::GraphApplied) {
     let creator = Creator { graph: &f.graph, data_dir: &f.data_dir };
     precheck(&f.root, bp).unwrap();
-    let op = creator.begin(&f.root, bp).unwrap();
+    let op = creator.begin(&f.root, bp, &Provenance::Preset).unwrap();
     creator.write_files(&f.root, &op, bp, &|_| false).unwrap();
     assert!(f.graph.attach(&f.root).is_usable());
     creator.record_open(&f.root, &op).unwrap();
-    let applied = creator.apply_graph(&f.root, &op, bp, None).unwrap();
+    let applied = creator.apply_graph(&f.root, &op, bp, &Provenance::Preset).unwrap();
     creator.complete(&f.root, &op).unwrap();
     (op, applied)
 }
@@ -360,7 +360,7 @@ fn existing_files_are_never_overwritten() {
     // Even if a file appears after the precheck, create-new refuses it.
     let creator = Creator { graph: &f.graph, data_dir: &f.data_dir };
     let bp = paper();
-    let op = creator.begin(&f.root, &bp).unwrap();
+    let op = creator.begin(&f.root, &bp, &Provenance::Preset).unwrap();
     let err = creator.write_files(&f.root, &op, &bp, &|_| false).unwrap_err();
     assert_eq!(err.code, "project.collision");
     assert_eq!(read(&f.root, "main.typ"), "my own work");
@@ -377,7 +377,7 @@ fn interrupted_creation_is_recoverable_and_never_complete() {
     let total = bp.files.len();
     assert!(total >= 3);
     let creator = Creator { graph: &f.graph, data_dir: &f.data_dir };
-    let op = creator.begin(&f.root, &bp).unwrap();
+    let op = creator.begin(&f.root, &bp, &Provenance::Preset).unwrap();
     // Crash after the first file.
     let err = creator.write_files(&f.root, &op, &bp, &|n| n == 1).unwrap_err();
     assert_eq!(err.code, "project.interrupted");
@@ -417,12 +417,12 @@ fn reapplying_after_a_crash_between_graph_commit_and_journal_creates_no_duplicat
     let f = fixture();
     let bp = paper();
     let creator = Creator { graph: &f.graph, data_dir: &f.data_dir };
-    let op = creator.begin(&f.root, &bp).unwrap();
+    let op = creator.begin(&f.root, &bp, &Provenance::Preset).unwrap();
     creator.write_files(&f.root, &op, &bp, &|_| false).unwrap();
     assert!(f.graph.attach(&f.root).is_usable());
-    let first = creator.apply_graph(&f.root, &op, &bp, None).unwrap();
+    let first = creator.apply_graph(&f.root, &op, &bp, &Provenance::Preset).unwrap();
     let count = f.graph.status().entities;
-    let again = creator.apply_graph(&f.root, &op, &bp, None).unwrap();
+    let again = creator.apply_graph(&f.root, &op, &bp, &Provenance::Preset).unwrap();
     assert_eq!(f.graph.status().entities, count, "no duplicate entities");
     let ids =
         |a: &super::materialize::GraphApplied| a.entities.iter().map(|e| e.entity.clone()).collect::<BTreeSet<_>>();
@@ -434,7 +434,7 @@ fn keep_admits_what_exists_and_resolves() {
     let f = fixture();
     let bp = paper();
     let creator = Creator { graph: &f.graph, data_dir: &f.data_dir };
-    let op = creator.begin(&f.root, &bp).unwrap();
+    let op = creator.begin(&f.root, &bp, &Provenance::Preset).unwrap();
     creator.write_files(&f.root, &op, &bp, &|_| true).unwrap_err();
     assert!(f.graph.attach(&f.root).is_usable());
     let admitted = creator.keep(&f.root, &op).unwrap();
@@ -451,10 +451,10 @@ fn graph_unavailable_leaves_the_creation_unfinished() {
     let f = fixture();
     let bp = paper();
     let creator = Creator { graph: &f.graph, data_dir: &f.data_dir };
-    let op = creator.begin(&f.root, &bp).unwrap();
+    let op = creator.begin(&f.root, &bp, &Provenance::Preset).unwrap();
     creator.write_files(&f.root, &op, &bp, &|_| false).unwrap();
     // The project was never opened: the graph step refuses rather than pretending.
-    let err = creator.apply_graph(&f.root, &op, &bp, None).unwrap_err();
+    let err = creator.apply_graph(&f.root, &op, &bp, &Provenance::Preset).unwrap_err();
     assert_eq!(err.code, "graph.unavailable");
     let s = creator.statuses(&f.root, &BTreeSet::new());
     assert!(matches!(s[0].state, OperationState::NeedsReconciliation { .. }));
@@ -467,10 +467,10 @@ fn agent_proposed_blueprints_create_suggestions() {
     let mut bp = paper();
     bp.source = "agent".into();
     let creator = Creator { graph: &f.graph, data_dir: &f.data_dir };
-    let op = creator.begin(&f.root, &bp).unwrap();
+    let op = creator.begin(&f.root, &bp, &Provenance::Preset).unwrap();
     creator.write_files(&f.root, &op, &bp, &|_| false).unwrap();
     assert!(f.graph.attach(&f.root).is_usable());
-    let applied = creator.apply_graph(&f.root, &op, &bp, Some("task-123")).unwrap();
+    let applied = creator.apply_graph(&f.root, &op, &bp, &Provenance::Agent { task_id: "task-123".into() }).unwrap();
     let claim = applied.entities.iter().find(|e| e.temp_id == "mainResult").unwrap();
     let detail = f.graph.entity_detail(&claim.entity).unwrap();
     assert!(
@@ -497,4 +497,69 @@ fn research_space_ids_follow_the_preset_or_agent_convention() {
         b.research.as_mut().unwrap().id = bad.into();
         assert!(!validate_blueprint(&b).valid, "{bad}");
     }
+}
+
+#[test]
+fn reapplying_never_overwrites_what_people_changed_since() {
+    let f = fixture();
+    let bp = paper();
+    let creator = Creator { graph: &f.graph, data_dir: &f.data_dir };
+    let op = creator.begin(&f.root, &bp, &Provenance::Preset).unwrap();
+    creator.write_files(&f.root, &op, &bp, &|_| false).unwrap();
+    assert!(f.graph.attach(&f.root).is_usable());
+    let first = creator.apply_graph(&f.root, &op, &bp, &Provenance::Preset).unwrap();
+    let claim = first.entities.iter().find(|e| e.temp_id == "mainResult").unwrap().entity.clone();
+    let rev = f.graph.entity_detail(&claim).unwrap().entity.revision;
+    let request = crate::ops::ChangeRequest {
+        base_revision: f.graph.status().revision,
+        operations: vec![crate::ops::GraphOperation::UpdateEntity {
+            entity: claim.clone(),
+            expected_revision: rev,
+            label: Some("Spectral gap theorem".into()),
+            attributes: None,
+        }],
+        summary: None,
+    };
+    let (_, outcome) = f.graph.propose_and_apply(crate::model::Origin::User, &request).unwrap();
+    assert!(matches!(outcome, crate::ops::ApplyOutcome::Applied { .. }), "{outcome:?}");
+    creator.apply_graph(&f.root, &op, &bp, &Provenance::Preset).unwrap();
+    assert_eq!(f.graph.entity_detail(&claim).unwrap().entity.label, "Spectral gap theorem");
+}
+
+#[test]
+fn imported_blueprints_only_suggest_whatever_source_they_claim() {
+    let f = fixture();
+    let mut bp = blueprint(&request(LEAN)).unwrap();
+    bp.source = "preset:lean".into(); // self-declared; the caller decides provenance
+    let creator = Creator { graph: &f.graph, data_dir: &f.data_dir };
+    let op = creator.begin(&f.root, &bp, &Provenance::Imported).unwrap();
+    creator.write_files(&f.root, &op, &bp, &|_| false).unwrap();
+    assert!(f.graph.attach(&f.root).is_usable());
+    let applied = creator.apply_graph(&f.root, &op, &bp, &Provenance::Imported).unwrap();
+    let collection = applied.entities.iter().find(|e| e.kind == EntityKind::Collection).unwrap();
+    let incoming = f.graph.entity_detail(&collection.entity).unwrap().incoming;
+    assert!(!incoming.is_empty());
+    assert!(incoming.iter().all(|r| r.status == AssertionStatus::Suggested));
+    let saved = f.graph.workflow(&applied.workflows[0].workflow, None).unwrap();
+    assert!(saved.imported, "an imported blueprint's drafts are imported drafts");
+    assert!(!saved.validation.runnable);
+    // Finish uses the recorded provenance too.
+    assert_eq!(creator.record(&op).unwrap().provenance, Provenance::Imported);
+}
+
+#[test]
+fn a_bare_git_repository_layout_is_refused() {
+    let mut bp = paper();
+    for (path, content) in
+        [("payload/HEAD", "ref: refs/heads/main\n"), ("payload/config", "[core]\n\tfsmonitor = calc\n")]
+    {
+        bp.files.push(BlueprintFile { path: path.into(), content: content.into() });
+    }
+    let v = validate_blueprint(&bp);
+    assert!(!v.valid);
+    assert!(v.diagnostics.iter().any(|d| d.message.contains("Git repository")), "{:?}", errors(&v));
+    // Either file alone is ordinary.
+    let mut bp = paper();
+    bp.files.push(BlueprintFile { path: "notes/config".into(), content: String::new() });
+    assert!(validate_blueprint(&bp).valid);
 }

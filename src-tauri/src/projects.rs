@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 
 use exposition_core::build::{DocumentFormat, Engine};
 use exposition_core::path::WorkspacePath;
-use exposition_graph::blueprint::materialize::{CreationAction, CreationStatus, Creator, GraphApplied, precheck};
+use exposition_graph::blueprint::materialize::{
+    CreationAction, CreationStatus, Creator, GraphApplied, Provenance, precheck,
+};
 use exposition_graph::blueprint::presets::{ProjectPresetInfo, ProjectPresetRequest, ResearchRuntime};
 use exposition_graph::blueprint::{
     BlueprintEngine, BlueprintEntry, BlueprintValidation, CapabilityId, CapabilityStatus, ProjectBlueprint,
@@ -105,6 +107,10 @@ pub struct DestinationCheck {
     pub message: Option<String>,
     /// The folder does not exist yet and will be created.
     pub creates_folder: bool,
+    /// The location is inside this trusted folder: native tools (Lean,
+    /// LaTeX, research kernels) may run the new project's files there.
+    /// Creating it there needs the user's explicit acknowledgement.
+    pub trusted_via: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -115,6 +121,8 @@ pub struct CreateProjectRequest {
     pub destination: String,
     /// The blueprint as JSON text (validated strictly in Rust).
     pub blueprint: String,
+    /// The user acknowledged creating the project inside a trusted folder.
+    pub accept_trusted_location: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -127,6 +135,8 @@ pub struct ProjectCreated {
     pub applied: GraphApplied,
     /// What to open (Editor file, Research page, or files).
     pub entry: BlueprintEntry,
+    /// The project lies inside this (already) trusted folder.
+    pub trusted_via: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -145,22 +155,36 @@ fn graph_error(e: GraphError) -> CommandError {
 
 // ----- destination -----
 
-/// Entries a project-creation destination may already contain: nothing,
-/// or only the graph storage an earlier open of the empty folder created.
-fn effectively_empty(dir: &Path) -> std::io::Result<bool> {
+enum Contents {
+    Empty,
+    /// It already holds an Exposition project graph (from an earlier open).
+    ExistingProject,
+    Other,
+}
+
+/// What an existing destination holds. Only an empty folder (or one with an
+/// empty `.exposition`) receives a new project: an existing project graph
+/// would carry its old identities and records into the "new" project.
+fn contents(dir: &Path) -> std::io::Result<Contents> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         if entry.file_name() != ".exposition" || !entry.file_type()?.is_dir() {
-            return Ok(false);
+            return Ok(Contents::Other);
         }
-        for inner in std::fs::read_dir(entry.path())? {
-            let name = inner?.file_name().to_string_lossy().to_lowercase();
-            if !(name.starts_with("graph.sqlite3") || name == "graph-backups") {
-                return Ok(false);
-            }
+        if std::fs::read_dir(entry.path())?.next().is_some() {
+            return Ok(Contents::ExistingProject);
         }
     }
-    Ok(true)
+    Ok(Contents::Empty)
+}
+
+/// A folder path as people read it (without the verbatim `\\?\` prefix).
+fn display_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_owned()
 }
 
 /// Check a destination without changing anything.
@@ -180,13 +204,30 @@ pub fn check_destination(raw: &str, data_dir: &Path) -> Result<DestinationCheck,
                 return refuse("project.destination", format!("{raw} is not a folder."));
             }
             let root = WorkspaceRoot::open_excluding(&path, data_dir).map_err(CommandError::from)?;
-            if !effectively_empty(root.path()).map_err(|e| CommandError::new("project.destination", e.to_string()))? {
-                return refuse(
-                    "project.notEmpty",
-                    format!("{raw} is not empty. Choose a new or empty folder; existing files are never overwritten."),
-                );
+            match contents(root.path()).map_err(|e| CommandError::new("project.destination", e.to_string()))? {
+                Contents::Empty => {}
+                Contents::ExistingProject => {
+                    return refuse(
+                        "project.existingProject",
+                        format!("{raw} already holds an Exposition project. Open it instead, or choose a new folder."),
+                    );
+                }
+                Contents::Other => {
+                    return refuse(
+                        "project.notEmpty",
+                        format!(
+                            "{raw} is not empty. Choose a new or empty folder; existing files are never overwritten."
+                        ),
+                    );
+                }
             }
-            Ok(DestinationCheck { path: root.display_path(), ok: true, message: None, creates_folder: false })
+            Ok(DestinationCheck {
+                path: root.display_path(),
+                ok: true,
+                message: None,
+                creates_folder: false,
+                trusted_via: None,
+            })
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
@@ -218,8 +259,13 @@ pub fn check_destination(raw: &str, data_dir: &Path) -> Result<DestinationCheck,
                     "That location is inside Exposition's own data folder, which is never a project.".into(),
                 );
             }
-            let shown = candidate.to_string_lossy().trim_start_matches(r"\\?\").to_owned();
-            Ok(DestinationCheck { path: shown, ok: true, message: None, creates_folder: true })
+            Ok(DestinationCheck {
+                path: display_path(&candidate),
+                ok: true,
+                message: None,
+                creates_folder: true,
+                trusted_via: None,
+            })
         }
         Err(e) => refuse("project.destination", format!("{raw} cannot be used: {e}.")),
     }
@@ -362,6 +408,29 @@ async fn host_capabilities(state: &AppState) -> HostCapabilities {
     HostCapabilities { statuses, runtimes, lean }
 }
 
+/// The trusted folder that would cover a new project at this destination.
+fn trusted_via(execution: &exposition_execution::ExecutionService, check: &DestinationCheck) -> Option<String> {
+    let path = PathBuf::from(&check.path);
+    let probe = if check.creates_folder { path.parent()?.to_path_buf() } else { path };
+    let status = execution.trust_status(&probe.to_string_lossy()).ok()?;
+    status.trusted.then(|| status.trusted_via.unwrap_or(status.root))
+}
+
+/// Built-in presets assert their graph content; any other blueprint (whatever
+/// `source` it declares) only suggests. A blueprint claiming a preset must
+/// name one that exists.
+fn provenance_of(bp: &ProjectBlueprint) -> Provenance {
+    let preset = bp.source.strip_prefix("preset:");
+    let known = |id: &str| {
+        id == exposition_graph::blueprint::presets::EMPTY.to_ascii_lowercase()
+            || exposition_graph::blueprint::presets::catalog().iter().any(|p| p.id.to_ascii_lowercase() == id)
+    };
+    match preset {
+        Some(id) if known(id) => Provenance::Preset,
+        _ => Provenance::Imported,
+    }
+}
+
 // ----- commands -----
 
 #[tauri::command]
@@ -399,14 +468,19 @@ pub async fn project_check_destination(
     destination: String,
 ) -> Result<DestinationCheck, CommandError> {
     let data_dir = state.data_dir.clone();
+    let execution = state.execution.clone();
     blocking(move || {
         Ok(match check_destination(&destination, &data_dir) {
-            Ok(c) => c,
+            Ok(mut c) => {
+                c.trusted_via = trusted_via(&execution, &c);
+                c
+            }
             Err(e) => DestinationCheck {
                 path: destination.trim().to_owned(),
                 ok: false,
                 message: Some(e.message),
                 creates_folder: false,
+                trusted_via: None,
             },
         })
     })
@@ -508,16 +582,37 @@ pub async fn project_create(
     };
     let data_dir = state.data_dir.clone();
     let graph: Arc<GraphService> = Arc::clone(&state.graph);
+    // Inside a trusted folder, native tools may run the new project's files:
+    // only with the user's explicit acknowledgement.
+    let trusted = {
+        let execution = state.execution.clone();
+        let data_dir = data_dir.clone();
+        let destination = request.destination.clone();
+        blocking(move || Ok(check_destination(&destination, &data_dir).ok().and_then(|c| trusted_via(&execution, &c))))
+            .await?
+    };
+    if let Some(via) = &trusted
+        && !request.accept_trusted_location
+    {
+        return Err(CommandError::new(
+            "project.trustedLocation",
+            format!(
+                "This location is inside the trusted folder {via}, where Exposition's native tools may run the project's files. Confirm creating it there, or choose another location."
+            ),
+        ));
+    }
+    let provenance = provenance_of(&bp);
     let (root, display, op) = blocking({
         let bp = bp.clone();
         let graph = Arc::clone(&graph);
         let data_dir = data_dir.clone();
         let destination = request.destination.clone();
+        let provenance = provenance.clone();
         move || {
             let (root, display) = prepare_destination(&destination, &data_dir)?;
             precheck(&root, &bp).map_err(graph_error)?;
             let creator = Creator { graph: &graph, data_dir: &data_dir };
-            let op = creator.begin(&root, &bp).map_err(graph_error)?;
+            let op = creator.begin(&root, &bp, &provenance).map_err(graph_error)?;
             set_running(&op, true);
             let interrupt = interrupt_hook();
             if let Err(e) = creator.write_files(&root, &op, &bp, &interrupt) {
@@ -548,7 +643,7 @@ pub async fn project_create(
             let creator = Creator { graph: &graph, data_dir: &data_dir };
             let result = (|| -> Result<GraphApplied, CommandError> {
                 creator.record_open(&root, &op).map_err(graph_error)?;
-                let applied = creator.apply_graph(&root, &op, &bp, None).map_err(graph_error)?;
+                let applied = creator.apply_graph(&root, &op, &bp, &provenance).map_err(graph_error)?;
                 apply_settings(&workspace, &creator, &root, &op, &bp);
                 creator.complete(&root, &op).map_err(graph_error)?;
                 Ok(applied)
@@ -564,6 +659,7 @@ pub async fn project_create(
         title: bp.title.clone(),
         applied: outcome,
         entry: bp.entry.clone(),
+        trusted_via: trusted,
     })
 }
 
@@ -659,10 +755,13 @@ mod tests {
         // An empty existing folder.
         std::fs::create_dir(&new).unwrap();
         assert!(!check_destination(new.to_str().unwrap(), data.path()).unwrap().creates_folder);
-        // Only graph storage from opening the empty folder earlier still counts as empty.
+        // An empty `.exposition` is fine; an existing project graph is not
+        // carried into a "new" project.
         std::fs::create_dir(new.join(".exposition")).unwrap();
-        std::fs::write(new.join(".exposition").join("graph.sqlite3"), b"").unwrap();
         assert!(check_destination(new.to_str().unwrap(), data.path()).is_ok());
+        std::fs::write(new.join(".exposition").join("graph.sqlite3"), b"").unwrap();
+        assert_eq!(check_destination(new.to_str().unwrap(), data.path()).unwrap_err().code, "project.existingProject");
+        std::fs::remove_file(new.join(".exposition").join("graph.sqlite3")).unwrap();
         // Anything else makes it non-empty.
         std::fs::write(new.join("notes.txt"), b"mine").unwrap();
         assert_eq!(check_destination(new.to_str().unwrap(), data.path()).unwrap_err().code, "project.notEmpty");
@@ -705,6 +804,31 @@ mod tests {
         assert_eq!(s.entry.as_ref().unwrap().as_str(), "main.tex");
         assert!(s.validate().is_ok());
         assert!(target_settings(&bp, s).is_none(), "existing targets are not replaced");
+    }
+
+    #[test]
+    fn only_real_presets_assert_their_graph_content() {
+        let mut bp = exposition_graph::blueprint::presets::blueprint(&ProjectPresetRequest {
+            preset: "paperLean".into(),
+            title: None,
+            format: Some(exposition_graph::blueprint::presets::ManuscriptFormat::Typst),
+            runtime: None,
+            lean_toolchain: None,
+            include_workflow: true,
+            purpose: None,
+        })
+        .unwrap();
+        assert_eq!(provenance_of(&bp), Provenance::Preset);
+        for source in ["preset:invented", "agent", "import", "presetpaper"] {
+            bp.source = source.into();
+            assert_eq!(provenance_of(&bp), Provenance::Imported, "{source}");
+        }
+    }
+
+    #[test]
+    fn unc_destinations_keep_their_share_prefix() {
+        assert_eq!(display_path(Path::new(r"\\?\UNC\srv\share\p\new")), r"\\srv\share\p\new");
+        assert_eq!(display_path(Path::new(r"\\?\C:\p\new")), r"C:\p\new");
     }
 
     #[test]

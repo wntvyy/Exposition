@@ -40,6 +40,11 @@ const HOOK_FILES: &[&str] = &[
     ".pythonstartup",
     "desktop.ini",
     "autorun.inf",
+    // R restores `.RData` from the working directory (the project) at start.
+    ".rdata",
+    // Python puts the working directory first on the import path, so this
+    // would replace the kernel launcher of a research session.
+    "ipykernel_launcher.py",
 ];
 
 /// Executable, script-host, and shortcut types Windows runs on open.
@@ -71,6 +76,22 @@ const EXECUTABLE_EXTENSIONS: &[&str] = &[
     "appref-ms",
     "sys",
     "pth",
+    "js",
+    "jar",
+    "msc",
+    "library-ms",
+    "searchconnector-ms",
+    "settingcontent-ms",
+    "chm",
+    "wsc",
+    "sct",
+    "ps1xml",
+    "psc1",
+    "appx",
+    "msix",
+    "appinstaller",
+    "diagcab",
+    "xbap",
 ];
 
 /// Validate one blueprint path. `research` is the blueprint's research
@@ -124,8 +145,13 @@ pub fn check(raw: &str, research: Option<&str>) -> Result<WorkspacePath, String>
         return Err("the path is not in normalized form".into());
     }
     let lower: Vec<String> = components.iter().map(|c| c.to_ascii_lowercase()).collect();
-    if RESERVED_ROOTS.contains(&lower[0].as_str()) {
-        return Err(format!("{} is a version-control or tool folder", components[0]));
+    // Version-control and tool folders anywhere (a nested `.git` file or
+    // folder would make its parent a repository whose config can run code).
+    if let Some(i) = lower.iter().position(|c| RESERVED_ROOTS.contains(&c.as_str())) {
+        return Err(format!("{} is a version-control or tool folder", components[i]));
+    }
+    if let Some(i) = lower.iter().skip(1).position(|c| c == ".exposition") {
+        return Err(format!("{} would be another project's metadata folder", components[i + 1]));
     }
     if lower[0] == ".exposition" {
         let allowed = match research {
@@ -139,9 +165,8 @@ pub fn check(raw: &str, research: Option<&str>) -> Result<WorkspacePath, String>
             );
         }
     }
-    if let Some(dir) = components[..components.len() - 1]
-        .iter()
-        .find(|c| crate::admission::EXCLUDED_DIRS.iter().any(|x| x.eq_ignore_ascii_case(c)))
+    if let Some(dir) =
+        components.iter().find(|c| crate::admission::EXCLUDED_DIRS.iter().any(|x| x.eq_ignore_ascii_case(c)))
     {
         return Err(format!("{dir} is a dependency, cache, or tool folder"));
     }
@@ -216,6 +241,19 @@ mod tests {
             ("EXPOSI~1/project.json", "short (8.3)"),
             ("GIT~1/hooks/post-checkout", "short (8.3)"),
             ("docs/LONGNA~2.TXT", "short (8.3)"),
+            ("sub/.git", "version-control"),
+            ("sub/.GIT/config", "version-control"),
+            ("a/b/.hg/hgrc", "version-control"),
+            ("sub/.vscode/settings.json", "tool folder"),
+            ("sub/.exposition/graph.sqlite3", "metadata folder"),
+            ("sub/node_modules", "dependency"),
+            (".RData", "startup hooks"),
+            ("ipykernel_launcher.py", "startup hooks"),
+            ("tools/run.js", "can run"),
+            ("x.msc", "can run"),
+            ("Saved.library-ms", "can run"),
+            ("q.searchConnector-ms", "can run"),
+            ("app.jar", "can run"),
             ("", "empty"),
         ];
         for (raw, expect) in cases {

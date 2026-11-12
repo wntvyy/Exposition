@@ -11,4 +11,10 @@ message: string | null,
 /**
  * The folder does not exist yet and will be created.
  */
-createsFolder: boolean, };
+createsFolder: boolean, 
+/**
+ * The location is inside this trusted folder: native tools (Lean,
+ * LaTeX, research kernels) may run the new project's files there.
+ * Creating it there needs the user's explicit acknowledgement.
+ */
+trustedVia: string | null, };

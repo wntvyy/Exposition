@@ -58,6 +58,8 @@ export interface ProjectsState {
   /** The user typed the location (do not re-derive it from the title). */
   locationEdited: boolean;
   destination: DestinationCheck | null;
+  /** The user confirmed creating the project inside a trusted folder. */
+  acceptTrusted: boolean;
   blueprint: ProjectBlueprint | null;
   preview: BlueprintValidation | null;
   previewError: string | null;
@@ -86,6 +88,7 @@ export const initialProjectsState: ProjectsState = {
   location: "",
   locationEdited: false,
   destination: null,
+  acceptTrusted: false,
   blueprint: null,
   preview: null,
   previewError: null,
@@ -197,7 +200,7 @@ export function setOptions(patch: Partial<ProjectsState>): void {
 }
 
 export function setLocation(location: string): void {
-  set({ location, locationEdited: true, error: null });
+  set({ location, locationEdited: true, error: null, acceptTrusted: false });
   scheduleDestinationCheck();
 }
 
@@ -218,7 +221,13 @@ export async function checkDestination(): Promise<DestinationCheck | null> {
     if (seq === destinationSeq) set({ destination: result });
     return result;
   } catch (error) {
-    const result: DestinationCheck = { path: location, ok: false, message: errorMessage(error), createsFolder: false };
+    const result: DestinationCheck = {
+      path: location,
+      ok: false,
+      message: errorMessage(error),
+      createsFolder: false,
+      trustedVia: null,
+    };
     if (seq === destinationSeq) set({ destination: result });
     return result;
   }
@@ -267,7 +276,10 @@ function describeCreated(created: ProjectCreated): string {
   const drafts = created.applied.workflows.length;
   const parts = [`${files} file${files === 1 ? "" : "s"}`, `${entities} project entit${entities === 1 ? "y" : "ies"}`];
   if (drafts) parts.push(`${drafts} workflow draft${drafts === 1 ? "" : "s"} (not runnable in this version)`);
-  return `${created.root}: ${parts.join(", ")}. Nothing was trusted or run.`;
+  const trust = created.trustedVia
+    ? `It lies inside the trusted folder ${created.trustedVia}; nothing was run.`
+    : "Nothing was trusted or run.";
+  return `${created.root}: ${parts.join(", ")}. ${trust}`;
 }
 
 async function createProject(blueprint: ProjectBlueprint): Promise<ProjectCreated | null> {
@@ -278,6 +290,7 @@ async function createProject(blueprint: ProjectBlueprint): Promise<ProjectCreate
     const created = await projectCommands.create({
       destination: state.location.trim(),
       blueprint: JSON.stringify(blueprint),
+      acceptTrustedLocation: state.acceptTrusted,
     });
     await openWorkspace(created.root);
     return created;

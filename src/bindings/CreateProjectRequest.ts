@@ -8,4 +8,8 @@ destination: string,
 /**
  * The blueprint as JSON text (validated strictly in Rust).
  */
-blueprint: string, };
+blueprint: string, 
+/**
+ * The user acknowledged creating the project inside a trusted folder.
+ */
+acceptTrustedLocation: boolean, };

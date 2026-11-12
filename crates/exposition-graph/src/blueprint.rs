@@ -577,6 +577,17 @@ pub fn validate_blueprint(bp: &ProjectBlueprint) -> BlueprintValidation {
         if folded.keys().any(|k| k.starts_with(&prefix)) {
             err("blueprint.collision", format!("{key} is a file but other paths are inside it"), Some(key));
         }
+        // A folder with `HEAD` and `config` is a bare Git repository, whose
+        // config can run commands when Git is used there.
+        if let Some(dir) = key.strip_suffix("head").filter(|d| d.is_empty() || d.ends_with('/'))
+            && folded.get(&format!("{dir}config")) == Some(&"file")
+        {
+            err(
+                "blueprint.path",
+                format!("{dir}HEAD and {dir}config would form a Git repository; blueprints cannot create one"),
+                Some(key),
+            );
+        }
     }
 
     // ----- temp ids: entities, collections, workflows -----

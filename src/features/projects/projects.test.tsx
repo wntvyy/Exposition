@@ -1,7 +1,7 @@
 // New Project: pure helpers, the preset and objective creation flows (Rust
 // calls mocked at the feature's IPC boundary), interrupted-setup detection,
 // and the page rendered through the real shared components.
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BlueprintValidation } from "../../bindings/BlueprintValidation";
@@ -120,6 +120,7 @@ const created: ProjectCreated = {
   title: "Spectral gaps",
   applied: { project: "prj-1", graphRevision: 3, resources: [{ path: "main.typ", entity: "ent-1" }], entities: [], workflows: [], researchSpace: null },
   entry: { kind: "editor", path: "main.typ" },
+  trustedVia: null,
 };
 
 beforeEach(() => {
@@ -129,7 +130,13 @@ beforeEach(() => {
   projectIpc.capabilities.mockResolvedValue(report);
   projectIpc.presetBlueprint.mockResolvedValue(blueprint);
   projectIpc.validate.mockResolvedValue(preview(true));
-  projectIpc.checkDestination.mockResolvedValue({ path: "C:\\work\\spectral-gaps", ok: true, message: null, createsFolder: true });
+  projectIpc.checkDestination.mockResolvedValue({
+    path: "C:\\work\\spectral-gaps",
+    ok: true,
+    message: null,
+    createsFolder: true,
+    trustedVia: null,
+  });
   projectIpc.create.mockResolvedValue(created);
   projectIpc.creationStatus.mockResolvedValue([]);
   pagesMock.show.mockReturnValue(false);
@@ -189,7 +196,11 @@ describe("preset path", () => {
     expect(projectIpc.validate).toHaveBeenCalledWith(JSON.stringify(blueprint));
     const result = await store.createFromPreset();
     expect(result).toEqual(created);
-    expect(projectIpc.create).toHaveBeenCalledWith({ destination: "C:\\work\\spectral-gaps", blueprint: JSON.stringify(blueprint) });
+    expect(projectIpc.create).toHaveBeenCalledWith({
+      destination: "C:\\work\\spectral-gaps",
+      blueprint: JSON.stringify(blueprint),
+      acceptTrustedLocation: false,
+    });
     expect(workspace.openWorkspace).toHaveBeenCalledWith(created.root);
     expect(editorsMock.open).toHaveBeenCalledWith({ key: "file:main.typ", path: "main.typ", title: "main.typ" });
     expect(pagesMock.show).toHaveBeenCalledWith("editor");
@@ -334,8 +345,27 @@ describe("New Project page", () => {
     const lean = screen.getByTestId("project-capabilities").querySelector("[data-capability=lean]");
     expect(lean?.getAttribute("data-available")).toBe("false");
     expect(lean?.textContent).toMatch(/Install one with elan/);
-    expect(screen.getByTestId("project-authorization").textContent).toMatch(/does not trust the folder, run any code, install anything/);
+    expect(screen.getByTestId("project-authorization").textContent).toMatch(/does not grant trust, run any code, install anything/);
     await waitFor(() => expect(screen.getByTestId("project-create").hasAttribute("disabled")).toBe(false));
+  });
+
+  it("asks before creating a project inside a trusted folder", async () => {
+    projectIpc.checkDestination.mockResolvedValue({
+      path: "C:\trusted\new",
+      ok: true,
+      message: null,
+      createsFolder: true,
+      trustedVia: "C:\trusted",
+    });
+    store.setLocation("C:\trusted\new");
+    render(<NewProjectView resource={{ key: "new-project:", title: "New Project" }} mode="source" active />);
+    const warning = await screen.findByTestId("project-trusted-location");
+    expect(warning.textContent).toMatch(/C:\trusted is trusted/);
+    await screen.findByTestId("project-capabilities");
+    expect(screen.getByTestId("project-create").hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Create the project inside this trusted folder/ }));
+    await waitFor(() => expect(screen.getByTestId("project-create").hasAttribute("disabled")).toBe(false));
+    expect(store.useProjects.getState().acceptTrusted).toBe(true);
   });
 
   it("keeps Create disabled for an invalid blueprint and lists why", async () => {
