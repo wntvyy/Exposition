@@ -1,0 +1,25 @@
+[package]
+name = "exposition-research"
+description = "Research environments: discovery, managed Jupyter kernel sessions, runs, provenance, and artifacts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+exposition-core.workspace = true
+exposition-workspace.workspace = true
+exposition-execution.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ts-rs.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

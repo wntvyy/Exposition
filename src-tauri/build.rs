@@ -53,6 +53,21 @@ const COMMANDS: &[&str] = &[
     "agents_review_diff",
     "agents_review_revert",
     "agents_review_accept",
+    // Research (M4) and the format-owned artifact attachment command.
+    "research_workspace",
+    "research_environments",
+    "research_session_start",
+    "research_sessions",
+    "research_session_interrupt",
+    "research_session_restart",
+    "research_session_shutdown",
+    "research_execute",
+    "research_run_cancel",
+    "research_runs",
+    "research_run",
+    "research_run_output",
+    "research_artifact",
+    "artifact_attach",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

@@ -19,6 +19,8 @@ exposition-core.workspace = true
 exposition-workspace.workspace = true
 exposition-agents.workspace = true
 exposition-execution.workspace = true
+exposition-research.workspace = true
+exposition-attach.workspace = true
 tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2"
 serde.workspace = true

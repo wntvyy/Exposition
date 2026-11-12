@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-session-shutdown"
+description = "Enables the research_session_shutdown command without any pre-configured scope."
+commands.allow = ["research_session_shutdown"]
+
+[[permission]]
+identifier = "deny-research-session-shutdown"
+description = "Denies the research_session_shutdown command without any pre-configured scope."
+commands.deny = ["research_session_shutdown"]

@@ -939,8 +939,10 @@ name = "exposition"
 version = "0.1.0"
 dependencies = [
  "exposition-agents",
+ "exposition-attach",
  "exposition-core",
  "exposition-execution",
+ "exposition-research",
  "exposition-workspace",
  "serde",
  "serde_json",
@@ -978,6 +980,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "exposition-attach"
+version = "0.1.0"
+dependencies = [
+ "exposition-core",
+ "exposition-workspace",
+ "serde",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "exposition-core"
 version = "0.1.0"
 dependencies = [
@@ -1002,6 +1016,23 @@ dependencies = [
  "ts-rs",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "exposition-research"
+version = "0.1.0"
+dependencies = [
+ "exposition-core",
+ "exposition-execution",
+ "exposition-workspace",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "ts-rs",
+ "uuid",
 ]
 
 [[package]]

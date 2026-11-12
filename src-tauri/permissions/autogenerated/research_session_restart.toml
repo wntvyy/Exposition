@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-session-restart"
+description = "Enables the research_session_restart command without any pre-configured scope."
+commands.allow = ["research_session_restart"]
+
+[[permission]]
+identifier = "deny-research-session-restart"
+description = "Denies the research_session_restart command without any pre-configured scope."
+commands.deny = ["research_session_restart"]

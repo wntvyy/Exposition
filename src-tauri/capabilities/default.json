@@ -55,6 +55,20 @@
     "allow-agents-review",
     "allow-agents-review-diff",
     "allow-agents-review-revert",
-    "allow-agents-review-accept"
+    "allow-agents-review-accept",
+    "allow-research-workspace",
+    "allow-research-environments",
+    "allow-research-session-start",
+    "allow-research-sessions",
+    "allow-research-session-interrupt",
+    "allow-research-session-restart",
+    "allow-research-session-shutdown",
+    "allow-research-execute",
+    "allow-research-run-cancel",
+    "allow-research-runs",
+    "allow-research-run",
+    "allow-research-run-output",
+    "allow-research-artifact",
+    "allow-artifact-attach"
   ]
 }

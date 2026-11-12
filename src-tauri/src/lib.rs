@@ -7,6 +7,7 @@ mod app;
 mod documents;
 mod error;
 mod execution;
+mod research;
 mod state;
 mod workspace;
 
@@ -29,6 +30,7 @@ pub fn run() {
             execution::add_dev_capability(app.handle())?;
             #[cfg(debug_assertions)]
             agents::add_dev_capability(app.handle())?;
+            research::forward_events(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -86,6 +88,20 @@ pub fn run() {
             execution::dev_start_workspace_job,
             #[cfg(debug_assertions)]
             agents::agents_dev_load_script,
+            research::research_workspace,
+            research::research_environments,
+            research::research_session_start,
+            research::research_sessions,
+            research::research_session_interrupt,
+            research::research_session_restart,
+            research::research_session_shutdown,
+            research::research_execute,
+            research::research_run_cancel,
+            research::research_runs,
+            research::research_run,
+            research::research_run_output,
+            research::research_artifact,
+            research::artifact_attach,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")
