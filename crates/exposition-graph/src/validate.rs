@@ -812,6 +812,13 @@ pub fn run_batch(w: &Writer<'_>, origin: &Origin, batch: &ServiceBatch) -> Resul
         for e in &batch.evidence {
             w.put_evidence(e)?;
         }
+        // Removals first, so a batch can replace a relation (e.g. move a
+        // resource to another container) in one transaction.
+        for id in &batch.remove_relations {
+            if w.delete_relation(id)? {
+                cx.mark_relation(|d| &mut d.relations_removed, id);
+            }
+        }
         let mut relation_ids = Vec::new();
         for (i, r) in batch.relations.iter().enumerate() {
             let get = |br: &BatchRef| -> StoreResult<Option<Entity>> {
@@ -848,11 +855,6 @@ pub fn run_batch(w: &Writer<'_>, origin: &Origin, batch: &ServiceBatch) -> Resul
                 && let Some(id) = cx.delta.relations_added.last()
             {
                 relation_ids.push(id.clone());
-            }
-        }
-        for id in &batch.remove_relations {
-            if w.delete_relation(id)? {
-                cx.mark_relation(|d| &mut d.relations_removed, id);
             }
         }
         for c in &batch.coverage {

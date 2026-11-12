@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use exposition_core::path::WorkspacePath;
@@ -22,10 +23,14 @@ use crate::model::{
 };
 use crate::ops::{ApplyChangeRequest, ApplyOutcome, ChangeProposal, ChangeRequest};
 use crate::query::{
-    DEFAULT_LIMIT, Direction, FormalAssociationState, GraphQuery, GraphSnapshot, GraphView, GraphViewInput,
+    DEFAULT_LIMIT, Direction, EvidenceImpact, FormalAssociationState, GraphQuery, GraphSnapshot, GraphView, GraphViewInput,
     GraphViewSummary, ImpactAction, ImpactItem, ImpactReport, ImpactRequest, ImpactStep, InformalState,
     InspectAtSourceRequest, InspectedEntity, MAX_DEPTH, MAX_LIMIT, MathOverview, MathRow, SourceInspection, ViewScope,
 };
+use crate::backup::{self, BackupInfo};
+use crate::reconcile::engine::ReconcileState;
+use crate::reconcile::overlay::OverlayEntry;
+use crate::reconcile::{ReconcileOptions, ReconcileReport};
 use crate::store::{DATABASE_FILE, GraphStore, StoreError, Writer, now_ms};
 use crate::validate::{self, BatchOutcome, ServiceBatch};
 use crate::vocabulary::{EntityFamily, EntityKind, EvidenceKind, RelationKind};
@@ -109,6 +114,16 @@ pub struct GraphService {
     journal: OperationJournal,
     /// Freshness reported by the reconciler (it owns this state).
     sync: Mutex<GraphFreshness>,
+    /// Session reconciliation state; held for a whole pass (passes are serialized).
+    reconcile: Mutex<ReconcileState>,
+    /// Unsaved buffers extracted into revision-labelled overlays (never
+    /// written as saved state).
+    overlay: Mutex<BTreeMap<WorkspacePath, Arc<OverlayEntry>>>,
+    /// Bumped on every attach/detach (stale overlays and passes are dropped).
+    generation: AtomicU64,
+    /// When this service started: journal records older than this that are
+    /// still pending were interrupted by an earlier session.
+    started_at_ms: u64,
 }
 
 impl GraphService {
@@ -126,6 +141,10 @@ impl GraphService {
                 checkpoint_ms: None,
                 overlay: Vec::new(),
             }),
+            reconcile: Mutex::new(ReconcileState::default()),
+            overlay: Mutex::new(BTreeMap::new()),
+            generation: AtomicU64::new(0),
+            started_at_ms: now_ms(),
         })
     }
 
@@ -147,6 +166,15 @@ impl GraphService {
 
     fn emit(&self, event: GraphEvent) {
         let _ = self.events.send(event);
+    }
+
+    pub(crate) fn emit_event(&self, event: GraphEvent) {
+        self.emit(event);
+    }
+
+    /// Attach/detach generation (changes whenever the project changes).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     // ----- lifecycle -----
@@ -176,6 +204,9 @@ impl GraphService {
                         inner.open = Some(open);
                         inner.status = self.compute_status(&inner);
                     }
+                    // Cross-service operations a previous session left
+                    // pending were interrupted: label them (never re-run).
+                    let _ = self.journal.unresolved_before(root, self.started_at_ms);
                 }
                 Err((reason, recovery)) => {
                     inner.status = unavailable_status(root, reason, recovery);
@@ -184,7 +215,12 @@ impl GraphService {
             }
             inner.status.clone()
         };
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.overlay_lock().clear();
+        *self.sync.lock().unwrap_or_else(|p| p.into_inner()) =
+            GraphFreshness { state: SyncState::Pending, pending: 0, checkpoint_ms: None, overlay: Vec::new() };
         self.proposals_clear();
+        let status = if status.is_usable() { self.status() } else { status };
         self.emit(GraphEvent::Status { status: status.clone() });
         status
     }
@@ -197,6 +233,8 @@ impl GraphService {
             inner.failed_root = None;
             inner.status = GraphStatus::detached();
         }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.overlay_lock().clear();
         self.proposals_clear();
         *self.sync.lock().unwrap_or_else(|p| p.into_inner()) =
             GraphFreshness { state: SyncState::Pending, pending: 0, checkpoint_ms: None, overlay: Vec::new() };
@@ -230,8 +268,10 @@ impl GraphService {
                     }
                 }
             }
-            RecoveryOption::RestoreBackup { .. } => {
-                return Err(GraphError::new("graph.recovery", "Restoring a backup is not available for this graph."));
+            RecoveryOption::RestoreBackup { backup: name, .. } => {
+                backup::restore(&root.join(PROJECT_DIR), name).map_err(|e| {
+                    GraphError::new("graph.recovery", format!("The backup could not be restored: {e}"))
+                })?;
             }
         }
         {
@@ -274,18 +314,149 @@ impl GraphService {
 
     /// Synchronization state, as last reported by the reconciler.
     pub fn freshness(&self) -> GraphFreshness {
-        self.sync.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        let mut f = self.sync.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        f.overlay = self
+            .overlay_lock()
+            .values()
+            .map(|o| crate::model::OverlayDocument { path: o.path.clone(), revision: o.revision })
+            .collect();
+        f
     }
 
     /// Reconciler hook: report synchronization progress (emits `reconciled`
     /// when it reaches `Synchronized`).
+    /// The overlay list of `freshness` is ignored: overlays are kept by the
+    /// service (`set_overlay`/`clear_overlay`).
     pub fn set_freshness(&self, freshness: GraphFreshness) {
         let synchronized = freshness.state == SyncState::Synchronized;
-        *self.sync.lock().unwrap_or_else(|p| p.into_inner()) = freshness.clone();
+        let changed = {
+            let mut sync = self.sync.lock().unwrap_or_else(|p| p.into_inner());
+            let changed = sync.state != freshness.state || sync.pending != freshness.pending;
+            *sync = GraphFreshness { overlay: Vec::new(), ..freshness };
+            changed
+        };
         if synchronized {
             let revision = self.with_store(|s| Ok(s.revision()?)).unwrap_or(0);
-            self.emit(GraphEvent::Reconciled { revision, freshness });
+            self.emit(GraphEvent::Reconciled { revision, freshness: self.freshness() });
+        } else if changed && self.status().is_usable() {
+            self.emit(GraphEvent::Status { status: self.status() });
         }
+    }
+
+    // ----- reconciliation -----
+
+    /// Reconcile the graph with the project's files (see
+    /// [`crate::reconcile`]): one pass over `options.scope`. Derived
+    /// projections only; curated records are never deleted or reassigned.
+    /// Passes are serialized; freshness is reported while it runs.
+    pub fn reconcile(&self, options: &ReconcileOptions) -> GraphResult<ReconcileReport> {
+        let before = self.freshness();
+        self.set_freshness(GraphFreshness { state: SyncState::Reconciling, ..before.clone() });
+        let generation = self.generation();
+        let result = crate::reconcile::engine::run(self, options);
+        if self.generation() != generation {
+            return result;
+        }
+        match &result {
+            Ok(_) => self.set_freshness(GraphFreshness {
+                state: SyncState::Synchronized,
+                pending: 0,
+                checkpoint_ms: Some(now_ms()),
+                overlay: Vec::new(),
+            }),
+            Err(_) => self.set_freshness(GraphFreshness { state: SyncState::Pending, ..before }),
+        }
+        result
+    }
+
+    /// The reconciliation state, unless a pass holds it right now.
+    pub(crate) fn try_reconcile_state(&self) -> Option<MutexGuard<'_, ReconcileState>> {
+        let state = match self.reconcile.try_lock() {
+            Ok(s) => s,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        (state.generation == self.generation()).then_some(state)
+    }
+
+    pub(crate) fn reconcile_state(&self) -> MutexGuard<'_, ReconcileState> {
+        let mut state = self.reconcile.lock().unwrap_or_else(|p| p.into_inner());
+        let generation = self.generation();
+        if state.generation != generation {
+            *state = ReconcileState { generation, ..Default::default() };
+        }
+        state
+    }
+
+    /// The attached project folder (not a failed one).
+    pub(crate) fn attached_root(&self) -> Option<PathBuf> {
+        self.lock().open.as_ref().map(|o| o.root.clone())
+    }
+
+    fn overlay_lock(&self) -> MutexGuard<'_, BTreeMap<WorkspacePath, Arc<OverlayEntry>>> {
+        self.overlay.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Install the overlay of an unsaved buffer (computed for `generation`).
+    pub fn set_overlay(&self, generation: u64, entry: OverlayEntry) {
+        if generation != self.generation() {
+            return;
+        }
+        let path = entry.path.clone();
+        let changed = {
+            let mut map = self.overlay_lock();
+            let changed = map.get(&path).is_none_or(|o| o.revision != entry.revision);
+            map.insert(path, Arc::new(entry));
+            changed
+        };
+        if changed {
+            self.emit(GraphEvent::Reconciled { revision: self.status().revision, freshness: self.freshness() });
+        }
+    }
+
+    /// Drop the overlay of a buffer (saved, reverted to its saved text, closed).
+    pub fn clear_overlay(&self, path: &WorkspacePath) {
+        if self.overlay_lock().remove(path).is_some() {
+            self.emit(GraphEvent::Reconciled { revision: self.status().revision, freshness: self.freshness() });
+        }
+    }
+
+    /// The overlay of an unsaved buffer, if one is current.
+    pub fn overlay(&self, path: &WorkspacePath) -> Option<Arc<OverlayEntry>> {
+        self.overlay_lock().get(path).cloned()
+    }
+
+    // ----- backups -----
+
+    fn backup_dir(&self) -> GraphResult<PathBuf> {
+        let inner = self.lock();
+        match inner.open.as_ref() {
+            Some(open) if open.temporary.is_none() => Ok(open.root.join(PROJECT_DIR).join(backup::BACKUP_DIR)),
+            Some(_) => Err(GraphError::new("graph.temporary", "This temporary graph is not saved with the project.")),
+            None => Err(GraphError::new("graph.noProject", "No project graph is attached.")),
+        }
+    }
+
+    /// Take a consistent backup of the project graph now.
+    pub fn backup(&self, reason: &str) -> GraphResult<BackupInfo> {
+        let dir = self.backup_dir()?;
+        self.with_store(|s| Ok(backup::create(s, &dir, reason)?))
+    }
+
+    /// Backups of the attached graph, newest first.
+    pub fn backups(&self) -> GraphResult<Vec<BackupInfo>> {
+        Ok(backup::list(&self.backup_dir()?))
+    }
+
+    /// Take a backup when the newest one is older than `max_age_ms` (or none
+    /// exists). Returns the backup taken, if any.
+    pub fn backup_if_stale(&self, max_age_ms: u64) -> GraphResult<Option<BackupInfo>> {
+        let dir = self.backup_dir()?;
+        let newest = backup::list(&dir).into_iter().next();
+        if newest.is_some_and(|b| now_ms().saturating_sub(b.taken_at_ms) < max_age_ms) {
+            return Ok(None);
+        }
+        Ok(Some(self.backup("auto")?))
     }
 
     /// Run `f` against the open store, or fail with `graph.unavailable`.
@@ -379,19 +550,44 @@ impl GraphService {
     }
 
     /// Entities bound at a source position (or in the whole file).
+    ///
+    /// When `revision` names the revision of a current live-buffer overlay,
+    /// the answer reflects the unsaved text (declarations, bindings, observed
+    /// links) and says so (`unsaved`); provisional entities that exist only
+    /// in the buffer carry the attribute `overlay.provisional`. Otherwise the
+    /// saved projection is used.
     pub fn inspect_at_source(&self, req: &InspectAtSourceRequest) -> GraphResult<SourceInspection> {
         let freshness = self.freshness();
-        let unsaved =
-            req.revision.is_some_and(|rev| freshness.overlay.iter().any(|o| o.path == req.path && o.revision == rev));
+        let overlay = req.revision.and_then(|rev| self.overlay(&req.path).filter(|o| o.revision == rev));
+        let unsaved = overlay.is_some();
         self.with_store(|store| {
             let resource = store
                 .entities_by_key(EntityKind::Resource, req.path.as_str())?
                 .into_iter()
                 .find(|e| e.lifecycle != Lifecycle::Tombstoned);
-            let mut hits: Vec<(u32, InspectedEntity)> = Vec::new();
+            let entity_of = |id: &EntityId| -> Result<Option<Entity>, StoreError> {
+                match overlay.as_ref().and_then(|o| o.entities.get(id)) {
+                    Some(e) => Ok(Some(e.clone())),
+                    None => store.entity(id),
+                }
+            };
+            let mut candidates: Vec<crate::model::SourceBinding> = Vec::new();
+            let mut overlaid: BTreeSet<EntityId> = BTreeSet::new();
+            if let Some(o) = &overlay {
+                for (id, bindings) in &o.bindings {
+                    overlaid.insert(id.clone());
+                    candidates.extend(bindings.iter().filter(|b| b.path == req.path).cloned());
+                }
+            }
             for b in store.bindings_at_path(&req.path)? {
-                let Some(entity) = store.entity(&b.entity)? else { continue };
-                if entity.kind == EntityKind::Resource {
+                if !overlaid.contains(&b.entity) {
+                    candidates.push(b);
+                }
+            }
+            let mut hits: Vec<(u32, InspectedEntity)> = Vec::new();
+            for b in candidates {
+                let Some(entity) = entity_of(&b.entity)? else { continue };
+                if entity.kind == EntityKind::Resource || (unsaved && entity.lifecycle == Lifecycle::Tombstoned) {
                     continue;
                 }
                 let width = match (req.offset, b.range) {
@@ -402,25 +598,38 @@ impl GraphService {
                 };
                 let mut relations = store.relations_from(&entity.id)?;
                 relations.extend(store.relations_to(&entity.id)?);
+                if let Some(o) = &overlay {
+                    relations.retain(|r| !o.removed.contains(&r.id));
+                    relations.extend(o.added.iter().filter(|r| r.from == entity.id || r.to == entity.id).cloned());
+                }
                 relations.truncate(200);
                 let mut related_ids: Vec<EntityId> =
                     relations.iter().map(|r| if r.from == entity.id { r.to.clone() } else { r.from.clone() }).collect();
                 related_ids.sort();
                 related_ids.dedup();
-                let related = store.entities(&related_ids)?;
+                let mut related = Vec::new();
+                for id in &related_ids {
+                    if let Some(e) = entity_of(id)? {
+                        related.push(e);
+                    }
+                }
                 hits.push((width, InspectedEntity { entity, binding: b, relations, related }));
                 if hits.len() >= 200 {
                     break;
                 }
             }
             hits.sort_by_key(|(w, _)| *w);
+            let coverage = match overlay.as_ref().and_then(|o| o.coverage.clone()) {
+                Some(c) => Some(c),
+                None => store.coverage(&req.path)?,
+            };
             Ok(SourceInspection {
                 path: req.path.clone(),
                 revision: req.revision,
                 unsaved,
                 resource,
                 entities: hits.into_iter().map(|(_, h)| h).collect(),
-                coverage: store.coverage(&req.path)?,
+                coverage,
                 freshness: freshness.clone(),
                 graph_revision: store.revision()?,
             })
@@ -447,13 +656,22 @@ impl GraphService {
             let mut work_limit_reached = false;
             let mut truncated = false;
             let mut unknown: BTreeSet<WorkspacePath> = BTreeSet::new();
+            let mut root_entities: Vec<Entity> = Vec::new();
+            for root in &roots {
+                if let Some(e) = store.entity(root)? {
+                    note_unknown_coverage(store, &e, &mut unknown)?;
+                    root_entities.push(e);
+                }
+            }
             while let Some((current, depth, path)) = queue.pop_front() {
                 if depth >= max_depth {
                     continue;
                 }
+                let current_kind = store.entity(&current)?.map(|e| e.kind);
                 let mut edges: Vec<(Relation, EntityId)> = Vec::new();
                 for r in store.relations_to(&current)? {
-                    if propagates_reverse(r.kind) && r.status != AssertionStatus::Rejected {
+                    let anchored = r.kind == RelationKind::AnchoredIn && current_kind == Some(EntityKind::Resource);
+                    if (propagates_reverse(r.kind) || anchored) && r.status != AssertionStatus::Rejected {
                         let other = r.from.clone();
                         edges.push((r, other));
                     }
@@ -495,23 +713,76 @@ impl GraphService {
                     if entity.lifecycle == Lifecycle::Tombstoned {
                         continue;
                     }
-                    for b in store.bindings(&entity.id)? {
-                        if let Some(c) = store.coverage(&b.path)?
-                            && c.state != CoverageState::Complete
-                        {
-                            unknown.insert(b.path.clone());
-                        }
-                    }
+                    note_unknown_coverage(store, &entity, &mut unknown)?;
                     let (action, reason) = impact_reason(&r, &other, store)?;
                     if items.len() >= max_items {
                         truncated = true;
                         break;
                     }
                     items.push(ImpactItem { entity, depth: depth + 1, path: step_path.clone(), action, reason });
-                    queue.push_back((other, depth + 1, step_path));
+                    // A declaration in a changed file may or may not have
+                    // changed itself: it is listed, its dependents are not
+                    // (name it as a root to follow it).
+                    if r.kind != RelationKind::AnchoredIn {
+                        queue.push_back((other, depth + 1, step_path));
+                    }
                 }
                 if truncated || work_limit_reached {
                     break;
+                }
+            }
+            // Evidence recorded for the changed entities and their stale or
+            // to-be-reviewed dependents: it stays valid history for the inputs
+            // it recorded; its current applicability is reported.
+            let mut evidence: Vec<EvidenceImpact> = Vec::new();
+            let mut seen_evidence: BTreeSet<EvidenceId> = BTreeSet::new();
+            let subjects = root_entities.iter().map(|e| (e.id.clone(), e.label.clone(), None)).chain(
+                items
+                    .iter()
+                    .filter(|i| matches!(i.action, ImpactAction::Stale | ImpactAction::NeedsReview))
+                    .map(|i| (i.entity.id.clone(), i.entity.label.clone(), Some(i.reason.clone()))),
+            );
+            'subjects: for (subject, label, why) in subjects {
+                let mut records = store.evidence_for_subject(&subject)?;
+                for r in store.relations_to(&subject)?.into_iter().chain(store.relations_from(&subject)?) {
+                    if r.kind == RelationKind::EvidenceFor {
+                        for id in &r.evidence {
+                            if let Some(e) = store.evidence(id)? {
+                                records.push(e);
+                            }
+                        }
+                    }
+                }
+                for e in records {
+                    if evidence.len() >= 200 {
+                        break 'subjects;
+                    }
+                    if !seen_evidence.insert(e.id.clone()) {
+                        continue;
+                    }
+                    let freshness = evidence_freshness(store, &e);
+                    let reason = match (&freshness, &why) {
+                        (Freshness::Current, None) => format!(
+                            "{} evidence for “{label}” matches the current sources; a change to it makes this evidence historical",
+                            e.kind.as_str()
+                        ),
+                        (Freshness::Current, Some(w)) => {
+                            format!("{} evidence for “{label}”, which {w}", e.kind.as_str())
+                        }
+                        (Freshness::Stale { .. }, _) => {
+                            format!("{} evidence for “{label}” was recorded for older inputs", e.kind.as_str())
+                        }
+                        (Freshness::Unknown { .. }, _) => {
+                            format!("whether {} evidence for “{label}” still applies is unknown", e.kind.as_str())
+                        }
+                    };
+                    evidence.push(EvidenceImpact {
+                        evidence: e.id.clone(),
+                        kind: e.kind,
+                        subject: subject.clone(),
+                        freshness,
+                        reason,
+                    });
                 }
             }
             Ok(ImpactReport {
@@ -521,6 +792,7 @@ impl GraphService {
                 truncated,
                 work_limit_reached,
                 unknown_coverage: unknown.into_iter().take(200).collect(),
+                evidence,
                 graph_revision: store.revision()?,
             })
         })
@@ -804,9 +1076,6 @@ impl GraphService {
                 return Err(GraphError::new("graph.excluded", format!("{path} is not a project resource: {reason}")));
             }
         };
-        if let Some(existing) = self.resource(path)? {
-            return Ok(existing);
-        }
         let origin = Origin::Service { service: service.to_owned() };
         let binding = crate::model::SourceBinding {
             entity: EntityId::mint(),
@@ -837,10 +1106,57 @@ impl GraphService {
             summary: format!("Admit {path}"),
             ..Default::default()
         };
-        let outcome = self.apply_service_batch(&origin, &batch)?;
-        let id =
-            outcome.entity_ids.first().cloned().ok_or_else(|| GraphError::new("graph.storage", "admission failed"))?;
-        self.with_store(|s| s.entity(&id)?.ok_or_else(|| GraphError::new("graph.storage", "admission failed")))
+        // Look up and admit under one lock, so concurrent admissions (the
+        // reconciler, another service) never create two identities for one file.
+        let (entity, delta) = self.with_store(|store| {
+            if let Some(existing) = store
+                .entities_by_key(EntityKind::Resource, path.as_str())?
+                .into_iter()
+                .find(|e| e.lifecycle != Lifecycle::Tombstoned)
+            {
+                return Ok((existing, None));
+            }
+            let w = Writer::new(store.transaction()?);
+            let (mut run, _) =
+                validate::run_batch(&w, &origin, &batch).map_err(|m| GraphError::new("graph.invalidBatch", m))?;
+            let id = run.created.first().map(|c| c.id.clone());
+            w.record_change(&origin, &batch.summary, &mut run.delta)?;
+            w.commit()?;
+            let id = id.ok_or_else(|| GraphError::new("graph.storage", "admission failed"))?;
+            let entity = store.entity(&id)?.ok_or_else(|| GraphError::new("graph.storage", "admission failed"))?;
+            Ok((entity, Some(run.delta)))
+        })?;
+        if let Some(delta) = delta {
+            self.emit(GraphEvent::Changed { delta, origin });
+        }
+        Ok(entity)
+    }
+
+    /// The formal declaration `name` (fully qualified, as Lean prints it)
+    /// declared in the Lean file `path`, as indexed from the saved file.
+    ///
+    /// This is the stable lookup for attaching Lean audit evidence: the
+    /// extractor admits every literal `theorem/lemma/def/abbrev/structure/
+    /// inductive/class/instance/axiom/opaque` declaration as a
+    /// `FormalDeclaration` entity whose `key` is its qualified name
+    /// (namespace + name, `_root_.` removed) and whose binding is in `path`
+    /// (attribute `lean.module` holds the module name). The identity survives
+    /// edits and renames of the file; when the declaration is removed the
+    /// entity is tombstoned (returned here only while live). `None` when the
+    /// file is not indexed yet (reconcile it first) or the declaration was
+    /// not recognised literally (e.g. generated by a macro).
+    pub fn formal_declaration(&self, path: &WorkspacePath, name: &str) -> GraphResult<Option<Entity>> {
+        self.with_store(|store| {
+            for e in store.live_entities_with_key(name)? {
+                if e.kind != EntityKind::FormalDeclaration {
+                    continue;
+                }
+                if store.bindings(&e.id)?.iter().any(|b| &b.path == path) {
+                    return Ok(Some(e));
+                }
+            }
+            Ok(None)
+        })
     }
 
     // ----- views -----
@@ -963,16 +1279,26 @@ fn open_project_graph(root: &Path, _data_dir: &Path) -> Result<OpenGraph, (Strin
             vec![RecoveryOption::Retry],
         )),
         Err(e @ (StoreError::Corrupt(_) | StoreError::Untrusted(_))) => {
-            Err((format!("{e}. It was left unchanged."), vec![RecoveryOption::StartNew, RecoveryOption::Retry]))
+            Err((format!("{e}. It was left unchanged."), recovery_options(&dir)))
         }
         Err(StoreError::Sqlite(e)) if !exists => temporary(format!(
             "The project graph could not be created ({e}); graph changes are not saved with the project."
         )),
-        Err(e) => Err((
-            format!("The project graph could not be opened: {e}"),
-            vec![RecoveryOption::StartNew, RecoveryOption::Retry],
-        )),
+        Err(e) => Err((format!("The project graph could not be opened: {e}"), recovery_options(&dir))),
     }
+}
+
+/// Recovery choices for a damaged graph: its consistent backups (newest
+/// first), a new graph (the damaged one kept aside), or retrying.
+fn recovery_options(project_dir: &Path) -> Vec<RecoveryOption> {
+    let mut options: Vec<RecoveryOption> = backup::list(&project_dir.join(backup::BACKUP_DIR))
+        .into_iter()
+        .take(5)
+        .map(|b| RecoveryOption::RestoreBackup { backup: b.name, taken_at_ms: b.taken_at_ms, revision: Some(b.revision) })
+        .collect();
+    options.push(RecoveryOption::StartNew);
+    options.push(RecoveryOption::Retry);
+    options
 }
 
 /// Every graph has exactly one project entity.
@@ -1113,13 +1439,66 @@ fn impact_reason(r: &Relation, affected: &EntityId, store: &GraphStore) -> Resul
             ImpactAction::NeedsReview,
             format!("its formal declaration “{other_label}” changed; review the correspondence"),
         ),
+        (AnchoredIn, _) => (
+            ImpactAction::Informational,
+            format!("is declared in “{other_label}”, which changed; check whether it changed"),
+        ),
         _ => (ImpactAction::Informational, format!("related to “{other_label}”")),
     };
     Ok((action, format!("{text}{suggested}")))
 }
 
+/// Record the files through which an entity's impact is unknown: bindings
+/// that are not resolved, files not indexed, and files whose extraction is
+/// partial, failed, pending, or unsupported for a text source. (An image or
+/// dataset without an extractor states no relations: it is not unknown.)
+fn note_unknown_coverage(
+    store: &GraphStore,
+    entity: &Entity,
+    unknown: &mut BTreeSet<WorkspacePath>,
+) -> Result<(), StoreError> {
+    for b in store.bindings(&entity.id)? {
+        if b.state != BindingState::Resolved {
+            unknown.insert(b.path.clone());
+            continue;
+        }
+        if entity.kind == EntityKind::Folder {
+            continue;
+        }
+        match store.coverage(&b.path)? {
+            None => {
+                unknown.insert(b.path.clone());
+            }
+            Some(c) => {
+                let opaque = entity.roles.iter().all(|r| {
+                    matches!(
+                        r,
+                        crate::vocabulary::ResourceRole::Asset
+                            | crate::vocabulary::ResourceRole::Dataset
+                            | crate::vocabulary::ResourceRole::Artifact
+                    )
+                }) && entity.kind == EntityKind::Resource
+                    && !entity.roles.is_empty();
+                let known = match c.state {
+                    CoverageState::Complete => c.unresolved == 0,
+                    CoverageState::Unsupported => opaque,
+                    CoverageState::Partial | CoverageState::Pending | CoverageState::Failed => false,
+                };
+                if !known {
+                    unknown.insert(b.path.clone());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Whether evidence still applies to the current sources: its inputs' hashes
 /// against the indexed versions. Missing data is Unknown, never Current.
+///
+/// Input and formal source digests are SHA-256 of the file's bytes as saved
+/// (for UTF-8 text without a byte-order mark this equals the hash of the
+/// text), compared with the hash the reconciler indexed.
 pub fn evidence_freshness(store: &GraphStore, evidence: &Evidence) -> Freshness {
     let mut stale = Vec::new();
     let mut unknown = None;
@@ -1139,7 +1518,17 @@ pub fn evidence_freshness(store: &GraphStore, evidence: &Evidence) -> Freshness 
                 Some(_) => stale.push(format!("{path} changed since it was checked")),
                 None => unknown = Some(format!("{path} has not been indexed")),
             },
-            Ok(None) => unknown = Some(format!("{path} is not indexed (deleted or never seen)")),
+            Ok(None) => {
+                let deleted = store
+                    .entities_by_key(EntityKind::Resource, path.as_str())
+                    .map(|es| !es.is_empty() && es.iter().all(|e| e.lifecycle == Lifecycle::Tombstoned))
+                    .unwrap_or(false);
+                if deleted {
+                    stale.push(format!("{path} was deleted since it was recorded"));
+                } else {
+                    unknown = Some(format!("{path} is not indexed"));
+                }
+            }
             Err(_) => unknown = Some(format!("{path}: unreadable index")),
         }
     }

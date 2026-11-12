@@ -114,6 +114,9 @@ const COMMANDS: &[&str] = &[
     "graph_view_delete",
     "graph_recover",
     "graph_operations",
+    "graph_reconcile",
+    "graph_backup",
+    "graph_backups",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

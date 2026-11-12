@@ -19,6 +19,7 @@
 //!   (scanning, extractors, identity matching, live-buffer overlay).
 
 pub mod admission;
+pub mod backup;
 pub mod ids;
 pub mod journal;
 pub mod model;
@@ -31,6 +32,7 @@ pub mod validate;
 pub mod vocabulary;
 
 pub use admission::{Admission, classify};
+pub use backup::BackupInfo;
 pub use ids::{EntityId, EvidenceId, OperationId, ProjectId, ProposalId, RelationId, ViewId, WorkflowId};
 pub use journal::{OperationJournal, OperationKind, OperationRecord, OperationState};
 pub use model::*;

@@ -8,12 +8,14 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use exposition_graph::reconcile::ReconcileReport;
 use exposition_graph::{
-    ApplyChangeRequest, ApplyOutcome, ChangeProposal, ChangeRequest, EntityDetail, EntityId, GraphError, GraphQuery,
-    GraphService, GraphSnapshot, GraphStatus, GraphView, GraphViewInput, GraphViewSummary, ImpactReport, ImpactRequest,
-    InspectAtSourceRequest, MathOverview, OperationRecord, Origin, RecoveryOption, SourceInspection, ViewId,
-    Vocabulary,
+    ApplyChangeRequest, ApplyOutcome, BackupInfo, ChangeProposal, ChangeRequest, EntityDetail, EntityId, GraphError,
+    GraphQuery, GraphService, GraphSnapshot, GraphStatus, GraphView, GraphViewInput, GraphViewSummary, ImpactReport,
+    ImpactRequest, InspectAtSourceRequest, MathOverview, OperationRecord, Origin, RecoveryOption, SourceInspection,
+    ViewId, Vocabulary,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
@@ -139,6 +141,37 @@ pub async fn graph_operations(state: State<'_, AppState>) -> Result<Vec<Operatio
         })
     })
     .await
+}
+
+/// "Reindex project": rebuild the graph's derived projections (resources,
+/// extracted declarations, observed links, coverage) from the files, reading
+/// every file again (`force`, default true). Curated records (entities and
+/// relations people, agents, presets, or services created) are never
+/// touched. Runs on the reconciler thread; waits up to five minutes, after
+/// which progress continues and is reported through `graph:event`.
+#[tauri::command]
+pub async fn graph_reconcile(state: State<'_, AppState>, force: Option<bool>) -> Result<ReconcileReport, CommandError> {
+    let handle = state.reconciler.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        handle.reindex_blocking(force.unwrap_or(true), Duration::from_secs(300))
+    })
+    .await
+    .map_err(|e| CommandError::new("internal.task", format!("Graph task failed: {e}")))?
+    .map_err(CommandError::from)
+}
+
+/// Take a consistent backup of the project graph now
+/// (`.exposition/graph-backups/`, `VACUUM INTO`; the newest are kept).
+#[tauri::command]
+pub async fn graph_backup(state: State<'_, AppState>) -> Result<BackupInfo, CommandError> {
+    blocking(&state, |g| g.backup("manual")).await
+}
+
+/// Backups of the project graph, newest first (restorable through
+/// `graph_recover` when the graph is damaged).
+#[tauri::command]
+pub async fn graph_backups(state: State<'_, AppState>) -> Result<Vec<BackupInfo>, CommandError> {
+    blocking(&state, |g| g.backups()).await
 }
 
 /// Forward graph events to the webview in order.

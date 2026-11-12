@@ -6,6 +6,7 @@ use exposition_agents::tools::execution::AppToolServices;
 use exposition_agents::{AgentConfig, AgentService};
 use exposition_core::path::WorkspacePath;
 use exposition_execution::{ExecutionConfig, ExecutionService};
+use exposition_graph::reconcile::ReconcilerHandle;
 use exposition_graph::{GraphConfig, GraphService};
 use exposition_lean::{LeanConfig, LeanService};
 use exposition_research::launcher::ExecutionLauncher;
@@ -39,6 +40,9 @@ pub struct AppState {
     /// The project graph (`.exposition/graph.sqlite3`): attached for every
     /// open project, whether or not a graph view is open.
     pub graph: Arc<GraphService>,
+    /// Keeps the graph reconciled with the project's files and open buffers
+    /// (its own thread, subscribed to workspace/document/graph events).
+    pub reconciler: ReconcilerHandle,
 }
 
 impl AppState {
@@ -63,6 +67,7 @@ impl AppState {
         });
         let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
         let graph = GraphService::new(GraphConfig { data_dir: data_dir.clone() });
+        let reconciler = exposition_graph::reconcile::spawn(Arc::clone(&graph), Arc::clone(&workspace));
         let (lean, lean_actor) = LeanService::new(execution.clone(), Arc::clone(&workspace), LeanConfig::default());
         tauri::async_runtime::spawn(lean_actor);
         let tex = TexService::new(
@@ -121,7 +126,7 @@ impl AppState {
             anthropic_base_url: None,
             retry: None,
         })?;
-        Ok(Self { documents, workspace, execution, lean, research, tex, typesetting, data_dir, agents, graph })
+        Ok(Self { documents, workspace, execution, lean, research, tex, typesetting, data_dir, agents, graph, reconciler })
     }
 }
 

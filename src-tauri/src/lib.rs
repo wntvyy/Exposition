@@ -156,6 +156,9 @@ pub fn run() {
             graph::graph_view_delete,
             graph::graph_recover,
             graph::graph_operations,
+            graph::graph_reconcile,
+            graph::graph_backup,
+            graph::graph_backups,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")
@@ -165,6 +168,7 @@ pub fn run() {
             if let RunEvent::Exit = event {
                 app.state::<AppState>().tex.shutdown();
                 app.state::<AppState>().execution.shutdown();
+                app.state::<AppState>().reconciler.shutdown();
             }
         });
 }

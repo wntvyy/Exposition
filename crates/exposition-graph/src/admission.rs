@@ -114,6 +114,23 @@ pub fn roles_for(path: &WorkspacePath) -> Option<Vec<ResourceRole>> {
     Some(roles)
 }
 
+/// Should normal scanning descend into this folder? Excluded tooling/cache
+/// folders and application metadata are skipped; `.exposition/` is entered
+/// only for `project.json` and the managed research sources
+/// (`.exposition/research/`). Generated artifacts, run records, and the
+/// graph's own storage are never scanned (artifacts are admitted explicitly).
+pub fn scan_directory(path: &WorkspacePath) -> bool {
+    if path.components().any(|c| EXCLUDED_DIRS.contains(&c)) {
+        return false;
+    }
+    let p = path.as_str();
+    match p.strip_prefix(".exposition") {
+        Some("") => true,
+        Some(rest) => rest.starts_with("/research/") || rest == "/research",
+        None => true,
+    }
+}
+
 /// Classify a workspace path under the inclusion policy.
 pub fn classify(path: &WorkspacePath) -> Admission {
     let p = path.as_str();
@@ -210,6 +227,28 @@ mod tests {
             "unknown.xyz",
         ] {
             assert!(matches!(c(p), Admission::Exclude(_)), "{p}");
+        }
+    }
+
+    #[test]
+    fn scanning_enters_research_sources_but_not_runs_artifacts_or_caches() {
+        let d = |p: &str| scan_directory(&WorkspacePath::parse(p).unwrap());
+        assert!(d("chapters"));
+        assert!(d(".exposition"));
+        assert!(d(".exposition/research"));
+        assert!(d(".exposition/research/rs-1/data"));
+        for p in [
+            ".exposition/runs",
+            ".exposition/artifacts",
+            ".exposition/artifacts/run-1",
+            ".exposition/graph-backups",
+            ".exposition/researchers",
+            ".git",
+            "src/node_modules",
+            ".lake",
+            "a/__pycache__",
+        ] {
+            assert!(!d(p), "{p}");
         }
     }
 

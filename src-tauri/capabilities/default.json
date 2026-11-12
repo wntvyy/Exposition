@@ -112,6 +112,9 @@
     "allow-graph-view-save",
     "allow-graph-view-delete",
     "allow-graph-recover",
-    "allow-graph-operations"
+    "allow-graph-operations",
+    "allow-graph-reconcile",
+    "allow-graph-backup",
+    "allow-graph-backups"
   ]
 }
