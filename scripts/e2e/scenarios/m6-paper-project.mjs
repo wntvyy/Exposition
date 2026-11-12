@@ -503,6 +503,10 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       }
       await group.getByRole("button", { name: "Update in document" }).click();
     }
+    // Reviewed promotion: approve the exact markup shown.
+    await group.getByTestId("research-promotion-review").waitFor({ timeout: 15_000 });
+    await group.getByRole("button", { name: mode === "insert" ? "Approve insertion" : "Approve update" }).click();
+    await group.getByTestId("research-promotion-review").waitFor({ state: "detached", timeout: 15_000 });
   }
 
   // ---- agent helpers ----------------------------------------------------------

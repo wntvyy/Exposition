@@ -81,6 +81,10 @@ async function attach(page, { document, caption, mode }) {
     await update.waitFor();
     await update.click();
   }
+  // Reviewed promotion: the exact markup, target revision, and digest are shown; approve.
+  await group.getByTestId("research-promotion-review").waitFor({ timeout: 15_000 });
+  await group.getByRole("button", { name: mode === "insert" ? "Approve insertion" : "Approve update" }).click();
+  await group.getByTestId("research-promotion-review").waitFor({ state: "detached", timeout: 15_000 });
 }
 
 export default async function researchPython({ launchApp, artifactsDir, fixture, assert }) {

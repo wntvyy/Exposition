@@ -213,7 +213,7 @@ export function ResearchPage() {
       )}
       <PendingPromotions />
       <Group orientation="horizontal" className="exp-rpage__body">
-        <ResizablePanel id="research-explorer" defaultSize="20%" minSize="12%">
+        <ResizablePanel id="rp-explorer" defaultSize="20%" minSize="12%">
           <div className="exp-rpage__explorer">
             {enabled ? (
               <ResearchExplorer />
@@ -236,13 +236,13 @@ export function ResearchPage() {
           </div>
         </ResizablePanel>
         <ResizeHandle aria-label="Resize research explorer" />
-        <ResizablePanel id="research-work" defaultSize="50%" minSize="25%">
+        <ResizablePanel id="rp-work" defaultSize="50%" minSize="25%">
           <Group orientation="vertical" className="exp-rpage__work">
-            <ResizablePanel id="research-source" defaultSize="50%" minSize="15%">
+            <ResizablePanel id="rp-source" defaultSize="50%" minSize="15%">
               <SourceArea />
             </ResizablePanel>
             <ResizeHandle aria-label="Resize source and output" orientation="horizontal" />
-            <ResizablePanel id="research-output" defaultSize="50%" minSize="15%">
+            <ResizablePanel id="rp-output" defaultSize="50%" minSize="15%">
               <div className="exp-research exp-rpage__output" role="region" aria-label="Research output">
                 <EnvironmentNotice />
                 <div className="exp-research__main">
@@ -257,7 +257,7 @@ export function ResearchPage() {
           </Group>
         </ResizablePanel>
         <ResizeHandle aria-label="Resize inspector" />
-        <ResizablePanel id="research-inspector" defaultSize="30%" minSize="15%">
+        <ResizablePanel id="rp-inspector" defaultSize="30%" minSize="15%">
           <aside className="exp-rpage__inspector" aria-label="Inspector">
             <ResearchInspector item={selected} />
           </aside>

@@ -16,7 +16,15 @@ import { GraphDependencies } from "./GraphInspect";
 import { formatBytes, formatClock, runPill } from "./model";
 import { PromotionControls, lifecyclePill } from "./Promotion";
 import { Provenance } from "./ResearchPanel";
-import { runExperiment, saveExperiment, selectItem, setResultState, useSpace, type ResearchItem } from "./space";
+import {
+  loadExperiment,
+  runExperiment,
+  saveExperiment,
+  selectItem,
+  setResultState,
+  useSpace,
+  type ResearchItem,
+} from "./space";
 import { runFile, selectRun, useResearch } from "./store";
 
 const subscribe = (l: () => void) => registry.subscribe(l);
@@ -177,6 +185,11 @@ function ExperimentEditor({ entity }: { entity: EntityId | null }) {
   const [inputs, setInputs] = useState<string[]>([]);
   const [outcomes, setOutcomes] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  // Attempts follow run history: reload when a run finishes.
+  const finishedRuns = useResearch((s) => s.runs.filter((r) => r.status.kind !== "running").length);
+  useEffect(() => {
+    if (entity) void loadExperiment(entity);
+  }, [entity, finishedRuns]);
 
   useEffect(() => {
     setTitle(detail?.summary.label ?? "");
@@ -370,16 +383,16 @@ export function ResearchInspector({ item }: { item: ResearchItem | null }) {
   }
   switch (item.kind) {
     case "file":
-      return <FileInspector path={item.path} />;
+      return <FileInspector key={item.path} path={item.path} />;
     case "result":
-      return <ResultInspector entity={item.entity} />;
+      return <ResultInspector key={item.entity} entity={item.entity} />;
     case "experiment":
       return <ExperimentEditor key={item.entity ?? "new"} entity={item.entity} />;
     case "workflow":
-      return <WorkflowInspector entity={item.entity} />;
+      return <WorkflowInspector key={item.entity} entity={item.entity} />;
     case "reference":
-      return <ReferenceInspector entity={item.entity} />;
+      return <ReferenceInspector key={item.entity} entity={item.entity} />;
     case "run":
-      return <RunInspector runId={item.runId} />;
+      return <RunInspector key={item.runId} runId={item.runId} />;
   }
 }
