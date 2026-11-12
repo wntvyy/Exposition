@@ -799,3 +799,61 @@ async fn credentials_are_never_exposed_and_required_for_the_live_provider() {
     assert!(!h.service.clear_api_key().unwrap().configured);
     assert!(h.service.set_api_key("not a key").is_err());
 }
+
+/// Services whose end-of-task cleanup is slow (e.g. stopping an agent's
+/// research kernel), to expose the window between "completed" and the worker
+/// actually exiting.
+struct SlowFinishServices;
+
+#[async_trait]
+impl ToolServices for SlowFinishServices {
+    fn available(&self, kind: ServiceKind) -> bool {
+        UnavailableServices.available(kind)
+    }
+    fn restricted_backend(&self) -> Option<String> {
+        None
+    }
+    async fn build_document(&self, r: BuildRequest, c: CancellationToken) -> Result<Value, ServiceError> {
+        UnavailableServices.build_document(r, c).await
+    }
+    async fn run_python(&self, r: PythonRequest, c: CancellationToken) -> Result<Value, ServiceError> {
+        UnavailableServices.run_python(r, c).await
+    }
+    async fn check_lean(&self, r: LeanRequest, c: CancellationToken) -> Result<Value, ServiceError> {
+        UnavailableServices.check_lean(r, c).await
+    }
+    async fn run_command(&self, r: CommandRequest, c: CancellationToken) -> Result<Value, ServiceError> {
+        UnavailableServices.run_command(r, c).await
+    }
+    async fn task_finished(&self, _task_id: &str) {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Found by the live provider run: a task reported Completed while its worker
+/// was still releasing services, and review actions were refused with
+/// "Cancel the task before reverting its changes." Review must work as soon
+/// as the task reports a terminal status.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_actions_work_as_soon_as_the_task_reports_finished() {
+    let h = harness_with(Arc::new(SlowFinishServices));
+    h.service.load_script(read_edit_done("cat sat", "dog sat")).unwrap();
+    let task = h.service.create_task(request(&h, PermissionProfile::AutoApply)).unwrap();
+    let finished = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let status = h.service.task(&task.id).unwrap().status;
+            if !status.is_active() {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("task reports a terminal status");
+    assert_eq!(finished, TaskStatus::Completed);
+    // Immediately, while slow cleanup may still be running:
+    let results = h.service.revert(&task.id, None).expect("revert is allowed once the task reports finished");
+    assert!(results[0].ok, "{results:?}");
+    assert_eq!(text_of(&h, "main.typ"), MAIN);
+    tokio::time::timeout(Duration::from_secs(20), h.service.join(&task.id)).await.expect("worker exits");
+}

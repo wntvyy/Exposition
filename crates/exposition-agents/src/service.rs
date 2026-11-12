@@ -114,6 +114,9 @@ struct Running {
     cancel: CancellationToken,
     approvals: HashMap<String, (ApprovalRequest, oneshot::Sender<bool>)>,
     join: Option<JoinHandle<()>>,
+    /// The task loop has ended and its terminal status is stored; the worker
+    /// may still be releasing services (e.g. stopping research kernels).
+    finished: bool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -314,8 +317,13 @@ impl AgentService {
             return Err(AgentError::new("agents.emptyPrompt", "Describe what the agent should do next."));
         }
         let mut row = self.inner.store.task(id)?.ok_or_else(|| not_found(id))?;
-        if row.status.is_active() || lock(&self.inner.running).contains_key(id) {
+        // A finished worker may still be releasing this task's services
+        // (research sessions); a new run must wait until it has exited.
+        if row.status.is_active() || self.is_running(id) {
             return Err(AgentError::new("agents.taskRunning", "The task is still running."));
+        }
+        if lock(&self.inner.running).contains_key(id) {
+            return Err(AgentError::new("agents.taskFinishing", "The task is finishing up; try again in a moment."));
         }
         if let Some(budgets) = budgets {
             budgets.validate().map_err(|e| AgentError::new("agents.invalidBudgets", e))?;
@@ -363,14 +371,18 @@ impl AgentService {
         }
     }
 
+    /// True while the task loop is running (not merely while its worker
+    /// releases services after a terminal status was stored).
     pub fn is_running(&self, id: &TaskId) -> bool {
-        lock(&self.inner.running).contains_key(id)
+        lock(&self.inner.running).get(id).is_some_and(|r| !r.finished)
     }
 
     fn spawn(&self, id: TaskId, provider: Arc<dyn Provider>) {
         let cancel = CancellationToken::new();
-        lock(&self.inner.running)
-            .insert(id.clone(), Running { cancel: cancel.clone(), approvals: HashMap::new(), join: None });
+        lock(&self.inner.running).insert(
+            id.clone(),
+            Running { cancel: cancel.clone(), approvals: HashMap::new(), join: None, finished: false },
+        );
         let inner = Arc::clone(&self.inner);
         let task_id = id.clone();
         let handle = self.inner.runtime.spawn(async move {
@@ -692,6 +704,11 @@ impl Inner {
         };
         if let Some((status, usage)) = status {
             inner.finish(&id, &status, &usage);
+        }
+        // The terminal status is stored: review actions may proceed while the
+        // worker releases services below.
+        if let Some(running) = lock(&inner.running).get_mut(&id) {
+            running.finished = true;
         }
         // Release what the services hold for this run (agent research sessions).
         inner.services.task_finished(&id.0).await;

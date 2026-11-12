@@ -28,8 +28,23 @@ export async function makeProject(fixture) {
   return { base, root, outside, dataDir };
 }
 
-export function invoke(page, command, args = {}) {
-  return page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [command, args]);
+/** Invoke an app command; a rejection becomes an Error carrying the command's error payload. */
+export async function invoke(page, command, args = {}) {
+  const outcome = await page.evaluate(
+    ([c, a]) =>
+      window.__TAURI_INTERNALS__.invoke(c, a).then(
+        (ok) => ({ ok }),
+        (error) => ({ error }),
+      ),
+    [command, args],
+  );
+  if ("error" in outcome) {
+    const detail = typeof outcome.error === "string" ? outcome.error : JSON.stringify(outcome.error);
+    const error = new Error(`${command} failed: ${detail}`);
+    error.payload = outcome.error;
+    throw error;
+  }
+  return outcome.ok;
 }
 
 /** Invoke a command that must fail; returns the rejection payload. */
