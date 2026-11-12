@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { contrastRatio, parseColor, readCustomProperties, resolveVar } from "./color";
-import { colorRoles, palettes, type ColorRole, type ThemeName } from "./tokens";
+import { colorRoles, graphCategories, palettes, type ColorRole, type ThemeName } from "./tokens";
 
 // Vitest stubs CSS imports (even `?raw`), so read the stylesheet from disk.
 const nodeFs = "node:fs";
@@ -58,6 +58,12 @@ const textPairs: [ColorRole, ColorRole][] = [
   ["statusbar-text", "statusbar-bg"],
   ["text", "tab-active-bg"],
   ["text-muted", "surface-sunken"],
+  // Graph nodes: the title (text), secondary text, and the type label on each category fill.
+  ...graphCategories.flatMap((c): [ColorRole, ColorRole][] => [
+    ["text", `graph-${c}-bg`],
+    ["text-muted", `graph-${c}-bg`],
+    [`graph-${c}-text`, `graph-${c}-bg`],
+  ]),
 ];
 
 const boundaryPairs: [ColorRole, ColorRole][] = [
@@ -67,6 +73,17 @@ const boundaryPairs: [ColorRole, ColorRole][] = [
   ),
   ...surfaces.map((bg): [ColorRole, ColorRole] => ["accent", bg]),
   ["tab-indicator", "tab-active-bg"],
+  // Graph: node outlines and edges are meaningful boundaries on the canvas; the
+  // selection/focus ring must show on every node fill.
+  ...graphCategories.flatMap((c): [ColorRole, ColorRole][] => [
+    [`graph-${c}-border`, "graph-canvas"],
+    [`graph-${c}-border`, `graph-${c}-bg`],
+    ["focus-ring", `graph-${c}-bg`],
+  ]),
+  ...(["graph-edge", "graph-edge-math", "graph-edge-reference", "graph-edge-evidence", "graph-edge-formal"] as const).map(
+    (edge): [ColorRole, ColorRole] => [edge, "graph-canvas"],
+  ),
+  ["focus-ring", "graph-canvas"],
 ];
 
 describe("design tokens", () => {

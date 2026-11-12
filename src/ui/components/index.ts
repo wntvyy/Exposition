@@ -3,8 +3,12 @@
 // look, focus treatment, and keyboard behavior. See UI_STANDARD.md for usage.
 import "./components.css";
 
+export { Badge } from "./Badge";
+export type { BadgeProps, BadgeTone } from "./Badge";
 export { Button, IconButton, SegmentedControl, ToggleButton } from "./Button";
 export type { ButtonProps, ButtonSize, ButtonVariant, IconButtonProps, IconComponent, SegmentedControlProps, ToggleButtonProps } from "./Button";
+export { DataTable } from "./DataTable";
+export type { DataTableColumn, DataTableProps } from "./DataTable";
 export { AlertDialog, confirm, confirmUnsaved, ConfirmHost, Dialog, DialogTrigger } from "./Dialog";
 export type { ConfirmAction, ConfirmOptions, DialogProps, UnsavedChoice } from "./Dialog";
 export { Checkbox, SearchField, Select, Switch, TextField } from "./Fields";
@@ -12,6 +16,8 @@ export type { CheckboxProps, SearchFieldProps, SelectOption, SelectProps, Switch
 export { Kbd, Keybinding, keybindingLabel } from "./Kbd";
 export { Menu, MenuItem, MenuSection, MenuSeparator, MenuTrigger, Popover, SubmenuTrigger } from "./Menu";
 export type { MenuItemProps, MenuProps, PopoverProps } from "./Menu";
+export { NodeCard } from "./NodeCard";
+export type { NodeCardProps } from "./NodeCard";
 export { NotificationRegion, defaultTimeouts } from "./Notifications";
 export { Panel, PanelBody, PanelHeader, Section, Toolbar } from "./Panel";
 export type { PanelHeaderProps, PanelProps, SectionProps, ToolbarProps } from "./Panel";
