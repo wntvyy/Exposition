@@ -224,6 +224,19 @@ fn ensure_dir(root: &Path, dir: &[&str]) -> GraphResult<PathBuf> {
                 format!("{} leads outside the project folder", current.display()),
             ));
         }
+        // The folder must be the one named, not another one reached through
+        // an alias (a Windows short name such as `EXPOSI~1`).
+        let actual = canonical.file_name().map(|n| n.to_string_lossy().to_lowercase());
+        if actual.as_deref() != Some(part.to_lowercase().as_str()) {
+            return Err(GraphError::new(
+                "project.alias",
+                format!(
+                    "{} names another folder ({}); nothing was created there",
+                    current.display(),
+                    canonical.display()
+                ),
+            ));
+        }
     }
     Ok(current)
 }
@@ -1029,4 +1042,33 @@ pub(super) fn dry_run_graph(bp: &ProjectBlueprint, files: &BTreeMap<String, Work
     let built = build_batch(bp, &op, &anchors, prefix, &BTreeMap::new(), &hashes, false);
     crate::validate::run_batch(&w, &origin, &built.batch).map(|_| ())
     // `w` is dropped without commit.
+}
+
+#[cfg(all(test, windows))]
+mod alias_tests {
+    use super::*;
+
+    /// The 8.3 short name Windows assigned to `dir/name`, if the volume makes them.
+    fn short_name(dir: &Path, name: &str) -> Option<String> {
+        let out = std::process::Command::new("cmd").args(["/c", "dir", "/x", "/a:d"]).current_dir(dir).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.lines()
+            .filter(|l| l.trim_end().ends_with(name))
+            .find_map(|l| l.split_whitespace().rev().nth(1).filter(|s| s.contains('~')).map(str::to_owned))
+    }
+
+    #[test]
+    fn folders_reached_through_a_short_name_alias_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir(root.join(".exposition")).unwrap();
+        let Some(alias) = short_name(&root, ".exposition") else {
+            eprintln!("SKIPPED: this volume does not create short (8.3) names");
+            return;
+        };
+        let err = ensure_dir(&root, &[alias.as_str()]).unwrap_err();
+        assert_eq!(err.code, "project.alias", "{}", err.message);
+        // The ordinary name is fine.
+        assert!(ensure_dir(&root, &[".exposition", "research"]).is_ok());
+    }
 }

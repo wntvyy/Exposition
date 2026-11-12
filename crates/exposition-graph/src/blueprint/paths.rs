@@ -106,6 +106,11 @@ pub fn check(raw: &str, research: Option<&str>) -> Result<WorkspacePath, String>
             c if c.len() > MAX_COMPONENT_BYTES => {
                 return Err(format!("a path component is longer than {MAX_COMPONENT_BYTES} bytes"));
             }
+            // `NAME~1`: on Windows a short (8.3) name can alias another
+            // file or folder (e.g. `EXPOSI~1` for `.exposition`).
+            c if c.as_bytes().windows(2).any(|w| w[0] == b'~' && w[1].is_ascii_digit()) => {
+                return Err(format!("{c:?} looks like a short (8.3) file name, which can alias another file"));
+            }
             _ => {}
         }
     }
@@ -208,6 +213,9 @@ mod tests {
             ("run.BAT", "can run"),
             ("shortcut.lnk", "can run"),
             ("bad\u{0}name", "not a valid file name"),
+            ("EXPOSI~1/project.json", "short (8.3)"),
+            ("GIT~1/hooks/post-checkout", "short (8.3)"),
+            ("docs/LONGNA~2.TXT", "short (8.3)"),
             ("", "empty"),
         ];
         for (raw, expect) in cases {
