@@ -17,7 +17,7 @@
 //! entities bound to a file that changed are re-anchored or marked
 //! missing/ambiguous.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -193,9 +193,24 @@ pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<Reco
         if !state.index.loaded {
             state.index.load(s)?;
         }
-        Ok((s.checkpoints()?, live_resource_paths(s)?))
+        let prefixes = match &options.scope {
+            Scope::Full => None,
+            Scope::Paths(p) => Some(p.as_slice()),
+        };
+        let checkpoints = match prefixes {
+            None => s.checkpoints()?,
+            Some(p) => s.checkpoints_under(p)?,
+        };
+        let known: BTreeMap<WorkspacePath, Vec<ResourceRole>> = s
+            .resource_keys(prefixes)?
+            .into_iter()
+            .filter(|k| !k.tombstoned)
+            .map(|k| (k.path, k.roles))
+            .collect();
+        Ok((checkpoints, known))
     })?;
 
+    let t_loaded = started.elapsed();
     // 2. Scan (no lock).
     let mut scan_out = ScanOutcome::default();
     let covered = match &options.scope {
@@ -231,6 +246,7 @@ pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<Reco
         }
     }
 
+    let t_scanned = started.elapsed();
     // 3. Read and extract new or changed files (no lock).
     let mut fresh: BTreeMap<WorkspacePath, Fresh> = BTreeMap::new();
     for (path, meta) in &scan_out.files {
@@ -257,18 +273,32 @@ pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<Reco
         fresh.insert(path.clone(), Fresh { meta: meta.clone(), content, extraction });
     }
 
+    let t_read = started.elapsed();
     // 4. Plan and write (one lock, one transaction).
     let now = now_ms();
     let force = options.force;
     let index = &state.index;
     let outcome = graph.with_store(|store| {
+        let planning = Instant::now();
         let mut planner = Planner::new(store, &root, index, now, force);
         planner.plan(&scan_out, &covered, &checkpoints, &fresh)?;
         let plan = planner.finish();
+        let planned = planning.elapsed();
         let revision = plan.write(store)?;
-        Ok((plan, revision))
+        Ok((plan, revision, planned))
     })?;
-    let (plan, revision) = outcome;
+    let (plan, revision, planned) = outcome;
+    if std::env::var_os("EXPOSITION_GRAPH_TRACE").is_some() {
+        eprintln!(
+            "reconcile: load {:?}, scan {:?}, read+extract {:?} ({} files), plan {:?}, write {:?}",
+            t_loaded,
+            t_scanned - t_loaded,
+            t_read - t_scanned,
+            fresh.len(),
+            planned,
+            started.elapsed() - t_read - planned
+        );
+    }
     for (path, update) in &plan.index_updates {
         match update {
             Some((labels, main)) => state.index.set(path, labels, *main),
@@ -289,20 +319,6 @@ pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<Reco
         });
     }
     Ok(report)
-}
-
-/// Active resource paths with their roles.
-fn live_resource_paths(store: &GraphStore) -> StoreResult<BTreeMap<WorkspacePath, Vec<ResourceRole>>> {
-    let mut out = BTreeMap::new();
-    for e in store.all_of_kind(EntityKind::Resource)? {
-        if e.lifecycle == Lifecycle::Tombstoned {
-            continue;
-        }
-        if let Some(path) = e.key.as_deref().and_then(|k| WorkspacePath::parse(k).ok()) {
-            out.insert(path, e.roles.clone());
-        }
-    }
-    Ok(out)
 }
 
 /// Which known paths a pass is responsible for.
@@ -341,6 +357,7 @@ pub(crate) struct Plan {
     pub remove_coverage: Vec<WorkspacePath>,
     pub index: Vec<IndexRecord>,
     pub remove_index: Vec<WorkspacePath>,
+    pub wanted: Vec<(WorkspacePath, Vec<String>)>,
     pub index_updates: Vec<(WorkspacePath, Option<(Vec<String>, bool)>)>,
     pub delta: GraphDelta,
     pub report: ReconcileReport,
@@ -382,6 +399,9 @@ impl Plan {
         }
         for r in &self.index {
             w.put_source_index(r)?;
+        }
+        for (p, wanted) in &self.wanted {
+            w.set_index_wanted(p, wanted)?;
         }
         let now = now_ms().to_string();
         w.set_meta("reconciled_at", &now)?;
@@ -431,18 +451,37 @@ pub(crate) struct Planner<'a> {
     pub(crate) entities: HashMap<EntityId, Entity>,
     write_entities: BTreeSet<EntityId>,
     pub(crate) bindings: HashMap<EntityId, Vec<SourceBinding>>,
-    add: Vec<Relation>,
-    add_keys: HashSet<(RelationKind, EntityId, EntityId)>,
+    /// Entities with a planned binding in each path.
+    bound_at: HashMap<WorkspacePath, BTreeSet<EntityId>>,
+    /// Relations to add (`None` once withdrawn again in this pass).
+    add: Vec<Option<Relation>>,
+    add_keys: HashMap<(RelationKind, EntityId, EntityId), usize>,
+    adds_from: HashMap<EntityId, Vec<usize>>,
     remove: BTreeSet<RelationId>,
     pub(crate) coverage: BTreeMap<WorkspacePath, (ResourceCoverage, Option<Stamp>)>,
     stamps: BTreeMap<WorkspacePath, Stamp>,
     remove_coverage: BTreeSet<WorkspacePath>,
-    pub(crate) index_records: BTreeMap<WorkspacePath, IndexBody>,
+    pub(crate) index_records: BTreeMap<WorkspacePath, std::sync::Arc<IndexBody>>,
+    /// Labels and LaTeX main files of the index records planned in this pass.
+    pub(crate) planned_labels: HashMap<String, BTreeSet<WorkspacePath>>,
+    pub(crate) planned_mains: BTreeSet<WorkspacePath>,
     index_hashes: BTreeMap<WorkspacePath, (String, String)>,
-    remove_index: BTreeSet<WorkspacePath>,
+    pub(crate) remove_index: BTreeSet<WorkspacePath>,
+    /// Link targets each resolved file still waits for.
+    pub(crate) wanted: BTreeMap<WorkspacePath, Vec<String>>,
+    /// Targets that appeared or changed in this pass (`name:…`, `path:…`).
+    pub(crate) new_targets: BTreeSet<String>,
     delta: GraphDelta,
     pub(crate) report: ReconcileReport,
     semantic: bool,
+    started: Instant,
+    pub(crate) lake_roots_cache: Option<Vec<Option<WorkspacePath>>>,
+    /// All bindings by path, read once when many files are indexed.
+    preloaded_bindings: Option<HashMap<WorkspacePath, Vec<SourceBinding>>>,
+    /// Entities created in this pass (no stored relations to look up).
+    pub(crate) created_now: std::collections::HashSet<EntityId>,
+    /// Stored live entities by natural key (store state is fixed during planning).
+    pub(crate) key_cache: std::cell::RefCell<HashMap<String, Vec<EntityId>>>,
     /// Active resource per path after this pass's changes.
     pub(crate) resources: BTreeMap<WorkspacePath, EntityId>,
     /// Entities whose natural key was set in this pass (for resolution).
@@ -474,18 +513,29 @@ impl<'a> Planner<'a> {
             entities: HashMap::new(),
             write_entities: BTreeSet::new(),
             bindings: HashMap::new(),
+            bound_at: HashMap::new(),
             add: Vec::new(),
-            add_keys: HashSet::new(),
+            add_keys: HashMap::new(),
+            adds_from: HashMap::new(),
             remove: BTreeSet::new(),
             coverage: BTreeMap::new(),
             stamps: BTreeMap::new(),
             remove_coverage: BTreeSet::new(),
             index_records: BTreeMap::new(),
+            planned_labels: HashMap::new(),
+            planned_mains: BTreeSet::new(),
             index_hashes: BTreeMap::new(),
             remove_index: BTreeSet::new(),
+            wanted: BTreeMap::new(),
+            new_targets: BTreeSet::new(),
             delta: GraphDelta::default(),
             report: ReconcileReport::default(),
             semantic: false,
+            started: Instant::now(),
+            lake_roots_cache: None,
+            preloaded_bindings: None,
+            created_now: std::collections::HashSet::new(),
+            key_cache: std::cell::RefCell::new(HashMap::new()),
             resources: BTreeMap::new(),
             keyed: HashMap::new(),
             tombstoned_now: BTreeSet::new(),
@@ -505,6 +555,19 @@ impl<'a> Planner<'a> {
         match self.entities.get(id) {
             Some(e) => Ok(Some(e.clone())),
             None => self.store.entity(id),
+        }
+    }
+
+    /// An entity that must exist (a resource id read under the same lock).
+    fn must(&self, id: &EntityId) -> StoreResult<Entity> {
+        self.entity(id)?.ok_or_else(|| crate::store::StoreError::Corrupt(format!("entity {id} vanished")))
+    }
+
+    /// Stored bindings in `path` (before this pass's changes).
+    pub(crate) fn bindings_at(&self, path: &WorkspacePath) -> StoreResult<Vec<SourceBinding>> {
+        match &self.preloaded_bindings {
+            Some(map) => Ok(map.get(path).cloned().unwrap_or_default()),
+            None => self.store.bindings_at_path(path),
         }
     }
 
@@ -532,8 +595,10 @@ impl<'a> Planner<'a> {
         if let Some(k) = &e.key {
             self.keyed.entry(k.clone()).or_default().insert(e.id.clone());
             self.targets_added = true;
+            self.new_targets.insert(target_key(e.kind, k));
         }
         self.write_entities.insert(e.id.clone());
+        self.created_now.insert(e.id.clone());
         self.entities.insert(e.id.clone(), e);
     }
 
@@ -547,6 +612,13 @@ impl<'a> Planner<'a> {
             || before.tombstone_reason != after.tombstone_reason;
         if !changed {
             return;
+        }
+        // A name or file that appears, moves, or disappears can change how
+        // other files' references resolve (missing → found, ambiguous → unique).
+        if before.key != after.key || before.lifecycle != after.lifecycle {
+            for k in [&before.key, &after.key].into_iter().flatten() {
+                self.new_targets.insert(target_key(after.kind, k));
+            }
         }
         if before.lifecycle == Lifecycle::Tombstoned && after.lifecycle != Lifecycle::Tombstoned {
             self.tombstoned_now.remove(&after.id);
@@ -581,7 +653,36 @@ impl<'a> Planner<'a> {
     }
 
     pub(crate) fn set_bindings(&mut self, id: &EntityId, bindings: Vec<SourceBinding>) {
+        for b in &bindings {
+            self.bound_at.entry(b.path.clone()).or_default().insert(id.clone());
+        }
         self.bindings.insert(id.clone(), bindings);
+    }
+
+    /// Entities with a planned binding in `path` (possibly moved away since).
+    pub(crate) fn planned_bound_at(&self, path: &WorkspacePath) -> Vec<EntityId> {
+        self.bound_at.get(path).map(|s| s.iter().cloned().collect()).unwrap_or_default()
+    }
+
+    /// Record a file's index for this pass (keeps the label/main caches).
+    pub(crate) fn put_index_record(&mut self, path: &WorkspacePath, body: IndexBody) {
+        if let Some(old) = self.index_records.get(path) {
+            for l in &old.extraction.labels {
+                if let Some(set) = self.planned_labels.get_mut(l) {
+                    set.remove(path);
+                }
+            }
+        }
+        for l in &body.extraction.labels {
+            self.planned_labels.entry(l.clone()).or_default().insert(path.clone());
+            self.new_targets.insert(format!("name:{l}"));
+        }
+        if body.latex_main {
+            self.planned_mains.insert(path.clone());
+        } else {
+            self.planned_mains.remove(path);
+        }
+        self.index_records.insert(path.clone(), std::sync::Arc::new(body));
     }
 
     /// Add an observed relation unless one of this kind between these
@@ -592,10 +693,11 @@ impl<'a> Planner<'a> {
             return Ok(false);
         }
         let key = (kind, from.id.clone(), to.id.clone());
-        if self.add_keys.contains(&key) {
+        if self.add_keys.contains_key(&key) {
             return Ok(true);
         }
-        if let Some(existing) = self.store.find_relation(kind, &from.id, &to.id)? {
+        let fresh_endpoint = self.created_now.contains(&from.id) || self.created_now.contains(&to.id);
+        if !fresh_endpoint && let Some(existing) = self.store.find_relation(kind, &from.id, &to.id)? {
             if self.remove.remove(&existing.id) {
                 // Kept after all.
                 self.unmark_removed(&existing.id);
@@ -624,8 +726,9 @@ impl<'a> Planner<'a> {
             self.delta.truncated = true;
         }
         self.report.relations_added += 1;
-        self.add_keys.insert(key);
-        self.add.push(relation);
+        self.add_keys.insert(key, self.add.len());
+        self.adds_from.entry(relation.from.clone()).or_default().push(self.add.len());
+        self.add.push(Some(relation));
         Ok(true)
     }
 
@@ -636,9 +739,14 @@ impl<'a> Planner<'a> {
 
     /// Remove a relation (observed relations only; callers check origin).
     pub(crate) fn unrelate(&mut self, r: &Relation) {
-        if let Some(pos) = self.add.iter().position(|a| a.id == r.id) {
-            let a = self.add.remove(pos);
-            self.add_keys.remove(&(a.kind, a.from, a.to));
+        let key = (r.kind, r.from.clone(), r.to.clone());
+        if let Some(&pos) = self.add_keys.get(&key)
+            && self.add[pos].as_ref().is_some_and(|a| a.id == r.id)
+        {
+            self.add[pos] = None;
+            self.add_keys.remove(&key);
+            self.report.relations_added = self.report.relations_added.saturating_sub(1);
+            self.delta.relations_added.retain(|x| x != &r.id);
             return;
         }
         if self.remove.insert(r.id.clone()) {
@@ -657,7 +765,10 @@ impl<'a> Planner<'a> {
 
     /// Planned relations added in this pass from `from`.
     pub(crate) fn added_from(&self, from: &EntityId) -> Vec<Relation> {
-        self.add.iter().filter(|r| &r.from == from).cloned().collect()
+        self.adds_from
+            .get(from)
+            .map(|ix| ix.iter().filter_map(|&i| self.add[i].clone()).collect())
+            .unwrap_or_default()
     }
 
     pub(crate) fn set_coverage(&mut self, c: ResourceCoverage, stamp: Option<Stamp>) {
@@ -675,24 +786,33 @@ impl<'a> Planner<'a> {
         fresh: &BTreeMap<WorkspacePath, Fresh>,
     ) -> StoreResult<()> {
         // Current resources (fresh state under the lock).
-        let mut active: BTreeMap<WorkspacePath, Entity> = BTreeMap::new();
-        let mut tombs: HashMap<WorkspacePath, Vec<Entity>> = HashMap::new();
-        for e in self.store.all_of_kind(EntityKind::Resource)? {
-            let Some(path) = e.key.as_deref().and_then(|k| WorkspacePath::parse(k).ok()) else { continue };
-            if e.lifecycle == Lifecycle::Tombstoned {
-                tombs.entry(path).or_default().push(e);
-            } else {
-                match active.get(&path) {
-                    // Two identities for one path (a race elsewhere): keep the oldest, touch neither other.
-                    Some(existing) if existing.created_at_ms <= e.created_at_ms => {}
-                    _ => {
-                        active.insert(path, e);
-                    }
+        let mut active: BTreeMap<WorkspacePath, EntityId> = BTreeMap::new();
+        let mut created: HashMap<EntityId, u64> = HashMap::new();
+        let mut tombs: HashMap<WorkspacePath, Vec<EntityId>> = HashMap::new();
+        for k in self.store.resource_keys(None)? {
+            if k.tombstoned {
+                tombs.entry(k.path).or_default().push(k.id);
+                continue;
+            }
+            match active.get(&k.path) {
+                // Two identities for one path (a race elsewhere): keep the oldest, touch neither other.
+                Some(existing) if created.get(existing).is_some_and(|c| *c <= k.created_at_ms) => {}
+                _ => {
+                    created.insert(k.id.clone(), k.created_at_ms);
+                    active.insert(k.path, k.id);
                 }
             }
         }
-        for (path, e) in &active {
-            self.resources.insert(path.clone(), e.id.clone());
+        for (path, id) in &active {
+            self.resources.insert(path.clone(), id.clone());
+        }
+        if fresh.len() > 64 {
+            // Many files to index: read all bindings once instead of per file.
+            let mut by_path: HashMap<WorkspacePath, Vec<SourceBinding>> = HashMap::new();
+            for b in self.store.all_bindings()? {
+                by_path.entry(b.path.clone()).or_default().push(b);
+            }
+            self.preloaded_bindings = Some(by_path);
         }
 
         let observed = &scan_out.files;
@@ -701,14 +821,14 @@ impl<'a> Planner<'a> {
         let new_paths: Vec<WorkspacePath> = observed.keys().filter(|p| !active.contains_key(*p)).cloned().collect();
 
         // Confirmed renames: same physical file, else unique same content.
-        let renames = confirm_renames(&gone, &new_paths, checkpoints, &active, fresh);
+        let renames = confirm_renames(&gone, &new_paths, checkpoints, fresh);
         let renamed_old: BTreeSet<&WorkspacePath> = renames.iter().map(|(o, _)| o).collect();
         let renamed_new: BTreeSet<&WorkspacePath> = renames.iter().map(|(_, n)| n).collect();
 
         let mut matches: Vec<FileMatch> = Vec::new();
 
         for (old, new) in &renames {
-            let entity = active[old].clone();
+            let entity = self.must(&active[old])?;
             let meta = &observed[new];
             let mut after = entity.clone();
             after.key = Some(new.as_str().to_owned());
@@ -739,7 +859,7 @@ impl<'a> Planner<'a> {
             if renamed_old.contains(path) {
                 continue;
             }
-            let entity = active[path].clone();
+            let entity = self.must(&active[path])?;
             self.remove_resource(path, &entity)?;
         }
 
@@ -751,22 +871,19 @@ impl<'a> Planner<'a> {
             let Some(f) = fresh.get(path) else { continue };
             // A file restored at the same path with the same content is the
             // same resource (e.g. switching back to a branch).
-            let revived = tombs.get(path).and_then(|candidates| {
-                let same: Vec<&Entity> = candidates
-                    .iter()
-                    .filter(|t| {
-                        f.content.hash.is_some()
-                            && self
-                                .store
-                                .bindings(&t.id)
-                                .ok()
-                                .and_then(|b| b.first().and_then(|b| b.version.clone()))
-                                .map(|v| Some(v.content_hash) == f.content.hash)
-                                .unwrap_or(false)
-                    })
-                    .collect();
-                (same.len() == 1).then(|| same[0].clone())
-            });
+            let revived = match tombs.get(path) {
+                Some(candidates) if f.content.hash.is_some() => {
+                    let mut same: Vec<Entity> = Vec::new();
+                    for id in candidates {
+                        let version = self.store.bindings(id)?.first().and_then(|b| b.version.clone());
+                        if version.map(|v| v.content_hash) == f.content.hash {
+                            same.push(self.must(id)?);
+                        }
+                    }
+                    (same.len() == 1).then(|| same.remove(0))
+                }
+                _ => None,
+            };
             let entity = match revived {
                 Some(t) => {
                     let mut after = t.clone();
@@ -809,7 +926,7 @@ impl<'a> Planner<'a> {
             if !active.contains_key(path) || renamed_old.contains(path) {
                 continue;
             }
-            let entity = self.entity(&active[path].id)?.unwrap_or_else(|| active[path].clone());
+            let entity = self.must(&active[path])?;
             let checkpoint = checkpoints.get(path);
             let same = !self.force
                 && f.extraction.is_none()
@@ -836,10 +953,12 @@ impl<'a> Planner<'a> {
             self.index_file(path, &entity, f, None, &mut matches)?;
         }
 
+        let t_files = Instant::now();
         self.apply_matches(matches)?;
-        if self.targets_added {
-            for p in self.store.paths_with_unresolved()? {
-                if self.resources.contains_key(&p) {
+        let t_matches = Instant::now();
+        if !self.new_targets.is_empty() {
+            for (p, wanted) in self.store.index_wanted()? {
+                if self.resources.contains_key(&p) && wanted.iter().any(|w| self.new_targets.contains(w)) {
                     self.resolve.insert(p);
                 }
             }
@@ -847,9 +966,20 @@ impl<'a> Planner<'a> {
         if self.structure_dirty {
             self.plan_structure()?;
         }
+        let t_structure = Instant::now();
         let paths: Vec<WorkspacePath> = self.resolve.iter().cloned().collect();
+        let resolved = paths.len();
         for path in paths {
             self.resolve_links(&path)?;
+        }
+        if std::env::var_os("EXPOSITION_GRAPH_TRACE").is_some() {
+            eprintln!(
+                "plan: files {:?}, matches {:?}, structure {:?}, resolve {:?} ({resolved} files)",
+                t_files - self.started,
+                t_matches - t_files,
+                t_structure - t_matches,
+                t_structure.elapsed()
+            );
         }
         Ok(())
     }
@@ -875,7 +1005,7 @@ impl<'a> Planner<'a> {
     /// Bindings at `old` move to `new` (renamed file).
     fn rebind_path(&mut self, old: &WorkspacePath, new: &WorkspacePath) -> StoreResult<()> {
         let mut ids: BTreeSet<EntityId> = BTreeSet::new();
-        for b in self.store.bindings_at_path(old)? {
+        for b in self.bindings_at(old)? {
             ids.insert(b.entity);
         }
         for id in ids {
@@ -940,7 +1070,7 @@ impl<'a> Planner<'a> {
         }
         // Declarations and curated bindings in the file.
         let mut ids: BTreeSet<EntityId> = BTreeSet::new();
-        for b in self.store.bindings_at_path(path)? {
+        for b in self.bindings_at(path)? {
             if b.entity != entity.id {
                 ids.insert(b.entity);
             }
@@ -1051,7 +1181,7 @@ impl<'a> Planner<'a> {
                     && let Ok(body) = serde_json::from_str::<IndexBody>(&record.body)
                 {
                     self.index_hashes.insert(path.clone(), (record.content_hash.clone(), record.extractor.clone()));
-                    self.index_records.insert(path.clone(), body);
+                    self.put_index_record(path, body);
                     self.resolve.insert(path.clone());
                 }
             }
@@ -1065,7 +1195,7 @@ impl<'a> Planner<'a> {
         let mut live = Vec::new();
         let mut tombs = Vec::new();
         let mut seen = BTreeSet::new();
-        for b in self.store.bindings_at_path(path)? {
+        for b in self.bindings_at(path)? {
             if !seen.insert(b.entity.clone()) {
                 continue;
             }
@@ -1135,7 +1265,10 @@ impl<'a> Planner<'a> {
             let path = matches[fi].path.clone();
             let resource = self.entity(&matches[fi].resource)?.expect("resource planned");
             let extractor = matches[fi].extraction.extractor.clone();
-            let lean_module = lean_module(&path, &self.lake_roots()?);
+            if self.lake_roots_cache.is_none() {
+                self.lake_roots_cache = Some(self.lake_roots()?);
+            }
+            let lean_module = lean_module(&path, self.lake_roots_cache.as_deref().unwrap_or(&[]));
             let hash = matches[fi].hash.clone();
             let mut problems: Vec<String> = Vec::new();
             let decls = matches[fi].extraction.declarations.clone();
@@ -1244,7 +1377,7 @@ impl<'a> Planner<'a> {
                 path.clone(),
                 (fm.hash.clone().unwrap_or_default(), fm.extraction.extractor.clone()),
             );
-            self.index_records.insert(path.clone(), body);
+            self.put_index_record(&path, body);
             self.remove_index.remove(&path);
         }
         Ok(())
@@ -1277,7 +1410,8 @@ impl<'a> Planner<'a> {
     /// `anchoredIn` of a declaration: exactly the resource it is bound in.
     fn anchor(&mut self, id: &EntityId, resource: &Entity) -> StoreResult<()> {
         let Some(e) = self.entity(id)? else { return Ok(()) };
-        for r in self.store.relations_from(id)? {
+        let stored = if self.created_now.contains(id) { Vec::new() } else { self.store.relations_from(id)? };
+        for r in stored {
             if r.kind == RelationKind::AnchoredIn && r.to != resource.id && matches!(r.origin, Origin::Extracted { .. })
             {
                 self.unrelate(&r);
@@ -1294,7 +1428,7 @@ impl<'a> Planner<'a> {
     fn reanchor_curated(&mut self, path: &WorkspacePath, old_path: Option<&WorkspacePath>, f: &Fresh) -> StoreResult<()> {
         let mut ids: BTreeSet<EntityId> = BTreeSet::new();
         for p in [Some(path), old_path].into_iter().flatten() {
-            for b in self.store.bindings_at_path(p)? {
+            for b in self.bindings_at(p)? {
                 ids.insert(b.entity);
             }
         }
@@ -1436,7 +1570,7 @@ impl<'a> Planner<'a> {
         let mut index_updates = Vec::new();
         for (path, body) in &self.index_records {
             let (hash, extractor) = self.index_hashes.get(path).cloned().unwrap_or_default();
-            if let Ok(json) = serde_json::to_string(body) {
+            if let Ok(json) = serde_json::to_string(&**body) {
                 index.push(IndexRecord { path: path.clone(), content_hash: hash, extractor, body: json });
                 index_updates.push((path.clone(), Some((body.extraction.labels.clone(), body.latex_main))));
             }
@@ -1452,18 +1586,27 @@ impl<'a> Planner<'a> {
         Plan {
             entities,
             bindings,
-            add: self.add,
+            add: self.add.into_iter().flatten().collect(),
             remove: self.remove.into_iter().collect(),
             coverage: self.coverage.into_values().collect(),
             stamps: self.stamps.into_iter().collect(),
             remove_coverage: self.remove_coverage.into_iter().collect(),
             index,
-            remove_index: self.remove_index.into_iter().filter(|p| !self.index_records.contains_key(p)).collect(),
+            remove_index: self.remove_index.iter().filter(|p| !self.index_records.contains_key(*p)).cloned().collect(),
+            wanted: self.wanted.into_iter().collect(),
             index_updates,
             delta: self.delta,
             report: self.report,
             semantic,
         }
+    }
+}
+
+/// The key under which a file waits for a link target (see `wanted`).
+pub(crate) fn target_key(kind: EntityKind, key: &str) -> String {
+    match kind {
+        EntityKind::Resource | EntityKind::Folder => format!("path:{key}"),
+        _ => format!("name:{key}"),
     }
 }
 
@@ -1584,13 +1727,11 @@ fn confirm_renames(
     gone: &[WorkspacePath],
     new: &[WorkspacePath],
     checkpoints: &BTreeMap<WorkspacePath, Checkpoint>,
-    active: &BTreeMap<WorkspacePath, Entity>,
     fresh: &BTreeMap<WorkspacePath, Fresh>,
 ) -> Vec<(WorkspacePath, WorkspacePath)> {
     let mut out = Vec::new();
     let mut taken_old: BTreeSet<WorkspacePath> = BTreeSet::new();
     let mut taken_new: BTreeSet<WorkspacePath> = BTreeSet::new();
-    let _ = active;
     type Key = fn(Option<&Checkpoint>, Option<&Fresh>) -> (Option<String>, Option<String>);
     let keys: [Key; 2] = [
         |c, f| (c.and_then(|c| c.identity.clone()), f.and_then(|f| f.content.identity.clone())),

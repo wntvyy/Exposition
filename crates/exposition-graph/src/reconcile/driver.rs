@@ -334,6 +334,15 @@ impl Driver {
             self.graph.clear_overlay(&path);
             return;
         }
+        // Undo back to the saved text leaves the buffer at a new revision
+        // with no unsaved difference: the bytes it would save are the indexed
+        // file, so there is nothing to overlay.
+        let would_save = super::scan::sha256_hex(&exposition_workspace::encoding::encode(&snapshot.text, info.encoding));
+        let indexed = self.graph.with_store(|s| Ok(s.coverage(&path)?.and_then(|c| c.content_hash))).ok().flatten();
+        if indexed.as_deref() == Some(would_save.as_str()) {
+            self.graph.clear_overlay(&path);
+            return;
+        }
         let generation = self.graph.generation();
         match super::overlay::compute(&self.graph, &path, snapshot.revision, &snapshot.text) {
             Ok(Some(entry)) => self.graph.set_overlay(generation, entry),

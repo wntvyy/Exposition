@@ -149,7 +149,8 @@ const MIGRATIONS: &[(u32, &str)] = &[
         path TEXT PRIMARY KEY,
         content_hash TEXT NOT NULL,
         extractor TEXT NOT NULL,
-        body TEXT NOT NULL
+        body TEXT NOT NULL,
+        wanted TEXT NOT NULL DEFAULT '[]'
     );
     "#,
     ),
@@ -249,7 +250,7 @@ fn expected_columns(version: u32) -> Vec<(&'static str, Vec<&'static str>)> {
         ("coverage", coverage),
     ];
     if version >= 2 {
-        tables.push(("source_index", vec!["path", "content_hash", "extractor", "body"]));
+        tables.push(("source_index", vec!["path", "content_hash", "extractor", "body", "wanted"]));
     }
     tables
 }
@@ -670,6 +671,20 @@ impl GraphStore {
         Ok(out)
     }
 
+    /// Files waiting for link targets, with the targets they wait for.
+    pub fn index_wanted(&self) -> StoreResult<Vec<(WorkspacePath, Vec<String>)>> {
+        let mut stmt =
+            self.conn.prepare_cached("SELECT path, wanted FROM source_index WHERE wanted != '[]' LIMIT 500000")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (path, wanted) = row?;
+            let path = WorkspacePath::parse(&path).map_err(|_| untrusted("index path"))?;
+            out.push((path, decode::<Vec<String>>(&wanted)?));
+        }
+        Ok(out)
+    }
+
     /// Every stored source index body's labels (path, body), for building the
     /// in-memory project label index once per session.
     pub fn all_source_index(&self) -> StoreResult<Vec<IndexRecord>> {
@@ -837,6 +852,80 @@ impl GraphStore {
                     coverage,
                 },
             );
+        }
+        Ok(out)
+    }
+
+    /// Checkpoints of the files at or under `prefixes`.
+    pub fn checkpoints_under(&self, prefixes: &[WorkspacePath]) -> StoreResult<BTreeMap<WorkspacePath, Checkpoint>> {
+        let mut out = BTreeMap::new();
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {COVERAGE_COLUMNS}, size, modified_ms, file_identity FROM coverage
+             WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' LIMIT 500000"
+        ))?;
+        for prefix in prefixes {
+            let like = format!("{}/%", escape_like(prefix.as_str()));
+            let rows = stmt.query_map(params![prefix.as_str(), like], |r| {
+                let coverage = read_coverage(r)?;
+                Ok((coverage, r.get::<_, Option<i64>>(6)?, r.get::<_, Option<i64>>(7)?, r.get::<_, Option<String>>(8)?))
+            })?;
+            for row in rows {
+                let (coverage, size, modified, identity) = row?;
+                let coverage = coverage?;
+                out.insert(
+                    coverage.path.clone(),
+                    Checkpoint {
+                        size: size.map(|s| s.max(0) as u64),
+                        modified_ms: modified.map(|m| m.max(0) as u64),
+                        identity: identity.map(short).transpose()?,
+                        coverage,
+                    },
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// Resource identities by path, without decoding whole records:
+    /// `(path, id, roles, tombstoned, created_at_ms)`. With `prefixes`, only
+    /// resources at or under them.
+    pub fn resource_keys(&self, prefixes: Option<&[WorkspacePath]>) -> StoreResult<Vec<ResourceKey>> {
+        let mut out = Vec::new();
+        let mut read = |rows: rusqlite::MappedRows<'_, _>| -> StoreResult<()> {
+            for row in rows {
+                let (id, key, roles, lifecycle, created): (String, Option<String>, String, String, i64) = row?;
+                let Some(path) = key.as_deref().and_then(|k| WorkspacePath::parse(k).ok()) else { continue };
+                out.push(ResourceKey {
+                    path,
+                    id: EntityId::parse(&id).map_err(|_| untrusted("entity id"))?,
+                    roles: decode::<Vec<ResourceRole>>(&roles)?,
+                    tombstoned: Lifecycle::parse(&lifecycle).ok_or_else(|| untrusted("lifecycle"))?
+                        == Lifecycle::Tombstoned,
+                    created_at_ms: created.max(0) as u64,
+                });
+            }
+            Ok(())
+        };
+        let map = |r: &rusqlite::Row<'_>| -> rusqlite::Result<(String, Option<String>, String, String, i64)> {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        };
+        match prefixes {
+            None => {
+                let mut stmt = self.conn.prepare_cached(
+                    "SELECT id, key, roles, lifecycle, created_at FROM entities WHERE kind = 'resource' LIMIT 500000",
+                )?;
+                read(stmt.query_map([], map)?)?;
+            }
+            Some(prefixes) => {
+                let mut stmt = self.conn.prepare_cached(
+                    "SELECT id, key, roles, lifecycle, created_at FROM entities
+                     WHERE kind = 'resource' AND (key = ?1 OR key LIKE ?2 ESCAPE '\\') LIMIT 500000",
+                )?;
+                for prefix in prefixes {
+                    let like = format!("{}/%", escape_like(prefix.as_str()));
+                    read(stmt.query_map(params![prefix.as_str(), like], map)?)?;
+                }
+            }
         }
         Ok(out)
     }
@@ -1166,6 +1255,17 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
+    /// Link targets a file's references are waiting for (`name:<label or
+    /// key>`, `path:<workspace path>`), so it is resolved again only when one
+    /// of them appears.
+    pub fn set_index_wanted(&self, path: &WorkspacePath, wanted: &[String]) -> StoreResult<()> {
+        self.tx.execute(
+            "UPDATE source_index SET wanted = ?2 WHERE path = ?1",
+            params![path.as_str(), serde_json::to_string(wanted)?],
+        )?;
+        Ok(())
+    }
+
     pub fn remove_source_index(&self, path: &WorkspacePath) -> StoreResult<()> {
         self.tx.execute("DELETE FROM source_index WHERE path = ?1", [path.as_str()])?;
         Ok(())
@@ -1204,6 +1304,16 @@ pub struct Checkpoint {
     pub modified_ms: Option<u64>,
     /// Opaque physical file identity (rename confirmation), when known.
     pub identity: Option<String>,
+}
+
+/// A resource's identity by path (see [`GraphStore::resource_keys`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceKey {
+    pub path: WorkspacePath,
+    pub id: EntityId,
+    pub roles: Vec<ResourceRole>,
+    pub tombstoned: bool,
+    pub created_at_ms: u64,
 }
 
 /// One file's rebuildable source index (JSON body owned by the reconciler).

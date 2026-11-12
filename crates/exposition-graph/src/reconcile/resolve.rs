@@ -40,9 +40,16 @@ impl Planner<'_> {
     /// as of this pass.
     fn keyed_entities(&self, key: &str, kinds: impl Fn(EntityKind) -> bool) -> StoreResult<Vec<Entity>> {
         let mut ids: BTreeSet<EntityId> = BTreeSet::new();
-        for e in self.store.live_entities_with_key(key)? {
-            ids.insert(e.id);
-        }
+        let cached = self.key_cache.borrow().get(key).cloned();
+        let stored = match cached {
+            Some(ids) => ids,
+            None => {
+                let ids: Vec<EntityId> = self.store.live_entities_with_key(key)?.into_iter().map(|e| e.id).collect();
+                self.key_cache.borrow_mut().insert(key.to_owned(), ids.clone());
+                ids
+            }
+        };
+        ids.extend(stored);
         if let Some(planned) = self.keyed.get(key) {
             ids.extend(planned.iter().cloned());
         }
@@ -64,10 +71,14 @@ impl Planner<'_> {
         if body.extraction.labels.iter().any(|l| l == label) {
             return true;
         }
-        if self.index_records.values().any(|b| b.extraction.labels.iter().any(|l| l == label)) {
+        if self.planned_labels.get(label).is_some_and(|paths| !paths.is_empty()) {
             return true;
         }
-        self.index.labels.get(label).is_some_and(|paths| paths.iter().any(|p| self.resources.contains_key(p)))
+        self.index.labels.get(label).is_some_and(|paths| {
+            paths.iter().any(|p| {
+                self.resources.contains_key(p) && !self.index_records.contains_key(p) && !self.remove_index.contains(p)
+            })
+        })
     }
 
     fn resolve_label(&self, name: &str, body: &IndexBody) -> StoreResult<Target> {
@@ -115,9 +126,7 @@ impl Planner<'_> {
                 bases.push(dir.clone());
                 bases.push(None);
                 let mut mains: BTreeSet<Option<WorkspacePath>> = BTreeSet::new();
-                for m in self.index.latex_mains.iter().chain(
-                    self.index_records.iter().filter(|(_, b)| b.latex_main).map(|(p, _)| p),
-                ) {
+                for m in self.index.latex_mains.iter().chain(self.planned_mains.iter()) {
                     mains.insert(m.parent());
                 }
                 bases.extend(mains);
@@ -241,8 +250,11 @@ impl Planner<'_> {
             return Ok(Vec::new());
         }
         let rel = format!("{}.lean", module.replace('.', "/"));
-        Ok(self
-            .lake_roots()?
+        let roots = match &self.lake_roots_cache {
+            Some(r) => r.clone(),
+            None => self.lake_roots()?,
+        };
+        Ok(roots
             .into_iter()
             .filter_map(|root| extract::join_relative(root.as_ref(), &rel))
             .collect())
@@ -253,11 +265,11 @@ impl Planner<'_> {
     pub(crate) fn resolve_links(&mut self, path: &WorkspacePath) -> StoreResult<()> {
         let Some(resource_id) = self.resources.get(path).cloned() else { return Ok(()) };
         let Some(resource) = self.entity(&resource_id)? else { return Ok(()) };
-        let body: IndexBody = match self.index_records.get(path) {
-            Some(b) => b.clone(),
+        let body: std::sync::Arc<IndexBody> = match self.index_records.get(path) {
+            Some(b) => std::sync::Arc::clone(b),
             None => match self.store.source_index(path)? {
-                Some(r) => match serde_json::from_str(&r.body) {
-                    Ok(b) => b,
+                Some(r) => match serde_json::from_str::<IndexBody>(&r.body) {
+                    Ok(b) => std::sync::Arc::new(b),
                     Err(_) => return Ok(()),
                 },
                 None => return Ok(()),
@@ -269,7 +281,8 @@ impl Planner<'_> {
         sources.extend(body.ids.iter().flatten().cloned());
         let mut existing: Vec<Relation> = Vec::new();
         for id in &sources {
-            for r in self.store.relations_from(id)? {
+            let stored = if self.created_now.contains(id) { Vec::new() } else { self.store.relations_from(id)? };
+            for r in stored {
                 if is_link_kind(r.kind) && matches!(r.origin, Origin::Extracted { .. }) && !self.is_removed(&r.id) {
                     existing.push(r);
                 }
@@ -282,6 +295,7 @@ impl Planner<'_> {
         }
         let mut desired: BTreeSet<(RelationKind, EntityId, EntityId)> = BTreeSet::new();
         let mut unresolved: Vec<String> = Vec::new();
+        let mut wanted: BTreeSet<String> = BTreeSet::new();
         for link in &body.extraction.links {
             let from = match link.from {
                 LinkFrom::Resource => resource_id.clone(),
@@ -303,10 +317,16 @@ impl Planner<'_> {
                     let generated = link.kind == RelationKind::UsesAsset;
                     match self.resolve_path(&candidates, generated)? {
                         Some(id) => Target::Entity(id),
-                        None if code => Target::NotAnEntity,
+                        None if code => {
+                            wanted.extend(candidates.iter().take(4).map(|c| format!("path:{c}")));
+                            Target::NotAnEntity
+                        }
                         None => {
                             // An existing file that is not a project resource type is not unresolved.
                             let exists = candidates.iter().any(|c| scan::stat_file(self.root, c).is_some());
+                            if !exists {
+                                wanted.extend(candidates.iter().take(8).map(|c| format!("path:{c}")));
+                            }
                             if exists { Target::NotAnEntity } else { Target::Missing }
                         }
                     }
@@ -315,11 +335,19 @@ impl Planner<'_> {
                     let candidates = self.lean_candidates(m)?;
                     match self.resolve_path(&candidates, false)? {
                         Some(id) => Target::Entity(id),
-                        None => Target::NotAnEntity,
+                        None => {
+                            wanted.extend(candidates.iter().take(4).map(|c| format!("path:{c}")));
+                            Target::NotAnEntity
+                        }
                     }
                 }
             };
             let described = describe(&link.target);
+            if matches!(target, Target::Missing | Target::Ambiguous(_))
+                && let LinkTarget::Label(x) | LinkTarget::Citation(x) | LinkTarget::LabelOrCitation(x) = &link.target
+            {
+                wanted.insert(format!("name:{x}"));
+            }
             match target {
                 Target::Entity(to) => {
                     if from == to {
@@ -351,7 +379,10 @@ impl Planner<'_> {
                     desired.insert((RelationKind::UsesAsset, resource_id.clone(), to));
                 }
                 Some(_) => {}
-                None => unresolved.push(format!("attachment {} uses “{image}”, which was not found", att.key)),
+                None => {
+                    wanted.extend(candidates.iter().take(8).map(|c| format!("path:{c}")));
+                    unresolved.push(format!("attachment {} uses “{image}”, which was not found", att.key));
+                }
             }
         }
         // Replace the observed set.
@@ -379,6 +410,7 @@ impl Planner<'_> {
             self.relate(kind, &fe, &te, &link_extractor)?;
         }
         self.finish_coverage(path, &resource, &body, unresolved)?;
+        self.wanted.insert(path.clone(), wanted.into_iter().take(200).collect());
         Ok(())
     }
 
@@ -437,14 +469,10 @@ impl Planner<'_> {
     /// for live entities.
     fn binding_unresolved(&self, path: &WorkspacePath, resource: &Entity) -> StoreResult<(u32, Vec<String>)> {
         let mut ids: BTreeSet<EntityId> = BTreeSet::new();
-        for b in self.store.bindings_at_path(path)? {
+        for b in self.bindings_at(path)? {
             ids.insert(b.entity);
         }
-        for (id, bs) in &self.bindings {
-            if bs.iter().any(|b| &b.path == path) {
-                ids.insert(id.clone());
-            }
-        }
+        ids.extend(self.planned_bound_at(path));
         let mut count = 0u32;
         let mut reasons = Vec::new();
         for id in ids {
