@@ -48,13 +48,12 @@ impl WorkspaceRoot {
         }
         fs::read_dir(&canonical)
             .map_err(|e| WorkspaceError::new("workspace.unreadable", format!("{shown} cannot be listed: {e}.")))?;
-        if let Some(reason) = too_broad_reason(&canonical) {
+        // The same rule as workspace trust: no drive roots, nothing that is or
+        // contains a profile/system folder, nothing inside a system folder.
+        if let Some(reason) = exposition_core::roots::too_broad_reason(&canonical) {
             return Err(WorkspaceError::new(
                 "workspace.tooBroad",
-                format!(
-                    "{} cannot be opened as a project folder: {reason}. Open a specific project folder instead.",
-                    display_path(&canonical)
-                ),
+                format!("{reason}. Open a specific project folder instead."),
             ));
         }
         Ok(Self { canonical })
@@ -174,90 +173,6 @@ impl WorkspaceRoot {
     pub fn contains(&self, canonical: &Path) -> bool {
         canonical.starts_with(&self.canonical)
     }
-}
-
-/// Directories a project folder may not equal or contain (system, program,
-/// profile, and per-user application data folders).
-fn protected_directories() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    #[cfg(windows)]
-    {
-        for var in [
-            "SystemRoot",
-            "windir",
-            "ProgramFiles",
-            "ProgramFiles(x86)",
-            "ProgramW6432",
-            "ProgramData",
-            "USERPROFILE",
-            "PUBLIC",
-            "APPDATA",
-            "LOCALAPPDATA",
-        ] {
-            if let Some(value) = std::env::var_os(var).filter(|v| !v.is_empty()) {
-                dirs.push(PathBuf::from(value));
-            }
-        }
-        // The folder holding every user profile (C:\Users).
-        if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty())
-            && let Some(parent) = Path::new(&profile).parent()
-        {
-            dirs.push(parent.to_path_buf());
-        }
-    }
-    #[cfg(unix)]
-    {
-        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-            let home = PathBuf::from(home);
-            if let Some(parent) = home.parent() {
-                dirs.push(parent.to_path_buf());
-            }
-            dirs.push(home);
-        }
-        for dir in ["/usr", "/etc", "/bin", "/sbin", "/lib", "/var", "/opt", "/System", "/Library", "/Applications"] {
-            dirs.push(PathBuf::from(dir));
-        }
-    }
-    dirs.into_iter().filter_map(|d| fs::canonicalize(d).ok()).collect()
-}
-
-/// Directories a project folder may not be inside (operating system and
-/// installed programs).
-fn system_directories() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    #[cfg(windows)]
-    for var in ["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"] {
-        if let Some(value) = std::env::var_os(var).filter(|v| !v.is_empty()) {
-            dirs.push(PathBuf::from(value));
-        }
-    }
-    #[cfg(unix)]
-    for dir in ["/usr", "/etc", "/bin", "/sbin", "/lib", "/System", "/proc", "/sys", "/dev"] {
-        dirs.push(PathBuf::from(dir));
-    }
-    dirs.into_iter().filter_map(|d| fs::canonicalize(d).ok()).collect()
-}
-
-/// Why `canonical` is too broad to open as a project folder, if it is: a
-/// drive/file-system root, a folder that equals or contains a system, program,
-/// or profile folder, or a folder inside a system or program folder. This is
-/// the same rule workspace trust applies (to be shared as
-/// `exposition_core::roots::too_broad_reason`).
-pub fn too_broad_reason(canonical: &Path) -> Option<String> {
-    if canonical.parent().is_none() {
-        return Some("it is the root of a drive".into());
-    }
-    if let Some(dir) = protected_directories().into_iter().find(|dir| dir.starts_with(canonical)) {
-        return Some(if dir == canonical {
-            "it is a system or profile folder".into()
-        } else {
-            format!("it contains the system or profile folder {}", display_path(&dir))
-        });
-    }
-    if let Some(dir) = system_directories().into_iter().find(|dir| canonical.starts_with(dir)) {
-        return Some(format!("it is inside the system folder {}", display_path(&dir)));
-    }
-    None
 }
 
 fn append(mut base: PathBuf, parts: &[String]) -> PathBuf {
