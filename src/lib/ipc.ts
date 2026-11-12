@@ -24,10 +24,13 @@ import type { DocumentEvent } from "../bindings/DocumentEvent";
 import type { DocumentId } from "../bindings/DocumentId";
 import type { DocumentInfo } from "../bindings/DocumentInfo";
 import type { DocumentOpened } from "../bindings/DocumentOpened";
+import type { DockerImage } from "../bindings/DockerImage";
 import type { DocumentState } from "../bindings/DocumentState";
 import type { EditOrigin } from "../bindings/EditOrigin";
 import type { EnvironmentReport } from "../bindings/EnvironmentReport";
 import type { ExecuteRequest } from "../bindings/ExecuteRequest";
+import type { ExecutionSettingsChange } from "../bindings/ExecutionSettingsChange";
+import type { ExecutionSettingsState } from "../bindings/ExecutionSettingsState";
 import type { ExportArtifact } from "../bindings/ExportArtifact";
 import type { FileEntry } from "../bindings/FileEntry";
 import type { JobEvent } from "../bindings/JobEvent";
@@ -78,6 +81,7 @@ import type { TaskSummary } from "../bindings/TaskSummary";
 import type { TransactionError } from "../bindings/TransactionError";
 import type { TransactionOutcome } from "../bindings/TransactionOutcome";
 import type { TransactionRequest } from "../bindings/TransactionRequest";
+import type { TrustList } from "../bindings/TrustList";
 import type { TrustStatus } from "../bindings/TrustStatus";
 import type { WorkspaceEvent } from "../bindings/WorkspaceEvent";
 import type { WorkspaceInfo } from "../bindings/WorkspaceInfo";
@@ -139,6 +143,16 @@ export const commands = {
   /** Only call from the explicit trust dialog (`requestWorkspaceTrust`). */
   trustGrant: (root: string) => invoke<TrustStatus>("trust_grant", { root }),
   trustRevoke: (root: string) => invoke<TrustStatus>("trust_revoke", { root }),
+
+  // Settings. Changes are narrow and validated in Rust; nothing here grants trust.
+  executionSettingsGet: () => invoke<ExecutionSettingsState>("execution_settings_get"),
+  /** One change (Docker image or tool location); refused with `settings.*` codes. */
+  executionSettingsUpdate: (change: ExecutionSettingsChange) =>
+    invoke<ExecutionSettingsState>("execution_settings_update", { change }),
+  /** Locally present tagged images (`docker image ls`; never pulls). */
+  dockerImagesList: () => invoke<DockerImage[]>("docker_images_list"),
+  /** Trusted folders (with grant times) and the rules for what may be trusted. */
+  trustList: () => invoke<TrustList>("trust_list"),
 
   // Lean. Errors are `LeanError`s ({ code, message, currentRevision }).
   leanDocuments: () => invoke<LeanDocumentState[]>("lean_documents"),

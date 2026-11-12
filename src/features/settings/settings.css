@@ -1,0 +1,370 @@
+/* Settings editor. Tokens only (src/ui/tokens.css); controls, pills, banners,
+   and region states come from src/ui/components. */
+
+.exp-settings {
+  container-type: inline-size;
+  height: 100%;
+  min-height: 0;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+}
+
+/* Vertical section list (shared Tabs, laid out as a side navigation). */
+.exp-settings__tabs.ui-tabs {
+  flex-direction: row;
+  height: 100%;
+}
+
+.exp-settings__nav.ui-tab-list {
+  flex: 0 0 200px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-0-5);
+  min-height: 0;
+  padding: var(--space-4) var(--space-2);
+  border-bottom: none;
+  border-right: var(--border-width) solid var(--color-border);
+  background: var(--color-surface-sunken);
+  overflow-y: auto;
+}
+
+.exp-settings__nav-item.ui-tab {
+  flex: 0 0 auto;
+  height: var(--control-height-lg);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-regular);
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--color-text-muted);
+}
+
+.exp-settings__nav-item.ui-tab[data-hovered] {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.exp-settings__nav-item.ui-tab[data-selected] {
+  background: var(--color-accent-subtle);
+  color: var(--color-text);
+  font-weight: var(--font-weight-medium);
+}
+
+.exp-settings__nav-item.ui-tab[data-selected]::after {
+  left: 0;
+  right: auto;
+  top: var(--space-1-5);
+  bottom: var(--space-1-5);
+  width: 2px;
+  height: auto;
+}
+
+.exp-settings__panel.ui-tab-panel {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: var(--space-6) var(--space-8) var(--space-10);
+}
+
+@container (max-width: 640px) {
+  .exp-settings__tabs.ui-tabs {
+    flex-direction: column;
+  }
+
+  .exp-settings__nav.ui-tab-list {
+    flex: 0 0 auto;
+    flex-direction: row;
+    padding: var(--space-1) var(--space-2);
+    border-right: none;
+    border-bottom: var(--border-width) solid var(--color-border);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .exp-settings__nav-item.ui-tab[data-selected]::after {
+    top: auto;
+    bottom: 0;
+    left: var(--space-2);
+    right: var(--space-2);
+    width: auto;
+    height: 2px;
+  }
+
+  .exp-settings__panel.ui-tab-panel {
+    padding: var(--space-4) var(--space-4) var(--space-8);
+  }
+}
+
+/* Pages and groups */
+.exp-settings__page {
+  max-width: 920px;
+}
+
+.exp-settings__page-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  margin-bottom: var(--space-2);
+}
+
+.exp-settings__page-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.exp-settings__page-title {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.exp-settings__page-description {
+  margin: var(--space-1-5) 0 0;
+  color: var(--color-text-muted);
+  line-height: var(--line-height-normal);
+  max-width: 72ch;
+}
+
+.exp-settings__page-actions,
+.exp-settings__group-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.exp-settings__group {
+  margin-top: var(--space-6);
+}
+
+.exp-settings__group-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-height-md);
+}
+
+.exp-settings__group-title {
+  flex: 1;
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+}
+
+.exp-settings__group-description {
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  max-width: 80ch;
+}
+
+.exp-settings__group > .ui-banner {
+  margin: var(--space-2) 0;
+}
+
+/* Setting rows */
+.exp-settings__row {
+  display: grid;
+  grid-template-columns: minmax(180px, 2fr) minmax(0, 3fr);
+  gap: var(--space-2) var(--space-6);
+  align-items: start;
+  padding: var(--space-3) 0;
+  border-top: var(--border-width) solid var(--color-border-subtle);
+}
+
+@container (max-width: 640px) {
+  .exp-settings__row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.exp-settings__row-label {
+  font-weight: var(--font-weight-medium);
+}
+
+.exp-settings__row-description {
+  margin-top: var(--space-0-5);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.exp-settings__row-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.exp-settings__stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1-5);
+  min-width: 0;
+}
+
+.exp-settings__inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.exp-settings__select {
+  min-width: 260px;
+}
+
+/* Text */
+.exp-settings__muted {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.exp-settings__path {
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.exp-settings__subhead {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.exp-settings__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Lists (trusted folders) */
+.exp-settings__list {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  border-top: var(--border-width) solid var(--color-border-subtle);
+}
+
+.exp-settings__list-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+}
+
+.exp-settings__list-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  user-select: text;
+}
+
+.exp-settings__pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.exp-settings__rules {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.exp-settings__locations {
+  margin: 0;
+  padding-left: var(--space-4);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+/* Tables (tools, environments, capabilities) */
+.exp-settings__table {
+  width: 100%;
+  margin-top: var(--space-1);
+  border-collapse: collapse;
+  table-layout: auto;
+}
+
+.exp-settings__table th,
+.exp-settings__table td {
+  padding: var(--space-2) var(--space-2) var(--space-2) 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+  overflow-wrap: anywhere;
+}
+
+.exp-settings__table thead th {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-muted);
+  border-bottom-color: var(--color-border);
+}
+
+.exp-settings__table tbody th {
+  font-weight: var(--font-weight-medium);
+  min-width: 120px;
+}
+
+.exp-settings__table td {
+  user-select: text;
+}
+
+.exp-settings__table td:nth-child(2) {
+  white-space: nowrap;
+}
+
+.exp-settings__actions {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.exp-settings__actions .ui-button + .ui-button {
+  margin-left: var(--space-1);
+}
+
+/* What restricted runs enforce */
+.exp-settings__enforce {
+  margin-top: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-sunken);
+}
+
+.exp-settings__enforce ul {
+  margin: 0;
+  padding-left: var(--space-4);
+  line-height: var(--line-height-normal);
+}
+
+/* Dialogs */
+.exp-settings__dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.exp-settings__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}

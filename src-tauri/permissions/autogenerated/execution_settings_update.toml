@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-execution-settings-update"
+description = "Enables the execution_settings_update command without any pre-configured scope."
+commands.allow = ["execution_settings_update"]
+
+[[permission]]
+identifier = "deny-execution-settings-update"
+description = "Denies the execution_settings_update command without any pre-configured scope."
+commands.deny = ["execution_settings_update"]
