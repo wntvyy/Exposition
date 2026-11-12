@@ -3,23 +3,21 @@
 // collapsed groups (members fold into the group; their relations re-route to
 // it and aggregate), search (non-matches dim, never disappear), and badges.
 // Presentation only: nothing here changes or infers semantics.
+import type { Entity } from "../../bindings/Entity";
+import type { Relation } from "../../bindings/Relation";
 import type { CanvasBadge, CanvasEdge, CanvasNode } from "./canvas/types";
-import {
-  entityKind,
-  relationKind,
-  STATUS_LABELS,
-  type EntitySummary,
-  type RelationSummary,
-  type SavedView,
-  type Snapshot,
-  type Vocabulary,
-} from "./model";
+import { entityDisplay, relationDisplay, STATUS_LABELS, type SavedView, type VocabularyIndex } from "./model";
 
 /** Structure relations that make one entity a member of a group. */
-const MEMBERSHIP: Record<string, "groupToMember" | "memberToGroup"> = {
+const MEMBERSHIP: Partial<Record<Relation["kind"], "groupToMember" | "memberToGroup">> = {
   contains: "groupToMember",
-  member_of: "memberToGroup",
+  memberOf: "memberToGroup",
 };
+
+export interface ProjectionInput {
+  entities: Entity[];
+  relations: Relation[];
+}
 
 export interface Projection {
   nodes: Omit<CanvasNode, "position">[];
@@ -34,26 +32,27 @@ export interface Projection {
   matches: number;
 }
 
-export function entityBadges(entity: EntitySummary): CanvasBadge[] {
-  const badges: CanvasBadge[] = [];
-  if (entity.lifecycle === "archived") badges.push({ label: "Archived", tone: "neutral", dashed: true });
-  if (entity.binding === "missing") {
-    badges.push({ label: "Source missing", tone: "warning", dashed: true, title: "Its source binding no longer resolves" });
-  } else if (entity.binding === "ambiguous") {
-    badges.push({ label: "Ambiguous source", tone: "warning", dashed: true, title: "Its source binding matches more than one place" });
-  }
-  if (entity.stale) badges.push({ label: "Stale", tone: "stale", title: "Its evidence predates a relevant change" });
-  return badges;
+const LIFECYCLE_BADGE: Record<Exclude<Entity["lifecycle"], "active">, CanvasBadge> = {
+  archived: { label: "Archived", tone: "neutral", dashed: true },
+  discarded: { label: "Discarded", tone: "neutral", dashed: true },
+  tombstoned: { label: "Removed from source", tone: "warning", dashed: true, title: "Its file or declaration no longer exists" },
+};
+
+/** Extra per-entity badges supplied by the caller (binding state, verdicts, freshness). */
+export type BadgeSource = (entity: Entity) => CanvasBadge[];
+
+export function lifecycleBadges(entity: Entity): CanvasBadge[] {
+  return entity.lifecycle === "active" ? [] : [LIFECYCLE_BADGE[entity.lifecycle]];
 }
 
-export function matchesText(entity: EntitySummary, kindLabel: string, text: string): boolean {
+export function matchesText(entity: Entity, typeLabel: string, text: string): boolean {
   const query = text.trim().toLowerCase();
   if (!query) return true;
-  return [entity.label, kindLabel, entity.path ?? "", entity.kind].some((field) => field.toLowerCase().includes(query));
+  return [entity.label, typeLabel, entity.key ?? "", entity.kind].some((field) => field.toLowerCase().includes(query));
 }
 
 /** Member → group map (direct membership) from structure relations among `ids`. */
-export function membership(relations: RelationSummary[], ids: Set<string>, isGroup: (id: string) => boolean): Map<string, string> {
+export function membership(relations: Relation[], ids: Set<string>, isGroup: (id: string) => boolean): Map<string, string> {
   const parent = new Map<string, string>();
   for (const r of relations) {
     const how = MEMBERSHIP[r.kind];
@@ -80,20 +79,25 @@ export function visibleRepresentative(id: string, parent: Map<string, string>, c
   return representative;
 }
 
-export function project(snapshot: Snapshot, vocabulary: Vocabulary | null, view: SavedView): Projection {
+export function project(
+  input: ProjectionInput,
+  vocabulary: VocabularyIndex | null,
+  view: SavedView,
+  extraBadges?: BadgeSource,
+): Projection {
   const { filters } = view;
   const hiddenSet = new Set(view.hidden);
   const collapsed = new Set(view.collapsed);
   let filteredOut = 0;
   let hidden = 0;
 
-  const kept = new Map<string, EntitySummary>();
-  for (const entity of snapshot.entities) {
-    if (filters.lifecycle === "active" && entity.lifecycle === "archived") {
+  const kept = new Map<string, Entity>();
+  for (const entity of input.entities) {
+    if (!filters.showInactive && entity.lifecycle !== "active") {
       filteredOut++;
       continue;
     }
-    if (filters.entityKinds && !filters.entityKinds.includes(entity.kind)) {
+    if (filters.kinds.length && !filters.kinds.includes(entity.kind)) {
       filteredOut++;
       continue;
     }
@@ -105,8 +109,8 @@ export function project(snapshot: Snapshot, vocabulary: Vocabulary | null, view:
   }
 
   const ids = new Set(kept.keys());
-  const isGroup = (id: string) => entityKind(vocabulary, kept.get(id)!.kind).group;
-  const parent = membership(snapshot.relations, ids, isGroup);
+  const isGroup = (id: string) => entityDisplay(vocabulary, kept.get(id)!).kind.group;
+  const parent = membership(input.relations, ids, isGroup);
   const representative = new Map<string, string>();
   for (const id of ids) representative.set(id, visibleRepresentative(id, parent, collapsed));
   const memberCount = new Map<string, number>();
@@ -118,39 +122,39 @@ export function project(snapshot: Snapshot, vocabulary: Vocabulary | null, view:
   const nodes: Omit<CanvasNode, "position">[] = [];
   for (const entity of kept.values()) {
     if (representative.get(entity.id) !== entity.id) continue;
-    const kind = entityKind(vocabulary, entity.kind);
-    const match = matchesText(entity, kind.label, filters.text);
+    const display = entityDisplay(vocabulary, entity);
+    const match = matchesText(entity, display.typeLabel, filters.text);
     if (filters.text.trim() && match) matches++;
     const isCollapsed = collapsed.has(entity.id);
     nodes.push({
       id: entity.id,
       title: entity.label,
-      typeLabel: kind.label,
-      typeIcon: kind.icon,
-      category: kind.category,
-      badges: entityBadges(entity),
-      inactive: entity.lifecycle === "archived",
+      typeLabel: display.typeLabel,
+      typeIcon: display.icon,
+      category: display.category,
+      badges: [...lifecycleBadges(entity), ...(extraBadges?.(entity) ?? [])],
+      inactive: entity.lifecycle !== "active",
       dimmed: !match,
-      ...(kind.group && (childCount.get(entity.id) || isCollapsed)
+      ...(display.kind.group && (childCount.get(entity.id) || isCollapsed)
         ? { group: { collapsed: isCollapsed, memberCount: memberCount.get(entity.id) ?? 0 } }
         : {}),
     });
   }
 
   const edges = new Map<string, CanvasEdge>();
-  for (const r of snapshot.relations) {
-    if (r.status === "rejected" && !filters.showRejected) continue;
-    if (filters.relationKinds && !filters.relationKinds.includes(r.kind)) continue;
+  for (const r of input.relations) {
+    if (r.status === "rejected" && !filters.showInactive) continue;
+    if (filters.relationKinds.length && !filters.relationKinds.includes(r.kind)) continue;
     const from = representative.get(r.from);
     const to = representative.get(r.to);
     if (!from || !to || from === to) continue;
-    const info = relationKind(vocabulary, r.kind);
+    const info = relationDisplay(vocabulary, r.kind);
     const rerouted = from !== r.from || to !== r.to;
     const id = rerouted ? `folded:${from}:${to}:${r.kind}:${r.status}` : r.id;
     const existing = edges.get(id);
     if (existing) {
       existing.count = (existing.count ?? 1) + 1;
-      existing.description = describe(kept, from, info.label, to, r.status, existing.count);
+      existing.description = describe(kept, from, info.reading, to, r.status, existing.count);
       continue;
     }
     edges.set(id, {
@@ -158,11 +162,11 @@ export function project(snapshot: Snapshot, vocabulary: Vocabulary | null, view:
       source: from,
       target: to,
       kind: r.kind,
-      label: info.label,
+      label: info.reading,
       family: info.family,
       status: r.status,
       ...(rerouted ? { count: 1 } : {}),
-      description: describe(kept, from, info.label, to, r.status, 1),
+      description: describe(kept, from, info.reading, to, r.status, 1),
     });
   }
 
@@ -172,15 +176,15 @@ export function project(snapshot: Snapshot, vocabulary: Vocabulary | null, view:
 }
 
 function describe(
-  entities: Map<string, EntitySummary>,
+  entities: Map<string, Entity>,
   from: string,
-  label: string,
+  reading: string,
   to: string,
-  status: RelationSummary["status"],
+  status: Relation["status"],
   count: number,
 ): string {
   const name = (id: string) => entities.get(id)?.label ?? id;
   const suffix = status === "accepted" ? "" : `, ${STATUS_LABELS[status].toLowerCase()}`;
   const many = count > 1 ? ` (${count} relationships)` : "";
-  return `${name(from)} ${label} ${name(to)}${suffix}${many}`;
+  return `${name(from)} ${reading} ${name(to)}${suffix}${many}`;
 }

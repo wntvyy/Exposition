@@ -5,14 +5,16 @@
 // event: a `graph:resync` (or a workspace change) re-reads everything.
 import { create } from "zustand";
 
-import { errorText, graphApi, type GraphEvent } from "./api";
-import type { GraphStatus, Vocabulary } from "./model";
+import type { GraphEvent } from "../../bindings/GraphEvent";
+import type { GraphStatus } from "../../bindings/GraphStatus";
+import { errorText, graphApi } from "./api";
+import type { VocabularyIndex } from "./model";
 
 export interface GraphState {
   started: boolean;
   status: GraphStatus | null;
   statusError: string | null;
-  vocabulary: Vocabulary | null;
+  vocabulary: VocabularyIndex | null;
   vocabularyError: string | null;
   /** Latest known graph revision (status, change, and reconcile events). */
   revision: number;
@@ -40,13 +42,23 @@ function bumpRevision(revision: number) {
 
 function onEvent(event: GraphEvent) {
   switch (event.kind) {
-    case "status":
+    case "status": {
+      const previous = useGraph.getState().status;
       useGraph.setState({ status: event.status, statusError: null });
-      bumpRevision(event.status.revision);
+      // A different project (or a newly attached graph) starts a new epoch.
+      if (previous && (previous.project !== event.status.project || previous.state.kind !== event.status.state.kind)) {
+        useGraph.setState((s) => ({ epoch: s.epoch + 1, revision: event.status.revision }));
+      } else {
+        bumpRevision(event.status.revision);
+      }
       break;
+    }
     case "changed":
+      bumpRevision(event.delta.revision);
+      break;
     case "reconciled":
       bumpRevision(event.revision);
+      useGraph.setState((s) => (s.status ? { status: { ...s.status, freshness: event.freshness } } : s));
       break;
   }
 }
@@ -94,6 +106,12 @@ export const graph = {
   noteRevision(revision: number): void {
     bumpRevision(revision);
   },
+
+  /** Replace the status (e.g. after a recovery action returned it). */
+  setStatus(status: GraphStatus): void {
+    useGraph.setState({ status, statusError: null });
+    bumpRevision(status.revision);
+  },
 };
 
 /** Test helper: stop listening and reset state. */
@@ -105,10 +123,10 @@ export function resetGraphForTests(): void {
 
 /** Is the graph usable for reads (attached or temporary read-only)? */
 export function canRead(status: GraphStatus | null): boolean {
-  return status !== null && (status.availability.kind === "attached" || status.availability.kind === "temporaryReadOnly");
+  return status !== null && (status.state.kind === "attached" || status.state.kind === "temporaryReadOnly");
 }
 
 /** May graph changes be proposed/applied? */
 export function canWrite(status: GraphStatus | null): boolean {
-  return status !== null && status.availability.kind === "attached";
+  return status !== null && status.state.kind === "attached";
 }

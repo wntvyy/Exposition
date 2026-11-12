@@ -1,14 +1,17 @@
 // Saved graph views: per-view node positions/sizes, viewport, filters, hidden
-// entities, collapsed groups, and local focus. Presentation only — a view
-// never changes entities or relations. Changes save automatically (debounced)
-// with the view's expected revision; a conflict adopts the newer saved view
-// and says so.
+// entities, and collapsed groups. Presentation only — a view never changes
+// entities or relations. Changes save automatically (debounced) with the
+// view's expected revision; a stale save (`graph.staleView`) adopts the newer
+// saved view and says so.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 
 import { notify } from "../../app/notifications";
-import { errorText, graphApi } from "./api";
+import type { GraphView } from "../../bindings/GraphView";
+import type { GraphViewInput } from "../../bindings/GraphViewInput";
+import type { ViewScope } from "../../bindings/ViewScope";
+import { errorCode, errorText, graphApi } from "./api";
 import type { CanvasViewport, Point } from "./canvas/types";
-import { defaultFilters, type NodeLayout, type SavedView, type ViewFilters, type ViewFocus } from "./model";
+import { defaultFilters, type ClientFilters, type NodeLayout, type SavedView } from "./model";
 
 export type SaveState = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -22,39 +25,99 @@ export interface ViewStoreState {
 
 export interface ViewStore {
   use: UseBoundStore<StoreApi<ViewStoreState>>;
+  /** Load the saved view of this scope (or start an unsaved one). */
   load(): Promise<void>;
   /** Committed node moves (layout only). */
   moveNodes(moves: Map<string, Point>): void;
-  /** Place nodes without saved positions (initial placement or Arrange). */
+  /** Place nodes: only those without a position unless `replace` (Arrange). */
   placeNodes(positions: Map<string, Point>, options?: { replace?: boolean }): void;
   setViewport(viewport: CanvasViewport): void;
-  setFilters(patch: Partial<ViewFilters>): void;
+  setFilters(patch: Partial<ClientFilters>): void;
   hide(ids: string[]): void;
   unhide(ids: string[]): void;
   unhideAll(): void;
   toggleCollapsed(id: string): void;
-  setFocus(focus: ViewFocus | null): void;
   /** Save now (e.g. before the window closes). */
   flush(): Promise<void>;
 }
 
 export const SAVE_DELAY_MS = 600;
 
-export function emptyView(id: string, name: string): SavedView {
+export function emptyView(name: string, scope: ViewScope): SavedView {
   return {
-    id,
+    id: null,
     name,
-    revision: 0,
+    scope,
+    revision: null,
     positions: {},
     viewport: null,
     filters: { ...defaultFilters },
     hidden: [],
     collapsed: [],
-    focus: null,
   };
 }
 
-export function createViewStore(id: string, name: string, options: { saveDelayMs?: number } = {}): ViewStore {
+export function fromGraphView(view: GraphView): SavedView {
+  const positions: Record<string, NodeLayout> = {};
+  for (const node of view.nodes) {
+    positions[node.entity] = {
+      x: node.x,
+      y: node.y,
+      ...(node.width !== null ? { width: node.width } : {}),
+      ...(node.height !== null ? { height: node.height } : {}),
+    };
+  }
+  return {
+    id: view.id,
+    name: view.name,
+    scope: view.scope,
+    revision: view.revision,
+    positions,
+    viewport: view.viewport,
+    filters: {
+      kinds: view.filters.kinds,
+      relationKinds: view.filters.relationKinds,
+      text: view.filters.text ?? "",
+      showInactive: view.filters.showInactive,
+    },
+    hidden: view.hidden,
+    collapsed: view.collapsed,
+  };
+}
+
+const clampZoom = (zoom: number) => Math.min(8, Math.max(0.05, zoom));
+
+export function toGraphViewInput(view: SavedView): GraphViewInput {
+  return {
+    id: view.id,
+    name: view.name,
+    scope: view.scope,
+    nodes: Object.entries(view.positions).map(([entity, p]) => ({
+      entity,
+      x: p.x,
+      y: p.y,
+      width: p.width ?? null,
+      height: p.height ?? null,
+    })),
+    viewport: view.viewport
+      ? { x: view.viewport.x, y: view.viewport.y, zoom: clampZoom(view.viewport.zoom) }
+      : { x: 0, y: 0, zoom: 1 },
+    filters: {
+      kinds: view.filters.kinds,
+      relationKinds: view.filters.relationKinds,
+      text: view.filters.text.trim() ? view.filters.text : null,
+      showInactive: view.filters.showInactive,
+      depth: null,
+    },
+    hidden: view.hidden,
+    collapsed: view.collapsed,
+    expectedRevision: view.revision,
+  };
+}
+
+const sameScope = (a: ViewScope, b: ViewScope) => JSON.stringify(a) === JSON.stringify(b);
+
+export function createViewStore(name: string, scope: ViewScope, options: { saveDelayMs?: number } = {}): ViewStore {
   const delay = options.saveDelayMs ?? SAVE_DELAY_MS;
   const use = create<ViewStoreState>(() => ({ view: null, loading: false, loadError: null, save: "idle", saveError: null }));
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -76,6 +139,21 @@ export function createViewStore(id: string, name: string, options: { saveDelayMs
     }, delay);
   };
 
+  const adoptLatest = async (id: string) => {
+    try {
+      const latest = fromGraphView(await graphApi().viewGet(id));
+      use.setState({ view: latest, save: "saved" });
+    } catch (error) {
+      use.setState({ save: "error", saveError: errorText(error) });
+    }
+    notify({
+      id: `graph-view-conflict-${name}`,
+      tone: "warning",
+      title: `The ${name} view changed elsewhere`,
+      body: "Showing its latest saved layout; your last change to this view was not saved.",
+    });
+  };
+
   const save = async (): Promise<void> => {
     if (saving) {
       dirtyAgain = true;
@@ -86,22 +164,17 @@ export function createViewStore(id: string, name: string, options: { saveDelayMs
     use.setState({ save: "saving", saveError: null });
     saving = (async () => {
       try {
-        const outcome = await graphApi().viewSave(view);
-        if (outcome.kind === "saved") {
-          // Keep edits made while saving; adopt only the new revision token.
-          use.setState((s) => ({ view: s.view ? { ...s.view, revision: outcome.view.revision } : outcome.view }));
-          use.setState({ save: dirtyAgain ? "pending" : "saved" });
-        } else {
-          use.setState({ view: outcome.current, save: "saved" });
-          notify({
-            id: `graph-view-conflict-${id}`,
-            tone: "warning",
-            title: `The ${name} view changed elsewhere`,
-            body: "Showing its latest saved layout; your last change to this view was not saved.",
-          });
-        }
+        const saved = await graphApi().viewSave(toGraphViewInput(view));
+        // Keep edits made while saving; adopt the id and new revision token.
+        use.setState((s) => ({ view: s.view ? { ...s.view, id: saved.id, revision: saved.revision } : fromGraphView(saved) }));
+        use.setState({ save: dirtyAgain ? "pending" : "saved" });
       } catch (error) {
-        use.setState({ save: "error", saveError: errorText(error) });
+        if (errorCode(error) === "graph.staleView" && view.id) {
+          dirtyAgain = false;
+          await adoptLatest(view.id);
+        } else {
+          use.setState({ save: "error", saveError: errorText(error) });
+        }
       } finally {
         saving = null;
       }
@@ -128,8 +201,9 @@ export function createViewStore(id: string, name: string, options: { saveDelayMs
     async load() {
       use.setState({ loading: true, loadError: null });
       try {
-        const saved = await graphApi().viewGet(id);
-        use.setState({ view: saved ?? emptyView(id, name), loading: false, save: "idle" });
+        const summary = (await graphApi().views()).find((v) => sameScope(v.scope, scope));
+        const view = summary ? fromGraphView(await graphApi().viewGet(summary.id)) : emptyView(name, scope);
+        use.setState({ view, loading: false, save: "idle" });
       } catch (error) {
         use.setState({ loading: false, loadError: errorText(error) });
       }
@@ -143,7 +217,11 @@ export function createViewStore(id: string, name: string, options: { saveDelayMs
     setViewport(viewport) {
       update((view) => ({
         ...view,
-        viewport: { x: Math.round(viewport.x), y: Math.round(viewport.y), zoom: Math.round(viewport.zoom * 1000) / 1000 },
+        viewport: {
+          x: Math.round(viewport.x),
+          y: Math.round(viewport.y),
+          zoom: Math.round(clampZoom(viewport.zoom) * 1000) / 1000,
+        },
       }));
     },
     setFilters(patch) {
@@ -163,9 +241,6 @@ export function createViewStore(id: string, name: string, options: { saveDelayMs
         ...view,
         collapsed: view.collapsed.includes(entity) ? view.collapsed.filter((c) => c !== entity) : [...view.collapsed, entity],
       }));
-    },
-    setFocus(focus) {
-      update((view) => ({ ...view, focus }));
     },
     async flush() {
       if (timer) {

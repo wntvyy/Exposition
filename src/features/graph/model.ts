@@ -1,10 +1,10 @@
-// The Graph feature's normalized model of backend graph data. `api.ts` maps the
-// generated IPC bindings into these shapes; every view consumes only these.
+// The Graph feature's model. Records come from the generated IPC bindings
+// (Rust owns identities, semantics, admission, validation); this module adds
+// the frontend's display layer: a vocabulary index for legends and pickers,
+// icons and color categories, and the client-side shape of a saved view.
 //
-// Semantics (which relations exist, endpoint rules, admission, validation)
-// come from the backend vocabulary and proposals. The tables at the end of
-// this file are display only: icon, color category, and a fallback label for
-// a kind id the vocabulary did not describe.
+// Endpoint rules here are display aids (ordering a picker); every change is
+// still proposed to and validated by the backend.
 import {
   Anchor,
   BookMarked,
@@ -12,500 +12,251 @@ import {
   Braces,
   CircleHelp,
   Database,
+  File,
   FileCode,
   FileText,
   FlaskConical,
   FlaskRound,
   Folder,
   FolderKanban,
+  Globe,
   Image,
   Library,
   Lightbulb,
   Quote,
   ScrollText,
   Search,
+  Settings2,
   Shapes,
   Sigma,
   StickyNote,
-  Table2,
   Workflow,
 } from "lucide-react";
 
-import type { IconComponent } from "../../ui/components";
+import type { AssertionStatus } from "../../bindings/AssertionStatus";
+import type { Entity } from "../../bindings/Entity";
+import type { EntityFamily } from "../../bindings/EntityFamily";
+import type { EntityKind } from "../../bindings/EntityKind";
+import type { FormalVerdict } from "../../bindings/FormalVerdict";
+import type { Freshness } from "../../bindings/Freshness";
+import type { Origin } from "../../bindings/Origin";
+import type { RelationFamily as BindingRelationFamily } from "../../bindings/RelationFamily";
+import type { RelationKind } from "../../bindings/RelationKind";
+import type { ResourceRole } from "../../bindings/ResourceRole";
+import type { ViewScope } from "../../bindings/ViewScope";
+import type { Vocabulary } from "../../bindings/Vocabulary";
+import type { IconComponent, Status } from "../../ui/components";
 import type { GraphCategory } from "../../ui/tokens";
-import type { AssertionStatus, RelationFamily } from "./canvas/types";
+import type { RelationFamily } from "./canvas/types";
 
-export type { AssertionStatus, RelationFamily };
+// ----- vocabulary index ----------------------------------------------------------------
 
-// ----- status ------------------------------------------------------------------
-
-export type GraphFreshness =
-  | { kind: "synchronized" }
-  | { kind: "reconciling" }
-  | { kind: "pending"; count: number }
-  | { kind: "unavailable"; reason?: string };
-
-export interface RecoveryOption {
-  id: string;
-  label: string;
-  description?: string;
-}
-
-export type GraphAvailability =
-  | { kind: "attached" }
-  | { kind: "temporaryReadOnly"; reason: string }
-  | { kind: "unavailable"; reason: string; recovery: RecoveryOption[] }
-  | { kind: "detached" };
-
-export interface GraphStatus {
-  projectId: string | null;
-  availability: GraphAvailability;
-  revision: number;
-  counts: { entities: number; relations: number };
-  freshness: GraphFreshness;
-}
-
-// ----- vocabulary ----------------------------------------------------------------
-
-export interface EntityKindInfo {
-  id: string;
-  label: string;
-  /** Plural label for lists ("Theorems"). */
-  plural: string;
-  description?: string;
+export interface EntityKindDisplay {
+  kind: EntityKind;
+  family: EntityFamily;
+  /** Vocabulary title ("Theorem"). */
+  title: string;
   category: GraphCategory;
   icon: IconComponent;
-  /** Can organize other entities (folder, collection, research space). */
+  /** Organizes other entities (project, folder, collection, research space). */
   group: boolean;
-  /** Shown in the Mathematics subsection. */
+  /** Shown in the Mathematics subsection (informal math and formal declarations). */
   mathematical: boolean;
-  /** A formal declaration (e.g. a Lean declaration). */
+  /** A statement a proof can target. */
+  statement: boolean;
   formal: boolean;
-  /** Users may create it manually through a proposal. */
+  /** People may create it through a proposal. */
   creatable: boolean;
-  /** Backed by a project file (its deletion is a file operation, not a graph edit). */
+  /** Backed by a project file or folder (deleting it is a file operation). */
   fileBacked: boolean;
 }
 
-export interface RelationKindInfo {
-  id: string;
+export interface RelationKindDisplay {
+  kind: RelationKind;
   family: RelationFamily;
   /** Forward reading: "A depends on B". */
-  label: string;
-  /** Reverse reading: "B is a dependency of A". */
-  inverseLabel: string;
-  description?: string;
-  /** Allowed source and target entity kinds (empty = any). */
-  from: string[];
-  to: string[];
-  /** Users may add it manually. */
+  reading: string;
+  /** Reverse reading for incoming relations: "B is a dependency of A". */
+  inverse: string;
+  /** Plain-language endpoint rule from the vocabulary. */
+  rule: string;
+  /** Allowed `from→to` kind pairs, as `${from}>${to}`. */
+  endpoints: Set<string>;
+  /** People may add or remove it. */
   manual: boolean;
 }
 
-export interface Vocabulary {
-  version: string;
-  entityKinds: Map<string, EntityKindInfo>;
-  relationKinds: Map<string, RelationKindInfo>;
+export interface VocabularyIndex {
+  version: number;
+  entityKinds: Map<EntityKind, EntityKindDisplay>;
+  relationKinds: Map<RelationKind, RelationKindDisplay>;
+  roles: ResourceRole[];
 }
 
-// ----- entities, relations, snapshots ---------------------------------------------
+const STATEMENTS = new Set<EntityKind>(["conjecture", "lemma", "theorem", "proposition", "corollary", "claim"]);
+const GROUPS = new Set<EntityKind>(["project", "folder", "collection", "researchSpace"]);
 
-export type Lifecycle = "active" | "archived";
-export type BindingState = "resolved" | "missing" | "ambiguous";
-
-export interface TextSpan {
-  start: number;
-  end: number;
-}
-
-export interface SourceBinding {
-  path: string;
-  range: TextSpan | null;
-  /** 0-based line of the range start, when known. */
-  line: number | null;
-  state: BindingState;
-  sourceVersion: string | null;
-  /** Inspected from an unsaved buffer (revision-labelled overlay), not the saved file. */
-  unsaved?: boolean;
-}
-
-export interface EntitySummary {
-  id: string;
-  kind: string;
-  label: string;
-  lifecycle: Lifecycle;
-  /** Primary binding state (worst of its bindings), null when unbound. */
-  binding: BindingState | null;
-  /** Primary path, when file-backed or bound. */
-  path: string | null;
-  /** Evidence is stale for current inputs. */
-  stale?: boolean;
-  /** Origin of the entity: indexed, user, agent, preset. */
-  origin?: string;
-}
-
-export interface RelationSummary {
-  id: string;
-  kind: string;
-  from: string;
-  to: string;
-  status: AssertionStatus;
-  origin: string;
-}
-
-export type CoverageState = "complete" | "partial" | "unknown" | "unsupported";
-
-export interface Coverage {
-  state: CoverageState;
-  /** What was or was not extracted, e.g. "LaTeX labels and theorem environments". */
-  detail?: string;
-  /** Files whose extraction is partial/unknown. */
-  unresolved: number;
-}
-
-export interface Snapshot {
-  revision: number;
-  entities: EntitySummary[];
-  relations: RelationSummary[];
-  /** The result was cut to the query limit. */
-  truncated: boolean;
-  /** Total matching entities, when known (> entities.length when truncated). */
-  total: number | null;
-  coverage: Coverage;
-  freshness: GraphFreshness;
-}
-
-export type SnapshotDirection = "outgoing" | "incoming" | "both";
-
-export interface SnapshotQuery {
-  kinds?: string[];
-  text?: string;
-  around?: { entity: string; depth: number; relationKinds?: string[]; direction?: SnapshotDirection };
-  limit?: number;
-  includeArchived?: boolean;
-}
-
-export interface EvidenceRecord {
-  id: string;
-  kind: string;
-  /** Human summary: "Lean audit of RunCheck at rev 4". */
-  summary: string;
-  outcome: string | null;
-  recordedAt: string | null;
-  /** Current / stale / unknown applicability for current inputs. */
-  freshness: "current" | "stale" | "unknown";
-  /** Lean evidence: the audited declaration, its printed statement and axioms. */
-  formal?: {
-    declaration: string;
-    statement: string | null;
-    axioms: string[];
-    verdict: VerifierVerdict | null;
-    toolchain: string | null;
-    /** Dependency edges the checker exposed; null = not exposed by the evidence. */
-    dependencies: string[] | null;
-  };
-}
-
-export interface EntityDetail extends EntitySummary {
-  description?: string;
-  bindings: SourceBinding[];
-  relations: RelationSummary[];
-  /** Other endpoints of `relations`, for labels. */
-  neighbors: EntitySummary[];
-  evidence: EvidenceRecord[];
-  provenance: { origin: string; createdAt: string | null; detail?: string }[];
-  revision: number;
-}
-
-// ----- source inspection ---------------------------------------------------------------
-
-export interface SourceInspection {
-  path: string;
-  offset: number;
-  revision: number | null;
-  /** Answered from the unsaved buffer overlay rather than the saved file. */
-  unsaved: boolean;
-  entities: EntitySummary[];
-  relations: RelationSummary[];
-  neighbors: EntitySummary[];
-  unresolved: SourceBinding[];
-  coverage: Coverage;
-  freshness: GraphFreshness;
-  graphRevision: number;
-}
-
-// ----- impact -------------------------------------------------------------------------
-
-export type ImpactAction = "needsReview" | "stale" | "citationReview";
-
-export interface ImpactItem {
-  entity: EntitySummary;
-  path: string[];
-  reason: string;
-  action: ImpactAction;
-}
-
-export interface ImpactResult {
-  items: ImpactItem[];
-  cycles: string[];
-  truncated: boolean;
-  workLimited: boolean;
-}
-
-// ----- changes ---------------------------------------------------------------------------
-
-export type GraphOperation =
-  | { op: "createEntity"; kind: string; label: string; metadata?: Record<string, unknown> }
-  | { op: "updateLabel"; entity: string; label: string }
-  | { op: "setLifecycle"; entity: string; lifecycle: Lifecycle }
-  | { op: "addRelation"; kind: string; from: string; to: string }
-  | { op: "setRelationStatus"; relation: string; status: "accepted" | "rejected" }
-  | { op: "removeRelation"; relation: string }
-  | { op: "addMember"; collection: string; entity: string }
-  | { op: "removeMember"; collection: string; entity: string };
-
-export interface Diagnostic {
-  severity: "error" | "warning" | "info";
-  code: string;
-  message: string;
-  /** Index of the operation it concerns. */
-  operation: number | null;
-}
-
-export interface Proposal {
-  id: string | null;
-  baseRevision: number;
-  operations: GraphOperation[];
-  valid: boolean;
-  diagnostics: Diagnostic[];
-  /** Human summary of the effect, when the backend provides one. */
-  summary?: string;
-}
-
-export type ApplyOutcome =
-  | { kind: "applied"; revision: number }
-  | { kind: "conflict"; currentRevision: number }
-  | { kind: "invalid"; diagnostics: Diagnostic[] };
-
-// ----- saved views -----------------------------------------------------------------------
-
-export interface ViewFilters {
-  /** Entity kinds to show (null = all). */
-  entityKinds: string[] | null;
-  /** Relation kinds to show (null = all). */
-  relationKinds: string[] | null;
-  lifecycle: "active" | "all";
-  /** Show rejected suggestions. */
-  showRejected: boolean;
-  text: string;
-}
-
-export interface ViewFocus {
-  entity: string;
-  depth: number;
-  direction: SnapshotDirection;
-}
-
-export interface NodeLayout {
-  x: number;
-  y: number;
-  width?: number;
-  height?: number;
-}
-
-export interface SavedView {
-  id: string;
-  name: string;
-  /** Expected-revision token for saves. */
-  revision: number;
-  positions: Record<string, NodeLayout>;
-  viewport: { x: number; y: number; zoom: number } | null;
-  filters: ViewFilters;
-  hidden: string[];
-  collapsed: string[];
-  focus: ViewFocus | null;
-}
-
-export type ViewSaveOutcome = { kind: "saved"; view: SavedView } | { kind: "conflict"; current: SavedView };
-
-export const defaultFilters: ViewFilters = {
-  entityKinds: null,
-  relationKinds: null,
-  lifecycle: "active",
-  showRejected: false,
-  text: "",
+const KIND_ICONS: Partial<Record<EntityKind, IconComponent>> = {
+  project: FolderKanban,
+  folder: Folder,
+  collection: Library,
+  researchSpace: FlaskConical,
+  resource: File,
+  externalResource: Globe,
+  definition: BookOpen,
+  assumption: Anchor,
+  conjecture: CircleHelp,
+  lemma: Sigma,
+  theorem: Sigma,
+  proposition: Sigma,
+  corollary: Sigma,
+  claim: Quote,
+  proof: ScrollText,
+  question: CircleHelp,
+  mathObject: Shapes,
+  formalDeclaration: Braces,
+  reference: BookMarked,
+  experiment: FlaskRound,
+  finding: Lightbulb,
+  investigation: Search,
+  workflow: Workflow,
 };
 
-// ----- Mathematics ---------------------------------------------------------------------------
-
-/** Exact verifier verdict vocabulary (Lean audit), or none. */
-export type VerifierVerdict =
-  | "checked"
-  | "checkedWithAxioms"
-  | "incomplete"
-  | "reliesOnCompiledCode"
-  | "partiallyChecked"
-  | "notVerified"
-  | "errors";
-
-export type InformalState = "none" | "draft" | "proofLinked" | "underReview" | "reviewed" | "disputed";
-export type FormalAssociationState = "none" | "suggested" | "proposed" | "reviewed" | "rejected";
-export type EvidenceFreshness = "current" | "stale" | "unknown";
-
-export interface MathRow {
-  entity: EntitySummary;
-  binding: SourceBinding | null;
-  informal: InformalState;
-  /** Entities whose `proof_of` targets this statement. */
-  proofs: string[];
-  formal: FormalAssociationState;
-  /** Formal declarations associated (`formalizes`). */
-  declarations: string[];
-  verdict: VerifierVerdict | null;
-  freshness: EvidenceFreshness;
-  coverage: Coverage;
-}
-
-export interface MathOverview {
-  revision: number;
-  rows: MathRow[];
-  relations: RelationSummary[];
-  coverage: Coverage;
-  freshness: GraphFreshness;
-  /** Formal dependency edges from checker evidence are available. */
-  formalDependencies: "available" | "unavailable";
-  formalDependenciesReason?: string;
-}
-
-// ----- display tables (fallbacks; the vocabulary wins) ---------------------------------------
-
-interface KindDisplay {
-  category: GraphCategory;
-  icon: IconComponent;
-}
-
-const KIND_DISPLAY: Record<string, KindDisplay> = {
-  project: { category: "structure", icon: FolderKanban },
-  folder: { category: "structure", icon: Folder },
-  collection: { category: "structure", icon: Library },
-  research_space: { category: "structure", icon: FlaskConical },
-  manuscript: { category: "document", icon: FileText },
-  document: { category: "document", icon: FileText },
-  note: { category: "document", icon: StickyNote },
-  source: { category: "document", icon: FileCode },
-  script: { category: "document", icon: FileCode },
-  file: { category: "document", icon: FileText },
-  asset: { category: "data", icon: Image },
-  dataset: { category: "data", icon: Database },
-  artifact: { category: "data", icon: Image },
-  figure: { category: "data", icon: Image },
-  table: { category: "data", icon: Table2 },
-  result: { category: "data", icon: Lightbulb },
-  finding: { category: "data", icon: Lightbulb },
-  experiment: { category: "data", icon: FlaskRound },
-  reference: { category: "reference", icon: BookMarked },
-  citation: { category: "reference", icon: BookMarked },
-  external_resource: { category: "reference", icon: BookMarked },
-  definition: { category: "math", icon: BookOpen },
-  assumption: { category: "math", icon: Anchor },
-  conjecture: { category: "math", icon: CircleHelp },
-  lemma: { category: "math", icon: Sigma },
-  theorem: { category: "math", icon: Sigma },
-  proposition: { category: "math", icon: Sigma },
-  corollary: { category: "math", icon: Sigma },
-  claim: { category: "math", icon: Quote },
-  proof: { category: "math", icon: ScrollText },
-  question: { category: "math", icon: CircleHelp },
-  math_object: { category: "math", icon: Shapes },
-  formal_declaration: { category: "formal", icon: Braces },
-  lean_declaration: { category: "formal", icon: Braces },
-  investigation: { category: "workflow", icon: Search },
-  workflow: { category: "workflow", icon: Workflow },
+const FAMILY_CATEGORY: Record<EntityFamily, GraphCategory> = {
+  structure: "structure",
+  resource: "document",
+  mathematics: "math",
+  citation: "reference",
+  research: "data",
+  workflow: "workflow",
 };
 
-const MATH_KINDS = new Set([
-  "definition",
-  "assumption",
-  "conjecture",
-  "lemma",
-  "theorem",
-  "proposition",
-  "corollary",
-  "claim",
-  "proof",
-  "question",
-  "math_object",
-]);
-const FORMAL_KINDS = new Set(["formal_declaration", "lean_declaration"]);
-const GROUP_KINDS = new Set(["project", "folder", "collection", "research_space"]);
-const FILE_KINDS = new Set(["manuscript", "document", "note", "source", "script", "file", "asset", "dataset", "artifact", "figure", "table"]);
-
-const RELATION_FAMILY: Record<string, RelationFamily> = {
-  contains: "structure",
-  member_of: "structure",
-  anchored_in: "structure",
-  imports: "resource",
-  uses_asset: "resource",
-  depends_on: "math",
-  assumes: "math",
-  proof_of: "math",
-  references: "citation",
-  evidence_for: "evidence",
-  derived_from: "evidence",
-  formalizes: "formal",
+const ROLE_DISPLAY: Record<ResourceRole, { label: string; icon: IconComponent; category: GraphCategory }> = {
+  manuscript: { label: "Manuscript", icon: FileText, category: "document" },
+  note: { label: "Note", icon: StickyNote, category: "document" },
+  script: { label: "Script", icon: FileCode, category: "document" },
+  dataset: { label: "Dataset", icon: Database, category: "data" },
+  artifact: { label: "Artifact", icon: Image, category: "data" },
+  asset: { label: "Asset", icon: Image, category: "data" },
+  formalSource: { label: "Formal source", icon: Braces, category: "formal" },
+  bibliography: { label: "Bibliography", icon: BookMarked, category: "reference" },
+  configuration: { label: "Configuration", icon: Settings2, category: "structure" },
+  other: { label: "File", icon: File, category: "document" },
 };
 
-/** "research_space" → "Research space". */
+const RELATION_FAMILY: Record<BindingRelationFamily, RelationFamily> = {
+  structure: "structure",
+  resourceUse: "resource",
+  mathematics: "math",
+  citation: "citation",
+  evidence: "evidence",
+  formal: "formal",
+};
+
+/** Display-only reverse readings (the vocabulary gives the forward reading). */
+const INVERSE: Record<RelationKind, string> = {
+  contains: "is in",
+  memberOf: "has member",
+  anchoredIn: "declares",
+  imports: "is imported by",
+  usesAsset: "is used by",
+  dependsOn: "is a dependency of",
+  assumes: "is assumed by",
+  proofOf: "is proved by",
+  references: "is referenced by",
+  evidenceFor: "is supported by",
+  derivedFrom: "has derivative",
+  formalizes: "is formalized by",
+};
+
+export function indexVocabulary(vocabulary: Vocabulary): VocabularyIndex {
+  const entityKinds = new Map<EntityKind, EntityKindDisplay>();
+  for (const info of vocabulary.entityKinds) {
+    entityKinds.set(info.kind, {
+      kind: info.kind,
+      family: info.family,
+      title: info.title,
+      category: info.kind === "formalDeclaration" ? "formal" : FAMILY_CATEGORY[info.family],
+      icon: KIND_ICONS[info.kind] ?? Shapes,
+      group: GROUPS.has(info.kind),
+      mathematical: info.family === "mathematics",
+      statement: STATEMENTS.has(info.kind),
+      formal: info.kind === "formalDeclaration",
+      creatable: info.creatable,
+      fileBacked: info.kind === "resource" || info.kind === "folder",
+    });
+  }
+  const relationKinds = new Map<RelationKind, RelationKindDisplay>();
+  for (const info of vocabulary.relationKinds) {
+    relationKinds.set(info.kind, {
+      kind: info.kind,
+      family: RELATION_FAMILY[info.family],
+      reading: info.reading,
+      inverse: INVERSE[info.kind],
+      rule: info.rule,
+      endpoints: new Set(info.endpoints.map(([from, to]) => `${from}>${to}`)),
+      manual: info.manual,
+    });
+  }
+  return { version: vocabulary.version, entityKinds, relationKinds, roles: vocabulary.resourceRoles };
+}
+
+/** "researchSpace" → "Research space". */
 export function humanize(id: string): string {
   const words = id.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").trim().toLowerCase();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
-export function displayForKind(kind: string): KindDisplay {
-  return KIND_DISPLAY[kind] ?? { category: "structure", icon: Shapes };
-}
-
-/** Fallback description of an entity kind the vocabulary did not list. */
-export function fallbackEntityKind(kind: string): EntityKindInfo {
-  const display = displayForKind(kind);
-  const label = humanize(kind);
+export function kindDisplay(index: VocabularyIndex | null, kind: EntityKind): EntityKindDisplay {
+  const known = index?.entityKinds.get(kind);
+  if (known) return known;
   return {
-    id: kind,
-    label,
-    plural: `${label}s`,
-    category: display.category,
-    icon: display.icon,
-    group: GROUP_KINDS.has(kind),
-    mathematical: MATH_KINDS.has(kind) || FORMAL_KINDS.has(kind),
-    formal: FORMAL_KINDS.has(kind),
+    kind,
+    family: "structure",
+    title: humanize(kind),
+    category: "structure",
+    icon: KIND_ICONS[kind] ?? Shapes,
+    group: GROUPS.has(kind),
+    mathematical: false,
+    statement: STATEMENTS.has(kind),
+    formal: kind === "formalDeclaration",
     creatable: false,
-    fileBacked: FILE_KINDS.has(kind),
+    fileBacked: kind === "resource" || kind === "folder",
   };
 }
 
-/** Fallback description of a relation kind the vocabulary did not list. */
-export function fallbackRelationKind(kind: string): RelationKindInfo {
-  const label = humanize(kind).toLowerCase();
-  return {
-    id: kind,
-    family: RELATION_FAMILY[kind] ?? "structure",
-    label,
-    inverseLabel: `${label} (inverse)`,
-    from: [],
-    to: [],
-    manual: false,
-  };
+export function relationDisplay(index: VocabularyIndex | null, kind: RelationKind): RelationKindDisplay {
+  return (
+    index?.relationKinds.get(kind) ?? {
+      kind,
+      family: "structure",
+      reading: humanize(kind).toLowerCase(),
+      inverse: INVERSE[kind] ?? `${humanize(kind).toLowerCase()} (inverse)`,
+      rule: "",
+      endpoints: new Set(),
+      manual: false,
+    }
+  );
 }
 
-export const familyFallback = (kind: string): RelationFamily => RELATION_FAMILY[kind] ?? "structure";
-export const isMathKindFallback = (kind: string) => MATH_KINDS.has(kind) || FORMAL_KINDS.has(kind);
-
-export function entityKind(vocabulary: Vocabulary | null, kind: string): EntityKindInfo {
-  return vocabulary?.entityKinds.get(kind) ?? fallbackEntityKind(kind);
+/** Type label, icon, and color of one entity (resources by their first role). */
+export function entityDisplay(index: VocabularyIndex | null, entity: Pick<Entity, "kind" | "roles">) {
+  const kind = kindDisplay(index, entity.kind);
+  const role = entity.kind === "resource" ? entity.roles[0] : undefined;
+  if (role) {
+    const r = ROLE_DISPLAY[role];
+    return { typeLabel: r.label, icon: r.icon, category: r.category, kind };
+  }
+  return { typeLabel: kind.title, icon: kind.icon, category: kind.category, kind };
 }
 
-export function relationKind(vocabulary: Vocabulary | null, kind: string): RelationKindInfo {
-  return vocabulary?.relationKinds.get(kind) ?? fallbackRelationKind(kind);
+export function roleLabel(role: ResourceRole): string {
+  return ROLE_DISPLAY[role].label;
+}
+
+/** Display ordering only: does the vocabulary list this endpoint pair? */
+export function endpointAllowed(relation: RelationKindDisplay, from: EntityKind, to: EntityKind): boolean {
+  return relation.endpoints.has(`${from}>${to}`);
 }
 
 export const FAMILY_LABELS: Record<RelationFamily, string> = {
@@ -525,7 +276,96 @@ export const STATUS_LABELS: Record<AssertionStatus, string> = {
   rejected: "Rejected",
 };
 
-/** Does the vocabulary allow `kind` between entities of these kinds? (Display ordering only; the backend validates.) */
-export function endpointAllowed(info: RelationKindInfo, fromKind: string, toKind: string): boolean {
-  return (info.from.length === 0 || info.from.includes(fromKind)) && (info.to.length === 0 || info.to.includes(toKind));
+export function originLabel(origin: Origin): string {
+  switch (origin.kind) {
+    case "extracted":
+      return `Extracted (${origin.extractor})`;
+    case "user":
+      return "You";
+    case "agent":
+      return "Agent task";
+    case "preset":
+      return `Preset ${origin.blueprint}`;
+    case "service":
+      return `Service (${origin.service})`;
+  }
+}
+
+// ----- verification vocabulary ------------------------------------------------------------
+
+/**
+ * Exact verifier verdict labels (the Lean status vocabulary of
+ * `src/features/lean/status.ts`); only a clean result is ever "Checked".
+ */
+export const VERDICT_VIEW: Record<FormalVerdict, { label: string; status: Status; sentence: string }> = {
+  checked: { label: "Checked", status: "succeeded", sentence: "Checked by Lean's kernel with only the standard axioms." },
+  checkedWithAxioms: {
+    label: "Checked with axioms",
+    status: "warning",
+    sentence: "Checked, but it depends on axioms beyond Lean's standard ones; it holds only if they do.",
+  },
+  incomplete: { label: "Incomplete (sorry)", status: "warning", sentence: "The proof is incomplete: it depends on sorry." },
+  reliesOnCompiledCode: {
+    label: "Relies on compiled code",
+    status: "warning",
+    sentence: "Checked by trusting compiled code (native_decide or similar) instead of the kernel.",
+  },
+  partiallyChecked: { label: "Partially checked", status: "warning", sentence: "Only part of the file could be checked." },
+  notVerified: { label: "Not verified", status: "warning", sentence: "The audit could not verify this result." },
+  errors: { label: "Errors", status: "failed", sentence: "Lean reported errors." },
+};
+
+/** Freshness as a status: stale and unknown are never shown as success. */
+export function freshnessView(freshness: Freshness | null): { label: string; status: Status; detail: string } {
+  if (!freshness) return { label: "No evidence", status: "idle", detail: "There is no evidence to be current or stale." };
+  switch (freshness.kind) {
+    case "current":
+      return { label: "Current", status: "idle", detail: "The evidence matches the current sources." };
+    case "stale":
+      return { label: "Stale", status: "stale", detail: freshness.reasons.join("; ") || "A relevant source changed." };
+    case "unknown":
+      return { label: "Unknown", status: "unavailable", detail: freshness.reason };
+  }
+}
+
+// ----- saved views (client shape) ------------------------------------------------------------
+
+export interface ClientFilters {
+  /** Entity kinds to show (empty = all). */
+  kinds: EntityKind[];
+  /** Relation kinds to show (empty = all). */
+  relationKinds: RelationKind[];
+  text: string;
+  /** Show archived/discarded/tombstoned entities and rejected suggestions. */
+  showInactive: boolean;
+}
+
+export interface NodeLayout {
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+}
+
+export interface SavedView {
+  /** Backend id; null until first saved. */
+  id: string | null;
+  name: string;
+  scope: ViewScope;
+  /** Expected revision for the next save; null = create. */
+  revision: number | null;
+  positions: Record<string, NodeLayout>;
+  viewport: { x: number; y: number; zoom: number } | null;
+  filters: ClientFilters;
+  hidden: string[];
+  collapsed: string[];
+}
+
+export const defaultFilters: ClientFilters = { kinds: [], relationKinds: [], text: "", showInactive: false };
+
+/** Local dependency focus (transient, not saved): show `depth` relations around an entity. */
+export interface ViewFocus {
+  entity: string;
+  depth: number;
+  direction: "outgoing" | "incoming" | "both";
 }
