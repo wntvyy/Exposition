@@ -26,10 +26,15 @@ pub fn position(index: &LineIndex, offset: u32) -> Result<Value, TextError> {
 pub fn offset_of(index: &LineIndex, value: &Value) -> Option<u32> {
     let line = value.get("line")?.as_u64()?;
     let character = value.get("character")?.as_u64()?;
+    offset_at(index, line.min(u32::MAX as u64) as u32, character.min(u32::MAX as u64) as u32)
+}
+
+/// UTF-16 offset of a zero-based line and UTF-16 column, clamped like [`offset_of`].
+pub fn offset_at(index: &LineIndex, line: u32, character: u32) -> Option<u32> {
     if line as usize >= index.line_count() {
         return Some(index.len_utf16() as u32);
     }
-    let lc = LineColumn { line: line as u32, character: character.min(u32::MAX as u64) as u32 };
+    let lc = LineColumn { line, character };
     match index.offset(lc) {
         Ok(o) => Some(o as u32),
         // Past the line content: `len` is that line's content end.

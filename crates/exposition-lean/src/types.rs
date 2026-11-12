@@ -30,6 +30,19 @@ pub struct LeanToolchainInfo {
     pub note: Option<String>,
 }
 
+/// How incomplete material was found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum SorrySource {
+    /// Lean warned "declaration uses `sorry`".
+    Warning,
+    /// The axiom audit found `sorryAx` among the declaration's axioms: the
+    /// `sorry` is imported, reached through another declaration, or its warning
+    /// was suppressed (`#guard_msgs`, `warn.sorry false`).
+    AxiomAudit,
+}
+
 /// Where a declaration is incomplete.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -43,6 +56,20 @@ pub struct SorryLocation {
     pub declaration: Option<String>,
     /// The `sorry`/`admit` tokens inside the declaration, when Lean reported them.
     pub tokens: Vec<TextRange>,
+    pub source: SorrySource,
+}
+
+/// A declaration of the checked file and the axioms beyond Lean's standard
+/// ones (`propext`, `Classical.choice`, `Quot.sound`) that it depends on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AxiomUse {
+    pub declaration: String,
+    /// Range of the declaration name in the checked text, when known.
+    pub range: Option<TextRange>,
+    pub line: Option<u32>,
+    pub axioms: Vec<String>,
 }
 
 /// Checking status of one Lean document.
@@ -60,15 +87,45 @@ pub enum LeanStatus {
     /// Checking runs project code (lakefile, `#eval`, macros); the workspace is not trusted.
     Untrusted { workspace_root: String },
     /// The server is processing `revision`. `processing` lists the ranges
-    /// still being elaborated (UTF-16, over that revision's text).
-    Checking { revision: u64, toolchain: String, starting: bool, processing: Vec<TextRange> },
-    /// Lean finished `revision` with no errors and no `sorry`.
-    Checked { revision: u64, toolchain: String, warnings: u32 },
-    /// Lean finished `revision` with no errors, but `count` declarations use
-    /// `sorry` (incomplete material).
+    /// still being elaborated (UTF-16, over that revision's text). `auditing`:
+    /// Lean reported no errors and the axiom audit is running.
+    Checking { revision: u64, toolchain: String, starting: bool, auditing: bool, processing: Vec<TextRange> },
+    /// A checked proof: Lean elaborated all of `revision` with no errors, no
+    /// `sorry` (also not through imports or suppressed warnings), the kernel
+    /// checked it, and its declarations use only the standard axioms listed.
+    Checked { revision: u64, toolchain: String, warnings: u32, axioms: Vec<String> },
+    /// Incomplete: no errors, but `count` declarations depend on `sorry`
+    /// (directly, through an import, or with the warning suppressed).
     CheckedWithSorry { revision: u64, toolchain: String, count: u32, locations: Vec<SorryLocation>, warnings: u32 },
+    /// No errors, but declarations depend on axioms beyond the standard ones
+    /// (e.g. a user `axiom`). Not a checked proof of the stated results alone.
+    CheckedWithAxioms {
+        revision: u64,
+        toolchain: String,
+        axioms: Vec<String>,
+        declarations: Vec<AxiomUse>,
+        warnings: u32,
+    },
+    /// No errors, but declarations trust compiled code instead of the kernel
+    /// (`native_decide`, `Lean.ofReduceBool`, `Lean.trustCompiler`).
+    ReliesOnCompiledCode {
+        revision: u64,
+        toolchain: String,
+        axioms: Vec<String>,
+        declarations: Vec<AxiomUse>,
+        warnings: u32,
+    },
+    /// Elaboration stopped before the end of the file (e.g. `#exit`); the rest
+    /// was never checked. `line`: zero-based line where it stopped, if known.
+    PartiallyChecked { revision: u64, toolchain: String, line: Option<u32>, reason: String },
+    /// Lean reported no errors, but the result cannot be trusted as checked:
+    /// kernel checking was disabled, or the axiom audit could not run.
+    Unverified { revision: u64, toolchain: String, reason: String },
     /// Lean finished `revision` and reported errors.
     Errors { revision: u64, toolchain: String, count: u32, sorry_count: u32 },
+    /// The language server could not be started (e.g. too many interactive
+    /// sessions are running); it is retried automatically and on Restart.
+    ServerUnavailable { reason: String },
     /// The language server stopped unexpectedly.
     ServerCrashed { message: String, restarting: bool, attempts: u32 },
 }
@@ -79,6 +136,10 @@ impl LeanStatus {
         match self {
             LeanStatus::Checked { revision, .. }
             | LeanStatus::CheckedWithSorry { revision, .. }
+            | LeanStatus::CheckedWithAxioms { revision, .. }
+            | LeanStatus::ReliesOnCompiledCode { revision, .. }
+            | LeanStatus::PartiallyChecked { revision, .. }
+            | LeanStatus::Unverified { revision, .. }
             | LeanStatus::Errors { revision, .. } => Some(*revision),
             _ => None,
         }
@@ -134,9 +195,22 @@ pub enum LeanToolchainState {
 pub enum LeanServerState {
     Stopped,
     Starting,
-    Running { job: JobId, pid: Option<u32> },
-    Crashed { message: String, attempts: u32, restarting: bool },
-    Untrusted { workspace_root: String },
+    Running {
+        job: JobId,
+        pid: Option<u32>,
+    },
+    Crashed {
+        message: String,
+        attempts: u32,
+        restarting: bool,
+    },
+    Untrusted {
+        workspace_root: String,
+    },
+    /// Could not start (e.g. too many interactive sessions); retried.
+    Unavailable {
+        reason: String,
+    },
 }
 
 /// A Lean project found in the workspace.
@@ -247,10 +321,17 @@ pub struct LeanCheckReport {
     pub project_root: Option<String>,
     pub toolchain: Option<LeanToolchainInfo>,
     pub status: LeanStatus,
-    /// True only if Lean finished exactly this text without errors and without `sorry`.
+    /// True only for a checked proof (`LeanStatus::Checked`): Lean elaborated
+    /// exactly this text completely, with no errors, no `sorry` (including
+    /// imported or suppressed), kernel checking enabled, and only the standard
+    /// axioms.
     pub checked: bool,
     pub diagnostics: Vec<Diagnostic>,
     pub sorries: Vec<SorryLocation>,
+    /// Every axiom the file's declarations depend on (from the axiom audit).
+    pub axioms: Vec<String>,
+    /// Declarations depending on anything beyond the standard axioms.
+    pub axiom_uses: Vec<AxiomUse>,
     pub goals: Vec<LeanCheckGoals>,
     pub duration_ms: u64,
 }

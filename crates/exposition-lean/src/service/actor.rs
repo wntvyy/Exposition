@@ -19,9 +19,21 @@ enum Phase {
     Stopped,
     Starting,
     Running(Running),
-    Crashed { message: String, restarting: bool },
-    Untrusted { workspace_root: String },
-    Stopping { restart: bool },
+    Crashed {
+        message: String,
+        restarting: bool,
+    },
+    Untrusted {
+        workspace_root: String,
+    },
+    /// The server could not be started for a reason that may pass (e.g. too
+    /// many interactive sessions); retried periodically and on any change.
+    Unavailable {
+        reason: String,
+    },
+    Stopping {
+        restart: bool,
+    },
 }
 
 struct Server {
@@ -49,7 +61,7 @@ struct SyncState {
     version: u64,
     text: Arc<str>,
     index: Arc<LineIndex>,
-    /// Latest `publishDiagnostics` for `version`.
+    /// Latest `publishDiagnostics` for `version` (converted lazily).
     lsp_diagnostics: Vec<Value>,
     /// Lean reported a fatal error for `version` (`$/lean/fileProgress` kind 2).
     fatal: bool,
@@ -70,10 +82,39 @@ struct Doc {
     diagnostics: Vec<Diagnostic>,
     diagnostics_revision: Option<u64>,
     sorries: Vec<SorryLocation>,
+    /// Every axiom the declarations depend on, and those beyond the standard
+    /// ones, from the axiom audit of `diagnostics_revision`.
+    axioms: Vec<String>,
+    axiom_uses: Vec<AxiomUse>,
     sync: Option<SyncState>,
     waiters: Vec<(u64, oneshot::Sender<()>)>,
     dirty: bool,
+    /// `sync.lsp_diagnostics` changed and `diagnostics` is not yet converted.
+    diagnostics_pending: bool,
+    last_emit: Option<Instant>,
     goal_requests: Vec<i64>,
+    /// Work towards the final status of the current version: the axiom
+    /// audit (started speculatively once the version is stable, so it runs
+    /// alongside Lean), `sorry` token locations, and Lean's own completion.
+    work: Option<CheckWork>,
+}
+
+struct CheckWork {
+    generation: u64,
+    version: u64,
+    /// Cancels the audit jobs when the work is dropped or superseded.
+    cancel: watch::Sender<bool>,
+    audit: Option<audit::AuditOutcome>,
+    /// `None` while the `sorry` token request is pending.
+    tokens: Option<Vec<TextRange>>,
+    /// Lean answered `waitForDiagnostics` for `version` with no errors.
+    lean_done: bool,
+}
+
+impl Drop for CheckWork {
+    fn drop(&mut self) {
+        let _ = self.cancel.send(true);
+    }
 }
 
 impl Doc {
@@ -91,15 +132,40 @@ impl Doc {
             diagnostics: Vec::new(),
             diagnostics_revision: None,
             sorries: Vec::new(),
+            axioms: Vec::new(),
+            axiom_uses: Vec::new(),
             sync: None,
             waiters: Vec::new(),
             dirty: false,
+            diagnostics_pending: false,
+            last_emit: None,
             goal_requests: Vec::new(),
+            work: None,
         }
     }
 
     fn is_temp(&self) -> bool {
         self.temp_text.is_some()
+    }
+
+    /// Drop (and cancel) work for an older version.
+    fn cancel_audit(&mut self) {
+        self.work = None;
+    }
+
+    /// Convert the latest published diagnostics (done lazily: Lean republishes
+    /// the whole list after every command, which is far more often than the UI
+    /// needs it).
+    fn convert_pending(&mut self) {
+        if !self.diagnostics_pending {
+            return;
+        }
+        self.diagnostics_pending = false;
+        if let Some(sync) = &self.sync {
+            self.diagnostics =
+                sync.lsp_diagnostics.iter().map(|d| convert::diagnostic(d, &sync.index, &self.path)).collect();
+            self.diagnostics_revision = Some(sync.version);
+        }
     }
 }
 
@@ -191,6 +257,8 @@ impl Actor {
     fn emit(&mut self, id: &DocumentId) {
         let Some(doc) = self.docs.get_mut(id) else { return };
         doc.dirty = false;
+        doc.last_emit = Some(Instant::now());
+        doc.convert_pending();
         if doc.status.is_settled() {
             for (_, waiter) in doc.waiters.drain(..) {
                 let _ = waiter.send(());
@@ -236,12 +304,27 @@ impl Actor {
     }
 
     fn on_tick(&mut self) {
-        let dirty: Vec<DocumentId> = self.docs.values().filter(|d| d.dirty).map(|d| d.id.clone()).collect();
+        // Progress and partial diagnostics are coalesced: at most every tick,
+        // and at most once a second for documents with many diagnostics.
+        let now = Instant::now();
+        let dirty: Vec<DocumentId> = self
+            .docs
+            .values()
+            .filter(|d| d.dirty)
+            .filter(|d| {
+                let interval = if d.sync.as_ref().is_some_and(|s| s.lsp_diagnostics.len() > 500) {
+                    Duration::from_secs(1)
+                } else {
+                    TICK
+                };
+                d.last_emit.is_none_or(|t| now.duration_since(t) >= interval)
+            })
+            .map(|d| d.id.clone())
+            .collect();
         for id in dirty {
             self.emit(&id);
         }
         // Stop servers nobody uses any more.
-        let now = Instant::now();
         let keys: Vec<ServerKey> = self.servers.keys().cloned().collect();
         for key in keys {
             let used = self.docs.values().any(|d| d.key.as_ref() == Some(&key));
@@ -386,7 +469,8 @@ impl Actor {
     }
 
     fn untrack(&mut self, id: &DocumentId) {
-        let Some(doc) = self.docs.remove(id) else { return };
+        let Some(mut doc) = self.docs.remove(id) else { return };
+        doc.cancel_audit();
         if let (Some(sync), Some(uri), Some(key)) = (&doc.sync, &doc.uri, &doc.key)
             && let Some(server) = self.servers.get(key)
             && server.generation == sync.generation
@@ -512,7 +596,13 @@ impl Actor {
                 let revision = self.docs[id].revision;
                 self.set_status(
                     id,
-                    LeanStatus::Checking { revision, toolchain: toolchain_name, starting: true, processing: vec![] },
+                    LeanStatus::Checking {
+                        revision,
+                        toolchain: toolchain_name,
+                        starting: true,
+                        auditing: false,
+                        processing: vec![],
+                    },
                 );
             }
             Phase::Crashed { message, restarting } => {
@@ -521,6 +611,10 @@ impl Actor {
                     restarting: *restarting,
                     attempts: server.attempts,
                 };
+                self.set_status(id, status);
+            }
+            Phase::Unavailable { reason } => {
+                let status = LeanStatus::ServerUnavailable { reason: reason.clone() };
                 self.set_status(id, status);
             }
             Phase::Stopped | Phase::Untrusted { .. } => self.ensure_started(&key),
@@ -560,7 +654,10 @@ impl Actor {
             // (the user may have trusted the folder since); a server that is
             // starting picks up the latest text when it opens the document.
             if let Some(key) = key
-                && matches!(self.servers.get(&key).map(|s| &s.phase), Some(Phase::Untrusted { .. }))
+                && matches!(
+                    self.servers.get(&key).map(|s| &s.phase),
+                    Some(Phase::Untrusted { .. } | Phase::Unavailable { .. })
+                )
             {
                 self.ensure_started(&key);
             } else if let Some(doc) = self.docs.get_mut(&id)
@@ -596,6 +693,7 @@ impl Actor {
             json!({ "textDocument": { "uri": uri, "version": version }, "contentChanges": changes }),
         );
         let doc = self.docs.get_mut(&id).expect("present");
+        doc.cancel_audit();
         let sync = doc.sync.as_mut().expect("synced");
         let text: Arc<str> = Arc::from(text);
         sync.index = Arc::new(LineIndex::new(&text));
@@ -607,9 +705,10 @@ impl Actor {
         let toolchain = key.as_ref().map(|k| self.toolchain_name(k)).unwrap_or_default();
         self.set_status(
             &id,
-            LeanStatus::Checking { revision: version, toolchain, starting: false, processing: vec![] },
+            LeanStatus::Checking { revision: version, toolchain, starting: false, auditing: false, processing: vec![] },
         );
         self.spawn_wait(&id, generation, client, uri, version);
+        self.schedule_audit(&id, generation, version);
     }
 
     fn resync_documents(&mut self) {
@@ -690,7 +789,13 @@ impl Actor {
             }
             self.set_status(
                 &id,
-                LeanStatus::Checking { revision, toolchain: name.clone(), starting: true, processing: vec![] },
+                LeanStatus::Checking {
+                    revision,
+                    toolchain: name.clone(),
+                    starting: true,
+                    auditing: false,
+                    processing: vec![],
+                },
             );
         }
         if !self.versions.contains_key(&toolchain.dir) {
@@ -749,6 +854,7 @@ impl Actor {
                     self.set_status(&id, LeanStatus::Untrusted { workspace_root: workspace_root.clone() });
                 }
             }
+            Err(StartError::Unavailable { reason }) => self.unavailable(&key, reason),
             Err(StartError::Failed { message, .. }) => self.crashed(&key, message),
         }
     }
@@ -781,8 +887,12 @@ impl Actor {
             fatal: false,
         });
         doc.revision = doc.revision.max(revision);
-        self.set_status(id, LeanStatus::Checking { revision, toolchain, starting: false, processing: vec![] });
+        self.set_status(
+            id,
+            LeanStatus::Checking { revision, toolchain, starting: false, auditing: false, processing: vec![] },
+        );
         self.spawn_wait(id, generation, client, uri, revision);
+        self.schedule_audit(id, generation, revision);
     }
 
     fn spawn_wait(&self, id: &DocumentId, generation: u64, client: Arc<LspClient>, uri: String, version: u64) {
@@ -816,35 +926,40 @@ impl Actor {
             Ok(()) => {
                 let doc = &self.docs[&id];
                 let sync = doc.sync.as_ref().expect("current");
+                let errors = sync.fatal
+                    || sync
+                        .lsp_diagnostics
+                        .iter()
+                        .any(|d| matches!(d.get("severity").and_then(Value::as_u64), Some(1) | None));
+                if errors {
+                    // Errors are final without an audit: this is not a checked proof.
+                    self.docs.get_mut(&id).expect("present").cancel_audit();
+                    self.finalize(&id, Vec::new(), None);
+                    return;
+                }
                 let has_sorry = sync
                     .lsp_diagnostics
                     .iter()
                     .any(|d| d.get("message").and_then(Value::as_str).is_some_and(is_sorry_message));
-                let running = doc.key.as_ref().and_then(|k| self.servers.get(k)).and_then(|s| s.running());
-                match running.and_then(|r| r.sorry_type.map(|t| (r.client.clone(), t))).filter(|_| has_sorry) {
-                    Some((client, token_type)) => {
-                        // Locate the exact sorry/admit tokens before reporting.
-                        let (tx, uri, index) =
-                            (self.tx.clone(), doc.uri.clone().unwrap_or_default(), sync.index.clone());
-                        tokio::spawn(async move {
-                            let tokens = client
-                                .call(
-                                    "textDocument/semanticTokens/full",
-                                    json!({ "textDocument": { "uri": uri } }),
-                                    Duration::from_secs(30),
-                                )
-                                .await
-                                .ok()
-                                .and_then(|v| v.get("data").and_then(Value::as_array).cloned())
-                                .map(|data| {
-                                    let data: Vec<u64> = data.iter().filter_map(Value::as_u64).collect();
-                                    convert::tokens_of_type(&index, &data, token_type)
-                                })
-                                .unwrap_or_default();
-                            let _ = tx.send(Msg::SorryTokens { generation, doc: id, version, tokens });
-                        });
-                    }
-                    None => self.finalize(&id, Vec::new()),
+                if !self.docs[&id].work.as_ref().is_some_and(|w| w.version == version && w.generation == generation) {
+                    self.start_audit(&id, generation, version);
+                }
+                self.request_tokens(&id, generation, version, has_sorry);
+                if let Some(work) = self.docs.get_mut(&id).and_then(|d| d.work.as_mut()) {
+                    work.lean_done = true;
+                }
+                if !self.try_finalize(&id) {
+                    let toolchain = self.docs[&id].key.as_ref().map(|k| self.toolchain_name(k)).unwrap_or_default();
+                    self.set_status(
+                        &id,
+                        LeanStatus::Checking {
+                            revision: version,
+                            toolchain,
+                            starting: false,
+                            auditing: true,
+                            processing: vec![],
+                        },
+                    );
                 }
             }
             Err(e) if e.is_superseded() || e == LspError::Closed => {}
@@ -855,9 +970,117 @@ impl Actor {
         }
     }
 
+    /// Start the axiom audit of a version once it has been stable briefly, so
+    /// it runs alongside Lean instead of after it (typing never starts one).
+    fn schedule_audit(&self, id: &DocumentId, generation: u64, version: u64) {
+        let (tx, doc) = (self.tx.clone(), id.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(AUDIT_DEBOUNCE).await;
+            let _ = tx.send(Msg::StartAudit { generation, doc, version });
+        });
+    }
+
+    fn on_start_audit(&mut self, id: &DocumentId, generation: u64, version: u64) {
+        if !self.current_sync(id, generation, version) {
+            return;
+        }
+        let doc = &self.docs[id];
+        let busy = doc.work.as_ref().is_some_and(|w| w.version == version && w.generation == generation);
+        if busy || doc.status.finished_revision() == Some(version) {
+            return;
+        }
+        self.start_audit(id, generation, version);
+    }
+
+    /// Run the axiom audit of exactly the text of `version`.
+    fn start_audit(&mut self, id: &DocumentId, generation: u64, version: u64) {
+        let doc = &self.docs[id];
+        let Some(sync) = doc.sync.as_ref() else { return };
+        let Some(key) = doc.key.clone() else { return };
+        let Some(server) = self.servers.get(&key) else { return };
+        if server.running().is_none() {
+            return;
+        }
+        let (exec, tx) = (self.exec.clone(), self.tx.clone());
+        let (project, toolchain) = (server.project.clone(), server.toolchain.clone());
+        let text = sync.text.clone();
+        let file_name = format!("{} (revision {version})", doc.path.file_name());
+        let scratch = self.config.scratch_dir.join("audit");
+        let (cancel, cancel_rx) = watch::channel(false);
+        let doc = self.docs.get_mut(id).expect("present");
+        doc.work = Some(CheckWork { generation, version, cancel, audit: None, tokens: None, lean_done: false });
+        let doc_id = id.clone();
+        tokio::spawn(async move {
+            let request = audit::AuditRequest {
+                project: &project,
+                toolchain: &toolchain,
+                text,
+                scratch,
+                nonce: audit::nonce(),
+                file_name,
+            };
+            let outcome = audit::run_audit(&exec, request, cancel_rx).await;
+            let _ = tx.send(Msg::Audited { generation, doc: doc_id, version, outcome });
+        });
+    }
+
+    /// Locate the exact `sorry`/`admit` tokens (needs Lean to have finished).
+    fn request_tokens(&mut self, id: &DocumentId, generation: u64, version: u64, has_sorry: bool) {
+        let doc = &self.docs[id];
+        let running = doc.key.as_ref().and_then(|k| self.servers.get(k)).and_then(|s| s.running());
+        let request = running.and_then(|r| r.sorry_type.map(|t| (r.client.clone(), t))).filter(|_| has_sorry);
+        let Some((client, token_type)) = request else {
+            if let Some(work) = self.docs.get_mut(id).and_then(|d| d.work.as_mut()) {
+                work.tokens = Some(Vec::new());
+            }
+            return;
+        };
+        let sync = doc.sync.as_ref().expect("current");
+        let (tx, uri, index, doc_id) =
+            (self.tx.clone(), doc.uri.clone().unwrap_or_default(), sync.index.clone(), id.clone());
+        tokio::spawn(async move {
+            let tokens = client
+                .call(
+                    "textDocument/semanticTokens/full",
+                    json!({ "textDocument": { "uri": uri } }),
+                    Duration::from_secs(120),
+                )
+                .await
+                .ok()
+                .and_then(|v| v.get("data").and_then(Value::as_array).cloned())
+                .map(|data| {
+                    let data: Vec<u64> = data.iter().filter_map(Value::as_u64).collect();
+                    convert::tokens_of_type(&index, &data, token_type)
+                })
+                .unwrap_or_default();
+            let _ = tx.send(Msg::SorryTokens { generation, doc: doc_id, version, tokens });
+        });
+    }
+
+    /// Finalize when Lean, the audit, and the token request are all done.
+    fn try_finalize(&mut self, id: &DocumentId) -> bool {
+        let Some(doc) = self.docs.get_mut(id) else { return false };
+        let ready = doc.work.as_ref().is_some_and(|w| w.lean_done && w.audit.is_some() && w.tokens.is_some());
+        if !ready {
+            return false;
+        }
+        let mut work = doc.work.take().expect("ready");
+        let (tokens, outcome) = (work.tokens.take().unwrap_or_default(), work.audit.take());
+        self.finalize(id, tokens, outcome);
+        true
+    }
+
+    fn work_mut(&mut self, id: &DocumentId, generation: u64, version: u64) -> Option<&mut CheckWork> {
+        if !self.current_sync(id, generation, version) {
+            return None;
+        }
+        self.docs.get_mut(id)?.work.as_mut().filter(|w| w.generation == generation && w.version == version)
+    }
+
     /// Lean finished the document's current version: compute its final status
-    /// from the final diagnostics of exactly that version.
-    fn finalize(&mut self, id: &DocumentId, tokens: Vec<TextRange>) {
+    /// from the final diagnostics of exactly that version and, when Lean
+    /// reported no errors, the axiom audit of exactly that text.
+    fn finalize(&mut self, id: &DocumentId, tokens: Vec<TextRange>, audit: Option<audit::AuditOutcome>) {
         let Some(doc) = self.docs.get(id) else { return };
         let (Some(sync), Some(key)) = (&doc.sync, doc.key.clone()) else { return };
         let toolchain = self.toolchain_name(&key);
@@ -874,6 +1097,9 @@ impl Actor {
             });
             errors = 1;
         }
+        let warnings =
+            diagnostics.iter().filter(|d| d.severity == Severity::Warning && !is_sorry_message(&d.message)).count()
+                as u32;
         let mut sorries: Vec<SorryLocation> = diagnostics
             .iter()
             .filter(|d| is_sorry_message(&d.message))
@@ -884,9 +1110,67 @@ impl Actor {
                     .ok()
                     .map(|b| sync.text[b].trim().to_owned())
                     .filter(|n| !n.is_empty() && n.len() <= 200 && !n.contains(char::is_whitespace));
-                SorryLocation { range: loc.range, line, declaration: name, tokens: Vec::new() }
+                SorryLocation {
+                    range: loc.range,
+                    line,
+                    declaration: name,
+                    tokens: Vec::new(),
+                    source: SorrySource::Warning,
+                }
             })
             .collect();
+        let mut classification = None;
+        if errors == 0 {
+            let audit = audit.unwrap_or_else(|| audit::AuditOutcome::Failed("the file was not audited".into()));
+            let c = Classification::new(&audit, &sync.text, &sync.index);
+            // Declarations that depend on `sorry` without a warning (imported,
+            // reached through another declaration, or warning suppressed).
+            for d in &c.sorry_decls {
+                let overlaps = |r: TextRange| {
+                    sorries
+                        .iter()
+                        .any(|s| s.range.start < r.end.max(r.start + 1) && r.start < s.range.end.max(s.range.start + 1))
+                };
+                if d.range.is_some_and(overlaps) {
+                    continue;
+                }
+                sorries.push(SorryLocation {
+                    range: d.range.unwrap_or(TextRange::empty(0)),
+                    line: d.line.unwrap_or(0),
+                    declaration: Some(d.declaration.clone()),
+                    tokens: Vec::new(),
+                    source: SorrySource::AxiomAudit,
+                });
+                diagnostics.push(audit_diagnostic(
+                    &doc.path,
+                    d.range,
+                    format!(
+                        "`{}` depends on `sorry` (found by the axiom audit: the `sorry` is imported, reached through another declaration, or its warning is suppressed).",
+                        d.declaration
+                    ),
+                ));
+            }
+            for d in c.compiled.iter().chain(&c.nonstandard) {
+                diagnostics.push(audit_diagnostic(
+                    &doc.path,
+                    d.range,
+                    format!(
+                        "`{}` depends on axioms beyond Lean's standard ones: {}.",
+                        d.declaration,
+                        d.axioms.join(", ")
+                    ),
+                ));
+            }
+            if let Some(reason) = c.unverified.as_ref().or(c.stop_reason.as_ref()) {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Warning,
+                    message: reason.clone(),
+                    location: None,
+                    hints: vec![AUDIT_HINT.into()],
+                });
+            }
+            classification = Some(c);
+        }
         sorries.sort_by_key(|s| s.range.start);
         for token in tokens {
             // A token belongs to the last declaration that starts before it.
@@ -896,29 +1180,55 @@ impl Actor {
             }
         }
         let sorry_count = sorries.len() as u32;
-        let warnings =
-            diagnostics.iter().filter(|d| d.severity == Severity::Warning && !is_sorry_message(&d.message)).count()
-                as u32;
-        let status = if errors > 0 {
-            LeanStatus::Errors { revision: version, toolchain, count: errors, sorry_count }
-        } else if sorry_count > 0 {
-            LeanStatus::CheckedWithSorry {
-                revision: version,
-                toolchain,
-                count: sorry_count,
-                locations: sorries.clone(),
-                warnings,
+        let (axioms, axiom_uses) =
+            classification.as_ref().map(|c| (c.all_axioms.clone(), c.axiom_uses.clone())).unwrap_or_default();
+        let status = match classification {
+            None => LeanStatus::Errors { revision: version, toolchain, count: errors, sorry_count },
+            Some(c) => {
+                if let Some(reason) = c.unverified {
+                    LeanStatus::Unverified { revision: version, toolchain, reason }
+                } else if let Some(reason) = c.stop_reason {
+                    LeanStatus::PartiallyChecked { revision: version, toolchain, line: c.stop_line, reason }
+                } else if sorry_count > 0 {
+                    LeanStatus::CheckedWithSorry {
+                        revision: version,
+                        toolchain,
+                        count: sorry_count,
+                        locations: sorries.clone(),
+                        warnings,
+                    }
+                } else if !c.compiled.is_empty() {
+                    LeanStatus::ReliesOnCompiledCode {
+                        revision: version,
+                        toolchain,
+                        axioms: c.nonstandard_axioms,
+                        declarations: c.compiled,
+                        warnings,
+                    }
+                } else if !c.nonstandard.is_empty() {
+                    LeanStatus::CheckedWithAxioms {
+                        revision: version,
+                        toolchain,
+                        axioms: c.nonstandard_axioms,
+                        declarations: c.nonstandard,
+                        warnings,
+                    }
+                } else {
+                    LeanStatus::Checked { revision: version, toolchain, warnings, axioms: c.all_axioms }
+                }
             }
-        } else {
-            LeanStatus::Checked { revision: version, toolchain, warnings }
         };
         if let Some(server) = self.servers.get_mut(&key) {
             server.attempts = 0; // the server demonstrably works again
         }
         let doc = self.docs.get_mut(id).expect("present");
+        doc.work = None;
         doc.diagnostics = diagnostics;
+        doc.diagnostics_pending = false;
         doc.diagnostics_revision = Some(version);
         doc.sorries = sorries;
+        doc.axioms = axioms;
+        doc.axiom_uses = axiom_uses;
         self.set_status(id, status);
     }
 
@@ -929,7 +1239,7 @@ impl Actor {
         }
         match incoming {
             Incoming::Notification { method, params } => match method.as_str() {
-                "textDocument/publishDiagnostics" => self.on_diagnostics(&key, generation, &params),
+                "textDocument/publishDiagnostics" => self.on_diagnostics(&key, generation, params),
                 "$/lean/fileProgress" => self.on_progress(&key, generation, &params),
                 _ => {}
             },
@@ -961,7 +1271,7 @@ impl Actor {
             .map(|d| d.id.clone())
     }
 
-    fn on_diagnostics(&mut self, key: &ServerKey, generation: u64, params: &Value) {
+    fn on_diagnostics(&mut self, key: &ServerKey, generation: u64, mut params: Value) {
         let Some(uri) = params.get("uri").and_then(Value::as_str) else { return };
         let Some(id) = self.doc_for_uri(key, generation, uri) else { return };
         let doc = self.docs.get_mut(&id).expect("found");
@@ -970,10 +1280,13 @@ impl Actor {
         if version != sync.version {
             return;
         }
-        let list = params.get("diagnostics").and_then(Value::as_array).cloned().unwrap_or_default();
-        doc.diagnostics = list.iter().map(|d| convert::diagnostic(d, &sync.index, &doc.path)).collect();
-        doc.diagnostics_revision = Some(version);
-        sync.lsp_diagnostics = list;
+        // Keep the latest list as received; it is converted when the UI is
+        // updated (coalesced) and once more at the end.
+        sync.lsp_diagnostics = match params.get_mut("diagnostics").map(Value::take) {
+            Some(Value::Array(list)) => list,
+            _ => Vec::new(),
+        };
+        doc.diagnostics_pending = true;
         doc.dirty = true;
     }
 
@@ -1025,6 +1338,25 @@ impl Actor {
         self.crashed(&key, format!("{outcome}{tail}"));
     }
 
+    /// The server could not start for a reason that may pass: say so (it
+    /// never ran, so it did not crash) and retry later.
+    fn unavailable(&mut self, key: &ServerKey, reason: String) {
+        let Some(server) = self.servers.get_mut(key) else { return };
+        server.phase = Phase::Unavailable { reason: reason.clone() };
+        let generation = server.generation;
+        for id in self.docs_of(key) {
+            if let Some(doc) = self.docs.get_mut(&id) {
+                doc.sync = None;
+            }
+            self.set_status(&id, LeanStatus::ServerUnavailable { reason: reason.clone() });
+        }
+        let (tx, key) = (self.tx.clone(), key.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(UNAVAILABLE_RETRY).await;
+            let _ = tx.send(Msg::Retry { key, generation });
+        });
+    }
+
     fn crashed(&mut self, key: &ServerKey, message: String) {
         let Some(server) = self.servers.get_mut(key) else { return };
         server.attempts += 1;
@@ -1037,6 +1369,7 @@ impl Actor {
             if let Some(doc) = self.docs.get_mut(&id) {
                 doc.sync = None;
                 doc.goal_requests.clear();
+                doc.cancel_audit();
             }
             self.set_status(&id, LeanStatus::ServerCrashed { message: message.clone(), restarting, attempts });
         }
@@ -1079,7 +1412,13 @@ impl Actor {
                 let revision = self.docs[&id].revision;
                 self.set_status(
                     &id,
-                    LeanStatus::Checking { revision, toolchain: name.clone(), starting: true, processing: vec![] },
+                    LeanStatus::Checking {
+                        revision,
+                        toolchain: name.clone(),
+                        starting: true,
+                        auditing: false,
+                        processing: vec![],
+                    },
                 );
             }
         }
@@ -1208,7 +1547,12 @@ impl Actor {
             Msg::FinishCheck { doc, reply } => {
                 let snapshot = self.docs.get(&doc).and_then(|d| {
                     let state = self.state_of(&doc)?;
-                    Some(CheckSnapshot { state, sorries: d.sorries.clone() })
+                    Some(CheckSnapshot {
+                        state,
+                        sorries: d.sorries.clone(),
+                        axioms: d.axioms.clone(),
+                        axiom_uses: d.axiom_uses.clone(),
+                    })
                 });
                 let _ = reply.send(snapshot);
             }
@@ -1235,14 +1579,23 @@ impl Actor {
             Msg::Incoming { key, generation, incoming } => self.on_incoming(key, generation, incoming),
             Msg::JobExited { key, generation, result } => self.on_job_exited(key, generation, result),
             Msg::WaitDone { generation, doc, version, result } => self.on_wait_done(generation, doc, version, result),
+            Msg::StartAudit { generation, doc, version } => self.on_start_audit(&doc, generation, version),
+            Msg::Audited { generation, doc, version, outcome } => {
+                if let Some(work) = self.work_mut(&doc, generation, version) {
+                    work.audit = Some(outcome);
+                    self.try_finalize(&doc);
+                }
+            }
             Msg::SorryTokens { generation, doc, version, tokens } => {
-                if self.current_sync(&doc, generation, version) {
-                    self.finalize(&doc, tokens);
+                if let Some(work) = self.work_mut(&doc, generation, version) {
+                    work.tokens = Some(tokens);
+                    self.try_finalize(&doc);
                 }
             }
             Msg::Retry { key, generation } => {
                 let retry = self.servers.get(&key).is_some_and(|s| {
-                    s.generation == generation && matches!(s.phase, Phase::Crashed { restarting: true, .. })
+                    s.generation == generation
+                        && matches!(s.phase, Phase::Crashed { restarting: true, .. } | Phase::Unavailable { .. })
                 });
                 if retry {
                     self.ensure_started(&key);
@@ -1379,6 +1732,7 @@ impl Actor {
                         Phase::Untrusted { workspace_root } => {
                             LeanServerState::Untrusted { workspace_root: workspace_root.clone() }
                         }
+                        Phase::Unavailable { reason } => LeanServerState::Unavailable { reason: reason.clone() },
                     })
                     .unwrap_or(LeanServerState::Stopped);
                 LeanProjectInfo {
@@ -1513,5 +1867,121 @@ impl Actor {
             text_hash: sha256_hex(&text),
             wait,
         })
+    }
+}
+
+const AUDIT_HINT: &str = "Reported by Exposition's axiom audit of this revision.";
+const UNAVAILABLE_RETRY: Duration = Duration::from_secs(10);
+/// How long a version must stay unchanged before its axiom audit starts.
+const AUDIT_DEBOUNCE: Duration = Duration::from_millis(800);
+
+fn audit_diagnostic(path: &WorkspacePath, range: Option<TextRange>, message: String) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Warning,
+        message,
+        location: range.map(|range| exposition_core::build::SourceLocation { path: path.clone(), range }),
+        hints: vec![AUDIT_HINT.into()],
+    }
+}
+
+/// What the axiom audit says about a revision Lean reported without errors.
+struct Classification {
+    /// Kernel checking disabled, or the audit could not run.
+    unverified: Option<String>,
+    /// Elaboration stopped before the end (`#exit`).
+    stop_reason: Option<String>,
+    stop_line: Option<u32>,
+    sorry_decls: Vec<AxiomUse>,
+    compiled: Vec<AxiomUse>,
+    nonstandard: Vec<AxiomUse>,
+    /// Axioms beyond the standard ones (excluding `sorryAx`), sorted.
+    nonstandard_axioms: Vec<String>,
+    /// Every axiom used, sorted.
+    all_axioms: Vec<String>,
+    /// Declarations using anything beyond the standard axioms.
+    axiom_uses: Vec<AxiomUse>,
+}
+
+impl Classification {
+    fn new(outcome: &audit::AuditOutcome, text: &str, index: &LineIndex) -> Self {
+        let mut c = Classification {
+            unverified: audit::trust_weakening(text),
+            stop_reason: None,
+            stop_line: None,
+            sorry_decls: Vec::new(),
+            compiled: Vec::new(),
+            nonstandard: Vec::new(),
+            nonstandard_axioms: Vec::new(),
+            all_axioms: Vec::new(),
+            axiom_uses: Vec::new(),
+        };
+        let decls = match outcome {
+            audit::AuditOutcome::Complete(d) => d,
+            audit::AuditOutcome::Stopped(d) => {
+                c.stop_line = audit::exit_line(text);
+                c.stop_reason = Some(match c.stop_line {
+                    Some(line) => format!(
+                        "Lean stopped elaborating at `#exit` on line {}; everything after it was never checked.",
+                        line + 1
+                    ),
+                    None => {
+                        "Lean stopped elaborating before the end of the file; the rest was never checked.".to_owned()
+                    }
+                });
+                d
+            }
+            audit::AuditOutcome::Failed(reason) => {
+                c.unverified.get_or_insert_with(|| {
+                    format!("The axiom audit could not run, so this result is not verified: {reason}.")
+                });
+                return c;
+            }
+        };
+        let to_use = |d: &audit::DeclAxioms, axioms: Vec<String>| {
+            let range = d.range.and_then(|((l1, c1), (l2, c2))| {
+                let start = convert::offset_at(index, l1, c1)?;
+                let end = convert::offset_at(index, l2, c2)?;
+                Some(TextRange::new(start.min(end), end.max(start)))
+            });
+            AxiomUse { declaration: d.name.clone(), range, line: d.range.map(|((l, _), _)| l), axioms }
+        };
+        let standard = |a: &str| audit::STANDARD_AXIOMS.contains(&a);
+        let mut all = std::collections::BTreeSet::new();
+        let mut nonstandard_all = std::collections::BTreeSet::new();
+        for d in decls {
+            all.extend(d.axioms.iter().cloned());
+            nonstandard_all.extend(d.axioms.iter().filter(|a| !standard(a) && *a != audit::SORRY_AXIOM).cloned());
+        }
+        // Report declarations by name; internal (auxiliary) ones only when no
+        // visible declaration carries the same finding.
+        let pick = |pred: &dyn Fn(&str) -> bool| -> Vec<&audit::DeclAxioms> {
+            let visible: Vec<_> = decls.iter().filter(|d| !d.internal && d.axioms.iter().any(|a| pred(a))).collect();
+            if visible.is_empty() {
+                decls.iter().filter(|d| d.axioms.iter().any(|a| pred(a))).collect()
+            } else {
+                visible
+            }
+        };
+        c.sorry_decls = pick(&|a| a == audit::SORRY_AXIOM)
+            .into_iter()
+            .map(|d| to_use(d, vec![audit::SORRY_AXIOM.into()]))
+            .collect();
+        c.compiled = pick(&audit::is_compiled_code_axiom)
+            .into_iter()
+            .map(|d| to_use(d, d.axioms.iter().filter(|a| audit::is_compiled_code_axiom(a)).cloned().collect()))
+            .collect();
+        let other = |a: &str| !standard(a) && a != audit::SORRY_AXIOM && !audit::is_compiled_code_axiom(a);
+        c.nonstandard = pick(&other)
+            .into_iter()
+            .map(|d| to_use(d, d.axioms.iter().filter(|a| other(a)).cloned().collect()))
+            .collect();
+        c.axiom_uses = decls
+            .iter()
+            .filter(|d| !d.internal && d.axioms.iter().any(|a| !standard(a)))
+            .map(|d| to_use(d, d.axioms.iter().filter(|a| !standard(a)).cloned().collect()))
+            .collect();
+        c.all_axioms = all.into_iter().collect();
+        c.nonstandard_axioms = nonstandard_all.into_iter().collect();
+        c
     }
 }

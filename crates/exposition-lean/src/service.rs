@@ -34,8 +34,9 @@ use exposition_workspace::{DocumentService, WorkspaceService};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+use crate::audit;
 use crate::convert::{self, is_sorry_message};
 use crate::lsp::{Incoming, LspClient, LspError, PendingRequest};
 use crate::project::{self, LAKEFILES, LeanProject, PinSource, ProjectKind, TOOLCHAIN_FILE};
@@ -65,6 +66,9 @@ pub struct LeanConfig {
     pub restart_backoff: Vec<Duration>,
     /// Stop a server this long after its last document closed.
     pub idle_shutdown: Duration,
+    /// Application-owned scratch directory (axiom audits write temporary
+    /// copies of the checked text here, never into the project).
+    pub scratch_dir: PathBuf,
 }
 
 impl Default for LeanConfig {
@@ -73,6 +77,7 @@ impl Default for LeanConfig {
             elan_home: toolchain::elan_home(|name| std::env::var(name).ok()),
             restart_backoff: [1, 2, 4, 8, 16].into_iter().map(Duration::from_secs).collect(),
             idle_shutdown: Duration::from_secs(120),
+            scratch_dir: std::env::temp_dir().join("exposition-lean"),
         }
     }
 }
@@ -112,6 +117,8 @@ struct CheckTicket {
 struct CheckSnapshot {
     state: LeanDocumentState,
     sorries: Vec<SorryLocation>,
+    axioms: Vec<String>,
+    axiom_uses: Vec<AxiomUse>,
 }
 
 type Reply<T> = oneshot::Sender<T>;
@@ -176,6 +183,17 @@ enum Msg {
         doc: DocumentId,
         version: u64,
         result: Result<(), LspError>,
+    },
+    StartAudit {
+        generation: u64,
+        doc: DocumentId,
+        version: u64,
+    },
+    Audited {
+        generation: u64,
+        doc: DocumentId,
+        version: u64,
+        outcome: audit::AuditOutcome,
     },
     SorryTokens {
         generation: u64,
@@ -384,10 +402,14 @@ impl LeanService {
 
     /// Check a Lean file and report the result for the exact text checked.
     ///
-    /// The report says `checked: true` only when Lean finished exactly this
-    /// revision (or disk text) with no errors and no `sorry`. A timeout, an
-    /// edit during the check, a crash, a missing toolchain, or an untrusted
-    /// workspace all produce `checked: false` with the corresponding status.
+    /// The report says `checked: true` only for [`LeanStatus::Checked`]: Lean
+    /// elaborated exactly this revision (or disk text) completely with no
+    /// errors, and the axiom audit of that text found no `sorry` (also none
+    /// imported or with a suppressed warning), kernel checking enabled, and
+    /// only the standard axioms (listed in `axioms`). Incomplete material,
+    /// extra axioms, compiled-code trust, `#exit`, a timeout, an edit during
+    /// the check, a crash, a missing toolchain, or an untrusted workspace all
+    /// produce `checked: false` with the corresponding status.
     pub async fn check(&self, request: LeanCheckRequest) -> Result<LeanCheckReport, LeanError> {
         let started = Instant::now();
         let timeout =
@@ -415,11 +437,12 @@ impl LeanService {
         }
         let state = snapshot.state;
         let checked = matches!(state.status, LeanStatus::Checked { revision, .. } if revision == ticket.revision);
-        let (diagnostics, sorries) = if finished && state.diagnostics_revision == Some(ticket.revision) {
-            (state.diagnostics, snapshot.sorries)
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        let (diagnostics, sorries, axioms, axiom_uses) =
+            if finished && state.diagnostics_revision == Some(ticket.revision) {
+                (state.diagnostics, snapshot.sorries, snapshot.axioms, snapshot.axiom_uses)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            };
         Ok(LeanCheckReport {
             path: ticket.path,
             document: (!ticket.temp).then_some(ticket.doc),
@@ -431,6 +454,8 @@ impl LeanService {
             checked,
             diagnostics,
             sorries,
+            axioms,
+            axiom_uses,
             goals,
             duration_ms: started.elapsed().as_millis() as u64,
         })

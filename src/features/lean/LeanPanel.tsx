@@ -29,6 +29,8 @@ import { statusSentence, statusView } from "./status";
 import { startLeanTracking, useLean } from "./store";
 
 export const LEAN_VIEW_ID = "lean.infoview";
+/** The infoview lists at most this many diagnostics (all are markers in Monaco). */
+const MAX_DIAGNOSTICS_SHOWN = 200;
 
 function lineOf(text: string | undefined, offset: number): number {
   // Offsets are UTF-16 code units, like JavaScript strings.
@@ -184,6 +186,15 @@ export function LeanPanel() {
   const view = statusView(status);
   const toolchain = state.toolchain;
   const sorries = status.kind === "checkedWithSorry" ? status.locations : [];
+  const axiomUses =
+    status.kind === "checkedWithAxioms" || status.kind === "reliesOnCompiledCode" ? status.declarations : [];
+  const axioms =
+    status.kind === "checked"
+      ? status.axioms
+      : status.kind === "checkedWithAxioms" || status.kind === "reliesOnCompiledCode"
+        ? status.axioms
+        : null;
+  const shown = state.diagnostics.slice(0, MAX_DIAGNOSTICS_SHOWN);
   const stale = state.diagnosticsRevision != null && state.diagnosticsRevision !== state.revision;
   const text = modelText(state);
 
@@ -219,11 +230,25 @@ export function LeanPanel() {
             "—"
           )}
         </dd>
+        {axioms && (
+          <>
+            <dt>Axioms</dt>
+            <dd data-testid="lean-axioms">
+              {axioms.length ? axioms.map((a) => <code key={a}>{a} </code>) : "none"}
+            </dd>
+          </>
+        )}
       </dl>
 
       {status.kind === "checking" && (
         <ProgressBar
-          label={status.starting ? "Starting the Lean server" : `Checking revision ${status.revision}`}
+          label={
+            status.starting
+              ? "Starting the Lean server"
+              : status.auditing
+                ? `Auditing the axioms of revision ${status.revision}`
+                : `Checking revision ${status.revision}`
+          }
           valueLabel={status.processing[0] ? `from line ${lineOf(text, status.processing[0].start)}` : undefined}
         />
       )}
@@ -261,6 +286,25 @@ export function LeanPanel() {
         </Banner>
       )}
       {status.kind === "unavailable" && <Banner tone="warning" title="Lean cannot check this file">{status.reason}</Banner>}
+      {status.kind === "serverUnavailable" && (
+        <Banner
+          tone="warning"
+          title="The Lean server has not started"
+          actions={<Button size="sm" onPress={() => void commands.leanRestart(state.document)}>Retry now</Button>}
+        >
+          {status.reason}
+        </Banner>
+      )}
+      {status.kind === "partiallyChecked" && (
+        <Banner tone="warning" title="Only part of this file was checked">
+          {status.reason}
+        </Banner>
+      )}
+      {status.kind === "unverified" && (
+        <Banner tone="warning" title="Not a verified result">
+          {status.reason}
+        </Banner>
+      )}
 
       <GoalsSection state={state} />
 
@@ -273,7 +317,30 @@ export function LeanPanel() {
                   <StatusPill size="sm" status="warning" label="sorry" />
                   <span className="exp-lean__line">Ln {s.line + 1}</span>
                   <code>{s.declaration ?? "declaration"}</code>
+                  {s.source === "axiomAudit" && <span className="exp-muted">found by the axiom audit</span>}
                 </button>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
+
+      {axiomUses.length > 0 && (
+        <Section title={status.kind === "reliesOnCompiledCode" ? `Trusts compiled code (${axiomUses.length})` : `Uses axioms (${axiomUses.length})`}>
+          <ul className="exp-lean__list" data-testid="lean-axiom-uses">
+            {axiomUses.map((u, i) => (
+              <li key={i}>
+                <button
+                  type="button"
+                  className="exp-lean__diag-jump"
+                  disabled={!u.range}
+                  onClick={() => u.range && void revealInEditor(state.path, { range: u.range })}
+                >
+                  <StatusPill size="sm" status="warning" label="axiom" />
+                  {u.line != null && <span className="exp-lean__line">Ln {u.line + 1}</span>}
+                  <code>{u.declaration}</code>
+                </button>
+                <pre className="exp-lean__message">{u.axioms.join(", ")}</pre>
               </li>
             ))}
           </ul>
@@ -290,10 +357,15 @@ export function LeanPanel() {
           <p className="exp-muted">{view.status === "running" ? "None yet." : "No diagnostics."}</p>
         ) : (
           <ul className="exp-lean__list" data-testid="lean-diagnostics">
-            {state.diagnostics.map((d, i) => (
+            {shown.map((d, i) => (
               <DiagnosticRow key={i} d={d} state={state} text={text} />
             ))}
           </ul>
+        )}
+        {state.diagnostics.length > shown.length && (
+          <p className="exp-muted" data-testid="lean-diagnostics-more">
+            {state.diagnostics.length - shown.length} more not shown here; they are marked in the editor.
+          </p>
         )}
       </Section>
     </div>
