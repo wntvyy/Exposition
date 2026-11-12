@@ -4,7 +4,7 @@
 // a matplotlib figure, and an inert pandas table, insert the figure into a
 // Typst document and the table into Markdown, rerun with changed code and
 // update the figure in place, interrupt a long run, recover from a killed
-// kernel, run R and Julia in agent-owned sessions, and leave no processes.
+// kernel, run R and Julia in further sessions, and leave no processes.
 //
 // Needs Python with ipykernel/jupyter_client (+ matplotlib, pandas); R
 // (IRkernel) and Julia (IJulia) are exercised when discovery reports them.
@@ -125,7 +125,7 @@ export default async function researchPython({ launchApp, artifactsDir, fixture,
 
     // Untrusted workspace: no kernel may start.
     const refused = await invokeError(page, "research_session_start", {
-      request: { environmentId: "python:any", owner: { kind: "user" } },
+      request: { environmentId: "python:any" },
     });
     assert.equal(refused.error?.code, "research.notTrusted", "kernels are refused in an untrusted workspace");
 
@@ -346,12 +346,8 @@ export default async function researchPython({ launchApp, artifactsDir, fixture,
     await runInPanel(page, "21 * 2");
     assert.equal((await output(page).getByTestId("research-result").first().innerText()).trim(), "42");
 
-    // Agent-owned sessions for R and Julia; the user's session refuses agent runs.
-    const agent = { kind: "agent", taskId: "e2e-task" };
-    const mismatch = await invokeError(page, "research_execute", {
-      request: { sessionId: live.id, source: { kind: "input", code: "1" }, requester: agent },
-    });
-    assert.equal(mismatch.error?.code, "research.ownerMismatch", "agent runs need their own session");
+    // R and Julia in further user sessions (the webview cannot create agent
+    // sessions: an owner it sends is ignored).
     for (const [language, code, expected] of [
       ["r", "x <- c(1, 2, 3)\ncat(sum(x), '\\n')", "6"],
       ["julia", "println(1 + 2)", "3"],
@@ -361,9 +357,12 @@ export default async function researchPython({ launchApp, artifactsDir, fixture,
         console.log(`${language}: unavailable (${report.runtimes.find((r) => r.language === language)?.availability.guidance})`);
         continue;
       }
-      const agentSession = await invoke(page, "research_session_start", { request: { environmentId: env.id, owner: agent } });
+      const other = await invoke(page, "research_session_start", {
+        request: { environmentId: env.id, owner: { kind: "agent", taskId: "forged" } },
+      });
+      assert.equal(other.owner.kind, "user", "webview sessions are always the user's");
       const run = await invoke(page, "research_execute", {
-        request: { sessionId: agentSession.id, source: { kind: "input", code }, requester: agent },
+        request: { sessionId: other.id, source: { kind: "input", code } },
       });
       const done = await waitFor(
         async () => {
@@ -376,8 +375,9 @@ export default async function researchPython({ launchApp, artifactsDir, fixture,
       const page1 = await invoke(page, "research_run_output", { runId: run.id, after: null, limit: 100 });
       const text = page1.entries.filter((e) => e.item.kind === "stream").map((e) => e.item.text).join("");
       assert.equal(text.trim(), expected, `${language} output`);
-      console.log(`${language}: ${env.displayName} ran "${code.split("\n").pop()}" -> ${text.trim()}`);
-      await invoke(page, "research_session_shutdown", { sessionId: agentSession.id });
+      console.log(`${language}: ${env.displayName} ran "${code.split("
+").pop()}" -> ${text.trim()}`);
+      await invoke(page, "research_session_shutdown", { sessionId: other.id });
     }
 
     // Dark theme reference screen.

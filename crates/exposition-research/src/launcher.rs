@@ -103,8 +103,12 @@ pub type LaunchFuture<'a> = Pin<Box<dyn Future<Output = Result<InteractiveProces
 pub trait KernelProcessLauncher: Send + Sync {
     /// Launch a long-lived interactive process (from an async context).
     fn launch_interactive(&self, spec: JobSpec) -> LaunchFuture<'_>;
-    /// Run a short discovery probe to completion (blocking; call off the async runtime).
+    /// Run a short discovery probe of a system tool to completion (blocking;
+    /// call off the async runtime). Application probes touch no project content.
     fn run_probe(&self, spec: &JobSpec) -> Result<ProbeOutput, LaunchError>;
+    /// Run a short probe of a project-provided tool (e.g. a project `.venv`
+    /// interpreter) as a trusted project job: refused unless the project is trusted.
+    fn run_project_probe(&self, spec: &JobSpec) -> Result<ProbeOutput, LaunchError>;
     /// Application-owned directory probes must run in, if the launcher has one.
     fn probe_dir(&self) -> Option<PathBuf> {
         None
@@ -215,7 +219,32 @@ impl KernelProcessLauncher for ExecutionLauncher {
     }
 
     fn run_probe(&self, spec: &JobSpec) -> Result<ProbeOutput, LaunchError> {
-        let id = self.execution.launch_application(spec.clone());
+        self.wait_probe(spec, self.execution.launch_application(spec.clone()))
+    }
+
+    fn run_project_probe(&self, spec: &JobSpec) -> Result<ProbeOutput, LaunchError> {
+        self.wait_probe(spec, self.execution.launch(spec.clone()))
+    }
+
+    fn probe_dir(&self) -> Option<PathBuf> {
+        Some(self.execution.probe_dir().to_path_buf())
+    }
+
+    fn register_workspace(&self, root: &Path) -> Result<(), String> {
+        self.execution.register_workspace_root(root).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    fn workspace_trusted(&self, root: &Path) -> Option<bool> {
+        Some(self.execution.trust_status(&root.display().to_string()).map(|s| s.trusted).unwrap_or(false))
+    }
+
+    fn redact(&self, text: &str) -> String {
+        self.execution.redact(text)
+    }
+}
+
+impl ExecutionLauncher {
+    fn wait_probe(&self, spec: &JobSpec, id: JobId) -> Result<ProbeOutput, LaunchError> {
         let timeout = Duration::from_millis(spec.timeout_ms.unwrap_or(30_000) + 5_000);
         let started = Instant::now();
         let result = loop {
@@ -239,22 +268,6 @@ impl KernelProcessLauncher for ExecutionLauncher {
             stdout: self.execution.output_text(&id, OutputStream::Stdout).unwrap_or_default(),
             stderr: self.execution.output_text(&id, OutputStream::Stderr).unwrap_or_default(),
         })
-    }
-
-    fn probe_dir(&self) -> Option<PathBuf> {
-        Some(self.execution.probe_dir().to_path_buf())
-    }
-
-    fn register_workspace(&self, root: &Path) -> Result<(), String> {
-        self.execution.register_workspace_root(root).map(|_| ()).map_err(|e| e.to_string())
-    }
-
-    fn workspace_trusted(&self, root: &Path) -> Option<bool> {
-        Some(self.execution.trust_status(&root.display().to_string()).map(|s| s.trusted).unwrap_or(false))
-    }
-
-    fn redact(&self, text: &str) -> String {
-        self.execution.redact(text)
     }
 }
 

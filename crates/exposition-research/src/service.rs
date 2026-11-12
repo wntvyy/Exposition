@@ -14,7 +14,7 @@ use exposition_workspace::DocumentService;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::discovery::{DiscoveryOptions, discover, now_ms};
+use crate::discovery::{DiscoveryOptions, ProjectScope, discover, now_ms};
 use crate::error::ResearchError;
 use crate::helper::{HELPER_VERSION, PROTOCOL_VERSION, install_helper, sha256_hex};
 use crate::launcher::{KernelProcessLauncher, LaunchError, LineSink, ProcessControl, research_environment};
@@ -51,6 +51,11 @@ pub struct ResearchConfig {
     pub heartbeat_timeout: Duration,
     /// Cancel waits this long after interrupting before restarting the kernel.
     pub cancel_grace: Duration,
+    /// Live research sessions allowed per owner kind. Kernels share the
+    /// execution service's interactive-job slots with language servers (Lean),
+    /// so research leaves headroom.
+    pub max_user_sessions: usize,
+    pub max_agent_sessions: usize,
     /// Reads project files the way builds see them (the workspace snapshot:
     /// open buffer preferred, exact saved bytes hashed). Without one, research
     /// reads the open buffer or the file under the workspace root itself.
@@ -65,6 +70,8 @@ pub struct ResolvedSource {
     pub revision: Option<u64>,
     /// Hex SHA-256 of the exact bytes (as saved, in the file's encoding).
     pub content_hash: String,
+    /// Root of the workspace the file was read from.
+    pub root: PathBuf,
 }
 
 /// Source access provided by the workspace service.
@@ -81,14 +88,16 @@ impl ResearchConfig {
             request_timeout: Duration::from_secs(120),
             heartbeat_timeout: Duration::from_secs(20),
             cancel_grace: Duration::from_secs(5),
+            max_user_sessions: 8,
+            max_agent_sessions: 4,
             source_reader: None,
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
-#[ts(export)]
-#[serde(rename_all = "camelCase")]
+/// Start a session (Rust callers). The application's IPC never accepts an
+/// owner from the webview: webview sessions are always the user's.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartSessionRequest {
     pub environment_id: String,
     pub owner: SessionOwner,
@@ -108,7 +117,9 @@ struct Shared {
     config: ResearchConfig,
     events: broadcast::Sender<ResearchEvent>,
     workspace: Mutex<Option<Workspace>>,
-    environments: Mutex<Option<EnvironmentReport>>,
+    /// Discovery report and the project root it was made for (project
+    /// interpreters depend on the open, trusted project).
+    environments: Mutex<Option<(Option<PathBuf>, EnvironmentReport)>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     runs: Mutex<HashMap<String, RunState>>,
 }
@@ -167,15 +178,36 @@ impl ResearchService {
             .launcher
             .register_workspace(&canonical)
             .map_err(|e| ResearchError::InvalidWorkspace(format!("the workspace cannot be used for execution: {e}")))?;
-        *lock(&self.shared.workspace) = Some(Workspace { root: canonical.clone(), trusted });
+        let previous = lock(&self.shared.workspace).replace(Workspace { root: canonical.clone(), trusted });
+        if previous.as_ref().is_none_or(|p| p.root != canonical) {
+            self.detach_sessions_outside(
+                Some(&canonical),
+                "The project folder changed; this session's kernel was stopped.",
+            );
+            *lock(&self.shared.environments) = None;
+        }
         let trusted = self.shared.config.launcher.workspace_trusted(&canonical).unwrap_or(trusted);
         Ok(WorkspaceStatus { root: display_path(&canonical), trusted })
     }
 
-    /// Forget the workspace (the project was closed). Running sessions keep
-    /// their own root until they are stopped.
+    /// Forget the workspace (the project was closed): every session is
+    /// detached (its kernel stopped) and accepts no more code.
     pub fn clear_workspace(&self) {
-        *lock(&self.shared.workspace) = None;
+        let previous = lock(&self.shared.workspace).take();
+        if previous.is_some() {
+            self.detach_sessions_outside(None, "The project folder was closed; this session's kernel was stopped.");
+            *lock(&self.shared.environments) = None;
+        }
+    }
+
+    /// Detach every live session whose workspace is not `keep`.
+    fn detach_sessions_outside(&self, keep: Option<&Path>, reason: &str) {
+        let sessions: Vec<Arc<Session>> = lock(&self.shared.sessions).values().cloned().collect();
+        for session in sessions {
+            if keep != Some(session.root.as_path()) {
+                session.detach(reason);
+            }
+        }
     }
 
     /// The current workspace; trust comes from the launcher's trust store when it has one.
@@ -196,44 +228,40 @@ impl ResearchService {
 
     // ---- environments ---------------------------------------------------
 
-    /// Discover research runtimes. Cached; `refresh` probes again.
-    pub async fn environments(
-        &self,
-        refresh: bool,
-        extra_interpreters: Vec<PathBuf>,
-    ) -> Result<EnvironmentReport, ResearchError> {
+    /// Discover research runtimes. Cached per open project; `refresh` probes
+    /// again. Only discovery chooses executables: system interpreters run as
+    /// application probes, and interpreters inside the open project (`.venv`)
+    /// are probed only when the project is trusted, as trusted project jobs.
+    pub async fn environments(&self, refresh: bool) -> Result<EnvironmentReport, ResearchError> {
+        let workspace = lock(&self.shared.workspace).clone();
+        let root = workspace.as_ref().map(|w| w.root.clone());
         if !refresh
-            && extra_interpreters.is_empty()
-            && let Some(report) = lock(&self.shared.environments).clone()
+            && let Some((cached_root, report)) = lock(&self.shared.environments).clone()
+            && cached_root == root
         {
             return Ok(report);
         }
-        for path in &extra_interpreters {
-            let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-            if !path.is_absolute() || !path.is_file() || !name.starts_with("python") {
-                return Err(ResearchError::InvalidRequest(format!(
-                    "{} is not a Python interpreter executable",
-                    path.display()
-                )));
-            }
-        }
+        let project = workspace.map(|w| ProjectScope {
+            trusted: self.shared.config.launcher.workspace_trusted(&w.root).unwrap_or(w.trusted),
+            root: w.root,
+        });
         let probe_dir = match self.shared.config.launcher.probe_dir() {
             Some(dir) => dir,
             None => self.shared.research_dir("probe")?,
         };
         let launcher = self.shared.config.launcher.clone();
         let report = tokio::task::spawn_blocking(move || {
-            discover(&DiscoveryOptions { launcher: launcher.as_ref(), probe_dir: &probe_dir, extra_interpreters })
+            discover(&DiscoveryOptions { launcher: launcher.as_ref(), probe_dir: &probe_dir, project })
         })
         .await
         .map_err(|e| ResearchError::Io(format!("environment discovery failed: {e}")))?;
-        *lock(&self.shared.environments) = Some(report.clone());
+        *lock(&self.shared.environments) = Some((root, report.clone()));
         Ok(report)
     }
 
     fn environment(&self, id: &str) -> Result<RuntimeEnvironment, ResearchError> {
         let guard = lock(&self.shared.environments);
-        let report = guard.as_ref().ok_or_else(|| ResearchError::UnknownEnvironment(id.to_owned()))?;
+        let (_, report) = guard.as_ref().ok_or_else(|| ResearchError::UnknownEnvironment(id.to_owned()))?;
         report.runtimes.iter().find(|r| r.id == id).cloned().ok_or_else(|| ResearchError::UnknownEnvironment(id.into()))
     }
 
@@ -245,10 +273,22 @@ impl ResearchService {
         if !trusted {
             return Err(ResearchError::NotTrusted);
         }
-        if lock(&self.shared.environments).is_none() {
-            self.environments(false, Vec::new()).await?;
+        let cached_for = lock(&self.shared.environments).as_ref().map(|(root, _)| root.clone());
+        if cached_for != Some(Some(workspace.root.clone())) {
+            self.environments(false).await?;
         }
         let environment = self.environment(&request.environment_id)?;
+        let (kind, limit) = match request.owner {
+            SessionOwner::User => ("user", self.shared.config.max_user_sessions),
+            SessionOwner::Agent { .. } => ("agent", self.shared.config.max_agent_sessions),
+        };
+        let live = lock(&self.shared.sessions)
+            .values()
+            .filter(|s| std::mem::discriminant(&s.owner) == std::mem::discriminant(&request.owner) && s.is_live())
+            .count();
+        if live >= limit {
+            return Err(ResearchError::TooManySessions { owner: kind.into(), limit });
+        }
         if let Availability::Unavailable { reason, guidance } = &environment.availability {
             return Err(ResearchError::EnvironmentUnavailable { reason: reason.clone(), guidance: guidance.clone() });
         }
@@ -320,6 +360,19 @@ impl ResearchService {
         if session.owner != request.requester {
             return Err(ResearchError::OwnerMismatch { session: session.id.clone() });
         }
+        // A session runs code only for its own workspace, and only while that
+        // workspace is open and trusted.
+        let current = self.workspace_root();
+        if current.as_deref() != Some(session.root.as_path()) {
+            return Err(ResearchError::WorkspaceMismatch {
+                session: session.id.clone(),
+                root: display_path(&session.root),
+            });
+        }
+        if self.shared.config.launcher.workspace_trusted(&session.root) == Some(false) {
+            session.detach("Workspace trust was revoked; this session's kernel was stopped.");
+            return Err(ResearchError::NotTrusted);
+        }
         let (code, origin, inputs) = self.resolve_source(&session, &request.source)?;
         session.enqueue(code, origin, inputs)
     }
@@ -365,6 +418,12 @@ impl ResearchService {
                 check_language(session.env.language, path.extension())?;
                 let reader = self.shared.config.source_reader.as_ref().expect("checked");
                 let source = reader.read(path).map_err(ResearchError::InvalidRequest)?;
+                if !same_dir(&source.root, &session.root) {
+                    return Err(ResearchError::WorkspaceMismatch {
+                        session: session.id.clone(),
+                        root: display_path(&session.root),
+                    });
+                }
                 let input = RunInput {
                     path: path.clone(),
                     revision: source.revision,
@@ -437,6 +496,9 @@ impl ResearchService {
 
     pub fn run_manifest(&self, run_id: &str) -> Result<RunManifest, ResearchError> {
         if let Some(run) = lock(&self.shared.runs).get(run_id) {
+            if Some(&run.root) != self.workspace_root().as_ref() {
+                return Err(ResearchError::UnknownRun(run_id.to_owned()));
+            }
             return Ok(run.manifest.clone());
         }
         let workspace = self.current_workspace()?;
@@ -446,6 +508,9 @@ impl ResearchService {
     /// Page through retained output (live runs) or the stored transcript.
     pub fn run_output(&self, run_id: &str, after: Option<u32>, limit: u32) -> Result<RunOutputPage, ResearchError> {
         if let Some(run) = lock(&self.shared.runs).get(run_id) {
+            if Some(&run.root) != self.workspace_root().as_ref() {
+                return Err(ResearchError::UnknownRun(run_id.to_owned()));
+            }
             return Ok(run.page(after, limit));
         }
         let workspace = self.current_workspace()?;
@@ -469,9 +534,12 @@ impl ResearchService {
         if !artifact_belongs_to_run(&path, run_id) {
             return Err(ResearchError::UnknownArtifact(artifact_id.to_owned()));
         }
+        // Only artifacts of runs in the open workspace are reachable.
+        let current = self.current_workspace()?.root;
         let root = match lock(&self.shared.runs).get(run_id) {
+            Some(run) if run.root != current => return Err(ResearchError::UnknownRun(run_id.to_owned())),
             Some(run) => run.root.clone(),
-            None => self.current_workspace()?.root,
+            None => current,
         };
         let file = resolve_existing(&root, &path)?;
         Ok((record, file))
@@ -507,6 +575,14 @@ fn check_language(language: RuntimeLanguage, extension: Option<&str>) -> Result<
                 RuntimeLanguage::Julia => "Julia",
             }
         )))
+    }
+}
+
+/// Whether two directories are the same after resolving links.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -667,7 +743,7 @@ impl Session {
             program: host,
             args: vec!["-u".into(), "-X".into(), "utf8".into(), helper.display().to_string()],
             environment: research_environment(extra),
-            working_directory: self.root.display().to_string(),
+            working_directory: display_path(&self.root),
             policy: ExecutionPolicy::TrustedNative,
             timeout_ms: None,
             log_limit_bytes: Some(64 * 1024),
@@ -726,8 +802,7 @@ impl Session {
             Some(KernelChoice::Kernelspec { name }) => json!({"kind": "kernelspec", "name": name}),
             _ => json!({"kind": "python"}),
         };
-        let started =
-            self.request(json!({"cmd": "start", "kernel": kernel, "cwd": self.root.display().to_string()})).await?;
+        let started = self.request(json!({"cmd": "start", "kernel": kernel, "cwd": display_path(&self.root)})).await?;
         self.adopt_kernel(&started);
         Ok(())
     }
@@ -811,8 +886,46 @@ impl Session {
                         control.kill_tree();
                     }
                 }
+                // Trust revoked for the session's folder: stop its kernel.
+                let untrusted =
+                    session.shared().and_then(|shared| shared.config.launcher.workspace_trusted(&session.root))
+                        == Some(false);
+                if untrusted && session.is_live() {
+                    session.detach("Workspace trust was revoked; this session's kernel was stopped.");
+                }
             }
         });
+    }
+
+    /// True while the session has (or is getting) a kernel.
+    fn is_live(&self) -> bool {
+        !matches!(lock(&self.state).state, SessionState::Stopped | SessionState::Detached { .. })
+    }
+
+    /// Stop the kernel and refuse further code: the session's workspace was
+    /// closed or switched, or its trust was revoked.
+    fn detach(self: &Arc<Self>, reason: &str) {
+        let (active, queued, control) = {
+            let mut state = lock(&self.state);
+            if matches!(state.state, SessionState::Stopped | SessionState::Detached { .. }) {
+                return;
+            }
+            state.state = SessionState::Detached { reason: reason.to_owned() };
+            (state.active.take(), state.queue.drain(..).collect::<Vec<_>>(), state.io.take().map(|io| io.control))
+        };
+        if let Some(control) = control {
+            control.kill_tree();
+        }
+        for (_, tx) in lock(&self.pending).drain() {
+            let _ = tx.send(Err(ResearchError::HelperGone));
+        }
+        if let Some(run) = active {
+            self.finish_run(&run, RunStatus::Canceled, None, Some(reason), false);
+        }
+        for run in queued {
+            self.finish_run(&run, RunStatus::Canceled, None, Some(reason), false);
+        }
+        self.emit_changed();
     }
 
     fn stop_process(&self) {
@@ -892,7 +1005,7 @@ impl Session {
         for (_, tx) in lock(&self.pending).drain() {
             let _ = tx.send(Err(ResearchError::HelperGone));
         }
-        let stopped = matches!(lock(&self.state).state, SessionState::Stopped);
+        let stopped = matches!(lock(&self.state).state, SessionState::Stopped | SessionState::Detached { .. });
         if !stopped {
             let detail = match code.flatten() {
                 Some(code) => format!(" (exit code {code})"),
@@ -906,7 +1019,10 @@ impl Session {
     fn crash(self: &Arc<Self>, reason: &str) {
         let (active, queued) = {
             let mut state = lock(&self.state);
-            if matches!(state.state, SessionState::Crashed { .. } | SessionState::Stopped) {
+            if matches!(
+                state.state,
+                SessionState::Crashed { .. } | SessionState::Stopped | SessionState::Detached { .. }
+            ) {
                 return;
             }
             state.state = SessionState::Crashed { reason: reason.to_owned() };
@@ -960,6 +1076,17 @@ impl Session {
                     let Some(run) = runs.get_mut(&run_id) else { return };
                     files.iter().filter_map(|f| run.register_file(f)).map(|a| a.id).collect()
                 };
+                if files.iter().any(|f| f.truncated) {
+                    self.push_output(
+                        &shared,
+                        &run_id,
+                        OutputItem::Notice {
+                            message:
+                                "The table was cut to 500 rows and 50 columns; the HTML output keeps the original."
+                                    .into(),
+                        },
+                    );
+                }
                 self.push_output(
                     &shared,
                     &run_id,
@@ -1080,6 +1207,9 @@ impl Session {
                 other => {
                     let (name, hint) = match other {
                         SessionState::Crashed { .. } => ("crashed", "restart the session to continue"),
+                        SessionState::Detached { .. } => {
+                            ("detached from its folder", "start a new session for the open folder")
+                        }
                         SessionState::Starting | SessionState::Restarting => ("starting", "wait until it is ready"),
                         _ => ("stopped", "start a new session"),
                     };
@@ -1366,6 +1496,13 @@ impl Session {
     async fn restart(self: &Arc<Self>) -> Result<(), ResearchError> {
         let (queued, helper_alive) = {
             let mut state = lock(&self.state);
+            if let SessionState::Detached { .. } = state.state {
+                return Err(ResearchError::SessionNotReady {
+                    session: self.id.clone(),
+                    state: "detached from its folder".into(),
+                    hint: "start a new session for the open folder".into(),
+                });
+            }
             if matches!(state.state, SessionState::Stopped | SessionState::Starting | SessionState::Restarting) {
                 return Err(ResearchError::SessionNotReady {
                     session: self.id.clone(),

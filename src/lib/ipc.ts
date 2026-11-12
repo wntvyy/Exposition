@@ -9,13 +9,13 @@ import type { AgentEvent } from "../bindings/AgentEvent";
 import type { AppInfo } from "../bindings/AppInfo";
 import type { AppSettings } from "../bindings/AppSettings";
 import type { AppSettingsState } from "../bindings/AppSettingsState";
-import type { Budgets } from "../bindings/Budgets";
-import type { AttachArtifactRequest } from "../bindings/AttachArtifactRequest";
 import type { AttachArtifactResult } from "../bindings/AttachArtifactResult";
-import type { BuildId } from "../bindings/BuildId";
-import type { BuildTarget } from "../bindings/BuildTarget";
+import type { AttachRunArtifactRequest } from "../bindings/AttachRunArtifactRequest";
+import type { Budgets } from "../bindings/Budgets";
 import type { BuildEvent } from "../bindings/BuildEvent";
+import type { BuildId } from "../bindings/BuildId";
 import type { BuildStatusEvent } from "../bindings/BuildStatusEvent";
+import type { BuildTarget } from "../bindings/BuildTarget";
 import type { CaretGeometry } from "../bindings/CaretGeometry";
 import type { CommandError } from "../bindings/CommandError";
 import type { CreateTaskRequest } from "../bindings/CreateTaskRequest";
@@ -27,8 +27,8 @@ import type { DocumentOpened } from "../bindings/DocumentOpened";
 import type { DocumentState } from "../bindings/DocumentState";
 import type { EditOrigin } from "../bindings/EditOrigin";
 import type { EnvironmentReport } from "../bindings/EnvironmentReport";
-import type { ExecuteRequest } from "../bindings/ExecuteRequest";
 import type { ExportArtifact } from "../bindings/ExportArtifact";
+import type { FileDiff } from "../bindings/FileDiff";
 import type { FileEntry } from "../bindings/FileEntry";
 import type { JobEvent } from "../bindings/JobEvent";
 import type { JobId } from "../bindings/JobId";
@@ -50,31 +50,31 @@ import type { PageEditRequest } from "../bindings/PageEditRequest";
 import type { PageHit } from "../bindings/PageHit";
 import type { ProjectSettings } from "../bindings/ProjectSettings";
 import type { ProjectSettingsState } from "../bindings/ProjectSettingsState";
+import type { ProviderSettings } from "../bindings/ProviderSettings";
+import type { ProviderStatus } from "../bindings/ProviderStatus";
 import type { RecentProject } from "../bindings/RecentProject";
 import type { RecoveryEntry } from "../bindings/RecoveryEntry";
 import type { ResearchEvent } from "../bindings/ResearchEvent";
+import type { ResearchExecuteRequest } from "../bindings/ResearchExecuteRequest";
+import type { ResearchStartRequest } from "../bindings/ResearchStartRequest";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
+import type { ReviewActionResult } from "../bindings/ReviewActionResult";
 import type { RunManifest } from "../bindings/RunManifest";
 import type { RunOutputPage } from "../bindings/RunOutputPage";
 import type { RunSummary } from "../bindings/RunSummary";
 import type { SaveAllOutcome } from "../bindings/SaveAllOutcome";
+import type { SelectionGeometry } from "../bindings/SelectionGeometry";
 import type { SessionInfo } from "../bindings/SessionInfo";
-import type { StartSessionRequest } from "../bindings/StartSessionRequest";
+import type { TaskDetail } from "../bindings/TaskDetail";
+import type { TaskId } from "../bindings/TaskId";
+import type { TaskReview } from "../bindings/TaskReview";
+import type { TaskSummary } from "../bindings/TaskSummary";
 import type { TexBuildMode } from "../bindings/TexBuildMode";
 import type { TexEvent } from "../bindings/TexEvent";
 import type { TexPageMapping } from "../bindings/TexPageMapping";
 import type { TexTargetRef } from "../bindings/TexTargetRef";
 import type { TexTargetStatus } from "../bindings/TexTargetStatus";
-import type { SelectionGeometry } from "../bindings/SelectionGeometry";
 import type { ToolchainInfo } from "../bindings/ToolchainInfo";
-import type { FileDiff } from "../bindings/FileDiff";
-import type { ProviderSettings } from "../bindings/ProviderSettings";
-import type { ProviderStatus } from "../bindings/ProviderStatus";
-import type { ReviewActionResult } from "../bindings/ReviewActionResult";
-import type { TaskDetail } from "../bindings/TaskDetail";
-import type { TaskId } from "../bindings/TaskId";
-import type { TaskReview } from "../bindings/TaskReview";
-import type { TaskSummary } from "../bindings/TaskSummary";
 import type { TransactionError } from "../bindings/TransactionError";
 import type { TransactionOutcome } from "../bindings/TransactionOutcome";
 import type { TransactionRequest } from "../bindings/TransactionRequest";
@@ -192,14 +192,16 @@ export const commands = {
 
   // Research (M4). The project root comes from the workspace service; trust from the execution service.
   researchWorkspace: () => invoke<WorkspaceStatus | null>("research_workspace"),
-  researchEnvironments: (refresh: boolean, extraInterpreters?: string[]) =>
-    invoke<EnvironmentReport>("research_environments", { refresh, extraInterpreters: extraInterpreters ?? null }),
-  researchSessionStart: (request: StartSessionRequest) => invoke<SessionInfo>("research_session_start", { request }),
+  /** Discovered runtimes only; the webview cannot point discovery at executables. */
+  researchEnvironments: (refresh: boolean) => invoke<EnvironmentReport>("research_environments", { refresh }),
+  /** Sessions started from the webview always belong to the user. */
+  researchSessionStart: (request: ResearchStartRequest) =>
+    invoke<SessionInfo>("research_session_start", { request }),
   researchSessions: () => invoke<SessionInfo[]>("research_sessions"),
   researchSessionInterrupt: (sessionId: string) => invoke<SessionInfo>("research_session_interrupt", { sessionId }),
   researchSessionRestart: (sessionId: string) => invoke<SessionInfo>("research_session_restart", { sessionId }),
   researchSessionShutdown: (sessionId: string) => invoke<void>("research_session_shutdown", { sessionId }),
-  researchExecute: (request: ExecuteRequest) => invoke<RunSummary>("research_execute", { request }),
+  researchExecute: (request: ResearchExecuteRequest) => invoke<RunSummary>("research_execute", { request }),
   researchRunCancel: (runId: string) => invoke<void>("research_run_cancel", { runId }),
   researchRuns: () => invoke<RunSummary[]>("research_runs"),
   researchRun: (runId: string) => invoke<RunManifest>("research_run", { runId }),
@@ -210,7 +212,8 @@ export const commands = {
   researchArtifact: (runId: string, artifactId: string) =>
     invoke<ArrayBuffer>("research_artifact", { runId, artifactId }),
   /** Format-owned insert/update of a figure or table in an open document. */
-  artifactAttach: (request: AttachArtifactRequest) => invoke<AttachArtifactResult>("artifact_attach", { request }),
+  /** The artifact record is resolved from the run's manifest in Rust; pass identifiers only. */
+  artifactAttach: (request: AttachRunArtifactRequest) => invoke<AttachArtifactResult>("artifact_attach", { request }),
 
   // Typesetting (builds, rendered pages, export).
   typesettingWatch: (entry: string) => invoke<BuildEvent | null>("typesetting_watch", { entry }),

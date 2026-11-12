@@ -345,3 +345,76 @@ fn attach_through_document_service() {
     assert!(matches!(attach_artifact(&documents, root, &update), Err(AttachError::Artifact(_))));
     let _ = Path::new("unused");
 }
+
+#[test]
+fn markdown_captions_cannot_inject_markup() {
+    let hostile = r"Cost $5 #1 *x* ] <!-- c \ end";
+    let insert = request(AttachmentPlacement::Insert { offset: 0 }, 1, Some(hostile), ArtifactKind::Figure);
+    let plan = plan_for(Format::Markdown, "notes.md", "", &insert, &figure()).unwrap();
+    let text = apply("", &plan);
+    assert!(
+        text.contains(r"![Cost \$5 \#1 \*x\* \] \<\!\-\- c \\ end](.exposition/artifacts/run-1/output-1.png)")
+            || text
+                .contains(r"![Cost \$5 \#1 \*x\* \] \<\!\-\- c \\ end](../.exposition/artifacts/run-1/output-1.png)"),
+        "{text}"
+    );
+    let insert = request(AttachmentPlacement::Insert { offset: 0 }, 1, Some(hostile), ArtifactKind::Table);
+    let plan = plan_for(Format::Markdown, "notes.md", "", &insert, &table()).unwrap();
+    assert!(apply("", &plan).contains(r"Table: Cost \$5 \#1 \*x\* \] \<\!\-\- c \\ end"));
+}
+
+#[test]
+fn latex_chapter_figures_resolve_against_the_main_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("chapters")).unwrap();
+    std::fs::write(
+        root.join("book.tex"),
+        "\\documentclass{book}\n\\begin{document}\n\\input{chapters/ch1}\n\\end{document}\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("chapters/ch1.tex"), "\\section{Results}\n").unwrap();
+    let run_dir = root.join(".exposition").join("artifacts").join("run-1");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let png = b"\x89PNG\r\n\x1a\nfake";
+    std::fs::write(run_dir.join("output-1.png"), png).unwrap();
+    let mut artifact = artifact(ArtifactKind::Figure, ".exposition/artifacts/run-1/output-1.png", "image/png", "");
+    artifact.content_hash = format!("sha256:{}", hex(&Sha256::digest(png)));
+    let chapter = WorkspacePath::parse("chapters/ch1.tex").unwrap();
+    let (content, warnings) =
+        load_content_with(root, Format::Latex, &chapter, Some("\\section{Results}\n"), &artifact).unwrap();
+    assert_eq!(
+        content,
+        AttachContent::Figure {
+            path: ".exposition/artifacts/run-1/output-1.png".into(),
+            media_type: "image/png".into()
+        },
+        "graphics paths are relative to book.tex's folder, not the chapter's"
+    );
+    assert!(warnings.is_empty());
+    // Typst and Markdown resolve against the document itself.
+    let typ = WorkspacePath::parse("chapters/paper.typ").unwrap();
+    let (content, _) = load_content_with(root, Format::Typst, &typ, None, &artifact).unwrap();
+    assert_eq!(
+        content,
+        AttachContent::Figure {
+            path: "../.exposition/artifacts/run-1/output-1.png".into(),
+            media_type: "image/png".into()
+        }
+    );
+}
+
+#[test]
+fn typst_captions_render_literally() {
+    // Dashes, ellipses, quotes, comments, and list markers are escaped so the
+    // caption renders exactly as written (no en dash from `--`, no smart quotes).
+    let insert = request(
+        AttachmentPlacement::Insert { offset: 0 },
+        1,
+        Some(r#"1. <!-- a... "q" 'r' // c"#),
+        ArtifactKind::Figure,
+    );
+    let plan = plan_for(Format::Typst, "main.typ", "", &insert, &figure()).unwrap();
+    let text = apply("", &plan);
+    assert!(text.contains(r#"caption: [1\. \<!\-\- a\.\.\. \"q\" \'r\' \/\/ c]"#), "{text}");
+}

@@ -26,6 +26,10 @@ pub enum ResearchError {
     UnknownArtifact(String),
     #[error("session {session} belongs to another owner; agent runs use their own sessions")]
     OwnerMismatch { session: String },
+    #[error("session {session} belongs to another folder ({root}); start a session for the open folder")]
+    WorkspaceMismatch { session: String, root: String },
+    #[error("at most {limit} {owner} research sessions may run at once; stop one first")]
+    TooManySessions { owner: String, limit: usize },
     #[error("session {session} is {state}; {hint}")]
     SessionNotReady { session: String, state: String, hint: String },
     #[error("{0}")]
@@ -57,6 +61,8 @@ impl ResearchError {
             ResearchError::UnknownRun(_) => "research.unknownRun".into(),
             ResearchError::UnknownArtifact(_) => "research.unknownArtifact".into(),
             ResearchError::OwnerMismatch { .. } => "research.ownerMismatch".into(),
+            ResearchError::WorkspaceMismatch { .. } => "research.workspaceMismatch".into(),
+            ResearchError::TooManySessions { .. } => "research.tooManySessions".into(),
             ResearchError::SessionNotReady { .. } => "research.sessionNotReady".into(),
             ResearchError::InvalidRequest(_) => "research.invalidRequest".into(),
             ResearchError::StaleSource(_) => "research.staleSource".into(),

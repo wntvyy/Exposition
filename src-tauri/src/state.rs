@@ -125,8 +125,14 @@ struct WorkspaceSources(Arc<WorkspaceService>);
 
 impl SourceReader for WorkspaceSources {
     fn read(&self, path: &WorkspacePath) -> Result<ResolvedSource, String> {
-        let input = self.0.snapshot().and_then(|snapshot| snapshot.read(path)).map_err(|e| e.to_string())?;
+        let snapshot = self.0.snapshot().map_err(|e| e.to_string())?;
+        let input = snapshot.read(path).map_err(|e| e.to_string())?;
         let text = input.text.ok_or_else(|| format!("{path} is not a text file"))?;
-        Ok(ResolvedSource { text: text.to_string(), revision: input.revision, content_hash: input.content_hash })
+        Ok(ResolvedSource {
+            text: text.to_string(),
+            revision: input.revision,
+            content_hash: input.content_hash,
+            root: snapshot.root().to_path_buf(),
+        })
     }
 }

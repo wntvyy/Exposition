@@ -19,10 +19,25 @@
 //! example the caption); an update without a new caption keeps the caption
 //! source found in the block.
 //!
+//! Captions and table cells are plain text, escaped for the format so they
+//! render literally (Typst markup and shorthands, LaTeX specials, every ASCII
+//! punctuation character in Markdown). Markdown table captions are written as
+//! a `Table: <caption>` paragraph after the table (Pandoc's convention); the
+//! Markdown print profile prints it as an ordinary paragraph below the table.
+//!
+//! Figure paths are relative to the document for Typst and Markdown. LaTeX
+//! resolves graphics against the main file's directory, so a figure attached
+//! to an included file (e.g. `chapters/ch1.tex` included by `book.tex`) is
+//! written relative to the main file: the document itself when it has
+//! `\documentclass`, else the project target entry that includes it
+//! (`.exposition/project.json`), else a main file in the project that
+//! `\input`s/`\include`s it; a warning is returned when none is found.
+//!
 //! This is format code: research supplies the artifact and run, and the
 //! typesetting owner owns this crate going forward.
 
 mod blocks;
+mod latex;
 mod table;
 
 use std::path::Path;
@@ -250,6 +265,19 @@ pub fn load_content(
     document_path: &WorkspacePath,
     artifact: &ArtifactRecord,
 ) -> Result<AttachContent, AttachError> {
+    load_content_with(workspace_root, format, document_path, None, artifact).map(|(content, _)| content)
+}
+
+/// [`load_content`] with the document's current text (to find the LaTeX main
+/// file whose directory graphics paths resolve against) and placement warnings.
+pub fn load_content_with(
+    workspace_root: &Path,
+    format: Format,
+    document_path: &WorkspacePath,
+    document_text: Option<&str>,
+    artifact: &ArtifactRecord,
+) -> Result<(AttachContent, Vec<String>), AttachError> {
+    let mut warnings = Vec::new();
     let path = artifact
         .path
         .as_ref()
@@ -281,7 +309,18 @@ pub fn load_content(
                     _ => format!("{media_type} figures cannot be included in this document format"),
                 }));
             }
-            Ok(AttachContent::Figure { path: relative_path(document_path, path), media_type: media_type.into() })
+            // LaTeX resolves graphics against the main file's directory;
+            // Typst and Markdown against the document's own directory.
+            let base = if format == Format::Latex {
+                let (base, warning) = latex::graphics_base(&root, document_path, document_text);
+                warnings.extend(warning);
+                base
+            } else {
+                document_path.parent()
+            };
+            let content =
+                AttachContent::Figure { path: relative_from(base.as_ref(), path), media_type: media_type.into() };
+            Ok((content, warnings))
         }
         ArtifactKind::Table => {
             if bytes.len() as u64 > TABLE_FILE_LIMIT {
@@ -296,7 +335,7 @@ pub fn load_content(
                     grid.header.len()
                 )));
             }
-            Ok(AttachContent::Table(grid))
+            Ok((AttachContent::Table(grid), warnings))
         }
         other => {
             Err(AttachError::Unsupported(format!("{other:?} artifacts cannot be attached; choose a figure or table")))
@@ -314,7 +353,8 @@ pub fn attach_artifact(
     let snapshot = documents.snapshot(&request.document)?;
     let document_path = snapshot.path.clone().ok_or(AttachError::UnsupportedFormat)?;
     let format = Format::from_path(&document_path).ok_or(AttachError::UnsupportedFormat)?;
-    let content = load_content(workspace_root, format, &document_path, &request.artifact)?;
+    let (content, load_warnings) =
+        load_content_with(workspace_root, format, &document_path, Some(&snapshot.text), &request.artifact)?;
     let input = PlanInput {
         format,
         document: &request.document,
@@ -322,7 +362,20 @@ pub fn attach_artifact(
         revision: snapshot.revision,
         text: &snapshot.text,
     };
-    let plan = plan(&input, request, &content)?;
+    let mut plan = plan(&input, request, &content)?;
+    if format == Format::Latex
+        && let Some(main) = latex::main_file(workspace_root, &document_path, Some(&snapshot.text))
+        && main != document_path
+    {
+        // An included file: preamble advice only when the main file lacks the package.
+        plan.warnings.retain(|warning| {
+            !["graphicx", "booktabs"].iter().any(|package| {
+                warning.contains(&format!("\\usepackage{{{package}}}"))
+                    && latex::loads_package(workspace_root, &main, package)
+            })
+        });
+    }
+    plan.warnings.splice(0..0, load_warnings);
     let outcome = documents.apply(plan.transaction.clone())?;
     let applied = outcome
         .applied
@@ -374,8 +427,12 @@ fn derive_key(format: Format, text: &str, table: bool, artifact: &ArtifactRecord
 
 /// Path of `target` relative to the directory containing `document`.
 pub fn relative_path(document: &WorkspacePath, target: &WorkspacePath) -> String {
-    let doc_dir: Vec<String> =
-        document.parent().map(|p| p.components().map(str::to_owned).collect()).unwrap_or_default();
+    relative_from(document.parent().as_ref(), target)
+}
+
+/// Path of `target` relative to directory `dir` (`None` = workspace root).
+pub fn relative_from(dir: Option<&WorkspacePath>, target: &WorkspacePath) -> String {
+    let doc_dir: Vec<String> = dir.map(|p| p.components().map(str::to_owned).collect()).unwrap_or_default();
     let target: Vec<&str> = target.components().collect();
     let common = doc_dir.iter().zip(&target).take_while(|(a, b)| a.as_str() == **b).count();
     let mut parts: Vec<&str> = vec![".."; doc_dir.len() - common];

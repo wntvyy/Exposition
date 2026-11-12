@@ -39,7 +39,7 @@ class TableGridTests(unittest.TestCase):
           <thead><tr style="text-align: right;"><th></th><th>x</th><th>y</th></tr></thead>
           <tbody><tr><th>0</th><td>1</td><td>a &amp; b</td></tr>
           <tr><th>1</th><td>2.5</td><td><script>alert(1)</script>c</td></tr></tbody></table></div>"""
-        rows, header_rows = host.html_table_grid(markup)
+        rows, header_rows, truncated = host.html_table_grid(markup)
         self.assertEqual(header_rows, 1)
         self.assertEqual(rows, [["", "x", "y"], ["0", "1", "a & b"], ["1", "2.5", "c"]])
 
@@ -48,15 +48,29 @@ class TableGridTests(unittest.TestCase):
           <tr><th></th><th colspan="2">grp</th></tr>
           <tr><th>idx</th><th>a</th><th>b</th></tr></thead>
           <tbody><tr><th rowspan="2">k</th><td>1</td><td>2</td></tr><tr><td>3</td><td>4</td></tr></tbody></table>"""
-        rows, header_rows = host.html_table_grid(markup)
+        rows, header_rows, truncated = host.html_table_grid(markup)
         self.assertEqual(header_rows, 1)
         self.assertEqual(rows[0], ["idx", "grp a", "grp b"])
         self.assertEqual(rows[1:], [["k", "1", "2"], ["k", "3", "4"]])
 
     def test_optional_end_tags_and_no_table(self) -> None:
-        rows, _ = host.html_table_grid("<table><tr><th>a<th>b<tr><td>1<td>2</table>")
+        rows, _, _ = host.html_table_grid("<table><tr><th>a<th>b<tr><td>1<td>2</table>")
         self.assertEqual(rows, [["a", "b"], ["1", "2"]])
         self.assertIsNone(host.html_table_grid("<p>no table</p>"))
+
+    def test_span_amplification_is_bounded(self) -> None:
+        # ~20 KB of HTML that would expand to 25 million cells without limits.
+        markup = "<table><tr>" + "<td colspan=1000 rowspan=1000>x</td>" * 25 + "</tr>" + "<tr><td>y</td></tr>" * 999 + "</table>"
+        started = time.time()
+        rows, header_rows, truncated = host.html_table_grid(markup)
+        self.assertLess(time.time() - started, 2.0)
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(rows) - header_rows, host.TABLE_MAX_ROWS)
+        self.assertTrue(all(len(r) <= host.TABLE_MAX_COLUMNS for r in rows))
+        self.assertLess(len(host.grid_to_csv(rows)), 200_000)
+        small, _, small_truncated = host.html_table_grid("<table><tr><td>1</td><td>2</td></tr></table>")
+        self.assertEqual(small, [["1", "2"]])
+        self.assertFalse(small_truncated)
 
     def test_csv_round_trip(self) -> None:
         rows = [["a,b", 'q"t'], ["1", "line\nbreak"]]
@@ -184,6 +198,9 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(self.hello["python"]["executable"], sys.executable)
         self.assertTrue(self.hello["packages"]["jupyter_client"])
         self.assertEqual(self.started["kernel"]["language"], "python")
+        outputs, _ = self.helper.run("r-cwd", "import os\nos.getcwd()", self.out_dir("r-cwd"))
+        cwd = [e["text"] for e in outputs if e["event"] == "display"][0].strip("'")
+        self.assertEqual(os.path.normcase(os.path.realpath(cwd.replace("\\\\", "\\"))), os.path.normcase(os.path.realpath(self.workdir)))
         self.assertIsInstance(self.started["pid"], int)
 
     def test_stream_and_result(self) -> None:

@@ -7,6 +7,7 @@ import { registry } from "../../app/registry";
 import type { ArtifactRecord } from "../../bindings/ArtifactRecord";
 import type { DocumentId } from "../../bindings/DocumentId";
 import type { EnvironmentReport } from "../../bindings/EnvironmentReport";
+import type { ResearchEvent } from "../../bindings/ResearchEvent";
 import type { RunSource } from "../../bindings/RunSource";
 import type { RunSummary } from "../../bindings/RunSummary";
 import type { SessionInfo } from "../../bindings/SessionInfo";
@@ -49,23 +50,60 @@ export const useResearch = create<ResearchState>(() => ({
 
 let started = false;
 
+// Research events arrive in bursts during output floods. They are queued and
+// applied in one store update per animation frame, so rendering never runs
+// once per event.
+let pending: ResearchEvent[] = [];
+let flushScheduled = false;
+
+function scheduleFlush(): void {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  const run = () => {
+    flushScheduled = false;
+    flushEvents();
+  };
+  if (typeof requestAnimationFrame === "function" && document.visibilityState === "visible") {
+    requestAnimationFrame(run);
+  } else {
+    setTimeout(run, 16);
+  }
+}
+
+/** Apply every queued event in one store update (exported for tests). */
+export function flushEvents(): void {
+  if (pending.length === 0) return;
+  const batch = pending;
+  pending = [];
+  useResearch.setState((state) => {
+    let model: { sessions: ResearchState["sessions"]; runs: ResearchState["runs"]; outputs: ResearchState["outputs"] } = state;
+    let selectedRun = state.selectedRun;
+    for (const event of batch) {
+      // Follow the newest run of the user's session.
+      if (event.kind === "runQueued" && event.run.owner.kind === "user" && !model.runs.some((r) => r.id === event.run.id)) {
+        selectedRun = event.run.id;
+      }
+      model = applyEvent(model, event);
+    }
+    return { sessions: model.sessions, runs: model.runs, outputs: model.outputs, selectedRun };
+  });
+}
+
+/** Queue an event as if it came from Rust (tests). */
+export function queueEventForTest(event: ResearchEvent): void {
+  pending.push(event);
+}
+
 /** Subscribe to research events once and load the current state. */
 export function startResearchTracking(): void {
   if (started) return;
   started = true;
   void events.research((event) => {
-    useResearch.setState((state) => {
-      const next = applyEvent(state, event);
-      const patch: Partial<ResearchState> = { sessions: next.sessions, runs: next.runs, outputs: next.outputs };
-      // Follow the newest run of the user's session.
-      if (event.kind === "runQueued" && event.run.owner.kind === "user" && !state.runs.some((r) => r.id === event.run.id)) {
-        patch.selectedRun = event.run.id;
-      }
-      return patch;
-    });
+    pending.push(event);
     if (event.kind === "runFinished" && event.run.status.kind === "failed" && document.visibilityState !== "visible") {
       notify({ tone: "danger", title: "Research run failed", body: event.run.status.message });
     }
+    scheduleFlush();
   });
   void events.researchResync(() => void refreshAll());
   void refreshAll();
@@ -145,7 +183,11 @@ export async function startSession(environmentId: string): Promise<SessionInfo |
   if (!workspace.trusted && !(await trustWorkspace())) return null;
   useResearch.setState({ starting: true, error: null });
   try {
-    const session = await commands.researchSessionStart({ environmentId, owner: { kind: "user" } });
+    // A session detached from its folder never runs again; clear it away first.
+    for (const old of useResearch.getState().sessions.filter((s) => s.state.kind === "detached")) {
+      await commands.researchSessionShutdown(old.id).catch(() => undefined);
+    }
+    const session = await commands.researchSessionStart({ environmentId });
     useResearch.setState((state) => ({
       starting: false,
       sessions: [...state.sessions.filter((s) => s.id !== session.id), session],
@@ -161,7 +203,7 @@ export async function startSession(environmentId: string): Promise<SessionInfo |
 async function ensureSession(): Promise<SessionInfo | null> {
   const state = useResearch.getState();
   const existing = userSession(state);
-  if (existing) return existing;
+  if (existing && existing.state.kind !== "detached") return existing;
   if (!state.selectedEnvironment) {
     useResearch.setState({ error: "Choose a research environment first." });
     return null;
@@ -173,7 +215,7 @@ export async function execute(source: RunSource): Promise<RunSummary | null> {
   const session = await ensureSession();
   if (!session) return null;
   try {
-    const run = await commands.researchExecute({ sessionId: session.id, source, requester: { kind: "user" } });
+    const run = await commands.researchExecute({ sessionId: session.id, source });
     useResearch.setState((state) => ({
       error: null,
       selectedRun: run.id,
@@ -331,12 +373,11 @@ export async function attachArtifact(options: {
     const result = await commands.artifactAttach({
       document: target.document,
       baseRevision: state.info.revision,
-      artifact,
-      run: run.id,
+      runId: run.id,
+      artifactId: artifact.id,
       placement,
       caption: caption && caption.trim() ? caption.trim() : null,
       attachmentKey: null,
-      origin: { kind: "research", runId: run.id },
     });
     const what = artifact.kind === "table" ? "Table" : "Figure";
     notify({

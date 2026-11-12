@@ -1,7 +1,7 @@
 // Research panel: environment and session controls, code input, streamed run
 // output (text, figures, inert tables), run history with provenance, and
 // insert/update of figures and tables into documents.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   FlaskConical,
   FolderOpen,
@@ -36,6 +36,7 @@ import {
 } from "../../ui/components";
 import {
   EMPTY_RUN_OUTPUT,
+  ENTRY_PREVIEW_CHARS,
   attachmentKeys,
   displayArtifacts,
   documentFormat,
@@ -178,7 +179,9 @@ function SessionBar() {
   const pill = sessionPill(session);
   const options = (environments?.runtimes ?? []).map((env) => ({ id: env.id, label: environmentLabel(env) }));
   const selectedEnv = environments?.runtimes.find((r) => r.id === selected);
-  const canStart = !session && selectedEnv?.availability.kind === "available" && !starting;
+  const detached = session?.state.kind === "detached";
+  const live = session && !detached ? session : undefined;
+  const canStart = !live && selectedEnv?.availability.kind === "available" && !starting;
   const crashed = session?.state.kind === "crashed";
   const busy = session?.state.kind === "busy";
 
@@ -188,8 +191,8 @@ function SessionBar() {
         aria-label="Research environment"
         className="exp-research__env"
         options={options}
-        value={session?.environmentId ?? selected}
-        isDisabled={Boolean(session)}
+        value={live?.environmentId ?? selected}
+        isDisabled={Boolean(live)}
         onChange={(id) => useResearch.setState({ selectedEnvironment: id })}
         placeholder="Choose environment"
       />
@@ -207,7 +210,7 @@ function SessionBar() {
           detail={session?.kernel ? `${session.kernel.language} ${session.kernel.languageVersion}` : undefined}
         />
       </span>
-      {!session && (
+      {!live && (
         <Button
           size="sm"
           variant="primary"
@@ -219,7 +222,7 @@ function SessionBar() {
           Start session
         </Button>
       )}
-      {session && (
+      {live && (
         <>
           <Button size="sm" icon={Square} isDisabled={!busy} onPress={() => void interruptSession()}>
             Interrupt
@@ -228,7 +231,7 @@ function SessionBar() {
             size="sm"
             variant={crashed ? "primary" : "secondary"}
             icon={RotateCcw}
-            isDisabled={session.state.kind === "starting" || session.state.kind === "restarting"}
+            isDisabled={live.state.kind === "starting" || live.state.kind === "restarting"}
             onPress={() => void restartSession()}
           >
             Restart
@@ -248,6 +251,21 @@ function EnvironmentNotice() {
   const selected = useResearch((s) => s.selectedEnvironment);
   const session = useResearch((s) => userSession(s));
   const env = environments?.runtimes.find((r) => r.id === selected);
+  if (session?.state.kind === "detached") {
+    return (
+      <Banner
+        tone="stale"
+        title="This session was stopped"
+        actions={
+          <Button size="sm" icon={Play} onPress={() => void startSession(session.environmentId)}>
+            Start a new session
+          </Button>
+        }
+      >
+        <span data-testid="research-detached-reason">{session.state.reason}</span>
+      </Banner>
+    );
+  }
   if (session?.state.kind === "crashed") {
     return (
       <Banner
@@ -398,24 +416,37 @@ function RunOutputView() {
   );
 }
 
-function OutputEntryView({ entry, run }: { entry: OutputEntry; run: RunSummary }) {
+/** Long text shows a bounded preview; "Show more" reveals more on request. */
+function LongText({ text, className, testId, stream }: { text: string; className: string; testId: string; stream?: string }) {
+  const [shown, setShown] = useState(ENTRY_PREVIEW_CHARS);
+  const visible = text.length > shown ? text.slice(0, shown) : text;
+  const hidden = text.length - visible.length;
+  return (
+    <>
+      <pre className={className} data-stream={stream} data-testid={testId}>
+        {visible}
+      </pre>
+      {hidden > 0 && (
+        <Button size="sm" variant="ghost" onPress={() => setShown((n) => n + 64 * 1024)}>
+          Show more ({formatBytes(hidden)} hidden)
+        </Button>
+      )}
+    </>
+  );
+}
+
+const OutputEntryView = memo(function OutputEntryView({ entry, run }: { entry: OutputEntry; run: RunSummary }) {
   const item = entry.item;
   switch (item.kind) {
     case "stream":
       return (
-        <pre className="exp-research__stream" data-stream={item.name} data-testid="research-stream">
-          {stripAnsi(item.text)}
-        </pre>
+        <LongText text={stripAnsi(item.text)} className="exp-research__stream" testId="research-stream" stream={item.name} />
       );
     case "display": {
       const { figure, table, html } = displayArtifacts(run, item.artifacts);
       if (figure) return <FigureView run={run} figure={figure} />;
       if (table && html) return <TableView run={run} table={table} html={html} />;
-      return (
-        <pre className="exp-research__result" data-testid="research-result">
-          {item.text ?? ""}
-        </pre>
-      );
+      return <LongText text={item.text ?? ""} className="exp-research__result" testId="research-result" />;
     }
     case "error":
       return (
@@ -431,7 +462,7 @@ function OutputEntryView({ entry, run }: { entry: OutputEntry; run: RunSummary }
     case "clearOutput":
       return null;
   }
-}
+});
 
 function FigureView({ run, figure }: { run: RunSummary; figure: ArtifactRecord }) {
   const [url, setUrl] = useState<string | null>(null);

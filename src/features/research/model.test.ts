@@ -6,6 +6,7 @@ import type { SessionInfo } from "../../bindings/SessionInfo";
 import {
   EMPTY_RUN_OUTPUT,
   MAX_ENTRIES,
+  MAX_RETAINED_CHARS,
   appendEntries,
   applyEvent,
   attachmentKeys,
@@ -74,6 +75,18 @@ describe("research model", () => {
     expect(out.entries[0]?.seq).toBe(11);
   });
 
+  it("bounds retained text so floods cannot grow the page without limit", () => {
+    const big = Array.from({ length: 200 }, (_, i) => stream(i + 1, "x".repeat(50_000)));
+    const out = appendEntries(EMPTY_RUN_OUTPUT, big);
+    const chars = out.entries.reduce((n, e) => n + (e.item.kind === "stream" ? e.item.text.length : 0), 0);
+    expect(chars).toBeLessThanOrEqual(MAX_RETAINED_CHARS);
+    expect(out.truncated).toBe(true);
+    expect(out.entries.at(-1)?.seq).toBe(200);
+    // A single entry larger than the limit is still kept (shown as a preview).
+    const one = appendEntries(EMPTY_RUN_OUTPUT, [stream(1, "y".repeat(3_000_000))]);
+    expect(one.entries).toHaveLength(1);
+  });
+
   it("reduces session and run events", () => {
     let model: ResearchModel = { sessions: [], runs: [], outputs: {} };
     model = applyEvent(model, { kind: "sessionChanged", session: session({ kind: "idle" }) });
@@ -92,6 +105,7 @@ describe("research model", () => {
   it("uses one status vocabulary", () => {
     expect(sessionPill(session({ kind: "crashed", reason: "x" })).status).toBe("failed");
     expect(sessionPill(session({ kind: "busy" })).status).toBe("running");
+    expect(sessionPill(session({ kind: "detached", reason: "closed" })).label).toBe("Session detached");
     expect(runPill(run({ queued: true })).label).toBe("Queued");
     expect(runPill(run({ status: { kind: "succeeded" } })).label).toBe("Executed");
   });
