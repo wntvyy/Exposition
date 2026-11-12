@@ -212,3 +212,43 @@
   background: var(--color-warning-bg);
   border-bottom: 2px dotted var(--color-warning-border);
 }
+
+/* Formal evidence and reviewed associations of audited declarations. */
+.exp-lean__evidence {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+
+.exp-lean__evidence-latest {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.exp-lean__association {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+  color: var(--color-text);
+}
+
+.exp-lean__evidence-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.exp-lean__new-claim {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.exp-lean__new-claim > :first-child {
+  flex: 1;
+}

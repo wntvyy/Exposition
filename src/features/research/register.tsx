@@ -1,11 +1,13 @@
 // Research feature registration: Research panel and research commands.
-import { FlaskConical } from "lucide-react";
+import { FlaskConical, Microscope } from "lucide-react";
 
 import { editors } from "../../app/editors";
 import { layout } from "../../app/layout";
 import { notify } from "../../app/notifications";
 import { registry } from "../../app/registry";
+import { ResearchPage } from "./ResearchPage";
 import { ResearchPanel } from "./ResearchPanel";
+import { RESEARCH_PAGE_ID, enableResearch, revealInResearch, startSpaceTracking } from "./space";
 import {
   interruptSession,
   loadEnvironments,
@@ -21,6 +23,16 @@ import {
 export const RESEARCH_VIEW_ID = "research.panel";
 
 const CODE_EXTENSIONS = ["py", "ipy", "r", "jl"];
+
+// The Research page: full code/data exploration suite (shares sessions, runs,
+// and document models with the bottom Research panel and the Editor page).
+registry.registerPage({
+  id: RESEARCH_PAGE_ID,
+  title: "Research",
+  icon: Microscope,
+  order: 20,
+  render: () => <ResearchPage />,
+});
 
 registry.registerView({
   id: RESEARCH_VIEW_ID,
@@ -106,5 +118,28 @@ registry.registerCommand({
   run: async () => {
     show();
     await loadEnvironments(true);
+  },
+});
+
+registry.registerCommand({
+  id: "research.showPage",
+  title: "Show Research Page",
+  category: "Research",
+  run: () => {
+    startResearchTracking();
+    startSpaceTracking();
+    revealInResearch(null);
+  },
+});
+
+registry.registerCommand({
+  id: "research.enable",
+  title: "Enable Research for This Project",
+  category: "Research",
+  enabled: () => Boolean(useResearch.getState().workspace),
+  run: async () => {
+    startSpaceTracking();
+    revealInResearch(null);
+    await enableResearch();
   },
 });

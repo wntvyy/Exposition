@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import type { FileEntry } from "../../bindings/FileEntry";
 import { notify } from "../../app/notifications";
 import type { RecoveryEntry } from "../../bindings/RecoveryEntry";
+import { ResearchFilesSection } from "../research/FilesSection";
 import {
   Banner,
   Button,
@@ -246,6 +247,7 @@ export function FilesView() {
           {renderEntries(root.entries, dirs, expanded)}
         </Tree>
       )}
+      <ResearchFilesSection />
     </div>
   );
 }

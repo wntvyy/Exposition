@@ -283,11 +283,20 @@ async function ensureSession(): Promise<SessionInfo | null> {
   return startSession(state.selectedEnvironment);
 }
 
-export async function execute(source: RunSource): Promise<RunSummary | null> {
+/**
+ * Run code in the user's session (starting one if needed). `declaredInputs`
+ * are project files the code reads (an experiment's inputs): Rust pins their
+ * content in the run's inputs when it is dispatched.
+ */
+export async function execute(source: RunSource, declaredInputs?: string[]): Promise<RunSummary | null> {
   const session = await ensureSession();
   if (!session) return null;
   try {
-    const run = await commands.researchExecute({ sessionId: session.id, source });
+    const run = await commands.researchExecute({
+      sessionId: session.id,
+      source,
+      ...(declaredInputs && declaredInputs.length > 0 ? { declaredInputs } : {}),
+    });
     useResearch.setState((state) => ({
       error: null,
       selectedRun: run.id,
