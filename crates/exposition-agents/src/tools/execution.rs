@@ -563,9 +563,20 @@ impl ToolServices for AppToolServices {
         };
         let mut value = serde_json::to_value(&report).map_err(|e| ServiceError::Failed(e.to_string()))?;
         let note = match &report.status {
-            _ if report.checked => {
-                "Lean finished exactly this text with no errors and no sorry: the file is checked.".to_owned()
+            _ if report.checked => "Lean finished exactly this text with no errors, no sorry (also none through \
+                 imports or suppressed warnings), kernel checking on, and only the standard axioms: the file is checked."
+                .to_owned(),
+            LeanStatus::CheckedWithAxioms { axioms, .. } => format!(
+                "Not checked: no errors, but declarations depend on axioms beyond Lean's standard ones ({}).",
+                axioms.join(", ")
+            ),
+            LeanStatus::ReliesOnCompiledCode { .. } => {
+                "Not checked: no errors, but declarations trust compiled code (native_decide) instead of the kernel."
+                    .to_owned()
             }
+            LeanStatus::PartiallyChecked { reason, .. }
+            | LeanStatus::Unverified { reason, .. }
+            | LeanStatus::ServerUnavailable { reason } => format!("Not checked: {reason}"),
             LeanStatus::Untrusted { workspace_root } => format!(
                 "Not checked: checking runs project code and {workspace_root} is not trusted. Ask the user to trust \
                  the folder."
@@ -574,7 +585,7 @@ impl ToolServices for AppToolServices {
                 format!("Not checked: the Lean toolchain {toolchain} is not installed. {guidance}")
             }
             LeanStatus::CheckedWithSorry { count, .. } => {
-                format!("Not checked: {count} declaration(s) use sorry, so the material is incomplete.")
+                format!("Not checked: {count} declaration(s) depend on sorry (directly, through an import, or with the warning suppressed), so the material is incomplete.")
             }
             LeanStatus::Errors { count, .. } => format!("Not checked: Lean reported {count} error(s)."),
             _ => "Not checked: Lean did not finish checking this exact text.".to_owned(),
