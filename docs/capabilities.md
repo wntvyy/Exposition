@@ -102,7 +102,8 @@ elaborated exactly that text with no errors, no `sorry` (including through
 imports), kernel checking enabled, and only the standard axioms (`propext`,
 `Classical.choice`, `Quot.sound`). Anything else gets its own status:
 Incomplete (`sorry`), Checked with axioms, Relies on compiled code
-(`native_decide` and other native evaluation), Partially checked (`#exit`),
+(`native_decide` and other native evaluation), Partially checked (`#exit`,
+or another command that ends elaboration early),
 Not verified, Errors. Goals are shown as plain text; third-party infoview
 widgets are not executed. Toolchains are never downloaded implicitly.
 
