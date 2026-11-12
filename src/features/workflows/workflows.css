@@ -1,0 +1,199 @@
+/* Workflow draft editor and list. Tokens only (src/ui/tokens.css); controls,
+   pills, banners, and region states come from src/ui/components. */
+
+.xp-wf {
+  container-type: inline-size;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  user-select: text;
+}
+
+.xp-wf__page {
+  max-width: 960px;
+  padding: var(--space-6) var(--space-8) var(--space-10);
+}
+
+@container (max-width: 640px) {
+  .xp-wf__page {
+    padding: var(--space-4) var(--space-4) var(--space-8);
+  }
+}
+
+.xp-wf__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.xp-wf__title {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.xp-wf__group {
+  margin-top: var(--space-6);
+}
+
+.xp-wf__group-title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+}
+
+.xp-wf__form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
+  align-items: start;
+  margin-top: var(--space-2);
+}
+
+@container (max-width: 640px) {
+  .xp-wf__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.xp-wf__wide {
+  grid-column: 1 / -1;
+}
+
+.xp-wf__grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.xp-wf__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.xp-wf__inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.xp-wf__cards {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.xp-wf__card {
+  padding: var(--space-3) var(--space-4);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
+}
+
+.xp-wf__card-header {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.xp-wf__multi {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.xp-wf__chips {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.xp-wf__chips li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-1) 0 var(--space-2);
+  border: var(--border-width) solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-sm);
+}
+
+.xp-wf__payload {
+  margin-top: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.xp-wf__code {
+  height: 200px;
+  border: var(--border-width) solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.xp-wf__textarea {
+  height: auto;
+  min-height: calc(var(--control-height-md) * 3);
+  padding: var(--space-1-5) var(--space-2);
+  line-height: var(--line-height-normal);
+  resize: vertical;
+  font-family: inherit;
+}
+
+.xp-wf__textarea[data-code] {
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+}
+
+.xp-wf__textarea:focus {
+  border-color: var(--color-focus-ring);
+  outline: var(--border-width) solid var(--color-focus-ring);
+  outline-offset: 0;
+}
+
+.xp-wf__diagnostics {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.xp-wf__diagnostics li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.xp-wf__plan {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.xp-wf__muted {
+  margin: var(--space-1) 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}

@@ -1,0 +1,190 @@
+/* New Project page and project-setup recovery. Tokens only (src/ui/tokens.css);
+   controls, pills, banners, and region states come from src/ui/components. */
+
+.xp-proj {
+  container-type: inline-size;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  user-select: text;
+}
+
+.xp-proj__page {
+  max-width: 920px;
+  padding: var(--space-6) var(--space-8) var(--space-10);
+}
+
+@container (max-width: 640px) {
+  .xp-proj__page {
+    padding: var(--space-4) var(--space-4) var(--space-8);
+  }
+}
+
+.xp-proj__header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.xp-proj__title {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.xp-proj__group {
+  margin-top: var(--space-6);
+}
+
+.xp-proj__group > .ui-banner {
+  margin: var(--space-2) 0;
+}
+
+.xp-proj__group-title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+}
+
+.xp-proj__subtitle {
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+}
+
+.xp-proj__form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
+  align-items: start;
+}
+
+@container (max-width: 640px) {
+  .xp-proj__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.xp-proj__wide {
+  grid-column: 1 / -1;
+}
+
+.xp-proj__row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.xp-proj__row > .ui-button {
+  margin-bottom: calc(var(--font-size-sm) * var(--line-height-normal) + var(--space-1));
+}
+
+.xp-proj__grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.xp-proj__textarea {
+  height: auto;
+  min-height: calc(var(--control-height-md) * 3);
+  padding: var(--space-1-5) var(--space-2);
+  line-height: var(--line-height-normal);
+  resize: vertical;
+  font-family: inherit;
+}
+
+.xp-proj__textarea:focus {
+  border-color: var(--color-focus-ring);
+  outline: var(--border-width) solid var(--color-focus-ring);
+  outline-offset: 0;
+}
+
+.xp-proj__preview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+@container (max-width: 720px) {
+  .xp-proj__preview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.xp-proj__list,
+.xp-proj__files,
+.xp-proj__capabilities {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.xp-proj__list {
+  padding-left: var(--space-3);
+  list-style: disc;
+}
+
+.xp-proj__files li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+}
+
+.xp-proj__files code {
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.xp-proj__capability {
+  display: grid;
+  grid-template-columns: minmax(140px, auto) auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-1-5) 0;
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+}
+
+.xp-proj__capability-name {
+  font-weight: var(--font-weight-medium);
+}
+
+.xp-proj__guidance {
+  grid-column: 1 / -1;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.xp-proj__muted {
+  margin: var(--space-1) 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.xp-proj__error {
+  margin: var(--space-1) 0;
+  color: var(--color-danger-text);
+  font-size: var(--font-size-sm);
+}
+
+.xp-proj__footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
