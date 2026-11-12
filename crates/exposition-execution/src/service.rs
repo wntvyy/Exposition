@@ -1283,6 +1283,17 @@ impl Inner {
                         format!("restricted execution is unavailable: {message} The job was not run natively."),
                     )
                 };
+                // The image is checked with the same grammar settings use (a
+                // hand-edited settings file gets no looser check here).
+                let Some(image) = settings.docker.image.clone() else {
+                    return Err(unavailable(
+                        "no container image is configured. Set execution.docker.image to an image present locally (`docker image ls`)."
+                            .into(),
+                    ));
+                };
+                if let Err(reason) = docker::validate_image_reference(&image) {
+                    return Err(unavailable(format!("the configured image is not valid: {reason}.")));
+                }
                 let docker_path = match (Locator { host: &self.host, settings: &settings }).locate("docker") {
                     Located::Found { path, .. } => path,
                     Located::BadOverride { path } => {
@@ -1296,15 +1307,6 @@ impl Inner {
                     }
                 };
                 let docker_path = validate_executable(&docker_path.display().to_string())?;
-                let Some(image) = settings.docker.image.clone() else {
-                    return Err(unavailable(
-                        "no container image is configured. Set execution.docker.image to an image present locally (`docker image ls`)."
-                            .into(),
-                    ));
-                };
-                if !docker::valid_image_ref(&image) {
-                    return Err(unavailable(format!("configured image `{image}` is not a valid image reference.")));
-                }
                 if !docker::valid_container_program(&spec.program) {
                     return Err(JobRefusal::new(
                         RefusalCode::ProgramRefused,

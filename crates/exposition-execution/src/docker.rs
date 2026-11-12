@@ -56,12 +56,10 @@ pub const LABEL_MANAGED: &str = "org.exposition.managed";
 pub const LABEL_JOB: &str = "org.exposition.job";
 pub const LABEL_INSTANCE: &str = "org.exposition.instance";
 
-/// Image references: registry/name:tag@digest characters only, never an option.
+/// Whether `image` is a valid reference: the full grammar of
+/// [`validate_image_reference`], the one check used everywhere.
 pub fn valid_image_ref(image: &str) -> bool {
-    !image.is_empty()
-        && image.len() <= 255
-        && image.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && image.chars().all(|c| c.is_ascii_alphanumeric() || "_.-/:@".contains(c))
+    validate_image_reference(image).is_ok()
 }
 
 /// Longest repository name Docker accepts (`NameTotalLengthMax`).
@@ -457,13 +455,27 @@ mod tests {
     #[test]
     fn image_and_program_validation() {
         assert!(valid_image_ref("node:26-trixie-slim"));
-        assert!(valid_image_ref("ghcr.io/org/img@sha256:abc"));
+        assert!(valid_image_ref("ghcr.io/org/img@sha256:0123456789abcdef0123456789abcdef"));
+        assert!(!valid_image_ref("ghcr.io/org/img@sha256:abc"), "a digest needs at least 32 hex digits");
         assert!(!valid_image_ref("--privileged"));
         assert!(!valid_image_ref("img; rm -rf /"));
         assert!(!valid_image_ref(""));
         assert!(valid_container_program("node"));
         assert!(valid_container_program("/usr/bin/python3"));
         assert!(!valid_container_program("--privileged"));
+    }
+
+    /// Launch and settings accept exactly the same images: references the
+    /// old character-set check let through are refused at launch too.
+    #[test]
+    fn one_image_validator_for_settings_and_launch() {
+        for loose_but_invalid in ["Python:3.13", "img::tag", "img:", "a..b", "img/", "img:tag:other", "a_-b"] {
+            assert!(validate_image_reference(loose_but_invalid).is_err(), "{loose_but_invalid}");
+            assert!(!valid_image_ref(loose_but_invalid), "{loose_but_invalid} must be refused at launch too");
+        }
+        for valid in ["python:3.13-slim", "ghcr.io/org/img:v1", "localhost:5000/img:latest"] {
+            assert!(valid_image_ref(valid) && validate_image_reference(valid).is_ok(), "{valid}");
+        }
     }
 
     #[test]

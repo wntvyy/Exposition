@@ -456,6 +456,10 @@ impl AgentService {
 
     pub fn accept(&self, id: &TaskId, path: Option<&WorkspacePath>) -> Result<Vec<ReviewActionResult>> {
         let task = self.inner.store.task(id)?.ok_or_else(|| not_found(id))?;
+        // A running task may still change the files under review.
+        if task.status.is_active() || self.is_running(id) {
+            return Err(AgentError::new("agents.taskRunning", "Cancel the task before accepting its changes."));
+        }
         let project = self.inner.content_files(&task);
         let mut results = Vec::new();
         for file in self.inner.store.task_files(id)? {
