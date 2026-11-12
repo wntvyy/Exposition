@@ -61,6 +61,9 @@ pub struct BuildTimings {
 pub struct BuildRecord {
     pub result: BuildResult,
     pub entry: WorkspacePath,
+    /// Canonical root of the folder the build read; it is served only while
+    /// that folder is open.
+    pub root: PathBuf,
     pub document: Option<Arc<PagedDocument>>,
     pub map: Option<Arc<PageMap>>,
     /// Texts of the open documents compiled, by (document, revision).
@@ -223,6 +226,7 @@ impl TypesettingService {
         let record = Arc::new(BuildRecord {
             result,
             entry: target.entry.clone(),
+            root: snapshot.root().to_path_buf(),
             document: if failed { None } else { output.document },
             map: if failed { None } else { output.map },
             texts: snapshot.buffer_texts().into_iter().collect(),
@@ -239,47 +243,62 @@ impl TypesettingService {
         Ok(record)
     }
 
-    /// A retained build by id.
-    pub fn record(&self, id: &str) -> Option<Arc<BuildRecord>> {
-        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
-        store.recent.iter().rev().chain(store.last_good.values()).find(|r| r.id() == id).cloned()
-    }
-
-    /// The last successful build of an entry.
-    pub fn last_good(&self, entry: &WorkspacePath) -> Option<Arc<BuildRecord>> {
-        self.store.lock().unwrap_or_else(|p| p.into_inner()).last_good.get(entry).cloned()
-    }
-
-    /// The most recent build of an entry (successful or not).
-    pub fn latest(&self, entry: &WorkspacePath) -> Option<Arc<BuildRecord>> {
-        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
-        store.recent.iter().rev().find(|r| &r.entry == entry).cloned()
-    }
-
-    /// Text of a document revision compiled by a retained build.
-    pub fn revision_text(&self, document: &DocumentId, revision: u64) -> Option<Arc<str>> {
-        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+    /// Retained builds of the folder that is open now, newest first. Builds of
+    /// a folder that was closed (or switched away from) are never served or
+    /// exported, even before the store forgets them.
+    fn open_folder_records<'a>(&self, store: &'a Store) -> impl Iterator<Item = &'a Arc<BuildRecord>> + 'a {
+        let open = self.workspace.open_root();
         store
             .recent
             .iter()
             .rev()
             .chain(store.last_good.values())
+            .filter(move |r| open.as_deref() == Some(r.root.as_path()))
+    }
+
+    /// A retained build by id.
+    pub fn record(&self, id: &str) -> Option<Arc<BuildRecord>> {
+        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        self.open_folder_records(&store).find(|r| r.id() == id).cloned()
+    }
+
+    /// The last successful build of an entry.
+    pub fn last_good(&self, entry: &WorkspacePath) -> Option<Arc<BuildRecord>> {
+        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        let record = store.last_good.get(entry)?;
+        (self.workspace.open_root().as_deref() == Some(record.root.as_path())).then(|| Arc::clone(record))
+    }
+
+    /// The most recent build of an entry (successful or not).
+    pub fn latest(&self, entry: &WorkspacePath) -> Option<Arc<BuildRecord>> {
+        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        let open = self.workspace.open_root();
+        store.recent.iter().rev().find(|r| &r.entry == entry && open.as_deref() == Some(r.root.as_path())).cloned()
+    }
+
+    /// Text of a document revision compiled by a retained build.
+    pub fn revision_text(&self, document: &DocumentId, revision: u64) -> Option<Arc<str>> {
+        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        self.open_folder_records(&store)
             .flat_map(|r| r.texts.iter())
             .find(|(d, rev, ..)| d == document && *rev == revision)
             .map(|(.., text)| Arc::clone(text))
     }
 
-    /// SVG for a page render reference (page content hash) of a retained build.
+    /// SVG for a page render reference (page content hash) of a retained build
+    /// of the open folder.
     pub fn page_svg(&self, render_ref: &str) -> Option<Arc<String>> {
         let source = {
             let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+            // Only a page of a build of the open folder is served, cached or not.
+            let source = self.open_folder_records(&store).find_map(|record| {
+                let index = record.result.pages.iter().position(|p| p.render_ref == render_ref)?;
+                Some((Arc::clone(record.document.as_ref()?), index))
+            })?;
             if let Some((_, svg)) = store.svgs.iter().find(|(r, _)| r == render_ref) {
                 return Some(Arc::clone(svg));
             }
-            store.recent.iter().rev().chain(store.last_good.values()).find_map(|record| {
-                let index = record.result.pages.iter().position(|p| p.render_ref == render_ref)?;
-                Some((Arc::clone(record.document.as_ref()?), index))
-            })
+            Some(source)
         };
         let (document, index) = source?;
         let svg = Arc::new(typst_adapter::render_svg(&document, index)?);
@@ -321,8 +340,39 @@ impl TypesettingService {
                 path
             }
         };
+        self.check_export_destination(&record, &path)?;
         write_atomically(&path, &bytes).map_err(|e| TypesettingError::Export(e.to_string()))?;
         Ok(ExportArtifact { kind: ExportKind::Pdf, path: path.display().to_string(), content_hash: sha256_hex(&bytes) })
+    }
+
+    /// The TeX export's rules (R-m23 F6): an existing destination must be a PDF
+    /// that is neither an input of the build (a `.pdf` figure the document
+    /// includes) nor an open document.
+    fn check_export_destination(&self, record: &BuildRecord, path: &Path) -> Result<(), TypesettingError> {
+        let invalid = |message: &str| TypesettingError::InvalidDestination(message.into());
+        let Ok(meta) = std::fs::symlink_metadata(path) else { return Ok(()) };
+        if !meta.is_file() {
+            return Err(invalid("the destination exists and is not a file"));
+        }
+        let mut head = [0u8; 5];
+        let is_pdf = std::fs::File::open(path).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head)).is_ok()
+            && &head == b"%PDF-";
+        if !is_pdf {
+            return Err(invalid("refusing to replace a file that is not a PDF"));
+        }
+        let canonical = |p: &Path| p.canonicalize().ok();
+        let destination = canonical(path);
+        let in_folder = |p: &WorkspacePath| p.components().fold(record.root.clone(), |a, c| a.join(c));
+        let inputs = record.result.sources.iter().map(|s| s.path.clone());
+        let open = self.workspace.documents().list().into_iter().filter_map(|d| d.path);
+        let replaces_source = inputs.chain(open).any(|p| {
+            let source = canonical(&in_folder(&p));
+            source.is_some() && source == destination
+        });
+        if replaces_source {
+            return Err(invalid("refusing to replace a source file of the document"));
+        }
+        Ok(())
     }
 }
 

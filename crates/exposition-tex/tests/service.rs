@@ -385,3 +385,36 @@ fn exports_never_replace_sources_or_other_files() {
     assert!(matches!(outcome, Err(TexServiceError::InvalidDestination(_))), "{outcome:?}");
     assert_eq!(std::fs::read(&figure).unwrap(), before);
 }
+
+/// R-sec LOW 6: a build belongs to the folder it read. After another folder is
+/// opened, its id serves no page or mapping and cannot be exported into the
+/// open folder; reopening the folder makes it reachable again.
+#[test]
+fn builds_of_a_folder_that_is_no_longer_open_are_unreachable() {
+    let Some(mut env) = Env::new(None) else { return };
+    env.trust();
+    env.request(TexBuildMode::Draft);
+    let summary = env.next_finished();
+    assert_eq!(summary.result.status, BuildStatus::Succeeded, "{:?}", summary.result.diagnostics);
+    let id = summary.result.id.clone();
+    assert!(env.service.page_png(&id, 0, 1.0).is_ok());
+
+    let other = tempfile::tempdir().unwrap();
+    std::fs::write(other.path().join("main.tex"), "\\documentclass{article}\\begin{document}B\\end{document}\n")
+        .unwrap();
+    let own_pdf = b"%PDF-1.7 the other folder's own export".to_vec();
+    std::fs::write(other.path().join("main.pdf"), &own_pdf).unwrap();
+    env.workspace.open_workspace(other.path()).unwrap();
+
+    assert!(env.service.build(&id).is_none(), "the build id is unknown in the other folder");
+    assert!(matches!(env.service.page_png(&id, 0, 1.0), Err(TexServiceError::UnknownBuild)));
+    assert!(matches!(env.service.page_map(&id, 0), Err(TexServiceError::UnknownBuild)));
+    assert!(exposition_page::PageMapProvider::page_image(&env.service, &format!("{}-p0", id.0)).is_none());
+    assert!(matches!(env.service.export_pdf(&id, None), Err(TexServiceError::UnknownBuild)));
+    let elsewhere = tempfile::tempdir().unwrap();
+    assert!(env.service.export_pdf(&id, Some(elsewhere.path().join("out.pdf"))).is_err());
+    assert_eq!(std::fs::read(other.path().join("main.pdf")).unwrap(), own_pdf, "the open folder's PDF is untouched");
+
+    env.workspace.open_workspace(env.project.path()).unwrap();
+    assert!(env.service.page_png(&id, 0, 1.0).is_ok(), "reopened: its retained build is served again");
+}

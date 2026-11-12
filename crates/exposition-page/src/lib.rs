@@ -26,6 +26,6 @@ pub use input::{EditPlan, EditRefusal, PageEditOp, PageEditOutcome, PageEditRequ
 pub use map::{
     Affinity, Cluster, ClusterKind, ClusterSource, EditMode, EquationInfo, NonEditableReason, PageMap, RawPage, Stop,
 };
-pub use provider::{PageImage, PageMapProvider};
+pub use provider::{MAX_PAGE_IMAGE_PIXELS, PageImage, PageMapProvider, capped_raster_scale};
 #[cfg(feature = "typst")]
 pub use typst_input::TypstInput;

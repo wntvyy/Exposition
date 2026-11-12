@@ -40,7 +40,6 @@ fn export_refuses_relative_non_pdf_and_missing_folders() {
 /// R-sec F-export-a: an existing file named `*.pdf` that is NOT a PDF is
 /// silently replaced (the TeX export refuses this since R-m23 F6).
 #[test]
-#[ignore = "R-sec F4: Typst export replaces an existing non-PDF file named *.pdf (TeX refuses)"]
 fn export_never_replaces_a_file_that_is_not_a_pdf() {
     let fx = fixture();
     let record = fx.build();
@@ -59,7 +58,6 @@ fn export_never_replaces_a_file_that_is_not_a_pdf() {
 /// R-sec F-export-b: an open document of the workspace (a text file that
 /// happens to be named `*.pdf`) is replaced behind the document service.
 #[test]
-#[ignore = "R-sec F4: Typst export replaces an open document's file on disk"]
 fn export_never_replaces_an_open_document() {
     let fx = fixture();
     let record = fx.build();
@@ -82,7 +80,6 @@ fn export_never_replaces_an_open_document() {
 /// R-sec F-export-c: a PDF the document itself includes (an input of the
 /// build) is replaced by the export.
 #[test]
-#[ignore = "R-sec F4: Typst export replaces a PDF the document includes (a build input)"]
 fn export_never_replaces_an_input_of_the_build() {
     let fx = fixture();
     let first = fx.build();
@@ -136,7 +133,6 @@ fn export_never_replaces_an_input_of_the_build() {
 /// R-sec: the default destination (`<entry stem>.pdf` next to the entry)
 /// must also never replace a non-PDF file.
 #[test]
-#[ignore = "R-sec F4: Typst default export replaces an existing non-PDF <entry>.pdf"]
 fn default_export_never_replaces_a_non_pdf() {
     let fx = fixture();
     let record = fx.build();
