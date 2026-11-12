@@ -354,18 +354,20 @@ fn escape_typst_markup(text: &str) -> String {
     let text = text.trim();
     let mut out = String::new();
     for (i, ch) in text.chars().enumerate() {
-        let leading_marker = i == 0 && matches!(ch, '-' | '+' | '=');
-        if leading_marker || matches!(ch, '\\' | '#' | '[' | ']' | '$' | '*' | '_' | '`' | '<' | '>' | '@' | '~' | '/')
+        let leading_marker = i == 0 && matches!(ch, '+' | '=');
+        // `-` and `.` are escaped everywhere (dash and ellipsis shorthands),
+        // quotes too (smart quotes), so the caption renders exactly as written.
+        if leading_marker
+            || matches!(
+                ch,
+                '\\' | '#' | '[' | ']' | '$' | '*' | '_' | '`' | '<' | '>' | '@' | '~' | '/' | '-' | '.' | '"' | '\''
+            )
         {
             out.push('\\');
         }
         out.push(ch);
     }
-    // "1. text" at the start would become a numbered list.
-    let digits = out.chars().take_while(char::is_ascii_digit).count();
-    if digits > 0 && out[digits..].starts_with('.') {
-        out.insert(digits, '\\');
-    }
+    // "1. text" at the start cannot become a numbered list: the dot is escaped above.
     out
 }
 
@@ -393,10 +395,13 @@ fn latex_row(cells: &[String]) -> String {
     cells.iter().map(|c| escape_latex(c)).collect::<Vec<_>>().join(" & ")
 }
 
+/// Escape plain text for Markdown inline content: every ASCII punctuation
+/// character is backslash-escaped (always literal in CommonMark), so captions
+/// and cells cannot start math (`$`), emphasis, links, HTML, or comments.
 fn escape_markdown(text: &str) -> String {
     let mut out = String::new();
     for ch in single_line(text).trim().chars() {
-        if matches!(ch, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|') {
+        if ch.is_ascii_punctuation() {
             out.push('\\');
         }
         out.push(ch);

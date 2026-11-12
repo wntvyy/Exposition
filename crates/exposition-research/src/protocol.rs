@@ -33,6 +33,9 @@ pub struct HelperFile {
     pub size: u64,
     pub sha256: String,
     pub seq: u32,
+    /// A table grid that was cut to the row/column limits.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

@@ -9,6 +9,10 @@ import type { Status } from "../../ui/components";
 
 /** Output entries kept per run in the webview (Rust keeps its own bounded copy). */
 export const MAX_ENTRIES = 2000;
+/** Text kept per run in the webview; older entries are dropped first (history pages from Rust). */
+export const MAX_RETAINED_CHARS = 512 * 1024;
+/** Characters of one entry rendered before "Show more". */
+export const ENTRY_PREVIEW_CHARS = 4 * 1024;
 
 export interface RunOutput {
   entries: OutputEntry[];
@@ -20,6 +24,22 @@ export interface RunOutput {
 }
 
 export const EMPTY_RUN_OUTPUT: RunOutput = { entries: [], lastSeq: 0, truncated: false, loaded: false };
+
+function entryChars(entry: OutputEntry): number {
+  const item = entry.item;
+  switch (item.kind) {
+    case "stream":
+      return item.text.length;
+    case "display":
+      return (item.text?.length ?? 0) + 64;
+    case "error":
+      return item.evalue.length + item.traceback.reduce((n, line) => n + line.length, 0);
+    case "notice":
+      return item.message.length;
+    case "clearOutput":
+      return 8;
+  }
+}
 
 export interface ResearchModel {
   sessions: SessionInfo[];
@@ -48,6 +68,15 @@ export function appendEntries(output: RunOutput, entries: OutputEntry[]): RunOut
   if (next.length > MAX_ENTRIES) {
     next = next.slice(next.length - MAX_ENTRIES);
     truncated = true;
+  }
+  let chars = 0;
+  for (let i = next.length - 1; i >= 0; i -= 1) {
+    chars += entryChars(next[i] as OutputEntry);
+    if (chars > MAX_RETAINED_CHARS && i < next.length - 1) {
+      next = next.slice(i + 1);
+      truncated = true;
+      break;
+    }
   }
   return { ...output, entries: next, lastSeq, truncated };
 }
@@ -116,6 +145,8 @@ export function sessionPill(session: SessionInfo | undefined): PillState {
       return { status: "running", label: "Restarting kernel" };
     case "crashed":
       return { status: "failed", label: "Kernel crashed" };
+    case "detached":
+      return { status: "stale", label: "Session detached" };
     case "stopped":
       return { status: "canceled", label: "Session stopped" };
   }

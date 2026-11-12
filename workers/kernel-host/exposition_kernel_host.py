@@ -72,6 +72,11 @@ STREAM_FLUSH_INTERVAL = 0.05
 FILES_PER_RUN_LIMIT = 200
 #: Largest single rich output written to disk (bytes).
 FILE_SIZE_LIMIT = 64 * 1024 * 1024
+#: Table grid limits (body rows, columns, HTML characters parsed). Matches the
+#: attachment limits so every captured table can be inserted.
+TABLE_MAX_ROWS = 500
+TABLE_MAX_COLUMNS = 50
+TABLE_MAX_HTML = 4 * 1024 * 1024
 #: Heartbeat period (seconds).
 HEARTBEAT_INTERVAL = 2.0
 #: Packages whose versions are reported for run provenance.
@@ -241,28 +246,37 @@ def _span(value: object) -> int:
         return 1
 
 
-def html_table_grid(markup: str) -> tuple[list[list[str]], int] | None:
-    """Return (rows, header_row_count) for the first table in ``markup``."""
+def html_table_grid(markup: str) -> tuple[list[list[str]], int, bool] | None:
+    """Return (rows, header_row_count, truncated) for the first table in ``markup``.
+
+    The grid is bounded before it is materialized: at most TABLE_MAX_ROWS body
+    rows and TABLE_MAX_COLUMNS columns, so small HTML with huge colspan/rowspan
+    values cannot expand into millions of cells.
+    """
     parser = _TableParser()
+    truncated = len(markup) > TABLE_MAX_HTML
     try:
-        parser.feed(markup)
+        parser.feed(markup[:TABLE_MAX_HTML])
         parser.close()
     except Exception:
         return None
     raw_rows = [r for r in parser.rows if len(r) > 1]
     if not raw_rows:
         return None
-    grid: list[list[str | None]] = []
+    grid: list[list[str]] = []
     header_rows = 0
     pending: dict[int, tuple[str, int]] = {}  # column -> (text, rows remaining)
     for raw in raw_rows:
+        if len(grid) - header_rows >= TABLE_MAX_ROWS:
+            truncated = True
+            break
         marker, cells = raw[0], raw[1:]
-        row: list[str | None] = []
+        row: list[str] = []
         col = 0
 
         def fill_pending() -> None:
             nonlocal col
-            while col in pending:
+            while col in pending and col < TABLE_MAX_COLUMNS:
                 text, remaining = pending[col]
                 row.append(text)
                 if remaining <= 1:
@@ -273,20 +287,31 @@ def html_table_grid(markup: str) -> tuple[list[list[str]], int] | None:
 
         for cell in cells:
             fill_pending()
+            if col >= TABLE_MAX_COLUMNS:
+                truncated = True
+                break
             text = " ".join("".join(cell["text"]).split())
-            for _ in range(cell["colspan"]):
+            span = cell["colspan"]
+            if col + span > TABLE_MAX_COLUMNS:
+                truncated = True
+                span = TABLE_MAX_COLUMNS - col
+            for _ in range(span):
                 row.append(text)
                 if cell["rowspan"] > 1:
-                    pending[col] = (text, cell["rowspan"] - 1)
+                    pending[col] = (text, min(cell["rowspan"], TABLE_MAX_ROWS + 1) - 1)
                 col += 1
         fill_pending()
+        if len(row) >= TABLE_MAX_COLUMNS and any(c >= TABLE_MAX_COLUMNS for c in pending):
+            truncated = True
         section = marker["section"]
         is_header = section == "thead" or (section is None and bool(cells) and all(c["header"] for c in cells))
         if is_header and header_rows == len(grid):
             header_rows += 1
         grid.append(row)
-    width = max(len(r) for r in grid)
-    rows = [[c or "" for c in r] + [""] * (width - len(r)) for r in grid]
+    if pending and len(grid) - header_rows >= TABLE_MAX_ROWS:
+        truncated = True
+    width = min(max(len(r) for r in grid), TABLE_MAX_COLUMNS)
+    rows = [r[:width] + [""] * (width - len(r[:width])) for r in grid]
     if header_rows > 1:
         merged = []
         for column in range(width):
@@ -298,7 +323,7 @@ def html_table_grid(markup: str) -> tuple[list[list[str]], int] | None:
             merged.append(" ".join(parts))
         rows = [merged] + rows[header_rows:]
         header_rows = 1
-    return rows, header_rows
+    return rows, header_rows, truncated
 
 
 def grid_to_csv(rows: list[list[str]]) -> str:
@@ -579,6 +604,7 @@ class KernelHost:
         self.kc = kc
         self.expect_exit = False
         info = self._kernel_info()
+        self._adopt_cwd(info.get("language", ""))
         self.execution_state = "idle"
         self.out.event("kernel_status", state="idle")
         return {
@@ -639,6 +665,34 @@ class KernelHost:
             "banner": (reply.get("banner") or "")[:2000],
         }
         return self.kernel_info
+
+    def _adopt_cwd(self, language: str) -> None:
+        """Make the kernel's working directory the workspace root.
+
+        Python kernels inherit it from the launch. Kernels started through a
+        launcher (R.exe starts Rterm.exe) may not, so R and Julia change
+        directory explicitly with a silent request.
+        """
+        if self.kc is None or not self.cwd:
+            return
+        path = self.cwd.replace("\\", "/").replace('"', "")
+        code = {
+            "r": f'setwd("{path}")',
+            "julia": f'cd("{path}")',
+        }.get(language.strip().lower())
+        if code is None:
+            return
+        try:
+            msg_id = self.kc.execute(code, silent=True, store_history=False, allow_stdin=False)
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                msg = self.kc.get_shell_msg(timeout=max(0.1, deadline - time.time()))
+                if msg.get("parent_header", {}).get("msg_id") == msg_id:
+                    if msg.get("content", {}).get("status") != "ok":
+                        self.out.event("log", level="warning", message=f"could not set the {language} working directory")
+                    return
+        except Exception as error:
+            self.out.event("log", level="warning", message=f"could not set the working directory: {error}")
 
     def _kernel_pid(self) -> int | None:
         try:
@@ -830,12 +884,13 @@ class KernelHost:
                 if "<table" in html_text.lower():
                     grid = html_table_grid(html_text)
                     if grid is not None:
-                        rows, header_rows = grid
+                        rows, header_rows, truncated = grid
                         csv_file = self._write_output(
                             run, "csv", grid_to_csv(rows), False, "text/csv", "table", seq=written["seq"]
                         )
                         if csv_file:
                             csv_file["headerRows"] = header_rows
+                            csv_file["truncated"] = truncated
                             csv_file["rows"] = len(rows)
                             csv_file["columns"] = len(rows[0]) if rows else 0
                             files.append(csv_file)

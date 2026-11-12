@@ -8,13 +8,17 @@
 
 use std::path::PathBuf;
 
-use exposition_core::artifact::{AttachArtifactOutcome, AttachArtifactRequest};
+use exposition_core::artifact::{
+    ArtifactKind, AttachArtifactOutcome, AttachArtifactRequest, AttachmentPlacement, RunId,
+};
+use exposition_core::document::{DocumentId, EditOrigin};
 use exposition_research::types::{
-    EnvironmentReport, ExecuteRequest, RunManifest, RunOutputPage, RunSummary, SessionInfo, WorkspaceStatus,
+    EnvironmentReport, ExecuteRequest, RunManifest, RunOutputPage, RunSource, RunSummary, SessionInfo, SessionOwner,
+    WorkspaceStatus,
 };
 use exposition_research::{ResearchError, StartSessionRequest};
 use exposition_workspace::types::WorkspaceEvent;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
@@ -50,6 +54,42 @@ pub struct AttachArtifactResult {
     pub warnings: Vec<String>,
 }
 
+/// Start a research session from the webview. Sessions started here always
+/// belong to the user (an `owner` sent by the webview is ignored); agent
+/// sessions are created only by the agents service in Rust.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchStartRequest {
+    pub environment_id: String,
+}
+
+/// Run code from the webview, always as the user (a `requester` sent by the
+/// webview is ignored).
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchExecuteRequest {
+    pub session_id: String,
+    pub source: RunSource,
+}
+
+/// Insert or update a run's figure/table in an open document. The webview
+/// names the run and artifact; the record (path, kind, hash) is read from the
+/// run's stored manifest in Rust, never taken from the caller.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachRunArtifactRequest {
+    pub document: DocumentId,
+    pub base_revision: u64,
+    pub run_id: String,
+    pub artifact_id: String,
+    pub placement: AttachmentPlacement,
+    pub caption: Option<String>,
+    pub attachment_key: Option<String>,
+}
+
 /// Follow the workspace service's open folder: research runs in the open
 /// project (registered with the execution service by `workspace_open`); trust
 /// is always the execution service's decision.
@@ -78,19 +118,21 @@ pub async fn research_workspace(state: State<'_, AppState>) -> Result<Option<Wor
 pub async fn research_environments(
     state: State<'_, AppState>,
     refresh: bool,
-    extra_interpreters: Option<Vec<String>>,
 ) -> Result<EnvironmentReport, CommandError> {
-    let extra = extra_interpreters.unwrap_or_default().into_iter().map(PathBuf::from).collect();
-    Ok(state.research.environments(refresh, extra).await?)
+    sync_workspace(&state)?;
+    Ok(state.research.environments(refresh).await?)
 }
 
 #[tauri::command]
 pub async fn research_session_start(
     state: State<'_, AppState>,
-    request: StartSessionRequest,
+    request: ResearchStartRequest,
 ) -> Result<SessionInfo, CommandError> {
     sync_workspace(&state)?;
-    Ok(state.research.start_session(request).await?)
+    Ok(state
+        .research
+        .start_session(StartSessionRequest { environment_id: request.environment_id, owner: SessionOwner::User })
+        .await?)
 }
 
 #[tauri::command]
@@ -120,9 +162,16 @@ pub async fn research_session_shutdown(state: State<'_, AppState>, session_id: S
 }
 
 #[tauri::command]
-pub async fn research_execute(state: State<'_, AppState>, request: ExecuteRequest) -> Result<RunSummary, CommandError> {
+pub async fn research_execute(
+    state: State<'_, AppState>,
+    request: ResearchExecuteRequest,
+) -> Result<RunSummary, CommandError> {
     sync_workspace(&state)?;
-    Ok(state.research.execute(request)?)
+    Ok(state.research.execute(ExecuteRequest {
+        session_id: request.session_id,
+        source: request.source,
+        requester: SessionOwner::User,
+    })?)
 }
 
 #[tauri::command]
@@ -170,14 +219,25 @@ pub async fn research_artifact(
 #[tauri::command]
 pub async fn artifact_attach(
     state: State<'_, AppState>,
-    request: AttachArtifactRequest,
+    request: AttachRunArtifactRequest,
 ) -> Result<AttachArtifactResult, CommandError> {
     sync_workspace(&state)?;
-    let root = state
-        .research
-        .workspace()
-        .map(|w| PathBuf::from(w.root))
-        .ok_or_else(|| CommandError::from(ResearchError::NoWorkspace))?;
+    let root = state.research.workspace_root().ok_or_else(|| CommandError::from(ResearchError::NoWorkspace))?;
+    // The artifact record comes from the run's stored manifest (in the open workspace).
+    let (artifact, _) = state.research.artifact(&request.run_id, &request.artifact_id)?;
+    if !matches!(artifact.kind, ArtifactKind::Figure | ArtifactKind::Table) {
+        return Err(CommandError::new("attach.unsupported", "Only figures and tables can be attached to documents."));
+    }
+    let request = AttachArtifactRequest {
+        document: request.document,
+        base_revision: request.base_revision,
+        artifact,
+        run: Some(RunId(request.run_id.clone())),
+        placement: request.placement,
+        caption: request.caption,
+        attachment_key: request.attachment_key,
+        origin: EditOrigin::Research { run_id: request.run_id },
+    };
     let (outcome, warnings) = exposition_attach::attach_artifact(&state.documents, &root, &request)?;
     Ok(AttachArtifactResult { outcome, warnings })
 }

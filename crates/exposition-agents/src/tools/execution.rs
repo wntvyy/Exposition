@@ -323,14 +323,17 @@ impl AppToolServices {
     }
 
     async fn agent_session(&self, research: &ResearchService, owner: &SessionOwner) -> Result<String, ServiceError> {
-        let live = research
-            .sessions()
-            .into_iter()
-            .find(|s| &s.owner == owner && !matches!(s.state, SessionState::Stopped | SessionState::Crashed { .. }));
+        let live = research.sessions().into_iter().find(|s| {
+            &s.owner == owner
+                && !matches!(
+                    s.state,
+                    SessionState::Stopped | SessionState::Crashed { .. } | SessionState::Detached { .. }
+                )
+        });
         if let Some(session) = live {
             return Ok(session.id);
         }
-        let report = research.environments(false, Vec::new()).await.map_err(|e| ServiceError::Failed(e.to_string()))?;
+        let report = research.environments(false).await.map_err(|e| ServiceError::Failed(e.to_string()))?;
         let python = report.runtimes.iter().filter(|r| r.language == RuntimeLanguage::Python).collect::<Vec<_>>();
         let usable = python.iter().find(|r| {
             matches!(r.availability, Availability::Available) && r.kernel.is_some() && r.host_interpreter.is_some()

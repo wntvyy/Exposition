@@ -111,20 +111,53 @@ pub struct DiscoveryOptions<'a> {
     pub launcher: &'a dyn KernelProcessLauncher,
     /// Neutral working directory for probes (application-owned).
     pub probe_dir: &'a Path,
-    /// Additional interpreters the user pointed at explicitly.
-    pub extra_interpreters: Vec<PathBuf>,
+    /// The open project. Interpreters inside it (e.g. `.venv`) are project
+    /// content: they are probed only when the project is trusted, as trusted
+    /// project jobs, and never as application probes.
+    pub project: Option<ProjectScope>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectScope {
+    /// Canonical project root.
+    pub root: PathBuf,
+    pub trusted: bool,
+}
+
+/// Interpreter locations inside a project that are offered when it is trusted.
+fn project_candidates(root: &Path) -> Vec<PathBuf> {
+    let (dir, exe) = if cfg!(windows) { ("Scripts", "python.exe") } else { ("bin", "python") };
+    [".venv", "venv"].iter().map(|venv| root.join(venv).join(dir).join(exe)).collect()
+}
+
+fn inside(path: &Path, root: &Path) -> bool {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical.starts_with(root) || path.starts_with(root)
 }
 
 pub fn discover(options: &DiscoveryOptions<'_>) -> EnvironmentReport {
-    let mut candidates = python_candidates(options);
-    candidates.extend(options.extra_interpreters.iter().cloned());
-    let candidates = dedupe(candidates);
+    let project_root = options.project.as_ref().map(|p| p.root.clone());
+    // System interpreters only: anything that resolves into the project is project content.
+    let system: Vec<PathBuf> = dedupe(python_candidates(options))
+        .into_iter()
+        .filter(|p| project_root.as_ref().is_none_or(|root| !inside(p, root)))
+        .collect();
+    let project: Vec<PathBuf> = match &options.project {
+        Some(scope) if scope.trusted => dedupe(project_candidates(&scope.root)),
+        _ => Vec::new(),
+    };
+    let candidates: Vec<(PathBuf, bool)> =
+        system.into_iter().map(|p| (p, false)).chain(project.into_iter().map(|p| (p, true))).collect();
 
     let probed: Vec<Option<ProbedPython>> = std::thread::scope(|scope| {
         let handles: Vec<_> = candidates
             .iter()
-            .map(|path| {
-                scope.spawn(move || probe_python(options, path).map(|probe| ProbedPython { path: path.clone(), probe }))
+            .map(|(path, in_project)| {
+                scope.spawn(move || {
+                    let probe =
+                        if *in_project { probe_project_python(options, path) } else { probe_python(options, path) };
+                    probe.map(|probe| ProbedPython { path: path.clone(), probe })
+                })
             })
             .collect();
         handles.into_iter().map(|h| h.join().ok().flatten()).collect()
@@ -308,6 +341,18 @@ fn probe_spec(options: &DiscoveryOptions<'_>, program: &Path, args: Vec<String>)
         log_limit_bytes: Some(1024 * 1024),
         stdin: None,
     }
+}
+
+/// A project interpreter, probed as a trusted project job in the project root
+/// (`-I`: the project directory is not put on `sys.path`).
+fn probe_project_python(options: &DiscoveryOptions<'_>, path: &Path) -> Option<PythonProbe> {
+    let scope = options.project.as_ref().filter(|p| p.trusted)?;
+    let mut spec = probe_spec(options, path, vec!["-I".into(), "-c".into(), PYTHON_PROBE.into()]);
+    spec.label = format!("research discovery (project interpreter): {}", path.display());
+    spec.working_directory = crate::service::display_path(&scope.root);
+    let output = options.launcher.run_project_probe(&spec).ok()?;
+    let line = output.stdout.lines().find_map(|l| l.trim().strip_prefix(PROBE_MARKER))?;
+    serde_json::from_str(line).ok()
 }
 
 fn probe_python(options: &DiscoveryOptions<'_>, path: &Path) -> Option<PythonProbe> {

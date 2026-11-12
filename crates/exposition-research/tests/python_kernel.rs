@@ -26,7 +26,10 @@ use tokio::sync::broadcast::Receiver;
 struct Fixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
+    /// A second, never-trusted project folder.
+    other: PathBuf,
     data: PathBuf,
+    execution: ExecutionService,
     service: ResearchService,
     documents: Arc<DocumentService>,
     events: Receiver<ResearchEvent>,
@@ -37,9 +40,16 @@ fn required() -> bool {
 }
 
 async fn fixture(trusted: bool) -> Fixture {
+    fixture_with(trusted, |_| {}).await
+}
+
+async fn fixture_with(trusted: bool, configure: impl FnOnce(&mut ResearchConfig)) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap().join("project");
     std::fs::create_dir_all(&root).unwrap();
+    let other = std::fs::canonicalize(dir.path()).unwrap().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let other = std::fs::canonicalize(&other).unwrap();
     let data = std::fs::canonicalize(dir.path()).unwrap().join("appdata");
     let documents = Arc::new(DocumentService::new());
     // The real shared execution service: containment, clean environment, trust.
@@ -47,6 +57,7 @@ async fn fixture(trusted: bool) -> Fixture {
     let mut config =
         ResearchConfig::new(data.clone(), Arc::new(ExecutionLauncher::new(execution.clone())), documents.clone());
     config.cancel_grace = Duration::from_secs(3);
+    configure(&mut config);
     let service = ResearchService::new(config);
     let root = std::fs::canonicalize(&root).unwrap();
     if trusted {
@@ -56,12 +67,12 @@ async fn fixture(trusted: bool) -> Fixture {
     let status = service.set_workspace(&root, !trusted).unwrap();
     assert_eq!(status.trusted, trusted);
     let events = service.subscribe();
-    Fixture { _dir: dir, root, data, service, documents, events }
+    Fixture { _dir: dir, root, other, data, execution, service, documents, events }
 }
 
 /// The best available Python environment (with matplotlib/pandas when asked).
 async fn python(fixture: &Fixture, science: bool) -> Option<String> {
-    let report = fixture.service.environments(true, Vec::new()).await.unwrap();
+    let report = fixture.service.environments(true).await.unwrap();
     let found = report.runtimes.iter().find(|r| {
         r.language == RuntimeLanguage::Python
             && r.availability == Availability::Available
@@ -444,7 +455,7 @@ async fn untrusted_workspaces_cannot_start_kernels() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_runtimes_report_setup_guidance() {
     let fx = fixture(true).await;
-    let report = fx.service.environments(true, Vec::new()).await.unwrap();
+    let report = fx.service.environments(true).await.unwrap();
     for language in [RuntimeLanguage::R, RuntimeLanguage::Julia] {
         let entry = report.runtimes.iter().find(|r| r.language == language).expect("entry per language");
         match &entry.availability {
@@ -471,7 +482,7 @@ async fn missing_runtimes_report_setup_guidance() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn helper_unit_tests_pass_with_real_interpreter() {
     let fx = fixture(true).await;
-    let report = fx.service.environments(true, Vec::new()).await.unwrap();
+    let report = fx.service.environments(true).await.unwrap();
     let Some(python) = report
         .runtimes
         .iter()
@@ -505,7 +516,7 @@ async fn helper_unit_tests_pass_with_real_interpreter() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn r_and_julia_kernels_execute_when_registered() {
     let mut fx = fixture(true).await;
-    let report = fx.service.environments(true, Vec::new()).await.unwrap();
+    let report = fx.service.environments(true).await.unwrap();
     let require = std::env::var_os("EXPOSITION_REQUIRE_RESEARCH_KERNELS").is_some_and(|v| !v.is_empty());
     for (language, code, expected_stream, figure_code) in [
         (
@@ -569,5 +580,155 @@ async fn r_and_julia_kernels_execute_when_registered() {
         assert!(begin.elapsed() < Duration::from_secs(45), "{language:?} stop too slow");
         fx.service.shutdown(&session.id).await.unwrap();
         assert_no_leftover_processes(&fx).await;
+    }
+}
+
+fn norm(path: &str) -> String {
+    path.trim().trim_matches('\'').replace("\\\\", "\\").replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+/// R-m4 #1: a session belongs to exactly one workspace and its trust.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sessions_are_bound_to_their_workspace_and_trust() {
+    let mut fx = fixture(true).await;
+    let Some(env) = python(&fx, false).await else { return };
+    std::fs::write(fx.other.join("plot.py"), "open('ran-in-wrong-project.txt', 'w').write('x')\n").unwrap();
+    let a = start(&fx, &env, SessionOwner::User).await;
+
+    // Switching to another (untrusted) project detaches A's session at once.
+    fx.service.set_workspace(&fx.other, false).unwrap();
+    let detached = session_state(&mut fx.events, |s| matches!(s, SessionState::Detached { .. })).await;
+    assert_eq!(detached.id, a.id);
+    let mismatch = fx.service.execute(ExecuteRequest {
+        session_id: a.id.clone(),
+        source: RunSource::File { path: WorkspacePath::parse("plot.py").unwrap() },
+        requester: SessionOwner::User,
+    });
+    assert!(matches!(mismatch, Err(ResearchError::WorkspaceMismatch { .. })), "{mismatch:?}");
+    assert!(!fx.other.join("ran-in-wrong-project.txt").exists() && !fx.root.join("ran-in-wrong-project.txt").exists());
+    // Coming back does not revive it: a detached session never runs code again.
+    fx.service.set_workspace(&fx.root, false).unwrap();
+    let again = fx.service.execute(ExecuteRequest {
+        session_id: a.id.clone(),
+        source: input("1"),
+        requester: SessionOwner::User,
+    });
+    assert!(matches!(again, Err(ResearchError::SessionNotReady { .. })), "{again:?}");
+    assert!(fx.service.restart(&a.id).await.is_err(), "a detached session cannot be restarted");
+
+    // Revoking trust stops the kernel (watchdog) and refuses code.
+    let b = start(&fx, &env, SessionOwner::User).await;
+    fx.execution.revoke_trust(&fx.root.display().to_string()).unwrap();
+    let revoked = session_state(&mut fx.events, |s| matches!(s, SessionState::Detached { .. })).await;
+    assert_eq!(revoked.id, b.id);
+    assert!(matches!(&revoked.state, SessionState::Detached { reason } if reason.contains("trust")));
+    let refused = fx.service.execute(ExecuteRequest {
+        session_id: b.id.clone(),
+        source: input("1"),
+        requester: SessionOwner::User,
+    });
+    assert!(refused.is_err());
+    assert!(matches!(
+        fx.service.start_session(StartSessionRequest { environment_id: env.clone(), owner: SessionOwner::User }).await,
+        Err(ResearchError::NotTrusted)
+    ));
+
+    // Closing the project detaches every session.
+    fx.execution.grant_trust(&fx.root.display().to_string()).unwrap();
+    let c = start(&fx, &env, SessionOwner::User).await;
+    fx.service.clear_workspace();
+    let closed = session_state(&mut fx.events, |s| matches!(s, SessionState::Detached { .. })).await;
+    assert_eq!(closed.id, c.id);
+    assert!(matches!(
+        fx.service.execute(ExecuteRequest {
+            session_id: c.id.clone(),
+            source: input("1"),
+            requester: SessionOwner::User
+        }),
+        Err(ResearchError::WorkspaceMismatch { .. })
+    ));
+    assert_no_leftover_processes(&fx).await;
+}
+
+/// R-m4 #7: every kernel's working directory is the workspace root, as a plain path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kernels_start_in_the_workspace_root() {
+    let mut fx = fixture(true).await;
+    let report = fx.service.environments(true).await.unwrap();
+    let expected = norm(&fx.root.display().to_string().replace(r"\\?\", ""));
+    for (language, code) in [
+        (RuntimeLanguage::Python, "import os\nprint(os.getcwd())"),
+        (RuntimeLanguage::R, "cat(getwd(), '\\n')"),
+        (RuntimeLanguage::Julia, "println(pwd())"),
+    ] {
+        let Some(env) =
+            report.runtimes.iter().find(|r| r.language == language && r.availability == Availability::Available)
+        else {
+            assert!(!(language == RuntimeLanguage::Python && required()), "Python required");
+            eprintln!("SKIPPED: no {language:?} kernel");
+            continue;
+        };
+        let session = start(&fx, &env.id, SessionOwner::User).await;
+        let summary = run(&fx, &session, input(code));
+        let done = finished(&mut fx.events, &summary.id.0, Duration::from_secs(120)).await;
+        assert_eq!(done.status, RunStatus::Succeeded, "{language:?}");
+        let cwd = texts(&fx, &summary.id.0).0;
+        assert!(!cwd.contains(r"\\?\"), "{language:?} cwd is a verbatim path: {cwd}");
+        assert_eq!(norm(&cwd), expected, "{language:?} kernel cwd");
+        fx.service.shutdown(&session.id).await.unwrap();
+    }
+}
+
+/// R-m4 #12: research leaves interactive-job headroom for other services.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_caps_are_per_owner() {
+    let fx = fixture_with(true, |config| {
+        config.max_user_sessions = 1;
+        config.max_agent_sessions = 1;
+    })
+    .await;
+    let Some(env) = python(&fx, false).await else { return };
+    let user = start(&fx, &env, SessionOwner::User).await;
+    let refused = fx
+        .service
+        .start_session(StartSessionRequest { environment_id: env.clone(), owner: SessionOwner::User })
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, ResearchError::TooManySessions { limit: 1, .. }), "{refused:?}");
+    assert_eq!(refused.code(), "research.tooManySessions");
+    let agent = start(&fx, &env, SessionOwner::Agent { task_id: "t".into() }).await;
+    fx.service.shutdown(&user.id).await.unwrap();
+    let again = start(&fx, &env, SessionOwner::User).await;
+    fx.service.shutdown(&again.id).await.unwrap();
+    fx.service.shutdown(&agent.id).await.unwrap();
+}
+
+/// R-m4 #4: interpreters inside a project run only when it is trusted, as
+/// trusted project jobs; discovery never takes executables from callers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_interpreters_are_probed_only_when_trusted() {
+    let program_dir = if cfg!(windows) { ".venv/Scripts" } else { ".venv/bin" };
+    let program_name = if cfg!(windows) { "python.exe" } else { "python" };
+    for trusted in [false, true] {
+        let fx = fixture(trusted).await;
+        let planted = fx.root.join(program_dir).join(program_name);
+        std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        std::fs::write(&planted, b"not a real interpreter").unwrap();
+        fx.service.environments(true).await.unwrap();
+        let jobs: Vec<_> = fx
+            .execution
+            .list()
+            .into_iter()
+            .filter(|job| {
+                let program = job.info.program.to_lowercase();
+                program.contains(".venv") && program.ends_with(program_name)
+            })
+            .collect();
+        if trusted {
+            assert!(!jobs.is_empty(), "a trusted project's .venv interpreter is probed");
+            assert!(jobs.iter().all(|j| j.kind == exposition_execution::JobKind::Batch), "as a trusted project job");
+        } else {
+            assert!(jobs.is_empty(), "an untrusted project's interpreter must not run: {jobs:?}");
+        }
     }
 }

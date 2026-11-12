@@ -205,7 +205,7 @@ async fn latex_builds_need_a_trusted_folder_and_report_refusals() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn python_runs_in_an_agent_session_and_its_figure_is_attached_and_built() {
     let mut h = harness();
-    let report = h.research.environments(false, Vec::new()).await.unwrap();
+    let report = h.research.environments(false).await.unwrap();
     let usable = report.runtimes.iter().any(|r| {
         r.language == RuntimeLanguage::Python
             && matches!(r.availability, Availability::Available)

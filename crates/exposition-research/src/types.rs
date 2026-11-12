@@ -107,6 +107,12 @@ pub enum SessionState {
     Crashed {
         reason: String,
     },
+    /// The session's workspace was closed or switched, or its trust was
+    /// revoked: the kernel was stopped and the session accepts no more code.
+    /// Start a new session for the open folder.
+    Detached {
+        reason: String,
+    },
     Stopped,
 }
 
@@ -160,9 +166,9 @@ pub enum RunSource {
     File { path: WorkspacePath },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-#[serde(rename_all = "camelCase")]
+/// Run code in a session (Rust callers; the webview uses its own request type
+/// and always runs as the user).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecuteRequest {
     pub session_id: String,
     pub source: RunSource,
