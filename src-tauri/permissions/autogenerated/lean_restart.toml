@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lean-restart"
+description = "Enables the lean_restart command without any pre-configured scope."
+commands.allow = ["lean_restart"]
+
+[[permission]]
+identifier = "deny-lean-restart"
+description = "Denies the lean_restart command without any pre-configured scope."
+commands.deny = ["lean_restart"]

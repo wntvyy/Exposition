@@ -19,6 +19,7 @@ exposition-core.workspace = true
 exposition-workspace.workspace = true
 exposition-agents.workspace = true
 exposition-execution.workspace = true
+exposition-lean.workspace = true
 exposition-research.workspace = true
 exposition-attach.workspace = true
 exposition-tex.workspace = true
