@@ -39,6 +39,15 @@ pub enum ScopeError {
 }
 
 impl ScopeError {
+    /// Stable code carried in the tool result (`code` field).
+    pub fn code(&self) -> &'static str {
+        match self {
+            ScopeError::OutsideScope { .. } => super::exec::codes::OUT_OF_SCOPE,
+            ScopeError::OutsideRoot(_) => super::exec::codes::OUTSIDE_PROJECT,
+            ScopeError::BrokenLink(_) | ScopeError::Io { .. } => super::exec::codes::INVALID_PATH,
+        }
+    }
+
     pub fn message(&self, scope: &TaskScope) -> String {
         match self {
             ScopeError::OutsideScope { path, resolved: None } => format!(

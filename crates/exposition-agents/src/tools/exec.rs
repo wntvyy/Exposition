@@ -113,6 +113,38 @@ impl ToolOutput {
     }
 }
 
+/// Stable codes of the gate's refusals, in the `code` field of the tool result
+/// (next to the human-readable `error`).
+pub mod codes {
+    /// A path (as requested or as resolved) is outside the task's scope.
+    pub const OUT_OF_SCOPE: &str = "agents.outOfScope";
+    /// A path resolves outside the project folder.
+    pub const OUTSIDE_PROJECT: &str = "agents.outsideProject";
+    pub const INVALID_PATH: &str = "agents.invalidPath";
+    /// The tool can read beyond any scope; the task is not scoped to the whole project.
+    pub const WHOLE_PROJECT_ONLY: &str = "agents.wholeProjectOnly";
+    /// The task's consent allows only file names and metadata.
+    pub const METADATA_ONLY: &str = "agents.metadataOnly";
+    pub const READ_ONLY: &str = "agents.readOnly";
+    pub const EXECUTION_DISABLED: &str = "agents.executionDisabled";
+    /// A native-only tool in a restricted-only task.
+    pub const NATIVE_NOT_ALLOWED: &str = "agents.nativeNotAllowed";
+    /// Restricted execution required, no restricted backend.
+    pub const RESTRICTED_UNAVAILABLE: &str = "agents.restrictedUnavailable";
+    /// Native execution is not possible here (e.g. the folder is not trusted).
+    pub const NATIVE_REFUSED: &str = "agents.nativeRefused";
+    pub const SERVICE_UNAVAILABLE: &str = "agents.serviceUnavailable";
+    /// The project switched (before running, or while waiting for approval).
+    pub const PROJECT_CHANGED: &str = "agents.projectChanged";
+    /// What the call would do changed while it waited for approval.
+    pub const CHANGED_SINCE_APPROVAL: &str = "agents.changedSinceApproval";
+}
+
+/// A refusal with its stable code.
+fn refusal(code: &str, message: impl Into<String>) -> ToolOutput {
+    ToolOutput::error_with(message, json!({"code": code}))
+}
+
 /// The application's permission to run one call, bound to the task's project
 /// folder. Only [`gate`] (and [`confirm`], after an approval) creates one, and
 /// [`run`] requires it: no tool runs without passing the gate.
@@ -157,7 +189,7 @@ pub enum Gate {
 }
 
 fn parse_path(raw: &str) -> Result<WorkspacePath, ToolOutput> {
-    WorkspacePath::parse(raw).map_err(|e| ToolOutput::error(format!("invalid path {raw:?}: {e}")))
+    WorkspacePath::parse(raw).map_err(|e| refusal(codes::INVALID_PATH, format!("invalid path {raw:?}: {e}")))
 }
 
 fn parse_dir(raw: &str) -> Result<Option<WorkspacePath>, ToolOutput> {
@@ -178,17 +210,21 @@ fn entry_visible(path: &str, scope: &TaskScope) -> bool {
 }
 
 fn read_only() -> ToolOutput {
-    ToolOutput::error("This task is read-only: the user did not allow document changes. Describe the change instead.")
+    refusal(
+        codes::READ_ONLY,
+        "This task is read-only: the user did not allow document changes. Describe the change instead.",
+    )
 }
 
 fn execution_disabled() -> ToolOutput {
-    ToolOutput::error("Process execution is disabled for this task by the user.")
+    refusal(codes::EXECUTION_DISABLED, "Process execution is disabled for this task by the user.")
 }
 
 fn project_changed(reason: &str) -> ToolOutput {
-    ToolOutput::error(format!(
-        "The project changed: {reason} This task acts only on its own project folder, so nothing was done."
-    ))
+    refusal(
+        codes::PROJECT_CHANGED,
+        format!("The project changed: {reason} This task acts only on its own project folder, so nothing was done."),
+    )
 }
 
 /// Check one path a call names: valid, and in the task's scope both as
@@ -200,7 +236,7 @@ fn check_path(env: &ToolEnv<'_>, raw: &str, path_use: PathUse) -> Result<(), Too
         PathUse::Folder => scope::check_dir(root, scope, parse_dir(raw)?.as_ref()),
         PathUse::Read | PathUse::Write | PathUse::Create => scope::check(root, scope, &parse_path(raw)?).map(|_| ()),
     };
-    checked.map_err(|e| ToolOutput::error(e.message(scope)))
+    checked.map_err(|e| refusal(e.code(), e.message(scope)))
 }
 
 /// Decide whether `call` may run, and whether it needs the user's approval.
@@ -243,11 +279,14 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         Exposure::ScopedContent => require_content_consent(spec, effects.what)?,
         Exposure::Unconfined => {
             if spec.scope != TaskScope::Workspace {
-                return Err(ToolOutput::error(format!(
-                    "{} can read any file of the project (and natively any file your account can read), so it is \
+                return Err(refusal(
+                    codes::WHOLE_PROJECT_ONLY,
+                    format!(
+                        "{} can read any file of the project (and natively any file your account can read), so it is \
                      only available for tasks scoped to the whole project. Nothing was run.",
-                    effects.what
-                )));
+                        effects.what
+                    ),
+                ));
             }
             require_content_consent(spec, effects.what)?;
         }
@@ -257,17 +296,20 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
             return Err(execution_disabled());
         }
         if effects.launch == Launch::NativeOnly && spec.execution == ExecutionMode::Restricted {
-            return Err(ToolOutput::error(format!(
-                "{} runs natively with your account's privileges, which this task does not allow (restricted \
+            return Err(refusal(
+                codes::NATIVE_NOT_ALLOWED,
+                format!(
+                    "{} runs natively with your account's privileges, which this task does not allow (restricted \
                  sandbox only; there is no restricted backend for it). Nothing was run.",
-                effects.what
-            )));
+                    effects.what
+                ),
+            ));
         }
     }
     if let Some(kind) = effects.service
         && !env.services.available(kind)
     {
-        return Err(ToolOutput::error(ServiceError::NotAvailable(kind).to_string()));
+        return Err(refusal(codes::SERVICE_UNAVAILABLE, ServiceError::NotAvailable(kind).to_string()));
     }
     let insertion = match call {
         ToolCall::InsertArtifact(input) => prepare_insertion(env, input)?,
@@ -279,7 +321,8 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         (_, ExecutionMode::Restricted) => match env.services.restricted_backend() {
             Some(backend) => Some(ExecutionPolicy::Restricted { backend }),
             None => {
-                return Err(ToolOutput::error(
+                return Err(refusal(
+                    codes::RESTRICTED_UNAVAILABLE,
                     "This task only allows unattended execution inside the restricted (container) backend, which is \
                      not available. Exposition never falls back to running it natively; the user can choose \
                      per-command approval instead.",
@@ -288,7 +331,10 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         },
         (_, ExecutionMode::ApproveEach) => {
             if let Some(reason) = env.services.native_refusal(root) {
-                return Err(ToolOutput::error_with(reason.clone(), json!({"status": "refused", "reason": reason})));
+                return Err(ToolOutput::error_with(
+                    reason.clone(),
+                    json!({"code": codes::NATIVE_REFUSED, "status": "refused", "reason": reason}),
+                ));
             }
             Some(ExecutionPolicy::TrustedNative)
         }
@@ -311,10 +357,13 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
 
 fn require_content_consent(spec: &TaskSpec, what: &str) -> Result<(), ToolOutput> {
     if spec.consent == ContextConsent::MetadataOnly {
-        return Err(ToolOutput::error(format!(
-            "The user's context consent for this task allows only file names and metadata to be sent to the model \
+        return Err(refusal(
+            codes::METADATA_ONLY,
+            format!(
+                "The user's context consent for this task allows only file names and metadata to be sent to the model \
              provider. {what} returns file content or results derived from it, so it was refused."
-        )));
+            ),
+        ));
     }
     Ok(())
 }
@@ -333,7 +382,8 @@ pub fn confirm(call: &ToolCall, env: &ToolEnv<'_>, approved: Authorization) -> R
     match gate(call, env) {
         Gate::Refused(output) => Err(output),
         Gate::NeedsApproval { authorization, .. } if authorization.approved == approved.approved => Ok(authorization),
-        Gate::Allowed(_) | Gate::NeedsApproval { .. } => Err(ToolOutput::error(
+        Gate::Allowed(_) | Gate::NeedsApproval { .. } => Err(refusal(
+            codes::CHANGED_SINCE_APPROVAL,
             "What this action would do changed while it waited for approval (for example, the document or the \
              artifact changed). Nothing was done; call the tool again so the user can approve the current version.",
         )),
@@ -509,11 +559,14 @@ fn prepare_insertion(
         .as_ref()
         .ok_or_else(|| ToolOutput::error("The artifact is not stored in the project, so it cannot be inserted."))?;
     scope::check(env.files.root(), &env.spec.scope, source).map_err(|e| {
-        ToolOutput::error(format!(
-            "The artifact file {source} is not in this task's scope ({}), so its content cannot be inserted. {}",
-            env.spec.scope.describe(),
-            e.message(&env.spec.scope)
-        ))
+        refusal(
+            e.code(),
+            format!(
+                "The artifact file {source} is not in this task's scope ({}), so its content cannot be inserted. {}",
+                env.spec.scope.describe(),
+                e.message(&env.spec.scope)
+            ),
+        )
     })?;
     if env.spec.permission != PermissionProfile::ReviewEdits {
         return Ok(None);
@@ -989,7 +1042,8 @@ fn insert_artifact(
         let texts: Vec<&str> =
             plan.transaction.edits.iter().flat_map(|e| e.patches.iter().map(|p| p.text.as_str())).collect();
         if texts != approved.texts.iter().map(String::as_str).collect::<Vec<_>>() {
-            return Err(ToolOutput::error(
+            return Err(refusal(
+                codes::CHANGED_SINCE_APPROVAL,
                 "The text to insert is no longer the text the user approved (the document or the artifact changed \
                  meanwhile). Nothing was inserted; call the tool again so the user can approve the current version.",
             ));

@@ -281,6 +281,20 @@ fn expect(
     Expect::Allowed(None)
 }
 
+/// The stable refusal code that goes with each refusal of the oracle.
+fn code_for(text: &str) -> &'static str {
+    use exposition_agents::tools::exec::codes;
+    match text {
+        "read-only" => codes::READ_ONLY,
+        "outside this task's scope" => codes::OUT_OF_SCOPE,
+        "consent" => codes::METADATA_ONLY,
+        "whole project" => codes::WHOLE_PROJECT_ONLY,
+        "disabled" => codes::EXECUTION_DISABLED,
+        "natively" => codes::NATIVE_NOT_ALLOWED,
+        other => panic!("no code for {other:?}"),
+    }
+}
+
 fn spec(
     mode: ExecutionMode,
     permission: PermissionProfile,
@@ -328,7 +342,9 @@ fn gate_matrix(kind: Kind) {
                     let expected = expect(kind, mode, permission, scope, consent);
                     let gate = exec::gate(&call, &env);
                     let ok = match (&expected, &gate) {
-                        (Expect::Refused(text), Gate::Refused(out)) => out.is_error && out.text().contains(text),
+                        (Expect::Refused(text), Gate::Refused(out)) => {
+                            out.is_error && out.text().contains(text) && out.content["code"] == json!(code_for(text))
+                        }
                         (Expect::Approval(policy), Gate::NeedsApproval { detail, authorization, .. }) => {
                             authorization.policy() == policy.as_ref() && detail.contains(kind.payload())
                         }
@@ -581,6 +597,10 @@ async fn loop_matrix(kind: Kind) {
                             if !(o.is_error && o.result.contains(text)) {
                                 problems.push(format!("not refused with {text:?}: {}", o.result));
                             }
+                            let code = format!("\"code\":\"{}\"", code_for(text));
+                            if !o.result.contains(&code) {
+                                problems.push(format!("refusal without the stable code {code}: {}", o.result));
+                            }
                             if asked > 0 || ran_service || changed_main || o.created {
                                 problems.push(format!(
                                     "a refused call acted (approvals {asked}, service {ran_service}, edit {changed_main}, created {})",
@@ -740,6 +760,8 @@ fn every_path_tool_refuses_a_link_inside_the_scope_that_leads_outside_it() {
         match exec::gate(&call, &env) {
             Gate::Refused(out) => {
                 assert!(out.text().contains("is a link to private"), "{name}: {}", out.text());
+                assert!(out.text().contains("outside this task's scope"), "{name}: {}", out.text());
+                assert_eq!(out.content["code"], json!("agents.outOfScope"), "{name}");
             }
             other => panic!("{name} through a link to an out-of-scope folder was not refused: {other:?}"),
         }
@@ -944,6 +966,7 @@ async fn approvals_answered_after_a_project_switch_do_nothing() {
             })
             .unwrap_or_default();
         assert!(result.contains("The project changed"), "{}: {result}", approval.tool);
+        assert!(result.contains("\"code\":\"agents.projectChanged\""), "{}: {result}", approval.tool);
         assert!(recorder.take().is_empty(), "{}: nothing ran", approval.tool);
         assert_eq!(std::fs::read_to_string(other.path().join("main.typ")).unwrap(), MAIN);
         assert_eq!(std::fs::read_to_string(dir.path().join("main.typ")).unwrap(), MAIN);
