@@ -27,7 +27,12 @@ revision: number, origin: OriginKind,
 /**
  * Source version the graph last recorded for its binding.
  */
-version: SourceVersion | null, binding: BindingState | null, 
+version: SourceVersion | null, 
+/**
+ * Attributes the task may see: path-valued ones (`research.path`) always,
+ * the others only with content consent. Absent when there are none.
+ */
+attributes?: { [key in string]: string }, binding: BindingState | null, 
 /**
  * Extraction coverage of the file (resources).
  */

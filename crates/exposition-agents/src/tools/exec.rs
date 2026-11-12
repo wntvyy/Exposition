@@ -163,6 +163,12 @@ pub mod codes {
     pub const GRAPH_CONFLICT: &str = "agents.graphConflict";
     /// Investigations and workflows are admitted deliberately, not by graph_propose.
     pub const GRAPH_RESERVED: &str = "agents.graphReservedKind";
+    /// A workflow definition that is not well formed, or a save that failed.
+    pub const WORKFLOW_INVALID: &str = "agents.workflowInvalid";
+    /// A workflow's authority ceiling wider than the task's own.
+    pub const WORKFLOW_CEILING: &str = "agents.workflowCeiling";
+    /// A workflow that forges a service-owned result (formal evidence, retained artifacts).
+    pub const WORKFLOW_SERVICE_OWNED: &str = "agents.workflowServiceOwned";
 }
 
 /// A refusal with its stable code.
@@ -184,6 +190,8 @@ pub struct Authorization {
     insertion: Option<PlannedInsertion>,
     /// A graph change validated (and shown) at the gate.
     proposal: Option<Box<Prepared>>,
+    /// A workflow draft validated (and shown) at the gate.
+    workflow: Option<Box<crate::graph::workflow::PreparedWorkflow>>,
 }
 
 impl Authorization {
@@ -353,7 +361,7 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
             crate::graph::bound_status(graph, root)?;
             crate::graph::targets::check_targets(graph, &effects)?;
         }
-        None if matches!(call, ToolCall::GraphQuery(_) | ToolCall::GraphPropose(_)) => {
+        None if matches!(call, ToolCall::GraphQuery(_) | ToolCall::GraphPropose(_) | ToolCall::WorkflowPropose(_)) => {
             return Err(crate::graph::unavailable("no project graph is attached to this task"));
         }
         None => {}
@@ -365,6 +373,12 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     let proposal = match (call, env.graph) {
         (ToolCall::GraphPropose(input), Some(graph)) => {
             Some(crate::graph::propose::prepare(graph, root, spec, env.task_id, input)?)
+        }
+        _ => None,
+    };
+    let workflow = match (call, env.graph) {
+        (ToolCall::WorkflowPropose(input), Some(graph)) => {
+            Some(crate::graph::workflow::prepare(graph, root, spec, input)?)
         }
         _ => None,
     };
@@ -394,18 +408,27 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     };
     let native = policy == Some(ExecutionPolicy::TrustedNative);
     let review = effects.changes && spec.permission == PermissionProfile::ReviewEdits;
-    let mut authorization =
-        Authorization { policy, root: root.to_path_buf(), approved: None, insertion: None, proposal: None };
+    let mut authorization = Authorization {
+        policy,
+        root: root.to_path_buf(),
+        approved: None,
+        insertion: None,
+        proposal: None,
+        workflow: None,
+    };
     if !(native || review) {
         authorization.insertion = insertion.map(|(planned, _)| planned);
         authorization.proposal = proposal.map(Box::new);
+        authorization.workflow = workflow.map(Box::new);
         return Ok(Gate::Allowed(authorization));
     }
-    let (title, mut detail) = match &proposal {
-        Some(prepared) => (prepared.title.clone(), prepared.detail.clone()),
-        None => describe(call, insertion.as_ref().map(|(_, shown)| shown.as_str())),
+    let (title, mut detail) = match (&proposal, &workflow) {
+        (Some(prepared), _) => (prepared.title.clone(), prepared.detail.clone()),
+        (_, Some(prepared)) => (prepared.title.clone(), prepared.detail.clone()),
+        _ => describe(call, insertion.as_ref().map(|(_, shown)| shown.as_str())),
     };
     authorization.proposal = proposal.map(Box::new);
+    authorization.workflow = workflow.map(Box::new);
     if native {
         detail.push_str("\n\nRuns natively with your account's privileges.");
     }
@@ -567,9 +590,11 @@ fn describe(call: &ToolCall, insertion: Option<&str>) -> (String, String) {
                 ),
             )
         }
-        ToolCall::ListFiles(_) | ToolCall::ReadFile(_) | ToolCall::GraphQuery(_) | ToolCall::GraphPropose(_) => {
-            (String::new(), String::new())
-        }
+        ToolCall::ListFiles(_)
+        | ToolCall::ReadFile(_)
+        | ToolCall::GraphQuery(_)
+        | ToolCall::GraphPropose(_)
+        | ToolCall::WorkflowPropose(_) => (String::new(), String::new()),
     };
     let detail = if detail.contains("⟨U+") {
         format!(
@@ -725,7 +750,7 @@ pub async fn run(
     if let Err(reason) = workspace::check_root(env.workspace, &authorization.root) {
         return project_changed(&reason);
     }
-    let Authorization { policy, insertion, proposal, .. } = authorization;
+    let Authorization { policy, insertion, proposal, workflow, .. } = authorization;
     let result = match call {
         ToolCall::GraphQuery(input) => match env.graph {
             Some(graph) => crate::graph::query::run(graph, env.files.root(), env.spec, &input),
@@ -742,6 +767,12 @@ pub async fn run(
                 &prepared,
             ),
             _ => Err(crate::graph::unavailable("the graph change was not validated by the gate")),
+        },
+        ToolCall::WorkflowPropose(_) => match (env.graph, workflow) {
+            (Some(graph), Some(prepared)) => {
+                crate::graph::workflow::save(graph, env.files.root(), env.task_id, &prepared)
+            }
+            _ => Err(crate::graph::unavailable("the workflow draft was not validated by the gate")),
         },
         ToolCall::ListFiles(input) => list_files(env, input),
         ToolCall::ReadFile(input) => read_file(env, seen, input),
