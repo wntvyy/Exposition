@@ -1721,3 +1721,184 @@ mod attachments {
         assert!(h.recorder.take().is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// 8. Protected paths in every spelling (R-M7-A1): the service-owned and
+//    graph-storage rules compare the `.exposition` folder case-insensitively
+//    and apply to the requested and the resolved path (links, 8.3 aliases).
+// ---------------------------------------------------------------------------
+
+/// Every call is asked of the gate in an auto-apply, whole-project task with
+/// restricted execution (so only the path rules can refuse).
+fn gate_rows(f: &Fixture, rows: &[(&str, Value, Option<&str>)]) -> Vec<String> {
+    let files = LocalProjectFiles::open(&f.root).unwrap();
+    let documents = DocumentService::new();
+    let store = Store::open_in_memory().unwrap();
+    let services = Recorder::new();
+    let task_id = TaskId::new();
+    let spec = TaskSpec {
+        prompt: "paths".into(),
+        workspace_root: f.root.display().to_string(),
+        scope: TaskScope::Workspace,
+        permission: PermissionProfile::AutoApply,
+        execution: ExecutionMode::Restricted,
+        consent: ContextConsent::ScopeContent,
+        budgets: Budgets::default(),
+        provider: ProviderChoice { provider: ProviderKind::Scripted, model: "scripted".into(), effort: Effort::Low },
+    };
+    let env = ToolEnv {
+        task_id: &task_id,
+        spec: &spec,
+        files: &files,
+        documents: &documents,
+        workspace: None,
+        services: services.as_ref(),
+        store: &store,
+        graph: Some(GraphEnv { service: &f.graph, project: None }),
+    };
+    let mut failures = Vec::new();
+    for (name, input, code) in rows {
+        let call = ToolCall::parse(name, input).unwrap_or_else(|e| panic!("{name} {input}: {e}"));
+        let gate = exec::gate(&call, &env);
+        let ok = match (code, &gate) {
+            (Some(code), Gate::Refused(out)) => out.content["code"] == json!(code),
+            (None, Gate::Allowed(_)) => true,
+            _ => false,
+        };
+        if !ok {
+            failures.push(format!("{name} {input}: expected {code:?}, gate {gate:?}"));
+        }
+    }
+    assert!(services.take().is_empty(), "the gate never runs a service");
+    failures
+}
+
+fn create(path: &str) -> (&'static str, Value) {
+    (tools::CREATE_FILE, json!({"path": path, "content": "{}"}))
+}
+
+#[test]
+fn protected_paths_are_refused_in_every_spelling() {
+    let f = fixture();
+    write(&f.root, "notes/plain.txt", "x\n");
+    let bind = |path: &str| {
+        json!({"summary": "", "base_revision": 1, "operations": [
+            {"op": "create_entity", "temp_id": "c", "kind": "claim", "label": "x", "attributes": [], "bind_path": path, "bind_start": -1, "bind_end": -1}
+        ]})
+    };
+    let mut rows: Vec<(&str, Value, Option<&str>)> = Vec::new();
+    for path in [
+        ".exposition/runs/run-7.json",
+        ".exposition/Runs/run-8.json",
+        ".EXPOSITION/runs/run-9.json",
+        ".Exposition/artifacts/run-9/fig.svg",
+        ".exposition/ARTIFACTS/run-9/table.csv",
+        ".EXPOSITION/settings-forged.json",
+        ".eXposition/recovery/x.json",
+    ] {
+        let (name, input) = create(path);
+        rows.push((name, input, Some(codes::SERVICE_OWNED)));
+        rows.push((tools::GRAPH_PROPOSE, bind(path), Some(codes::SERVICE_OWNED)));
+    }
+    for path in [".EXPOSITION/runs/run-1.json", ".Exposition/runs/run-1.json"] {
+        rows.push((
+            tools::EDIT_DOCUMENT,
+            json!({"path": path, "base_revision": 1, "edits": [{"old_text": "1", "new_text": "2"}]}),
+            Some(codes::SERVICE_OWNED),
+        ));
+        rows.push((
+            tools::INSERT_ARTIFACT,
+            json!({"path": path, "run_id": "run-1", "artifact_id": "fig", "after_text": "", "caption": "", "update_key": ""}),
+            Some(codes::SERVICE_OWNED),
+        ));
+    }
+    for dir in [".exposition/runs", ".EXPOSITION/Runs", ".Exposition", ".exposition/ARTIFACTS"] {
+        rows.push((
+            tools::RUN_COMMAND,
+            json!({"program": "python", "args": [], "working_directory": dir}),
+            Some(codes::SERVICE_OWNED),
+        ));
+    }
+    for path in [
+        ".EXPOSITION/graph.sqlite3",
+        ".exposition/GRAPH.SQLITE3",
+        ".Exposition/graph.sqlite3-wal",
+        ".EXPOSITION/Graph-Backups/b.sqlite3",
+        ".exposition/graph.DAMAGED-1.sqlite3",
+    ] {
+        rows.push((tools::READ_FILE, json!({"path": path}), Some(codes::GRAPH_STORAGE)));
+    }
+    rows.push((
+        tools::LIST_FILES,
+        json!({"path": ".EXPOSITION/graph-backups", "recursive": false}),
+        Some(codes::GRAPH_STORAGE),
+    ));
+    // Still allowed: managed research sources in any spelling, reading run
+    // records (operational references), listing metadata, ordinary files.
+    for (name, input) in [
+        create(".EXPOSITION/research/rs-1/notes/plan.md"),
+        create(".exposition/Research/rs-1/sources/fit.py"),
+        create("notes/new.typ"),
+        (tools::READ_FILE, json!({"path": ".EXPOSITION/runs/run-1.json"})),
+        (tools::LIST_FILES, json!({"path": ".Exposition/runs", "recursive": false})),
+        (tools::RUN_COMMAND, json!({"program": "python", "args": [], "working_directory": "notes"})),
+    ] {
+        rows.push((name, input, None));
+    }
+    let failures = gate_rows(&f, &rows);
+    assert!(failures.is_empty(), "{} rows differ:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// A link inside the project that leads into the service-owned folders, and
+/// the folder's 8.3 short name, are refused by the rule on the resolved path.
+#[cfg(windows)]
+#[test]
+fn protected_folders_reached_through_links_or_short_names_are_refused() {
+    let f = fixture();
+    std::fs::create_dir_all(f.root.join(".exposition/artifacts")).unwrap();
+    let mut rows: Vec<(&str, Value, Option<&str>)> = Vec::new();
+    let link = f.root.join("notes").join("runs-link");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(f.root.join(".exposition").join("runs"))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if made {
+        let (name, input) = create("notes/runs-link/run-5.json");
+        rows.push((name, input, Some(codes::SERVICE_OWNED)));
+        rows.push((
+            tools::RUN_COMMAND,
+            json!({"program": "python", "args": [], "working_directory": "notes/runs-link"}),
+            Some(codes::SERVICE_OWNED),
+        ));
+    } else {
+        eprintln!("skipped the junction rows: could not create a junction");
+    }
+    // The 8.3 short name of `.exposition`, when the volume has short names.
+    let short = std::process::Command::new("cmd")
+        .args(["/C", "for", "%I", "in", "(.exposition)", "do", "@echo", "%~sI"])
+        .current_dir(&f.root)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .and_then(|s| s.rsplit(['\\', '/']).next().map(str::to_owned))
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(".exposition") && WorkspacePath::parse(s).is_ok());
+    match &short {
+        Some(short) => {
+            let (name, input) = create(&format!("{short}/runs/run-6.json"));
+            rows.push((name, input, Some(codes::SERVICE_OWNED)));
+            rows.push((
+                tools::READ_FILE,
+                json!({"path": format!("{short}/graph.sqlite3")}),
+                Some(codes::GRAPH_STORAGE),
+            ));
+        }
+        None => eprintln!("skipped the 8.3 rows: no short name for .exposition on this volume"),
+    }
+    let failures = gate_rows(&f, &rows);
+    assert!(failures.is_empty(), "{} rows differ:\n{}", failures.len(), failures.join("\n"));
+    assert!(!f.root.join(".exposition/runs/run-5.json").exists());
+}

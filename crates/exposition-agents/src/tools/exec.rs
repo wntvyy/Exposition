@@ -273,7 +273,7 @@ fn check_path(env: &ToolEnv<'_>, raw: &str, path_use: PathUse) -> Result<(), Too
     let scope = &env.spec.scope;
     let root = env.files.root();
     let checked = match path_use {
-        PathUse::Folder => scope::check_dir(root, scope, parse_dir(raw)?.as_ref()),
+        PathUse::Folder | PathUse::WorkingFolder => scope::check_dir(root, scope, parse_dir(raw)?.as_ref()),
         PathUse::Read | PathUse::Write | PathUse::Create => scope::check(root, scope, &parse_path(raw)?).map(|_| ()),
     };
     checked.map_err(|e| refusal(e.code(), e.message(scope)))
@@ -313,8 +313,17 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     }
     for (raw, path_use) in &effects.paths {
         check_path(env, raw, *path_use)?;
-        if *path_use != PathUse::Folder || !tools::is_root(raw) {
-            crate::graph::targets::check_path_policy(&parse_path(raw.trim())?, *path_use)?;
+        let folder = matches!(path_use, PathUse::Folder | PathUse::WorkingFolder);
+        if !(folder && tools::is_root(raw)) {
+            // Protected paths, as requested and as resolved (links, junctions,
+            // case and 8.3 aliases): the rule is about the folder the path names.
+            let requested = parse_path(raw.trim())?;
+            crate::graph::targets::check_path_policy(&requested, *path_use)?;
+            if let Ok(Some(resolved)) = scope::resolve(root, &requested)
+                && resolved != requested
+            {
+                crate::graph::targets::check_path_policy(&resolved, *path_use)?;
+            }
         }
     }
     match effects.exposes {
@@ -859,12 +868,20 @@ fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The spelling of `path` as it exists on disk (links and case/8.3 aliases
+/// resolved; components that do not exist yet kept as given). Graph
+/// identities use it, so an alias never becomes a second identity.
+fn on_disk(env: &ToolEnv<'_>, path: &WorkspacePath) -> WorkspacePath {
+    scope::resolve(env.files.root(), path).ok().flatten().unwrap_or_else(|| path.clone())
+}
+
 /// Resolve a target to its graph identity (when the task has a graph) and
 /// record it with the task; the description goes into the tool result.
 fn resolve_target(env: &ToolEnv<'_>, path: &WorkspacePath, target_use: TargetUse) -> Option<Value> {
     let graph = env.graph?;
     let hash = saved_hash(env, path);
-    Some(crate::graph::targets::resolve(graph, env.store, env.task_id, path, target_use, hash.as_deref()))
+    let path = on_disk(env, path);
+    Some(crate::graph::targets::resolve(graph, env.store, env.task_id, &path, target_use, hash.as_deref()))
 }
 
 /// Add the graph description to a result (success or error object).
@@ -983,7 +1000,7 @@ fn list_files(env: &ToolEnv<'_>, input: ListFilesInput) -> Result<ToolOutput, To
         .entries
         .into_iter()
         .filter(|e| entry_visible(&e.path, &env.spec.scope))
-        .filter(|e| WorkspacePath::parse(&e.path).map(|p| !exposition_graph::is_graph_storage(&p)).unwrap_or(true))
+        .filter(|e| WorkspacePath::parse(&e.path).map(|p| !crate::graph::targets::graph_storage(&p)).unwrap_or(true))
         .map(|e| {
             let mut value = serde_json::to_value(&e).unwrap_or(Value::Null);
             if let Some((revision, unsaved)) = open.get(&e.path) {
@@ -1373,7 +1390,8 @@ fn create_file(
     let path = parse_path(&input.path)?;
     let exists = || ToolOutput::error(format!("{path} already exists; use read_file and edit_document to change it."));
     // A provisional identity (operation journal) before the file exists.
-    let provisional = env.graph.map(|graph| (graph, crate::graph::targets::reserve(graph, env.task_id, &path)));
+    let provisional =
+        env.graph.map(|graph| (graph, crate::graph::targets::reserve(graph, env.task_id, &on_disk(env, &path))));
     let created = create_file_inner(env, &path, &input, exists);
     let opened = match created {
         Ok(opened) => opened,
@@ -1386,6 +1404,7 @@ fn create_file(
     };
     let graph_info = provisional.map(|(graph, provisional)| {
         let hash = sha256_hex(input.content.as_bytes());
+        let path = on_disk(env, &path);
         crate::graph::targets::finalize(graph, env.store, env.task_id, &path, provisional, &hash)
     });
     let document = opened.as_ref().and_then(|id| env.documents.snapshot(id).ok().map(|s| (id.clone(), s)));

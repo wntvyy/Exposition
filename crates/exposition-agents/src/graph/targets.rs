@@ -48,17 +48,40 @@ pub enum TargetState {
     Ambiguous(String),
 }
 
+/// The path compared the way the file system names it: Windows (and macOS by
+/// default) ignore case, so `.EXPOSITION/Runs` is `.exposition/runs`.
+fn folded(path: &WorkspacePath) -> String {
+    path.as_str().to_lowercase()
+}
+
+/// The project graph's own storage, in any spelling of its folder.
+pub fn graph_storage(path: &WorkspacePath) -> bool {
+    if is_graph_storage(path) {
+        return true;
+    }
+    let p = folded(path);
+    let Some(rest) = p.strip_prefix(".exposition/") else { return false };
+    rest.starts_with("graph.sqlite3")
+        || rest == "graph-backups"
+        || rest.starts_with("graph-backups/")
+        || rest.starts_with("graph.damaged")
+}
+
 /// Paths the graph's inclusion policy reserves to services: never written or
-/// created by agent file tools (reads stay possible under the existing rules).
-fn service_owned(path: &WorkspacePath) -> Option<&'static str> {
-    let p = path.as_str();
+/// created by agent file tools (reads stay possible under the existing rules),
+/// in any spelling of the folder (compared case-insensitively).
+pub fn service_owned(path: &WorkspacePath) -> Option<&'static str> {
+    let p = folded(path);
+    if p == ".exposition" {
+        return Some("application metadata");
+    }
     let rest = p.strip_prefix(".exposition/")?;
-    if rest.starts_with("research/") || p == ".exposition/project.json" {
+    if rest == "research" || rest.starts_with("research/") || rest == "project.json" {
         return None;
     }
-    Some(if rest.starts_with("runs/") {
+    Some(if rest == "runs" || rest.starts_with("runs/") {
         "a run record (written only by the research service)"
-    } else if rest.starts_with("artifacts/") {
+    } else if rest == "artifacts" || rest.starts_with("artifacts/") {
         "a generated research artifact (written only by the research service)"
     } else {
         "application metadata"
@@ -68,7 +91,7 @@ fn service_owned(path: &WorkspacePath) -> Option<&'static str> {
 /// Path rules that hold whatever the graph's state: its storage is never a
 /// file tool target, and service-owned records are never written by agents.
 pub fn check_path_policy(path: &WorkspacePath, path_use: PathUse) -> Result<(), ToolOutput> {
-    if is_graph_storage(path) {
+    if graph_storage(path) {
         return Err(refusal(
             codes::GRAPH_STORAGE,
             format!(
@@ -77,12 +100,13 @@ pub fn check_path_policy(path: &WorkspacePath, path_use: PathUse) -> Result<(), 
             ),
         ));
     }
-    if matches!(path_use, PathUse::Write | PathUse::Create)
+    if matches!(path_use, PathUse::Write | PathUse::Create | PathUse::WorkingFolder)
         && let Some(what) = service_owned(path)
     {
+        let action = if path_use == PathUse::WorkingFolder { "run processes in it" } else { "write or create it" };
         return Err(refusal(
             codes::SERVICE_OWNED,
-            format!("{path} is {what}. Agents cannot write or create it; nothing was changed."),
+            format!("{path} is {what}. Agents cannot {action}; nothing was changed."),
         ));
     }
     Ok(())
@@ -134,7 +158,7 @@ pub fn target_paths(effects: &Effects<'_>) -> Vec<(WorkspacePath, PathUse)> {
     effects
         .paths
         .iter()
-        .filter(|(_, u)| *u != PathUse::Folder)
+        .filter(|(_, u)| !matches!(u, PathUse::Folder | PathUse::WorkingFolder))
         .filter_map(|(raw, u)| WorkspacePath::parse(raw).ok().map(|p| (p, *u)))
         .collect()
 }
@@ -198,7 +222,14 @@ pub fn resolve(
     target_use: TargetUse,
     content_hash: Option<&str>,
 ) -> Value {
-    let (entity, admitted, note) = match classify(path) {
+    // Run records, artifacts, and other metadata are operational references in
+    // any spelling of their folder: never admitted here.
+    let admission = if service_owned(path).is_some() || graph_storage(path) {
+        Admission::Exclude("application metadata or a service-owned record")
+    } else {
+        classify(path)
+    };
+    let (entity, admitted, note) = match admission {
         Admission::Admit(_) => {
             let before = graph.service.resource(path).ok().flatten();
             match graph.service.ensure_resource(path, content_hash, false, "agents") {
@@ -263,7 +294,7 @@ pub struct Provisional {
 
 /// Reserve a provisional identity for a file about to be created.
 pub fn reserve(graph: GraphEnv<'_>, task: &TaskId, path: &WorkspacePath) -> Provisional {
-    let admit = matches!(classify(path), Admission::Admit(_));
+    let admit = service_owned(path).is_none() && matches!(classify(path), Admission::Admit(_));
     if !admit {
         return Provisional { operation: None, admit };
     }
