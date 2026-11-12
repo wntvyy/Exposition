@@ -1372,6 +1372,7 @@ version = "0.1.0"
 dependencies = [
  "exposition-core",
  "exposition-execution",
+ "exposition-page",
  "exposition-workspace",
  "flate2",
  "hayro 0.9.0",

@@ -22,6 +22,9 @@ export function BuildStatus() {
       )}
       {summary === "failed" && <StatusPill status="failed" label={`${name} failed`} detail={errorText} size="sm" />}
       {summary === "stale" && <StatusPill status="stale" label={`${name}: pages stale`} detail={errorText} size="sm" />}
+      {summary === "untrusted" && (
+        <StatusPill status="unavailable" label={`${name}: workspace not trusted`} size="sm" />
+      )}
     </span>
   );
 }

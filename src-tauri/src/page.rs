@@ -23,8 +23,8 @@ use crate::state::AppState;
 
 /// Every format's retained builds. Integration point: add the LaTeX/Markdown
 /// providers here.
-fn providers<'a>(state: &'a State<'_, AppState>) -> [&'a dyn PageMapProvider; 1] {
-    [state.typesetting.service.as_ref()]
+fn providers<'a>(state: &'a State<'_, AppState>) -> [&'a dyn PageMapProvider; 2] {
+    [state.typesetting.service.as_ref(), &state.tex]
 }
 
 /// Page input rules by document path. Integration point: add `.tex`
@@ -32,6 +32,7 @@ fn providers<'a>(state: &'a State<'_, AppState>) -> [&'a dyn PageMapProvider; 1]
 fn rules_for(path: Option<&WorkspacePath>) -> Option<&'static dyn PageInputRules> {
     match path?.extension()?.to_ascii_lowercase().as_str() {
         "typ" => Some(&TypstInput),
+        "tex" => Some(&exposition_tex::TexInput),
         // Markdown builds are retained by the typesetting service (the
         // provider above); its input rules are the print profile's.
         "md" | "markdown" => Some(&exposition_typesetting::MarkdownInput),

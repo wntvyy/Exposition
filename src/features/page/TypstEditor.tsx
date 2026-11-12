@@ -6,10 +6,10 @@ import { useEffect, useRef } from "react";
 import { Group, Panel as ResizablePanel } from "react-resizable-panels";
 import type * as monaco from "monaco-editor/editor";
 
-import { useEditors } from "../../app/editors";
+import { editors, useEditors } from "../../app/editors";
 import type { EditorProps } from "../../app/registry";
 import { ResizeHandle } from "../../ui/components";
-import { SourceEditor, type DocumentHandle } from "../editor";
+import { fileKey, SourceEditor, type DocumentHandle } from "../editor";
 import { useTypesetting } from "../typesetting/store";
 import { PageEditor } from "./PageEditor";
 import "./page.css";
@@ -32,8 +32,15 @@ export function TypstEditor({ resource, mode, active }: EditorProps) {
     if (mode === "source") editor.focus();
   }, [reveal, resource.path, mode]);
 
-  const onEditor = (editor: monaco.editor.IStandaloneCodeEditor | null, _handle: DocumentHandle | null) => {
+  const onEditor = (editor: monaco.editor.IStandaloneCodeEditor | null, handle: DocumentHandle | null) => {
     monacoEditor.current = editor;
+    // The tab's path was an alias (case variant, short name, link inside the
+    // folder) of a file open under its canonical path: show one tab for it
+    // (as the plain source editor does).
+    if (handle?.path && resource.path && handle.path !== resource.path) {
+      editors.open({ key: fileKey(handle.path), path: handle.path, title: handle.name });
+      void editors.close(resource.key);
+    }
   };
 
   if (mode === "source") {
