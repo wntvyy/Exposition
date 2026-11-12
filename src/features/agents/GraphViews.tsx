@@ -252,6 +252,7 @@ function Proposal({ proposal }: { proposal: TaskProposal }) {
           {proposal.revision !== null ? ` · applied at revision ${proposal.revision}` : ""}
         </span>
       </div>
+      {proposal.summary && <p className="agents-small">{proposal.summary}</p>}
       <ul className="agents-list" aria-label="Effects">
         {proposal.effects.map((effect, i) => (
           <li key={i}>{effect}</li>

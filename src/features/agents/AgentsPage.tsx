@@ -291,7 +291,7 @@ export function AgentsPage() {
           <KeptEntities snapshot={kept} error={keptError} />
         </section>
       </aside>
-      <main className="agents-page__detail" aria-label="Selected agent task" data-region="agents-detail">
+      <section className="agents-page__detail" aria-label="Selected agent task" data-region="agents-detail">
         {error && (
           <div data-testid="agents-page-error">
             <Banner
@@ -327,7 +327,7 @@ export function AgentsPage() {
             }
           />
         )}
-      </main>
+      </section>
     </div>
   );
 }

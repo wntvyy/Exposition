@@ -319,6 +319,8 @@ pub struct Prepared {
     /// Complete approval text (effects and every operation).
     pub detail: String,
     pub title: String,
+    /// The agent's one-line summary, if it gave one.
+    pub summary: Option<String>,
 }
 
 /// Diagnostics as the task may see them: without content consent the
@@ -450,7 +452,8 @@ pub fn prepare(
         proposal.operations.len(),
         if proposal.operations.len() == 1 { "" } else { "s" }
     );
-    Ok(Prepared { proposal, detail, title })
+    let summary = (!input.summary.trim().is_empty()).then(|| input.summary.trim().to_owned());
+    Ok(Prepared { proposal, detail, title, summary })
 }
 
 /// The complete approval payload: every effect and every operation.
@@ -521,7 +524,7 @@ pub fn apply(
         }
         ApplyOutcome::Conflict { current_revision, diagnostics }
         | ApplyOutcome::Invalid { current_revision, diagnostics } => {
-            let conflict = matches!(outcome_kind(&diagnostics), Some(true));
+            let conflict = is_conflict(&diagnostics);
             let (state, code) = if conflict {
                 (ProposalState::Conflict, codes::GRAPH_CONFLICT)
             } else {
@@ -543,13 +546,11 @@ pub fn apply(
     }
 }
 
-/// A conflict is reported with stale/unknown records; anything else is invalid.
-fn outcome_kind(diagnostics: &[GraphDiagnostic]) -> Option<bool> {
-    Some(
-        diagnostics
-            .iter()
-            .any(|d| matches!(d.code.as_str(), "graph.staleEntity" | "graph.unknownEntity" | "graph.unknownRelation")),
-    )
+/// A conflict is reported with stale or vanished records; anything else is invalid.
+fn is_conflict(diagnostics: &[GraphDiagnostic]) -> bool {
+    diagnostics
+        .iter()
+        .any(|d| matches!(d.code.as_str(), "graph.staleEntity" | "graph.unknownEntity" | "graph.unknownRelation"))
 }
 
 fn error_text(output: &ToolOutput) -> String {
@@ -576,7 +577,7 @@ pub fn record(
         tool_use_id: tool_use_id.to_owned(),
         proposal: prepared.proposal.id.clone(),
         state,
-        summary: None,
+        summary: prepared.summary.clone(),
         base_revision: prepared.proposal.base_revision,
         effects: prepared.proposal.effects.clone(),
         operations: serde_json::to_value(&prepared.proposal.operations).unwrap_or(Value::Null),
