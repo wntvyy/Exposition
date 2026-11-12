@@ -212,6 +212,9 @@ struct Control {
 /// (page, scale in thousandths).
 type PngKey = (u32, u32);
 
+/// Cached renderings/mappings per build before the cache is reset.
+const MAX_CACHED_PAGES: usize = 48;
+
 /// A finished build with lazily opened page access.
 pub struct StoredBuild {
     pub build: TexBuild,
@@ -364,7 +367,11 @@ impl TexService {
         }
         let rendered = session.render_page(page as usize, scale).map_err(|e| TexServiceError::Io(e.to_string()))?;
         let png = Arc::new(rendered.png);
-        stored.pngs.lock().unwrap_or_else(|p| p.into_inner()).insert(key, png.clone());
+        let mut pngs = stored.pngs.lock().unwrap_or_else(|p| p.into_inner());
+        if pngs.len() >= MAX_CACHED_PAGES {
+            pngs.clear();
+        }
+        pngs.insert(key, png.clone());
         Ok(png)
     }
 
@@ -379,7 +386,11 @@ impl TexService {
             return Err(TexServiceError::NoSuchPage(page));
         }
         let map = Arc::new(session.map_page(page as usize).map_err(|e| TexServiceError::Io(e.to_string()))?);
-        stored.maps.lock().unwrap_or_else(|p| p.into_inner()).insert(page, map.clone());
+        let mut maps = stored.maps.lock().unwrap_or_else(|p| p.into_inner());
+        if maps.len() >= MAX_CACHED_PAGES {
+            maps.clear();
+        }
+        maps.insert(page, map.clone());
         Ok(map)
     }
 
@@ -548,6 +559,11 @@ impl Inner {
                 pngs: Mutex::new(HashMap::new()),
                 maps: Mutex::new(HashMap::new()),
             });
+            // Load the PDF and SyncTeX now: the frozen output directory may be
+            // pruned on disk later while this build is still served.
+            if summary.has_output {
+                let _ = stored.session();
+            }
             match (mode, &summary.result.status) {
                 (_, BuildStatus::Canceled) => {}
                 (TexBuildMode::Draft, BuildStatus::Succeeded) => control.needs_full = true,
