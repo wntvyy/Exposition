@@ -122,17 +122,6 @@ registry.registerCommand({
 });
 
 registry.registerCommand({
-  id: "research.showPage",
-  title: "Show Research Page",
-  category: "Research",
-  run: () => {
-    startResearchTracking();
-    startSpaceTracking();
-    revealInResearch(null);
-  },
-});
-
-registry.registerCommand({
   id: "research.enable",
   title: "Enable Research for This Project",
   category: "Research",

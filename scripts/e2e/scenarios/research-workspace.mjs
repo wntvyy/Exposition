@@ -81,7 +81,7 @@ export default async function researchWorkspace({ launchApp, artifactsDir, asser
     await invoke(page, "trust_grant", { root: info.root });
 
     // ---- 1. Enable Research without a manuscript; nothing runs -------------
-    await runCommand(page, "Show Research Page", /Show Research Page/);
+    await page.getByRole("toolbar", { name: "Pages" }).getByRole("button", { name: "Research", exact: true }).click();
     await rp.locator('[data-testid="research-page"][data-state="disabled"]').waitFor({ timeout: 15_000 });
     const mode = await rp.getByTestId("research-execution-mode").first().getAttribute("aria-label");
     note("execution-labelled-trusted-native", /Trusted native/.test(mode) && /privileges/.test(mode) && /not available/.test(mode), mode);
@@ -416,14 +416,17 @@ export default async function researchWorkspace({ launchApp, artifactsDir, asser
     await invoke(page, "research_result_state", { request: { entity: figure.entity, state: "active" } });
 
     // Files explorer: the Research subsection opens the Research page at an item.
-    await runCommand(page, "Show Explorer", /Explorer/).catch(() => {});
+    await page.getByRole("toolbar", { name: "Pages" }).getByRole("button", { name: "Editor", exact: true }).click();
     const filesResearch = page.locator('[data-page="editor"] [data-testid="files-research"][data-enabled="true"]');
-    if (await filesResearch.count()) {
-      note("files-explorer-research-subsection", true, await filesResearch.innerText());
-    }
+    await filesResearch.waitFor({ timeout: 10_000 });
+    const sourcesGroup = filesResearch.locator('[data-research-group="sources"]');
+    await sourcesGroup.locator(".ui-tree-item__chevron").first().click();
+    await filesResearch.locator(`[data-research-item="file:${sourcePath}"]`).locator(".ui-tree-item__title").click();
+    await rp.locator(`[data-testid="research-inspector"][data-kind="file"][data-path="${sourcePath}"]`).waitFor({ timeout: 10_000 });
+    note("files-explorer-research-subsection-opens-page-at-item", await rp.isVisible(), await filesResearch.innerText());
 
     // Dark theme reference screen of the page.
-    await runCommand(page, "Show Research Page", /Show Research Page/);
+    await page.getByRole("toolbar", { name: "Pages" }).getByRole("button", { name: "Research", exact: true }).click();
     await runCommand(page, "color theme dark", /Color Theme: Dark/);
     await page.waitForTimeout(300);
     await shot("research-page-result-inspector-dark");

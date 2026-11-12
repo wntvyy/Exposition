@@ -81,17 +81,19 @@ function SourceArea() {
   const active = useSpace((s) => s.activeSource);
   if (open.length === 0 || !active) {
     return (
+      <div className="exp-rpage__sources" data-region="research-sources" aria-label="Research sources">
       <EmptyState
         fill
         icon={FlaskConical}
         title="No source open"
         description="Select a source or data file in the research explorer to edit it here. Files open in the same document model as the Editor page."
       />
+      </div>
     );
   }
   const script = SCRIPT.test(active);
   return (
-    <div className="exp-rpage__sources" data-testid="research-sources" data-active={active}>
+    <div className="exp-rpage__sources" data-testid="research-sources" data-active={active} data-region="research-sources" aria-label="Research sources">
       <Tabs
         className="exp-rpage__tabs"
         selectedKey={active}
@@ -190,7 +192,7 @@ export function ResearchPage() {
   const enabled = Boolean(listing?.space);
   return (
     <div className="exp-rpage" data-testid="research-page" data-state={enabled ? "enabled" : "disabled"}>
-      <header className="exp-rpage__header">
+      <header className="exp-rpage__header" data-region="research-header" aria-label="Research session">
         <div className="exp-rpage__heading">
           <h2 className="exp-rpage__title">Research</h2>
           {listing?.space && (
@@ -214,7 +216,7 @@ export function ResearchPage() {
       <PendingPromotions />
       <Group orientation="horizontal" className="exp-rpage__body">
         <ResizablePanel id="rp-explorer" defaultSize="20%" minSize="12%">
-          <div className="exp-rpage__explorer">
+          <div className="exp-rpage__explorer" data-region="research-explorer" aria-label="Research explorer">
             {enabled ? (
               <ResearchExplorer />
             ) : (
@@ -243,7 +245,7 @@ export function ResearchPage() {
             </ResizablePanel>
             <ResizeHandle aria-label="Resize source and output" orientation="horizontal" />
             <ResizablePanel id="rp-output" defaultSize="50%" minSize="15%">
-              <div className="exp-research exp-rpage__output" role="region" aria-label="Research output">
+              <div className="exp-research exp-rpage__output" role="region" aria-label="Research output" data-region="research-output">
                 <EnvironmentNotice />
                 <div className="exp-research__main">
                   <div className="exp-research__work">
@@ -258,7 +260,7 @@ export function ResearchPage() {
         </ResizablePanel>
         <ResizeHandle aria-label="Resize inspector" />
         <ResizablePanel id="rp-inspector" defaultSize="30%" minSize="15%">
-          <aside className="exp-rpage__inspector" aria-label="Inspector">
+          <aside className="exp-rpage__inspector" aria-label="Inspector" data-region="research-inspector">
             <ResearchInspector item={selected} />
           </aside>
         </ResizablePanel>

@@ -17,7 +17,7 @@ export function ResearchFilesSection() {
   if (!loaded) return null;
   if (!listing?.space) {
     return (
-      <Section title="Research" collapsible defaultExpanded={false}>
+      <Section key="disabled" title="Research" collapsible defaultExpanded={false}>
         <div className="xp-files__research" data-testid="files-research" data-enabled="false">
           <p className="xp-files__research-note">Research is not enabled for this project.</p>
           <Button size="sm" variant="ghost" icon={FlaskConical} onPress={() => revealInResearch(null)}>
@@ -58,7 +58,7 @@ export function ResearchFilesSection() {
     },
   ];
   return (
-    <Section title="Research" collapsible defaultExpanded>
+    <Section key="enabled" title="Research" collapsible defaultExpanded>
       <div className="xp-files__research" data-testid="files-research" data-enabled="true">
         <Tree
           aria-label="Research space"
