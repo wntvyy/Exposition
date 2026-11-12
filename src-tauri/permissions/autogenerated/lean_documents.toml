@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lean-documents"
+description = "Enables the lean_documents command without any pre-configured scope."
+commands.allow = ["lean_documents"]
+
+[[permission]]
+identifier = "deny-lean-documents"
+description = "Denies the lean_documents command without any pre-configured scope."
+commands.deny = ["lean_documents"]

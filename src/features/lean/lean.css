@@ -1,0 +1,184 @@
+/* Lean infoview. Tokens only (src/ui/tokens.css); shared components provide
+   pills, banners, sections, buttons, and region states. */
+
+.exp-lean {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) var(--space-4);
+  min-width: 0;
+}
+
+.exp-lean__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.exp-lean__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.exp-lean__file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+}
+
+.exp-lean__actions {
+  display: flex;
+  gap: var(--space-0-5);
+}
+
+.exp-lean__sentence {
+  margin: 0;
+  color: var(--color-text-muted);
+  user-select: text;
+}
+
+.exp-lean__facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-0-5) var(--space-3);
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.exp-lean__facts dt {
+  color: var(--color-text-muted);
+}
+
+.exp-lean__facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.exp-lean__facts code,
+.exp-lean__list code {
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+}
+
+.exp-lean__where {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.exp-lean__goals {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.exp-lean__goals p {
+  margin: 0;
+}
+
+.exp-lean__goal-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: var(--space-0-5);
+}
+
+.exp-lean__goal {
+  margin: 0;
+  padding: var(--space-2);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--line-height-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.exp-lean__target {
+  display: block;
+  font-weight: 600;
+}
+
+/* Separate the target from the hypotheses above it. */
+.exp-lean__hyps + .exp-lean__target {
+  margin-top: var(--space-1);
+  padding-top: var(--space-1);
+  border-top: var(--border-width) solid var(--color-border-subtle);
+}
+
+.exp-lean__error {
+  color: var(--color-danger-text);
+}
+
+.exp-lean__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.exp-lean__diag {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.exp-lean__diag-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-0-5) var(--space-1);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.exp-lean__diag-jump:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+}
+
+.exp-lean__diag-jump:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+.exp-lean__line {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.exp-lean__message {
+  margin: 0;
+  padding-left: var(--space-2);
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* Incomplete material in the editor: `sorry`/`admit` tokens Lean reported. */
+.exp-lean-sorry {
+  background: var(--color-warning-bg);
+  border-bottom: 2px dotted var(--color-warning-border);
+}
