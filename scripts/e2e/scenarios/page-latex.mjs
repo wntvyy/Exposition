@@ -14,6 +14,7 @@ import { copyFile, cp, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
+import { waitForAsync } from "../wait.mjs";
 import { openFromTree } from "../workspace-helpers.mjs";
 
 const PATH = "main.tex";
@@ -106,17 +107,27 @@ export default async function pageLatex({ launchApp, artifactsDir, assert, fixtu
     const build = () => editor.getAttribute("data-build");
     /** Wait until the shown build covers the current revision (not stale). */
     const settled = async (label, since = Date.now()) => {
-      await page.waitForFunction(
-        () => {
+      await waitForAsync(
+        page,
+        async (path) => {
           const el = document.querySelector('[data-testid="page-editor"]');
           const img = document.querySelector('[data-testid="page"] img');
-          return el?.dataset.stale === "false" && el.dataset.build && img?.complete;
+          if (!(el?.dataset.stale === "false" && el.dataset.build && img?.complete)) return false;
+          // The shown build covers the document's current revision (not merely
+          // "not stale" before the newest edit has been noticed).
+          const docs = await window.__TAURI_INTERNALS__.invoke("document_list");
+          const d = docs.find((x) => x.path === path);
+          return !!d && el.dataset.buildRevision === String(d.revision);
         },
-        null,
-        { timeout: 60000 },
+        PATH,
+        { timeout: 60000, message: `pages settled (${label})` },
       );
       const ms = Date.now() - since;
-      latency.push({ engine, label, ms });
+      // The app's own edit-to-new-page latency (status pill detail), when this
+      // settle followed an edit.
+      const pill = (await page.locator('[data-testid="page-build-status"]').textContent()) ?? "";
+      const shown = label.includes("→") ? /(\d+) ms/.exec(pill)?.[1] : undefined;
+      latency.push({ engine, label, ms, ...(shown ? { app: Number(shown) } : {}) });
       return ms;
     };
     /** Screen point of a source offset (center of the caret line), via the page map. */
@@ -124,13 +135,20 @@ export default async function pageLatex({ launchApp, artifactsDir, assert, fixtu
       const g = await invoke("page_caret", { build: await build(), path: PATH, offset, affinity });
       assert.ok(g, `no geometry for offset ${offset}`);
       const el = page.locator(`[data-testid="page"][data-page="${g.page}"]`);
-      await el.evaluate((pageEl, top) => {
-        const scroller = pageEl.closest('[data-testid="page-scroller"]');
-        const scale = pageEl.getBoundingClientRect().width / Number(pageEl.dataset.widthPt);
-        const y = pageEl.getBoundingClientRect().top + top * scale;
-        const view = scroller.getBoundingClientRect();
-        scroller.scrollTop += y - (view.top + view.height / 2);
-      }, g.top);
+      // Scroll the target into the middle of the page view (vertically and,
+      // when the page is wider than the view, e.g. in Split mode, horizontally).
+      await el.evaluate(
+        (pageEl, [top, x]) => {
+          const scroller = pageEl.closest('[data-testid="page-scroller"]');
+          const scale = pageEl.getBoundingClientRect().width / Number(pageEl.dataset.widthPt);
+          const view = scroller.getBoundingClientRect();
+          const y = pageEl.getBoundingClientRect().top + top * scale;
+          scroller.scrollTop += y - (view.top + view.height / 2);
+          const left = pageEl.getBoundingClientRect().left + x * scale;
+          scroller.scrollLeft += left - (view.left + view.width / 2);
+        },
+        [g.top, g.x + dx],
+      );
       const box = await el.boundingBox();
       const scale = box.width / Number(await el.getAttribute("data-width-pt"));
       return { x: box.x + (g.x + dx) * scale, y: box.y + ((g.top + g.bottom) / 2) * scale, g, scale };
@@ -333,9 +351,6 @@ export default async function pageLatex({ launchApp, artifactsDir, assert, fixtu
     await settled("page view after split");
     if (declineFirst) await referenceShots("page-latex-editing");
 
-    // Edit-to-new-page latency as displayed in the app (status pill).
-    const pill = (await page.locator('[data-testid="page-build-status"]').textContent()) ?? "";
-    latency.push({ engine, label: "status pill after last edit", text: pill.trim() });
     const configuration = (await invoke("tex_status", { target: null }))?.lastGood?.result.configuration;
     assert.ok(configuration?.compiler.includes(engine === "pdfLatex" ? "pdfTeX" : "LuaHBTeX"), JSON.stringify(configuration));
     await invoke("workspace_close");
@@ -344,7 +359,9 @@ export default async function pageLatex({ launchApp, artifactsDir, assert, fixtu
   try {
     await run("pdfLatex", { declineFirst: true });
     await run("luaLatex", { declineFirst: false });
-    for (const t of latency) console.log(`      ${t.engine} ${t.label}: ${t.ms ?? t.text}${t.ms !== undefined ? " ms" : ""}`);
+    for (const t of latency) {
+      console.log(`      ${t.engine} ${t.label}: ${t.ms} ms${t.app !== undefined ? ` (app: ${t.app} ms)` : ""}`);
+    }
     await writeFile(join(artifactsDir, "latency.json"), JSON.stringify(latency, null, 2));
     if (process.env.EXPOSITION_DEV_HOME) {
       const dir = join(process.env.EXPOSITION_DEV_HOME, "ui-reference");
