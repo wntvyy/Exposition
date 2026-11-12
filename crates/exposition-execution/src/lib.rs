@@ -43,11 +43,12 @@ pub mod settings;
 pub mod toolchains;
 pub mod trust;
 
+pub use docker::{DockerImage, DockerListError};
 pub use log::{OutputChunk, OutputPage};
 pub use service::{
     ExecutionConfig, ExecutionService, InputClosed, InteractiveInput, InteractiveJob, InteractiveOptions,
     InteractiveOutput, JobKind, JobRefusal, JobState, JobSummary, ProtocolLog, RefusalCode,
 };
-pub use settings::{DockerSettings, ExecutionSettings};
+pub use settings::{DockerSettings, ExecutionSettings, ExecutionSettingsChange, ExecutionSettingsState, SettingsError};
 pub use toolchains::{Located, ToolSource, ToolStatus, ToolchainInfo};
-pub use trust::{TrustError, TrustStatus};
+pub use trust::{TrustError, TrustRuleLocation, TrustRules, TrustStatus, TrustedRoot};
