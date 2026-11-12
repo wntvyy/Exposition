@@ -144,6 +144,66 @@ function order(rows: string[][], edges: [string, string][]): string[][] {
 }
 
 /**
+ * Positions across the layer axis: each node moves toward the average of its
+ * neighbors in other layers (a few down and up sweeps), keeping the layer's
+ * order and a minimum gap. Result starts at 0. Deterministic.
+ */
+function alignAcross(
+  rows: string[][],
+  edges: [string, string][],
+  across: (id: string) => number,
+  gap: number,
+): Map<string, number> {
+  const up = new Map<string, string[]>();
+  const down = new Map<string, string[]>();
+  for (const [s, t] of edges) {
+    (down.get(s) ?? down.set(s, []).get(s)!).push(t);
+    (up.get(t) ?? up.set(t, []).get(t)!).push(s);
+  }
+  const pos = new Map<string, number>();
+  for (const row of rows) {
+    let cursor = 0;
+    for (const id of row) {
+      pos.set(id, cursor);
+      cursor += across(id) + gap;
+    }
+  }
+  const center = (id: string) => pos.get(id)! + across(id) / 2;
+  const pack = (row: string[], desired: number[]) => {
+    // Forward sweep keeps order and gaps; backward sweep pulls nodes back toward
+    // their targets; average both, then enforce the gaps once more.
+    const forward: number[] = [];
+    row.forEach((_, i) => {
+      forward[i] = i === 0 ? desired[0]! : Math.max(desired[i]!, forward[i - 1]! + across(row[i - 1]!) + gap);
+    });
+    const backward: number[] = [];
+    for (let i = row.length - 1; i >= 0; i--) {
+      backward[i] = i === row.length - 1 ? desired[i]! : Math.min(desired[i]!, backward[i + 1]! - across(row[i]!) - gap);
+    }
+    let previousEnd = -Infinity;
+    row.forEach((id, i) => {
+      const value = Math.max((forward[i]! + backward[i]!) / 2, previousEnd);
+      pos.set(id, value);
+      previousEnd = value + across(id) + gap;
+    });
+  };
+  const sweep = (row: string[], neighbors: Map<string, string[]>) => {
+    const desired = row.map((id) => {
+      const ns = neighbors.get(id) ?? [];
+      return ns.length ? ns.reduce((sum, n) => sum + center(n), 0) / ns.length - across(id) / 2 : pos.get(id)!;
+    });
+    pack(row, desired);
+  };
+  for (let pass = 0; pass < 4; pass++) {
+    for (let r = 1; r < rows.length; r++) sweep(rows[r]!, up);
+    for (let r = rows.length - 2; r >= 0; r--) sweep(rows[r]!, down);
+  }
+  const min = Math.min(...[...pos.values()]);
+  for (const [id, value] of pos) pos.set(id, Math.round(value - min));
+  return pos;
+}
+
+/**
  * Layered positions (top-left corners) for every node. Edges whose endpoints
  * are not both in `nodes` are ignored, as are self-loops.
  */
@@ -185,21 +245,20 @@ export function layeredLayout(nodes: LayoutNode[], edges: LayoutEdge[], options:
     const along = (id: string) => (direction === "LR" ? size.get(id)!.width : size.get(id)!.height);
     const across = (id: string) => (direction === "LR" ? size.get(id)!.height : size.get(id)!.width);
     const layerThickness = ordered.map((row) => Math.max(0, ...row.map(along)));
-    const layerLength = ordered.map((row) => row.reduce((sum, id) => sum + across(id), 0) + nodeGap * Math.max(0, row.length - 1));
-    const longest = Math.max(...layerLength);
+    const cross = alignAcross(ordered, dag, across, nodeGap);
 
     let layerOffset = 0;
+    let extent = 0;
     ordered.forEach((row, r) => {
-      let cursor = (longest - layerLength[r]!) / 2;
       for (const id of row) {
         const a = layerOffset + (layerThickness[r]! - along(id)) / 2;
-        const b = stackOffset + cursor;
+        const b = stackOffset + cross.get(id)!;
+        extent = Math.max(extent, cross.get(id)! + across(id));
         positions.set(id, direction === "LR" ? { x: origin.x + a, y: origin.y + b } : { x: origin.x + b, y: origin.y + a });
-        cursor += across(id) + nodeGap;
       }
       layerOffset += layerThickness[r]! + layerGap;
     });
-    stackOffset += longest + componentGap;
+    stackOffset += extent + componentGap;
   }
   return positions;
 }
