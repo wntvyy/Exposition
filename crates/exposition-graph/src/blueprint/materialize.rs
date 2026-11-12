@@ -704,7 +704,7 @@ impl Creator<'_> {
             out.push(CreationStatus {
                 operation: rec.id.clone(),
                 title: record.as_ref().map(|r| r.blueprint.title.clone()).unwrap_or_else(|| rec.description.clone()),
-                root: rec.project_root.clone(),
+                root: display_root(&rec.project_root),
                 state: rec.state.clone(),
                 in_progress,
                 files,
@@ -802,6 +802,14 @@ impl Creator<'_> {
             .map_err(|e| GraphError::new("project.journal", e.to_string()))?;
         Ok(admitted)
     }
+}
+
+/// A folder path as people read it (without the verbatim `\\?\` prefix).
+fn display_root(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    raw.strip_prefix(r"\\?\").unwrap_or(raw).to_owned()
 }
 
 fn journal_workflows(graph: &GraphService, root: &Path, op: &OperationId) -> BTreeMap<String, WorkflowId> {

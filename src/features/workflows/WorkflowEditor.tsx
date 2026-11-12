@@ -428,7 +428,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
       notify({
         tone: result.unchanged ? "info" : "success",
         title: result.unchanged ? "No changes to save" : `Saved revision ${result.revision}`,
-        body: `${result.definition.title}: ${result.validation.state === "wellFormed" ? "well-formed draft" : `incomplete draft (${result.validation.errors} problems)`}. Not runnable in this version.`,
+        body: `${result.definition.title}: ${result.validation.state === "wellFormed" ? "well-formed draft" : `incomplete draft (${result.validation.errors} problem${result.validation.errors === 1 ? "" : "s"})`}. Not runnable in this version.`,
       });
       return true;
     } catch (error) {

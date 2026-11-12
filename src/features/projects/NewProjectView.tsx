@@ -211,8 +211,8 @@ function PresetForm() {
   const lean = [...catalog.leanToolchains];
   if (!lean.includes(catalog.defaultLeanToolchain)) lean.push(catalog.defaultLeanToolchain);
   return (
-    <section className="xp-proj__group" aria-label="Preset">
-      <h3 className="xp-proj__group-title">Preset</h3>
+    <section className="xp-proj__group" aria-label="Starting structure">
+      <h3 className="xp-proj__group-title">Starting structure</h3>
       <div className="xp-proj__form">
         <Select
           label="Preset"

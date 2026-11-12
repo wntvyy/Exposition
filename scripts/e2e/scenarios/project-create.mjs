@@ -403,16 +403,17 @@ export default async function projectCreate({ launchApp, artifactsDir, assert })
         },
         { timeout: 30_000, message: "objective task finished" },
       );
+      assert.equal(tasks.length, 1, "exactly one task");
       const task = tasks[0];
       const detailTask = await invoke(page, "agents_task_detail", { task: task.id });
-      assert.equal(detailTask.summary?.status?.kind ?? task.status.kind, "completed");
-      const spec = detailTask.spec ?? detailTask.summary?.spec ?? task.spec;
-      if (spec) {
-        assert.deepEqual(spec.scope, { kind: "workspace" });
-        assert.equal(spec.execution, "disabled", "no commands by default");
-        assert.match(spec.prompt, /spectral gap of random regular graphs/);
-        assert.match(spec.workspaceRoot.toLowerCase(), /gap-concentration/);
-      }
+      assert.equal(detailTask.summary.status.kind, "completed");
+      const spec = detailTask.summary.spec;
+      assert.deepEqual(spec.scope, { kind: "workspace" }, "whole-project scope");
+      assert.equal(spec.execution, "disabled", "no commands by default");
+      assert.equal(spec.permission, "autoApply", "the permission chosen on the page");
+      assert.match(spec.prompt, /spectral gap of random regular graphs/);
+      assert.match(spec.prompt, /research-only project is fine/);
+      assert.match(spec.workspaceRoot.toLowerCase(), /gap-concentration$/);
       assert.equal((await invoke(page, "workspace_current")).name, "gap-concentration");
       assert.ok(existsSync(join(objectiveRoot, ".exposition", "graph.sqlite3")), "the empty project has its graph");
       assert.equal(await readFile(join(objectiveRoot, "notes", "plan.md"), "utf8"), "# Plan\n\nResearch question: does the gap concentrate?\n");
