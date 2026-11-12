@@ -106,7 +106,7 @@ function GoalsSection({ state }: { state: LeanDocumentState }) {
     body = (
       <>
         {goals == null && !term && !view.loading && <p className="exp-muted" data-testid="lean-no-goals">No goals here (not inside a tactic proof).</p>}
-        {goals && goals.length === 0 && <p data-testid="lean-goals-done"><StatusPill size="sm" status="succeeded" label="No goals" /> All goals are solved at this point.</p>}
+        {goals && goals.length === 0 && <p data-testid="lean-goals-done"><StatusPill size="sm" status="succeeded" label="No goals" /> No goals remain at this point.</p>}
         {goals?.map((g, i) => (
           <div key={i} className="exp-lean__goal-block">
             {goals.length > 1 && <div className="exp-lean__goal-label">Goal {i + 1} of {goals.length}</div>}
@@ -233,7 +233,7 @@ export function LeanPanel() {
           title="Workspace not trusted"
           actions={<Button size="sm" variant="primary" icon={ShieldCheck} onPress={() => void trustAndRestart(state)}>Trust workspace…</Button>}
         >
-          Lean has not run. Checking executes the project’s lakefile and any code in its files.
+          Lean has not run. Checking executes the project’s code.
         </Banner>
       )}
       {status.kind === "toolchainMissing" && (

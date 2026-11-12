@@ -109,14 +109,14 @@
 
 .exp-lean__target {
   display: block;
-  margin-top: var(--space-1);
-  padding-top: var(--space-1);
-  border-top: var(--border-width) solid var(--color-border-subtle);
   font-weight: 600;
 }
 
+/* Separate the target from the hypotheses above it. */
 .exp-lean__hyps + .exp-lean__target {
-  margin-top: 0;
+  margin-top: var(--space-1);
+  padding-top: var(--space-1);
+  border-top: var(--border-width) solid var(--color-border-subtle);
 }
 
 .exp-lean__error {
