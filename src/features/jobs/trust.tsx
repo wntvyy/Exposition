@@ -10,19 +10,6 @@ import "./jobs.css";
 
 let open: Promise<boolean> | null = null;
 
-const trustedListeners = new Set<(root: string) => void>();
-
-/**
- * Be told when the user trusted a workspace folder through the prompt (from
- * any surface), e.g. to retry what was refused for it. Returns the unsubscribe.
- */
-export function onWorkspaceTrusted(listener: (root: string) => void): () => void {
-  trustedListeners.add(listener);
-  return () => {
-    trustedListeners.delete(listener);
-  };
-}
-
 /**
  * Ask the user whether to trust a workspace folder. Resolves true if it is (or
  * already was) trusted, false if the user declined or granting failed.
@@ -74,7 +61,6 @@ export function requestWorkspaceTrust(root: string): Promise<boolean> {
           dismiss(`trust-${root}`);
           dismiss(`trust-${status.root}`);
           notify({ tone: "success", title: "Workspace trusted", body: status.root });
-          for (const listener of [...trustedListeners]) listener(status.root);
           return true;
         }
       } catch (e) {

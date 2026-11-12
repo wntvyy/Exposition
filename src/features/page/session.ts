@@ -18,9 +18,10 @@ import type { Motion } from "../../bindings/Motion";
 import type { NonEditableReason } from "../../bindings/NonEditableReason";
 import type { PageEditOp } from "../../bindings/PageEditOp";
 import type { PageRect } from "../../bindings/PageRect";
+import type { TrustChanged } from "../../bindings/TrustChanged";
 import { commands, errorMessage, events, isCommandError, newId } from "../../lib/ipc";
 import { openDocument } from "../editor";
-import { onWorkspaceTrusted, requestWorkspaceTrust } from "../jobs/trust";
+import { requestWorkspaceTrust } from "../jobs/trust";
 import { buildSequence, isOlder } from "./buildOrder";
 import { imageType } from "./images";
 import { RevisionHistory } from "./mapping";
@@ -176,12 +177,14 @@ export class PageSession {
     try {
       const unDocuments = await events.documents((e) => this.onDocumentEvent(e));
       const unBuilds = await events.typesettingBuild((e) => void this.onBuild(e));
+      const unTrust = await events.trustChanged((change) => void this.onTrustChanged(change));
       if (!current()) {
         unDocuments();
         unBuilds();
+        unTrust();
         return;
       }
-      this.unlisten.push(unDocuments, unBuilds, onWorkspaceTrusted(() => void this.trustGranted()));
+      this.unlisten.push(unDocuments, unBuilds, unTrust);
       // Open (or join) the document through the workspace, sharing the one
       // document handle with the source editor.
       const handle = await openDocument(this.path);
@@ -685,28 +688,40 @@ export class PageSession {
     await this.refreshGeometry();
   }
 
-  /** Ask to trust the workspace; when granted, build again. */
+  /**
+   * Ask to trust the workspace. A grant (here or on any other surface) is
+   * announced as a trust change, on which the app rebuilds the watched LaTeX
+   * entries; that build replaces the refusal, so this view requests nothing.
+   * Only a folder that is trusted already (nothing to announce) gets its
+   * build requested here, once.
+   */
   async trust(): Promise<boolean> {
     const root = this.model.untrustedRoot;
     if (!root) return true;
-    const trusted = await requestWorkspaceTrust(root);
-    if (trusted) await this.rebuildTrusted();
-    return trusted;
-  }
-
-  /** A folder was trusted elsewhere (another view, the Research or Jobs panel). */
-  private async trustGranted(): Promise<void> {
-    const root = this.model.untrustedRoot;
-    if (!root || this.disposed) return;
     const status = await commands.trustStatus(root).catch(() => null);
-    if (status?.trusted) await this.rebuildTrusted();
+    if (status?.trusted) {
+      await this.requestBuild();
+      return true;
+    }
+    return requestWorkspaceTrust(root);
   }
 
-  private async rebuildTrusted(): Promise<void> {
-    if (this.disposed || !this.model.untrustedRoot) return;
+  /**
+   * Trust granted or revoked anywhere. The app rebuilds the watched entries
+   * itself; this view only stops showing the refusal as soon as its folder is
+   * trusted (the build then shows pages). A revoke comes back as a refused build.
+   */
+  private async onTrustChanged(change: TrustChanged | null): Promise<void> {
+    const root = this.model.untrustedRoot;
+    if (!root || this.disposed || change?.granted === false) return;
+    const status = await commands.trustStatus(root).catch(() => null);
+    if (status?.trusted && this.model.untrustedRoot === root) this.set({ untrustedRoot: null });
+  }
+
+  /** Request this view's build again (it already holds its one watch). */
+  private async requestBuild(): Promise<void> {
+    if (this.disposed) return;
     this.set({ untrustedRoot: null });
-    // Request the build again; watches are counted per view, and this view
-    // already holds one from when it opened.
     await commands.typesettingWatch(this.path).catch(() => null);
     await commands.typesettingUnwatch(this.path).catch(() => null);
   }
