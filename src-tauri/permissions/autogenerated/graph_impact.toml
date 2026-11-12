@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-graph-impact"
+description = "Enables the graph_impact command without any pre-configured scope."
+commands.allow = ["graph_impact"]
+
+[[permission]]
+identifier = "deny-graph-impact"
+description = "Denies the graph_impact command without any pre-configured scope."
+commands.deny = ["graph_impact"]

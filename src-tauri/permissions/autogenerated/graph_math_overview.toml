@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-graph-math-overview"
+description = "Enables the graph_math_overview command without any pre-configured scope."
+commands.allow = ["graph_math_overview"]
+
+[[permission]]
+identifier = "deny-graph-math-overview"
+description = "Denies the graph_math_overview command without any pre-configured scope."
+commands.deny = ["graph_math_overview"]

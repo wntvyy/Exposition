@@ -6,6 +6,7 @@ use exposition_agents::tools::execution::AppToolServices;
 use exposition_agents::{AgentConfig, AgentService};
 use exposition_core::path::WorkspacePath;
 use exposition_execution::{ExecutionConfig, ExecutionService};
+use exposition_graph::{GraphConfig, GraphService};
 use exposition_lean::{LeanConfig, LeanService};
 use exposition_research::launcher::ExecutionLauncher;
 use exposition_research::{ResearchConfig, ResearchService, ResolvedSource, SourceReader};
@@ -35,6 +36,9 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// Agent tasks (provider, task loop, review); task history in `agents.sqlite3`.
     pub agents: AgentService,
+    /// The project graph (`.exposition/graph.sqlite3`): attached for every
+    /// open project, whether or not a graph view is open.
+    pub graph: Arc<GraphService>,
 }
 
 impl AppState {
@@ -58,6 +62,7 @@ impl AppState {
             }
         });
         let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
+        let graph = GraphService::new(GraphConfig { data_dir: data_dir.clone() });
         let (lean, lean_actor) = LeanService::new(execution.clone(), Arc::clone(&workspace), LeanConfig::default());
         tauri::async_runtime::spawn(lean_actor);
         let tex = TexService::new(
@@ -116,7 +121,7 @@ impl AppState {
             anthropic_base_url: None,
             retry: None,
         })?;
-        Ok(Self { documents, workspace, execution, lean, research, tex, typesetting, data_dir, agents })
+        Ok(Self { documents, workspace, execution, lean, research, tex, typesetting, data_dir, agents, graph })
     }
 }
 

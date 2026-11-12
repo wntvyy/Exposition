@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-graph-vocabulary"
+description = "Enables the graph_vocabulary command without any pre-configured scope."
+commands.allow = ["graph_vocabulary"]
+
+[[permission]]
+identifier = "deny-graph-vocabulary"
+description = "Denies the graph_vocabulary command without any pre-configured scope."
+commands.deny = ["graph_vocabulary"]

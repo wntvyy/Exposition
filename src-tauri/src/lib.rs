@@ -7,6 +7,7 @@ mod app;
 mod documents;
 mod error;
 mod execution;
+mod graph;
 mod lean;
 mod page;
 mod research;
@@ -39,6 +40,7 @@ pub fn run() {
             #[cfg(debug_assertions)]
             agents::add_dev_capability(app.handle())?;
             research::forward_events(app.handle().clone());
+            graph::forward_events(app.handle().clone());
             app.state::<AppState>().typesetting.start(app.handle().clone());
             Ok(())
         })
@@ -139,6 +141,21 @@ pub fn run() {
             page::page_navigate,
             page::page_selection,
             page::page_edit,
+            graph::graph_status,
+            graph::graph_vocabulary,
+            graph::graph_snapshot,
+            graph::graph_entity,
+            graph::graph_inspect_at_source,
+            graph::graph_impact,
+            graph::graph_math_overview,
+            graph::graph_propose_change,
+            graph::graph_apply_change,
+            graph::graph_views,
+            graph::graph_view_get,
+            graph::graph_view_save,
+            graph::graph_view_delete,
+            graph::graph_recover,
+            graph::graph_operations,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

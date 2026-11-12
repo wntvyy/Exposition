@@ -12,9 +12,19 @@ use crate::types::{EntryKind, FileEntry};
 /// Directory names never shown in the tree or reported by the watcher.
 pub const HIDDEN_NAMES: &[&str] = &[".git", ".lake", "node_modules", "target"];
 
-/// True if a workspace path is inside a hidden directory or is a save temp file.
+/// True if a workspace path is inside a hidden directory, is a save temp
+/// file, or is the project graph's own storage (`.exposition/graph.sqlite3*`,
+/// its backups and set-aside copies): graph writes are not source changes.
 pub fn is_ignored(path: &WorkspacePath) -> bool {
-    path.components().any(|c| HIDDEN_NAMES.contains(&c)) || path.file_name().contains(TEMP_MARKER)
+    path.components().any(|c| HIDDEN_NAMES.contains(&c))
+        || path.file_name().contains(TEMP_MARKER)
+        || is_graph_storage(path)
+}
+
+/// The project graph's own files under `.exposition/`.
+pub fn is_graph_storage(path: &WorkspacePath) -> bool {
+    let Some(rest) = path.as_str().strip_prefix(".exposition/") else { return false };
+    rest.starts_with("graph.sqlite3") || rest.starts_with("graph-backups/") || rest.starts_with("graph.damaged")
 }
 
 /// List one directory (`None` = the root): directories first, then files, each
@@ -136,6 +146,11 @@ mod tests {
         assert!(is_ignored(&WorkspacePath::parse(".lake/build/lib/A.olean").unwrap()));
         assert!(is_ignored(&WorkspacePath::parse("app/node_modules/x/y.js").unwrap()));
         assert!(is_ignored(&WorkspacePath::parse("dir/.main.typ.exposition-save-12.tmp").unwrap()));
+        assert!(is_ignored(&WorkspacePath::parse(".exposition/graph.sqlite3").unwrap()));
+        assert!(is_ignored(&WorkspacePath::parse(".exposition/graph.sqlite3-journal").unwrap()));
+        assert!(is_ignored(&WorkspacePath::parse(".exposition/graph-backups/b1.sqlite3").unwrap()));
+        assert!(!is_ignored(&WorkspacePath::parse(".exposition/project.json").unwrap()));
+        assert!(!is_ignored(&WorkspacePath::parse(".exposition/research/r/fit.py").unwrap()));
         assert!(!is_ignored(&WorkspacePath::parse("chapters/target.typ").unwrap()));
     }
 }

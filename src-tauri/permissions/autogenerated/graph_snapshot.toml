@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-graph-snapshot"
+description = "Enables the graph_snapshot command without any pre-configured scope."
+commands.allow = ["graph_snapshot"]
+
+[[permission]]
+identifier = "deny-graph-snapshot"
+description = "Denies the graph_snapshot command without any pre-configured scope."
+commands.deny = ["graph_snapshot"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-graph-views"
+description = "Enables the graph_views command without any pre-configured scope."
+commands.allow = ["graph_views"]
+
+[[permission]]
+identifier = "deny-graph-views"
+description = "Denies the graph_views command without any pre-configured scope."
+commands.deny = ["graph_views"]

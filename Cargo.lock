@@ -1216,6 +1216,7 @@ dependencies = [
  "exposition-attach",
  "exposition-core",
  "exposition-execution",
+ "exposition-graph",
  "exposition-lean",
  "exposition-page",
  "exposition-research",
@@ -1301,6 +1302,22 @@ dependencies = [
  "ts-rs",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "exposition-graph"
+version = "0.1.0"
+dependencies = [
+ "exposition-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "ts-rs",
+ "uuid",
 ]
 
 [[package]]
