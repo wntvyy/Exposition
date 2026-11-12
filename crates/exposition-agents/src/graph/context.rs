@@ -74,7 +74,7 @@ impl<'a> Visibility<'a> {
 
     /// Whether a file is in scope (requested spelling and resolved file).
     pub fn path(&self, path: &WorkspacePath) -> bool {
-        if exposition_graph::is_graph_storage(path) {
+        if super::targets::graph_storage(path) {
             return false;
         }
         if let Some(known) = self.paths.borrow().get(path.as_str()) {

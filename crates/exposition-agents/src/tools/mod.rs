@@ -552,8 +552,10 @@ pub enum ToolCall {
 pub enum PathUse {
     /// Read the file's content.
     Read,
-    /// List a folder (names and sizes) or use it as a working folder.
+    /// List a folder (names and sizes).
     Folder,
+    /// Run a process in a folder (it may write there).
+    WorkingFolder,
     /// Change an existing (or open) document.
     Write,
     /// Create a new file.
@@ -725,7 +727,7 @@ impl ToolCall {
                 let paths = if is_root(&input.working_directory) {
                     Vec::new()
                 } else {
-                    vec![(input.working_directory.as_str(), PathUse::Folder)]
+                    vec![(input.working_directory.as_str(), PathUse::WorkingFolder)]
                 };
                 effects(
                     paths,
