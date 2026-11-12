@@ -13,6 +13,7 @@ exposition-core = { path = "crates/exposition-core" }
 exposition-workspace = { path = "crates/exposition-workspace" }
 exposition-execution = { path = "crates/exposition-execution" }
 exposition-tex = { path = "crates/exposition-tex" }
+exposition-lean = { path = "crates/exposition-lean" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

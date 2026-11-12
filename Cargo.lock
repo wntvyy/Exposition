@@ -878,6 +878,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "exposition-lean"
+version = "0.1.0"
+dependencies = [
+ "exposition-core",
+ "exposition-execution",
+ "exposition-workspace",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "ts-rs",
+]
+
+[[package]]
 name = "exposition-tex"
 version = "0.1.0"
 dependencies = [
