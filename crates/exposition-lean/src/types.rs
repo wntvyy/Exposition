@@ -96,6 +96,71 @@ pub struct CheckedDeclaration {
 /// At most this many declarations are listed in [`LeanStatus::Checked`].
 pub const CHECKED_DECLARATIONS_SHOWN: usize = 300;
 
+/// What the axiom audit says about one declaration, from the axioms that
+/// declaration itself depends on (the audit's per-declaration granularity).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum DeclarationVerdict {
+    /// Kernel-checked in the audit's elaboration; only Lean's standard axioms.
+    Checked,
+    /// Depends on axioms beyond the standard ones.
+    CheckedWithAxioms,
+    /// Depends on `sorry`.
+    Incomplete,
+    /// Trusts compiled code instead of the kernel.
+    ReliesOnCompiledCode,
+}
+
+/// A declaration as the axiom audit reported it, with its own verdict.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditedDeclaration {
+    pub name: String,
+    pub kind: String,
+    /// The type the audit printed (the toolchain's notation only).
+    pub statement: String,
+    pub range: Option<TextRange>,
+    pub line: Option<u32>,
+    /// Every axiom it depends on.
+    pub axioms: Vec<String>,
+    pub verdict: DeclarationVerdict,
+}
+
+/// At most this many declarations are kept in a [`LeanAuditRecord`].
+pub const AUDIT_RECORD_LIMIT: usize = 2000;
+
+/// The axiom audit of one finished revision of a document, kept by the Lean
+/// service so formal evidence is recorded from what the audit actually
+/// reported (never from data supplied by a view). Kept after the document
+/// changes: it describes exactly `revision` / `content_hash`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct LeanAuditRecord {
+    pub document: DocumentId,
+    pub path: WorkspacePath,
+    /// The revision audited.
+    pub revision: u64,
+    /// SHA-256 (hex) of the exact UTF-8 text audited.
+    pub content_hash: String,
+    /// Exact toolchain, e.g. `leanprover/lean4:v4.35.0`.
+    pub toolchain: String,
+    /// `lean --version` of that toolchain, when probed.
+    pub toolchain_version: Option<String>,
+    /// The final status Lean and the audit gave `revision`.
+    pub status: LeanStatus,
+    /// Declarations the audit reported (written ones first, in text order).
+    pub declarations: Vec<AuditedDeclaration>,
+    /// Declarations the audit reported in total.
+    pub declaration_count: u32,
+    /// More declarations were audited than are kept here; a declaration not
+    /// listed has no evidence of its own.
+    pub truncated: bool,
+    pub finished_at_ms: u64,
+}
+
 /// Checking status of one Lean document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]

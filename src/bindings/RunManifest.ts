@@ -4,6 +4,7 @@ import type { OutputSummary } from "./OutputSummary";
 import type { RunErrorInfo } from "./RunErrorInfo";
 import type { RunRecord } from "./RunRecord";
 import type { SessionProvenance } from "./SessionProvenance";
+import type { WorkspacePath } from "./WorkspacePath";
 
 /**
  * Portable run manifest stored at `.exposition/runs/<run-id>.json`.
@@ -12,4 +13,11 @@ export type RunManifest = {
 /**
  * Manifest format identifier, currently `exposition.run/1`.
  */
-format: string, record: RunRecord, session: SessionProvenance, code: CodeProvenance, executionCount: number | null, error: RunErrorInfo | null, output: OutputSummary, };
+format: string, record: RunRecord, session: SessionProvenance, code: CodeProvenance, executionCount: number | null, error: RunErrorInfo | null, output: OutputSummary, 
+/**
+ * Inputs that were unsaved buffers when the run was dispatched: their
+ * `content_hash` is the digest of that buffer text, not of the saved file.
+ * (The code itself is kept in `code.text` when it fits; otherwise only its
+ * digest remains.)
+ */
+unsavedInputs: Array<WorkspacePath>, };

@@ -86,6 +86,9 @@ struct Doc {
     /// ones, from the axiom audit of `diagnostics_revision`.
     axioms: Vec<String>,
     axiom_uses: Vec<AxiomUse>,
+    /// The axiom audit of the last revision that finished with one (kept
+    /// after later edits: it describes exactly its own revision and text).
+    audit: Option<LeanAuditRecord>,
     sync: Option<SyncState>,
     waiters: Vec<(u64, oneshot::Sender<()>)>,
     dirty: bool,
@@ -146,6 +149,7 @@ impl Doc {
             sorries: Vec::new(),
             axioms: Vec::new(),
             axiom_uses: Vec::new(),
+            audit: None,
             sync: None,
             waiters: Vec::new(),
             dirty: false,
@@ -1323,6 +1327,7 @@ impl Actor {
                 }
             })
             .collect();
+        let audited_text_hash = sha256_hex(&sync.text);
         let mut classification = None;
         if errors == 0 {
             let audit = audit.unwrap_or_else(|| audit::AuditOutcome::Failed("the file was not audited".into()));
@@ -1386,6 +1391,9 @@ impl Actor {
         let sorry_count = sorries.len() as u32;
         let (axioms, axiom_uses) =
             classification.as_ref().map(|c| (c.all_axioms.clone(), c.axiom_uses.clone())).unwrap_or_default();
+        let audited: Option<Vec<AuditedDeclaration>> =
+            classification.as_ref().filter(|c| c.unverified.is_none()).map(|c| c.audited.clone());
+        let toolchain_version = self.servers.get(&key).and_then(|s| s.info.version.clone());
         let status = match classification {
             None => LeanStatus::Errors { revision: version, toolchain, count: errors, sorry_count },
             Some(c) => {
@@ -1440,6 +1448,37 @@ impl Actor {
         doc.sorries = sorries;
         doc.axioms = axioms;
         doc.axiom_uses = axiom_uses;
+        if let Some(mut declarations) = audited {
+            let declaration_count = declarations.len() as u32;
+            let truncated = declarations.len() > AUDIT_RECORD_LIMIT;
+            declarations.truncate(AUDIT_RECORD_LIMIT);
+            let toolchain = match &status {
+                LeanStatus::Checked { toolchain, .. }
+                | LeanStatus::CheckedWithSorry { toolchain, .. }
+                | LeanStatus::CheckedWithAxioms { toolchain, .. }
+                | LeanStatus::ReliesOnCompiledCode { toolchain, .. }
+                | LeanStatus::PartiallyChecked { toolchain, .. }
+                | LeanStatus::Unverified { toolchain, .. }
+                | LeanStatus::Errors { toolchain, .. } => toolchain.clone(),
+                _ => String::new(),
+            };
+            doc.audit = Some(LeanAuditRecord {
+                document: doc.id.clone(),
+                path: doc.path.clone(),
+                revision: version,
+                content_hash: audited_text_hash,
+                toolchain,
+                toolchain_version,
+                status: status.clone(),
+                declarations,
+                declaration_count,
+                truncated,
+                finished_at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            });
+        }
         self.set_status(id, status);
     }
 
@@ -1773,6 +1812,13 @@ impl Actor {
                     })
                 });
                 let _ = reply.send(snapshot);
+            }
+            Msg::AuditRecord { document, reply } => {
+                let result = match self.docs.get(&document) {
+                    Some(d) if !d.is_temp() => Ok(d.audit.clone()),
+                    _ => Err(unknown_document()),
+                };
+                let _ = reply.send(result);
             }
             Msg::DropTemp { doc } => {
                 if self.docs.get(&doc).is_some_and(Doc::is_temp) {
@@ -2139,6 +2185,9 @@ struct Classification {
     checked: Vec<CheckedDeclaration>,
     /// Declarations using anything beyond the standard axioms.
     axiom_uses: Vec<AxiomUse>,
+    /// Every declaration the audit printed, with its own verdict (same order
+    /// as `checked`), whatever the file's verdict.
+    audited: Vec<AuditedDeclaration>,
 }
 
 impl Classification {
@@ -2160,6 +2209,7 @@ impl Classification {
             all_axioms: Vec::new(),
             axiom_uses: Vec::new(),
             checked: Vec::new(),
+            audited: Vec::new(),
         };
         match tripwire {
             Ok(missing) if missing.is_empty() => {}
@@ -2282,6 +2332,33 @@ impl Classification {
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => a.name.cmp(&b.name),
         });
+        let verdict_of = |d: &audit::DeclAxioms| {
+            let has = |k: AxiomKind| d.axioms.iter().any(|a| a.kind() == k);
+            if has(AxiomKind::Sorry) {
+                DeclarationVerdict::Incomplete
+            } else if has(AxiomKind::CompiledCode) {
+                DeclarationVerdict::ReliesOnCompiledCode
+            } else if has(AxiomKind::Other) {
+                DeclarationVerdict::CheckedWithAxioms
+            } else {
+                DeclarationVerdict::Checked
+            }
+        };
+        c.audited = checked
+            .iter()
+            .filter_map(|cd| {
+                let d = decls.iter().find(|d| d.name == cd.name)?;
+                Some(AuditedDeclaration {
+                    name: cd.name.clone(),
+                    kind: cd.kind.clone(),
+                    statement: cd.statement.clone(),
+                    range: cd.range,
+                    line: cd.line,
+                    axioms: cd.axioms.clone(),
+                    verdict: verdict_of(d),
+                })
+            })
+            .collect();
         c.checked = checked;
         c
     }

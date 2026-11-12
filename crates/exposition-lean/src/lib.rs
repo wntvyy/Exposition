@@ -11,6 +11,8 @@
 //!   the [`LeanService::check`] seam for agents.
 //!
 //! - [`audit`]: the axiom audit of every revision Lean reports without errors.
+//! - [`evidence`]: version-bound formal evidence in the project graph from an
+//!   audit record, and reviewed `formalizes` associations.
 //!
 //! Statuses are distinct by construction: [`LeanStatus::Checked`] means Lean
 //! elaborated exactly that revision completely with no errors, and the axiom
@@ -22,6 +24,7 @@
 
 pub mod audit;
 pub mod convert;
+pub mod evidence;
 pub mod lsp;
 pub mod project;
 mod server;

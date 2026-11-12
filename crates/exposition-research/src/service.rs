@@ -35,6 +35,27 @@ use crate::types::{
 
 /// Largest code accepted for one run.
 const CODE_LIMIT: usize = 4 * 1024 * 1024;
+/// Declared inputs pinned per run.
+const MAX_DECLARED_INPUTS: usize = 32;
+/// Largest declared input hashed when a run is dispatched.
+const DECLARED_INPUT_LIMIT: u64 = 1024 * 1024 * 1024;
+
+/// SHA-256 (hex) of a file, streamed.
+pub fn hash_file(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
 /// Helper stderr lines kept for diagnostics.
 const DIAGNOSTIC_LINES: usize = 200;
 
@@ -360,6 +381,22 @@ impl ResearchService {
     // ---- runs -----------------------------------------------------------
 
     pub fn execute(&self, request: ExecuteRequest) -> Result<RunSummary, ResearchError> {
+        self.execute_with_inputs(request, &[])
+    }
+
+    /// Run code and pin `declared` project files (data the code reads, e.g. an
+    /// experiment's declared inputs) in the run's inputs: each is hashed as it
+    /// is when the run is dispatched (the open buffer when the file is open).
+    /// The kernel itself does not report which files it read; declared inputs
+    /// are the person's statement, pinned by version.
+    pub fn execute_with_inputs(
+        &self,
+        request: ExecuteRequest,
+        declared: &[WorkspacePath],
+    ) -> Result<RunSummary, ResearchError> {
+        if declared.len() > MAX_DECLARED_INPUTS {
+            return Err(ResearchError::InvalidRequest(format!("at most {MAX_DECLARED_INPUTS} declared inputs")));
+        }
         let session = self.session(&request.session_id)?;
         if session.owner != request.requester {
             return Err(ResearchError::OwnerMismatch { session: session.id.clone() });
@@ -377,8 +414,51 @@ impl ResearchService {
             session.detach(TRUST_REVOKED);
             return Err(ResearchError::NotTrusted);
         }
-        let (code, origin, inputs) = self.resolve_source(&session, &request.source)?;
-        session.enqueue(code, origin, inputs)
+        let (code, origin, mut inputs) = self.resolve_source(&session, &request.source)?;
+        for path in declared {
+            if inputs.iter().any(|i| &i.path == path) {
+                continue;
+            }
+            inputs.push(self.pin_declared_input(&session, path)?);
+        }
+        let unsaved = inputs.iter().filter(|i| self.is_unsaved(&i.path, i.revision)).map(|i| i.path.clone()).collect();
+        session.enqueue(code, origin, inputs, unsaved)
+    }
+
+    /// Whether `path` at `revision` was an unsaved buffer.
+    fn is_unsaved(&self, path: &WorkspacePath, revision: Option<u64>) -> bool {
+        let Some(revision) = revision else { return false };
+        let documents = &self.shared.config.documents;
+        documents
+            .find_by_path(path)
+            .and_then(|id| documents.info(&id).ok())
+            .is_some_and(|info| info.saved_revision != Some(revision))
+    }
+
+    /// Hash a declared input as it is now (open buffer first, else the file).
+    fn pin_declared_input(&self, session: &Session, path: &WorkspacePath) -> Result<RunInput, ResearchError> {
+        let documents = &self.shared.config.documents;
+        if let Some(id) = documents.find_by_path(path) {
+            let snapshot = documents.snapshot(&id).map_err(|e| ResearchError::InvalidRequest(e.to_string()))?;
+            return Ok(RunInput {
+                path: path.clone(),
+                revision: Some(snapshot.revision),
+                content_hash: Some(format!("sha256:{}", sha256_hex(snapshot.text.as_bytes()))),
+            });
+        }
+        let file = resolve_existing(&session.root, path)?;
+        let meta = std::fs::metadata(&file).map_err(|e| ResearchError::io("reading a declared input", e))?;
+        if !meta.is_file() {
+            return Err(ResearchError::InvalidRequest(format!("{path} is not a file")));
+        }
+        if meta.len() > DECLARED_INPUT_LIMIT {
+            return Err(ResearchError::InvalidRequest(format!(
+                "{path} is too large to pin by content ({} MiB at most)",
+                DECLARED_INPUT_LIMIT / (1024 * 1024)
+            )));
+        }
+        let hash = hash_file(&file).map_err(|e| ResearchError::io("hashing a declared input", e))?;
+        Ok(RunInput { path: path.clone(), revision: None, content_hash: Some(format!("sha256:{hash}")) })
     }
 
     fn resolve_source(
@@ -1244,6 +1324,7 @@ impl Session {
         code: String,
         origin: CodeOrigin,
         inputs: Vec<RunInput>,
+        unsaved_inputs: Vec<WorkspacePath>,
     ) -> Result<RunSummary, ResearchError> {
         let shared = self.shared().ok_or(ResearchError::HelperGone)?;
         // The session lock is held until the run is registered and placed, so
@@ -1327,6 +1408,7 @@ impl Session {
             execution_count: None,
             error: None,
             output: OutputSummary::default(),
+            unsaved_inputs,
         };
         let run = RunState {
             manifest,

@@ -18,6 +18,7 @@ pub mod discovery;
 pub mod error;
 pub mod helper;
 pub mod launcher;
+pub mod project;
 pub mod protocol;
 mod runs;
 mod service;
@@ -25,5 +26,6 @@ pub mod store;
 pub mod types;
 
 pub use error::ResearchError;
+pub use project::ResearchProject;
 pub use runs::media_type_for;
-pub use service::{ResearchConfig, ResearchService, ResolvedSource, SourceReader, StartSessionRequest};
+pub use service::{ResearchConfig, ResearchService, ResolvedSource, SourceReader, StartSessionRequest, hash_file};

@@ -256,6 +256,12 @@ pub struct RunManifest {
     pub execution_count: Option<u32>,
     pub error: Option<RunErrorInfo>,
     pub output: OutputSummary,
+    /// Inputs that were unsaved buffers when the run was dispatched: their
+    /// `content_hash` is the digest of that buffer text, not of the saved file.
+    /// (The code itself is kept in `code.text` when it fits; otherwise only its
+    /// digest remains.)
+    #[serde(default)]
+    pub unsaved_inputs: Vec<WorkspacePath>,
 }
 
 /// Lightweight run listing entry.
