@@ -19,6 +19,14 @@ import type { FileEntry } from "../bindings/FileEntry";
 import type { JobEvent } from "../bindings/JobEvent";
 import type { JobId } from "../bindings/JobId";
 import type { JobSummary } from "../bindings/JobSummary";
+import type { LeanCheckReport } from "../bindings/LeanCheckReport";
+import type { LeanCheckRequest } from "../bindings/LeanCheckRequest";
+import type { LeanDocumentState } from "../bindings/LeanDocumentState";
+import type { LeanEvent } from "../bindings/LeanEvent";
+import type { LeanGoals } from "../bindings/LeanGoals";
+import type { LeanHover } from "../bindings/LeanHover";
+import type { LeanLocation } from "../bindings/LeanLocation";
+import type { LeanProjectInfo } from "../bindings/LeanProjectInfo";
 import type { LineEnding } from "../bindings/LineEnding";
 import type { OutputPage } from "../bindings/OutputPage";
 import type { ProjectSettings } from "../bindings/ProjectSettings";
@@ -91,6 +99,24 @@ export const commands = {
   /** Only call from the explicit trust dialog (`requestWorkspaceTrust`). */
   trustGrant: (root: string) => invoke<TrustStatus>("trust_grant", { root }),
   trustRevoke: (root: string) => invoke<TrustStatus>("trust_revoke", { root }),
+
+  // Lean. Errors are `LeanError`s ({ code, message, currentRevision }).
+  leanDocuments: () => invoke<LeanDocumentState[]>("lean_documents"),
+  leanProjects: () => invoke<LeanProjectInfo[]>("lean_projects"),
+  /** Goals at a UTF-16 offset of exactly `revision` (`lean.stale` once the document moved on). */
+  leanGoals: (document: DocumentId, revision: number, offset: number) =>
+    invoke<LeanGoals>("lean_goals", { document, revision, offset }),
+  leanHover: (document: DocumentId, revision: number, offset: number) =>
+    invoke<LeanHover | null>("lean_hover", { document, revision, offset }),
+  leanDefinition: (document: DocumentId, revision: number, offset: number) =>
+    invoke<LeanLocation[]>("lean_definition", { document, revision, offset }),
+  /** Restart the document's Lean server (re-checks trust and the toolchain). */
+  leanRestart: (document: DocumentId) => invoke<void>("lean_restart", { document }),
+  /** Re-elaborate one file, rebuilding out-of-date imports. */
+  leanRestartFile: (document: DocumentId) => invoke<void>("lean_restart_file", { document }),
+  /** Explicit user action only: install the toolchain the project pins (runs a job). */
+  leanInstallToolchain: (document: DocumentId) => invoke<JobId>("lean_install_toolchain", { document }),
+  leanCheck: (request: LeanCheckRequest) => invoke<LeanCheckReport>("lean_check", { request }),
 };
 
 export const events = {
@@ -107,6 +133,11 @@ export const events = {
     listen<JobEvent>("jobs:event", (e) => handler(e.payload)),
   /** The frontend fell behind; re-read the job list. */
   jobsResync: (handler: () => void): Promise<UnlistenFn> => listen("jobs:resync", () => handler()),
+  /** Lean document status/diagnostics changes. */
+  lean: (handler: (event: LeanEvent) => void): Promise<UnlistenFn> =>
+    listen<LeanEvent>("lean:event", (e) => handler(e.payload)),
+  /** The frontend fell behind; re-read `leanDocuments`. */
+  leanResync: (handler: () => void): Promise<UnlistenFn> => listen("lean:resync", () => handler()),
 };
 
 export function isCommandError(value: unknown): value is CommandError {
