@@ -171,8 +171,11 @@ statements with their informal proof, formal association, verifier verdict,
 and freshness. The verdict comes only from Lean's audit evidence. The Lean
 audit reports no declaration dependencies, so formal evidence is never
 current against imported modules and formal dependency edges are shown as
-unavailable. Associating a Lean declaration with a statement records your
-reviewed correspondence, not a machine proof of equivalence.
+unavailable. Evidence recorded on another computer (for example in a graph
+copied with the project) is shown as an imported historical claim, never as
+current verification on this computer. Associating a Lean declaration with
+a statement records your reviewed correspondence, not a machine proof of
+equivalence.
 
 **Storage, backups, and recovery.** The graph database is treated as
 untrusted input: it is opened only if it is a regular file of at most 1 GB
@@ -187,10 +190,11 @@ file is kept aside, never deleted), or retry. Nothing replaces a damaged
 graph automatically. Consistent backups are kept in
 `.exposition/graph-backups/` (the newest 8): one after the first
 reconciliation of an open when the newest is more than a day old, and one
-before a schema upgrade. A folder that
-cannot hold the graph (for example a read-only one) gets a temporary graph
-in memory: it is indexed and readable, but nothing curated persists and the
-Graph page offers no changes or saved layouts.
+before a schema upgrade. Recovery performs only an option the app offered,
+and never through a link. A folder that
+cannot hold the graph (for example a read-only one, or a graph on read-only
+storage) gets a temporary graph: it is indexed and readable, but nothing
+curated persists and the Graph page offers no changes or saved layouts.
 
 **Changes and layout.** Every change to the graph is validated by the
 application before it is applied, all or nothing; the webview cannot run
