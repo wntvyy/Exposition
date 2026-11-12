@@ -59,7 +59,7 @@ export function installTypesettingEvents(): void {
   void events.typesettingStatus((e) => recordActivity(e.entry, e.activity)).catch(() => {});
 }
 
-export type BuildSummary = "building" | "succeeded" | "failed" | "stale" | "none";
+export type BuildSummary = "building" | "succeeded" | "failed" | "stale" | "untrusted" | "none";
 
 /** Summary status of an entry: a failed latest build leaves the shown pages stale. */
 export function summarize(state: EntryBuildState | undefined): BuildSummary {
@@ -68,5 +68,7 @@ export function summarize(state: EntryBuildState | undefined): BuildSummary {
   const latest = state.latest;
   if (!latest) return "none";
   if (latest.result.status.kind === "succeeded") return "succeeded";
+  // Refused before running (LaTeX in an untrusted workspace): not a failure.
+  if (latest.refusal?.code === "untrustedWorkspace") return "untrusted";
   return latest.lastGood ? "stale" : "failed";
 }

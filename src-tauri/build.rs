@@ -39,6 +39,11 @@ const COMMANDS: &[&str] = &[
     "trust_status",
     "trust_grant",
     "trust_revoke",
+    // Settings (src/settings.rs).
+    "execution_settings_get",
+    "execution_settings_update",
+    "docker_images_list",
+    "trust_list",
     // Lean (src/lean.rs).
     "lean_documents",
     "lean_projects",

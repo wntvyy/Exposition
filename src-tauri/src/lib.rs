@@ -10,6 +10,7 @@ mod execution;
 mod lean;
 mod page;
 mod research;
+mod settings;
 mod state;
 mod tex;
 mod typesetting;
@@ -89,6 +90,10 @@ pub fn run() {
             execution::trust_status,
             execution::trust_grant,
             execution::trust_revoke,
+            settings::execution_settings_get,
+            settings::execution_settings_update,
+            settings::docker_images_list,
+            settings::trust_list,
             lean::lean_documents,
             lean::lean_projects,
             lean::lean_goals,

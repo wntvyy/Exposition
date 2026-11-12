@@ -27,6 +27,9 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
 use crate::env::Environment;
 use crate::settings::DockerSettings;
 
@@ -41,6 +44,124 @@ pub fn valid_image_ref(image: &str) -> bool {
         && image.len() <= 255
         && image.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
         && image.chars().all(|c| c.is_ascii_alphanumeric() || "_.-/:@".contains(c))
+}
+
+/// Longest repository name Docker accepts (`NameTotalLengthMax`).
+const MAX_NAME_LEN: usize = 255;
+
+static REFERENCE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    // The image reference grammar of github.com/distribution/reference, with
+    // `\w` spelled out as ASCII (RE2's `\w` is ASCII; Rust's is Unicode):
+    //   reference := name [ ":" tag ] [ "@" digest ]
+    //   name      := [ domain [ ":" port ] "/" ] path-component ( "/" path-component )*
+    let alphanumeric = "[a-z0-9]+";
+    let separator = "(?:[._]|__|[-]+)";
+    let path_component = format!("{alphanumeric}(?:{separator}{alphanumeric})*");
+    let domain_component = "(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])";
+    let host = format!(r"(?:{domain_component}(?:\.{domain_component})*|\[[a-fA-F0-9:]+\])");
+    let domain = format!("{host}(?::[0-9]+)?");
+    let name = format!("(?:{domain}/)?{path_component}(?:/{path_component})*");
+    let tag = "[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}";
+    let digest = "[A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*:[0-9a-fA-F]{32,}";
+    regex::Regex::new(&format!("^({name})(?::{tag})?(?:@{digest})?$")).expect("reference grammar")
+});
+
+/// Check an image reference against Docker's reference grammar
+/// (`[registry[:port]/]name[:tag][@digest]`, lowercase repository path).
+/// Used to validate settings: the result is also always passed to the docker
+/// client as one argument, never through a shell.
+pub fn validate_image_reference(image: &str) -> Result<(), String> {
+    if image.is_empty() {
+        return Err("enter an image reference such as python:3.13-slim".into());
+    }
+    if image.len() > 512 {
+        return Err("the image reference is too long".into());
+    }
+    let Some(captures) = REFERENCE.captures(image) else {
+        return Err(format!(
+            "`{image}` is not a valid Docker image reference ([registry/]name[:tag][@digest]; repository names are lowercase letters, digits, and . _ - separators)"
+        ));
+    };
+    if captures.get(1).map_or(0, |m| m.len()) > MAX_NAME_LEN {
+        return Err(format!("the repository name may be at most {MAX_NAME_LEN} characters"));
+    }
+    Ok(())
+}
+
+/// A locally present, tagged image (from `docker image ls`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerImage {
+    /// `repository:tag`, usable as `execution.docker.image`.
+    pub reference: String,
+    /// Short image id.
+    pub id: String,
+    /// Size as reported by Docker (e.g. "178MB").
+    pub size: String,
+    /// When the image was created, as reported by Docker (e.g. "6 days ago").
+    pub created: String,
+}
+
+/// Why local images could not be listed.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DockerListError {
+    /// No docker client (or a broken configured path).
+    #[error("{0}")]
+    NotFound(String),
+    /// The client ran but the engine did not answer.
+    #[error("{0}")]
+    Unreachable(String),
+    #[error("could not list Docker images: {0}")]
+    Failed(String),
+}
+
+impl DockerListError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            DockerListError::NotFound(_) => "docker.notFound",
+            DockerListError::Unreachable(_) => "docker.unreachable",
+            DockerListError::Failed(_) => "docker.failed",
+        }
+    }
+}
+
+/// Arguments for listing local images, one JSON object per line.
+pub const IMAGE_LIST_ARGS: &[&str] = &["image", "ls", "--format", "{{json .}}"];
+
+/// Parse `docker image ls --format '{{json .}}'` output. Untagged (`<none>`)
+/// images and references outside the grammar are skipped; the result is
+/// sorted and free of duplicates.
+pub fn parse_image_list(stdout: &str) -> Vec<DockerImage> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Line {
+        #[serde(default)]
+        repository: String,
+        #[serde(default)]
+        tag: String,
+        #[serde(default, rename = "ID")]
+        id: String,
+        #[serde(default)]
+        size: String,
+        #[serde(default)]
+        created_since: String,
+    }
+    let mut images: Vec<DockerImage> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Line>(line.trim()).ok())
+        .filter(|l| !l.repository.is_empty() && l.repository != "<none>" && !l.tag.is_empty() && l.tag != "<none>")
+        .map(|l| DockerImage {
+            reference: format!("{}:{}", l.repository, l.tag),
+            id: l.id.trim_start_matches("sha256:").chars().take(12).collect(),
+            size: l.size,
+            created: l.created_since,
+        })
+        .filter(|image| validate_image_reference(&image.reference).is_ok())
+        .collect();
+    images.sort_by(|a, b| a.reference.cmp(&b.reference));
+    images.dedup_by(|a, b| a.reference == b.reference);
+    images
 }
 
 /// Container-side program: a bare name or absolute POSIX path, never an option.
@@ -263,6 +384,84 @@ mod tests {
         assert!(valid_container_program("node"));
         assert!(valid_container_program("/usr/bin/python3"));
         assert!(!valid_container_program("--privileged"));
+    }
+
+    #[test]
+    fn image_reference_grammar() {
+        for valid in [
+            "python:3.13-slim",
+            "node:26-trixie-slim",
+            "ubuntu",
+            "library/ubuntu:24.04",
+            "ghcr.io/org/team/img:v1.2_3",
+            "localhost:5000/img:latest",
+            "registry.example.com:443/a/b",
+            "[::1]:5000/img",
+            "public.ecr.aws/supabase/postgres:17.11.0.006",
+            "img@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "img:tag@sha256:0123456789abcdef0123456789abcdef",
+            "a__b:x",
+            "a---b",
+        ] {
+            assert_eq!(validate_image_reference(valid), Ok(()), "{valid} should be valid");
+        }
+        for invalid in [
+            "",
+            "--privileged",
+            "-img",
+            "img; rm -rf /",
+            "img && calc",
+            "$(calc)",
+            "img`calc`",
+            "img|calc",
+            "img calc",
+            "img\ncalc",
+            "Python:3.13",
+            "img:",
+            "img:-tag",
+            ":tag",
+            "img::tag",
+            "img@sha256:abc",
+            "img/",
+            "/img",
+            "a..b",
+            "a_-b",
+            "img:tag:other",
+            "img:töt",
+            "--network=host",
+        ] {
+            assert!(validate_image_reference(invalid).is_err(), "{invalid:?} should be refused");
+        }
+        let long_tag = format!("img:{}", "t".repeat(129));
+        assert!(validate_image_reference(&long_tag).is_err());
+        let long_name = "a".repeat(256);
+        assert!(validate_image_reference(&long_name).is_err());
+        assert!(validate_image_reference(&"a".repeat(255)).is_ok());
+    }
+
+    #[test]
+    fn image_list_parsing_skips_untagged_and_invalid() {
+        let out = concat!(
+            r#"{"Containers":"N/A","CreatedAt":"2026-11-05 03:02:05 -0500 EST","CreatedSince":"6 days ago","Digest":"<none>","ID":"e48f59cdba69","Repository":"python","SharedSize":"N/A","Size":"178MB","Tag":"3.13-slim","UniqueSize":"N/A","VirtualSize":"178MB"}"#,
+            "\n",
+            r#"{"ID":"sha256:43b9ba1142b8aaaa","Repository":"node","Size":"337MB","Tag":"24-trixie-slim","CreatedSince":"3 weeks ago"}"#,
+            "\n",
+            r#"{"ID":"abc","Repository":"<none>","Size":"1MB","Tag":"<none>"}"#,
+            "\n",
+            r#"{"ID":"def","Repository":"dangling","Size":"1MB","Tag":"<none>"}"#,
+            "\n",
+            r#"{"ID":"bad","Repository":"Bad Name","Size":"1MB","Tag":"x"}"#,
+            "\n",
+            "not json\n",
+            r#"{"ID":"e48f59cdba69","Repository":"python","Size":"178MB","Tag":"3.13-slim"}"#,
+            "\n",
+        );
+        let images = parse_image_list(out);
+        let refs: Vec<&str> = images.iter().map(|i| i.reference.as_str()).collect();
+        assert_eq!(refs, ["node:24-trixie-slim", "python:3.13-slim"]);
+        assert_eq!(images[0].id, "43b9ba1142b8");
+        assert_eq!(images[1].size, "178MB");
+        assert_eq!(images[1].created, "6 days ago");
     }
 
     #[test]

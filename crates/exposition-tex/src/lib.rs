@@ -16,7 +16,10 @@ pub mod compile;
 pub mod latex;
 pub mod log;
 pub mod mapping;
+pub mod mirror;
 pub mod normalize;
+pub mod page_input;
+pub mod page_map;
 pub mod pdf;
 pub mod runner;
 pub mod service;
@@ -26,6 +29,7 @@ pub mod toolchain;
 
 pub use compile::{BuildMode, BuildSnapshot, TexBuild, TexBuildRequest, TexBuilder, TexOutput};
 pub use mapping::{CaretHit, GlyphTarget, PageMapping, UnmappedReason};
+pub use page_input::TexInput;
 pub use runner::{CancelToken, ExecutionRunner, JobRunner, LocalProcessRunner, ProcessOutput};
 pub use service::{
     TexBuildMode, TexBuildSummary, TexEvent, TexService, TexServiceConfig, TexServiceError, TexTargetRef,
