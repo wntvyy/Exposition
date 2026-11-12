@@ -10,8 +10,9 @@ document service.
 
 ## Status
 
-Early development. Windows is the primary verified platform; macOS and Linux
-are structurally supported but unverified.
+Local alpha. Windows is the primary verified platform; macOS and Linux are
+structurally supported but unverified. See [docs/capabilities.md](docs/capabilities.md)
+for exactly what works per format and subsystem, and its known limitations.
 
 ## Prerequisites
 
