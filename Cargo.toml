@@ -16,6 +16,7 @@ exposition-typesetting = { path = "crates/exposition-typesetting" }
 exposition-page = { path = "crates/exposition-page" }
 exposition-execution = { path = "crates/exposition-execution" }
 exposition-tex = { path = "crates/exposition-tex" }
+exposition-lean = { path = "crates/exposition-lean" }
 exposition-research = { path = "crates/exposition-research" }
 exposition-attach = { path = "crates/exposition-attach" }
 

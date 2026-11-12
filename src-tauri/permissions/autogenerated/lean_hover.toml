@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lean-hover"
+description = "Enables the lean_hover command without any pre-configured scope."
+commands.allow = ["lean_hover"]
+
+[[permission]]
+identifier = "deny-lean-hover"
+description = "Denies the lean_hover command without any pre-configured scope."
+commands.deny = ["lean_hover"]
