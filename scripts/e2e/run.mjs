@@ -13,7 +13,9 @@ import { launchApp, REPO_ROOT } from "./app.mjs";
 const scenariosDir = join(import.meta.dirname, "scenarios");
 const requested = process.argv.slice(2);
 const available = (await readdir(scenariosDir)).filter((f) => f.endsWith(".mjs")).map((f) => f.replace(/\.mjs$/, ""));
-const selected = requested.length ? requested : available;
+// `live-*` scenarios call paid external services (e.g. a model provider) and
+// run only when named explicitly.
+const selected = requested.length ? requested : available.filter((name) => !name.startsWith("live-"));
 const unknown = selected.filter((s) => !available.includes(s));
 if (unknown.length) {
   console.error(`unknown scenarios: ${unknown.join(", ")}; available: ${available.join(", ")}`);
