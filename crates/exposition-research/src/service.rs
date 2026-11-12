@@ -1010,7 +1010,13 @@ impl Session {
             let _ = tx.send(Err(ResearchError::HelperGone));
         }
         let stopped = matches!(lock(&self.state).state, SessionState::Stopped | SessionState::Detached { .. });
-        if !stopped {
+        // A trust revoke stops the folder's jobs (this helper among them)
+        // before it is announced: the session is detached, not crashed.
+        let revoked =
+            self.shared().and_then(|shared| shared.config.launcher.workspace_trusted(&self.root)) == Some(false);
+        if !stopped && revoked {
+            self.detach("Workspace trust was revoked; this session's kernel was stopped.");
+        } else if !stopped {
             let detail = match code.flatten() {
                 Some(code) => format!(" (exit code {code})"),
                 None => String::new(),

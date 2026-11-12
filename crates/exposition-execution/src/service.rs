@@ -49,6 +49,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 /// How long to wait for output readers after the process tree is gone.
 const READER_GRACE: Duration = Duration::from_secs(3);
+/// How long to wait for a killed process tree to be reported empty.
+const TREE_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest a trust revoke waits for the folder's jobs to stop.
+const REVOKE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What kind of job this is (affects trust rules and UI grouping).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -199,6 +203,9 @@ struct Prepared {
     timeout: Option<Duration>,
     stdin: StdinMode,
     docker: Option<DockerLaunch>,
+    /// The workspace whose trust allowed this host job (`None` for restricted
+    /// jobs and application probes, which need no trust).
+    trust_scope: Option<PathBuf>,
 }
 
 struct Control {
@@ -232,6 +239,13 @@ struct Mutable {
     refusal: Option<JobRefusal>,
     pid: Option<u32>,
     program_display: String,
+    /// See [`Prepared::trust_scope`]; set once the launch is validated.
+    trust_scope: Option<PathBuf>,
+    /// Why the service canceled the job (written to its log).
+    cancel_reason: Option<String>,
+    /// The process tree is gone (or never started). Set before the result,
+    /// which may still wait for output readers.
+    stopped: bool,
 }
 
 struct Output {
@@ -256,9 +270,26 @@ struct Job {
     output: Mutex<Output>,
     control: Control,
     done: watch::Sender<Option<JobResult>>,
+    /// Signaled (with `state`) when `stopped` is set.
+    stopped_cv: Condvar,
 }
 
 impl Job {
+    fn mark_stopped(&self) {
+        self.state.locked().stopped = true;
+        self.stopped_cv.notify_all();
+    }
+
+    /// Wait until the process tree is gone (or the job finished); false on timeout.
+    fn wait_stopped(&self, timeout: Duration) -> bool {
+        let guard = self.state.locked();
+        let (guard, _) = self
+            .stopped_cv
+            .wait_timeout_while(guard, timeout, |m| !m.stopped && m.result.is_none())
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.stopped || guard.result.is_some()
+    }
+
     fn summary(&self) -> JobSummary {
         let m = self.state.locked();
         JobSummary {
@@ -421,10 +452,46 @@ impl ExecutionService {
 
     /// Revoke trust (the folder and anything trusted inside it). Announced to
     /// [`Self::subscribe_trust`] subscribers, which stop trusted work there.
+    ///
+    /// Before it returns, and before the announcement, every queued or
+    /// running host job whose launch-time trust scope is no longer trusted is
+    /// canceled and its process tree killed ("canceled: workspace trust
+    /// revoked ..." in its log): once a revoke returns, no trusted job of that
+    /// folder runs, whether or not its owner has noticed. Restricted jobs need
+    /// no trust and are not affected.
     pub fn revoke_trust(&self, path: &str) -> Result<TrustStatus, TrustError> {
         let status = self.inner.trust.revoke(path)?;
+        self.stop_untrusted_jobs(&status.root);
         let _ = self.inner.trust_events.send(TrustChanged { root: status.root.clone(), granted: false });
         Ok(status)
+    }
+
+    /// Cancel every unfinished job whose trust scope is no longer trusted (the
+    /// same check as at launch) and wait, bounded, until each process tree is
+    /// gone.
+    fn stop_untrusted_jobs(&self, revoked: &str) {
+        let jobs: Vec<Arc<Job>> = self.inner.table.locked().jobs.values().cloned().collect();
+        let doomed: Vec<Arc<Job>> = jobs
+            .into_iter()
+            .filter(|job| {
+                let scope = {
+                    let m = job.state.locked();
+                    if m.result.is_some() {
+                        return false;
+                    }
+                    m.trust_scope.clone()
+                };
+                scope.is_some_and(|scope| !self.inner.trust.is_trusted(&scope))
+            })
+            .collect();
+        let reason = format!("workspace trust revoked for {revoked}");
+        for job in &doomed {
+            self.cancel_job(job, Some(&reason));
+        }
+        let deadline = Instant::now() + REVOKE_STOP_TIMEOUT;
+        for job in &doomed {
+            job.wait_stopped(deadline.saturating_duration_since(Instant::now()));
+        }
     }
 
     /// Trust grants and revokes from any surface, in order. Services that
@@ -718,6 +785,9 @@ impl ExecutionService {
                 refusal: None,
                 pid: None,
                 program_display: redactor.redact(&spec.program),
+                trust_scope: None,
+                cancel_reason: None,
+                stopped: false,
             }),
             output: Mutex::new(Output {
                 stdout,
@@ -730,6 +800,7 @@ impl ExecutionService {
             }),
             control: Control { cancel: Mutex::new(false), wake: Condvar::new() },
             done,
+            stopped_cv: Condvar::new(),
         });
         {
             let mut table = inner.table.locked();
@@ -744,7 +815,11 @@ impl ExecutionService {
         }
         match inner.prepare(spec, kind) {
             Ok(prepared) => {
-                job.state.locked().program_display = prepared.display_program();
+                {
+                    let mut m = job.state.locked();
+                    m.program_display = prepared.display_program();
+                    m.trust_scope = prepared.trust_scope.clone();
+                }
                 Ok((job, prepared))
             }
             Err(refusal) => Err(inner.finish_refused(&job, refusal)),
@@ -808,6 +883,12 @@ impl ExecutionService {
     /// Request cancellation. Returns false when the job is unknown or finished.
     pub fn cancel(&self, id: &JobId) -> bool {
         let Some(job) = self.job(id) else { return false };
+        self.cancel_job(&job, None)
+    }
+
+    /// Cancel a job; `reason` (when the service itself cancels it) goes to its log.
+    fn cancel_job(&self, job: &Arc<Job>, reason: Option<&str>) -> bool {
+        let id = &job.id;
         let queued = {
             let mut table = self.inner.table.locked();
             let position = table.queue.iter().position(|(j, _)| j.id == *id);
@@ -821,11 +902,16 @@ impl ExecutionService {
             if m.state != JobState::Queued || queued.is_none() {
                 m.state = JobState::Canceling;
             }
+            if let Some(reason) = reason {
+                m.cancel_reason.get_or_insert_with(|| reason.to_owned());
+            }
         }
         let _ = self.inner.events.send(JobEvent::CancelRequested { id: id.clone() });
         job.control.request();
         if queued.is_some() {
-            self.inner.finish(&job, JobOutcome::Canceled);
+            self.inner.note_cancel_reason(job);
+            self.inner.final_flush(job);
+            self.inner.finish(job, JobOutcome::Canceled);
         }
         true
     }
@@ -1081,6 +1167,7 @@ impl Inner {
         };
         match &spec.policy {
             ExecutionPolicy::TrustedNative => {
+                let mut trust_scope = None;
                 if !app_kind {
                     let workspace = match &root.kind {
                         RootKind::Workspace => Some(root.path.clone()),
@@ -1102,6 +1189,7 @@ impl Inner {
                             workspace_root: Some(workspace.display().to_string()),
                         });
                     }
+                    trust_scope = Some(workspace);
                 }
                 let program = self.resolve_program(&spec.program, &settings)?;
                 let temp = PathBuf::new(); // replaced at spawn time with the job temp dir
@@ -1115,7 +1203,7 @@ impl Inner {
                     &EnvContext { host: &self.host, redactor: &self.redactor, temp_dir: &temp, path_dirs: &path_dirs },
                 )
                 .map_err(|e| JobRefusal::new(RefusalCode::EnvironmentRefused, e.to_string()))?;
-                Ok(Prepared { program, args: spec.args.clone(), env, cwd, timeout, stdin, docker: None })
+                Ok(Prepared { program, args: spec.args.clone(), env, cwd, timeout, stdin, docker: None, trust_scope })
             }
             ExecutionPolicy::Restricted { backend } => {
                 if backend != docker::BACKEND {
@@ -1192,6 +1280,8 @@ impl Inner {
                         mount_root: root.path.clone(),
                         workdir_components: relative,
                     }),
+                    // Restricted execution needs no trust.
+                    trust_scope: None,
                 })
             }
         }
@@ -1284,8 +1374,10 @@ impl Inner {
             let result = JobResult { id: job.id.clone(), outcome, duration_ms, output_truncated: truncated };
             m.result = Some(result.clone());
             m.state = JobState::Finished;
+            m.stopped = true;
             result
         };
+        job.stopped_cv.notify_all();
         let _ = self.events.send(JobEvent::Finished { result: result.clone() });
         job.done.send_replace(Some(result.clone()));
         result
@@ -1332,6 +1424,14 @@ impl Inner {
         self.flush(job, false);
     }
 
+    /// Write why the service canceled the job (if it did) to its log.
+    fn note_cancel_reason(&self, job: &Job) {
+        let reason = job.state.locked().cancel_reason.clone();
+        if let Some(reason) = reason {
+            self.note(job, OutputStream::Stderr, &format!("[canceled: {reason}]\n"));
+        }
+    }
+
     fn note(&self, job: &Job, stream: OutputStream, text: &str) {
         {
             let mut out = job.output.locked();
@@ -1354,7 +1454,27 @@ impl Inner {
             }
         };
         if job.control.requested() || self.shutting_down.load(Ordering::SeqCst) {
+            self.note_cancel_reason(job);
+            self.final_flush(job);
             let result = self.finish(job, JobOutcome::Canceled);
+            if let Some(tx) = session.started.take() {
+                let _ = tx.send(Err(result));
+            }
+            return;
+        }
+        // Trust may have been revoked since the launch was validated (a revoke
+        // cancels jobs it can see; this covers one validated just before it).
+        let scope = job.state.locked().trust_scope.clone();
+        if let Some(scope) = scope
+            && !self.trust.is_trusted(&scope)
+        {
+            remove_job_dir(&job_dir);
+            let refusal = JobRefusal {
+                code: RefusalCode::UntrustedWorkspace,
+                message: format!("Workspace {} is no longer trusted; the job was not started", scope.display()),
+                workspace_root: Some(scope.display().to_string()),
+            };
+            let result = self.finish_refused(job, refusal);
             if let Some(tx) = session.started.take() {
                 let _ = tx.send(Err(result));
             }
@@ -1549,6 +1669,17 @@ impl Inner {
             }
         };
         let _ = child.wait();
+        // The tree was killed (or the primary exited and the rest was
+        // killed): wait, bounded, until the OS reports it empty, so a caller
+        // waiting for `stopped` (a trust revoke) knows nothing still runs.
+        let tree_deadline = Instant::now() + TREE_EXIT_TIMEOUT;
+        while containment.active_processes().is_some_and(|n| n > 0) && Instant::now() < tree_deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        job.mark_stopped();
+        if outcome == JobOutcome::Canceled {
+            self.note_cancel_reason(job);
+        }
         let grace_end = Instant::now() + READER_GRACE;
         let mut finished_readers = 0;
         while finished_readers < readers {

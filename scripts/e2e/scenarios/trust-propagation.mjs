@@ -10,11 +10,14 @@
 //     the Lean infoview leaves Untrusted by itself, lean_check (the agent's
 //     check_lean) checks, and the page builds
 //   3 start a research session and run code (the kernel works)
-//   4 revoke from Settings > Trusted folders: the Lean server stops and the
-//     infoview says Untrusted, lean_check refuses, the research session is
-//     detached and its kernel is gone, Research shows its banner, the LaTeX
-//     page says "Workspace not trusted" over its last pages, the status bar
-//     says so too, and no trust prompt opens by itself
+//   4 revoke from Settings > Trusted folders: a long host job of the folder
+//     (debug builds: the dev job path, a two-process tree) is gone and
+//     canceled ("workspace trust revoked" in its log) as soon as the revoke
+//     returns; the Lean server stops and the infoview says Untrusted,
+//     lean_check refuses, the research session is detached and its kernel is
+//     gone, Research shows its banner, the LaTeX page says "Workspace not
+//     trusted" over its last pages, the status bar says so too, and no trust
+//     prompt opens by itself
 //   5 trust again from the Lean infoview: Research, the page, and Lean follow
 //
 // Needs Lean 4.35.0 through elan, TeX Live (pdflatex), and Python with
@@ -26,7 +29,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { waitForAsync } from "../wait.mjs";
-import { invoke, openFromTree, openInEditor, waitFor } from "../workspace-helpers.mjs";
+import { invoke, invokeError, openFromTree, openInEditor, waitFor } from "../workspace-helpers.mjs";
 
 const LEMMA = "Paper/Gauss.lean";
 const SUPPLEMENT = "supplement.tex";
@@ -194,6 +197,26 @@ export default async function trustPropagation({ launchApp, artifactsDir, assert
     assert.ok(leanJob, "the Lean server runs as a job");
     assert.ok(descendantsNamed(app.child.pid, /^lean\.exe$/i).length > 0, "a Lean process runs");
 
+    // A long host job of the folder that no view owns (debug builds only).
+    const longJob = await invokeError(page, "dev_start_workspace_job", { root: opened.root, holdSeconds: 600 });
+    let longTree = null;
+    if (longJob.error) {
+      console.log(`      NOT VERIFIED long host job (dev command unavailable: ${JSON.stringify(longJob.error).slice(0, 120)})`);
+    } else {
+      const text = await waitFor(
+        async () => {
+          const out = await invoke(page, "job_output", { job: longJob.unexpectedSuccess, after: null, maxBytes: 65536 });
+          const line = out.chunks.map((c) => c.text).join("");
+          return /parent=\d+ child=\d+/.test(line) ? line : null;
+        },
+        { timeout: 30_000, message: "the long host job prints its process tree" },
+      );
+      const [, parent, child] = text.match(/parent=(\d+) child=(\d+)/);
+      longTree = [Number(parent), Number(child)];
+      const table = processTable();
+      assert.ok(longTree.every((pid) => table.some((p) => p.pid === pid)), `long job tree runs: ${longTree}`);
+    }
+
     // ---- 4: revoke from Settings; trusted work stops, every surface says so --
     await runCommand(page, "Manage Trusted Folders", /Manage Trusted Folders/);
     const trustedRoot = (await invoke(page, "trust_status", { root: opened.root })).root;
@@ -204,7 +227,22 @@ export default async function trustPropagation({ launchApp, artifactsDir, assert
     await revokeDialog.waitFor();
     await revokeDialog.getByRole("button", { name: "Revoke trust", exact: true }).click();
     await revokeDialog.waitFor({ state: "detached" });
+    // The list reloads only after trust_revoke returned.
+    await row.waitFor({ state: "detached", timeout: FOLLOW });
     const revokedAt = Date.now();
+    if (longTree) {
+      // One snapshot, no waiting: the tree is already gone.
+      const table = processTable();
+      const living = longTree.filter((pid) => table.some((p) => p.pid === pid));
+      assert.deepEqual(living, [], "the long host job's process tree is gone once the revoke returned");
+      const job = await waitFor(
+        async () => (await invoke(page, "job_list")).find((j) => j.info.id === longJob.unexpectedSuccess && j.info.result),
+        { timeout: FOLLOW, message: "the long host job finished" },
+      );
+      assert.equal(job.info.result.outcome.kind, "canceled", JSON.stringify(job.info.result));
+      const out = await invoke(page, "job_output", { job: longJob.unexpectedSuccess, after: null, maxBytes: 65536 });
+      assert.match(out.chunks.map((c) => c.text).join(""), /canceled: workspace trust revoked/);
+    }
     assert.equal((await invoke(page, "trust_status", { root: opened.root })).trusted, false);
     // The check seam refuses at once.
     const refused = await leanCheck(leanId, 5_000);

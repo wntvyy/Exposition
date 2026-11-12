@@ -147,28 +147,40 @@ while True:
 /// DEV-ONLY (debug builds): register `root` as an open workspace (a stand-in
 /// for project opening) and launch a fixed native job there that writes
 /// `exposition-dev-ran.txt`. Used to demonstrate that an untrusted workspace
-/// never executes until the user grants trust in the dialog.
+/// never executes until the user grants trust in the dialog. With
+/// `hold_seconds` (at most 600) the job then keeps a two-process tree running
+/// that long and prints `parent=<pid> child=<pid>` (revocation evidence).
 #[cfg(debug_assertions)]
 #[tauri::command]
-pub async fn dev_start_workspace_job(state: State<'_, AppState>, root: String) -> Result<JobId, CommandError> {
+pub async fn dev_start_workspace_job(
+    state: State<'_, AppState>,
+    root: String,
+    hold_seconds: Option<u32>,
+) -> Result<JobId, CommandError> {
     use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobSpec};
     validate_root(&root)?;
     let canonical = state
         .execution
         .register_workspace_root(std::path::Path::new(&root))
         .map_err(|e| CommandError::new("workspace.invalidRoot", e.to_string()))?;
+    let mut script = "open('exposition-dev-ran.txt', 'w').write('ran'); print('workspace job ran')".to_owned();
+    let hold = hold_seconds.map(|s| s.min(600));
+    if let Some(seconds) = hold {
+        script.push_str(&format!(
+            "\nimport os, subprocess, sys, time\n\
+             child = subprocess.Popen([sys.executable, '-E', '-c', 'import time; time.sleep({seconds})'])\n\
+             print(f'parent={{os.getpid()}} child={{child.pid}}', flush=True)\n\
+             time.sleep({seconds})"
+        ));
+    }
     let spec = JobSpec {
-        label: "Dev workspace job".into(),
+        label: if hold.is_some() { "Dev workspace job (long)".into() } else { "Dev workspace job".into() },
         program: "python".into(),
-        args: vec![
-            "-E".into(),
-            "-c".into(),
-            "open('exposition-dev-ran.txt', 'w').write('ran'); print('workspace job ran')".into(),
-        ],
+        args: vec!["-E".into(), "-u".into(), "-c".into(), script],
         environment: EnvironmentSpec::default(),
         working_directory: canonical.display().to_string(),
         policy: ExecutionPolicy::TrustedNative,
-        timeout_ms: Some(60_000),
+        timeout_ms: Some(60_000 + u64::from(hold.unwrap_or(0)) * 1000),
         log_limit_bytes: None,
         stdin: None,
     };
