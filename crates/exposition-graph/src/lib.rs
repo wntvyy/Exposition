@@ -15,6 +15,8 @@
 //! - [`validate`]: the one validator for people, presets, agents, services.
 //! - [`service`]: [`GraphService`], one graph context per open project.
 //! - [`journal`]: app-owned journal of cross-service operations.
+//! - [`reconcile`]: incremental reconciliation with the project's files
+//!   (scanning, extractors, identity matching, live-buffer overlay).
 
 pub mod admission;
 pub mod ids;
@@ -22,6 +24,7 @@ pub mod journal;
 pub mod model;
 pub mod ops;
 pub mod query;
+pub mod reconcile;
 pub mod service;
 pub mod store;
 pub mod validate;
