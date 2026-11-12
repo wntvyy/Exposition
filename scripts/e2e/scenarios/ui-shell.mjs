@@ -398,7 +398,10 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     const target = join(devHome, "ui-reference");
     await mkdir(target, { recursive: true });
     const names = shots.map((path) => path.split(/[\\/]/).pop());
-    for (const stale of (await readdir(target)).filter((f) => f.endsWith(".png") && !names.includes(f))) {
+    // Remove only stale screens of this scenario: other scenarios (page-typst,
+    // feature owners) keep their own screens in the same folder.
+    const own = /^(workbench|ui-reference|palette|dialog-unsaved|notifications|editor-split|splitter-focus|small-window|page-graph)-/;
+    for (const stale of (await readdir(target)).filter((f) => f.endsWith(".png") && own.test(f) && !names.includes(f))) {
       await rm(join(target, stale));
     }
     for (const [i, path] of shots.entries()) await copyFile(path, join(target, names[i]));
