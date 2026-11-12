@@ -303,6 +303,7 @@ impl Actor {
         use exposition_workspace::types::FileChangeKind;
         let Some(root) = self.root.clone() else { return };
         let mut restart: Vec<ServerKey> = Vec::new();
+        let mut reattach: Vec<DocumentId> = Vec::new();
         let mut watched: HashMap<ServerKey, Vec<Value>> = HashMap::new();
         for change in changes {
             if change.path.components().any(|c| c == ".lake" || c == "lake-packages") {
@@ -312,13 +313,23 @@ impl Actor {
             let name = change.path.file_name();
             if name == TOOLCHAIN_FILE || LAKEFILES.contains(&name) {
                 // The toolchain or Lake configuration changed: statuses computed
-                // with the old one are no longer valid.
+                // with the old one are no longer valid. Restart the servers it
+                // concerns, and re-resolve documents that have no server (e.g.
+                // a toolchain that was missing may now be installed).
                 let dir = abs.parent().map(Path::to_path_buf).unwrap_or_default();
                 for (key, server) in &self.servers {
                     let affected = same_path(&key.root, &dir)
                         || (server.project.kind == ProjectKind::Standalone && name == TOOLCHAIN_FILE);
                     if affected && !restart.contains(key) {
                         restart.push(key.clone());
+                    }
+                }
+                for doc in self.docs.values().filter(|d| d.abs.as_ref().is_some_and(|a| a.starts_with(&dir))) {
+                    match &doc.key {
+                        Some(key) if !restart.contains(key) => restart.push(key.clone()),
+                        Some(_) => {}
+                        None if !reattach.contains(&doc.id) => reattach.push(doc.id.clone()),
+                        None => {}
                     }
                 }
             } else if change.path.extension() == Some("lean") {
@@ -342,6 +353,9 @@ impl Actor {
         }
         for key in restart {
             self.restart_server(&key);
+        }
+        for id in reattach {
+            self.reattach(&id);
         }
     }
 

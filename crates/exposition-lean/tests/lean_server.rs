@@ -254,3 +254,28 @@ async fn missing_toolchain_is_reported_and_never_installed_implicitly() {
     assert_eq!(refused.code, "lean.untrusted");
     assert!(h.exec.list().is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn changing_the_pinned_toolchain_invalidates_the_status() {
+    if !lean_available() {
+        return;
+    }
+    let mut h = harness("lean-basic", Options::default()).await;
+    let doc = h.open("LeanBasic/Defs.lean");
+    let state = h.finished(&doc, 1, FIRST).await;
+    assert!(matches!(state.status, LeanStatus::Checked { revision: 1, .. }), "{:?}", state.status);
+    // Re-pin to a toolchain that is not installed: the earlier result no
+    // longer describes this project, and nothing is installed.
+    std::fs::write(h.root.join("lean-toolchain"), "leanprover/lean4:v4.0.0\n").unwrap();
+    let (state, _) = h
+        .wait_for(&doc, NEXT, "toolchain missing after re-pin", |s| {
+            matches!(s.status, LeanStatus::ToolchainMissing { .. })
+        })
+        .await;
+    assert!(state.toolchain.is_none(), "no toolchain is claimed: {:?}", state.toolchain);
+    // Back to the installed toolchain: a new server checks it again.
+    std::fs::write(h.root.join("lean-toolchain"), format!("{TOOLCHAIN}\n")).unwrap();
+    let (state, _) = h.wait_for(&doc, FIRST, "checked again", |s| matches!(s.status, LeanStatus::Checked { .. })).await;
+    assert_eq!(state.toolchain.unwrap().name, TOOLCHAIN);
+    h.lean.shutdown().await;
+}
