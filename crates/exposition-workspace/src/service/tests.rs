@@ -597,3 +597,27 @@ fn create_document_refuses_link_escapes() {
     assert_eq!(err.code, "path.outsideWorkspace", "{err:?}");
     assert!(!outside.path().join("escape.txt").exists());
 }
+
+/// A folder reported "modified" (its timestamp changed because an entry was
+/// created or removed, e.g. the graph database's journal in `.exposition/`)
+/// is not a source change: no `FilesChanged` (which rebuilds open documents).
+#[test]
+fn folder_timestamp_changes_are_not_file_changes() {
+    let f = fixture();
+    fs::create_dir_all(f.project().join(".exposition")).unwrap();
+    let mut events = f.service.subscribe();
+    let generation = lock(&f.service.state).open.as_ref().unwrap().generation;
+    let modify = |path: PathBuf| FsSignal {
+        generation,
+        event: Ok(notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(path)),
+    };
+    f.service.process_fs(vec![modify(f.project().join(".exposition")), modify(f.project().join("chapters"))]);
+    assert!(events.try_recv().is_err(), "no event for folder timestamp changes");
+    f.service.process_fs(vec![modify(f.file("main.typ"))]);
+    match events.try_recv() {
+        Ok(WorkspaceEvent::FilesChanged { changes, .. }) => {
+            assert_eq!(changes, vec![FileChange { path: wp("main.typ"), kind: FileChangeKind::Modified }]);
+        }
+        other => panic!("expected FilesChanged for a file, got {other:?}"),
+    }
+}

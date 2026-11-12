@@ -1091,6 +1091,13 @@ impl WorkspaceService {
                     continue;
                 }
                 let kind = kinds.get(index).or(kinds.last()).copied().unwrap_or(FileChangeKind::Modified);
+                // A folder whose entries changed reports itself "modified"
+                // (its timestamp); that is not a change to any source. Its
+                // entries report their own events. (Without this, every graph
+                // transaction in `.exposition/` rebuilt the open documents.)
+                if kind == FileChangeKind::Modified && absolute.is_dir() {
+                    continue;
+                }
                 let change = FileChange { path, kind };
                 if seen.insert(change.clone()) {
                     changes.push(change);
