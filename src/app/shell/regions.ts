@@ -1,6 +1,11 @@
 // Region focus navigation (F6 / Shift+F6). Workbench regions are elements
 // with `data-region`; focus returns to the element last focused inside the
 // target region, else its first tabbable element, else the region itself.
+//
+// Regions may nest: a page container is a region, and a page can mark its own
+// parts (toolbar, main view, inspector) as regions. Only the innermost shown
+// regions take part in cycling, so a page without inner regions is one stop
+// and a page with inner regions contributes each of them.
 
 const lastFocused = new WeakMap<Element, HTMLElement>();
 let tracking = false;
@@ -26,8 +31,10 @@ export function trackRegionFocus(doc: Document = document): void {
   });
 }
 
+/** Shown regions in document order, innermost only (a region containing other shown regions is skipped). */
 export function regionElements(doc: Document = document): HTMLElement[] {
-  return [...doc.querySelectorAll<HTMLElement>("[data-region]")].filter(isShown);
+  const shown = [...doc.querySelectorAll<HTMLElement>("[data-region]")].filter(isShown);
+  return shown.filter((region) => !shown.some((other) => other !== region && region.contains(other)));
 }
 
 export function focusRegion(region: HTMLElement): void {
@@ -50,7 +57,13 @@ export function focusNextRegion(backwards = false, doc: Document = document): vo
   const regions = regionElements(doc);
   if (!regions.length) return;
   const active = doc.activeElement;
-  const current = regions.findIndex((r) => r === active || r.contains(active));
+  let current = regions.findIndex((r) => r === active || r.contains(active));
+  if (current < 0 && active) {
+    // Focus is in a region's chrome outside its inner regions (e.g. a page
+    // header): continue from the last inner region that precedes it.
+    const before = regions.filter((r) => r.compareDocumentPosition(active) & Node.DOCUMENT_POSITION_FOLLOWING);
+    if (before.length) current = regions.indexOf(before[before.length - 1]!);
+  }
   const step = backwards ? -1 : 1;
   const next = current < 0 ? (backwards ? regions.length - 1 : 0) : (current + step + regions.length) % regions.length;
   focusRegion(regions[next]!);

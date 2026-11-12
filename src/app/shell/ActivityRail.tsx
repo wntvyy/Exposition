@@ -1,5 +1,5 @@
 import { Command as CommandIcon, FileText, Monitor, Moon, PanelBottom, PanelLeft, PanelRight, Settings, Shapes, SlidersHorizontal, Sun } from "lucide-react";
-import { ToggleButton as AriaToggleButton } from "react-aria-components";
+import { Focusable, ToggleButton as AriaToggleButton } from "react-aria-components";
 
 import { MenuTrigger, Menu, MenuItem, MenuSection, MenuSeparator, SubmenuTrigger } from "../../ui/components/Menu";
 import { IconButton } from "../../ui/components/Button";
@@ -7,8 +7,9 @@ import { Toolbar } from "../../ui/components/Panel";
 import { Tooltip } from "../../ui/components/Tooltip";
 import { setThemePreference, useTheme, type ThemePreference } from "../../ui/theme";
 import { layout, useVisibility, type Region } from "../layout";
-import { EDITOR_PAGE, pages, usePages } from "../pages";
+import { EDITOR_PAGE, EDITOR_PAGE_TITLE, PAGE_KEYBINDINGS, pages, usePages } from "../pages";
 import { registry } from "../registry";
+import { toggleEditorRegion } from "./builtins";
 import { useRegistryVersion } from "./useRegistry";
 import { useActiveView } from "./ViewContainer";
 
@@ -30,6 +31,40 @@ function RailToggle({
       <AriaToggleButton className="wb-rail__button" aria-label={label} isSelected={isSelected} onChange={onChange}>
         <Icon size={20} aria-hidden />
       </AriaToggleButton>
+    </Tooltip>
+  );
+}
+
+/**
+ * A page switcher entry: a navigation button marked `aria-current="page"` when
+ * its page is shown (not a toggle: choosing the shown page again keeps it).
+ */
+function PageButton({
+  id,
+  title,
+  icon: Icon,
+  current,
+}: {
+  id: string;
+  title: string;
+  icon: React.ComponentType<{ size?: number; "aria-hidden"?: boolean }>;
+  current: boolean;
+}) {
+  return (
+    <Tooltip label={`${title} page`} keybinding={PAGE_KEYBINDINGS[id]} placement="right">
+      <Focusable>
+        <button
+          type="button"
+          className="wb-rail__button wb-rail__page"
+          aria-label={title}
+          aria-current={current ? "page" : undefined}
+          data-selected={current || undefined}
+          data-page-button={id}
+          onClick={() => pages.show(id)}
+        >
+          <Icon size={20} aria-hidden />
+        </button>
+      </Focusable>
     </Tooltip>
   );
 }
@@ -65,14 +100,8 @@ export function ActivityRail() {
     <nav className="wb-rail" aria-label="Activity bar" data-region="activitybar">
       {registeredPages.length > 0 && (
         <Toolbar aria-label="Pages" orientation="vertical" className="wb-rail__group wb-rail__group--pages">
-          {[{ id: EDITOR_PAGE, title: "Editor", icon: FileText }, ...registeredPages].map((page) => (
-            <RailToggle
-              key={page.id}
-              label={page.title}
-              icon={page.icon}
-              isSelected={activePage === page.id}
-              onChange={() => pages.show(page.id)}
-            />
+          {[{ id: EDITOR_PAGE, title: EDITOR_PAGE_TITLE, icon: FileText }, ...registeredPages].map((page) => (
+            <PageButton key={page.id} id={page.id} title={page.title} icon={page.icon} current={activePage === page.id} />
           ))}
         </Toolbar>
       )}
@@ -100,8 +129,8 @@ export function ActivityRail() {
             label={label}
             keybinding={keybinding}
             icon={icon}
-            isSelected={visibility[region]}
-            onChange={() => layout.toggle(region)}
+            isSelected={onEditor && visibility[region]}
+            onChange={() => toggleEditorRegion(region)}
           />
         ))}
         <MenuTrigger>

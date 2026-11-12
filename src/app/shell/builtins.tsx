@@ -7,7 +7,8 @@ import { commands as ipc } from "../../lib/ipc";
 import { LoadingState } from "../../ui/components/States";
 import { setThemePreference, toggleTheme } from "../../ui/theme";
 import { editors, useEditors, type EditorGroupId } from "../editors";
-import { defaultLayout, layout, useLayout } from "../layout";
+import { defaultLayout, layout, useLayout, type Region } from "../layout";
+import { EDITOR_PAGE, pages } from "../pages";
 import { registry, type CommandContribution, type EditorResource } from "../registry";
 import { commandPalette, SHOW_COMMANDS_ID } from "./CommandPalette";
 import { focusNextRegion } from "./regions";
@@ -56,6 +57,20 @@ function cycleEditor(step: 1 | -1) {
 
 const hasActiveEditor = () => editors.active() !== undefined;
 
+/**
+ * Toggle a region of the Editor page. On another page the regions are not
+ * shown, so the command shows the Editor page with the region visible rather
+ * than silently changing a hidden layout.
+ */
+export function toggleEditorRegion(region: Region): void {
+  if (pages.active() !== EDITOR_PAGE) {
+    pages.show(EDITOR_PAGE);
+    layout.setVisible(region, true);
+    return;
+  }
+  layout.toggle(region);
+}
+
 const builtinCommands: CommandContribution[] = [
   {
     id: SHOW_COMMANDS_ID,
@@ -69,21 +84,21 @@ const builtinCommands: CommandContribution[] = [
     title: "Toggle Sidebar",
     category: "View",
     keybinding: "Mod+B",
-    run: () => layout.toggle("sidebar"),
+    run: () => toggleEditorRegion("sidebar"),
   },
   {
     id: "workbench.action.togglePanel",
     title: "Toggle Panel",
     category: "View",
     keybinding: "Mod+J",
-    run: () => layout.toggle("panel"),
+    run: () => toggleEditorRegion("panel"),
   },
   {
     id: "workbench.action.toggleAuxiliary",
     title: "Toggle Auxiliary Panel",
     category: "View",
     keybinding: "Mod+Alt+B",
-    run: () => layout.toggle("auxiliary"),
+    run: () => toggleEditorRegion("auxiliary"),
   },
   {
     id: "workbench.action.focusNextRegion",
