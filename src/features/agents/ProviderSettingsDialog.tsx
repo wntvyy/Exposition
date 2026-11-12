@@ -5,7 +5,7 @@ import type { ContextConsent } from "../../bindings/ContextConsent";
 import type { Effort } from "../../bindings/Effort";
 import type { ProviderKind } from "../../bindings/ProviderKind";
 import { commands } from "../../lib/ipc";
-import { Banner, Button, Dialog, Select, StatusPill, TextField } from "../../ui/components";
+import { Banner, Button, confirm, Dialog, Select, StatusPill, TextField } from "../../ui/components";
 import { CONSENT_LABELS, EFFORT_LABELS } from "./format";
 import { agents, useAgents } from "./store";
 
@@ -53,12 +53,29 @@ export function ProviderSettingsDialog() {
   }
 
   async function removeKey() {
+    // Destructive and not undoable from here: the key is not shown again, so
+    // removing it means pasting it in again. Keep is the default.
+    const choice = await confirm<"keep" | "remove">({
+      title: "Remove the API key?",
+      message: `The key is deleted from ${status?.credentialStore ?? "the credential store"}. Agent tasks cannot use the model provider until you paste a key again; Exposition cannot show or restore the removed key.`,
+      actions: [
+        { id: "keep", label: "Keep key", variant: "secondary" },
+        { id: "remove", label: "Remove key", variant: "danger" },
+      ],
+      cancelId: "keep",
+      defaultId: "keep",
+      tone: "danger",
+    });
+    if (choice !== "remove") return;
     setBusy(true);
     const next = await agents.run(() => commands.agentsProviderClearKey());
     setBusy(false);
     if (next) {
       agents.setStatus(next);
       setMessage("API key removed.");
+      // The Remove button is now disabled; keep focus in the dialog, on the
+      // field for a new key.
+      requestAnimationFrame(() => document.querySelector<HTMLInputElement>("[data-testid=agents-key-input] input")?.focus());
     }
   }
 

@@ -396,12 +396,19 @@ impl AgentService {
     // ---- review
 
     pub fn review(&self, id: &TaskId) -> Result<TaskReview> {
-        self.inner.store.task(id)?.ok_or_else(|| not_found(id))?;
+        let task = self.inner.store.task(id)?.ok_or_else(|| not_found(id))?;
         let files = self.inner.store.task_files(id)?;
+        let project = self.inner.content_files(&task);
         Ok(TaskReview {
             task_id: id.clone(),
             checkpoint: self.inner.store.checkpoint(id)?,
-            files: files.iter().map(|row| review::file_review(row, &self.inner.documents)).collect(),
+            files: files
+                .iter()
+                .map(|row| {
+                    let current = project.as_ref().map(|p| review::current(&row.path, &self.inner.documents, p));
+                    review::file_review(row, &self.inner.documents, current.as_ref())
+                })
+                .collect(),
         })
     }
 
@@ -441,14 +448,19 @@ impl AgentService {
     }
 
     pub fn accept(&self, id: &TaskId, path: Option<&WorkspacePath>) -> Result<Vec<ReviewActionResult>> {
-        self.inner.store.task(id)?.ok_or_else(|| not_found(id))?;
+        let task = self.inner.store.task(id)?.ok_or_else(|| not_found(id))?;
+        let project = self.inner.content_files(&task);
         let mut results = Vec::new();
         for file in self.inner.store.task_files(id)? {
             if path.is_some_and(|p| p != &file.path) {
                 continue;
             }
-            if file.state == ReviewState::Pending || path.is_some() {
-                results.push(review::accept_file(&self.inner.store, id, file)?);
+            let current = match &project {
+                Some(p) => review::current(&file.path, &self.inner.documents, p),
+                None => review::Current::Unknown,
+            };
+            if path.is_some() || review::effective_state(&file, &current).0 == ReviewState::Pending {
+                results.push(review::accept_file(&self.inner.store, id, file, &current)?);
             }
         }
         self.inner.review_changed(id);
@@ -558,6 +570,31 @@ impl Inner {
         self.summary_of(&row)
     }
 
+    /// The task's project files, for judging review state from content; `None`
+    /// when the task's folder is not the open one (a same-named file there is
+    /// not this task's file) or is unavailable.
+    fn content_files(&self, task: &TaskRow) -> Option<LocalProjectFiles> {
+        let files = LocalProjectFiles::open(Path::new(&task.spec.workspace_root)).ok()?;
+        crate::workspace::check_root(self.workspace.as_deref(), files.root()).ok()?;
+        Some(files)
+    }
+
+    /// Files whose changes still await review, judged from content once the
+    /// task has stopped (a change the user undid is not pending).
+    fn pending_review(&self, row: &TaskRow, files: &[crate::store::TaskFileRow]) -> u32 {
+        let stored = |f: &crate::store::TaskFileRow| f.state == ReviewState::Pending;
+        let project = if row.status.is_active() { None } else { self.content_files(row) };
+        let Some(project) = project else { return files.iter().filter(|f| stored(f)).count() as u32 };
+        files
+            .iter()
+            .filter(|f| matches!(f.state, ReviewState::Pending | ReviewState::Reverted))
+            .filter(|f| {
+                let current = review::current(&f.path, &self.documents, &project);
+                review::effective_state(f, &current).0 == ReviewState::Pending
+            })
+            .count() as u32
+    }
+
     fn summary_of(&self, row: &TaskRow) -> Result<TaskSummary> {
         let files = self.store.task_files(&row.id)?;
         Ok(TaskSummary {
@@ -568,7 +605,7 @@ impl Inner {
             status: row.status.clone(),
             spec: row.spec.clone(),
             usage: row.usage.clone(),
-            pending_review: files.iter().filter(|f| f.state == ReviewState::Pending).count() as u32,
+            pending_review: self.pending_review(row, &files),
             changed_files: files.len() as u32,
         })
     }
@@ -646,6 +683,10 @@ impl Inner {
             let (text, is_error) = match calls.get(tool_use_id) {
                 Some(call) if matches!(call.status, ToolCallStatus::Succeeded | ToolCallStatus::Failed) => {
                     (call.result.clone().unwrap_or_default(), call.is_error)
+                }
+                // Skipped with a recorded reason (e.g. the response was cut off).
+                Some(ToolCallRow { status: ToolCallStatus::NotRun, result: Some(result), .. }) => {
+                    (result.clone(), true)
                 }
                 _ => (ToolOutput::error("Not executed: the previous run stopped before this tool ran.").text(), true),
             };
@@ -725,6 +766,7 @@ impl Inner {
             }
             TaskStatus::BudgetExceeded { detail, .. } => Some((NoticeLevel::Warning, format!("Stopped: {detail}"))),
             TaskStatus::Failed { message } => Some((NoticeLevel::Error, message.clone())),
+            TaskStatus::Stopped { message, .. } => Some((NoticeLevel::Warning, format!("Stopped: {message}"))),
             TaskStatus::Refused { category, explanation } => Some((
                 NoticeLevel::Warning,
                 format!(
@@ -773,6 +815,52 @@ fn bounded(text: &str, limit: usize) -> String {
 
 fn budget_exceeded(budget: BudgetKind, detail: impl Into<String>) -> TaskStatus {
     TaskStatus::BudgetExceeded { budget, detail: detail.into() }
+}
+
+/// The provider's stop reason, reduced to a short identifier safe to show.
+fn sanitize_stop_reason(reason: &str) -> String {
+    let clean: String = reason.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').take(64).collect();
+    if clean.is_empty() { "unknown".to_owned() } else { clean }
+}
+
+/// Why a tool call of a stopped response did not run (sent to the model on continuation).
+fn skip_reason(stop_reason: &str) -> String {
+    match stop_reason {
+        "max_tokens" => "your response was cut off at the per-turn output limit before this call was complete. Send \
+                         it again; split very large content across several calls."
+            .to_owned(),
+        "model_context_window_exceeded" => {
+            "your response was cut off because the conversation filled the model's context window.".to_owned()
+        }
+        "pause_turn" => "the response was paused before this call ran.".to_owned(),
+        other => format!("the response ended (stop reason \"{other}\") without asking to run tools."),
+    }
+}
+
+/// The user-facing explanation of a response that stopped without finishing its turn.
+fn stop_message(stop_reason: &str, unrun_calls: usize) -> String {
+    let calls = match unrun_calls {
+        0 => String::new(),
+        1 => " Its tool call was not run.".to_owned(),
+        n => format!(" Its {n} tool calls were not run."),
+    };
+    match stop_reason {
+        "max_tokens" => format!(
+            "The response reached the per-turn output limit ({MAX_TOKENS_PER_TURN} tokens) and was cut off.{calls} \
+             Continue the task to resume."
+        ),
+        "model_context_window_exceeded" => format!(
+            "The conversation filled the model's context window, so the response was cut off.{calls} Start a new \
+             task with a narrower scope, or continue with a short follow-up."
+        ),
+        "pause_turn" => {
+            format!("The model provider paused the response before it finished.{calls} Continue the task to resume.")
+        }
+        other => format!(
+            "The model provider ended the response in a way Exposition does not handle (stop reason \"{other}\").\
+             {calls} Continue the task to retry."
+        ),
+    }
 }
 
 /// One run of the task loop.
@@ -930,36 +1018,51 @@ impl Run<'_> {
                 }
                 self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
             }
+            // Only a response that ended normally completes the task, and only
+            // a `tool_use` stop runs tools. Every other stop reason ends the run
+            // with its own status; the response's tool calls (possibly cut off
+            // mid-input) are recorded as not run, never executed.
+            let calls = content.iter().filter(|b| block_type(b) == "tool_use").count();
             match response.stop_reason.as_str() {
-                "tool_use" => {
-                    if !content.iter().any(|b| block_type(b) == "tool_use") {
-                        return TaskStatus::Completed;
-                    }
+                "tool_use" if calls > 0 => {
                     if let Some(status) = self.execute_tools(&content, &response.invalid_tool_inputs, turn).await {
                         return status;
                     }
                 }
-                "max_tokens" => {
-                    return if limited_by_budget {
-                        budget_exceeded(
-                            BudgetKind::OutputTokens,
-                            format!(
-                                "the output-token budget ({}) ran out mid-response.",
-                                self.spec.budgets.max_output_tokens
-                            ),
-                        )
-                    } else {
-                        TaskStatus::Failed {
-                            message: format!(
-                                "The response reached the per-turn output limit ({MAX_TOKENS_PER_TURN} tokens); its \
-                                 tool calls were not run. Continue the task to resume."
-                            ),
-                        }
-                    };
+                "end_turn" | "stop_sequence" if calls == 0 => return TaskStatus::Completed,
+                "max_tokens" if limited_by_budget => {
+                    self.skip_calls(&content, turn, "the task's output-token budget ran out mid-response.");
+                    return budget_exceeded(
+                        BudgetKind::OutputTokens,
+                        format!(
+                            "the output-token budget ({}) ran out mid-response.",
+                            self.spec.budgets.max_output_tokens
+                        ),
+                    );
                 }
-                "pause_turn" => {}
-                _ => return TaskStatus::Completed,
+                reason => {
+                    let stop_reason = sanitize_stop_reason(reason);
+                    self.skip_calls(&content, turn, &skip_reason(&stop_reason));
+                    return TaskStatus::Stopped { message: stop_message(&stop_reason, calls), stop_reason };
+                }
             }
+        }
+    }
+
+    /// Record the tool calls of a response that ended without running them,
+    /// so the transcript (and a later continuation) says why.
+    fn skip_calls(&self, content: &[Value], turn: u32, reason: &str) {
+        let output = ToolOutput::error(format!("Not executed: {reason}"));
+        let mut skipped = false;
+        for block in content.iter().filter(|b| block_type(b) == "tool_use") {
+            let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = block.get("name").and_then(Value::as_str).unwrap_or_default();
+            let input = block.get("input").cloned().unwrap_or(Value::Null);
+            self.record_call(id, turn, name, &input, ToolCallStatus::NotRun, Some(&output));
+            skipped = true;
+        }
+        if skipped {
+            self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
         }
     }
 

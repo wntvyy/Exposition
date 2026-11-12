@@ -13,7 +13,13 @@
 //!
 //! Reverting applies `diff(tip → baseline)` as an inverse transaction based on
 //! `tip_revision`, so the document service rebases it over everything that
-//! happened later and refuses on overlap. Every revert is itself recorded.
+//! happened later; when that history touches the agent's text (a later edit,
+//! or an undo and redo), the inverse is rebased over the current text instead,
+//! and refused on overlap. Every revert is itself recorded.
+//!
+//! Review state follows the content: undo history is shared by every origin,
+//! so the user's Ctrl+Z can remove an agent change (shown as undone, nothing to
+//! revert) and undoing a revert brings it back (pending again).
 
 use exposition_core::document::{
     ConflictPolicy, DocumentEdit, DocumentId, EditOrigin, TextPatch, TransactionError, TransactionId,
@@ -151,18 +157,120 @@ pub fn record_create(
     Ok(())
 }
 
-pub fn file_review(row: &TaskFileRow, documents: &DocumentService) -> FileReview {
+/// What a file holds now, for deciding its review state from content.
+pub enum Current {
+    /// The open document's text (unsaved agent edits live here).
+    Open(std::sync::Arc<str>),
+    /// The file on disk (no document is open for it).
+    Disk(String),
+    /// Neither open nor on disk.
+    Missing,
+    /// It could not be read; the stored state stands.
+    Unknown,
+}
+
+impl Current {
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Current::Open(text) => Some(text),
+            Current::Disk(text) => Some(text),
+            Current::Missing | Current::Unknown => None,
+        }
+    }
+}
+
+/// The file's current content: the open document, else the file on disk.
+pub fn current(path: &WorkspacePath, documents: &DocumentService, files: &dyn ProjectFiles) -> Current {
+    if let Some(snapshot) = documents.find_by_path(path).and_then(|id| documents.snapshot(&id).ok()) {
+        return Current::Open(snapshot.text);
+    }
+    match files.read_text(path) {
+        Ok(loaded) => Current::Disk(loaded.text),
+        Err(FileError::NotFound(_)) => Current::Missing,
+        Err(_) => Current::Unknown,
+    }
+}
+
+/// Whether a file's current text still contains the task's net change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// The change is there (possibly with separable later edits around it).
+    Present,
+    /// The change is gone: the agent's regions hold the text without it, and
+    /// any other differences are separate from them.
+    Absent,
+    /// Later edits overlap the agent's regions; neither can be told apart.
+    Overlapped,
+}
+
+/// Decide from content alone whether the change `baseline → tip` is in `current`.
+pub fn presence(baseline: &str, tip: &str, current: &str) -> Presence {
+    let forward = patch::diff(baseline, tip);
+    if forward.is_empty() || current == tip {
+        return Presence::Present;
+    }
+    if current == baseline {
+        return Presence::Absent;
+    }
+    let inverse = patch::diff(tip, baseline);
+    if patch::rebase(&inverse, &patch::diff(tip, current)).is_some() {
+        return Presence::Present;
+    }
+    if patch::rebase(&forward, &patch::diff(baseline, current)).is_some() {
+        return Presence::Absent;
+    }
+    Presence::Overlapped
+}
+
+/// The review state a file is actually in, judged from its current content,
+/// and the message explaining a state that differs from the stored one.
+///
+/// The stored state records review actions; content can move on without one:
+/// the user's Ctrl+Z (undo history is shared by every origin) or discarding
+/// unsaved changes removes a pending change, and undoing a revert brings the
+/// change back. Accepted files stay accepted whatever happens to them later.
+pub fn effective_state(row: &TaskFileRow, current: &Current) -> (ReviewState, Option<String>) {
+    match (row.kind, row.state) {
+        (ReviewChangeKind::Edited, ReviewState::Pending | ReviewState::Reverted) if !row.entangled => {
+            let Some(text) = current.text() else { return (row.state, row.message.clone()) };
+            match (row.state, presence(&row.baseline_text, &row.tip_text, text)) {
+                (ReviewState::Pending, Presence::Absent) => (
+                    ReviewState::Undone,
+                    Some("The agent's changes are no longer in the file: they were undone or discarded.".into()),
+                ),
+                (ReviewState::Reverted, Presence::Present) if text != row.baseline_text.as_str() => (
+                    ReviewState::Pending,
+                    Some("The agent's changes are back in the file (the revert was undone).".into()),
+                ),
+                _ => (row.state, row.message.clone()),
+            }
+        }
+        (ReviewChangeKind::Created, ReviewState::Pending) if matches!(current, Current::Missing) => {
+            (ReviewState::Undone, Some("The file the agent created no longer exists.".into()))
+        }
+        _ => (row.state, row.message.clone()),
+    }
+}
+
+/// Review entry for one file. `current` is `None` when the file's content
+/// cannot be consulted (e.g. the task's folder is not the open one); the
+/// stored state is shown then.
+pub fn file_review(row: &TaskFileRow, documents: &DocumentService, current: Option<&Current>) -> FileReview {
     let current_revision =
         documents.find_by_path(&row.path).and_then(|id| documents.info(&id).ok()).map(|i| i.revision);
+    let (state, message) = match current {
+        Some(current) => effective_state(row, current),
+        None => (row.state, row.message.clone()),
+    };
     FileReview {
         path: row.path.clone(),
         kind: row.kind,
-        state: row.state,
+        state,
         change_count: row.change_count,
         entangled: row.entangled,
         tip_revision: row.tip_revision,
         current_revision,
-        message: row.message.clone(),
+        message,
     }
 }
 
@@ -176,13 +284,19 @@ pub fn file_diff(row: &TaskFileRow) -> FileDiff {
     }
 }
 
-pub fn accept_file(store: &Store, task: &TaskId, mut row: TaskFileRow) -> StoreResult<ReviewActionResult> {
-    if row.state == ReviewState::Reverted {
-        return Ok(ReviewActionResult {
-            path: row.path,
-            ok: false,
-            message: "These changes were already reverted.".into(),
-        });
+pub fn accept_file(
+    store: &Store,
+    task: &TaskId,
+    mut row: TaskFileRow,
+    current: &Current,
+) -> StoreResult<ReviewActionResult> {
+    let refused = |message: &str| ReviewActionResult { path: row.path.clone(), ok: false, message: message.into() };
+    match effective_state(&row, current).0 {
+        ReviewState::Reverted => return Ok(refused("These changes were already reverted.")),
+        ReviewState::Undone => {
+            return Ok(refused("The agent's changes are no longer in the file, so there is nothing to keep."));
+        }
+        ReviewState::Pending | ReviewState::Accepted => {}
     }
     row.state = ReviewState::Accepted;
     row.message = Some("Kept.".into());
@@ -215,12 +329,21 @@ pub fn revert_file(
     files: &dyn ProjectFiles,
     row: TaskFileRow,
 ) -> StoreResult<ReviewActionResult> {
-    let outcome = match row.state {
+    let now = current(&row.path, documents, files);
+    let outcome = match effective_state(&row, &now).0 {
         ReviewState::Reverted => Ok("Already reverted.".to_owned()),
-        _ if row.entangled => Err("Edits made while the agent was working overlap its changes, so they cannot be \
-            separated automatically. Compare the versions and fix the text by hand, or keep the changes."
+        // Already gone from the content: nothing is applied and the stored
+        // state stays, so a redo makes the change revertible again.
+        ReviewState::Undone => {
+            let message = match row.kind {
+                ReviewChangeKind::Edited => "Nothing to revert: the agent's changes were already undone.",
+                ReviewChangeKind::Created => "Nothing to revert: the file the agent created no longer exists.",
+            };
+            return Ok(ReviewActionResult { path: row.path, ok: true, message: message.into() });
+        }
+        _ if row.entangled => Err("Edits made while the agent was working overlap its changes, so they cannot be             separated automatically. Compare the versions and fix the text by hand, or keep the changes."
             .to_owned()),
-        _ => match row.kind {
+        ReviewState::Pending | ReviewState::Accepted => match row.kind {
             ReviewChangeKind::Created => revert_created(store, task, documents, workspace, files, &row),
             ReviewChangeKind::Edited => revert_edited(store, task, documents, workspace, files, &row),
         },
@@ -286,14 +409,16 @@ fn revert_edited(
                 record_revert(store, task, row, &id, &outcome.applied[0], before.as_ref());
                 return Ok(revert_message(outcome.applied[0].rebased));
             }
-            Err(TransactionError::Conflict { .. }) => return Err(OVERLAP.into()),
-            Err(TransactionError::HistoryUnavailable { .. }) => {}
+            // Some revision since the tip touched the agent's text: a later
+            // edit, or an undo and redo that restored it. Decide from the text.
+            Err(TransactionError::Conflict { .. } | TransactionError::HistoryUnavailable { .. }) => {}
             Err(e) => return Err(format!("The revert was refused: {e}")),
         }
     }
 
-    // Otherwise rebase against the current text ourselves (the document was
-    // reopened, or its history no longer reaches the tip).
+    // Otherwise rebase against the current text ourselves (the history touched
+    // the agent's text, the document was reopened, or its history no longer
+    // reaches the tip). Overlap in the text itself refuses.
     let id = workspace::open_document_in(workspace, documents, files, &row.path).map_err(|e| match e {
         FileError::NotFound(_) => "The file no longer exists, so there is nothing to revert.".to_owned(),
         other => format!("The file could not be opened: {other}"),
@@ -351,6 +476,30 @@ fn record_revert(
     }
 }
 
+/// Every version of a created file this task produced: the created content
+/// and the text after each of its edits (the user may have saved any of them,
+/// or undone back to one).
+fn agent_texts(store: &Store, task: &TaskId, row: &TaskFileRow) -> Vec<String> {
+    let mut texts = vec![row.tip_text.clone()];
+    let Ok(changes) = store.changes(task) else { return texts };
+    let mut text: Option<String> = None;
+    for change in changes.iter().filter(|c| c.path == row.path) {
+        text = match change.kind.as_str() {
+            "create" => patch::apply("", &change.patches).ok(),
+            "edit" => text.as_deref().and_then(|t| patch::apply(t, &change.patches).ok()),
+            _ => continue,
+        };
+        if let Some(t) = &text
+            && !texts.contains(t)
+        {
+            texts.push(t.clone());
+        }
+    }
+    texts
+}
+
+/// Delete a file the task created, when nothing in it (open document or file
+/// on disk) is anyone else's work.
 fn revert_created(
     store: &Store,
     task: &TaskId,
@@ -359,17 +508,25 @@ fn revert_created(
     files: &dyn ProjectFiles,
     row: &TaskFileRow,
 ) -> Result<String, String> {
-    const CHANGED: &str = "The file changed after the agent created it, so it was not deleted. Delete it yourself \
-        if you no longer want it.";
+    if !row.baseline_text.is_empty() {
+        return Err("Edits made while the agent was working are in this file, so it was not deleted. Remove the             agent's text by hand, or keep the file."
+            .into());
+    }
+    let ours = agent_texts(store, task, row);
+    let is_ours = |text: &str| ours.iter().any(|t| t == text);
     if let Some(id) = documents.find_by_path(&row.path) {
         let snapshot = documents.snapshot(&id).map_err(|e| e.to_string())?;
-        if *snapshot.text != *row.tip_text {
-            return Err(CHANGED.into());
+        if !is_ours(&snapshot.text) {
+            return Err("The file was edited after the agent's changes, so it was not deleted. Delete it yourself                 if you no longer want it."
+                .into());
         }
     }
     match files.read_text(&row.path) {
-        Ok(disk) if disk.text == row.tip_text => {}
-        Ok(_) => return Err(CHANGED.into()),
+        Ok(disk) if is_ours(&disk.text) => {}
+        Ok(_) => {
+            return Err("The saved file contains text the agent did not write, so it was not deleted. Delete it                 yourself if you no longer want it."
+                .into());
+        }
         Err(FileError::NotFound(_)) => {
             if let Some(id) = documents.find_by_path(&row.path) {
                 let _ = workspace::close_document_in(workspace, documents, &id);

@@ -8,10 +8,16 @@ import type { TaskDetail } from "../../bindings/TaskDetail";
 import type { TaskId } from "../../bindings/TaskId";
 import type { TaskSummary } from "../../bindings/TaskSummary";
 import type { WorkspaceInfo } from "../../bindings/WorkspaceInfo";
+import type { DocumentEvent } from "../../bindings/DocumentEvent";
+import { layout, useLayout } from "../../app/layout";
 import type { Notification } from "../../app/notifications";
-import { notify } from "../../app/notifications";
+import { dismiss, notify } from "../../app/notifications";
+import { registry } from "../../app/registry";
 import { commands, errorMessage, events } from "../../lib/ipc";
 import { isActive, statusLabel } from "./format";
+
+/** The Agent view (auxiliary region). */
+export const AGENT_VIEW_ID = "agents.panel";
 
 export type PanelView = "tasks" | "compose" | "task" | "review";
 
@@ -68,6 +74,31 @@ export interface EventEffect {
   refetch: TaskId | null;
   /** Announce a finished task (the user may not be looking at the panel). */
   notification?: Omit<Notification, "id"> & { id: string };
+  /** Notifications that no longer apply (e.g. an approval that was answered). */
+  dismiss?: string[];
+}
+
+/** Notification id for a task's pending approval (a task waits for one at a time). */
+export const approvalNotificationId = (taskId: TaskId) => `agents-approval-${taskId}`;
+
+/**
+ * A persistent notification for an approval the task is blocked on, with an
+ * action that opens it. Retired when the approval is answered.
+ */
+export function approvalNotification(
+  taskId: TaskId,
+  what: string | null,
+  task: string | undefined,
+): NonNullable<EventEffect["notification"]> {
+  return {
+    id: approvalNotificationId(taskId),
+    tone: "warning",
+    title: "Agent needs your approval",
+    body: [what, task ? `Task: ${task}` : null].filter(Boolean).join(" · ") || undefined,
+    actions: [{ label: "Open approval", run: () => openApproval(taskId) }],
+    // The task waits until the user answers; never time out.
+    timeoutMs: null,
+  };
 }
 
 /** Notification for a task that just stopped running; `undefined` otherwise. */
@@ -85,6 +116,8 @@ export function finishedNotification(previous: TaskSummary | undefined, task: Ta
       return { id, tone: "warning", title: `${label}: ${task.title}`, body: task.status.detail + review };
     case "failed":
       return { id, tone: "danger", title: `${label}: ${task.title}`, body: task.status.message };
+    case "stopped":
+      return { id, tone: "warning", title: `${label}: ${task.title}`, body: task.status.message + review };
     case "refused":
       return {
         id,
@@ -110,6 +143,10 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
         },
         refetch: null,
         notification: finishedNotification(previous, event.task),
+        // A task that is no longer waiting (finished, canceled) has no approval to answer.
+        ...(event.task.status.kind !== "awaitingApproval" && !isActive(event.task.status)
+          ? { dismiss: [approvalNotificationId(event.task.id)] }
+          : {}),
       };
     }
     case "streamStarted":
@@ -157,10 +194,13 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
         refetch: event.taskId,
       };
     }
-    case "approvalRequested":
-      return { patch: {}, refetch: event.approval.taskId };
+    case "approvalRequested": {
+      const { taskId, title } = event.approval;
+      const task = state.tasks.find((t) => t.id === taskId)?.title;
+      return { patch: {}, refetch: taskId, notification: approvalNotification(taskId, title, task) };
+    }
     case "approvalResolved":
-      return { patch: {}, refetch: event.taskId };
+      return { patch: {}, refetch: event.taskId, dismiss: [approvalNotificationId(event.taskId)] };
     case "reviewChanged":
       return {
         patch: {
@@ -213,11 +253,57 @@ async function refetch(id: TaskId): Promise<void> {
 
 let initialized: Promise<void> | null = null;
 
+/** Whether the Agent view is on screen (its region visible and the view active). */
+function agentViewShowing(): boolean {
+  if (!layout.isVisible("auxiliary")) return false;
+  const active = useLayout.getState().auxiliary.activeView ?? registry.viewsAt("auxiliary")[0]?.id;
+  return active === AGENT_VIEW_ID;
+}
+
+/** Whether the task's approval card is on screen right now. */
+function approvalShowing(taskId: TaskId): boolean {
+  const { view, selected } = useAgents.getState();
+  return agentViewShowing() && view === "task" && selected === taskId;
+}
+
+/**
+ * Show the Agent view on the task and move focus to its approval card, so a
+ * keyboard or screen-reader user lands on the decision (the card's label
+ * names the action; Approve and Decline are the next Tab stops).
+ */
+export function openApproval(taskId: TaskId): void {
+  layout.showView("auxiliary", AGENT_VIEW_ID);
+  agents.show("task", taskId);
+  let frames = 0;
+  const focus = () => {
+    const card = document.querySelector<HTMLElement>("[data-testid=agents-panel] [data-testid=agents-approval]");
+    if (!card) {
+      if (++frames < 120) requestAnimationFrame(focus);
+      return;
+    }
+    if (!card.hasAttribute("tabindex")) card.setAttribute("tabindex", "-1");
+    card.scrollIntoView({ block: "nearest" });
+    card.focus();
+  };
+  requestAnimationFrame(focus);
+}
+
 function handleEvent(event: AgentEvent) {
-  const { patch, refetch: id, notification } = reduceEvent(useAgents.getState(), event);
+  const { patch, refetch: id, notification, dismiss: retired } = reduceEvent(useAgents.getState(), event);
   if (Object.keys(patch).length) useAgents.setState(patch);
-  if (notification) notify(notification);
+  for (const old of retired ?? []) dismiss(old);
+  // An approval the user is already looking at needs no notification.
+  const shown = event.kind === "approvalRequested" && approvalShowing(event.approval.taskId);
+  if (notification && !shown) notify(notification);
   if (id && (useAgents.getState().details[id] || useAgents.getState().selected === id)) void refetch(id);
+}
+
+/** Bring approval notifications in line with the tasks (after a resync). */
+function syncApprovalNotifications(tasks: TaskSummary[]) {
+  for (const task of tasks) {
+    if (task.status.kind !== "awaitingApproval") dismiss(approvalNotificationId(task.id));
+    else if (!approvalShowing(task.id)) notify(approvalNotification(task.id, null, task.title));
+  }
 }
 
 async function resync() {
@@ -227,8 +313,42 @@ async function resync() {
     commands.workspaceCurrent(),
   ]);
   useAgents.setState({ status, tasks, workspace });
+  syncApprovalNotifications(tasks);
   const selected = useAgents.getState().selected;
   if (selected) await refetch(selected);
+}
+
+/** Whether a document event can change what a task's review shows. */
+export function reviewAffectedBy(event: DocumentEvent): boolean {
+  if (event.kind === "closed") return true;
+  return event.kind === "changed" && event.origin.kind !== "agent";
+}
+
+/**
+ * Review state follows file content (an undo can remove an agent change), so
+ * after edits that are not the agent's, re-read open reviews and the tasks'
+ * pending-review counts. Debounced: typing produces many events.
+ */
+let reviewRefresh: ReturnType<typeof setTimeout> | null = null;
+
+function handleDocumentEvent(event: DocumentEvent) {
+  if (!reviewAffectedBy(event)) return;
+  if (!useAgents.getState().tasks.some((t) => t.changedFiles > 0 && !isActive(t.status))) return;
+  if (reviewRefresh) clearTimeout(reviewRefresh);
+  reviewRefresh = setTimeout(() => {
+    reviewRefresh = null;
+    useAgents.setState((state) => {
+      const reviewVersions = { ...state.reviewVersions };
+      for (const task of state.tasks) {
+        if (task.changedFiles > 0) reviewVersions[task.id] = (reviewVersions[task.id] ?? 0) + 1;
+      }
+      return { reviewVersions };
+    });
+    void commands.agentsTaskList().then(
+      (tasks) => useAgents.setState({ tasks }),
+      () => {},
+    );
+  }, 400);
 }
 
 export const agents = {
@@ -241,6 +361,7 @@ export const agents = {
         if (event.kind === "opened") useAgents.setState({ workspace: event.info });
         if (event.kind === "closed") useAgents.setState({ workspace: null });
       });
+      await events.documents(handleDocumentEvent);
       await resync();
     })().catch((e: unknown) => {
       initialized = null;
@@ -256,6 +377,8 @@ export const agents = {
       error: null,
     }));
     if (selected) void refetch(selected);
+    // The task's approval card is on screen now; its notification has done its job.
+    if (view === "task" && selected && agentViewShowing()) dismiss(approvalNotificationId(selected));
   },
 
   setStatus(status: ProviderStatus) {
