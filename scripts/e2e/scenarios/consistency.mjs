@@ -163,7 +163,8 @@ export default async function consistency({ launchApp, artifactsDir, assert, fix
     const reopen = page.getByRole("switch", { name: "Reopen the last project" });
     await reopen.waitFor();
     assert.equal(await reopen.isChecked(), false, "off by default");
-    await reopen.click();
+    await reopen.focus();
+    await page.keyboard.press("Space");
     await waitForAsync(page, async () => (await window.__TAURI_INTERNALS__.invoke("settings_get")).settings.files.reopenLastProject, null, {
       message: "reopenLastProject saved",
     });

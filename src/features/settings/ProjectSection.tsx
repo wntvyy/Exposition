@@ -241,7 +241,7 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
           }
         />
       ) : (
-        <table className="exp-settings__table" aria-busy={saving}>
+        <table className="exp-settings__table exp-settings__table--targets" aria-busy={saving}>
           <thead>
             <tr>
               <th scope="col" className="exp-settings__col-name">
@@ -280,12 +280,13 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
                         });
                       }
                     }}
-                    className="exp-settings__select"
+                    className="exp-settings__engine"
                   />
                 </td>
                 <td className="exp-settings__actions">
                   <Button
                     size="sm"
+                    variant="ghost"
                     icon={Pencil}
                     aria-label={`Edit target ${target.name}`}
                     isDisabled={saving}

@@ -351,6 +351,15 @@
   margin-left: var(--space-1);
 }
 
+/* LaTeX targets (Project): paths wrap; the engine select stays compact. */
+.exp-settings__table--targets td:nth-child(2) {
+  white-space: normal;
+}
+
+.exp-settings__engine {
+  width: 132px;
+}
+
 /* What restricted runs enforce */
 .exp-settings__enforce {
   margin-top: var(--space-3);
