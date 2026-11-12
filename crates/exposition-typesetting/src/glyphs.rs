@@ -223,6 +223,14 @@ impl Extractor<'_> {
             }
             false
         };
+        // Content laid out from a definition (a `#let` macro, a function body,
+        // a loop body) or a show rule's replacement is rendered where it is
+        // used, not where it is written: editing it on the page would rewrite
+        // the definition and change every use. Only content written in place
+        // is editable.
+        if let Some(reason) = defined_elsewhere(&node) {
+            return Resolved::NonEditable(reason, Some((file, range)));
+        }
         match node.kind() {
             SyntaxKind::Text if in_raw(&node) => Resolved::NonEditable(NonEditableReason::Raw, Some((file, range))),
             SyntaxKind::Text => {
@@ -470,6 +478,9 @@ impl Extractor<'_> {
         let text = source.text();
         let is_boundary =
             |byte: usize| byte <= node.start || byte >= node.end || boundaries.binary_search(&byte).is_ok();
+        // Right-to-left runs are laid out in visual order: logically earlier
+        // characters are to the right, so caret stops are mirrored.
+        let rtl = item_is_rtl(item);
 
         // Per glyph: its source byte range if it maps exactly.
         struct Pending {
@@ -484,13 +495,16 @@ impl Extractor<'_> {
             let starts: Vec<usize> = src_text.grapheme_indices(true).map(|(i, _)| i).collect();
             let n = starts.len().max(1);
             let mut stops = Vec::with_capacity(n + 1);
+            let at = |k: usize| {
+                let t = (p.x1 - p.x0) * k as f64 / n as f64;
+                if rtl { p.x1 - t } else { p.x0 + t }
+            };
             for (k, &i) in starts.iter().enumerate() {
-                let x = p.x0 + (p.x1 - p.x0) * k as f64 / n as f64;
                 let Some(o) = this.utf16(file, &(p.src.start + i..p.src.start + i)) else { return };
-                stops.push((x, o.start, i as u32));
+                stops.push((at(k), o.start, i as u32));
             }
             let Some(end) = this.utf16(file, &(p.src.end..p.src.end)) else { return };
-            stops.push((p.x1, end.start, src_text.len() as u32));
+            stops.push((at(n), end.start, src_text.len() as u32));
             let Some(range) = this.utf16(file, &p.src) else { return };
             let c = this.make(
                 placed,
@@ -551,9 +565,14 @@ impl Extractor<'_> {
             }
             match current.as_mut() {
                 // Continue a grapheme (combining marks, multi-glyph clusters).
-                Some(p) if p.src.end == start && !is_boundary(start) => {
+                Some(p) if !rtl && p.src.end == start && !is_boundary(start) => {
                     p.x1 = b.x1;
                     p.src.end = end;
+                }
+                // The same, right to left: the glyph to the right is earlier.
+                Some(p) if rtl && end == p.src.start && !is_boundary(p.src.start) => {
+                    p.x1 = b.x1;
+                    p.src.start = start;
                 }
                 // Several glyphs for the same characters (decomposition).
                 Some(p) if start >= p.src.start && end <= p.src.end => {
@@ -571,6 +590,53 @@ impl Extractor<'_> {
             flush(self, p, out);
         }
     }
+}
+
+/// Whether a shaped run is right to left: its glyphs (in visual order) map to
+/// decreasing source offsets, or its first strong character is RTL.
+fn item_is_rtl(item: &TextItem) -> bool {
+    for pair in item.glyphs.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        if a.span.0 == b.span.0 && a.span.1 != b.span.1 {
+            return b.span.1 < a.span.1;
+        }
+    }
+    item.text.chars().find_map(|c| {
+        if is_rtl_char(c) {
+            Some(true)
+        } else if c.is_alphabetic() {
+            Some(false)
+        } else {
+            None
+        }
+    }) == Some(true)
+}
+
+/// Strong right-to-left scripts (Hebrew, Arabic, Syriac, Thaana, NKo,
+/// Samaritan, Mandaic, and their presentation forms).
+fn is_rtl_char(c: char) -> bool {
+    matches!(c as u32,
+        0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF)
+}
+
+/// Why a node's content is rendered somewhere other than where it is written:
+/// it lies inside a show rule (its replacement content) or inside a definition
+/// whose output appears at call sites (`#let`, function bodies, loops, set rules).
+fn defined_elsewhere(node: &LinkedNode) -> Option<NonEditableReason> {
+    let mut current = node.parent().cloned();
+    while let Some(n) = current {
+        match n.kind() {
+            SyntaxKind::ShowRule => return Some(NonEditableReason::Transformed),
+            SyntaxKind::LetBinding
+            | SyntaxKind::SetRule
+            | SyntaxKind::Closure
+            | SyntaxKind::ForLoop
+            | SyntaxKind::WhileLoop
+            | SyntaxKind::ModuleImport => return Some(NonEditableReason::Code),
+            _ => current = n.parent().cloned(),
+        }
+    }
+    None
 }
 
 fn is_code(kind: SyntaxKind) -> bool {
