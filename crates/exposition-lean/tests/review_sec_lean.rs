@@ -1,9 +1,9 @@
 //! R-sec (M6 security review): Lean checking-status integrity against the real
 //! language server and the real two-step axiom audit (pinned toolchain).
 //!
-//! `review_sec_f_lean_audit_forged_by_imported_elaborator` FAILS on the product
-//! (ignored with the finding); run it with
-//! `cargo test -p exposition-lean --test review_sec_lean -- --include-ignored --nocapture`.
+//! Both tests failed on the product at the review (they were `#[ignore]`d with
+//! the findings) and pass since the audit stopped importing the audited module
+//! and re-checks its declarations with the kernel (`exposition_lean::audit`).
 
 mod common;
 
@@ -58,13 +58,12 @@ run_cmd liftCoreM <| withOptions (fun o => o.setBool (Name.mkStr2 "debug" ("skip
 theorem viaKernelSkip : False := kbad
 "#;
 
-/// R-sec F-lean-skipkernel: the kernel-check bypass is detected by a text
-/// search for `skipKernelTC` (`audit::trust_weakening`). Expected: a file that
+/// R-sec F-lean-skipkernel: the kernel-check bypass was detected by a text
+/// search for `skipKernelTC` (now: kernel replay). Expected: a file that
 /// adds `False` without kernel checking is `Unverified` (as the literal
 /// `set_option debug.skipKernelTC true` form is). Observed: `Checked` with no
 /// axioms (`#print axioms` in plain Lean: "does not depend on any axioms").
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "R-sec F-lean-skipkernel: debug.skipKernelTC set through a computed option name is not detected; False reported Checked"]
 async fn review_sec_f_lean_skip_kernel_through_computed_option_name() {
     if !lean_available() {
         return;
@@ -92,7 +91,6 @@ async fn review_sec_f_lean_skip_kernel_through_computed_option_name() {
 /// `Checked` (it was `CheckedWithAxioms` before the shim was added — see the
 /// control). Observed: `Checked`, `checked = true`, no axioms reported.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "R-sec F-lean-audit: an imported #eval elaborator in the checked file forges the axiom audit (1 = 2 reported Checked)"]
 async fn review_sec_f_lean_audit_forged_by_imported_elaborator() {
     if !lean_available() {
         return;
