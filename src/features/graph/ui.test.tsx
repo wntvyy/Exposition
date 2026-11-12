@@ -148,4 +148,43 @@ describe("Project graph table (keyboard alternative)", () => {
     expect(fake.calls.some((c) => c.method === "propose" || c.method === "apply")).toBe(false);
     await waitFor(() => expect([...fake.views.values()][0]?.hidden).toEqual(["lem"]));
   });
+
+  it("removes a relationship only after confirmation, and refuses to remove an observed one", async () => {
+    fake.relations.push(relation("acc", "dependsOn", "thm", "lem"));
+    localStorage.setItem("exposition.graph.mode.project", "table");
+    graph.start();
+    await waitFor(() => expect(useGraph.getState().vocabulary).not.toBeNull());
+    const store = createViewStore("Project", { kind: "project" }, { saveDelayMs: 5 });
+    await store.load();
+    render(
+      <>
+        <ConfirmHost />
+        <ProjectGraph store={store} />
+      </>,
+    );
+    fireEvent.click(await screen.findByRole("tab", { name: /Relationships/ }));
+    const grid = await screen.findByRole("grid", { name: "Relationships" });
+    const row = grid.querySelector('[data-relation-id="acc"]') as HTMLElement;
+    act(() => row.focus());
+    fireEvent.keyDown(row, { key: " ", code: "Space" });
+    fireEvent.keyUp(row, { key: " ", code: "Space" });
+    const inspector = await screen.findByTestId("graph-relation-inspector");
+    fireEvent.click(within(inspector).getByRole("button", { name: "Remove relationship" }));
+    const alert = await screen.findByRole("alertdialog", { name: "Remove this relationship?" });
+    expect(alert.textContent).toMatch(/No file changes/);
+    // Cancel keeps it.
+    fireEvent.click(within(alert).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(fake.relations.some((r) => r.id === "acc")).toBe(true);
+    fireEvent.click(within(inspector).getByRole("button", { name: "Remove relationship" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Remove relationship" }));
+    await waitFor(() => expect(fake.relations.some((r) => r.id === "acc")).toBe(false));
+    // The observed one offers no remove action and says why.
+    const observedRow = grid.querySelector('[data-relation-id="obs"]') as HTMLElement;
+    act(() => observedRow.focus());
+    fireEvent.keyDown(observedRow, { key: " ", code: "Space" });
+    fireEvent.keyUp(observedRow, { key: " ", code: "Space" });
+    await waitFor(() => expect(screen.getByTestId("graph-relation-inspector").textContent).toMatch(/change the source/));
+    expect(within(screen.getByTestId("graph-relation-inspector")).queryByRole("button", { name: "Remove relationship" })).toBeNull();
+  });
 });
