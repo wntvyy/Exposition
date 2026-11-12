@@ -84,8 +84,31 @@ export function payloadSize(text: string): string {
   return `${lines.toLocaleString()} ${lines === 1 ? "line" : "lines"} · ${bytes.toLocaleString()} ${bytes === 1 ? "byte" : "bytes"}`;
 }
 
+/**
+ * Whether an element's content overflows it (it scrolls). Re-measured when
+ * `content` changes and when the element is resized.
+ */
+function useOverflows(content: string) {
+  const ref = useRef<HTMLPreElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => setOverflows(el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [content]);
+  return [ref, overflows] as const;
+}
+
 function Approval({ approval }: { approval: ApprovalRequest }) {
   const [busy, setBusy] = useState(false);
+  // A payload that scrolls is a tab stop, so it can be read with the keyboard;
+  // a short one is not, and Tab goes straight to Approve.
+  const [payloadRef, scrolls] = useOverflows(approval.detail);
   async function resolve(approved: boolean) {
     setBusy(true);
     await agents.run(() => commands.agentsApprovalResolve(approval.taskId, approval.id, approved));
@@ -101,8 +124,10 @@ function Approval({ approval }: { approval: ApprovalRequest }) {
         {payloadSize(approval.detail)} · complete, nothing omitted
       </p>
       <pre
+        ref={payloadRef}
         className="agents-pre agents-approval__payload"
-        tabIndex={0}
+        tabIndex={scrolls ? 0 : undefined}
+        role="region"
         aria-label={`Complete content to approve: ${approval.title}`}
         data-testid="agents-approval-payload"
       >

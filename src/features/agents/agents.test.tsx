@@ -190,12 +190,27 @@ describe("task view", () => {
     const detail = useAgents.getState().details["task-1"]!;
     const approval = { ...detail.approvals[0]!, tool: "run_python", title: "Run Python code", detail: code };
     useAgents.setState({ details: { "task-1": { ...detail, approvals: [approval] } } });
+    // jsdom does no layout: the long payload overflows its 560px area.
+    const scrollHeight = vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(8000);
+    const clientHeight = vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(560);
+    try {
+      render(<TaskView id="task-1" />);
+      const payload = screen.getByTestId("agents-approval-payload");
+      expect(payload.textContent).toBe(code);
+      expect(payload.getAttribute("tabindex")).toBe("0");
+      expect(screen.getByRole("region", { name: "Complete content to approve: Run Python code" })).toBe(payload);
+      expect(screen.getByTestId("agents-approval-size").textContent).toContain("401 lines");
+      expect(payloadSize("a\nb")).toBe("2 lines · 3 bytes");
+    } finally {
+      scrollHeight.mockRestore();
+      clientHeight.mockRestore();
+    }
+  });
+
+  it("keeps a short approval payload out of the tab order, so Tab reaches Approve", () => {
     render(<TaskView id="task-1" />);
     const payload = screen.getByTestId("agents-approval-payload");
-    expect(payload.textContent).toBe(code);
-    expect(payload.getAttribute("tabindex")).toBe("0");
-    expect(screen.getByLabelText("Complete content to approve: Run Python code")).toBe(payload);
-    expect(screen.getByTestId("agents-approval-size").textContent).toContain("401 lines");
-    expect(payloadSize("a\nb")).toBe("2 lines · 3 bytes");
+    expect(payload.textContent).toBe("- a\n+ b");
+    expect(payload.hasAttribute("tabindex")).toBe(false);
   });
 });
