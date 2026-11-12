@@ -116,6 +116,7 @@ const COMMANDS: &[&str] = &[
     "graph_operations",
     // Project creation and workflow drafts (src/projects.rs, src/workflows.rs).
     "project_presets",
+    "project_capabilities",
     "project_preset_blueprint",
     "project_blueprint_validate",
     "project_check_destination",

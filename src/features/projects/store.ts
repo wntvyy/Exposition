@@ -10,7 +10,8 @@ import { layout } from "../../app/layout";
 import { dismiss, notify } from "../../app/notifications";
 import { EDITOR_PAGE, pages } from "../../app/pages";
 import type { BlueprintEntry } from "../../bindings/BlueprintEntry";
-import type { BlueprintPreview } from "../../bindings/BlueprintPreview";
+import type { BlueprintValidation } from "../../bindings/BlueprintValidation";
+import type { CapabilityReport } from "../../bindings/CapabilityReport";
 import type { CreationAction } from "../../bindings/CreationAction";
 import type { CreationStatus } from "../../bindings/CreationStatus";
 import type { DestinationCheck } from "../../bindings/DestinationCheck";
@@ -42,11 +43,15 @@ export type NewProjectMode = "preset" | "objective";
 export interface ProjectsState {
   catalog: PresetCatalog | null;
   catalogError: string | null;
+  /** Tool availability (null until discovery answers). */
+  report: CapabilityReport | null;
+  reportError: string | null;
   mode: NewProjectMode;
   presetId: string;
   title: string;
   format: ManuscriptFormat;
   runtime: ResearchRuntime;
+  /** Null: the newest installed toolchain, else the default. */
   leanToolchain: string | null;
   includeWorkflow: boolean;
   /** Absolute path of the project folder (new, or existing and empty). */
@@ -55,7 +60,7 @@ export interface ProjectsState {
   locationEdited: boolean;
   destination: DestinationCheck | null;
   blueprint: ProjectBlueprint | null;
-  preview: BlueprintPreview | null;
+  preview: BlueprintValidation | null;
   previewError: string | null;
   objective: string;
   permission: PermissionProfile;
@@ -70,6 +75,8 @@ export interface ProjectsState {
 export const initialProjectsState: ProjectsState = {
   catalog: null,
   catalogError: null,
+  report: null,
+  reportError: null,
   mode: "preset",
   presetId: "paper",
   title: "",
@@ -112,12 +119,8 @@ export async function loadCatalog(): Promise<void> {
   try {
     const catalog = await projectCommands.presets();
     const recent = useWorkspace.getState().recent[0]?.path;
-    set({
-      catalog,
-      catalogError: null,
-      leanToolchain: catalog.leanToolchains[0] ?? catalog.defaultLeanToolchain,
-      runtime: catalog.runtimes.find((r) => r.available)?.runtime ?? "python",
-    });
+    set({ catalog, catalogError: null });
+    void loadCapabilities();
     const state = useProjects.getState();
     if (!state.location && recent) {
       const parent = parentOf(recent);
@@ -128,6 +131,24 @@ export async function loadCatalog(): Promise<void> {
   } catch (error) {
     set({ catalogError: errorMessage(error) });
   }
+}
+
+/** Tool availability, in the background (first-time discovery can take a while). */
+export async function loadCapabilities(): Promise<void> {
+  if (useProjects.getState().report) return;
+  try {
+    const report = await projectCommands.capabilities();
+    set({ report, reportError: null });
+    // The automatic Lean toolchain choice may now be an installed one.
+    if (useProjects.getState().leanToolchain === null && report.leanToolchains.length > 0) void refreshPreview();
+  } catch (error) {
+    set({ reportError: errorMessage(error) });
+  }
+}
+
+/** The toolchain written to `lean-toolchain`. */
+export function effectiveLeanToolchain(state: ProjectsState = useProjects.getState()): string | null {
+  return state.leanToolchain ?? state.report?.leanToolchains[0] ?? state.catalog?.defaultLeanToolchain ?? null;
 }
 
 function defaultTitle(): string {
@@ -148,7 +169,7 @@ export async function refreshPreview(): Promise<void> {
         title: state.title,
         format: state.format,
         runtime: state.runtime,
-        leanToolchain: state.leanToolchain,
+        leanToolchain: effectiveLeanToolchain(state),
         includeWorkflow: state.includeWorkflow,
       }),
     );
@@ -276,7 +297,7 @@ async function createProject(blueprint: ProjectBlueprint): Promise<ProjectCreate
 /** Preset path: create from the previewed blueprint. */
 export async function createFromPreset(): Promise<ProjectCreated | null> {
   const { blueprint, preview } = useProjects.getState();
-  if (!blueprint || !preview?.validation.valid) return null;
+  if (!blueprint || !preview?.valid) return null;
   const created = await createProject(blueprint);
   if (!created) return null;
   await editors.close(NEW_PROJECT_KEY);

@@ -3,7 +3,8 @@
 // previews and requests. Never bypass these wrappers with raw `invoke`.
 import { invoke } from "@tauri-apps/api/core";
 
-import type { BlueprintPreview } from "../../bindings/BlueprintPreview";
+import type { BlueprintValidation } from "../../bindings/BlueprintValidation";
+import type { CapabilityReport } from "../../bindings/CapabilityReport";
 import type { CreateProjectRequest } from "../../bindings/CreateProjectRequest";
 import type { CreationAction } from "../../bindings/CreationAction";
 import type { CreationResolution } from "../../bindings/CreationResolution";
@@ -16,12 +17,14 @@ import type { ProjectCreated } from "../../bindings/ProjectCreated";
 import type { ProjectPresetRequest } from "../../bindings/ProjectPresetRequest";
 
 export const projectCommands = {
-  /** Presets plus the availability of every capability they can declare. */
+  /** The presets (immediate). */
   presets: () => invoke<PresetCatalog>("project_presets"),
+  /** Availability of declared tools (may wait for first-time discovery). */
+  capabilities: () => invoke<CapabilityReport>("project_capabilities"),
   /** A preset's blueprint with the chosen options (fresh ids each time). */
   presetBlueprint: (request: ProjectPresetRequest) => invoke<ProjectBlueprint>("project_preset_blueprint", { request }),
   /** Strict validation of blueprint JSON text, with a summary for preview. */
-  validate: (blueprint: string) => invoke<BlueprintPreview>("project_blueprint_validate", { blueprint }),
+  validate: (blueprint: string) => invoke<BlueprintValidation>("project_blueprint_validate", { blueprint }),
   /** Whether a folder can hold a new project (new or empty, not too broad). */
   checkDestination: (destination: string) => invoke<DestinationCheck>("project_check_destination", { destination }),
   /** Create, open, and record the project (graph included). */

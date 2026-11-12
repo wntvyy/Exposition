@@ -4,7 +4,8 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BlueprintPreview } from "../../bindings/BlueprintPreview";
+import type { BlueprintValidation } from "../../bindings/BlueprintValidation";
+import type { CapabilityReport } from "../../bindings/CapabilityReport";
 import type { CreationStatus } from "../../bindings/CreationStatus";
 import type { PresetCatalog } from "../../bindings/PresetCatalog";
 import type { ProjectBlueprint } from "../../bindings/ProjectBlueprint";
@@ -12,6 +13,7 @@ import type { ProjectCreated } from "../../bindings/ProjectCreated";
 
 const projectIpc = vi.hoisted(() => ({
   presets: vi.fn(),
+  capabilities: vi.fn(),
   presetBlueprint: vi.fn(),
   validate: vi.fn(),
   checkDestination: vi.fn(),
@@ -63,10 +65,16 @@ const catalog: PresetCatalog = {
     { id: "paper", title: "Mathematical paper", description: "A manuscript.", manuscript: true, computation: false, lean: false, researchOnly: false, workflow: null },
     { id: "research", title: "Blank research project", description: "Research only.", manuscript: false, computation: false, lean: false, researchOnly: true, workflow: null },
   ],
-  capabilities: [],
+  defaultLeanToolchain: "leanprover/lean4:v4.35.0",
+};
+
+const report: CapabilityReport = {
+  capabilities: [
+    { capability: "typst", title: "Typst", available: true, detail: "Built into Exposition", guidance: null },
+    { capability: "lean", title: "Lean", available: false, detail: "No Lean toolchain is installed", guidance: "Install one with elan" },
+  ],
   runtimes: [{ runtime: "python", available: true, detail: "Python 3.14" }],
   leanToolchains: [],
-  defaultLeanToolchain: "leanprover/lean4:v4.35.0",
 };
 
 const blueprint: ProjectBlueprint = {
@@ -86,8 +94,7 @@ const blueprint: ProjectBlueprint = {
   entry: { kind: "editor", path: "main.typ" },
 };
 
-const preview = (valid: boolean): BlueprintPreview => ({
-  validation: {
+const preview = (valid: boolean): BlueprintValidation => ({
     valid,
     diagnostics: valid ? [] : [{ severity: "error", code: "blueprint.path", message: '"../x": \'..\' would leave the project folder', subject: "../x" }],
     summary: {
@@ -107,10 +114,6 @@ const preview = (valid: boolean): BlueprintPreview => ({
       buildTargets: [],
       entry: { kind: "editor", path: "main.typ" },
     },
-  },
-  capabilities: [
-    { capability: "lean", title: "Lean", available: false, detail: "No Lean toolchain is installed", guidance: "Install one with elan" },
-  ],
 });
 
 const created: ProjectCreated = {
@@ -119,13 +122,13 @@ const created: ProjectCreated = {
   title: "Spectral gaps",
   applied: { project: "prj-1", graphRevision: 3, resources: [{ path: "main.typ", entity: "ent-1" }], entities: [], workflows: [], researchSpace: null },
   entry: { kind: "editor", path: "main.typ" },
-  capabilities: [],
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
   store.resetProjectsForTests();
   projectIpc.presets.mockResolvedValue(catalog);
+  projectIpc.capabilities.mockResolvedValue(report);
   projectIpc.presetBlueprint.mockResolvedValue(blueprint);
   projectIpc.validate.mockResolvedValue(preview(true));
   projectIpc.checkDestination.mockResolvedValue({ path: "C:\\work\\spectral-gaps", ok: true, message: null, createsFolder: true });
@@ -161,6 +164,21 @@ describe("model", () => {
       includeWorkflow: true,
     });
     expect(request).toEqual({ preset: "research", title: "Notes", format: null, runtime: null, leanToolchain: null, includeWorkflow: false, purpose: null });
+  });
+
+  it("reports declared tools only once discovery answers, checking Lean's exact pin", () => {
+    const lean = { ...blueprint, files: [...blueprint.files, { path: "lean-toolchain", content: "leanprover/lean4:v4.35.0\n" }] };
+    expect(model.declaredCapabilities(lean, null)).toBeNull();
+    const missing = model.declaredCapabilities(lean, report)!;
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toMatchObject({ capability: "lean", available: false });
+    expect(missing[0]!.guidance).toMatch(/elan toolchain install leanprover\/lean4:v4.35.0/);
+    const installed = model.declaredCapabilities(lean, {
+      ...report,
+      capabilities: report.capabilities.map((c) => (c.capability === "lean" ? { ...c, available: true } : c)),
+      leanToolchains: ["leanprover/lean4:v4.35.0"],
+    })!;
+    expect(installed[0]).toMatchObject({ available: true, guidance: null });
   });
 
   it("writes an objective prompt that allows research-only projects and forbids installs and execution", () => {
@@ -303,9 +321,19 @@ describe("interrupted creation", () => {
 });
 
 describe("New Project page", () => {
+  it("shows the page before tool discovery answers", async () => {
+    let answer: (r: CapabilityReport) => void = () => {};
+    projectIpc.capabilities.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    render(<NewProjectView resource={{ key: "new-project:", title: "New Project" }} mode="source" active />);
+    await screen.findByTestId("project-capabilities-checking");
+    expect(screen.getByTestId("project-preview-files").textContent).toContain("main.typ");
+    answer(report);
+    await screen.findByTestId("project-capabilities");
+  });
+
   it("shows what will be created and declared tools honestly", async () => {
     render(<NewProjectView resource={{ key: "new-project:", title: "New Project" }} mode="source" active />);
-    await screen.findByTestId("project-preview");
+    await screen.findByTestId("project-capabilities");
     expect(screen.getByTestId("project-preview-files").textContent).toContain("main.typ");
     expect(screen.getByTestId("project-preview-entities").textContent).toContain("Main result");
     const lean = screen.getByTestId("project-capabilities").querySelector("[data-capability=lean]");

@@ -71,28 +71,27 @@ pub struct RuntimeChoice {
     pub detail: String,
 }
 
-/// Everything the New Project page needs to offer presets honestly.
+/// The presets (answered at once; tool availability comes separately).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct PresetCatalog {
     pub presets: Vec<ProjectPresetInfo>,
-    /// Availability of every capability a preset can declare.
-    pub capabilities: Vec<CapabilityStatus>,
-    pub runtimes: Vec<RuntimeChoice>,
-    /// Installed Lean toolchains (newest first); never installed by Exposition.
-    pub lean_toolchains: Vec<String>,
     /// Toolchain written to `lean-toolchain` when none is installed.
     pub default_lean_toolchain: String,
 }
 
-/// Validation of a blueprint plus the availability of what it declares.
+/// What this computer has for the capabilities presets declare (from the
+/// existing toolchain and research-environment discovery; nothing is
+/// installed, and no project code runs).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
-pub struct BlueprintPreview {
-    pub validation: BlueprintValidation,
+pub struct CapabilityReport {
     pub capabilities: Vec<CapabilityStatus>,
+    pub runtimes: Vec<RuntimeChoice>,
+    /// Installed Lean toolchains (newest first); never installed by Exposition.
+    pub lean_toolchains: Vec<String>,
 }
 
 /// Where a new project would be created.
@@ -128,7 +127,6 @@ pub struct ProjectCreated {
     pub applied: GraphApplied,
     /// What to open (Editor file, Research page, or files).
     pub entry: BlueprintEntry,
-    pub capabilities: Vec<CapabilityStatus>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -364,46 +362,22 @@ async fn host_capabilities(state: &AppState) -> HostCapabilities {
     HostCapabilities { statuses, runtimes, lean }
 }
 
-/// Availability of the capabilities a blueprint declares (Lean: the exact
-/// toolchain its `lean-toolchain` names).
-fn declared(bp: &ProjectBlueprint, host: &HostCapabilities) -> Vec<CapabilityStatus> {
-    bp.capabilities
-        .iter()
-        .filter_map(|c| {
-            let mut s = host.statuses.iter().find(|s| s.capability == c.capability)?.clone();
-            if c.capability == CapabilityId::Lean
-                && let Some(pin) = bp.files.iter().find(|f| f.path == "lean-toolchain").map(|f| f.content.trim().to_owned())
-            {
-                let installed = host.lean.iter().any(|t| t == &pin);
-                s.available = installed;
-                s.detail = if installed {
-                    format!("{pin} is installed")
-                } else {
-                    format!("{pin} is not installed; checking Lean files will report it as missing")
-                };
-                if !installed {
-                    s.guidance = Some(format!(
-                        "Install it with `elan toolchain install {pin}` (or from the Lean panel). Exposition never installs it implicitly."
-                    ));
-                }
-            }
-            Some(s)
-        })
-        .collect()
-}
-
 // ----- commands -----
 
 #[tauri::command]
-pub async fn project_presets(state: State<'_, AppState>) -> Result<PresetCatalog, CommandError> {
-    let host = host_capabilities(&state).await;
+pub async fn project_presets() -> Result<PresetCatalog, CommandError> {
     Ok(PresetCatalog {
         presets: exposition_graph::blueprint::presets::catalog(),
-        capabilities: host.statuses,
-        runtimes: host.runtimes,
-        lean_toolchains: host.lean,
         default_lean_toolchain: exposition_graph::blueprint::presets::DEFAULT_LEAN_TOOLCHAIN.to_owned(),
     })
+}
+
+/// Availability of every capability a preset can declare. This may wait for
+/// first-time tool discovery, so the New Project page asks for it separately.
+#[tauri::command]
+pub async fn project_capabilities(state: State<'_, AppState>) -> Result<CapabilityReport, CommandError> {
+    let host = host_capabilities(&state).await;
+    Ok(CapabilityReport { capabilities: host.statuses, runtimes: host.runtimes, lean_toolchains: host.lean })
 }
 
 /// The blueprint of a preset with the chosen options (fresh ids each time).
@@ -414,16 +388,9 @@ pub async fn project_preset_blueprint(request: ProjectPresetRequest) -> Result<P
 
 /// Validate a blueprint (JSON text: presets, agent proposals, imports alike).
 #[tauri::command]
-pub async fn project_blueprint_validate(
-    state: State<'_, AppState>,
-    blueprint: String,
-) -> Result<BlueprintPreview, CommandError> {
-    let (bp, validation) = blocking(move || Ok(validate_blueprint_text(&blueprint))).await?;
-    let capabilities = match &bp {
-        Some(bp) => declared(bp, &host_capabilities(&state).await),
-        None => Vec::new(),
-    };
-    Ok(BlueprintPreview { validation, capabilities })
+pub async fn project_blueprint_validate(blueprint: String) -> Result<BlueprintValidation, CommandError> {
+    let (_, validation) = blocking(move || Ok(validate_blueprint_text(&blueprint))).await?;
+    Ok(validation)
 }
 
 #[tauri::command]
@@ -573,8 +540,6 @@ pub async fn project_create(
         return Err(e);
     }
 
-    let host = host_capabilities(&state).await;
-    let capabilities = declared(&bp, &host);
     let workspace = Arc::clone(&state.workspace);
     let outcome = blocking({
         let bp = bp.clone();
@@ -599,7 +564,6 @@ pub async fn project_create(
         title: bp.title.clone(),
         applied: outcome,
         entry: bp.entry.clone(),
-        capabilities,
     })
 }
 

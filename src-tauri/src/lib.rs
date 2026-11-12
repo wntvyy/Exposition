@@ -159,6 +159,7 @@ pub fn run() {
             graph::graph_recover,
             graph::graph_operations,
             projects::project_presets,
+            projects::project_capabilities,
             projects::project_preset_blueprint,
             projects::project_blueprint_validate,
             projects::project_check_destination,

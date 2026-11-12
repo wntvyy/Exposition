@@ -18,14 +18,16 @@ import {
   LoadingState,
   SegmentedControl,
   Select,
+  Spinner,
   StatusPill,
   TextField,
 } from "../../ui/components";
 import { EXECUTION_LABELS, PERMISSION_LABELS } from "../agents/format";
-import { FORMAT_LABELS, RUNTIME_LABELS } from "./model";
+import { declaredCapabilities, FORMAT_LABELS, RUNTIME_LABELS } from "./model";
 import {
   browseLocation,
   createFromObjective,
+  effectiveLeanToolchain,
   createFromPreset,
   loadCatalog,
   setLocation,
@@ -122,13 +124,18 @@ function Location() {
 function Preview() {
   const preview = useProjects((s) => s.preview);
   const previewError = useProjects((s) => s.previewError);
+  const blueprint = useProjects((s) => s.blueprint);
+  const report = useProjects((s) => s.report);
+  const reportError = useProjects((s) => s.reportError);
   if (previewError) return <ErrorState title="Could not prepare this preset" description={previewError} />;
   if (!preview) return <LoadingState title="Preparing the preview…" />;
-  const s = preview.validation.summary;
+  const s = preview.summary;
+  const capabilities = blueprint ? declaredCapabilities(blueprint, report) : [];
+  const declares = (blueprint?.capabilities.length ?? 0) > 0;
   return (
-    <section className="xp-proj__group" aria-label="What will be created" data-testid="project-preview" data-valid={preview.validation.valid}>
+    <section className="xp-proj__group" aria-label="What will be created" data-testid="project-preview" data-valid={preview.valid}>
       <h3 className="xp-proj__group-title">What will be created</h3>
-      <Diagnostics items={preview.validation.diagnostics} />
+      <Diagnostics items={preview.diagnostics} />
       {s && (
         <div className="xp-proj__preview">
           <div>
@@ -183,14 +190,22 @@ function Preview() {
           </div>
         </div>
       )}
-      {preview.capabilities.length > 0 && (
+      {declares && (
         <>
           <h4 className="xp-proj__subtitle">Required tools (declared, never installed or run)</h4>
-          <ul className="xp-proj__capabilities" data-testid="project-capabilities">
-            {preview.capabilities.map((c) => (
-              <CapabilityRow key={c.capability} status={c} />
-            ))}
-          </ul>
+          {capabilities ? (
+            <ul className="xp-proj__capabilities" data-testid="project-capabilities">
+              {capabilities.map((c) => (
+                <CapabilityRow key={c.capability} status={c} />
+              ))}
+            </ul>
+          ) : reportError ? (
+            <p className="xp-proj__error">Could not check installed tools: {reportError}</p>
+          ) : (
+            <p className="xp-proj__muted xp-proj__checking" data-testid="project-capabilities-checking">
+              <Spinner size="sm" aria-label="Checking" /> Checking which tools are installed…
+            </p>
+          )}
         </>
       )}
     </section>
@@ -199,17 +214,20 @@ function Preview() {
 
 function PresetForm() {
   const catalog = useProjects((s) => s.catalog);
+  const report = useProjects((s) => s.report);
   const presetId = useProjects((s) => s.presetId);
   const title = useProjects((s) => s.title);
   const format = useProjects((s) => s.format);
   const runtime = useProjects((s) => s.runtime);
-  const leanToolchain = useProjects((s) => s.leanToolchain);
+  const leanToolchain = useProjects((s) => effectiveLeanToolchain(s));
   const includeWorkflow = useProjects((s) => s.includeWorkflow);
   if (!catalog) return null;
   const preset = catalog.presets.find((p) => p.id === presetId) ?? catalog.presets[0];
   if (!preset) return null;
-  const lean = [...catalog.leanToolchains];
+  const installedLean = report?.leanToolchains ?? [];
+  const lean = [...installedLean];
   if (!lean.includes(catalog.defaultLeanToolchain)) lean.push(catalog.defaultLeanToolchain);
+  const runtimes = report?.runtimes ?? (["python", "r", "julia"] as const).map((runtime) => ({ runtime, available: false, detail: "Checking…" }));
   return (
     <section className="xp-proj__group" aria-label="Starting structure">
       <h3 className="xp-proj__group-title">Starting structure</h3>
@@ -236,9 +254,9 @@ function PresetForm() {
             label="Research runtime"
             value={runtime}
             onChange={(v) => setOptions({ runtime: v })}
-            options={catalog.runtimes.map((r) => ({
+            options={runtimes.map((r) => ({
               id: r.runtime,
-              label: `${RUNTIME_LABELS[r.runtime]} — ${r.available ? "installed" : "not found"}`,
+              label: `${RUNTIME_LABELS[r.runtime]} — ${report ? (r.available ? "installed" : "not found") : "checking…"}`,
               description: r.detail,
             }))}
           />
@@ -250,7 +268,7 @@ function PresetForm() {
             onChange={(v) => setOptions({ leanToolchain: String(v) })}
             options={lean.map((t) => ({
               id: t,
-              label: catalog.leanToolchains.includes(t) ? t : `${t} (not installed)`,
+              label: installedLean.includes(t) ? t : report ? `${t} (not installed)` : t,
             }))}
           />
         )}
@@ -317,7 +335,7 @@ export function NewProjectView(_props: EditorProps) {
   }
   if (!catalog) return <LoadingState title="Loading presets…" />;
   const ready = Boolean(destination?.ok);
-  const canCreate = mode === "preset" ? ready && Boolean(preview?.validation.valid) : ready && objective.trim().length > 0;
+  const canCreate = mode === "preset" ? ready && Boolean(preview?.valid) : ready && objective.trim().length > 0;
   return (
     <div className="xp-proj" data-testid="new-project" data-mode={mode}>
       <div className="xp-proj__page">

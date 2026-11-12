@@ -1,5 +1,8 @@
 // Pure helpers for the New Project page (unit-tested; no IPC here).
+import type { CapabilityReport } from "../../bindings/CapabilityReport";
+import type { CapabilityStatus } from "../../bindings/CapabilityStatus";
 import type { ManuscriptFormat } from "../../bindings/ManuscriptFormat";
+import type { ProjectBlueprint } from "../../bindings/ProjectBlueprint";
 import type { ProjectPresetInfo } from "../../bindings/ProjectPresetInfo";
 import type { ProjectPresetRequest } from "../../bindings/ProjectPresetRequest";
 import type { ResearchRuntime } from "../../bindings/ResearchRuntime";
@@ -91,6 +94,35 @@ export function objectivePrompt(objective: string): string {
     "- meaningful entities and typed relations (questions, claims, definitions, experiments, collections) and workflow drafts where useful.",
     "Explain the organization briefly before creating it. Do not install software and do not run code.",
   ].join("\n");
+}
+
+/**
+ * Availability of what a blueprint declares, on this computer (null while
+ * discovery has not answered). Lean is checked against the exact toolchain
+ * the blueprint's `lean-toolchain` names.
+ */
+export function declaredCapabilities(blueprint: ProjectBlueprint, report: CapabilityReport | null): CapabilityStatus[] | null {
+  if (!report) return null;
+  const out: CapabilityStatus[] = [];
+  for (const declared of blueprint.capabilities) {
+    const host = report.capabilities.find((c) => c.capability === declared.capability);
+    if (!host) continue;
+    const pin = blueprint.files.find((f) => f.path === "lean-toolchain")?.content.trim();
+    if (declared.capability === "lean" && pin) {
+      const installed = report.leanToolchains.includes(pin);
+      out.push({
+        ...host,
+        available: installed,
+        detail: installed ? `${pin} is installed` : `${pin} is not installed; checking Lean files will report it as missing`,
+        guidance: installed
+          ? null
+          : `Install it with \`elan toolchain install ${pin}\` (or from the Lean panel). Exposition never installs it implicitly.`,
+      });
+    } else {
+      out.push(host);
+    }
+  }
+  return out;
 }
 
 export function setupKey(operation: string): string {

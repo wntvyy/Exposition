@@ -114,6 +114,7 @@
     "allow-graph-recover",
     "allow-graph-operations",
     "allow-project-presets",
+    "allow-project-capabilities",
     "allow-project-preset-blueprint",
     "allow-project-blueprint-validate",
     "allow-project-check-destination",
