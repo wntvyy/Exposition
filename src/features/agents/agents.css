@@ -28,7 +28,8 @@
   font-size: var(--font-size-sm);
 }
 
-.agents-provider[data-scripted] {
+.agents-provider[data-scripted],
+.agents-provider[data-ready="false"] {
   color: var(--color-warning-text);
 }
 

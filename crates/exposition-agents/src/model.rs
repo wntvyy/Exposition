@@ -386,12 +386,35 @@ pub struct TaskSummary {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub enum ToolCallStatus {
+    /// Requested in the current response; an earlier call in it runs first.
+    Pending,
     Running,
+    /// Waiting for the user to approve it (it has not run).
     AwaitingApproval,
     Succeeded,
     Failed,
-    /// Not executed (canceled, budget exhausted, or an earlier stop).
+    /// The user declined it in the approval request; it did not run.
+    Declined,
+    /// It was running when the task was canceled (or its time budget ended);
+    /// the result says how far it got.
+    Canceled,
+    /// Not executed (budget exhausted, the response was cut off, or the task
+    /// stopped before it was reached).
     NotRun,
+}
+
+impl ToolCallStatus {
+    /// The call is over (its result, if any, is final).
+    pub fn is_finished(self) -> bool {
+        matches!(
+            self,
+            ToolCallStatus::Succeeded
+                | ToolCallStatus::Failed
+                | ToolCallStatus::Declined
+                | ToolCallStatus::Canceled
+                | ToolCallStatus::NotRun
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -521,6 +544,11 @@ pub enum AgentEvent {
     },
     ReviewChanged {
         task_id: TaskId,
+    },
+    /// Provider settings or the stored key changed (from any surface). Carries
+    /// only what `provider_status` returns; never the key.
+    ProviderChanged {
+        status: Box<ProviderStatus>,
     },
 }
 

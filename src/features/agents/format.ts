@@ -4,6 +4,7 @@ import type { ContextConsent } from "../../bindings/ContextConsent";
 import type { Effort } from "../../bindings/Effort";
 import type { ExecutionMode } from "../../bindings/ExecutionMode";
 import type { PermissionProfile } from "../../bindings/PermissionProfile";
+import type { ProviderStatus } from "../../bindings/ProviderStatus";
 import type { TaskStatus } from "../../bindings/TaskStatus";
 import type { TaskSummary } from "../../bindings/TaskSummary";
 import type { ToolCallStatus } from "../../bindings/ToolCallStatus";
@@ -42,6 +43,12 @@ export function stopLabel(stopReason: string): string {
   }
 }
 
+/**
+ * The one phrase for "blocked on the user's decision", used by the task
+ * status, the tool call, the streaming draft, and the status bar alike.
+ */
+export const WAITING_FOR_APPROVAL = "Waiting for approval";
+
 /** Task status in the shared status vocabulary, with a specific label. */
 export function statusLabel(status: TaskStatus): PillState {
   switch (status.kind) {
@@ -50,7 +57,7 @@ export function statusLabel(status: TaskStatus): PillState {
     case "running":
       return { status: "running", label: "Agent working" };
     case "awaitingApproval":
-      return { status: "warning", label: "Needs approval" };
+      return { status: "warning", label: WAITING_FOR_APPROVAL };
     case "completed":
       return { status: "succeeded", label: "Task completed" };
     case "canceled":
@@ -71,19 +78,47 @@ export function statusLabel(status: TaskStatus): PillState {
 /** Tool call status; unavailable services are shown as unavailable, not failed. */
 export function toolStatusLabel(status: ToolCallStatus, result: string | null = null): PillState {
   switch (status) {
+    case "pending":
+      return { status: "idle", label: "Pending" };
+    case "awaitingApproval":
+      return { status: "warning", label: WAITING_FOR_APPROVAL };
     case "running":
       return { status: "running", label: "Running" };
-    case "awaitingApproval":
-      return { status: "warning", label: "Waiting for approval" };
     case "succeeded":
       return { status: "succeeded", label: "Done" };
     case "failed":
       return result?.includes("not available in this build")
         ? { status: "unavailable", label: "Unavailable" }
         : { status: "failed", label: "Failed" };
+    case "declined":
+      return { status: "canceled", label: "Declined" };
+    case "canceled":
+      return { status: "canceled", label: "Canceled" };
     case "notRun":
       return { status: "canceled", label: "Not run" };
   }
+}
+
+/** The live pill for the tool the agent is on, e.g. "Waiting for approval: create_file". */
+export function activeToolLabel(name: string, status: "running" | "awaitingApproval"): PillState {
+  const pill = toolStatusLabel(status);
+  return { status: pill.status, label: `${pill.label}: ${name}` };
+}
+
+/** Status bar text while tasks wait for the user. */
+export function waitingLabel(count: number): string {
+  return count === 1 ? `Agent: ${WAITING_FOR_APPROVAL.toLowerCase()}` : `Agent: ${count} ${WAITING_FOR_APPROVAL.toLowerCase()}`;
+}
+
+/** The provider actually selected, and whether it can run tasks. */
+export function providerLabel(status: ProviderStatus): { text: string; ready: boolean } {
+  if (status.settings.provider === "scripted") {
+    return { text: "Scripted provider — development only", ready: true };
+  }
+  if (status.credentialError) return { text: "Claude · credential store error", ready: false };
+  return status.configured
+    ? { text: `Claude · ${status.settings.model}`, ready: true }
+    : { text: "Claude · no API key configured", ready: false };
 }
 
 export const PERMISSION_LABELS: Record<PermissionProfile, string> = {

@@ -637,7 +637,7 @@ async fn cancellation_mid_tool_stops_the_process_and_keeps_changes_revertible() 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(services.canceled.load(Ordering::SeqCst), "the running process was told to cancel");
     let results = tool_results(&h, &task.id);
-    assert_eq!(results[2]["status"], json!("failed"));
+    assert_eq!(results[2]["status"], json!("canceled"));
     assert_eq!(results[2]["result"]["error"], "canceled");
     // The edit made before cancellation is reviewable and revertible.
     assert_eq!(h.service.review(&task.id).unwrap().files.len(), 1);

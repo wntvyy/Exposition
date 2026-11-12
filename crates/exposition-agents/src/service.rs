@@ -200,19 +200,26 @@ impl AgentService {
         let settings = ProviderSettings { model: model.to_owned(), ..settings };
         let raw = serde_json::to_string(&settings).map_err(|e| AgentError::new("agents.storage", e.to_string()))?;
         self.inner.store.set_setting(SETTINGS_KEY, &raw)?;
-        Ok(self.provider_status())
+        Ok(self.provider_changed())
+    }
+
+    /// The current provider status, announced to every view.
+    fn provider_changed(&self) -> ProviderStatus {
+        let status = self.provider_status();
+        self.inner.emit(AgentEvent::ProviderChanged { status: Box::new(status.clone()) });
+        status
     }
 
     /// Store the API key in OS credential storage. The key is never returned.
     pub fn set_api_key(&self, raw: &str) -> Result<ProviderStatus> {
         let key = normalize_api_key(raw).map_err(|e| AgentError::new("agents.invalidKey", e.to_string()))?;
         self.inner.credentials.set(&key).map_err(|e| AgentError::new("agents.credentials", e.to_string()))?;
-        Ok(self.provider_status())
+        Ok(self.provider_changed())
     }
 
     pub fn clear_api_key(&self) -> Result<ProviderStatus> {
         self.inner.credentials.delete().map_err(|e| AgentError::new("agents.credentials", e.to_string()))?;
-        Ok(self.provider_status())
+        Ok(self.provider_changed())
     }
 
     /// Queue a development script for the next scripted task (debug builds only).
@@ -681,7 +688,15 @@ impl Inner {
         for block in content.iter().filter(|b| block_type(b) == "tool_use") {
             let tool_use_id = block.get("id").and_then(Value::as_str).unwrap_or_default();
             let (text, is_error) = match calls.get(tool_use_id) {
-                Some(call) if matches!(call.status, ToolCallStatus::Succeeded | ToolCallStatus::Failed) => {
+                Some(call)
+                    if matches!(
+                        call.status,
+                        ToolCallStatus::Succeeded
+                            | ToolCallStatus::Failed
+                            | ToolCallStatus::Declined
+                            | ToolCallStatus::Canceled
+                    ) =>
+                {
                     (call.result.clone().unwrap_or_default(), call.is_error)
                 }
                 // Skipped with a recorded reason (e.g. the response was cut off).
@@ -815,6 +830,24 @@ fn bounded(text: &str, limit: usize) -> String {
 
 fn budget_exceeded(budget: BudgetKind, detail: impl Into<String>) -> TaskStatus {
     TaskStatus::BudgetExceeded { budget, detail: detail.into() }
+}
+
+/// Result text of a call the user declined in its approval request.
+const DECLINED: &str = "The user declined this action. Do not retry it unchanged.";
+/// Prefix of every result for a call that was never executed.
+const NOT_EXECUTED: &str = "Not executed:";
+
+/// The status a call that returned `output` is recorded with: what happened
+/// to it, not merely whether its result is an error.
+fn finished_status(output: &ToolOutput) -> ToolCallStatus {
+    if !output.is_error {
+        return ToolCallStatus::Succeeded;
+    }
+    match output.content.get("error").and_then(Value::as_str).unwrap_or_default() {
+        e if e.starts_with(NOT_EXECUTED) => ToolCallStatus::NotRun,
+        e if e == DECLINED => ToolCallStatus::Declined,
+        _ => ToolCallStatus::Failed,
+    }
 }
 
 /// The provider's stop reason, reduced to a short identifier safe to show.
@@ -1052,7 +1085,7 @@ impl Run<'_> {
     /// Record the tool calls of a response that ended without running them,
     /// so the transcript (and a later continuation) says why.
     fn skip_calls(&self, content: &[Value], turn: u32, reason: &str) {
-        let output = ToolOutput::error(format!("Not executed: {reason}"));
+        let output = ToolOutput::error(format!("{NOT_EXECUTED} {reason}"));
         let mut skipped = false;
         for block in content.iter().filter(|b| block_type(b) == "tool_use") {
             let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -1110,6 +1143,11 @@ impl Run<'_> {
             .collect();
         let mut results = Vec::with_capacity(calls.len());
         let mut budget_hit: Option<TaskStatus> = None;
+        // Calls run one at a time; the ones behind the running call are queued.
+        for (tool_use_id, name, input) in &calls {
+            self.record_call(tool_use_id, turn, name, input, ToolCallStatus::Pending, None);
+        }
+        self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
         for (index, (tool_use_id, name, input)) in calls.iter().enumerate() {
             self.record_call(tool_use_id, turn, name, input, ToolCallStatus::Running, None);
             self.inner.emit(AgentEvent::ToolCallStarted {
@@ -1120,11 +1158,12 @@ impl Run<'_> {
             let output = match self.execute_one(tool_use_id, name, input, invalid, &mut budget_hit).await {
                 Ok(output) => output,
                 Err((interrupt, partial)) => {
-                    let stopped = ToolOutput::error("Not executed: the task stopped.");
+                    let stopped = ToolOutput::error(format!("{NOT_EXECUTED} the task stopped."));
                     let mut rest = &calls[index..];
                     if let Some(output) = partial {
-                        // The tool had started; record what it reported.
-                        let status = if output.is_error { ToolCallStatus::Failed } else { ToolCallStatus::Succeeded };
+                        // The tool had started and was stopped: record what it
+                        // reported (a tool that still finished cleanly succeeded).
+                        let status = if output.is_error { ToolCallStatus::Canceled } else { ToolCallStatus::Succeeded };
                         self.record_call(tool_use_id, turn, name, input, status, Some(&output));
                         rest = &calls[index + 1..];
                     }
@@ -1140,7 +1179,12 @@ impl Run<'_> {
                     });
                 }
             };
-            let status = if output.is_error { ToolCallStatus::Failed } else { ToolCallStatus::Succeeded };
+            // A tool that saw the task's cancellation can return before the
+            // loop notices it; its error then means "stopped", not "failed".
+            let status = match finished_status(&output) {
+                ToolCallStatus::Failed if self.cancel.is_cancelled() => ToolCallStatus::Canceled,
+                status => status,
+            };
             self.record_call(tool_use_id, turn, name, input, status, Some(&output));
             self.inner.emit(AgentEvent::ToolCallFinished {
                 task_id: self.id.clone(),
@@ -1206,7 +1250,7 @@ impl Run<'_> {
                 match self.request_approval(tool_use_id, name, input, title, detail).await {
                     ApprovalOutcome::Approved => policy,
                     ApprovalOutcome::Declined => {
-                        return Ok(ToolOutput::error("The user declined this action. Do not retry it unchanged."));
+                        return Ok(ToolOutput::error(DECLINED));
                     }
                     ApprovalOutcome::Canceled => return Err((Interrupt::Canceled, None)),
                 }
@@ -1242,8 +1286,12 @@ impl Run<'_> {
             _ = tokio::time::sleep(wall) => Interrupt::WallTime,
         };
         cancel.cancel();
-        let output = tokio::time::timeout(Duration::from_secs(5), &mut tool).await.ok();
-        Err((interrupt, output))
+        // The tool started, so it is recorded as stopped (canceled) even when
+        // it does not report within the grace period.
+        let output = tokio::time::timeout(Duration::from_secs(5), &mut tool)
+            .await
+            .unwrap_or_else(|_| ToolOutput::error("Stopped while running; the tool did not report how far it got."));
+        Err((interrupt, Some(output)))
     }
 
     fn env(&self) -> ToolEnv<'_> {
@@ -1293,6 +1341,10 @@ impl Run<'_> {
         self.paused += waiting.elapsed();
         if let Some(running) = lock(&self.inner.running).get_mut(&self.id) {
             running.approvals.remove(&approval.id);
+        }
+        if matches!(outcome, ApprovalOutcome::Approved) {
+            // Approved: it runs now (shown before the resolution is announced).
+            self.record_call(tool_use_id, turn, tool, input, ToolCallStatus::Running, None);
         }
         self.inner.emit(AgentEvent::ApprovalResolved {
             task_id: self.id.clone(),

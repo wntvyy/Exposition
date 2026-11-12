@@ -314,12 +314,13 @@ impl Store {
             if task.status.is_active() {
                 self.update_task(&task.id, &TaskStatus::Interrupted, &task.usage)?;
                 self.lock().execute(
-                    "UPDATE tool_calls SET status = ?2 WHERE task_id = ?1 AND status IN (?3, ?4)",
+                    "UPDATE tool_calls SET status = ?2 WHERE task_id = ?1 AND status IN (?3, ?4, ?5)",
                     params![
                         task.id.0,
                         to_json(&ToolCallStatus::NotRun)?,
                         to_json(&ToolCallStatus::Running)?,
-                        to_json(&ToolCallStatus::AwaitingApproval)?
+                        to_json(&ToolCallStatus::AwaitingApproval)?,
+                        to_json(&ToolCallStatus::Pending)?
                     ],
                 )?;
                 changed.push(task.id);
@@ -406,13 +407,15 @@ impl Store {
 
     pub fn upsert_tool_call(&self, task: &TaskId, row: &ToolCallRow) -> StoreResult<()> {
         let now = i(now_ms());
-        let finished =
-            matches!(row.status, ToolCallStatus::Succeeded | ToolCallStatus::Failed | ToolCallStatus::NotRun);
+        let finished = row.status.is_finished();
+        // A queued call has not started yet; it starts when it first runs.
+        let started = (row.status != ToolCallStatus::Pending).then_some(now);
         self.lock().execute(
             "INSERT INTO tool_calls (task_id, tool_use_id, turn, name, input, status, result, is_error, started_at, finished_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(task_id, tool_use_id) DO UPDATE SET status = excluded.status, result = excluded.result,
-               is_error = excluded.is_error, finished_at = excluded.finished_at",
+               is_error = excluded.is_error, started_at = COALESCE(tool_calls.started_at, excluded.started_at),
+               finished_at = excluded.finished_at",
             params![
                 task.0,
                 row.tool_use_id,
@@ -422,7 +425,7 @@ impl Store {
                 to_json(&row.status)?,
                 row.result,
                 row.is_error,
-                now,
+                started,
                 if finished { Some(now) } else { None }
             ],
         )?;

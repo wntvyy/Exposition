@@ -136,7 +136,7 @@ describe("status bar item", () => {
   it("asks for attention when a task waits for approval and opens it from the keyboard", () => {
     useAgents.setState({ tasks: [summary({ status: { kind: "awaitingApproval" } }), summary({ id: "task-2" })] });
     render(<AgentStatusItem />);
-    const button = screen.getByRole("button", { name: "Agent: approval needed" });
+    const button = screen.getByRole("button", { name: "Agent: waiting for approval" });
     expect(button.querySelector("[data-status='warning']")).toBeTruthy();
     button.focus();
     act(() => {

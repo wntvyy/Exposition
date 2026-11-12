@@ -9,6 +9,10 @@
 // - Review follows content: the user's Ctrl+Z in the editor turns an agent
 //   change into "Undone in editor" (nothing to revert); Ctrl+Y makes it pending.
 // - A response cut off at the output limit stops the task honestly ("Stopped").
+// - Tool-call states read the same everywhere: pending, waiting for approval
+//   (task status, streaming draft, transcript, status bar), running, done,
+//   declined, canceled, not run.
+// - The provider chip follows the provider actually selected, from any surface.
 // - Removing the stored API key asks first, with the safe choice focused.
 // - The live-agents scope check accepts a real application refusal and rejects
 //   a model that merely declines.
@@ -81,6 +85,17 @@ async function showTask(panel) {
   await panel.getByTestId("agents-task-view").waitFor({ timeout: 10_000 });
 }
 
+/** Visible text of the task status pill, the draft pill, and each transcript tool pill. */
+async function visibleStates(panel) {
+  return panel.evaluate((root) => ({
+    task: root.querySelector("[data-testid=agents-task-status]")?.textContent ?? null,
+    draft: root.querySelector("[data-testid=agents-draft] .ui-status-pill")?.textContent ?? null,
+    tools: [...root.querySelectorAll("[data-testid=agents-tool-call]")].map(
+      (el) => `${el.dataset.tool}: ${el.querySelector("summary .ui-status-pill")?.textContent ?? ""}`,
+    ),
+  }));
+}
+
 const approvalNotices = (page) =>
   page.$$eval("[data-testid=notification]", (els) =>
     els.map((e) => e.textContent ?? "").filter((t) => /approval/i.test(t)),
@@ -110,9 +125,19 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     await panel.waitFor({ timeout: 15_000 });
     await setTheme(page, "light");
     await openWorkspace(page, project);
+    // The chip starts on the default provider (no key in this namespace) and
+    // follows a change made outside the dialog (here: over IPC).
+    const chip = panel.getByTestId("agents-provider-chip");
+    await waitFor(async () => (await chip.textContent()) === "Claude · no API key configured", { message: "default chip" });
     await invoke(page, "agents_provider_update", {
       settings: { provider: "scripted", model: "claude-opus-5-5", effort: "medium", consent: "scopeContent" },
     });
+    await waitFor(async () => (await chip.textContent()) === "Scripted provider — development only", {
+      timeout: 5000,
+      message: "chip follows the provider selected outside the dialog",
+    });
+    await shot(page, "provider-chip-scripted-light");
+    step("provider chip follows the selected provider (changed over IPC, not through the dialog)");
 
     // --- 1. Approval while the Agent view is hidden ---------------------------
     await page.locator("body").click({ position: { x: 700, y: 400 } });
@@ -123,7 +148,12 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
       page,
       {
         turns: [
-          { steps: [tool("c", "create_file", { path: "notes/new.typ", content: "= Draft\nAlpha\n" })] },
+          {
+            steps: [
+              tool("c", "create_file", { path: "notes/new.typ", content: "= Draft\nAlpha\n" }),
+              tool("l", "list_files", { path: "", recursive: false }),
+            ],
+          },
           { steps: [tool("r", "read_file", { path: "notes/new.typ" })] },
           {
             steps: [
@@ -142,7 +172,12 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     await waitStatus(page, created.id, ["awaitingApproval"]);
     const statusButton = page.getByTestId("agents-status-approval");
     await statusButton.waitFor({ timeout: 5000 });
-    assert.equal((await statusButton.textContent())?.trim(), "Agent: approval needed");
+    assert.equal((await statusButton.textContent())?.trim(), "Agent: waiting for approval");
+    // The task list says the same.
+    assert.equal(
+      await invoke(page, "agents_task_detail", { task: created.id }).then((d) => d.summary.status.kind),
+      "awaitingApproval",
+    );
     assert.equal(await statusButton.locator("[data-status]").getAttribute("data-status"), "warning");
     await waitFor(async () => (await approvalNotices(page)).length === 1, { message: "approval notification" });
     const notice = page.locator("[data-testid=notification]", { hasText: "Agent needs your approval" });
@@ -155,7 +190,7 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     await setTheme(page, "light");
     // Still waiting after the theme switches (the notification never times out).
     assert.equal((await approvalNotices(page)).length, 1, "the approval notification persists");
-    step("panel hidden: status item 'Agent: approval needed' (warning) and a persistent notification with Open approval");
+    step("panel hidden: status item 'Agent: waiting for approval' (warning) and a persistent notification with Open approval");
 
     // Keyboard: focus the status item and press Enter -> the approval card has focus.
     await statusButton.focus();
@@ -167,9 +202,30 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     const cardName = await page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
     assert.match(cardName ?? "", /^Approval needed: /);
     await waitFor(async () => (await approvalNotices(page)).length === 0, { message: "notification retired once the card is shown" });
+    // One phrase everywhere while the call waits; the call behind it is pending.
+    const waiting = await waitFor(
+      async () => {
+        const v = await visibleStates(panel);
+        return v.tools.length === 2 && v.draft ? v : null;
+      },
+      { message: "task, draft, and transcript states" },
+    );
+    assert.deepEqual(waiting, {
+      task: "Waiting for approval",
+      draft: "Waiting for approval: create_file",
+      tools: ["create_file: Waiting for approval", "list_files: Pending"],
+    });
     await page.waitForTimeout(200);
-    await shot(page, "approval-card-focused-light");
-    step("Enter on the status item opened the Agent view with focus on the approval card", { cardName });
+    await shot(page, "approval-states-light");
+    await setTheme(page, "dark");
+    await shot(page, "approval-states-dark");
+    await setTheme(page, "light");
+    await page.focus("[data-testid=agents-panel] [data-testid=agents-approval]");
+    // The task list row says the same.
+    step("Enter on the status item opened the Agent view with focus on the approval card; states agree", {
+      cardName,
+      waiting,
+    });
     // Tab to Approve, Enter.
     await page.keyboard.press("Tab");
     assert.equal(await page.evaluate(() => document.activeElement?.textContent), "Approve");
@@ -186,7 +242,14 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     await waitFor(async () => (await page.getByTestId("agents-status-approval").count()) === 0, {
       message: "status item no longer asks for attention",
     });
-    step("approved by keyboard; status item and notifications cleared");
+    const doneStates = await waitFor(
+      async () => {
+        const tools = (await visibleStates(panel)).tools;
+        return tools.length === 4 && tools.every((t) => t.endsWith(": Done")) ? tools : null;
+      },
+      { message: "every finished call reads Done" },
+    );
+    step("approved by keyboard; status item and notifications cleared; finished calls read Done", { doneStates });
 
     // --- 2. Diff gutter icons (codicon font bundled locally) ------------------
     await panel.getByTestId("agents-open-review").click();
@@ -306,6 +369,65 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     await page.waitForTimeout(300);
     await shot(page, "task-stopped-light");
     step("max_tokens mid tool_use: Stopped (response cut off), tool call not run", { status: cutDetail.summary.status });
+
+    // --- 4b. Declined, running, canceled, not run -----------------------------
+    await invoke(page, "trust_grant", { root: project });
+    const states = await startTask(
+      page,
+      {
+        turns: [
+          { steps: [tool("d", "create_file", { path: "declined.typ", content: "x\n" })] },
+          {
+            steps: [
+              tool("cmd", "run_command", {
+                program: "python",
+                args: ["-c", "import time; time.sleep(30)"],
+                working_directory: "",
+              }),
+              tool("after", "list_files", { path: "", recursive: false }),
+            ],
+          },
+          { steps: [{ text: "unreachable" }] },
+        ],
+      },
+      request(project, { permission: "reviewEdits", execution: "approveEach", prompt: "Exercise every call state" }),
+    );
+    await showTask(panel);
+    await panel.getByTestId("agents-approval").waitFor({ timeout: 10_000 });
+    await panel.getByRole("button", { name: "Decline" }).click();
+    await waitFor(async () => (await invoke(page, "agents_task_detail", { task: states.id })).approvals[0]?.tool === "run_command", {
+      message: "run_command approval",
+    });
+    await panel.getByRole("button", { name: "Approve" }).click();
+    const running = await waitFor(
+      async () => {
+        const v = await visibleStates(panel);
+        return v.tools.includes("run_command: Running") ? v : null;
+      },
+      { timeout: 15_000, message: "the approved command shows as running" },
+    );
+    assert.deepEqual(running, {
+      task: "Agent working",
+      draft: "Running: run_command",
+      tools: ["create_file: Declined", "run_command: Running", "list_files: Pending"],
+    });
+    await shot(page, "tool-running-light");
+    await panel.getByTestId("agents-cancel").click();
+    await waitStatus(page, states.id, ["canceled"]);
+    const stopped = await waitFor(
+      async () => {
+        const v = await visibleStates(panel);
+        return v.task === "Canceled" ? v : null;
+      },
+      { message: "canceled view" },
+    );
+    assert.deepEqual(stopped.tools, ["create_file: Declined", "run_command: Canceled", "list_files: Not run"]);
+    await page.waitForTimeout(200);
+    await shot(page, "tool-states-light");
+    await setTheme(page, "dark");
+    await shot(page, "tool-states-dark");
+    await setTheme(page, "light");
+    step("declined, running (after approval), canceled, and not run read correctly", { running, stopped });
 
     // --- 5. Removing the key asks first; Keep is focused ----------------------
     await panel.getByRole("button", { name: "Agent provider settings" }).click();
