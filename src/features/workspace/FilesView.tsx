@@ -1,7 +1,7 @@
 // Files sidebar: open-folder empty state with recent projects, recovery
 // entries from an earlier session, and the lazily loaded, keyboard-accessible
 // file tree (shared Tree component).
-import { File, FileWarning, Folder, FolderOpen, FolderPlus, Link2, RefreshCw, Unlink } from "lucide-react";
+import { File, FileWarning, Folder, FolderOpen, FolderPlus, Link2, RefreshCw, Unlink, X } from "lucide-react";
 import type { ReactNode } from "react";
 
 import type { FileEntry } from "../../bindings/FileEntry";
@@ -22,6 +22,7 @@ import {
 import {
   ROOT,
   discardRecovery,
+  forgetRecent,
   loadDir,
   openFile,
   openFolderDialog,
@@ -62,7 +63,7 @@ function EmptyFolder() {
         <Section title="Recent">
           <ul className="xp-recent">
             {recent.map((project) => (
-              <li key={project.path}>
+              <li key={project.path} className="xp-recent__row" data-testid="recent-project" data-path={project.path}>
                 <Button
                   variant="ghost"
                   className="xp-recent__item"
@@ -73,6 +74,13 @@ function EmptyFolder() {
                   <span className="xp-recent__name">{project.name}</span>
                   <span className="xp-recent__path">{project.path}</span>
                 </Button>
+                <IconButton
+                  icon={X}
+                  size="sm"
+                  className="xp-recent__remove"
+                  aria-label={`Remove ${project.name} from Recent`}
+                  onPress={() => void forgetRecent(project)}
+                />
               </li>
             ))}
           </ul>

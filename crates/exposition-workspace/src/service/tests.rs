@@ -421,6 +421,40 @@ fn build_inputs_prefer_open_buffers() {
 }
 
 #[test]
+fn invalid_project_settings_are_announced_whoever_reads_them() {
+    let f = fixture();
+    fs::create_dir_all(f.file(".exposition")).unwrap();
+    fs::write(f.file(".exposition/project.json"), br#"{"version":1,"defaultTarget":"missing"}"#).unwrap();
+    let mut events = f.service.subscribe();
+    // A build service reads first; it ignores the warning, but the user is told.
+    let state = f.service.project_settings().unwrap();
+    let warning = state.warning.expect("the first read reports the problem");
+    let kept: Vec<String> = fs::read_dir(f.file(".exposition"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("project.json.invalid-"))
+        .collect();
+    assert_eq!(kept.len(), 1);
+    let sep = std::path::MAIN_SEPARATOR;
+    assert!(warning.contains("missing"), "{warning}");
+    assert!(warning.contains(&format!(".exposition{sep}{}", kept[0])), "names the kept file: {warning}");
+    assert!(!warning.contains(r"\\?\"), "no verbatim prefix: {warning}");
+    let announced = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|e| match e {
+            WorkspaceEvent::ProjectSettingsInvalid { message } => Some(message),
+            _ => None,
+        })
+        .expect("announced as a workspace event");
+    assert_eq!(announced, warning);
+    // Set aside once: later reads are quiet.
+    assert_eq!(f.service.project_settings().unwrap().warning, None);
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .all(|e| !matches!(e, WorkspaceEvent::ProjectSettingsInvalid { .. }))
+    );
+}
+
+#[test]
 fn project_and_app_settings_round_trip() {
     let f = fixture();
     let state = f.service.project_settings().unwrap();

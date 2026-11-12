@@ -7,6 +7,8 @@ import { create } from "zustand";
 import type { AppInfo } from "../../bindings/AppInfo";
 import type { DockerImage } from "../../bindings/DockerImage";
 import type { ExecutionSettingsState } from "../../bindings/ExecutionSettingsState";
+import type { ProjectSettings } from "../../bindings/ProjectSettings";
+import type { ProjectSettingsState } from "../../bindings/ProjectSettingsState";
 import type { TrustedRoot } from "../../bindings/TrustedRoot";
 import type { TrustList } from "../../bindings/TrustList";
 import { notify } from "../../app/notifications";
@@ -14,6 +16,7 @@ import { commands, errorMessage } from "../../lib/ipc";
 import { confirm } from "../../ui/components";
 import { loadToolchains } from "../jobs/store";
 import { nestedTrustedRoots, type SectionId } from "./model";
+import { reportSettingsWarning } from "./warnings";
 
 export interface SettingsState {
   section: SectionId;
@@ -27,6 +30,12 @@ export interface SettingsState {
   imagesLoading: boolean;
   /** A Docker image change is being saved. */
   savingImage: boolean;
+  /** Project settings of the open folder (`null`: not loaded, or no folder). */
+  project: ProjectSettingsState | null;
+  /** Folder the project settings were read from. */
+  projectRoot: string | null;
+  projectError: string | null;
+  savingProject: boolean;
 }
 
 export const initialSettingsState: SettingsState = {
@@ -40,6 +49,10 @@ export const initialSettingsState: SettingsState = {
   imagesError: null,
   imagesLoading: false,
   savingImage: false,
+  project: null,
+  projectRoot: null,
+  projectError: null,
+  savingProject: false,
 };
 
 export const useSettings = create<SettingsState>(() => initialSettingsState);
@@ -58,7 +71,9 @@ export async function loadAppInfo(): Promise<void> {
 
 export async function loadExecutionSettings(): Promise<void> {
   try {
-    useSettings.setState({ execution: await commands.executionSettingsGet(), executionError: null });
+    const execution = await commands.executionSettingsGet();
+    useSettings.setState({ execution, executionError: null });
+    reportSettingsWarning("execution", execution.warning);
   } catch (e) {
     useSettings.setState({ executionError: errorMessage(e) });
   }
@@ -69,6 +84,43 @@ export async function loadTrust(): Promise<void> {
     useSettings.setState({ trust: await commands.trustList(), trustError: null });
   } catch (e) {
     useSettings.setState({ trustError: errorMessage(e) });
+  }
+}
+
+/** Read `.exposition/project.json` of the open folder (`root`). */
+export async function loadProjectSettings(root: string): Promise<ProjectSettingsState | null> {
+  try {
+    const project = await commands.projectSettingsGet();
+    useSettings.setState({ project, projectRoot: root, projectError: null });
+    reportSettingsWarning("project", project.warning);
+    return project;
+  } catch (e) {
+    useSettings.setState({ project: null, projectRoot: root, projectError: errorMessage(e) });
+    return null;
+  }
+}
+
+export function forgetProjectSettings(): void {
+  useSettings.setState({ project: null, projectRoot: null, projectError: null });
+}
+
+/**
+ * Save project settings (validated by the workspace service; open page views
+ * of LaTeX entries rebuild with the new targets). Resolves with the refusal
+ * message, or null when saved.
+ */
+export async function saveProjectSettings(settings: ProjectSettings): Promise<string | null> {
+  useSettings.setState({ savingProject: true });
+  try {
+    const saved = await commands.projectSettingsUpdate(settings);
+    useSettings.setState((s) => ({
+      savingProject: false,
+      project: { settings: saved, exists: true, warning: s.project?.warning ?? null },
+    }));
+    return null;
+  } catch (e) {
+    useSettings.setState({ savingProject: false });
+    return errorMessage(e);
   }
 }
 

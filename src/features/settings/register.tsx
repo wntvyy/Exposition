@@ -1,10 +1,13 @@
-// Settings feature registration: the Settings editor (`settings:` resource)
-// and the commands that open it.
+// Settings feature registration: the Settings editor (`settings:` resource),
+// the commands that open it, the LaTeX engine switch, and the startup check
+// for settings files that were invalid and set aside.
 import { editors } from "../../app/editors";
 import { registry } from "../../app/registry";
+import { loadAppSettings } from "../editor/settings";
+import { canSwitchEngine, switchEngine } from "./engine";
 import { SETTINGS_RESOURCE, type SectionId } from "./model";
 import { SettingsEditor } from "./SettingsEditor";
-import { showSection } from "./store";
+import { loadExecutionSettings, showSection } from "./store";
 
 export function openSettings(section?: SectionId): void {
   if (section) showSection(section);
@@ -40,3 +43,35 @@ registry.registerCommand({
   category: "Preferences",
   run: () => openSettings("execution"),
 });
+
+registry.registerCommand({
+  id: "settings.project",
+  title: "Project Settings and LaTeX Targets",
+  category: "Preferences",
+  run: () => openSettings("project"),
+});
+
+registry.registerCommand({
+  id: "latex.useLuaLatex",
+  title: "Build This File with LuaLaTeX",
+  category: "LaTeX",
+  enabled: canSwitchEngine,
+  run: async () => {
+    await switchEngine("luaLatex");
+  },
+});
+
+registry.registerCommand({
+  id: "latex.usePdfLatex",
+  title: "Build This File with pdfLaTeX",
+  category: "LaTeX",
+  enabled: canSwitchEngine,
+  run: async () => {
+    await switchEngine("pdfLatex");
+  },
+});
+
+// Settings files that were invalid at startup were set aside; say so now
+// rather than when a settings page happens to be opened.
+void loadAppSettings();
+void loadExecutionSettings();

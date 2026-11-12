@@ -14,7 +14,11 @@ import type { RecoveryEntry } from "../../bindings/RecoveryEntry";
 import type { WorkspaceEvent } from "../../bindings/WorkspaceEvent";
 import type { WorkspaceInfo } from "../../bindings/WorkspaceInfo";
 import { commands, errorMessage, events } from "../../lib/ipc";
+import type { KeyValueStorage } from "../../ui/storage";
+import { readStored, writeStored } from "../../ui/storage";
 import { disposeAllHandles, fileKey } from "../editor/documentClient";
+import { loadAppSettings, useAppSettings } from "../editor/settings";
+import { reportSettingsWarning } from "../settings/warnings";
 
 /** Key of the root directory in `dirs`. */
 export const ROOT = "";
@@ -73,6 +77,15 @@ export async function refreshRecent(): Promise<void> {
     useWorkspace.setState({ recent: await commands.workspaceRecent() });
   } catch {
     // Recent projects are optional.
+  }
+}
+
+/** Remove a folder from the recent list (the folder itself is untouched). */
+export async function forgetRecent(project: RecentProject): Promise<void> {
+  try {
+    useWorkspace.setState({ recent: await commands.workspaceForgetRecent(project.path) });
+  } catch (error) {
+    notify({ tone: "danger", title: `Could not remove ${project.name} from Recent`, body: errorMessage(error) });
   }
 }
 
@@ -144,6 +157,53 @@ export async function openWorkspace(path: string): Promise<boolean> {
   }
 }
 
+/** Session storage: survives webview reloads, not an application restart. */
+function sessionStore(): KeyValueStorage | null {
+  try {
+    return globalThis.sessionStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+const REOPEN_ATTEMPTED = "exposition.startupReopenAttempted";
+
+/**
+ * At startup, reopen the most recent project when the setting
+ * `files.reopenLastProject` asks for it. Runs once per application start (a
+ * webview reload keeps whatever is open). Opening runs nothing in the folder;
+ * a folder that is gone or may not be opened leaves a short notice.
+ */
+export async function reopenLastProject(): Promise<"opened" | "skipped" | "failed"> {
+  const storage = sessionStore();
+  if (readStored(REOPEN_ATTEMPTED, storage) !== null) return "skipped";
+  writeStored(REOPEN_ATTEMPTED, "1", storage);
+  await loadAppSettings();
+  if (!useAppSettings.getState().settings.files.reopenLastProject) return "skipped";
+  let last: RecentProject | undefined;
+  try {
+    last = (await commands.workspaceRecent())[0];
+  } catch {
+    return "skipped";
+  }
+  // Nothing to reopen, or the user opened a folder meanwhile.
+  if (!last || useWorkspace.getState().info || useWorkspace.getState().opening) return "skipped";
+  useWorkspace.setState({ opening: true, error: null });
+  try {
+    applyInfo(await commands.workspaceOpen(last.path));
+    return "opened";
+  } catch (error) {
+    useWorkspace.setState({ opening: false });
+    notify({
+      id: "reopen-last-project",
+      tone: "warning",
+      title: `Could not reopen ${last.name}`,
+      body: `${errorMessage(error)} Open a folder to continue.`,
+    });
+    return "failed";
+  }
+}
+
 /** Show the folder picker and open the chosen folder. */
 export async function openFolderDialog(): Promise<void> {
   const chosen = await openDialog({ directory: true, multiple: false, title: "Open Folder" });
@@ -181,6 +241,15 @@ export async function restoreRecovery(entry: RecoveryEntry): Promise<void> {
     });
   } catch (error) {
     notify({ tone: "danger", title: "Could not restore unsaved changes", body: errorMessage(error) });
+  }
+}
+
+/** Re-read the recovery entries (after missed workspace events). */
+export async function refreshRecovery(): Promise<void> {
+  try {
+    useWorkspace.setState({ recovery: await commands.recoveryList() });
+  } catch {
+    // The folder closed meanwhile; its close event clears the list.
   }
 }
 
@@ -245,17 +314,30 @@ export function startWorkspaceEvents() {
         break;
       case "filesChanged":
         onFilesChanged(event.changes, event.rescan);
+        // Events were missed: the recovery list may have changed unseen too.
+        if (event.rescan && useWorkspace.getState().info) void refreshRecovery();
         break;
       case "recoveryChanged":
         useWorkspace.setState({ recovery: event.entries });
+        break;
+      case "projectSettingsInvalid":
+        reportSettingsWarning("project", event.message);
         break;
       default:
         break;
     }
   });
-  // Adopt a workspace that is already open (e.g. after a webview reload).
-  void commands.workspaceCurrent().then((info) => {
-    if (info && !useWorkspace.getState().info) applyInfo(info);
-  });
+  // Adopt a workspace that is already open (e.g. after a webview reload);
+  // otherwise reopen the last project if the setting asks for it.
+  void commands.workspaceCurrent().then(
+    (info) => {
+      if (info) {
+        if (!useWorkspace.getState().info) applyInfo(info);
+      } else {
+        void reopenLastProject();
+      }
+    },
+    () => {},
+  );
   void refreshRecent();
 }

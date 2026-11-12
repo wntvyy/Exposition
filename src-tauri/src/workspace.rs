@@ -180,12 +180,18 @@ pub async fn project_settings_get(state: State<'_, AppState>) -> Result<ProjectS
     blocking(&state, |ws| ws.project_settings()).await
 }
 
+/// Save project settings. Open page views of LaTeX entries rebuild at once
+/// with the targets just saved (engine changes), without waiting for the file
+/// watcher.
 #[tauri::command]
 pub async fn project_settings_update(
     state: State<'_, AppState>,
     settings: ProjectSettings,
 ) -> Result<ProjectSettings, CommandError> {
-    blocking(&state, move |ws| ws.update_project_settings(&settings)).await
+    let saved = blocking(&state, move |ws| ws.update_project_settings(&settings)).await?;
+    let tex = state.tex.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || tex.rebuild_watched()).await;
+    Ok(saved)
 }
 
 /// Start the workspace background loop (journals, watcher) and forward
