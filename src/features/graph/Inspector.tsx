@@ -115,8 +115,10 @@ export function BindingRow({ binding }: { binding: SourceBinding }) {
   return (
     <li className="xp-graph-list__item" data-testid="graph-binding" data-path={binding.path} data-state={binding.state}>
       <div className="xp-graph-list__main">
-        <code className="xp-graph-path">{binding.path}</code>
-        <span className="xp-muted"> · {where}</span>
+        <p className="xp-graph-list__line">
+          <code className="xp-graph-path">{binding.path}</code>
+          <span className="xp-muted"> · {where}</span>
+        </p>
         <div className="xp-graph-badges">
           <Badge tone={BINDING_TONE[binding.state]} dashed={binding.state !== "resolved"}>
             {binding.state === "resolved" ? "Resolved" : binding.state === "missing" ? "Missing" : binding.state === "ambiguous" ? "Ambiguous" : "Unresolved"}
@@ -151,15 +153,17 @@ function RelationRow({
   return (
     <li className="xp-graph-list__item" data-testid="graph-relation" data-relation-id={relation.id} data-kind={relation.kind} data-status={relation.status}>
       <div className="xp-graph-list__main">
-        <span className="xp-graph-relation__reading">{outgoing ? info.reading : info.inverse}</span>{" "}
-        {other && actions.onSelectEntity ? (
-          <button type="button" className="xp-link" onClick={() => actions.onSelectEntity?.(other.id)}>
-            {otherLabel}
-          </button>
-        ) : (
-          <span>{otherLabel}</span>
-        )}
-        {other && <span className="xp-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>}
+        <p className="xp-graph-list__line">
+          <span className="xp-graph-relation__reading">{outgoing ? info.reading : info.inverse}</span>{" "}
+          {other && actions.onSelectEntity ? (
+            <button type="button" className="xp-link" onClick={() => actions.onSelectEntity?.(other.id)}>
+              {otherLabel}
+            </button>
+          ) : (
+            <span>{otherLabel}</span>
+          )}
+          {other && <span className="xp-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>}
+        </p>
         <div className="xp-graph-badges">
           <RelationStatusBadge status={relation.status} />
           {relation.status === "observed" && <span className="xp-muted">from {originLabel(relation.origin)}</span>}
@@ -311,16 +315,16 @@ export function ImpactSection({ entityId, labelOf, onSelectEntity }: { entityId:
                 {report.items.map((item) => (
                   <li key={item.entity.id} className="xp-graph-list__item" data-testid="graph-impact-item" data-entity-id={item.entity.id} data-action={item.action}>
                     <div className="xp-graph-list__main">
-                      {onSelectEntity ? (
-                        <button type="button" className="xp-link" onClick={() => onSelectEntity(item.entity.id)}>
-                          {item.entity.label}
-                        </button>
-                      ) : (
-                        item.entity.label
-                      )}
-                      <div className="xp-graph-badges">
+                      <p className="xp-graph-list__line">
+                        {onSelectEntity ? (
+                          <button type="button" className="xp-link" onClick={() => onSelectEntity(item.entity.id)}>
+                            {item.entity.label}
+                          </button>
+                        ) : (
+                          item.entity.label
+                        )}{" "}
                         <Badge tone={ACTION_LABEL[item.action].tone}>{ACTION_LABEL[item.action].label}</Badge>
-                      </div>
+                      </p>
                       <p className="xp-muted">
                         {item.reason}
                         {item.path.length > 0 &&

@@ -219,10 +219,12 @@ function DependsOnSection({ entityId, vocabulary, onSelectEntity }: { entityId: 
     <ul className="xp-graph-list">
       {items.map((e) => (
         <li key={e.id} className="xp-graph-list__item" data-testid="graph-depends-on" data-entity-id={e.id}>
-          <button type="button" className="xp-link" onClick={() => onSelectEntity(e.id)}>
-            {e.label}
-          </button>
-          <span className="xp-muted"> ({kindDisplay(vocabulary, e.kind).title})</span>
+          <p className="xp-graph-list__line">
+            <button type="button" className="xp-link" onClick={() => onSelectEntity(e.id)}>
+              {e.label}
+            </button>
+            <span className="xp-muted"> ({kindDisplay(vocabulary, e.kind).title})</span>
+          </p>
         </li>
       ))}
     </ul>
@@ -270,14 +272,12 @@ function MathSections({
         const other = neighbors.get(pick(r));
         return (
           <li key={r.id} className="xp-graph-list__item" data-testid={testId} data-entity-id={pick(r)}>
-            <div className="xp-graph-list__main">
+            <p className="xp-graph-list__line">
               <button type="button" className="xp-link" onClick={() => onSelectEntity(pick(r))}>
                 {other?.label ?? pick(r)}
-              </button>
-              <div className="xp-graph-badges">
-                <RelationStatusBadge status={r.status} />
-              </div>
-            </div>
+              </button>{" "}
+              <RelationStatusBadge status={r.status} />
+            </p>
           </li>
         );
       })}

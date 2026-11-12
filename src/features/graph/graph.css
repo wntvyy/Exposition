@@ -276,6 +276,12 @@
   gap: var(--space-0-5);
   min-width: 0;
 }
+.xp-graph-list__line {
+  overflow-wrap: anywhere;
+}
+.xp-graph-list__line > .ui-badge {
+  vertical-align: text-bottom;
+}
 .xp-graph-list__detail {
   font-size: var(--font-size-sm);
 }

@@ -13,7 +13,11 @@ export function FreshnessPill({ freshness }: { freshness: GraphFreshness }) {
       case "reconciling":
         return <StatusPill size="sm" status="running" label="Reconciling" detail={freshness.pending ? `${freshness.pending} files` : undefined} />;
       case "pending":
-        return <StatusPill size="sm" status="warning" label="Not yet synchronized" detail={`${freshness.pending} pending`} />;
+        return freshness.pending > 0 ? (
+          <StatusPill size="sm" status="warning" label="Not yet synchronized" detail={`${freshness.pending} pending`} />
+        ) : (
+          <StatusPill size="sm" status="warning" label={freshness.checkpointMs === null ? "Not yet reconciled" : "Not yet synchronized"} />
+        );
       case "unavailable":
         return <StatusPill size="sm" status="unavailable" label="Synchronization unavailable" />;
     }

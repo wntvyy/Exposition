@@ -77,16 +77,14 @@ function InspectedEntityView({ item, vocabulary, primary }: { item: InspectedEnt
             <ul className="xp-graph-list">
               {groups.get(family)!.map(({ relation, outgoing, other }) => (
                 <li key={`${relation.id}-${outgoing}`} className="xp-graph-list__item" data-testid="deps-relation" data-kind={relation.kind} data-status={relation.status}>
-                  <div className="xp-graph-list__main">
+                  <p className="xp-graph-list__line">
                     <span className="xp-graph-relation__reading">
                       {outgoing ? relationDisplay(vocabulary, relation.kind).reading : relationDisplay(vocabulary, relation.kind).inverse}
                     </span>{" "}
                     {other?.label ?? "an item"}
-                    {other && <span className="xp-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>}
-                    <div className="xp-graph-badges">
-                      <RelationStatusBadge status={relation.status} />
-                    </div>
-                  </div>
+                    {other && <span className="xp-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>}{" "}
+                    <RelationStatusBadge status={relation.status} />
+                  </p>
                 </li>
               ))}
             </ul>
@@ -187,7 +185,7 @@ export function DependencyInspector() {
     <div className="xp-deps" data-testid="dependency-inspector" data-path={position.path} aria-busy={inspection.loading}>
       <header className="xp-deps__header">
         <code className="xp-graph-path">{position.path}</code>
-        <span className="xp-muted"> · caret at character {position.offset}</span>
+        <span className="xp-muted"> · line {position.line}</span>
         <div className="xp-graph-badges">
           {data?.unsaved && (
             <Badge tone="info" dashed title="Answered from the unsaved editor buffer, not the saved file">

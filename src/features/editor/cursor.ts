@@ -12,6 +12,8 @@ export interface SourcePosition {
   path: string;
   /** UTF-16 offset of the caret (selection start) in the current text. */
   offset: number;
+  /** 1-based line of the caret. */
+  line: number;
   /** Document revision the offset refers to. */
   revision: number;
   /** The document has unsaved changes. */
@@ -94,5 +96,6 @@ export function useActiveSourcePosition(): SourcePosition | null {
     offset = handle.selection[0].start;
   }
   if (offset === null) offset = 0;
-  return { path, offset, revision: handle.sync.revision, dirty: handle.isDirty, fromEditor };
+  const line = model.isDisposed() ? 1 : model.getPositionAt(offset).lineNumber;
+  return { path, offset, line, revision: handle.sync.revision, dirty: handle.isDirty, fromEditor };
 }

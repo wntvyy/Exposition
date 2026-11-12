@@ -147,8 +147,17 @@ export function GraphPage() {
         )}
       </header>
       {status?.freshness.state === "pending" && readable && (
-        <Banner tone="warning" title="The graph is catching up with recent file changes">
-          Answers may not include the latest edits yet; they are labelled when they come from unsaved buffers.
+        <Banner
+          tone={status.freshness.pending > 0 ? "warning" : "info"}
+          title={
+            status.freshness.pending > 0
+              ? `${status.freshness.pending} changed ${status.freshness.pending === 1 ? "file is" : "files are"} waiting to be reconciled`
+              : status.freshness.checkpointMs === null
+                ? "The graph has not reconciled with the project's files yet"
+                : "The graph is catching up with recent file changes"
+          }
+        >
+          Answers may not include the latest edits yet; answers from unsaved buffers are labelled as such.
         </Banner>
       )}
       <div className="xp-graph-page__body">{body}</div>

@@ -150,7 +150,13 @@ async function showGraph(page) {
   await page.getByTestId("graph-page").waitFor({ timeout: 10000 });
 }
 
+/** Dismiss visible notifications (they can cover canvas nodes in the bottom-right corner). */
+async function dismissNotifications(page) {
+  for (const button of await page.getByRole("button", { name: /^Dismiss notification/ }).all()) await button.click().catch(() => {});
+}
+
 async function connect(page, fromId, toId) {
+  await dismissNotifications(page);
   const from = node(page, fromId);
   await from.hover();
   const handle = from.locator(".xp-graph-node__source");
@@ -189,6 +195,8 @@ export default async function graphCanvas({ launchApp, artifactsDir, assert, fix
   let relationsBefore;
   let savedPositions;
   let savedViewport;
+  const thmStart = paperText.indexOf("\\begin{theorem}");
+  const thmEnd = paperText.indexOf("\\end{theorem}") + "\\end{theorem}".length;
 
   // ===== Session 1 ==========================================================
   let app = await launchApp({ dataDir });
@@ -231,8 +239,6 @@ export default async function graphCanvas({ launchApp, artifactsDir, assert, fix
       rel("memberOf", "t:lem", "t:col"),
     ]);
     for (const { tempId, id } of seeded.created) ids[tempId] = id;
-    const thmStart = paperText.indexOf("\\begin{theorem}");
-    const thmEnd = paperText.indexOf("\\end{theorem}") + "\\end{theorem}".length;
     await change(page, [
       { op: "bindSource", entity: { kind: "id", id: ids.thm }, binding: { path: "paper.tex", selector: { kind: "region" }, range: { start: thmStart, end: thmEnd } } },
     ]);
@@ -356,6 +362,16 @@ export default async function graphCanvas({ launchApp, artifactsDir, assert, fix
     assert.deepEqual(await semanticRelations(page), relationsBefore, "moving, panning, and zooming changed no relationship");
     await canvas.getByRole("button", { name: "Fit to view" }).click();
     await page.waitForTimeout(400);
+
+    // Collapsed groups (view-only): the collection folds its member; relations re-route to it.
+    await node(page, ids.col).getByRole("button", { name: "Collapse Reading list" }).click();
+    await node(page, ids.lem).waitFor({ state: "detached" });
+    assert.match(await node(page, ids.col).innerText(), /1 inside/);
+    assert.ok(await canvas.locator(`.react-flow__edge[data-id^="folded:${ids.thm}:${ids.col}"]`).count(), "the theorem's dependency on the folded lemma re-routes to the collection");
+    await shot(page, "graph-collapsed-group-light");
+    await node(page, ids.col).getByRole("button", { name: "Expand Reading list" }).click();
+    await node(page, ids.lem).waitFor();
+    assert.deepEqual(await semanticRelations(page), relationsBefore, "collapsing changed no relationship");
 
     // --- 4. Typed relationship authoring ---------------------------------------------
     // Valid: Closed subsets of compacts (lemma) → Hypothesis H (assumption), "assumes".

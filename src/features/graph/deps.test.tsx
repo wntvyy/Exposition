@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The editor and workspace modules pull in Monaco and Tauri; the inspector only
 // needs the caret position and whether a folder is open.
-const position = vi.hoisted(() => ({ current: { path: "paper.tex", offset: 12, revision: 3, dirty: false, fromEditor: true } as unknown }));
+const position = vi.hoisted(() => ({ current: { path: "paper.tex", offset: 12, line: 2, revision: 3, dirty: false, fromEditor: true } as unknown }));
 vi.mock("../editor", () => ({ useActiveSourcePosition: () => position.current }));
 vi.mock("../workspace/store", () => ({
   useWorkspace: (select: (s: { info: unknown }) => unknown) => select({ info: { root: "C:/p", name: "p", recovery: [] } }),
@@ -57,7 +57,7 @@ describe("Dependency inspector", () => {
   });
 
   it("says when nothing is bound at the caret", async () => {
-    position.current = { path: "notes.md", offset: 0, revision: 1, dirty: true, fromEditor: true };
+    position.current = { path: "notes.md", offset: 0, line: 1, revision: 1, dirty: true, fromEditor: true };
     render(<DependencyInspector />);
     await waitFor(() => expect(screen.getByTestId("deps-none")).toBeTruthy(), { timeout: 3000 });
     expect(screen.getByText(/not a graph resource/)).toBeTruthy();
