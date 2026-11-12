@@ -229,7 +229,10 @@ export class PageSession {
     if (event.result.target.entry !== this.path || this.disposed || !this.docId) return;
     // Ignore results older than one already handled (events and the watch
     // reply can arrive in either order).
-    const key = { revision: this.revisionOf(event.result) ?? 0, seq: buildSequence(event.result.id) };
+    // A build that compiled nothing (refused for an untrusted workspace, a
+    // missing tool) has no source revision: order it by its sequence alone.
+    const revision = this.revisionOf(event.result) ?? this.newestEvent?.revision ?? 0;
+    const key = { revision, seq: buildSequence(event.result.id) };
     if (this.newestEvent && isOlder(key, this.newestEvent)) return;
     this.newestEvent = key;
     // LaTeX builds run the TeX engine and need a trusted workspace: offer the

@@ -23,7 +23,8 @@ const backend = vi.hoisted(() => {
       id: `tex-${state.builds}`,
       target: { format: "latex", engine: "pdfLatex", entry: "main.tex" },
       snapshot: "",
-      sources: [{ path: "main.tex", document: "doc-1", revision: 1, contentHash: "" }],
+      // A refused build compiled nothing: it has no source revisions.
+      sources: refused ? [] : [{ path: "main.tex", document: "doc-1", revision: 1, contentHash: "" }],
       configuration: null,
       status: refused ? { kind: "error", message: "not trusted" } : { kind: "succeeded" },
       diagnostics: [],
