@@ -12,7 +12,7 @@
 // - Python, R, and Julia kernels run in the workspace root (plain path).
 //
 // Each check is recorded in test-results/e2e/research-isolation/observations.json
-// and the scenario fails if any is violated. Set EXPOSITION_E2E_EXE to run it
+// and the scenario fails if any is violated. Set EXPOSITION_E2E_EXECUTABLE to run it
 // against another build (e.g. the pre-fix binary, where these checks fail).
 import { cp, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -84,7 +84,7 @@ export default async function researchIsolation({ launchApp, artifactsDir, fixtu
   };
   const norm = (p) => p.replace(/\\/g, "/").replace(/^\/\/\?\//, "").replace(/\/$/, "").toLowerCase();
 
-  const app = await launchApp({ dataDir, executable: process.env.EXPOSITION_E2E_EXE || undefined });
+  const app = await launchApp({ dataDir });
   try {
     const { page } = app;
 

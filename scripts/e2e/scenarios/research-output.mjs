@@ -6,7 +6,7 @@
 // explicit refusal, leaving interactive-job slots for other services.
 //
 // Observations: test-results/e2e/research-output/observations.json. Set
-// EXPOSITION_E2E_EXE to run against another build.
+// EXPOSITION_E2E_EXECUTABLE to run against another build.
 import { cp, mkdir, mkdtemp, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,7 +56,7 @@ export default async function researchOutput({ launchApp, artifactsDir, fixture,
     console.log(`${ok ? "ok    " : "FAIL  "} ${id}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
   };
 
-  const app = await launchApp({ dataDir, executable: process.env.EXPOSITION_E2E_EXE || undefined });
+  const app = await launchApp({ dataDir });
   try {
     const { page } = app;
     await invoke(page, "workspace_open", { path: root });

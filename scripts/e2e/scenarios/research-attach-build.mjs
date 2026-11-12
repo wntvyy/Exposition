@@ -105,7 +105,7 @@ export default async function researchAttachBuild({ launchApp, artifactsDir, fix
     console.log(`${ok ? "ok    " : "FAIL  "} ${id}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
   };
 
-  const app = await launchApp({ dataDir, executable: process.env.EXPOSITION_E2E_EXE || undefined });
+  const app = await launchApp({ dataDir });
   try {
     const { page } = app;
     const info = await invoke(page, "workspace_open", { path: root });
