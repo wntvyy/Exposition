@@ -16,6 +16,7 @@ import { basename, join } from "node:path";
 
 import { waitForAsync } from "../wait.mjs";
 import { openFromTree } from "../workspace-helpers.mjs";
+import { runCommand } from "../palette.mjs";
 
 const PATH = "main.tex";
 
@@ -29,21 +30,10 @@ export default async function pageLatex({ launchApp, artifactsDir, assert, fixtu
   const modeButton = (label) => page.locator(".ui-segmented__item", { hasText: label }).first();
   const editor = page.locator('[data-testid="page-editor"]');
 
-  /** Run the first command-palette match for `query`. */
-  const runCommand = async (query) => {
-    await page.keyboard.press("Control+Shift+P");
-    const palette = page.getByRole("textbox", { name: "Command" });
-    await palette.waitFor({ state: "visible", timeout: 5000 });
-    await palette.fill(query);
-    await page.locator(".wb-palette__item").first().waitFor();
-    await page.keyboard.press("Enter");
-    await palette.waitFor({ state: "detached", timeout: 5000 });
-  };
-
   /** Reference screenshot in both themes (UI_STANDARD), returning to light. */
   const referenceShots = async (name) => {
     for (const theme of ["dark", "light"]) {
-      await runCommand(`color theme ${theme}`);
+      await runCommand(page, `color theme ${theme}`, theme === "dark" ? /Color Theme: Dark/ : /Color Theme: Light/);
       await page.waitForFunction((t) => document.documentElement.dataset.theme === t, theme);
       await page.waitForTimeout(150);
       const file = join(artifactsDir, `${name}-${theme}.png`);
@@ -359,11 +349,11 @@ export default async function pageLatex({ launchApp, artifactsDir, assert, fixtu
     // 8. Two editor groups on the document's pages: closing one leaves the
     //    other rebuilding on edits (page views' watches are counted).
     if (declineFirst) {
-      await runCommand("Split Editor Right");
+      await runCommand(page, "Split Editor Right", /Split Editor Right/);
       await page.waitForFunction(() => document.querySelectorAll('[data-testid="page-editor"]').length === 2, null, {
         timeout: 10000,
       });
-      await runCommand("Close Right Editor Group");
+      await runCommand(page, "Close Right Editor Group", /Close Right Editor Group/);
       await page.waitForFunction(() => document.querySelectorAll('[data-testid="page-editor"]').length === 1, null, {
         timeout: 10000,
       });

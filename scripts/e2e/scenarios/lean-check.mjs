@@ -13,24 +13,13 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { alertDialog, documentState, editorLocator, invoke, openInEditor, waitFor } from "../workspace-helpers.mjs";
+import { runCommand } from "../palette.mjs";
 
 const TOOLCHAIN_DIR = "leanprover--lean4---v4.35.0";
 const PROOFS = "LeanBasic/Proofs.lean";
 
-async function runCommand(page, assert, query, expectedTitle) {
-  await page.keyboard.press("Control+Shift+P");
-  const input = page.getByRole("textbox", { name: "Command" });
-  await input.waitFor({ state: "visible", timeout: 5000 });
-  await input.fill(query);
-  const first = page.locator(".wb-palette__item").first();
-  await first.waitFor({ state: "visible" });
-  assert.match(await first.innerText(), expectedTitle, `top palette match for "${query}"`);
-  await page.keyboard.press("Enter");
-  await input.waitFor({ state: "detached", timeout: 5000 });
-}
-
 async function setTheme(page, assert, theme) {
-  await runCommand(page, assert, `color theme ${theme}`, theme === "dark" ? /Color Theme: Dark/ : /Color Theme: Light/);
+  await runCommand(page, `color theme ${theme}`, theme === "dark" ? /Color Theme: Dark/ : /Color Theme: Light/);
   await waitFor(async () => (await page.evaluate(() => document.documentElement.dataset.theme)) === theme, {
     message: `${theme} theme`,
   });
@@ -75,7 +64,7 @@ export default async function leanCheck({ launchApp, artifactsDir, assert, fixtu
     // --- open the project: untrusted, so Lean does not run ---------------------
     await invoke(page, "workspace_open", { path: root });
     await page.locator('[data-testid="file-tree"] [data-path="lakefile.toml"]').waitFor({ timeout: 15000 });
-    await runCommand(page, assert, "show lean infoview", /Show Lean Infoview/);
+    await runCommand(page, "show lean infoview", /Show Lean Infoview/);
     const docId = await openInEditor(page, PROOFS);
     const panel = page.getByTestId("lean-panel");
     const status = () => panel.getAttribute("data-status");
@@ -182,7 +171,7 @@ export default async function leanCheck({ launchApp, artifactsDir, assert, fixtu
     await editor.locator(".view-line", { hasText: /theorem\sdouble_add/ }).click();
     await page.keyboard.press("Home");
     for (let i = 0; i < 35; i++) await page.keyboard.press("ArrowRight");
-    await runCommand(page, assert, "lean go to definition", /Go to Definition/);
+    await runCommand(page, "lean go to definition", /Go to Definition/);
     const defs = editorLocator(page, "LeanBasic/Defs.lean");
     await defs.locator(".monaco-editor").waitFor({ timeout: 15000 });
     await waitFor(async () => (await status()) === "checked", { timeout: 120000, message: "Defs.lean checked" });

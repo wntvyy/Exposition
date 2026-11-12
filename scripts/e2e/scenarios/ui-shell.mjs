@@ -8,6 +8,8 @@ import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 
+import { runCommand } from "../palette.mjs";
+
 const WIDE = { width: 1440, height: 900 };
 const SMALL = { width: 800, height: 600 };
 
@@ -47,20 +49,6 @@ function consoleErrors(app) {
 
 async function regionVisible(page, name) {
   return (await page.locator(`[data-region="${name}"]`).count()) > 0;
-}
-
-async function runCommand(page, assert, query, expectedTitle) {
-  await page.keyboard.press("Control+Shift+P");
-  const input = page.getByRole("textbox", { name: "Command" });
-  await input.waitFor({ state: "visible", timeout: 5000 });
-  assert.ok(await input.evaluate((el) => el === document.activeElement), "palette input is focused");
-  await input.fill(query);
-  // The first ranked match is focused (virtual focus) and runs on Enter.
-  const first = page.locator(".wb-palette__item").first();
-  await first.waitFor({ state: "visible" });
-  assert.match(await first.innerText(), expectedTitle, `top palette match for "${query}"`);
-  await page.keyboard.press("Enter");
-  await input.waitFor({ state: "detached", timeout: 5000 });
 }
 
 async function width(page, selector) {
@@ -133,8 +121,25 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     assert.ok(await page.getByRole("tab", { name: "Agent" }).isVisible(), "auxiliary region shows the Agent view");
 
     // Command palette: filter + Enter runs the top match.
-    await runCommand(page, assert, "color theme light", /Color Theme: Light/);
+    await runCommand(page, "color theme light", /Color Theme: Light/);
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), "light");
+    // Enter runs the top match however the query was edited: here a typo
+    // corrected with Backspace (react-aria moves its highlight only on forward
+    // typing, so Enter used to do nothing and the palette stayed open).
+    for (const theme of ["dark", "light"]) {
+      await page.keyboard.press("Control+Shift+P");
+      const input = page.getByRole("textbox", { name: "Command" });
+      await input.waitFor({ state: "visible", timeout: 5000 });
+      await page.keyboard.type(`color theme ${theme}x`);
+      await page.keyboard.press("Backspace");
+      await page.keyboard.press("Enter");
+      const closed = await input.waitFor({ state: "detached", timeout: 5000 }).then(
+        () => true,
+        () => false,
+      );
+      assert.ok(closed, `Enter after Backspace runs the top match ("color theme ${theme}")`);
+      assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), theme);
+    }
     await page.locator("[data-testid=app-info]").waitFor({ timeout: 5000 });
     await shot(page, "workbench-light");
 
@@ -195,14 +200,17 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
 
     // Command palette reference screen.
     await page.keyboard.press("Control+Shift+P");
-    await page.getByRole("textbox", { name: "Command" }).fill("toggle");
+    const paletteInput = page.getByRole("textbox", { name: "Command" });
+    await paletteInput.waitFor({ state: "visible", timeout: 5000 });
+    assert.ok(await paletteInput.evaluate((el) => el === document.activeElement), "palette input is focused");
+    await paletteInput.fill("toggle");
     await page.locator(".wb-palette__item").first().waitFor();
     await shot(page, "palette-light");
     await page.keyboard.press("Escape");
     await page.getByRole("textbox", { name: "Command" }).waitFor({ state: "detached" });
 
     // UI reference (light), opened from the palette.
-    await runCommand(page, assert, "ui reference", /Developer: Show UI Reference/);
+    await runCommand(page, "ui reference", /Developer: Show UI Reference/);
     const reference = page.getByTestId("ui-reference");
     await reference.waitFor({ timeout: 10000 });
     await page.locator("[data-testid=monaco-sample] .monaco-editor").waitFor({ timeout: 15000 });
@@ -257,7 +265,7 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     assert.equal(await page.locator('[data-group="primary"] .wb-editor-group__header [role="tab"]').count(), 1, "closing in one group keeps the other");
 
     // Dark theme.
-    await runCommand(page, assert, "color theme dark", /Color Theme: Dark/);
+    await runCommand(page, "color theme dark", /Color Theme: Dark/);
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), "dark");
     const monacoBg = await page
       .locator("[data-testid=monaco-sample] .monaco-editor-background")
@@ -314,7 +322,7 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     assert.equal(await regionVisible(page, "auxiliary"), true, "auxiliary returns when the window widens");
     assert.equal(await regionVisible(page, "sidebar"), true, "sidebar returns when the window widens");
 
-    await runCommand(page, assert, "color theme light", /Color Theme: Light/);
+    await runCommand(page, "color theme light", /Color Theme: Light/);
     await setViewport(page, SMALL);
     await shot(page, "small-window-light");
     await setViewport(page, WIDE);

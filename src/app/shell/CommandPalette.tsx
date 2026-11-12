@@ -1,5 +1,5 @@
 import { Search } from "lucide-react";
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useMemo, useState, type KeyboardEvent } from "react";
 import {
   Autocomplete,
   Dialog,
@@ -53,22 +53,27 @@ function Highlighted({ text, positions }: { text: string; positions: number[] })
   );
 }
 
+/** Enabled commands ranked for `query` (recently run first when it is empty). */
+function rankCommands(query: string) {
+  const available = registry
+    .allCommands()
+    .filter((c) => c.id !== SHOW_COMMANDS_ID && (c.enabled ? c.enabled() : true));
+  const ordered = query
+    ? available
+    : [...available].sort((a, b) => {
+        const ra = recent.indexOf(a.id);
+        const rb = recent.indexOf(b.id);
+        return (ra < 0 ? Infinity : ra) - (rb < 0 ? Infinity : rb);
+      });
+  return rankByFuzzy(query, ordered, commandLabel);
+}
+
 function PaletteContent() {
   const version = useRegistryVersion();
   const [query, setQuery] = useState("");
   const ranked = useMemo(() => {
     void version;
-    const available = registry
-      .allCommands()
-      .filter((c) => c.id !== SHOW_COMMANDS_ID && (c.enabled ? c.enabled() : true));
-    const ordered = query
-      ? available
-      : [...available].sort((a, b) => {
-          const ra = recent.indexOf(a.id);
-          const rb = recent.indexOf(b.id);
-          return (ra < 0 ? Infinity : ra) - (rb < 0 ? Infinity : rb);
-        });
-    return rankByFuzzy(query, ordered, commandLabel);
+    return rankCommands(query);
   }, [query, version]);
 
   const run = (id: string) => {
@@ -80,52 +85,83 @@ function PaletteContent() {
     }, 0);
   };
 
+  // Enter runs the highlighted command, else the top match for the text in the
+  // field now. react-aria's Menu runs only an item holding its virtual focus,
+  // which it moves to the first match only after forward typing: after
+  // Backspace, paste, undo, or an edit it saw no typing event for, nothing is
+  // highlighted and Enter did nothing, leaving the palette open.
+  const onKeyDownCapture = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (!(event.target instanceof HTMLInputElement)) return;
+    const text = event.target.value;
+    // The list (and its highlight) may not show `text` yet if rendering lags.
+    const current = text === query ? ranked : rankCommands(text);
+    const highlighted =
+      text === query
+        ? event.currentTarget.querySelector<HTMLElement>(".wb-palette__item[data-focused]")?.dataset.command
+        : undefined;
+    const id = highlighted ?? (text.trim() ? current[0]?.item.id : undefined);
+    if (!id) return;
+    event.preventDefault();
+    event.stopPropagation();
+    run(id);
+  };
+
   return (
     <Dialog className="wb-palette__dialog" aria-label="Command palette">
-      <Autocomplete inputValue={query} onInputChange={setQuery}>
-        <TextField aria-label="Command" className="wb-palette__field" autoFocus>
-          <Search size={16} aria-hidden className="wb-palette__icon" />
-          <Input className="wb-palette__input" placeholder="Type the name of a command to run" spellCheck={false} />
-        </TextField>
-        <Menu
-          className="wb-palette__list"
-          aria-label="Commands"
-          items={ranked.map((r) => ({ ...r, id: r.item.id }))}
-          onAction={(key) => run(String(key))}
-          renderEmptyState={() => <div className="wb-palette__empty">No matching commands</div>}
-        >
-          {(entry) => {
-            const label = commandLabel(entry.item);
-            const split = entry.item.category ? entry.item.category.length + 2 : 0;
-            return (
-              <MenuItem id={entry.item.id} textValue={label} className="wb-palette__item">
-                <Text slot="label" className="wb-palette__label">
-                  {split > 0 && (
-                    <>
-                      <span className="wb-palette__category">
-                        <Highlighted
-                          text={label.slice(0, split - 2)}
-                          positions={entry.positions.filter((p) => p < split - 2)}
-                        />
-                        :
-                      </span>{" "}
-                    </>
+      <div className="wb-palette__body" onKeyDownCapture={onKeyDownCapture}>
+        <Autocomplete inputValue={query} onInputChange={setQuery}>
+          <TextField aria-label="Command" className="wb-palette__field" autoFocus>
+            <Search size={16} aria-hidden className="wb-palette__icon" />
+            <Input className="wb-palette__input" placeholder="Type the name of a command to run" spellCheck={false} />
+          </TextField>
+          <Menu
+            className="wb-palette__list"
+            aria-label="Commands"
+            data-query={query.trim() ? "" : undefined}
+            items={ranked.map((r) => ({ ...r, id: r.item.id }))}
+            onAction={(key) => run(String(key))}
+            renderEmptyState={() => <div className="wb-palette__empty">No matching commands</div>}
+          >
+            {(entry) => {
+              const label = commandLabel(entry.item);
+              const split = entry.item.category ? entry.item.category.length + 2 : 0;
+              return (
+                <MenuItem
+                  id={entry.item.id}
+                  textValue={label}
+                  className="wb-palette__item"
+                  data-command={entry.item.id}
+                >
+                  <Text slot="label" className="wb-palette__label">
+                    {split > 0 && (
+                      <>
+                        <span className="wb-palette__category">
+                          <Highlighted
+                            text={label.slice(0, split - 2)}
+                            positions={entry.positions.filter((p) => p < split - 2)}
+                          />
+                          :
+                        </span>{" "}
+                      </>
+                    )}
+                    <Highlighted
+                      text={label.slice(split)}
+                      positions={entry.positions.filter((p) => p >= split).map((p) => p - split)}
+                    />
+                  </Text>
+                  {entry.item.keybinding && (
+                    <Keyboard className="wb-palette__keys">
+                      <Keybinding binding={entry.item.keybinding} />
+                    </Keyboard>
                   )}
-                  <Highlighted
-                    text={label.slice(split)}
-                    positions={entry.positions.filter((p) => p >= split).map((p) => p - split)}
-                  />
-                </Text>
-                {entry.item.keybinding && (
-                  <Keyboard className="wb-palette__keys">
-                    <Keybinding binding={entry.item.keybinding} />
-                  </Keyboard>
-                )}
-              </MenuItem>
-            );
-          }}
-        </Menu>
-      </Autocomplete>
+                </MenuItem>
+              );
+            }}
+          </Menu>
+        </Autocomplete>
+      </div>
     </Dialog>
   );
 }

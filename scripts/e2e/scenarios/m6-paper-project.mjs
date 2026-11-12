@@ -58,6 +58,7 @@ import {
   waitFor,
   waitForMirror,
 } from "../workspace-helpers.mjs";
+import { runCommand } from "../palette.mjs";
 
 const PAPER = "main.typ";
 const FIT = "analysis/fit.py";
@@ -208,19 +209,6 @@ const contentLines = (text) => withoutAttachments(text).split("\n").filter((line
 const attachmentKeys = (text) => [...text.matchAll(/^\/\/ exposition:begin (\S+)$/gm)].map((m) => m[1]);
 
 // ---------------------------------------------------------------- UI helpers
-
-async function runCommand(page, query, expected) {
-  await page.keyboard.press("Control+Shift+P");
-  const input = page.getByRole("textbox", { name: "Command" });
-  await input.waitFor({ state: "visible", timeout: 5000 });
-  await input.fill(query);
-  const first = page.locator(".wb-palette__item").first();
-  await first.waitFor({ state: "visible" });
-  const title = await first.innerText();
-  if (!expected.test(title)) throw new Error(`palette top match for "${query}" was "${title}"`);
-  await page.keyboard.press("Enter");
-  await input.waitFor({ state: "detached", timeout: 5000 });
-}
 
 async function setTheme(page, theme) {
   await runCommand(page, `color theme ${theme}`, theme === "dark" ? /Color Theme: Dark/ : /Color Theme: Light/);
