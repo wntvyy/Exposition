@@ -1,6 +1,7 @@
 //! The provider key in Windows Credential Manager: kept on this machine only,
 //! and a key saved by an earlier version keeps working (it is moved, byte for
-//! byte, never deleted).
+//! byte). No old roaming copy comes back when another program saves a roaming
+//! credential: not over a moved or replaced key, and not after a removal.
 //!
 //! Every test uses its own throwaway namespace
 //! (`org.exposition.desktop.test-…`); the real entry is never read, written,
@@ -43,9 +44,11 @@ impl Namespace {
 
 impl Drop for Namespace {
     fn drop(&mut self) {
-        if let Ok(entry) = keyring::Entry::new(&self.service(), KEYRING_USER) {
-            let _ = entry.delete_credential();
-        }
+        // Also an old roaming copy: a plain delete can leave one that comes
+        // back later (that is what these tests are about).
+        let _ = wincred::delete_everywhere(&self.target());
+        let _ = wincred::delete_everywhere(&format!("other-program.{}.other-program", self.service()));
+        let _ = wincred::delete_everywhere(&format!("other-program.{}.other-local", self.service()));
     }
 }
 
@@ -69,6 +72,73 @@ fn a_key_saved_by_an_earlier_version_keeps_working_and_stays_on_this_machine() {
     assert_eq!(ns.persist(), Some(PERSIST_LOCAL_MACHINE));
 }
 
+/// Another program saves a roaming credential (any program, any credential;
+/// for example a browser or Git). Credential Manager then reloads its roaming
+/// store, which brings back a roaming copy left behind there.
+fn another_program_saves_a_roaming_credential(ns: &Namespace) {
+    let other = keyring::Entry::new(&format!("{}.other-program", ns.service()), "other-program").unwrap();
+    other.set_password("not a secret").unwrap();
+    other.delete_credential().unwrap();
+}
+
+/// Another program saves a local-machine credential: Credential Manager
+/// reloads its local store, which brings back a local copy left behind there.
+fn another_program_saves_a_local_credential(ns: &Namespace) {
+    let other = format!("other-program.{}.other-local", ns.service());
+    wincred::write(&other, b"-", "other-program", "", PERSIST_LOCAL_MACHINE).unwrap();
+    wincred::delete(&other).unwrap();
+}
+
+fn other_programs_save_credentials(ns: &Namespace) {
+    another_program_saves_a_roaming_credential(ns);
+    another_program_saves_a_local_credential(ns);
+}
+
+/// A key saved by an earlier version long ago (roaming, already settled).
+fn saved_by_an_earlier_version(ns: &Namespace, key: &str) {
+    keyring::Entry::new(&ns.service(), KEYRING_USER).unwrap().set_password(key).unwrap();
+    another_program_saves_a_roaming_credential(ns);
+    assert_eq!(ns.persist(), Some(PERSIST_ENTERPRISE), "setup: the earlier layout");
+}
+
+fn key_of(store: &KeyringStore) -> Option<String> {
+    store.get().unwrap().map(|s| s.expose().to_owned())
+}
+
+#[test]
+fn a_moved_key_stays_on_this_machine_when_another_program_saves_a_roaming_credential() {
+    let ns = Namespace::new("stays");
+    saved_by_an_earlier_version(&ns, OLD_KEY);
+    assert_eq!(key_of(&KeyringStore::new(Some(&ns.name))).as_deref(), Some(OLD_KEY));
+    assert_eq!(ns.persist(), Some(PERSIST_LOCAL_MACHINE));
+    other_programs_save_credentials(&ns);
+    assert_eq!(ns.persist(), Some(PERSIST_LOCAL_MACHINE), "no roaming copy came back");
+    assert_eq!(key_of(&KeyringStore::new(Some(&ns.name))).as_deref(), Some(OLD_KEY));
+}
+
+#[test]
+fn a_replaced_key_is_not_brought_back_by_another_programs_roaming_save() {
+    let ns = Namespace::new("replace");
+    saved_by_an_earlier_version(&ns, OLD_KEY);
+    let store = KeyringStore::new(Some(&ns.name));
+    store.set(NEW_KEY).unwrap();
+    other_programs_save_credentials(&ns);
+    assert_eq!(ns.persist(), Some(PERSIST_LOCAL_MACHINE));
+    assert_eq!(key_of(&KeyringStore::new(Some(&ns.name))).as_deref(), Some(NEW_KEY), "the old key did not come back");
+}
+
+#[test]
+fn a_removed_key_stays_removed_when_another_program_saves_a_roaming_credential() {
+    let ns = Namespace::new("remove");
+    saved_by_an_earlier_version(&ns, OLD_KEY);
+    let store = KeyringStore::new(Some(&ns.name));
+    assert_eq!(key_of(&store).as_deref(), Some(OLD_KEY), "moved on first use");
+    store.delete().unwrap();
+    other_programs_save_credentials(&ns);
+    assert_eq!(ns.persist(), None, "the removed key did not come back");
+    assert_eq!(key_of(&KeyringStore::new(Some(&ns.name))), None);
+}
+
 #[test]
 fn a_saved_key_is_kept_on_this_machine_and_readable_by_keyring() {
     let ns = Namespace::new("save");
@@ -79,12 +149,17 @@ fn a_saved_key_is_kept_on_this_machine_and_readable_by_keyring() {
     assert_eq!(ns.persist(), Some(PERSIST_LOCAL_MACHINE));
     assert_eq!(store.get().unwrap().map(|s| s.expose().to_owned()).as_deref(), Some(NEW_KEY));
     assert_eq!(keyring::Entry::new(&ns.service(), KEYRING_USER).unwrap().get_password().unwrap(), NEW_KEY);
-    // Replacing a roaming copy (written by an earlier version) works too.
+    // Replacing a roaming copy written over it (an earlier version run again)
+    // works too, and neither copy comes back after a removal.
     keyring::Entry::new(&ns.service(), KEYRING_USER).unwrap().set_password(OLD_KEY).unwrap();
     store.set(NEW_KEY).unwrap();
     assert_eq!(ns.persist(), Some(PERSIST_LOCAL_MACHINE));
+    other_programs_save_credentials(&ns);
+    assert_eq!(key_of(&store).as_deref(), Some(NEW_KEY));
     store.delete().unwrap();
     assert_eq!(ns.persist(), None);
+    other_programs_save_credentials(&ns);
+    assert_eq!(ns.persist(), None, "the removed key did not come back");
     assert!(store.get().unwrap().is_none());
 }
 

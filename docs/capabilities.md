@@ -161,7 +161,11 @@ neither is reported as completed. Review reflects the
 document's actual content: a change you undid in the editor shows as undone.
 
 The API key is stored in Windows Credential Manager for this computer only
-(it does not roam with a domain profile). It is kept out of every child
+(it does not roam with a domain profile). A key saved by an earlier version
+with roaming persistence is moved the first time it is read: the roaming
+copy is deleted and a local copy written, and the result is checked after
+Credential Manager has reloaded its stores, so no old copy comes back later
+over a replaced key or after Remove. It is kept out of every child
 process's environment and redacted from output, transcripts, and stored
 text artifacts. Trusted native code (research kernels, and the commands,
 Python, LaTeX builds, and Lean checks you approve) runs as your Windows user
@@ -171,7 +175,11 @@ A live end-to-end run against the real provider is covered by the opt-in
 scenario `npm run e2e -- live-agents` (it spends API credit): it computes with
 Python, edits the paper, runs a Lean check, builds, reverts through review,
 cancels a running task, handles a concurrent user edit, and requires that an
-out-of-scope read be refused by the application itself. The default automated
+out-of-scope read be refused by the application itself. A second opt-in
+scenario, `npm run e2e -- live-restricted`, runs an unattended task's Python in
+the Docker sandbox and then checks that the same request is refused, never run
+natively, when no image is configured; it uses no development-only command, so
+it also runs against an installed release. The default automated
 suite uses a scripted development provider that release builds do not contain,
 and development builds use a separate development credential entry unless told
 otherwise.

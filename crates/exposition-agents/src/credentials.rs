@@ -8,7 +8,8 @@
 //! On Windows the key is kept on this machine only (local-machine persistence,
 //! not the roaming "enterprise" persistence the keyring crate uses); a key
 //! saved by an earlier version is moved there, byte for byte, the first time
-//! it is read. Code running as the same user (trusted native kernels,
+//! it is read: its roaming copy is deleted and a local copy written, so no
+//! roaming copy can come back later (see `wincred`). Code running as the same user (trusted native kernels,
 //! commands, builds) can still read it through the Credential Manager API.
 
 use std::sync::Mutex;
@@ -152,13 +153,7 @@ impl SecretStore for KeyringStore {
         // Windows: written in keyring's layout, but kept on this machine only.
         #[cfg(windows)]
         {
-            match crate::wincred::write_password(
-                &self.target(),
-                secret,
-                &self.user,
-                "Exposition provider API key",
-                crate::wincred::PERSIST_LOCAL_MACHINE,
-            ) {
+            match crate::wincred::store_password(&self.target(), secret, &self.user, "Exposition provider API key") {
                 Ok(true) => Ok(()),
                 Ok(false) => {
                     Err(CredentialError::Unavailable("the key did not read back as saved; try saving it again".into()))
@@ -173,6 +168,16 @@ impl SecretStore for KeyringStore {
     }
 
     fn delete(&self) -> Result<(), CredentialError> {
+        // Windows: also an old roaming copy, so the key does not come back.
+        #[cfg(windows)]
+        {
+            match crate::wincred::delete_everywhere(&self.target()) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(CredentialError::Unavailable("the key could not be removed; try again".into())),
+                Err(code) => Err(CredentialError::Unavailable(format!("the credential store reported error {code}"))),
+            }
+        }
+        #[cfg(not(windows))]
         match self.entry()?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(CredentialError::Unavailable(describe_error(&e))),

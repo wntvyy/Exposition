@@ -16,7 +16,7 @@
 - Command palette: **48 registered commands** (47 listed; Show All Commands hides itself); 14 keybindings
 - Agent tools: **9**; 13 gate refusal codes; 22 agent error codes; 10 task statuses; 8 tool-call states
 - Settings keys: **27 persisted** (App 2, Editor 7, Project 4, Execution 7, Provider 4, Trust 3) + API key (OS store) + 3 frontend-only
-- e2e scenarios: **31** (30 in the default run; `live-agents` opt-in)
+- e2e scenarios: **32** (30 in the default run; `live-agents` and `live-restricted` opt-in)
 - Workbench: 7 views, 7 editors, 6 status-bar items, 12 dialogs, 8 Settings sections
 - Formats: 4 (Typst, Markdown print profile, pdfLaTeX, LuaLaTeX); 4 page-edit operations
 - Research: 3 languages (Python, R, Julia); Lean: 14 document statuses, 19 `lean.` error codes
@@ -439,7 +439,7 @@ Process launches (count against `maxCommands`): LaTeX build, `run_python`, `chec
 - Events: `agents:event` (13 kinds: taskChanged, transcriptChanged, streamStarted, textDelta, thinkingDelta, streamReset, toolCallStarted, toolCallFinished, approvalRequested, approvalResolved, fallback, reviewChanged, providerChanged); broadcast capacity 4096; lag → `agents:resync`.
 
 ### 6.11 Credentials
-- Windows: generic credential target `anthropic-api-key.org.exposition.desktop` (user `anthropic-api-key`), persistence local machine (not roaming); every write read back (4 attempts); a key saved with roaming persistence by an earlier version is moved to local-machine on first read. macOS Keychain / Linux keyutils via `keyring` (unverified). Debug builds: entry `org.exposition.desktop.development` unless `EXPOSITION_CREDENTIAL_NAMESPACE` (≤64 `[A-Za-z0-9-]`) or `EXPOSITION_USE_REAL_CREDENTIAL=1`; release builds ignore both and use the real entry.
+- Windows: generic credential target `anthropic-api-key.org.exposition.desktop` (user `anthropic-api-key`), persistence local machine (not roaming). Persistence is never changed in place (Credential Manager would keep the old copy in its other store and bring it back on the next write of that persistence by any program): a roaming copy is deleted before the local one is written, and every save, move, and removal is checked after both stores reload (a throwaway roaming and a throwaway local credential `<target>.settle-roaming` / `.settle-local`, no secret, written and deleted at once), up to 4 attempts. A key saved with roaming persistence by an earlier version is moved to local-machine on first read; one moved in place by an earlier build has its leftover roaming copy removed on first read, keeping the local bytes. macOS Keychain / Linux keyutils via `keyring` (unverified). Debug builds: entry `org.exposition.desktop.development` unless `EXPOSITION_CREDENTIAL_NAMESPACE` (≤64 `[A-Za-z0-9-]`) or `EXPOSITION_USE_REAL_CREDENTIAL=1`; release builds ignore both and use the real entry.
 - Key: trimmed, 16–512 ASCII graphic chars (IPC rejects >1 024 bytes); never returned, logged, stored in SQLite or project files; webview clears the field before saving (restored only on failure). Agent jobs start from an empty environment; provider errors replace the key with `<redacted>`; process output and text artifacts pass the execution redactor, which matches the stored key by value (registered when read or saved, removed when cleared) as well as by token shape. Trusted native code runs as the user and could read the stored key.
 
 ### 6.12 Agent error codes (22)
@@ -730,7 +730,7 @@ Not launched: latexmk, makeindex, kpsewhich, synctex CLI, Typst CLI, any rasteri
 
 | OS facility | Use |
 |---|---|
-| Windows Credential Manager | API key, generic credential `anthropic-api-key.org.exposition.desktop` (debug default `….development`), `CRED_PERSIST_LOCAL_MACHINE` (roaming entries rewritten on first read); Keychain/keyutils via `keyring` elsewhere (unverified) |
+| Windows Credential Manager | API key, generic credential `anthropic-api-key.org.exposition.desktop` (debug default `….development`), `CRED_PERSIST_LOCAL_MACHINE` (roaming entries moved on first read: roaming copy deleted, local copy written); Keychain/keyutils via `keyring` elsewhere (unverified) |
 | Job Objects | every child: `KILL_ON_JOB_CLOSE`, `DIE_ON_UNHANDLED_EXCEPTION`, no breakaway; `CREATE_SUSPENDED \| CREATE_NO_WINDOW` → assign → resume; tree killed when the primary exits; app exit runs `tex.shutdown()` + `execution.shutdown()` (≤ 5 s); crash → handle close kills trees |
 | File watching | `notify` (ReadDirectoryChangesW), recursive on the open root; batch handled 150 ms after its first event; journals throttled to 300 ms |
 | WebView2 / dialog | Tauri defaults, no extra browser args; window `main` 1440×900, min 720×480, drag-drop off; native folder picker via `dialog:allow-open` |
@@ -819,8 +819,8 @@ Set for children: job `TEMP`/`TMP`, constructed `PATH`, `PAR_GLOBAL_TEMP`; resea
 
 **e2e harness** (`npm run e2e [-- <names>]`, `scripts/e2e/run.mjs`): launches `EXPOSITION_E2E_EXECUTABLE` or `target/debug/exposition.exe` with isolated `EXPOSITION_DATA_DIR`, `WEBVIEW2_USER_DATA_FOLDER`, `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<free port>`; connects with Playwright `connectOverCDP`; raw IPC via `window.__TAURI_INTERNALS__.invoke`; strips `EXPOSITION_USE_REAL_CREDENTIAL` except for `live-*`; artifacts and last-state screenshot/console in `test-results/e2e/<name>/`. Helpers: `agent-scope-check.mjs`, `app.mjs`, `app-env.mjs`, `palette.mjs`, `processes.mjs`, `wait.mjs`, `workspace-helpers.mjs`, `repro/page-race-keystrokes.mjs`.
 
-**31 scenarios** (`scripts/e2e/scenarios/*.mjs`): agents-attention, agents-harness, consistency, execution-jobs, lean-check, live-agents, m6-paper-project, page-latex, page-markdown, page-typst, research-attach-build, research-isolation, research-output, research-python, review-m4-lean-ui, review-m5-agents, review-sec-acl, review-sec-exec, review-sec-ipc, review-sec-render, review-sec-secrets, settings, smoke, tex-build, trust-propagation, ui-shell, workspace-external, workspace-files, workspace-recovery, workspace-save-failure, workspace-window-close.
-- Excluded from the default run: `live-agents` (runner skips `live-*`; real key, spends API credit).
+**32 scenarios** (`scripts/e2e/scenarios/*.mjs`): agents-attention, agents-harness, consistency, execution-jobs, lean-check, live-agents, live-restricted, m6-paper-project, page-latex, page-markdown, page-typst, research-attach-build, research-isolation, research-output, research-python, review-m4-lean-ui, review-m5-agents, review-sec-acl, review-sec-exec, review-sec-ipc, review-sec-render, review-sec-secrets, settings, smoke, tex-build, trust-propagation, ui-shell, workspace-external, workspace-files, workspace-recovery, workspace-save-failure, workspace-window-close.
+- Excluded from the default run: `live-agents` and `live-restricted` (runner skips `live-*`; real key, spends API credit). `live-restricted` uses no development-only command, so it also runs against release/installed builds: an unattended task's `run_python` in the Docker sandbox, then the same request refused with no image configured.
 - Self-skip unless named: `review-m5-agents`, `review-sec-acl`, `review-sec-exec`, `review-sec-ipc`, `review-sec-render`, `review-sec-secrets`.
 - Need a debug build (scripted provider, dev commands or credential namespace): `agents-attention`, `agents-harness`, `execution-jobs`, `review-m5-agents`, `review-sec-exec`, `review-sec-render`, `review-sec-secrets`, `settings`, `trust-propagation`; `m6-paper-project` runs its agent step only in debug builds.
 - Report SKIPPED without Lean `leanprover/lean4:v4.35.0` via elan (fail instead with `EXPOSITION_REQUIRE_LEAN=1`): `lean-check`, `review-m4-lean-ui`, the Lean step of `agents-harness`.
@@ -851,7 +851,7 @@ From `docs/capabilities.md` (verified where code allows) plus code findings (mar
 - A trusted Lean file's code runs with the user's privileges while compiled; deliberate tampering with the toolchain or other processes is not contained.
 - Lean audit programs target Lean 4.35 APIs; toolchains they do not compile on report Not verified; kernel re-checking large dependencies (Mathlib) is slow.
 - Lean goals are plain text; third-party infoview widgets are not executed.
-- Agents: one provider (Anthropic Messages API); live behaviour is covered only by the opt-in `live-agents` scenario (spends credit).
+- Agents: one provider (Anthropic Messages API); live behaviour is covered only by the opt-in `live-agents` and `live-restricted` scenarios (spend credit).
 - Trusted native code (kernels, approved commands, Python, LaTeX, Lean) runs as the user and can read the stored API key.
 - Restricted execution needs Docker with a locally present image providing `/bin/sh` (`sleep` for the in-container time limit); no pull, no native fallback.
 - the startup container sweep runs only when an image is configured; a sweep failure is only printed to stderr (the first restricted job retries).
@@ -878,4 +878,4 @@ All counts were read from `c4669a5` (working tree clean); the two later merges (
 | Agent tools | 9 | `grep -c 'ToolDefinition {' crates/exposition-agents/src/tools/mod.rs` = 9 tool-name constants |
 | Gate refusal codes / agent error codes | 13 / 22 | `pub const` in `pub mod codes` (`tools/exec.rs`); unique `"agents.*"` strings in `service.rs` + `src-tauri/src/agents.rs` |
 | Settings keys | 27 | Fields of `AppSettings`/`FilesSettings`/`EditorSettings`, `ProjectSettings`, `ExecutionSettings`/`DockerSettings`, `ProviderSettings`, trust file; frontend keys from `readStored`/`writeStored`/`sessionStorage` callers |
-| e2e scenarios | 31 | `ls scripts/e2e/scenarios/*.mjs`; `run.mjs` loads all and skips `live-*` unless named |
+| e2e scenarios | 32 | `ls scripts/e2e/scenarios/*.mjs`; `run.mjs` loads all and skips `live-*` unless named |
