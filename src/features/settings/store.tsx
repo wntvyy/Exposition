@@ -132,8 +132,8 @@ export async function revokeTrust(root: TrustedRoot): Promise<boolean> {
       <div className="exp-settings__confirm" data-testid="revoke-dialog">
         <code className="exp-settings__path">{root.path}</code>
         <p>
-          Builds, kernels, and commands in this folder will no longer run on this computer until you trust it again
-          (Exposition asks when an action needs it). Processes that are already running are not stopped.
+          Builds, kernels, Lean servers, and commands running in this folder are stopped now. Nothing in it runs again
+          until you trust it again (Exposition asks when an action needs it).
         </p>
         {nested.length > 0 && (
           <>

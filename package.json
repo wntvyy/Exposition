@@ -20,6 +20,7 @@
     "fmt:rust": "cargo fmt --all",
     "check:private": "node scripts/check-private-paths.mjs",
     "check:bindings": "node scripts/check-bindings.mjs",
+    "check:permissions": "node scripts/check-permissions.mjs",
     "check": "node scripts/check.mjs",
     "e2e": "node scripts/e2e/run.mjs",
     "tauri": "tauri"
