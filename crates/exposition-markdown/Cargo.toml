@@ -1,0 +1,26 @@
+[package]
+name = "exposition-markdown"
+description = "Markdown print profile: Markdown to Typst translation with a reversible source map, LaTeX-subset math, and page input rules."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+exposition-core.workspace = true
+pulldown-cmark.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+exposition-tex.workspace = true
+exposition-workspace.workspace = true
+typst.workspace = true
+typst-layout.workspace = true
+typst-pdf.workspace = true
+typst-kit.workspace = true
+comemo.workspace = true
+
+[lints]
+workspace = true

@@ -13,6 +13,7 @@ exposition-core = { path = "crates/exposition-core" }
 exposition-workspace = { path = "crates/exposition-workspace" }
 exposition-execution = { path = "crates/exposition-execution" }
 exposition-tex = { path = "crates/exposition-tex" }
+exposition-markdown = { path = "crates/exposition-markdown" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,6 +39,15 @@ windows-sys = { version = "0.61", features = [
 hayro = "0.9"
 flate2 = "1"
 unicode-normalization = "0.1"
+# Markdown print profile (exposition-markdown): CommonMark/GFM parsing with
+# source offsets; Typst crates (same pins as the Typst adapter) for tests.
+pulldown-cmark = { version = "0.13", default-features = false }
+unicode-segmentation = "1"
+typst = "=0.15.1"
+typst-layout = "=0.15.1"
+typst-pdf = "=0.15.1"
+typst-kit = { version = "=0.15.1", default-features = false, features = ["embedded-fonts"] }
+comemo = "0.5"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
