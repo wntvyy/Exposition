@@ -25,6 +25,7 @@ exposition-attach.workspace = true
 exposition-tex.workspace = true
 exposition-typesetting.workspace = true
 exposition-page.workspace = true
+exposition-graph.workspace = true
 tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2"
 serde.workspace = true

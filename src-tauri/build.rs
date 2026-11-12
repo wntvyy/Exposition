@@ -98,6 +98,22 @@ const COMMANDS: &[&str] = &[
     "page_navigate",
     "page_selection",
     "page_edit",
+    // Project graph (src/graph.rs).
+    "graph_status",
+    "graph_vocabulary",
+    "graph_snapshot",
+    "graph_entity",
+    "graph_inspect_at_source",
+    "graph_impact",
+    "graph_math_overview",
+    "graph_propose_change",
+    "graph_apply_change",
+    "graph_views",
+    "graph_view_get",
+    "graph_view_save",
+    "graph_view_delete",
+    "graph_recover",
+    "graph_operations",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

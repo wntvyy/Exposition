@@ -49,7 +49,8 @@ where
 #[tauri::command]
 pub async fn workspace_open(state: State<'_, AppState>, path: String) -> Result<WorkspaceInfo, CommandError> {
     let execution = state.execution.clone();
-    blocking(&state, move |ws| {
+    let graph = Arc::clone(&state.graph);
+    let info = blocking(&state, move |ws| {
         let previous = ws.current().map(|info| info.root);
         let info = ws.open_workspace(&PathBuf::from(path))?;
         if previous.as_deref() != Some(info.root.as_str()) {
@@ -65,17 +66,24 @@ pub async fn workspace_open(state: State<'_, AppState>, path: String) -> Result<
         }
         Ok(info)
     })
-    .await
+    .await?;
+    // Attach the project graph (never runs project code). A graph failure
+    // leaves the graph unavailable; the project itself still opens.
+    let root = std::fs::canonicalize(&info.root).unwrap_or_else(|_| PathBuf::from(&info.root));
+    let _ = tauri::async_runtime::spawn_blocking(move || graph.attach(&root)).await;
+    Ok(info)
 }
 
 #[tauri::command]
 pub async fn workspace_close(state: State<'_, AppState>) -> Result<(), CommandError> {
     let execution = state.execution.clone();
+    let graph = Arc::clone(&state.graph);
     blocking(&state, move |ws| {
         if let Some(info) = ws.current() {
             execution.unregister_root(Path::new(&info.root));
         }
         ws.close_workspace();
+        graph.detach();
         Ok(())
     })
     .await

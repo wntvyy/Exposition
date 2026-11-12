@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-graph-status"
+description = "Enables the graph_status command without any pre-configured scope."
+commands.allow = ["graph_status"]
+
+[[permission]]
+identifier = "deny-graph-status"
+description = "Denies the graph_status command without any pre-configured scope."
+commands.deny = ["graph_status"]

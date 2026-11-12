@@ -97,6 +97,21 @@
     "allow-page-caret",
     "allow-page-navigate",
     "allow-page-selection",
-    "allow-page-edit"
+    "allow-page-edit",
+    "allow-graph-status",
+    "allow-graph-vocabulary",
+    "allow-graph-snapshot",
+    "allow-graph-entity",
+    "allow-graph-inspect-at-source",
+    "allow-graph-impact",
+    "allow-graph-math-overview",
+    "allow-graph-propose-change",
+    "allow-graph-apply-change",
+    "allow-graph-views",
+    "allow-graph-view-get",
+    "allow-graph-view-save",
+    "allow-graph-view-delete",
+    "allow-graph-recover",
+    "allow-graph-operations"
   ]
 }
