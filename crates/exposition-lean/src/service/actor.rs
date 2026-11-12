@@ -117,6 +117,10 @@ struct CheckWork {
     speculative: bool,
     /// An audit job for `version` is running.
     running: bool,
+    /// Tripwire result: declarations Lean's language server reports in this
+    /// file that the audit's elaboration lacks (`Err`: the comparison failed).
+    tripwire: Option<Result<Vec<String>, String>>,
+    tripwire_started: bool,
 }
 
 impl Drop for CheckWork {
@@ -891,8 +895,11 @@ impl Actor {
                 let _ = tx.send(Msg::Version { dir: toolchain.dir.clone(), version });
             });
         }
-        let (exec, tx, key) = (self.exec.clone(), self.tx.clone(), key.clone());
+        let (exec, tx, key, auditor) = (self.exec.clone(), self.tx.clone(), key.clone(), Arc::clone(&self.auditor));
         tokio::spawn(async move {
+            // Compile and pin the audit programs before this server runs any of
+            // the project's code (its lakefile, then its files).
+            auditor.prepare(&exec, &project, &toolchain).await;
             let result = server::start(&exec, &project, &toolchain).await;
             let _ = tx.send(Msg::Started { key, generation, result });
         });
@@ -1021,7 +1028,7 @@ impl Actor {
                 if errors {
                     // Errors are final without an audit: this is not a checked proof.
                     self.docs.get_mut(&id).expect("present").cancel_audit();
-                    self.finalize(&id, Vec::new(), None);
+                    self.finalize(&id, Vec::new(), None, Ok(Vec::new()));
                     return;
                 }
                 let has_sorry = sync
@@ -1126,6 +1133,8 @@ impl Actor {
                     lean_done: false,
                     speculative,
                     running: true,
+                    tripwire: None,
+                    tripwire_started: false,
                 })
             }
         }
@@ -1177,10 +1186,86 @@ impl Actor {
         if !ready {
             return false;
         }
-        let mut work = doc.work.take().expect("ready");
+        let work = doc.work.as_mut().expect("ready");
+        if work.tripwire.is_none() {
+            // Names written as declarations that the audit's elaboration does
+            // not have: ask the language server whether it has them.
+            let suspects = match (&work.audit, doc.sync.as_ref()) {
+                (
+                    Some(audit::AuditOutcome::Complete(d) | audit::AuditOutcome::Stopped { decls: d, .. }),
+                    Some(sync),
+                ) => audit::declared_names(&sync.text)
+                    .into_iter()
+                    .filter(|n| !d.iter().any(|decl| decl.name == *n || decl.name.ends_with(&format!(".{n}"))))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if suspects.is_empty() {
+                work.tripwire = Some(Ok(Vec::new()));
+            } else {
+                if !work.tripwire_started {
+                    work.tripwire_started = true;
+                    let (generation, version) = (work.generation, work.version);
+                    self.start_tripwire(id, generation, version, suspects);
+                }
+                return false;
+            }
+        }
+        let mut work = self.docs.get_mut(id).and_then(|d| d.work.take()).expect("ready");
         let (tokens, outcome) = (work.tokens.take().unwrap_or_default(), work.audit.take());
-        self.finalize(id, tokens, outcome);
+        self.finalize(id, tokens, outcome, work.tripwire.take().unwrap_or(Ok(Vec::new())));
         true
+    }
+
+    /// Ask Lean's language server (`workspace/symbol`, from the info trees of
+    /// its own elaboration of this file) which of `suspects` it has as
+    /// declarations of this document.
+    fn start_tripwire(&mut self, id: &DocumentId, generation: u64, version: u64, suspects: Vec<String>) {
+        let doc = &self.docs[id];
+        let running = doc.key.as_ref().and_then(|k| self.servers.get(k)).and_then(|s| s.running());
+        let (tx, doc_id) = (self.tx.clone(), id.clone());
+        let (Some(client), Some(uri)) = (running.map(|r| r.client.clone()), doc.uri.clone()) else {
+            let _ = tx.send(Msg::Tripwire {
+                generation,
+                doc: doc_id,
+                version,
+                result: Err("the language server is not running".into()),
+            });
+            return;
+        };
+        tokio::spawn(async move {
+            let doc_path = uri_to_path(&uri);
+            let mut found: Vec<String> = Vec::new();
+            let mut failure = None;
+            for suspect in suspects {
+                let last = suspect.rsplit('.').next().unwrap_or(&suspect).to_owned();
+                match client.call("workspace/symbol", json!({ "query": last }), POSITION_TIMEOUT).await {
+                    Ok(Value::Array(items)) => {
+                        for item in items {
+                            let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+                            let here = item
+                                .get("location")
+                                .and_then(|l| l.get("uri"))
+                                .and_then(Value::as_str)
+                                .and_then(uri_to_path)
+                                .zip(doc_path.as_ref())
+                                .is_some_and(|(a, b)| same_path(&a, b));
+                            let matches = name == suspect || name.ends_with(&format!(".{suspect}"));
+                            if here && matches && !found.iter().any(|f| f == name) {
+                                found.push(name.to_owned());
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => failure = Some(e.to_string()),
+                }
+            }
+            let result = match failure {
+                Some(e) if found.is_empty() => Err(e),
+                _ => Ok(found),
+            };
+            let _ = tx.send(Msg::Tripwire { generation, doc: doc_id, version, result });
+        });
     }
 
     fn work_mut(&mut self, id: &DocumentId, generation: u64, version: u64) -> Option<&mut CheckWork> {
@@ -1193,7 +1278,13 @@ impl Actor {
     /// Lean finished the document's current version: compute its final status
     /// from the final diagnostics of exactly that version and, when Lean
     /// reported no errors, the axiom audit of exactly that text.
-    fn finalize(&mut self, id: &DocumentId, tokens: Vec<TextRange>, audit: Option<audit::AuditOutcome>) {
+    fn finalize(
+        &mut self,
+        id: &DocumentId,
+        tokens: Vec<TextRange>,
+        audit: Option<audit::AuditOutcome>,
+        tripwire: Result<Vec<String>, String>,
+    ) {
         let Some(doc) = self.docs.get(id) else { return };
         let (Some(sync), Some(key)) = (&doc.sync, doc.key.clone()) else { return };
         let toolchain = self.toolchain_name(&key);
@@ -1235,7 +1326,7 @@ impl Actor {
         let mut classification = None;
         if errors == 0 {
             let audit = audit.unwrap_or_else(|| audit::AuditOutcome::Failed("the file was not audited".into()));
-            let c = Classification::new(&audit, &sync.text, &sync.index);
+            let c = Classification::new(&audit, &sync.text, &sync.index, &tripwire);
             // Declarations that depend on `sorry` without a warning (imported,
             // reached through another declaration, or warning suppressed).
             for d in &c.sorry_decls {
@@ -1327,7 +1418,14 @@ impl Actor {
                         warnings,
                     }
                 } else {
-                    LeanStatus::Checked { revision: version, toolchain, warnings, axioms: c.all_axioms }
+                    LeanStatus::Checked {
+                        revision: version,
+                        toolchain,
+                        warnings,
+                        axioms: c.all_axioms,
+                        declaration_count: c.checked.len() as u32,
+                        declarations: c.checked.into_iter().take(CHECKED_DECLARATIONS_SHOWN).collect(),
+                    }
                 }
             }
         };
@@ -1715,6 +1813,12 @@ impl Actor {
                     }
                 }
             }
+            Msg::Tripwire { generation, doc, version, result } => {
+                if let Some(work) = self.work_mut(&doc, generation, version) {
+                    work.tripwire = Some(result);
+                    self.try_finalize(&doc);
+                }
+            }
             Msg::SorryTokens { generation, doc, version, tokens } => {
                 if let Some(work) = self.work_mut(&doc, generation, version) {
                     work.tokens = Some(tokens);
@@ -2030,12 +2134,20 @@ struct Classification {
     nonstandard_axioms: Vec<String>,
     /// Every axiom used, sorted.
     all_axioms: Vec<String>,
+    /// What the audit verified: the kernel-checked declarations with their
+    /// statements (those written in the text first, in text order).
+    checked: Vec<CheckedDeclaration>,
     /// Declarations using anything beyond the standard axioms.
     axiom_uses: Vec<AxiomUse>,
 }
 
 impl Classification {
-    fn new(outcome: &audit::AuditOutcome, text: &str, index: &LineIndex) -> Self {
+    fn new(
+        outcome: &audit::AuditOutcome,
+        text: &str,
+        index: &LineIndex,
+        tripwire: &Result<Vec<String>, String>,
+    ) -> Self {
         use audit::AxiomKind;
         let mut c = Classification {
             unverified: None,
@@ -2047,7 +2159,27 @@ impl Classification {
             nonstandard_axioms: Vec::new(),
             all_axioms: Vec::new(),
             axiom_uses: Vec::new(),
+            checked: Vec::new(),
         };
+        match tripwire {
+            Ok(missing) if missing.is_empty() => {}
+            Ok(missing) => {
+                let names = missing.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+                c.unverified = Some(format!(
+                    "The file elaborates differently under the audit: Lean's language server reports {names} in \
+                     this file, but the audit's elaboration of the same text has no such declaration, so the \
+                     audit did not check what the editor shows."
+                ));
+                return c;
+            }
+            Err(e) => {
+                c.unverified = Some(format!(
+                    "The audit could not compare its declarations with the language server's ({e}), so this \
+                     result is not verified."
+                ));
+                return c;
+            }
+        }
         let decls = match outcome {
             audit::AuditOutcome::Complete(d) => d,
             audit::AuditOutcome::Stopped { decls, line } => {
@@ -2075,6 +2207,10 @@ impl Classification {
                      file contains or relies on declarations that were never checked by the kernel (for example \
                      ones added with `debug.skipKernelTC`): {message}"
                 ));
+                return c;
+            }
+            audit::AuditOutcome::Refused(reason) => {
+                c.unverified = Some(format!("The audit does not certify this file: {reason}."));
                 return c;
             }
             audit::AuditOutcome::Failed(reason) => {
@@ -2124,6 +2260,29 @@ impl Classification {
             .collect();
         c.all_axioms = all.into_iter().collect();
         c.nonstandard_axioms = nonstandard_all.into_iter().collect();
+        let mut checked: Vec<CheckedDeclaration> = decls
+            .iter()
+            .filter_map(|d| {
+                let (kind, statement) = (d.kind.clone()?, d.statement.clone()?);
+                let used = to_use(d, d.axioms.iter().map(audit::AxiomRef::display).collect());
+                Some(CheckedDeclaration {
+                    name: d.name.clone(),
+                    kind,
+                    statement,
+                    range: used.range,
+                    line: used.line,
+                    axioms: used.axioms,
+                })
+            })
+            .collect();
+        // Written declarations in text order, then generated ones by name.
+        checked.sort_by(|a, b| match (a.range, b.range) {
+            (Some(x), Some(y)) => x.start.cmp(&y.start),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.name.cmp(&b.name),
+        });
+        c.checked = checked;
         c
     }
 }

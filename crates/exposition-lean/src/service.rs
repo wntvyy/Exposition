@@ -203,6 +203,12 @@ enum Msg {
         version: u64,
         tokens: Vec<TextRange>,
     },
+    Tripwire {
+        generation: u64,
+        doc: DocumentId,
+        version: u64,
+        result: Result<Vec<String>, String>,
+    },
     Retry {
         key: ServerKey,
         generation: u64,

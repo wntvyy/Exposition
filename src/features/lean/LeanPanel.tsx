@@ -24,6 +24,7 @@ import {
 } from "../../ui/components";
 import { handleFor } from "../editor";
 import { requestWorkspaceTrust } from "../jobs/trust";
+import { CheckedDeclarations } from "./CheckedDeclarations";
 import { revealInEditor } from "./leanMonaco";
 import { statusSentence, statusView } from "./status";
 import { startLeanTracking, useLean } from "./store";
@@ -326,6 +327,10 @@ export function LeanPanel() {
             ))}
           </ul>
         </Section>
+      )}
+
+      {status.kind === "checked" && (
+        <CheckedDeclarations state={state} declarations={status.declarations} total={status.declarationCount} />
       )}
 
       {axiomUses.length > 0 && (

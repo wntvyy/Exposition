@@ -106,23 +106,27 @@ Incomplete (`sorry`), Checked with axioms, Relies on compiled code
 Not verified, Errors. Goals are shown as plain text; third-party infoview
 widgets are not executed. Toolchains are never downloaded implicitly.
 
-The verdict comes from an audit the checked file cannot steer. Exposition
-compiles exactly the checked text, then a separate Lean program that runs none
-of the file's code (no elaborators, macros, attributes, or `initialize` blocks,
-its own or its imports') reads the result as data, re-checks every project and
-dependency declaration it relies on with Lean's kernel (as lean4checker does),
-and lists the axioms from those declarations. A declaration added without the
-kernel, however the file did it, makes the file Not verified; a standard axiom
-counts only if it is the toolchain's own; the audit programs are pinned by
-hash, so a file that rewrites them gets Not verified. Limits: Checked
-describes the declarations Lean produced, and a file can redefine its own
-syntax so that its text reads differently; a trusted file's code runs with
-your account's privileges while it is compiled (as in the language server),
-and code that deliberately tampers with the Lean toolchain itself or with
-other processes is not contained.
-The audit programs are written for Lean 4.35's APIs; a toolchain they do not
-compile on reports Not verified. Re-checking large dependencies (such as
-Mathlib) with the kernel takes correspondingly long.
+What Checked certifies: the declarations listed under the status were
+re-checked by Lean's kernel in the audit's own elaboration of exactly that
+text, and they use only the axioms shown. The audit compiles the text, then a
+separate Lean program that runs none of the file's code reads the result as
+data, re-checks every project and dependency declaration it relies on with the
+kernel (as lean4checker does), lists the axioms, and prints each declaration's
+type with the toolchain's notation only. A declaration added without the
+kernel makes the file Not verified, as does a module that skips Lean's `Init`
+(`prelude`) or declares a constant the kernel evaluates by name; a standard
+axiom counts only if it is the toolchain's own.
+
+A Lean file is a program, and it also runs in the language server, so a file
+written to behave differently under the audit can make the audit check
+something other than what the editor shows. Exposition notices this only when
+the audit lacks a declaration the language server reports for the file (then
+Not verified); otherwise, the listed declarations are what was checked. A
+trusted file's code runs with your account's privileges, and code that
+tampers with the Lean toolchain itself is not contained. The audit programs
+target Lean 4.35 (another toolchain they do not compile on reports Not
+verified), and re-checking large dependencies such as Mathlib takes
+correspondingly long.
 
 ## Agents
 

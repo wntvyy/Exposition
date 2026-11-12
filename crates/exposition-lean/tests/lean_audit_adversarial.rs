@@ -369,8 +369,10 @@ axiom propext : Absurd
 theorem boom : Absurd := propext
 "##;
 
-/// Was DEFECT (pre-fix: `Checked`, axioms ["propext"]): a standard axiom must
-/// be the toolchain's own constant, not just one with the same name.
+/// A standard axiom must be the toolchain's own constant, not just one with
+/// the same name; and a module that does not import `Init` (`prelude`) is not
+/// certified at all (R-sec2 F2: such a module can also redefine the constants
+/// the kernel evaluates by name).
 #[tokio::test(flavor = "multi_thread")]
 async fn adversarial_axiom_named_like_a_standard_axiom() {
     if !lean_available() {
@@ -379,7 +381,40 @@ async fn adversarial_axiom_named_like_a_standard_axiom() {
     let h = harness("lean-basic", Options::default()).await;
     let r = report(&h, "LeanBasic/FakePropext.lean", FAKE_PROPEXT).await;
     h.lean.shutdown().await;
-    assert_axioms("FakePropext", &r, &["propext (declared outside the toolchain)"]);
+    assert!(!r.checked);
+    match &r.status {
+        LeanStatus::Unverified { reason, .. } => assert!(reason.contains("prelude"), "{reason}"),
+        other => panic!("FakePropext: expected Unverified, got {other:?}"),
+    }
+}
+
+/// A module that imports `Init` but declares a constant the kernel evaluates
+/// by name (here `Lean.reduceBool`, which this toolchain does not define).
+const KERNEL_SPECIAL_NAME: &str = r##"namespace Lean
+opaque reduceBool : Bool → Bool
+end Lean
+
+theorem uses_it : Lean.reduceBool true = Lean.reduceBool true := rfl
+"##;
+
+/// R-sec2 F2 rule: a non-toolchain declaration named like a constant Lean's
+/// kernel treats specially (built-in `Nat` arithmetic, literals, quotients,
+/// native reduction) is never certified, whatever its definition says.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversarial_declaration_named_like_a_kernel_special_constant() {
+    if !lean_available() {
+        return;
+    }
+    let h = harness("lean-basic", Options::default()).await;
+    let r = report(&h, "LeanBasic/KernelSpecialName.lean", KERNEL_SPECIAL_NAME).await;
+    h.lean.shutdown().await;
+    assert!(!r.checked);
+    match &r.status {
+        LeanStatus::Unverified { reason, .. } => {
+            assert!(reason.contains("`Lean.reduceBool`") && reason.contains("evaluates by name"), "{reason}")
+        }
+        other => panic!("KernelSpecialName: expected Unverified, got {other:?}"),
+    }
 }
 
 /// Ordinary Lean that the kernel replay must accept: structures, derived
@@ -493,8 +528,18 @@ async fn positive_statuses_survive_the_kernel_replay() {
             other => panic!("{name}: {other:?}"),
         }
     }
-    let LeanStatus::Checked { axioms, .. } = &legit.status else { unreachable!() };
+    let LeanStatus::Checked { axioms, declarations, declaration_count, .. } = &legit.status else { unreachable!() };
     assert_eq!(axioms, &["Classical.choice", "Quot.sound", "propext"]);
+    // What was verified is listed: written declarations first, in text order,
+    // with the statement the audit printed (no project notation involved).
+    assert!(*declaration_count as usize >= declarations.len());
+    let gauss = declarations.iter().find(|d| d.name == "Legit.two_mul_sumTo").expect("two_mul_sumTo listed");
+    assert_eq!(gauss.kind, "theorem");
+    assert_eq!(gauss.statement, "∀ (n : Nat), 2 * Legit.sumTo n = n * (n + 1)");
+    assert!(gauss.range.is_some() && gauss.axioms.contains(&"propext".to_owned()));
+    let written: Vec<_> = declarations.iter().take_while(|d| d.range.is_some()).collect();
+    assert!(written.windows(2).all(|w| w[0].range.unwrap().start <= w[1].range.unwrap().start));
+    assert!(declarations.iter().any(|d| d.range.is_none()), "generated declarations are listed too");
     assert!(matches!(sorry.status, LeanStatus::CheckedWithSorry { count: 1, .. }), "{:?}", sorry.status);
     assert_axioms("WithAxiom", &axiom, &["choice'"]);
     assert!(matches!(exit.status, LeanStatus::PartiallyChecked { line: Some(1), .. }), "{:?}", exit.status);

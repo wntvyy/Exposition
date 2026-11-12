@@ -9,8 +9,7 @@
 //! program: its elaborators, macros, attributes, and `initialize` blocks run
 //! while it (or a module importing it) is elaborated, and they can print
 //! anything. So after Lean reports a revision free of errors, the service
-//! audits exactly that text in two separate processes, and nothing the file
-//! controls decides the verdict:
+//! audits exactly that text in two separate processes:
 //!
 //! 1. **Compile** (`Compile.lean`, runs the file's code): elaborate the exact
 //!    text as a temporary module and write its `.olean`. Lean's frontend stops
@@ -24,19 +23,32 @@
 //!    imports only toolchain modules reads the compiled module and the
 //!    non-toolchain modules it imports as `.olean` data, without initializing
 //!    any of their environment extensions or running any of their
-//!    initializers, elaborators, or macros. It re-checks every non-toolchain
-//!    declaration the module depends on with Lean's kernel on top of the
-//!    toolchain's environment (`Lean.Kernel.Environment.replay`, as
-//!    lean4checker does), then collects the axioms of each declaration from
-//!    the replayed terms. An axiom counts as standard only when it is the
-//!    toolchain's own constant.
+//!    initializers, elaborators, or macros. It refuses a non-toolchain module
+//!    that does not import `Init` (`prelude`) or declares a constant the
+//!    kernel evaluates by name (built-in `Nat` arithmetic and the like), then
+//!    re-checks every non-toolchain declaration the module depends on with
+//!    Lean's kernel on top of the toolchain's environment
+//!    (`Lean.Kernel.Environment.replay`, as lean4checker does), collects the
+//!    axioms of each declaration from the replayed terms (standard only when
+//!    they are the toolchain's own constants), and prints each declaration's
+//!    type with the toolchain's notation (only the toolchain's extensions are
+//!    loaded). Those declarations are listed under a `Checked` status: they
+//!    are what the audit verified.
+//!
+//! The file's code also runs in the language server, so a file can elaborate
+//! differently under the audit (R-sec2 F1). The tripwire: names written after
+//! declaration keywords that the audit's elaboration lacks are looked up in
+//! the language server (`workspace/symbol`, from its own elaboration); any it
+//! reports for this file makes the result `Unverified`.
 //!
 //! Both programs are written by the application into its own directory and
-//! compiled once per toolchain and session, each in its own directory (only
-//! the compile program's is on step 1's `LEAN_PATH`). Their files are pinned
-//! by SHA-256 when compiled and verified before each step, after step 1's
-//! process tree has ended (job objects), so a file that rewrites them while it
-//! is compiled gets `Unverified` and the next audit compiles a fresh copy.
+//! compiled once per toolchain and session, before the first language server
+//! for that toolchain starts, each in its own directory (only the compile
+//! program's is on step 1's `LEAN_PATH`). Every file a run reads from those
+//! directories stays open with a share mode that denies writing, deleting,
+//! and renaming (also of the directories above them), is hashed through that
+//! handle, and is verified with the directories' entries before and after the
+//! steps; any change gives `Unverified` and a freshly compiled copy next time.
 //! Every job runs the toolchain's `lean` directly with the toolchain's library
 //! first on `LEAN_PATH` (a project cannot shadow `Init`/`Std`/`Lean`); the
 //! project's own module path comes from `lake env`. All jobs are supervised
@@ -45,15 +57,19 @@
 //! Lean finishes a version) runs only for imports Lean has already finished
 //! with, and one that fails is run again once Lean is done.
 //!
-//! Limits (see `docs/capabilities.md`): a `Checked` result certifies the
-//! environment Lean produced from the text, not how the text reads (a file can
-//! redefine its own syntax); the file's code runs with the user's privileges
-//! during step 1, so code that deliberately tampers with the toolchain or
-//! other processes outside Lean is not contained; and the audit programs use
-//! the Lean 4.35 APIs, so another toolchain whose APIs differ reports
-//! `Unverified` with the compiler's message.
+//! Limits (see `docs/capabilities.md`): `Checked` certifies the listed
+//! declarations as elaborated by the audit; a file that behaves differently
+//! under the audit without dropping a declaration the language server reports
+//! is not detected. The file's code runs with the user's privileges, so code
+//! that tampers with the Lean toolchain itself is not contained; share modes
+//! are Windows-only (elsewhere the programs are only re-hashed); and the audit
+//! programs use the Lean 4.35 APIs, so another toolchain whose APIs differ
+//! reports `Unverified` with the compiler's message.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -159,6 +175,10 @@ pub struct DeclAxioms {
     pub axioms: Vec<AxiomRef>,
     /// Zero-based (line, UTF-16 column) of the declaration name's start and end.
     pub range: Option<((u32, u32), (u32, u32))>,
+    /// `theorem`, `def`, ... (non-internal, kernel-checked declarations only).
+    pub kind: Option<String>,
+    /// The type as the check step printed it (same declarations as `kind`).
+    pub statement: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,6 +196,9 @@ pub enum AuditOutcome {
     /// Lean's kernel rejected a declaration the file depends on when the audit
     /// re-checked it: something was added without (or around) the kernel.
     KernelRejected(String),
+    /// The audit does not certify these foundations (a `prelude` module, or a
+    /// declaration named like a constant the kernel evaluates by name).
+    Refused(String),
     /// The audit could not run or its output was not trustworthy.
     Failed(String),
 }
@@ -197,24 +220,80 @@ pub struct Auditor {
     tools: Mutex<HashMap<PathBuf, Arc<OnceCell<Tools>>>>,
 }
 
-/// Compiled audit programs and the SHA-256 of every file a run reads. The
-/// two programs live in separate directories: only `compile` is on the
-/// `LEAN_PATH` of the step that runs the checked file's code.
+/// Compiled audit programs. Every file a run reads from their directories is
+/// held open for the lifetime of the service with a share mode that denies
+/// writing, deleting, and renaming (Windows; this also blocks renaming any
+/// directory above them), and hashed through that handle; the directories'
+/// entries are recorded too, so an added file (Lean also probes for
+/// `<module>.ir.sig`/`.ir`) is noticed. The two programs live in separate
+/// directories: only `compile` is on the `LEAN_PATH` of the step that runs the
+/// checked file's code.
 #[derive(Clone)]
 struct Tools {
     compile: PathBuf,
     check: PathBuf,
-    digests: Vec<(PathBuf, Vec<u8>)>,
+    pinned: Arc<Pinned>,
 }
 
-impl Tools {
-    /// The files are unchanged since they were compiled (a checked file's code
-    /// runs with the user's privileges and could otherwise replace them for
-    /// every later audit).
+struct Pinned {
+    files: Vec<(PathBuf, Vec<u8>, Mutex<File>)>,
+    /// Each program directory and the entry names it had when pinned.
+    dirs: Vec<(PathBuf, BTreeSet<OsString>)>,
+}
+
+/// Open `path` for reading so that, while the handle is held, nobody can
+/// write, delete, or rename it (Windows share mode: read only).
+fn open_pinned(path: &Path) -> std::io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        options.share_mode(FILE_SHARE_READ);
+    }
+    options.open(path)
+}
+
+/// SHA-256 of the whole file, read through `file`.
+fn digest_of(file: &mut File) -> std::io::Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(Sha256::digest(&bytes).to_vec())
+}
+
+fn entries(dir: &Path) -> std::io::Result<BTreeSet<OsString>> {
+    std::fs::read_dir(dir)?.map(|e| e.map(|e| e.file_name())).collect()
+}
+
+impl Pinned {
+    /// Pin `files` (and record the entries of their directories) as they are now.
+    fn pin(files: &[PathBuf]) -> Result<Pinned, String> {
+        let mut pinned = Vec::new();
+        let mut dirs: Vec<(PathBuf, BTreeSet<OsString>)> = Vec::new();
+        for path in files {
+            let fail = |e: std::io::Error| format!("could not pin {}: {e}", path.display());
+            let mut file = open_pinned(path).map_err(fail)?;
+            let digest = digest_of(&mut file).map_err(fail)?;
+            pinned.push((path.clone(), digest, Mutex::new(file)));
+            if let Some(dir) = path.parent()
+                && !dirs.iter().any(|(d, _)| d == dir)
+            {
+                dirs.push((dir.to_path_buf(), entries(dir).map_err(fail)?));
+            }
+        }
+        Ok(Pinned { files: pinned, dirs })
+    }
+
+    /// Unchanged since pinned: the same bytes through the held handles, and no
+    /// entry added to or removed from the programs' directories.
     fn intact(&self) -> bool {
-        self.digests
-            .iter()
-            .all(|(path, digest)| std::fs::read(path).is_ok_and(|b| Sha256::digest(&b).as_slice() == digest))
+        let files = self.files.iter().all(|(_, digest, file)| {
+            let mut file = file.lock().unwrap_or_else(|e| e.into_inner());
+            digest_of(&mut file).is_ok_and(|d| &d == digest)
+        });
+        files && self.dirs.iter().all(|(dir, names)| entries(dir).is_ok_and(|now| &now == names))
     }
 }
 
@@ -339,8 +418,15 @@ impl Auditor {
             }
             Ran::Failed(e) => Err(e),
         };
+        // Nothing was added next to the programs while the check step ran.
+        if !self.verify_tools(request.toolchain) {
+            return AuditOutcome::Failed(
+                "the audit programs were modified; they are compiled again for the next check".into(),
+            );
+        }
         match checked {
             Ok(CheckResult::KernelRejected(message)) => AuditOutcome::KernelRejected(message),
+            Ok(CheckResult::Refused(message)) => AuditOutcome::Refused(message),
             Ok(CheckResult::Decls(decls)) => {
                 let decls = combine(decls, &compiled.ranges, &module);
                 if compiled.complete {
@@ -369,20 +455,29 @@ impl Auditor {
         cell.get_or_try_init(|| compile_tools(exec, project, toolchain, dir)).await.cloned()
     }
 
-    /// Check the programs' digests; on a mismatch forget them, so the next
+    /// Check the pinned programs; when they changed, forget them, so the next
     /// audit compiles a fresh copy.
     fn verify_tools(&self, toolchain: &ResolvedToolchain) -> bool {
         let mut tools = self.tools.lock().unwrap_or_else(|e| e.into_inner());
-        let intact = tools.get(&toolchain.lean).and_then(|cell| cell.get()).is_some_and(Tools::intact);
+        let intact = tools.get(&toolchain.lean).and_then(|cell| cell.get()).is_some_and(|t| t.pinned.intact());
         if !intact {
             tools.remove(&toolchain.lean);
         }
         intact
     }
+
+    /// Compile (and pin) the programs for `toolchain` now, before any of the
+    /// project's code runs in a language server for it. Errors are not kept:
+    /// the next audit tries again.
+    pub async fn prepare(&self, exec: &ExecutionService, project: &LeanProject, toolchain: &ResolvedToolchain) {
+        let _ = self.tools(exec, project, toolchain).await;
+    }
 }
 
 impl Drop for Auditor {
     fn drop(&mut self) {
+        // Release the pinned handles before removing the directory.
+        self.tools.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let _ = std::fs::remove_dir_all(self.dir.join(format!("tools-{}", self.session)));
     }
 }
@@ -398,7 +493,7 @@ async fn compile_tools(
     let lib = toolchain_lib(toolchain);
     let lean_path = lean_path(&lib, &[], &[])?;
     let mut specs = Vec::new();
-    let mut digested = Vec::new();
+    let mut pinned = Vec::new();
     for (name, source) in [("Compile", COMPILE_SOURCE), ("Check", CHECK_SOURCE)] {
         let root = dir.join(name.to_lowercase());
         let package = root.join(TOOL_PACKAGE);
@@ -424,7 +519,7 @@ async fn compile_tools(
         );
         spec.timeout_ms = Some(TOOLS_TIMEOUT_MS);
         specs.push(spec);
-        digested.extend([stub, olean]);
+        pinned.extend([stub, olean]);
     }
     // Not cancelable by one audit: other audits may be waiting for the same programs.
     let (_never, mut never_a) = watch::channel(false);
@@ -437,12 +532,8 @@ async fn compile_tools(
             return Err(e);
         }
     }
-    let mut digests = Vec::new();
-    for path in digested {
-        let bytes = std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
-        digests.push((path, Sha256::digest(&bytes).to_vec()));
-    }
-    Ok(Tools { compile: dir.join("compile"), check: dir.join("check"), digests })
+    let pinned = Pinned::pin(&pinned)?;
+    Ok(Tools { compile: dir.join("compile"), check: dir.join("check"), pinned: Arc::new(pinned) })
 }
 
 /// `<toolchain>/lib/lean`: the toolchain's own module library.
@@ -618,12 +709,15 @@ pub struct CheckedDecl {
     /// Sent to the kernel (unsafe and partial declarations are not).
     pub replayed: bool,
     pub axioms: Vec<AxiomRef>,
+    pub kind: Option<String>,
+    pub statement: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CheckResult {
     Decls(Vec<CheckedDecl>),
     KernelRejected(String),
+    Refused(String),
 }
 
 /// Parse step 2's stdout: `<tag> <json>` lines, the first with the kernel
@@ -640,6 +734,11 @@ pub fn parse_check_output(stdout: &str, tag: &str) -> Result<CheckResult, String
     };
     if let Some(error) = first.get("error").and_then(Value::as_str) {
         return Err(error.chars().take(300).collect());
+    }
+    if let Some(refused) = first.get("refused").and_then(Value::as_str)
+        && last.get("end").and_then(Value::as_bool) == Some(true)
+    {
+        return Ok(CheckResult::Refused(refused.chars().take(1000).collect()));
     }
     if last.get("end").and_then(Value::as_bool) != Some(true) || lines.len() < 2 {
         return Err("the audit output was incomplete".into());
@@ -670,6 +769,8 @@ pub fn parse_check_output(stdout: &str, tag: &str) -> Result<CheckResult, String
             internal: v.get("i").and_then(Value::as_bool).unwrap_or(false),
             replayed: v.get("k").and_then(Value::as_bool).unwrap_or(false),
             axioms,
+            kind: v.get("kd").and_then(Value::as_str).map(str::to_owned),
+            statement: v.get("ty").and_then(Value::as_str).map(str::to_owned),
         });
     }
     Ok(CheckResult::Decls(decls))
@@ -688,7 +789,7 @@ fn combine(decls: Vec<CheckedDecl>, ranges: &HashMap<String, Range>, module: &st
                 .strip_prefix(&private_prefix)
                 .and_then(|rest| rest.split_once('.').map(|(_, n)| n.to_owned()))
                 .unwrap_or(d.name);
-            DeclAxioms { name, internal: d.internal, axioms: d.axioms, range }
+            DeclAxioms { name, internal: d.internal, axioms: d.axioms, range, kind: d.kind, statement: d.statement }
         })
         .collect()
 }
@@ -710,6 +811,81 @@ pub fn imports_key(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Keywords that introduce a named declaration.
+const DECLARATION_KEYWORDS: &[&str] =
+    &["theorem", "lemma", "def", "abbrev", "axiom", "opaque", "instance", "structure", "class", "inductive"];
+
+/// Names written after a declaration keyword anywhere in `text` (comments and
+/// string literals skipped), as written (possibly partly qualified). The
+/// tripwire asks Lean's language server about those the audit did not see.
+pub fn declared_names(text: &str) -> Vec<String> {
+    let is_id = |c: char| {
+        c.is_alphanumeric() || matches!(c, '_' | '\'' | '!' | '?' | '.' | '«' | '»') || ('₀'..='₉').contains(&c)
+    };
+    let is_id_start = |c: char| c.is_alphabetic() || c == '_' || c == '«';
+    let chars: Vec<char> = text.chars().collect();
+    let mut code = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let (c, next) = (chars[i], chars.get(i + 1).copied());
+        if c == '-' && next == Some('-') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && next == Some('-') {
+            let mut depth = 0;
+            while i < chars.len() {
+                if chars[i] == '/' && chars.get(i + 1) == Some(&'-') {
+                    depth += 1;
+                    i += 2;
+                } else if chars[i] == '-' && chars.get(i + 1) == Some(&'/') {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            code.push(' ');
+        } else if c == '"' {
+            i += 1;
+            while i < chars.len() && chars[i] != '"' {
+                i += if chars[i] == '\\' { 2 } else { 1 };
+            }
+            i += 1;
+            code.push(' ');
+        } else {
+            code.push(c);
+            i += 1;
+        }
+    }
+    // Each word with what follows it; a name must come right after the keyword
+    // (only whitespace between: `instance : C` declares no name).
+    let mut names: Vec<String> = Vec::new();
+    let mut rest = code.as_str();
+    while let Some(start) = rest.find(is_id) {
+        let after = &rest[start..];
+        let end = after.find(|c: char| !is_id(c)).unwrap_or(after.len());
+        let (word, tail) = after.split_at(end);
+        rest = tail;
+        if !DECLARATION_KEYWORDS.contains(&word) {
+            continue;
+        }
+        let next = tail.trim_start();
+        let name = &next[..next.find(|c: char| !is_id(c)).unwrap_or(next.len())];
+        let name = name.trim_end_matches('.');
+        if name.chars().next().is_some_and(is_id_start)
+            && !DECLARATION_KEYWORDS.contains(&name)
+            && !names.iter().any(|n| n == name)
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names
 }
 
 /// A fresh random hex token (run ids and secrets), unpredictable to the
@@ -824,6 +1000,68 @@ mod tests {
         assert_eq!(imports_key(a), imports_key(&a.replace("trivial", "by trivial")));
         assert_ne!(imports_key(a), imports_key(&a.replace("A.B", "A.D")));
         assert_eq!(imports_key("public theorem x : True := trivial\n"), "");
+    }
+
+    /// R-sec2 F3: the programs are hashed through handles that stay open, and
+    /// while they are open nobody can write, replace (rename over), delete, or
+    /// move them or any directory above them; an added file is noticed.
+    #[test]
+    fn pinned_programs_cannot_be_replaced_while_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let check = tmp.path().join("tools").join("key").join("check");
+        let package = check.join(TOOL_PACKAGE);
+        std::fs::create_dir_all(&package).unwrap();
+        let stub = check.join("RunCheck.lean");
+        let olean = package.join("Check.olean");
+        std::fs::write(&stub, "import ExpositionAuditTool.Check\n").unwrap();
+        std::fs::write(&olean, b"genuine program").unwrap();
+        let pinned = Pinned::pin(&[stub.clone(), olean.clone()]).unwrap();
+        assert!(pinned.intact());
+        // Readers (lean) can still open the files.
+        assert_eq!(std::fs::read(&olean).unwrap(), b"genuine program");
+        if cfg!(windows) {
+            let fake = check.join("RunCheck.tmp");
+            std::fs::write(&fake, "def main : IO Unit := pure ()\n").unwrap();
+            assert!(std::fs::write(&stub, "fake").is_err(), "writing a pinned file");
+            assert!(std::fs::rename(&fake, &stub).is_err(), "renaming over a pinned file");
+            assert!(std::fs::remove_file(&olean).is_err(), "deleting a pinned file");
+            assert!(std::fs::rename(&check, check.with_extension("old")).is_err(), "moving its directory");
+            assert!(
+                std::fs::rename(tmp.path().join("tools"), tmp.path().join("tools.old")).is_err(),
+                "moving an ancestor"
+            );
+            std::fs::remove_file(&fake).unwrap();
+            assert!(pinned.intact(), "nothing changed");
+        }
+        // A file Lean would also read next to the program (`<module>.ir.sig`).
+        std::fs::write(package.join("Check.ir.sig"), b"x").unwrap();
+        assert!(!pinned.intact(), "an added file is noticed");
+        std::fs::remove_file(package.join("Check.ir.sig")).unwrap();
+        assert!(pinned.intact());
+        drop(pinned);
+        // Released: now the file can change, and a new pin sees the change.
+        std::fs::write(&olean, b"replaced").unwrap();
+        let again = Pinned::pin(std::slice::from_ref(&olean)).unwrap();
+        assert!(again.intact());
+    }
+
+    #[test]
+    fn declared_names_skip_comments_and_strings() {
+        let text = "import Lean\n/- theorem inComment : True := trivial\n  /- nested -/ def stillComment := 1 -/\n\
+                    -- axiom lineComment : False\n\
+                    hide_from_audit axiom cheat : False\n\
+                    @[simp] private theorem Foo.one_eq_two : (1 : Nat) = 2 := cheat.elim\n\
+                    instance : Inhabited Nat := ⟨0⟩\ninstance instFoo : Inhabited Bool := ⟨true⟩\n\
+                    #eval \"def inString := 1\"\nstructure Point where\n  x : Nat\n";
+        assert_eq!(declared_names(text), vec!["cheat", "Foo.one_eq_two", "instFoo", "Point"]);
+    }
+
+    #[test]
+    fn a_refusal_is_reported_as_such() {
+        let out = "t {\"refused\":\"`X` does not import Lean's `Init`\"}\nt {\"end\":true}";
+        assert!(matches!(parse_check_output(out, "t"), Ok(CheckResult::Refused(m)) if m.contains("Init")));
+        // Without its end marker it is incomplete output, not a verdict.
+        assert!(parse_check_output("t {\"refused\":\"x\"}", "t").is_err());
     }
 
     #[test]
