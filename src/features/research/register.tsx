@@ -52,7 +52,7 @@ const hasSession = () => Boolean(userSession());
 
 registry.registerCommand({
   id: "research.show",
-  title: "Show Research",
+  title: "Show Research Panel",
   category: "Research",
   run: show,
 });

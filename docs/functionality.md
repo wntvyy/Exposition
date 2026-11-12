@@ -177,13 +177,14 @@ Default timeouts: info 6 s, success 5 s, warning 10 s, danger sticky; same id re
 | Lean: Go to Definition | `lean.goToDefinition` | — | same |
 | Lean: Trust Workspace to Check Lean | `lean.trustWorkspace` | — | active Lean file is Untrusted |
 | Lean: Install Project Toolchain | `lean.installToolchain` | — | toolchain missing and installable |
-| Research: Show Research | `research.show` | — | always |
+| Research: Show Research Panel | `research.show` | — | always |
 | Research: Run Selection in Research Session | `research.runSelection` | — | always (editor selection, else panel selection, else "Nothing selected") |
 | Research: Run File in Research Session | `research.runFile` | — | always (runs only `.py`/`.ipy`/`.r`/`.jl`, else "No script is active") |
 | Research: Interrupt Research Kernel | `research.interrupt` | — | some session is busy |
 | Research: Restart Research Kernel | `research.restart` | — | a user session exists |
 | Research: Stop Research Session | `research.stop` | — | a user session exists |
 | Research: Re-check Python, R, and Julia Environments | `research.refreshEnvironments` | — | always |
+| Research: Enable Research for This Project | `research.enable` | — | a folder is open (creates the research space; runs nothing) |
 | Agent: New Agent Task | `agents.newTask` | — | always |
 | Agent: Show Agent Tasks | `agents.showTasks` | — | always |
 | Agent: Open Pending Agent Approval | `agents.openApproval` | — | a task is waiting for approval (opens the first; focuses its card) |

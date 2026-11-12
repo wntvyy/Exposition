@@ -137,7 +137,7 @@ export default async function researchIsolation({ launchApp, artifactsDir, fixtu
     // ---- Switch to untrusted B: A's session must not run B's code ---------
     await invoke(page, "workspace_open", { path: rootB });
     await page.locator('[data-testid="file-tree"] [data-path="paper.typ"]').waitFor({ timeout: 15_000 });
-    await runCommand(page, "Show Research", /Show Research/);
+    await runCommand(page, "Show Research Panel", /Show Research Panel/);
     await page.getByTestId("research-panel").waitFor({ timeout: 15_000 });
     await openInEditor(page, "analysis/plot.py");
     await runCommand(page, "Run File in Research", /Run File in Research Session/);

@@ -120,7 +120,7 @@ export default async function researchPython({ launchApp, artifactsDir, fixture,
     });
     assert.equal(refused.error?.code, "research.notTrusted", "kernels are refused in an untrusted workspace");
 
-    await runCommand(page, "Show Research", /Show Research/);
+    await runCommand(page, "Show Research Panel", /Show Research Panel/);
     const panel = page.getByTestId("research-panel");
     await panel.waitFor({ timeout: 15_000 });
     // Give the panel room for output (keyboard resize, 5% per step) and hide the auxiliary region.

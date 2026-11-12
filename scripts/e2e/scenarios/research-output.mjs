@@ -51,7 +51,7 @@ export default async function researchOutput({ launchApp, artifactsDir, fixture,
     await page.locator('[data-testid="file-tree"] [data-path="paper.typ"]').waitFor({ timeout: 15_000 });
     const ws = await invoke(page, "research_workspace");
     await invoke(page, "trust_grant", { root: ws.root });
-    await runCommand(page, "Show Research", /Show Research/);
+    await runCommand(page, "Show Research Panel", /Show Research Panel/);
     await page.getByTestId("research-panel").waitFor({ timeout: 15_000 });
     const report = await invoke(page, "research_environments", { refresh: true });
     const python = report.runtimes.find((r) => r.language === "python" && r.availability.kind === "available");

@@ -139,7 +139,7 @@ export default async function trustPropagation({ launchApp, artifactsDir, assert
     // ---- 1: untrusted everywhere ------------------------------------------
     const opened = await invoke(page, "workspace_open", { path: root });
     await page.locator('[data-testid="file-tree"] [data-path="main.typ"]').waitFor({ timeout: 15_000 });
-    await runCommand(page, "Show Research", /Show Research/);
+    await runCommand(page, "Show Research Panel", /Show Research Panel/);
     await researchBanner().waitFor({ timeout: 15_000 });
     await runCommand(page, "show lean infoview", /Show Lean Infoview/);
     const leanId = await openInEditor(page, LEMMA);
@@ -171,7 +171,7 @@ export default async function trustPropagation({ launchApp, artifactsDir, assert
     await openInEditor(page, LEMMA);
     await waitFor(async () => (await leanStatus()) !== "untrusted", { timeout: FOLLOW, message: "Lean infoview leaves Untrusted after a grant in the page view" });
     // Research banner.
-    await runCommand(page, "Show Research", /Show Research/);
+    await runCommand(page, "Show Research Panel", /Show Research Panel/);
     await researchBanner().waitFor({ state: "detached", timeout: FOLLOW });
     // The page view built.
     await openFromTree(page, SUPPLEMENT);
@@ -182,7 +182,7 @@ export default async function trustPropagation({ launchApp, artifactsDir, assert
     await shot("02-trusted");
 
     // ---- 3: research session runs code -------------------------------------
-    await runCommand(page, "Show Research", /Show Research/);
+    await runCommand(page, "Show Research Panel", /Show Research Panel/);
     await page.getByRole("button", { name: "Start session" }).click();
     await page.locator('[data-testid="research-session-status"][data-state="idle"]').waitFor({ timeout: KERNEL_TIMEOUT });
     const code = page.getByTestId("research-code");
@@ -293,7 +293,7 @@ export default async function trustPropagation({ launchApp, artifactsDir, assert
     await runCommand(page, "show lean infoview", /Show Lean Infoview/);
     await openInEditor(page, LEMMA);
     await waitFor(async () => (await leanStatus()) === "untrusted", { timeout: FOLLOW, message: "Lean infoview shows Untrusted after the revoke" });
-    await runCommand(page, "Show Research", /Show Research/);
+    await runCommand(page, "Show Research Panel", /Show Research Panel/);
     await researchBanner().waitFor({ timeout: FOLLOW });
     // The panel shows the session detached because trust was revoked (the
     // message names what the panel and the service each show if it does not).
@@ -335,7 +335,7 @@ export default async function trustPropagation({ launchApp, artifactsDir, assert
     await trustPrompt.getByRole("button", { name: "Trust workspace", exact: true }).click();
     await trustPrompt.waitFor({ state: "detached" });
     await waitFor(async () => (await leanStatus()) !== "untrusted", { timeout: FOLLOW, message: "Lean leaves Untrusted" });
-    await runCommand(page, "Show Research", /Show Research/);
+    await runCommand(page, "Show Research Panel", /Show Research Panel/);
     await researchBanner().waitFor({ state: "detached", timeout: FOLLOW });
     await openFromTree(page, SUPPLEMENT);
     await pageEditor.waitFor({ timeout: 10_000 });
