@@ -14,6 +14,7 @@ import { Mathematics } from "./Mathematics";
 import { useGraphPage, type GraphSection } from "./navigation";
 import { ProjectGraph } from "./ProjectGraph";
 import { FreshnessPill } from "./status";
+import "./graph.css";
 import { canRead, graph, useGraph } from "./store";
 import { createViewStore } from "./viewStore";
 
