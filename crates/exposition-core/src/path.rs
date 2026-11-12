@@ -29,8 +29,41 @@ pub enum PathError {
 
 /// Windows reserved device names (case-insensitive, with or without extension).
 const RESERVED: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
-    "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+    // Also treated as devices by Windows: port 0, superscript digits, and the
+    // console streams.
+    "COM0",
+    "LPT0",
+    "COM\u{b9}",
+    "COM\u{b2}",
+    "COM\u{b3}",
+    "LPT\u{b9}",
+    "LPT\u{b2}",
+    "LPT\u{b3}",
+    "CONIN$",
+    "CONOUT$",
+    "CLOCK$",
 ];
 
 impl WorkspacePath {
@@ -114,7 +147,8 @@ fn validate_component(part: &str) -> Result<(), ()> {
     if part.ends_with('.') || part.ends_with(' ') {
         return Err(());
     }
-    let stem = part.split('.').next().unwrap_or(part).to_ascii_uppercase();
+    // Windows ignores trailing spaces before the extension (`nul .txt`).
+    let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ').to_uppercase();
     if RESERVED.contains(&stem.as_str()) {
         return Err(());
     }
@@ -149,6 +183,13 @@ mod tests {
             r"\\server\share",
             "a/con.txt",
             "a/NUL",
+            "COM\u{b9}",
+            "LPT\u{b2}.tex",
+            "COM0",
+            "LPT0.txt",
+            "CONIN$",
+            "conout$.log",
+            "nul .txt",
             "a/b?.tex",
             "trailing.",
             "a/space ",

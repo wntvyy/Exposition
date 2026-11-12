@@ -6,6 +6,7 @@ use exposition_agents::tools::execution::ExecutionToolServices;
 use exposition_agents::{AgentConfig, AgentService};
 use exposition_core::path::WorkspacePath;
 use exposition_execution::{ExecutionConfig, ExecutionService};
+use exposition_lean::{LeanConfig, LeanService};
 use exposition_research::launcher::ExecutionLauncher;
 use exposition_research::{ResearchConfig, ResearchService, ResolvedSource, SourceReader};
 use exposition_tex::{TexService, TexServiceConfig};
@@ -22,6 +23,8 @@ pub struct AppState {
     pub workspace: Arc<WorkspaceService>,
     /// Supervised process execution (jobs, toolchains, trust).
     pub execution: ExecutionService,
+    /// Lean language servers and per-revision checking status.
+    pub lean: LeanService,
     /// Research sessions, runs, and provenance (M4). Launches through `execution`.
     pub research: Arc<ResearchService>,
     /// LaTeX/LuaLaTeX builds (through `execution`) and their pages.
@@ -47,6 +50,8 @@ impl AppState {
         }
         let execution = ExecutionService::with_config(execution_config)?;
         let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
+        let (lean, lean_actor) = LeanService::new(execution.clone(), Arc::clone(&workspace), LeanConfig::default());
+        tauri::async_runtime::spawn(lean_actor);
         let tex = TexService::new(
             execution.clone(),
             Arc::clone(&workspace),
@@ -80,7 +85,7 @@ impl AppState {
         );
         research_config.source_reader = Some(Arc::new(WorkspaceSources(Arc::clone(&workspace))));
         let research = Arc::new(ResearchService::new(research_config));
-        Ok(Self { documents, workspace, execution, research, tex, typesetting, data_dir, agents })
+        Ok(Self { documents, workspace, execution, lean, research, tex, typesetting, data_dir, agents })
     }
 }
 
