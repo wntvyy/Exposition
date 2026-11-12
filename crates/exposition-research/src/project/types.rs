@@ -422,3 +422,30 @@ pub struct PromotionsState {
     pub unresolved: Vec<OperationRecord>,
     pub tracked: Vec<TrackedAttachment>,
 }
+
+/// An attachment another service inserted through the format-owned path
+/// (e.g. the agent `insert_artifact` tool), to be recorded in the graph.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentNotice {
+    pub run_id: String,
+    pub artifact_id: String,
+    pub document: DocumentId,
+    pub attachment_key: String,
+    /// The document transaction that inserted it, when known.
+    pub transaction: Option<String>,
+    /// Document revision after the insertion.
+    pub revision: u64,
+    /// Who inserted it, for the journal (e.g. `agent task task-…`).
+    pub actor: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentRecorded {
+    pub operation: OperationId,
+    pub path: WorkspacePath,
+    pub graph: PromotionGraphState,
+}

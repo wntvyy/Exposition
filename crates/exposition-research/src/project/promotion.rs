@@ -35,8 +35,8 @@ use exposition_graph::{
 };
 
 use super::types::{
-    PreviewEdit, PromotionGraphState, PromotionOutcome, PromotionPreview, PromotionRequest, PromotionsState,
-    ReconcileOutcome, RetainState, TrackedAttachment,
+    AttachmentNotice, AttachmentRecorded, PreviewEdit, PromotionGraphState, PromotionOutcome, PromotionPreview,
+    PromotionRequest, PromotionsState, ReconcileOutcome, RetainState, TrackedAttachment,
 };
 use super::{ResearchProject, now_ms, origin};
 use crate::error::ResearchError;
@@ -382,46 +382,16 @@ impl ResearchProject {
             true,
             None,
         );
-        let graph = match self.record_promotion_graph(&manifest, &artifact, &path, &plan.attachment_key) {
-            Ok((graph_revision, manuscript, artifact_entity, relation)) => {
-                let _ = journal.record_step(
-                    &root,
-                    &op,
-                    "graph",
-                    refs(&[
-                        ("graphRevision", graph_revision.to_string()),
-                        ("manuscript", manuscript.to_string()),
-                        ("artifact", artifact_entity.to_string()),
-                        ("relation", relation.as_ref().map(|r| r.to_string()).unwrap_or_default()),
-                    ]),
-                    true,
-                    None,
-                );
-                let _ = journal.complete(&root, &op);
-                self.track(
-                    &root,
-                    TrackedAttachment {
-                        operation: op.clone(),
-                        path: path.clone(),
-                        attachment_key: plan.attachment_key.clone(),
-                        manuscript: manuscript.clone(),
-                        artifact: artifact_entity.clone(),
-                        present: true,
-                    },
-                    format,
-                );
-                PromotionGraphState::Recorded { graph_revision, manuscript, artifact: artifact_entity, relation }
-            }
-            Err(e) => {
-                let reason = format!(
-                    "The attachment was inserted into {path} (revision {}), but the project graph was not updated: {e}",
-                    applied.revision
-                );
-                let _ = journal.record_step(&root, &op, "graph", BTreeMap::new(), false, Some(e.to_string()));
-                let _ = journal.needs_reconciliation(&root, &op, &reason);
-                PromotionGraphState::PendingReconciliation { reason }
-            }
-        };
+        let graph = self.finish_attachment(
+            &root,
+            &op,
+            &manifest,
+            &artifact,
+            &path,
+            format,
+            &plan.attachment_key,
+            applied.revision,
+        );
         Ok(PromotionOutcome {
             operation: op,
             document: pending.request.document.clone(),
@@ -433,6 +403,148 @@ impl ResearchProject {
             warnings: plan.warnings,
             graph,
         })
+    }
+
+    /// The graph step of an applied attachment: record it (and follow it for
+    /// undo/redo) or leave a pending-reconciliation record in the journal.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_attachment(
+        &self,
+        root: &std::path::Path,
+        op: &OperationId,
+        manifest: &RunManifest,
+        artifact: &ArtifactRecord,
+        path: &WorkspacePath,
+        format: Format,
+        key: &str,
+        revision: u64,
+    ) -> PromotionGraphState {
+        let journal = self.graph.journal();
+        match self.record_promotion_graph(manifest, artifact, path, key) {
+            Ok((graph_revision, manuscript, artifact_entity, relation)) => {
+                let _ = journal.record_step(
+                    root,
+                    op,
+                    "graph",
+                    refs(&[
+                        ("graphRevision", graph_revision.to_string()),
+                        ("manuscript", manuscript.to_string()),
+                        ("artifact", artifact_entity.to_string()),
+                        ("relation", relation.as_ref().map(|r| r.to_string()).unwrap_or_default()),
+                    ]),
+                    true,
+                    None,
+                );
+                let _ = journal.complete(root, op);
+                self.track(
+                    root,
+                    TrackedAttachment {
+                        operation: op.clone(),
+                        path: path.clone(),
+                        attachment_key: key.to_owned(),
+                        manuscript: manuscript.clone(),
+                        artifact: artifact_entity.clone(),
+                        present: true,
+                    },
+                    format,
+                );
+                PromotionGraphState::Recorded { graph_revision, manuscript, artifact: artifact_entity, relation }
+            }
+            Err(e) => {
+                let reason = format!(
+                    "The attachment was inserted into {path} (revision {revision}), but the project graph was not updated: {e}"
+                );
+                let _ = journal.record_step(root, op, "graph", BTreeMap::new(), false, Some(e.to_string()));
+                let _ = journal.needs_reconciliation(root, op, &reason);
+                PromotionGraphState::PendingReconciliation { reason }
+            }
+        }
+    }
+
+    /// Record an attachment another service already inserted through the
+    /// format-owned attachment path (the agent `insert_artifact` tool, after
+    /// its own review): the artifact is retained (one resource identity,
+    /// computational evidence, provenance), `manuscript usesAsset artifact` is
+    /// recorded, the operation is journaled like a promotion, and the
+    /// attachment is followed through undo/redo. The document is never
+    /// changed here; the attachment's markers must be in its current text.
+    /// A failed graph write leaves a pending-reconciliation record.
+    pub fn record_external_attachment(&self, notice: &AttachmentNotice) -> Result<AttachmentRecorded, ResearchError> {
+        let root = self.root()?;
+        let (manifest, artifact) = self.verified_artifact(&notice.run_id, &notice.artifact_id)?;
+        let snapshot = self
+            .documents
+            .snapshot(&notice.document)
+            .map_err(|e| ResearchError::coded("promotion.document", e.to_string()))?;
+        let path = snapshot
+            .path
+            .clone()
+            .ok_or_else(|| ResearchError::coded("attach.unsupportedFormat", "The document is not a project file."))?;
+        let format = Format::from_path(&path).ok_or_else(|| {
+            ResearchError::coded("attach.unsupportedFormat", "documents of this type do not support attachments")
+        })?;
+        if !attachment_present(format, &snapshot.text, &notice.attachment_key) {
+            return Err(ResearchError::coded(
+                "promotion.notAttached",
+                format!("The attachment {} is not in {path}; nothing was recorded.", notice.attachment_key),
+            ));
+        }
+        let journal = self.graph.journal();
+        let artifact_path = artifact.path.clone().expect("project artifact");
+        let record = journal
+            .begin(
+                OperationKind::Promotion,
+                &root,
+                self.journal_project(),
+                &format!("{}: insert {} into {}", notice.actor, artifact_path.file_name(), path),
+                vec!["attach".into(), "graph".into()],
+            )
+            .map_err(|e| {
+                ResearchError::coded("promotion.journal", format!("The operation could not be recorded ({e})."))
+            })?;
+        let op = record.id.clone();
+        let _ = journal.record_step(
+            &root,
+            &op,
+            "prepared",
+            refs(&[
+                ("document", notice.document.0.clone()),
+                ("path", path.to_string()),
+                ("format", format_name(format).into()),
+                ("revision", notice.revision.to_string()),
+                ("attachmentKey", notice.attachment_key.clone()),
+                ("runId", notice.run_id.clone()),
+                ("artifactId", notice.artifact_id.clone()),
+                ("artifactPath", artifact_path.to_string()),
+                ("artifactHash", artifact.content_hash.clone()),
+                ("actor", notice.actor.clone()),
+            ]),
+            true,
+            None,
+        );
+        let _ = journal.record_step(
+            &root,
+            &op,
+            "attach",
+            refs(&[
+                ("transaction", notice.transaction.clone().unwrap_or_default()),
+                ("revision", notice.revision.to_string()),
+                ("attachmentKey", notice.attachment_key.clone()),
+            ]),
+            true,
+            None,
+        );
+        let graph = self.finish_attachment(
+            &root,
+            &op,
+            &manifest,
+            &artifact,
+            &path,
+            format,
+            &notice.attachment_key,
+            notice.revision,
+        );
+        Ok(AttachmentRecorded { operation: op, path, graph })
     }
 
     /// Retain the artifact and record `manuscript usesAsset artifact`.

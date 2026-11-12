@@ -603,3 +603,50 @@ fn marker_detection_matches_the_format_adapters() {
         "fig-3"
     ));
 }
+
+#[test]
+fn an_attachment_inserted_elsewhere_is_recorded_and_followed() {
+    // The agent `insert_artifact` tool inserts through the format-owned
+    // attachment service; research then records the use in the graph.
+    let f = fixture();
+    let manifest = record_run(&f.root, "run-h1", vec![script_input()], vec![]);
+    let doc = open(&f, "paper.typ");
+    let snapshot = f.documents.snapshot(&doc).unwrap();
+    let artifact = manifest.record.outputs[0].clone();
+    let request = exposition_core::artifact::AttachArtifactRequest {
+        document: doc.clone(),
+        base_revision: snapshot.revision,
+        artifact,
+        run: Some(RunId("run-h1".into())),
+        placement: AttachmentPlacement::Insert { offset: snapshot.text.encode_utf16().count() as u32 },
+        caption: Some("Agent figure".into()),
+        attachment_key: None,
+        origin: EditOrigin::Agent { task_id: "task-1".into() },
+    };
+    let (outcome, _) = exposition_attach::attach_artifact(&f.documents, &f.root, &request).unwrap();
+    let notice = AttachmentNotice {
+        run_id: "run-h1".into(),
+        artifact_id: "run-h1/output-1.png".into(),
+        document: doc.clone(),
+        attachment_key: outcome.attachment_key.clone(),
+        transaction: None,
+        revision: outcome.revision,
+        actor: "agent task task-1".into(),
+    };
+    let recorded = f.project.record_external_attachment(&notice).unwrap();
+    let PromotionGraphState::Recorded { manuscript, artifact, .. } = &recorded.graph else {
+        panic!("{:?}", recorded.graph)
+    };
+    assert!(relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact));
+    let entity = f.graph.resource(&path(".exposition/artifacts/run-h1/output-1.png")).unwrap().unwrap();
+    assert_eq!(&entity.id, artifact, "one identity for the attached artifact");
+    assert_eq!(f.graph.journal().get(&f.root, &recorded.operation).unwrap().state, OperationState::Completed);
+    // Followed through undo like a reviewed promotion.
+    f.documents.undo(&doc, EditOrigin::Source).unwrap();
+    let text = f.documents.snapshot(&doc).unwrap().text.to_string();
+    f.project.observe_text(&path("paper.typ"), &text, false);
+    assert!(!relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact));
+    // A key that is not in the document records nothing.
+    let missing = AttachmentNotice { attachment_key: "fig-absent".into(), ..notice };
+    assert_eq!(f.project.record_external_attachment(&missing).unwrap_err().code(), "promotion.notAttached");
+}
