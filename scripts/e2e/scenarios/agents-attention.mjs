@@ -18,23 +18,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { scopeRefusalEvidence } from "../agent-scope-check.mjs";
+import { runCommand } from "../palette.mjs";
 import { editorLocator, invoke, openInEditor, openWorkspace, waitFor } from "../workspace-helpers.mjs";
 
 const MAIN = "= Notes\nThe cat sat on the mat.\n";
 const FAKE_KEY = "sk-ant-e2e-attention-not-a-real-key-5b8e";
 
-async function runCommand(page, query) {
-  await page.keyboard.press("Control+Shift+P");
-  const input = page.getByRole("textbox", { name: "Command" });
-  await input.waitFor({ state: "visible", timeout: 5000 });
-  await input.fill(query);
-  await page.locator(".wb-palette__item").first().waitFor({ state: "visible" });
-  await page.keyboard.press("Enter");
-  await input.waitFor({ state: "detached", timeout: 5000 });
-}
-
 async function setTheme(page, theme) {
-  await runCommand(page, theme === "dark" ? "color theme dark" : "color theme light");
+  await runCommand(page, `color theme ${theme}`, theme === "dark" ? /Color Theme: Dark/ : /Color Theme: Light/);
   await page.waitForFunction((t) => document.documentElement.dataset.theme === t, theme);
   await page.waitForTimeout(250);
 }
