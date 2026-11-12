@@ -37,7 +37,7 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
     assert.equal(info.name, "project");
     const tree = page.locator('[data-testid="file-tree"]');
     const topLevel = await tree.locator('[data-level="1"]').evaluateAll((rows) => rows.map((r) => r.dataset.path));
-    for (const hidden of [".git", "node_modules", "target"]) assert.ok(!topLevel.includes(hidden), `${hidden} hidden`);
+    for (const hidden of [".git", ".lake", "node_modules", "target"]) assert.ok(!topLevel.includes(hidden), `${hidden} hidden`);
     assert.deepEqual(
       topLevel.filter((p) => p !== "escape"),
       ["analysis", "chapters", "encoding", "main.typ", "notes.md", "README.txt"],
@@ -301,18 +301,18 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
     assert.deepEqual(introDocs.map((d) => d.path), ["chapters/intro.tex"], "one document for the file");
 
     // --- NUL characters: opened as text with a notice, saved, reopened -----------
-    await writeFile(join(project.root, "nul.txt"), "a\0b\n");
-    await page.locator('[data-testid="file-tree"] [data-path="nul.txt"]').waitFor({ timeout: 10_000 });
-    const nulId = await openInEditor(page, "nul.txt");
-    await editorLocator(page, "nul.txt").locator('[data-testid="nul-banner"]').waitFor();
-    await focusEditor(page, "nul.txt", "end");
+    await writeFile(join(project.root, "control-chars.txt"), "a\0b\n");
+    await page.locator('[data-testid="file-tree"] [data-path="control-chars.txt"]').waitFor({ timeout: 10_000 });
+    const nulId = await openInEditor(page, "control-chars.txt");
+    await editorLocator(page, "control-chars.txt").locator('[data-testid="nul-banner"]').waitFor();
+    await focusEditor(page, "control-chars.txt", "end");
     await page.keyboard.type("c");
     await waitForText(page, nulId, "a\0b\nc");
     await page.keyboard.press("Control+S");
-    await waitFor(async () => (await readFile(join(project.root, "nul.txt"), "utf8")) === "a\0b\nc", { message: "nul saved" });
-    await closeTab(page, "nul.txt");
+    await waitFor(async () => (await readFile(join(project.root, "control-chars.txt"), "utf8")) === "a\0b\nc", { message: "nul saved" });
+    await closeTab(page, "control-chars.txt");
     await waitFor(async () => (await invoke(page, "document_list")).every((d) => d.id !== nulId), { message: "nul closed" });
-    assert.equal((await invoke(page, "document_open", { path: "nul.txt" })).state.text, "a\0b\nc", "reopens as text");
+    assert.equal((await invoke(page, "document_open", { path: "control-chars.txt" })).state.text, "a\0b\nc", "reopens as text");
 
     // --- too-broad folders cannot be opened (R-m1 finding) ------------------------
     const systemRoot = process.env.SystemRoot ?? "C:\\Windows";

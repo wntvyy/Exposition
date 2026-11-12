@@ -44,6 +44,8 @@ export interface SyncCallbacks {
   onChange?(): void;
   /** A local edit was refused by the service; the view was resynchronized. */
   onRejected?(error: unknown): void;
+  /** An undo/redo was refused by the service (e.g. a later change overlaps it). */
+  onHistoryRejected?(kind: "undo" | "redo", error: unknown): void;
 }
 
 interface PendingEdit {
@@ -245,7 +247,11 @@ export class DocumentSync {
           this.pump();
         }
       };
-      call.then(done, done);
+      call.then(done, (error: unknown) => {
+        // Never swallow a refused undo/redo: the user must learn why nothing happened.
+        if (this.queue[0] === head) this.callbacks.onHistoryRejected?.(head.kind, error);
+        done();
+      });
     }
   }
 

@@ -16,7 +16,7 @@ export async function makeProject(fixture) {
   const dataDir = join(base, "data");
   await cp(fixture("workspace-basic"), root, { recursive: true });
   await cp(fixture("encoding"), join(root, "encoding"), { recursive: true });
-  for (const dir of [".git", "node_modules/pkg", "target/debug"]) await mkdir(join(root, dir), { recursive: true });
+  for (const dir of [".git", ".lake/build", "node_modules/pkg", "target/debug"]) await mkdir(join(root, dir), { recursive: true });
   await mkdir(outside, { recursive: true });
   await mkdir(dataDir, { recursive: true });
   await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");

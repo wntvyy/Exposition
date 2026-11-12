@@ -18,7 +18,7 @@ import type { DocumentState } from "../../bindings/DocumentState";
 import type { LineEnding } from "../../bindings/LineEnding";
 import type { TextPatch } from "../../bindings/TextPatch";
 import type { TextRange } from "../../bindings/TextRange";
-import { commands, errorMessage, events, isCommandError } from "../../lib/ipc";
+import { commands, errorMessage, events, isCommandError, isTransactionError } from "../../lib/ipc";
 import { monaco } from "../../lib/monaco";
 import { confirm, confirmUnsaved } from "../../ui/components";
 import { classifyEol, textFitsEol, type EolMode } from "./eol";
@@ -85,6 +85,19 @@ export class DocumentHandle {
       },
       {
         onChange: () => this.changed(),
+        onHistoryRejected: (kind, error) => {
+          // Nothing left to undo/redo is not worth a notification.
+          if (isTransactionError(error) && error.kind === "nothingToUndo") return;
+          const conflict = isTransactionError(error) && error.kind === "conflict";
+          notify({
+            id: `history-${this.id}`,
+            tone: "warning",
+            title: `Could not ${kind} in ${this.name}`,
+            body: conflict
+              ? `A later change overlaps the change to ${kind === "undo" ? "undo" : "redo"}, so it cannot be applied without overwriting that change.`
+              : errorMessage(error),
+          });
+        },
         onRejected: (error) => {
           notify({
             tone: "warning",

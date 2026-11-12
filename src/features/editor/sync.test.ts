@@ -327,6 +327,22 @@ describe("DocumentSync", () => {
     expect(view.text).toBe("abd");
   });
 
+  it("reports a refused undo instead of swallowing it", async () => {
+    const service = new FakeService("ab");
+    const view = new FakeView("ab");
+    const refused: unknown[] = [];
+    const transport = service.transport();
+    transport.undo = () => Promise.reject({ kind: "conflict" });
+    const sync = new DocumentSync("doc-1", 1, transport, view, {
+      onHistoryRejected: (kind, error) => refused.push([kind, error]),
+    });
+    sync.history("undo");
+    await tick();
+    expect(refused).toEqual([["undo", { kind: "conflict" }]]);
+    expect(sync.pendingCount).toBe(0);
+    expect(view.text).toBe("ab");
+  });
+
   it("idle() resolves after every pending edit is acknowledged", async () => {
     const { service, sync, type, settle } = setup("");
     type(ins(0, "a"));
