@@ -20,7 +20,7 @@ const notifications = vi.hoisted(() => ({ notify: vi.fn(), dismiss: vi.fn() }));
 
 vi.mock("../../lib/ipc", () => ({
   commands: ipc,
-  events: { jobs: vi.fn(), jobsResync: vi.fn() },
+  events: { jobs: vi.fn(), jobsResync: vi.fn(), trustChanged: vi.fn(() => Promise.resolve(() => {})) },
   errorMessage: (e: unknown) => (typeof e === "object" && e && "message" in e ? String(e.message) : String(e)),
 }));
 vi.mock("../../app/notifications", () => notifications);

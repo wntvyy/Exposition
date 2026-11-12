@@ -3,9 +3,13 @@
 //! The webview can observe and cancel jobs, read toolchain information, and
 //! manage workspace trust. There is deliberately NO command that runs an
 //! arbitrary program: launches come from application services in Rust.
+//!
+//! Every trust grant or revoke, whichever surface made it, is announced as
+//! [`TRUST_CHANGED`] so views that show trust re-check it; Lean and research
+//! follow it in their services, and watched LaTeX entries are rebuilt here.
 
 use exposition_core::job::JobId;
-use exposition_execution::{JobSummary, OutputPage, ToolchainInfo, TrustError, TrustStatus};
+use exposition_execution::{JobSummary, OutputPage, ToolchainInfo, TrustChanged, TrustError, TrustStatus};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
 
@@ -16,6 +20,9 @@ use crate::state::AppState;
 pub const JOB_EVENT: &str = "jobs:event";
 /// Emitted if the frontend fell behind and must re-read the job list.
 pub const JOB_RESYNC: &str = "jobs:resync";
+/// Event carrying every trust grant or revoke ([`TrustChanged`]); `null` when
+/// changes were missed (re-check everything).
+pub const TRUST_CHANGED: &str = "trust:changed";
 
 const MAX_PAGE_BYTES: u32 = 1024 * 1024;
 const DEFAULT_PAGE_BYTES: u32 = 64 * 1024;
@@ -184,6 +191,39 @@ pub fn forward_events(app: AppHandle) {
             }
         }
     });
+}
+
+/// Announce trust grants and revokes to the webview, and rebuild the watched
+/// LaTeX entries of the open project they concern: after a grant the pages
+/// refused before are built; after a revoke a running build is canceled (its
+/// next pass would be refused anyway) and the refused build tells every page
+/// view and status item that the folder is untrusted again.
+pub fn forward_trust(app: AppHandle) {
+    let mut rx = app.state::<AppState>().execution.subscribe_trust();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let change = match rx.recv().await {
+                Ok(change) => Some(change),
+                Err(RecvError::Lagged(_)) => None,
+                Err(RecvError::Closed) => break,
+            };
+            let state = app.state::<AppState>();
+            if change.as_ref().is_none_or(|c| concerns_open_workspace(&state, c)) {
+                state.tex.rebuild_watched();
+            }
+            let _ = app.emit(TRUST_CHANGED, change);
+        }
+    });
+}
+
+/// The change covers the open folder, or a folder inside it.
+fn concerns_open_workspace(state: &AppState, change: &TrustChanged) -> bool {
+    use exposition_execution::paths::{canonicalize, is_within};
+    use std::path::Path;
+    let Some(open) = state.workspace.current() else { return false };
+    let open = canonicalize(Path::new(&open.root)).unwrap_or_else(|_| open.root.clone().into());
+    let changed = Path::new(&change.root);
+    is_within(&open, changed) || is_within(changed, &open)
 }
 
 /// Debug builds only: grant the dev probe command to the main window.

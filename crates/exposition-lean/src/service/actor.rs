@@ -216,7 +216,9 @@ impl Actor {
         mut rx: mpsc::UnboundedReceiver<Msg>,
         mut doc_rx: broadcast::Receiver<DocumentEvent>,
         mut ws_rx: broadcast::Receiver<WorkspaceEvent>,
+        mut trust_rx: broadcast::Receiver<TrustChanged>,
     ) {
+        let mut trust_open = true;
         self.set_root(self.workspace.current().map(|info| info.root));
         for info in self.documents.list() {
             self.track(&info);
@@ -237,6 +239,11 @@ impl Actor {
                     Ok(event) => self.on_workspace(event),
                     Err(RecvError::Lagged(_)) => self.restart_all(),
                     Err(RecvError::Closed) => {}
+                },
+                // Before API requests: a check asked for after a grant sees it.
+                event = trust_rx.recv(), if trust_open => match event {
+                    Ok(_) | Err(RecvError::Lagged(_)) => self.sync_trust(),
+                    Err(RecvError::Closed) => trust_open = false,
                 },
                 msg = rx.recv() => match msg {
                     Some(Msg::Shutdown { reply }) => {
@@ -750,6 +757,52 @@ impl Actor {
             Ok(status) if status.trusted => Ok(()),
             Ok(status) => Err(status.root),
             Err(_) => Err(display),
+        }
+    }
+
+    /// Bring every server in line with the workspace's current trust, read
+    /// from the execution service (which also enforces it at launch). Runs on
+    /// every trust grant or revoke, from any surface, and before a check: a
+    /// server left untrusted starts once the folder is trusted; a server of a
+    /// folder whose trust was revoked is stopped (it runs project code) and
+    /// its documents report Untrusted.
+    fn sync_trust(&mut self) {
+        let trusted = self.workspace_trusted();
+        let keys: Vec<ServerKey> = self.servers.keys().cloned().collect();
+        for key in keys {
+            let Some(server) = self.servers.get(&key) else { continue };
+            let untrusted = matches!(server.phase, Phase::Untrusted { .. });
+            match &trusted {
+                Ok(()) if untrusted => self.ensure_started(&key),
+                Err(workspace_root) if !untrusted => self.untrust(&key, workspace_root.clone()),
+                _ => {}
+            }
+        }
+    }
+
+    /// Trust was revoked: stop the server now and report its documents
+    /// Untrusted. A new generation makes every message of the stopped one
+    /// (diagnostics, exits, retries, a start in flight) stale.
+    fn untrust(&mut self, key: &ServerKey, workspace_root: String) {
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        let Some(server) = self.servers.get_mut(key) else { return };
+        let phase = std::mem::replace(&mut server.phase, Phase::Untrusted { workspace_root: workspace_root.clone() });
+        server.generation = generation;
+        server.attempts = 0;
+        if let Phase::Running(running) = phase {
+            // Project code stops now (the whole process tree), not after a
+            // graceful shutdown that would let it run on for seconds.
+            self.exec.cancel(&running.job);
+        }
+        // Starting: `on_started` sees the new generation and stops the process.
+        for id in self.docs_of(key) {
+            if let Some(doc) = self.docs.get_mut(&id) {
+                doc.sync = None;
+                doc.goal_requests.clear();
+                doc.cancel_audit();
+            }
+            self.set_status(&id, LeanStatus::Untrusted { workspace_root: workspace_root.clone() });
         }
     }
 
@@ -1798,6 +1851,9 @@ impl Actor {
         if self.root.is_none() {
             return Err(LeanError::new("lean.noWorkspace", "No folder is open."));
         }
+        // A cached Untrusted (or trusted) status is not final: the folder's
+        // trust may have changed since, through any surface.
+        self.sync_trust();
         let ensure_tracked = |this: &mut Self, document: &DocumentId| -> Result<(), LeanError> {
             if !this.docs.contains_key(document) {
                 let info = this.documents.info(document).map_err(|_| unknown_document())?;

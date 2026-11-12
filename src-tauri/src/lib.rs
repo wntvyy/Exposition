@@ -30,6 +30,7 @@ pub fn run() {
             documents::forward_events(app.handle().clone());
             workspace::start(app.handle().clone());
             execution::forward_events(app.handle().clone());
+            execution::forward_trust(app.handle().clone());
             lean::forward_events(app.handle().clone());
             tex::forward_events(app.handle().clone());
             agents::forward_events(app.handle().clone());

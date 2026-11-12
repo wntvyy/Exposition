@@ -37,11 +37,14 @@ function lineOf(text: string | undefined, offset: number): number {
   return text ? text.slice(0, offset).split("\n").length : 0;
 }
 
+/**
+ * Ask to trust the folder. The Lean service follows every grant (from here or
+ * any other view) and starts the server itself; restarting here would only
+ * stop the server it just started.
+ */
 export async function trustAndRestart(state: LeanDocumentState) {
   if (state.status.kind !== "untrusted") return;
-  if (await requestWorkspaceTrust(state.status.workspaceRoot)) {
-    await commands.leanRestart(state.document).catch((e) => notify({ tone: "danger", title: "Could not restart Lean", body: errorMessage(e) }));
-  }
+  await requestWorkspaceTrust(state.status.workspaceRoot);
 }
 
 export async function installToolchain(state: LeanDocumentState) {

@@ -109,6 +109,10 @@ struct Workspace {
     trusted: bool,
 }
 
+/// A project root and whether it was trusted when discovery ran (project
+/// interpreters are offered only then).
+type DiscoveredFor = (PathBuf, bool);
+
 pub struct ResearchService {
     shared: Arc<Shared>,
 }
@@ -117,9 +121,8 @@ struct Shared {
     config: ResearchConfig,
     events: broadcast::Sender<ResearchEvent>,
     workspace: Mutex<Option<Workspace>>,
-    /// Discovery report and the project root it was made for (project
-    /// interpreters depend on the open, trusted project).
-    environments: Mutex<Option<(Option<PathBuf>, EnvironmentReport)>>,
+    /// Discovery report and the project it was made for.
+    environments: Mutex<Option<(Option<DiscoveredFor>, EnvironmentReport)>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     runs: Mutex<HashMap<String, RunState>>,
 }
@@ -228,23 +231,24 @@ impl ResearchService {
 
     // ---- environments ---------------------------------------------------
 
-    /// Discover research runtimes. Cached per open project; `refresh` probes
-    /// again. Only discovery chooses executables: system interpreters run as
-    /// application probes, and interpreters inside the open project (`.venv`)
-    /// are probed only when the project is trusted, as trusted project jobs.
+    /// Discover research runtimes. Cached per open project and its trust (a
+    /// grant or revoke discovers again); `refresh` probes again. Only
+    /// discovery chooses executables: system interpreters run as application
+    /// probes, and interpreters inside the open project (`.venv`) are probed
+    /// only when the project is trusted, as trusted project jobs.
     pub async fn environments(&self, refresh: bool) -> Result<EnvironmentReport, ResearchError> {
         let workspace = lock(&self.shared.workspace).clone();
-        let root = workspace.as_ref().map(|w| w.root.clone());
-        if !refresh
-            && let Some((cached_root, report)) = lock(&self.shared.environments).clone()
-            && cached_root == root
-        {
-            return Ok(report);
-        }
         let project = workspace.map(|w| ProjectScope {
             trusted: self.shared.config.launcher.workspace_trusted(&w.root).unwrap_or(w.trusted),
             root: w.root,
         });
+        let key = project.as_ref().map(|p| (p.root.clone(), p.trusted));
+        if !refresh
+            && let Some((cached, report)) = lock(&self.shared.environments).clone()
+            && cached == key
+        {
+            return Ok(report);
+        }
         let probe_dir = match self.shared.config.launcher.probe_dir() {
             Some(dir) => dir,
             None => self.shared.research_dir("probe")?,
@@ -255,7 +259,7 @@ impl ResearchService {
         })
         .await
         .map_err(|e| ResearchError::Io(format!("environment discovery failed: {e}")))?;
-        *lock(&self.shared.environments) = Some((root, report.clone()));
+        *lock(&self.shared.environments) = Some((key, report.clone()));
         Ok(report)
     }
 
@@ -273,8 +277,8 @@ impl ResearchService {
         if !trusted {
             return Err(ResearchError::NotTrusted);
         }
-        let cached_for = lock(&self.shared.environments).as_ref().map(|(root, _)| root.clone());
-        if cached_for != Some(Some(workspace.root.clone())) {
+        let cached_for = lock(&self.shared.environments).as_ref().map(|(key, _)| key.clone());
+        if cached_for != Some(Some((workspace.root.clone(), true))) {
             self.environments(false).await?;
         }
         let environment = self.environment(&request.environment_id)?;

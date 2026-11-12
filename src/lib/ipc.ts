@@ -81,6 +81,7 @@ import type { ToolchainInfo } from "../bindings/ToolchainInfo";
 import type { TransactionError } from "../bindings/TransactionError";
 import type { TransactionOutcome } from "../bindings/TransactionOutcome";
 import type { TransactionRequest } from "../bindings/TransactionRequest";
+import type { TrustChanged } from "../bindings/TrustChanged";
 import type { TrustList } from "../bindings/TrustList";
 import type { TrustStatus } from "../bindings/TrustStatus";
 import type { WorkspaceEvent } from "../bindings/WorkspaceEvent";
@@ -284,6 +285,12 @@ export const events = {
     listen<ResearchEvent>("research:event", (e) => handler(e.payload)),
   /** The frontend fell behind; re-read sessions and runs. */
   researchResync: (handler: () => void): Promise<UnlistenFn> => listen("research:resync", () => handler()),
+  /**
+   * A trust grant or revoke from any surface (`null`: changes were missed).
+   * Views that show trust re-check their own folder with `trustStatus`.
+   */
+  trustChanged: (handler: (change: TrustChanged | null) => void): Promise<UnlistenFn> =>
+    listen<TrustChanged | null>("trust:changed", (e) => handler(e.payload)),
 
 
   /** A finished build of a watched typesetting entry. */

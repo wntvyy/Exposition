@@ -5,6 +5,8 @@
 //! - document events (open/change/close/save) from the document service —
 //!   the unsaved buffer is what Lean checks; revisions are LSP versions;
 //! - workspace events (folder opened/closed, `lean-toolchain`/lakefile changes);
+//! - trust grants and revokes from any surface (servers start when the folder
+//!   becomes trusted and are stopped when its trust is revoked);
 //! - language-server notifications (diagnostics, `$/lean/fileProgress`) and
 //!   process exits;
 //! - API requests (goals, hover, definition, restart, install, check).
@@ -28,7 +30,7 @@ use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobId, JobOutcome, 
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::{LineIndex, TextRange};
 use exposition_execution::paths::canonicalize;
-use exposition_execution::{ExecutionService, Located};
+use exposition_execution::{ExecutionService, Located, TrustChanged};
 use exposition_workspace::types::WorkspaceEvent;
 use exposition_workspace::{DocumentService, WorkspaceService};
 use serde_json::{Value, json};
@@ -229,8 +231,10 @@ impl LeanService {
         let documents = Arc::clone(workspace.documents());
         let doc_rx = documents.subscribe();
         let ws_rx = workspace.subscribe();
+        // Subscribed now, so a grant or revoke made before the actor runs is not missed.
+        let trust_rx = execution.subscribe_trust();
         let actor = Actor::new(execution, Arc::clone(&workspace), documents, config, events.clone(), tx.clone());
-        (LeanService { tx, events, workspace }, actor.run(rx, doc_rx, ws_rx))
+        (LeanService { tx, events, workspace }, actor.run(rx, doc_rx, ws_rx, trust_rx))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<LeanEvent> {
