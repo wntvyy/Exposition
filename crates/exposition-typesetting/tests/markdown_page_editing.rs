@@ -216,3 +216,44 @@ fn pdf_export_comes_from_the_markdown_build() {
     assert!(pdf.starts_with(b"%PDF"));
     assert_eq!(record.result.pages.len(), record.document.as_ref().unwrap().pages().len());
 }
+
+/// R-m23 F13: code, footnote reference numbers and task boxes are content
+/// the page cannot edit; clicking them must report why (the page editor's
+/// "not editable" affordance) instead of silently placing the caret.
+#[test]
+fn non_editable_markdown_constructs_report_their_reason() {
+    use exposition_page::map::NonEditableReason;
+    let fx = open("markdown-basic");
+    let record = fx.build();
+    let map = record.map.as_ref().unwrap();
+    let text = fx.text();
+    let hit_center = |c: &exposition_page::Cluster, page: u32| {
+        map.hit_test(page, (c.x0 + c.x1) / 2.0, (c.top + c.bottom) / 2.0).non_editable
+    };
+    let find = |pred: &dyn Fn(&exposition_page::Cluster) -> bool| {
+        map.pages.iter().enumerate().find_map(|(p, page)| {
+            page.lines.iter().flat_map(|l| &l.clusters).find(|c| pred(c)).map(|c| (p as u32, c.clone()))
+        })
+    };
+    // Code block and inline code: raw/verbatim, navigating to their source.
+    let (page, code) = find(&|c| c.text == "println!").expect("code block glyphs");
+    assert_eq!(hit_center(&code, page), Some(NonEditableReason::Raw));
+    assert!(slice(&text, code.source.unwrap().range).starts_with("```rust"));
+    let (page, inline) = find(&|c| c.text == "code" && !c.is_editable()).expect("inline code glyphs");
+    assert_eq!(hit_center(&inline, page), Some(NonEditableReason::Raw));
+    assert_eq!(slice(&text, inline.source.unwrap().range), "`code`");
+    // Task box: a glyph mapped to `[x]`, generated.
+    let (page, task) = find(&|c| c.text == "☑").expect("task box glyph");
+    assert_eq!(slice(&text, task.source.unwrap().range), "[x]");
+    assert_eq!(hit_center(&task, page), Some(NonEditableReason::Generated));
+    // Footnote reference number: on the text line it belongs to, so a click
+    // just right of the referencing word lands on it (the reviewer's probe).
+    let at = fx.offset_of("[^note]", 0);
+    let caret = map.caret_geometry(&fx.path, at, Affinity::Downstream).unwrap();
+    let hit = map.hit_test(caret.page, caret.x + 1.0, (caret.top + caret.bottom) / 2.0);
+    assert_eq!(hit.non_editable, Some(NonEditableReason::Generated));
+    // Every piece of an inline equation (the radical of `\sqrt`) groups with
+    // its equation, so it does not split the text line.
+    let (_, radical) = find(&|c| c.text == "√").expect("radical");
+    assert!(radical.equation.is_some(), "{radical:?}");
+}

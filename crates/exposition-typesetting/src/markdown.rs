@@ -20,7 +20,7 @@ use exposition_core::path::WorkspacePath;
 use exposition_core::text::TextRange;
 use exposition_markdown::{SegmentKind, TranslateOptions, Translation};
 use exposition_page::PageInputRules;
-use exposition_page::map::{ClusterKind, ClusterSource, EditMode, EquationInfo, NonEditableReason, PageMap};
+use exposition_page::map::{ClusterKind, ClusterSource, EquationInfo, NonEditableReason, PageMap};
 
 pub use exposition_markdown::{MarkdownInput, PROFILE_ID};
 
@@ -162,6 +162,35 @@ pub fn remap_page_map(raw: RawExtraction, entry: &WorkspacePath, translation: &T
                 continue;
             };
             cluster.source = Some(ClusterSource { file, range: mapped.markdown });
+            // Why rendered content that is not editable cannot be edited, by
+            // what produced it in the Markdown (code and HTML are verbatim;
+            // markers, numbering, structure and template text are generated).
+            let verbatim = {
+                let segments = map.segments();
+                let first = segments.partition_point(|s| s.generated.end <= generated.start);
+                segments[first..]
+                    .iter()
+                    .take_while(|s| s.generated.start < generated.end.max(generated.start + 1))
+                    .any(|s| s.kind == SegmentKind::Raw)
+            };
+            let reason = |extracted: NonEditableReason| match mapped.kind {
+                _ if verbatim => NonEditableReason::Raw,
+                SegmentKind::Syntax | SegmentKind::Unsupported => NonEditableReason::Generated,
+                _ => extracted,
+            };
+            // Everything inside an equation (radicals, scaled delimiters,
+            // markers, `\text{..}`) groups with that equation on the page.
+            let equation = markdown_equation(generated).map(|t| {
+                *index_of.entry(t).or_insert_with(|| {
+                    equations.push(EquationInfo {
+                        file,
+                        range: translation.equations[t].markdown,
+                        block: translation.equations[t].block,
+                    });
+                    (equations.len() - 1) as u32
+                })
+            });
+            cluster.equation = equation;
             match (cluster.kind, mapped.mode) {
                 (ClusterKind::Editable(_), Some(mode)) => {
                     cluster.kind = ClusterKind::Editable(mode);
@@ -177,35 +206,15 @@ pub fn remap_page_map(raw: RawExtraction, entry: &WorkspacePath, translation: &T
                                 .clamp(md.start, md.end)
                         };
                     }
-                    if mode == EditMode::Math {
-                        // `\text{..}` is Typst markup inside the equation:
-                        // attach it to its equation for line grouping.
-                        if cluster.equation.is_none()
-                            && let Some(t) = markdown_equation(generated)
-                        {
-                            let index = *index_of.entry(t).or_insert_with(|| {
-                                equations.push(EquationInfo {
-                                    file,
-                                    range: translation.equations[t].markdown,
-                                    block: translation.equations[t].block,
-                                });
-                                (equations.len() - 1) as u32
-                            });
-                            cluster.equation = Some(index);
-                        }
-                    } else {
-                        cluster.equation = None;
-                    }
                 }
                 (ClusterKind::Editable(_), None) => {
-                    let reason = match mapped.kind {
-                        SegmentKind::Raw => NonEditableReason::Raw,
-                        _ => NonEditableReason::Generated,
-                    };
-                    cluster.kind = ClusterKind::NonEditable(reason);
+                    cluster.kind = ClusterKind::NonEditable(reason(NonEditableReason::Generated));
                     cluster.stops.clear();
                 }
-                (ClusterKind::NonEditable(_), _) => cluster.stops.clear(),
+                (ClusterKind::NonEditable(extracted), _) => {
+                    cluster.kind = ClusterKind::NonEditable(reason(extracted));
+                    cluster.stops.clear();
+                }
             }
         }
     }
