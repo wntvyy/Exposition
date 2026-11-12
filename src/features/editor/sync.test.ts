@@ -153,6 +153,9 @@ class FakeService {
 
 class FakeView implements SyncView {
   constructor(public text: string) {}
+  getText() {
+    return this.text;
+  }
   applyPatches(patches: TextPatch[]) {
     this.text = applyPatches(this.text, patches);
   }
@@ -324,6 +327,22 @@ describe("DocumentSync", () => {
     expect(view.text).toBe("abd");
   });
 
+  it("reports a refused undo instead of swallowing it", async () => {
+    const service = new FakeService("ab");
+    const view = new FakeView("ab");
+    const refused: unknown[] = [];
+    const transport = service.transport();
+    transport.undo = () => Promise.reject({ kind: "conflict" });
+    const sync = new DocumentSync("doc-1", 1, transport, view, {
+      onHistoryRejected: (kind, error) => refused.push([kind, error]),
+    });
+    sync.history("undo");
+    await tick();
+    expect(refused).toEqual([["undo", { kind: "conflict" }]]);
+    expect(sync.pendingCount).toBe(0);
+    expect(view.text).toBe("ab");
+  });
+
   it("idle() resolves after every pending edit is acknowledged", async () => {
     const { service, sync, type, settle } = setup("");
     type(ins(0, "a"));
@@ -335,6 +354,46 @@ describe("DocumentSync", () => {
     await tick();
     expect(idle).toBe(true);
     expect(service.text).toBe("a");
+  });
+
+  it("defers remote revisions while held (IME composition) and applies them in order on release", async () => {
+    const { service, view, sync, type, deliver, settle } = setup("0123456789");
+    sync.hold();
+    type(ins(10, "か")); // composition text
+    service.remote([ins(0, "R:")]); // an agent edit lands while composing
+    deliver();
+    expect(view.text).toBe("0123456789か"); // the composing view is untouched
+    type(rep(10, 11, "かん"));
+    type(rep(10, 12, "漢"));
+    deliver();
+    expect(view.text).toBe("0123456789漢");
+    expect(service.received).toHaveLength(0); // composition updates are not sent while composing
+    sync.release();
+    await settle();
+    expect(service.text).toBe("R:0123456789漢");
+    expect(view.text).toBe(service.text);
+    // The whole composition reached the service as one change (one undo step).
+    expect(service.received).toHaveLength(1);
+    // Sent after the deferred agent edit was applied, so it is based on (and shifted by) it.
+    expect(service.received[0]!.edits[0]!.patches).toEqual([ins(12, "漢")]);
+  });
+
+  it("defers a resync requested while held", async () => {
+    const { service, view, sync, type, settle } = setup("abc");
+    sync.hold();
+    service.applyNow = () => {
+      throw { kind: "readOnly", reason: "test" };
+    };
+    type(ins(3, "x"));
+    service.remote([ins(0, "R")]);
+    void sync.resync(); // e.g. the event stream fell behind
+    await tick();
+    expect(view.text).toBe("abcx"); // no resync while held
+    expect(sync.isResyncing).toBe(false);
+    sync.release();
+    await settle();
+    expect(view.text).toBe("Rabc"); // resynced to the service after the hold
+    expect(view.text).toBe(service.text);
   });
 
   it("converges under random interleavings of local and remote edits", async () => {

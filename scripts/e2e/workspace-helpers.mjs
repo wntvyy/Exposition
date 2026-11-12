@@ -16,7 +16,7 @@ export async function makeProject(fixture) {
   const dataDir = join(base, "data");
   await cp(fixture("workspace-basic"), root, { recursive: true });
   await cp(fixture("encoding"), join(root, "encoding"), { recursive: true });
-  for (const dir of [".git", "node_modules/pkg", "target/debug"]) await mkdir(join(root, dir), { recursive: true });
+  for (const dir of [".git", ".lake/build", "node_modules/pkg", "target/debug"]) await mkdir(join(root, dir), { recursive: true });
   await mkdir(outside, { recursive: true });
   await mkdir(dataDir, { recursive: true });
   await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
@@ -127,4 +127,59 @@ export async function closeTab(page, path) {
 /** The unsaved-changes / confirmation alert dialog. */
 export function alertDialog(page) {
   return page.getByRole("alertdialog");
+}
+
+/**
+ * Read the Monaco model behind a source editor (by workspace path) through the
+ * SourceEditor's React state (its loaded DocumentHandle). Adapted from the R-m1
+ * review helpers. Returns { text, revision, pending, resyncing, holding } or null.
+ */
+export function monacoState(page, path) {
+  return page.evaluate((p) => {
+    const el = [...document.querySelectorAll('[data-testid="source-editor"]')].find((e) => e.dataset.path === p);
+    if (!el) return null;
+    const key = Object.keys(el).find((k) => k.startsWith("__reactFiber$"));
+    let fiber = key ? el[key] : null;
+    while (fiber) {
+      let hook = fiber.memoizedState;
+      while (hook && typeof hook === "object" && "next" in hook) {
+        const s = hook.memoizedState;
+        if (s && s.status === "ready" && s.handle?.model) {
+          const h = s.handle;
+          return {
+            text: h.model.getValue(),
+            revision: h.sync.revision,
+            pending: h.sync.pendingCount,
+            resyncing: h.sync.isResyncing,
+            holding: h.sync.isHolding,
+          };
+        }
+        hook = hook.next;
+      }
+      fiber = fiber.return;
+    }
+    return null;
+  }, path);
+}
+
+/** Wait until the editor of `path` mirrors the service exactly; returns the text. */
+export async function waitForMirror(page, path, id, message = "Monaco mirrors the document") {
+  let last;
+  await waitFor(
+    async () => {
+      const view = await monacoState(page, path);
+      const service = await documentState(page, id);
+      last = { view: view?.text, service: service.text };
+      return (
+        view &&
+        view.pending === 0 &&
+        !view.resyncing &&
+        !view.holding &&
+        view.text === service.text &&
+        view.revision === service.info.revision
+      );
+    },
+    { message: `${message} (${JSON.stringify(last)})` },
+  );
+  return (await documentState(page, id)).text;
 }

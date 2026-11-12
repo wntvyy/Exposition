@@ -5,6 +5,7 @@ import { File, FileWarning, Folder, FolderOpen, FolderPlus, Link2, RefreshCw, Un
 import type { ReactNode } from "react";
 
 import type { FileEntry } from "../../bindings/FileEntry";
+import { notify } from "../../app/notifications";
 import type { RecoveryEntry } from "../../bindings/RecoveryEntry";
 import {
   Banner,
@@ -81,27 +82,67 @@ function EmptyFolder() {
   );
 }
 
+function copyText(text: string) {
+  void navigator.clipboard?.writeText(text).then(
+    () => notify({ tone: "info", title: "Location copied", body: text }),
+    () => notify({ tone: "warning", title: "Could not copy the location", body: text }),
+  );
+}
+
+function RecoveryItem({ entry }: { entry: RecoveryEntry }) {
+  if (entry.problem) {
+    return (
+      <li data-recovery-id={entry.id} data-recovery-unreadable="true">
+        <span className="xp-recovery__path">
+          Unreadable recovery data{entry.path ? ` for ${entry.path}` : ""}
+        </span>
+        <span className="xp-recovery__meta">
+          {formatTime(entry.savedAt)} · {entry.problem}
+        </span>
+        {entry.location && (
+          <span className="xp-recovery__location" title={entry.location}>
+            Kept at {entry.location}
+          </span>
+        )}
+        <span className="xp-recovery__actions">
+          {entry.location && (
+            <Button size="sm" variant="secondary" onPress={() => copyText(entry.location ?? "")}>
+              Copy Location
+            </Button>
+          )}
+          <Button size="sm" variant="secondary" onPress={() => void discardRecovery(entry)}>
+            Discard
+          </Button>
+        </span>
+      </li>
+    );
+  }
+  return (
+    <li data-recovery-id={entry.id} data-recovery-path={entry.path ?? undefined}>
+      <span className="xp-recovery__path">{entry.path}</span>
+      <span className="xp-recovery__meta">
+        {formatTime(entry.savedAt)}
+        {entry.disk === "changed" && " · file changed on disk since"}
+        {entry.disk === "missing" && " · file no longer exists"}
+      </span>
+      <span className="xp-recovery__actions">
+        <Button size="sm" variant="primary" onPress={() => void restoreRecovery(entry)}>
+          Restore
+        </Button>
+        <Button size="sm" variant="secondary" onPress={() => void discardRecovery(entry)}>
+          Discard
+        </Button>
+      </span>
+    </li>
+  );
+}
+
 function RecoveryList({ entries }: { entries: RecoveryEntry[] }) {
   return (
     <Banner tone="warning" title="Unsaved changes from a previous session" className="xp-recovery">
       <ul className="xp-recovery__list" data-testid="recovery-list">
         {entries.map((entry) => (
-          <li key={entry.id} data-recovery-path={entry.path}>
-            <span className="xp-recovery__path">{entry.path}</span>
-            <span className="xp-recovery__meta">
-              {formatTime(entry.savedAt)}
-              {entry.disk === "changed" && " · file changed on disk since"}
-              {entry.disk === "missing" && " · file no longer exists"}
-            </span>
-            <span className="xp-recovery__actions">
-              <Button size="sm" variant="primary" onPress={() => void restoreRecovery(entry)}>
-                Restore
-              </Button>
-              <Button size="sm" variant="secondary" onPress={() => void discardRecovery(entry)}>
-                Discard
-              </Button>
-            </span>
-          </li>
+          <RecoveryItem key={entry.id} entry={entry} />
         ))}
       </ul>
     </Banner>

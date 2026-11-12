@@ -295,7 +295,7 @@ fn recovery_restores_unsaved_text_with_undo_back_to_disk() {
     let service = f.restart();
     let entries = service.recovery_entries().unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].path.as_str(), "main.typ");
+    assert_eq!(entries[0].path.as_ref().unwrap().as_str(), "main.typ");
     assert_eq!(entries[0].disk, RecoveryDiskState::Unchanged);
     assert_eq!(service.current().unwrap().recovery, entries);
 

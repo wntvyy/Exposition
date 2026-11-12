@@ -1,19 +1,37 @@
 // Source editor contributions: the Monaco editor for workspace text files,
 // save commands, and the encoding/line-ending status item.
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
-import { useActiveEditor, useEditors } from "../../app/editors";
+import { editors, useActiveEditor, useEditors } from "../../app/editors";
 import { registry, type EditorProps } from "../../app/registry";
 import { commands } from "../../lib/ipc";
 import { confirm, confirmUnsaved, type UnsavedChoice } from "../../ui/components";
-import { activeHandle, handleForPath, openHandles, saveAll, saveDocument } from "./documentClient";
+import {
+  activeHandle,
+  fileKey,
+  handleForPath,
+  openHandles,
+  saveAll,
+  saveDocument,
+  type DocumentHandle,
+} from "./documentClient";
 import { SourceEditor } from "./SourceEditor";
 
 function SourceEditorTab({ resource, active }: EditorProps) {
   // Inactive tabs stay mounted; only the selected tab of the active group takes focus.
   const selected = useEditors((s) => s.groups[s.activeGroup].activeKey === resource.key);
-  return <SourceEditor path={resource.path} active={active && selected} />;
+  const onEditor = useCallback(
+    (_editor: unknown, handle: DocumentHandle | null) => {
+      // The tab's path was an alias (case variant, short name, link inside the
+      // folder) of a file open under its canonical path: show one tab for it.
+      if (!handle?.path || !resource.path || handle.path === resource.path) return;
+      editors.open({ key: fileKey(handle.path), path: handle.path, title: handle.name });
+      void editors.close(resource.key);
+    },
+    [resource.key, resource.path],
+  );
+  return <SourceEditor path={resource.path} active={active && selected} onEditor={onEditor} />;
 }
 
 const ENCODING_LABELS: Record<string, string> = {

@@ -102,6 +102,8 @@ pub enum RecoveryDiskState {
     Changed,
     /// The file no longer exists.
     Missing,
+    /// The recovery data itself could not be read (see `RecoveryEntry::problem`).
+    Unknown,
 }
 
 /// Unsaved buffer content journaled by an earlier session.
@@ -111,12 +113,18 @@ pub enum RecoveryDiskState {
 pub struct RecoveryEntry {
     /// Opaque identifier used to restore or discard the entry.
     pub id: String,
-    pub path: WorkspacePath,
+    /// The file the unsaved changes belong to (`None` when unreadable data no longer names it).
+    pub path: Option<WorkspacePath>,
     /// When the journal was written (Unix milliseconds).
     pub saved_at: u64,
     /// UTF-16 length of the journaled text.
     pub length: u32,
     pub disk: RecoveryDiskState,
+    /// Why the recovery data cannot be restored (corrupt, from a newer version).
+    /// Such entries are quarantined; they can only be inspected or discarded.
+    pub problem: Option<String>,
+    /// Absolute location of the quarantined data, for inspection.
+    pub location: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -110,11 +110,19 @@ function applyInfo(info: WorkspaceInfo) {
   setWindowTitle(info.name);
   if (info.recovery.length > 0) {
     layout.showView("sidebar", FILES_VIEW_ID);
+    const unreadable = info.recovery.filter((e) => e.problem).length;
+    const readable = info.recovery.length - unreadable;
+    const parts = [
+      readable > 0 &&
+        `${readable} file${readable === 1 ? " has" : "s have"} unsaved changes from a previous session.`,
+      unreadable > 0 &&
+        `${unreadable} recovery record${unreadable === 1 ? " was" : "s were"} unreadable and set aside for inspection.`,
+    ].filter(Boolean);
     notify({
       id: "recovery-available",
       tone: "warning",
-      title: "Unsaved changes were recovered",
-      body: `${info.recovery.length} file${info.recovery.length === 1 ? " has" : "s have"} unsaved changes from a previous session. Restore or discard them in the Files view.`,
+      title: readable > 0 ? "Unsaved changes were recovered" : "Unreadable recovery data",
+      body: `${parts.join(" ")} Review them in the Files view.`,
       timeoutMs: null,
     });
   }
@@ -160,8 +168,9 @@ export async function restoreRecovery(entry: RecoveryEntry): Promise<void> {
   try {
     const outcome = await commands.recoveryRestore(entry.id);
     useWorkspace.setState((s) => ({ recovery: s.recovery.filter((e) => e.id !== entry.id) }));
-    const name = entry.path.split("/").pop() ?? entry.path;
-    openFile({ path: entry.path, name });
+    const path = outcome.state.info.path ?? entry.path ?? "";
+    const name = path.split("/").pop() ?? path;
+    openFile({ path, name });
     notify({
       tone: outcome.diskChanged ? "warning" : "success",
       title: `Restored unsaved changes to ${name}`,
