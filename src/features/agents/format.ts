@@ -178,6 +178,8 @@ export function toolSummary(name: string, input: unknown): string {
       return str(obj.path) || "project root";
     case "build_document":
       return str(obj.entry);
+    case "insert_artifact":
+      return `${str(obj.path)} ← ${str(obj.artifact_id)}`;
     case "run_command": {
       const args = Array.isArray(obj.args) ? obj.args.filter((a): a is string => typeof a === "string") : [];
       return [str(obj.program), ...args].join(" ");

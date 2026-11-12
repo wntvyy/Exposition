@@ -20,9 +20,11 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::services::{
-    BuildRequest, CommandRequest, LeanRequest, PythonRequest, ServiceError, ServiceKind, ToolServices,
+    BuildRequest, CommandRequest, LatexEngine, LeanRequest, PythonRequest, ServiceError, ServiceKind, ToolServices,
 };
-use super::{CreateFileInput, EditDocumentInput, ListFilesInput, ReadFileInput, RunCommandInput, ToolCall};
+use super::{
+    CreateFileInput, EditDocumentInput, InsertArtifactInput, ListFilesInput, ReadFileInput, RunCommandInput, ToolCall,
+};
 use crate::model::{ContextConsent, ExecutionMode, PermissionProfile, TaskId, TaskScope, TaskSpec};
 use crate::review::{self, EditRecord};
 use crate::store::Store;
@@ -248,10 +250,45 @@ pub fn gate(call: &ToolCall, env: &ToolEnv<'_>) -> Gate {
                     ServiceError::NotAvailable(ServiceKind::Typesetting).to_string(),
                 ));
             }
-            if spec.execution == ExecutionMode::Disabled {
+            // Typst compiles in-process; LaTeX runs TeX tools, so it needs process
+            // execution allowed for the task (the TeX service also requires trust).
+            if call.is_process()
+                && (spec.execution == ExecutionMode::Disabled || spec.permission == PermissionProfile::ReadOnly)
+            {
                 return Gate::Refused(execution_disabled());
             }
-            // The typesetting service applies its own (shell-escape-free) policy.
+            Gate::Allowed { policy: None }
+        }
+        ToolCall::InsertArtifact(input) => {
+            if spec.permission == PermissionProfile::ReadOnly {
+                return Gate::Refused(read_only());
+            }
+            let path = match parse_path(&input.path) {
+                Ok(p) => p,
+                Err(e) => return Gate::Refused(e),
+            };
+            if !spec.scope.allows(&path) {
+                return Gate::Refused(out_of_scope(&path, &spec.scope));
+            }
+            if !env.services.available(ServiceKind::Research) {
+                return Gate::Refused(ToolOutput::error(ServiceError::NotAvailable(ServiceKind::Research).to_string()));
+            }
+            if spec.permission == PermissionProfile::ReviewEdits {
+                let action = if input.update_key.is_empty() {
+                    format!("Insert artifact {} of run {} into {path}", input.artifact_id, input.run_id)
+                } else {
+                    format!(
+                        "Update attachment {} in {path} with artifact {} of run {}",
+                        input.update_key, input.artifact_id, input.run_id
+                    )
+                };
+                let detail = if input.caption.is_empty() {
+                    action.clone()
+                } else {
+                    format!("{action}\nCaption: {}", input.caption)
+                };
+                return Gate::NeedsApproval { title: action, detail, policy: None };
+            }
             Gate::Allowed { policy: None }
         }
         ToolCall::RunPython(input) => process_gate(env, ServiceKind::Research, || {
@@ -268,8 +305,17 @@ pub fn gate(call: &ToolCall, env: &ToolEnv<'_>) -> Gate {
             if !spec.scope.allows(&path) {
                 return Gate::Refused(out_of_scope(&path, &spec.scope));
             }
+            if spec.execution == ExecutionMode::Restricted {
+                return Gate::Refused(ToolOutput::error(
+                    "Lean checks run the project's toolchain natively, which this task does not allow (restricted \
+                     execution only). Nothing was run.",
+                ));
+            }
             process_gate(env, ServiceKind::Lean, || {
-                (format!("Check {path} with Lean"), format!("lake/lean check of {path}"))
+                (
+                    format!("Check {path} with Lean"),
+                    format!("Check {path} with the project's Lean toolchain (lake serve)"),
+                )
             })
         }
         ToolCall::RunCommand(input) => {
@@ -343,11 +389,21 @@ pub async fn run(
         ToolCall::EditDocument(input) => edit_document(env, seen, tool_use_id, input),
         ToolCall::CreateFile(input) => create_file(env, seen, tool_use_id, input),
         ToolCall::BuildDocument(input) => match parse_path(&input.entry) {
-            Ok(entry) => service_result(
-                env.services.build_document(BuildRequest { entry, task_id: env.task_id.0.clone() }, cancel).await,
-            ),
+            Ok(entry) => {
+                let engine = match input.engine.as_str() {
+                    "pdflatex" => LatexEngine::PdfLatex,
+                    "lualatex" => LatexEngine::LuaLatex,
+                    _ => LatexEngine::Auto,
+                };
+                service_result(
+                    env.services
+                        .build_document(BuildRequest { entry, engine, task_id: env.task_id.0.clone() }, cancel)
+                        .await,
+                )
+            }
             Err(e) => Err(e),
         },
+        ToolCall::InsertArtifact(input) => insert_artifact(env, seen, tool_use_id, input),
         ToolCall::RunPython(input) => {
             let Some(policy) = policy else { return ToolOutput::error("missing execution policy") };
             service_result(
@@ -355,6 +411,7 @@ pub async fn run(
                     .run_python(
                         PythonRequest {
                             code: input.code,
+                            task_id: env.task_id.0.clone(),
                             root: env.files.root().to_path_buf(),
                             working_directory: env.files.root().to_path_buf(),
                             policy,
@@ -380,6 +437,8 @@ pub async fn run(
 fn service_result(result: Result<Value, ServiceError>) -> Result<ToolOutput, ToolOutput> {
     match result {
         Ok(value) => Ok(ToolOutput::ok(value)),
+        // A genuine failure reported by the service, with its details.
+        Err(ServiceError::Outcome(value)) => Err(ToolOutput { content: value, is_error: true }),
         Err(e) => Err(ToolOutput::error(e.to_string())),
     }
 }
@@ -621,29 +680,7 @@ fn edit_document(
         }
     };
     let applied = &outcome.applied[0];
-    let before = (before_apply.revision == applied.previous_revision).then(|| Arc::clone(&before_apply.text));
-    let after: Option<Arc<str>> = match &before {
-        Some(text) => crate::patch::apply(text, &applied.patches).ok().map(Arc::from),
-        None => env.documents.snapshot(&id).ok().filter(|s| s.revision == applied.revision).map(|s| s.text),
-    };
-    if let Some(after) = &after {
-        seen.insert(&id, applied.revision, Arc::clone(after));
-    }
-    review::record_edit(
-        env.store,
-        env.task_id,
-        &EditRecord {
-            tool_use_id,
-            path: &path,
-            document: &id,
-            previous_revision: applied.previous_revision,
-            revision: applied.revision,
-            patches: &applied.patches,
-            before: before.as_deref(),
-            after: after.as_deref(),
-        },
-    )
-    .map_err(|e| ToolOutput::error(format!("The edit was applied but could not be recorded for review: {e}")))?;
+    record_applied(env, seen, tool_use_id, &path, &id, &before_apply, applied)?;
     let mut result = json!({
         "path": path.as_str(),
         "revision": applied.revision,
@@ -660,6 +697,121 @@ fn edit_document(
     Ok(ToolOutput::ok(result))
 }
 
+/// Record an applied agent change for review and remember the new text.
+fn record_applied(
+    env: &ToolEnv<'_>,
+    seen: &mut SeenTexts,
+    tool_use_id: &str,
+    path: &WorkspacePath,
+    id: &DocumentId,
+    before_apply: &exposition_workspace::DocumentSnapshot,
+    applied: &exposition_core::document::AppliedEdit,
+) -> Result<(), ToolOutput> {
+    let before = (before_apply.revision == applied.previous_revision).then(|| Arc::clone(&before_apply.text));
+    let after: Option<Arc<str>> = match &before {
+        Some(text) => crate::patch::apply(text, &applied.patches).ok().map(Arc::from),
+        None => env.documents.snapshot(id).ok().filter(|s| s.revision == applied.revision).map(|s| s.text),
+    };
+    if let Some(after) = &after {
+        seen.insert(id, applied.revision, Arc::clone(after));
+    }
+    review::record_edit(
+        env.store,
+        env.task_id,
+        &EditRecord {
+            tool_use_id,
+            path,
+            document: id,
+            previous_revision: applied.previous_revision,
+            revision: applied.revision,
+            patches: &applied.patches,
+            before: before.as_deref(),
+            after: after.as_deref(),
+        },
+    )
+    .map_err(|e| ToolOutput::error(format!("The change was applied but could not be recorded for review: {e}")))
+}
+
+/// Insert or update a research artifact with the format-owned attachment
+/// transform (the same one the research panel uses), as an agent edit that is
+/// recorded for review.
+fn insert_artifact(
+    env: &ToolEnv<'_>,
+    seen: &mut SeenTexts,
+    tool_use_id: &str,
+    input: InsertArtifactInput,
+) -> Result<ToolOutput, ToolOutput> {
+    use exposition_core::artifact::{AttachArtifactRequest, AttachmentPlacement, RunId};
+    let path = parse_path(&input.path)?;
+    let format = exposition_attach::Format::from_path(&path)
+        .ok_or_else(|| ToolOutput::error(format!("{path} is not a Typst, LaTeX, or Markdown document.")))?;
+    let artifact = env
+        .services
+        .research_artifact(&input.run_id, &input.artifact_id)
+        .map_err(|e| ToolOutput::error(e.to_string()))?;
+    let id = workspace::open_document_in(env.workspace, env.documents, env.files, &path).map_err(file_error)?;
+    let snapshot = env.documents.snapshot(&id).map_err(|e| ToolOutput::error(e.to_string()))?;
+    let placement = if input.update_key.is_empty() {
+        let offset = if input.after_text.is_empty() {
+            snapshot.text.len()
+        } else {
+            let mut matches = snapshot.text.match_indices(input.after_text.as_str());
+            let Some((start, _)) = matches.next() else {
+                return Err(ToolOutput::error(format!("after_text was not found in {path}; read the file again.")));
+            };
+            if matches.next().is_some() {
+                return Err(ToolOutput::error("after_text occurs more than once; include more surrounding text."));
+            }
+            start + input.after_text.len()
+        };
+        let offset = exposition_core::text::byte_to_utf16(&snapshot.text, offset)
+            .map_err(|e| ToolOutput::error(e.to_string()))?;
+        AttachmentPlacement::Insert { offset: offset as u32 }
+    } else {
+        AttachmentPlacement::Update { attachment_key: input.update_key.clone() }
+    };
+    let request = AttachArtifactRequest {
+        document: id.clone(),
+        base_revision: snapshot.revision,
+        artifact,
+        run: Some(RunId(input.run_id.clone())),
+        placement,
+        caption: (!input.caption.is_empty()).then(|| input.caption.clone()),
+        attachment_key: None,
+        origin: EditOrigin::Agent { task_id: env.task_id.0.clone() },
+    };
+    let content = exposition_attach::load_content(env.files.root(), format, &path, &request.artifact)
+        .map_err(|e| ToolOutput::error(e.to_string()))?;
+    let plan = exposition_attach::plan(
+        &exposition_attach::PlanInput {
+            format,
+            document: &id,
+            document_path: &path,
+            revision: snapshot.revision,
+            text: &snapshot.text,
+        },
+        &request,
+        &content,
+    )
+    .map_err(|e| ToolOutput::error(e.to_string()))?;
+    let outcome = env.documents.apply(plan.transaction.clone()).map_err(|e| {
+        ToolOutput::error(format!("The attachment was not applied: {e}. Read the file again and retry."))
+    })?;
+    let applied = outcome
+        .applied
+        .iter()
+        .find(|edit| edit.document == id)
+        .ok_or_else(|| ToolOutput::error("the document service applied no edit"))?;
+    record_applied(env, seen, tool_use_id, &path, &id, &snapshot, applied)?;
+    Ok(ToolOutput::ok(json!({
+        "path": path.as_str(),
+        "revision": applied.revision,
+        "attachmentKey": plan.attachment_key,
+        "warnings": plan.warnings,
+        "note": "Inserted with the format's figure/table markup into the open document (not saved); reviewable like any agent edit.",
+    })))
+}
+
 fn create_file(
     env: &ToolEnv<'_>,
     seen: &mut SeenTexts,
@@ -667,11 +819,22 @@ fn create_file(
     input: CreateFileInput,
 ) -> Result<ToolOutput, ToolOutput> {
     let path = parse_path(&input.path)?;
-    if env.documents.find_by_path(&path).is_some() || env.files.exists(&path).map_err(file_error)? {
-        return Err(ToolOutput::error(format!("{path} already exists; use read_file and edit_document to change it.")));
-    }
-    env.files.create_text(&path, &input.content).map_err(file_error)?;
-    let opened = workspace::open_document_in(env.workspace, env.documents, env.files, &path).ok();
+    let exists = || ToolOutput::error(format!("{path} already exists; use read_file and edit_document to change it."));
+    let opened = match env.workspace {
+        // The workspace service creates the file (never overwriting) and opens it.
+        Some(workspace) => match workspace.create_document(&path, &input.content) {
+            Ok(opened) => Some(opened.state.info.id),
+            Err(e) if e.code == "file.exists" => return Err(exists()),
+            Err(e) => return Err(ToolOutput::error(e.message)),
+        },
+        None => {
+            if env.documents.find_by_path(&path).is_some() || env.files.exists(&path).map_err(file_error)? {
+                return Err(exists());
+            }
+            env.files.create_text(&path, &input.content).map_err(file_error)?;
+            workspace::open_document_in(None, env.documents, env.files, &path).ok()
+        }
+    };
     let document = opened.as_ref().and_then(|id| env.documents.snapshot(id).ok().map(|s| (id.clone(), s)));
     if let Some((id, snapshot)) = &document {
         seen.insert(id, snapshot.revision, Arc::clone(&snapshot.text));

@@ -3,13 +3,14 @@
 //! execution service (commands). Agent tools call the same services people
 //! use; they never launch processes themselves.
 //!
-//! [`super::execution::ExecutionToolServices`] runs commands and Python on the
-//! shared execution service; [`UnavailableServices`] reports every tool as
-//! unavailable. Results are never simulated.
+//! [`super::execution::AppToolServices`] connects the application's services
+//! (execution, typesetting, TeX builds, research); [`UnavailableServices`]
+//! reports every tool as unavailable. Results are never simulated.
 
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use exposition_core::artifact::ArtifactRecord;
 use exposition_core::job::ExecutionPolicy;
 use exposition_core::path::WorkspacePath;
 use serde_json::Value;
@@ -38,10 +39,26 @@ impl ServiceKind {
 pub enum ServiceError {
     #[error("{} is not available in this build of Exposition", .0.label())]
     NotAvailable(ServiceKind),
+    /// A specific capability (e.g. Markdown builds) is not wired in this build.
+    #[error("{0} is not available in this build of Exposition")]
+    Unsupported(String),
     #[error("canceled")]
     Canceled,
     #[error("{0}")]
     Failed(String),
+    /// The service ran and reports a genuine failure (build errors, an
+    /// exception, a refusal); the details go to the model as an error result.
+    #[error("{0}")]
+    Outcome(Value),
+}
+
+/// Engine for a LaTeX entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LatexEngine {
+    /// The project's configured engine for this entry, else pdfLaTeX.
+    Auto,
+    PdfLatex,
+    LuaLatex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +78,8 @@ pub struct CommandRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PythonRequest {
     pub code: String,
+    /// Agent task that requested the run (agent-owned research sessions).
+    pub task_id: String,
     /// Project root of the task (also the working directory).
     pub root: PathBuf,
     pub working_directory: PathBuf,
@@ -78,6 +97,7 @@ pub struct LeanRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildRequest {
     pub entry: WorkspacePath,
+    pub engine: LatexEngine,
     pub task_id: String,
 }
 
@@ -100,6 +120,15 @@ pub trait ToolServices: Send + Sync {
     async fn run_python(&self, request: PythonRequest, cancel: CancellationToken) -> Result<Value, ServiceError>;
     async fn check_lean(&self, request: LeanRequest, cancel: CancellationToken) -> Result<Value, ServiceError>;
     async fn run_command(&self, request: CommandRequest, cancel: CancellationToken) -> Result<Value, ServiceError>;
+
+    /// The record of a research run's artifact (for attaching it to a document).
+    fn research_artifact(&self, _run_id: &str, _artifact_id: &str) -> Result<ArtifactRecord, ServiceError> {
+        Err(ServiceError::NotAvailable(ServiceKind::Research))
+    }
+
+    /// A task run ended: release what the services hold for it (e.g. the
+    /// agent's research sessions).
+    async fn task_finished(&self, _task_id: &str) {}
 }
 
 /// No process services: every call fails with `NotAvailable`.
