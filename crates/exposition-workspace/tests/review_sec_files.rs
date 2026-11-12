@@ -105,7 +105,6 @@ fn allow_again(dir: &Path) {
 /// same code.)
 #[cfg(windows)]
 #[test]
-#[ignore = "R-sec F5: invalid project.json is deleted even when its backup copy failed"]
 fn invalid_project_settings_are_never_deleted_without_a_backup() {
     let fx = fixture();
     let dot = fx.project().join(".exposition");

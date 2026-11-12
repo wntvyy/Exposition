@@ -224,10 +224,16 @@ fn load<T: DeserializeOwned + Default + Validate>(file: &Path) -> Loaded<T> {
         },
         Err(e) => format!("is not valid ({e})"),
     };
-    // Keep the original for the user; never overwrite it silently.
+    // Keep the original for the user; never overwrite it silently. It moves
+    // aside only once an identical backup copy exists; otherwise it stays.
     let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let backup = file.with_file_name(format!("{name}.invalid-{}", now_millis()));
-    let _ = fs::copy(file, &backup);
+    let backed_up = fs::copy(file, &backup).is_ok() && fs::read(&backup).is_ok_and(|copy| copy == bytes);
+    if !backed_up {
+        let _ = fs::remove_file(&backup);
+        let warning = format!("{problem} (the file was left in place: a backup copy could not be written)");
+        return Loaded { value: T::default(), exists: true, warning: Some(warning) };
+    }
     let _ = fs::remove_file(file);
     Loaded { value: T::default(), exists: true, warning: Some(problem) }
 }
