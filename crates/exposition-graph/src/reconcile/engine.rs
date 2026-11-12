@@ -189,7 +189,7 @@ pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<Reco
         state.index = ProjectIndex::default();
     }
     // 1. Checkpoints and known resources (short lock).
-    let (checkpoints, known) = graph.with_store(|s| {
+    let (checkpoints, known) = graph.with_store_for(&root, |s| {
         if !state.index.loaded {
             state.index.load(s)?;
         }
@@ -278,7 +278,7 @@ pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<Reco
     let now = now_ms();
     let force = options.force;
     let index = &state.index;
-    let outcome = graph.with_store(|store| {
+    let outcome = graph.with_store_for(&root, |store| {
         let planning = Instant::now();
         let mut planner = Planner::new(store, &root, index, now, force);
         planner.plan(&scan_out, &covered, &checkpoints, &fresh)?;
@@ -987,12 +987,9 @@ impl<'a> Planner<'a> {
     /// Plan the unsaved text of one file (a live-buffer overlay): the same
     /// matching and resolution as a pass, never written.
     pub(crate) fn plan_overlay(&mut self, path: &WorkspacePath, resource: &Entity, f: &Fresh) -> StoreResult<()> {
-        for e in self.store.all_of_kind(EntityKind::Resource)? {
-            if e.lifecycle == Lifecycle::Tombstoned {
-                continue;
-            }
-            if let Some(p) = e.key.as_deref().and_then(|k| WorkspacePath::parse(k).ok()) {
-                self.resources.entry(p).or_insert(e.id);
+        for k in self.store.resource_keys(None)? {
+            if !k.tombstoned {
+                self.resources.entry(k.path).or_insert(k.id);
             }
         }
         let mut matches = Vec::new();

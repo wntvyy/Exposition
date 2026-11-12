@@ -121,7 +121,13 @@ impl Planner<'_> {
         let mut bases: Vec<Option<WorkspacePath>> = Vec::new();
         match base {
             PathBase::File => bases.push(dir.clone()),
-            PathBase::Root => bases.push(None),
+            PathBase::Root => {
+                // A Python script's own folder comes first on its import path.
+                if extensions.iter().any(|e| e == "py") {
+                    bases.push(dir.clone());
+                }
+                bases.push(None);
+            }
             PathBase::LatexMain => {
                 bases.push(dir.clone());
                 bases.push(None);

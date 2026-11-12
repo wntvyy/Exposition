@@ -81,7 +81,7 @@ pub fn compute(graph: &GraphService, path: &WorkspacePath, revision: u64, text: 
     let empty = ProjectIndex::default();
     let index = state.as_ref().map(|s| &s.index).filter(|i| i.loaded).unwrap_or(&empty);
     let now = now_ms();
-    graph.with_store(|store| {
+    graph.with_store_for(&root, |store| {
         let Some(resource) = store
             .entities_by_key(EntityKind::Resource, path.as_str())?
             .into_iter()

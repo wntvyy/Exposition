@@ -448,3 +448,58 @@ fn evidence_is_current_only_for_the_indexed_version_and_unknown_is_never_current
     p.full();
     assert!(matches!(freshness(&current), Freshness::Stale { .. }), "a deleted input makes evidence stale");
 }
+
+/// A folder the user cannot write to gets a temporary graph (nothing is
+/// written into the project) that still indexes the files.
+#[cfg(windows)]
+#[test]
+fn a_read_only_project_folder_gets_a_temporary_graph() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap().join("readonly");
+    write(&root, "paper.typ", "= Paper\n");
+    let icacls = |args: &[&str]| {
+        let status = std::process::Command::new("icacls")
+            .arg(&root)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "icacls {args:?}");
+    };
+    // Deny creating files and folders to everyone (S-1-1-0).
+    icacls(&["/deny", "*S-1-1-0:(OI)(CI)(WD,AD)"]);
+    let result = std::panic::catch_unwind(|| {
+        let svc = GraphService::new(GraphConfig { data_dir: data.path().to_path_buf() });
+        let status = svc.attach(&root);
+        assert!(matches!(status.state, GraphState::TemporaryReadOnly { .. }), "{status:?}");
+        svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: false }).unwrap();
+        assert!(svc.resource(&wp("paper.typ")).unwrap().is_some());
+        assert!(!root.join(".exposition").exists(), "nothing was written into the folder");
+    });
+    icacls(&["/remove:d", "*S-1-1-0"]);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+#[test]
+fn attaching_labels_operations_an_earlier_session_left_pending() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let journal = OperationJournal::new(data.path());
+    let op = journal.begin(OperationKind::Promotion, &root, None, "Promote a figure", vec!["attach".into()]).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    // A new application session.
+    let svc = GraphService::new(GraphConfig { data_dir: data.path().to_path_buf() });
+    svc.attach(&root);
+    let record = svc.journal().get(&root, &op.id).unwrap();
+    assert!(matches!(record.state, OperationState::NeedsReconciliation { .. }), "{record:?}");
+    // An operation of this session stays pending across a re-attach.
+    let current = svc.journal().begin(OperationKind::ProjectCreation, &root, None, "Create", vec![]).unwrap();
+    svc.detach();
+    svc.attach(&root);
+    assert_eq!(svc.journal().get(&root, &current.id).unwrap().state, OperationState::Pending);
+}

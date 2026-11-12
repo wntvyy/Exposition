@@ -459,6 +459,21 @@ impl GraphService {
         Ok(Some(self.backup("auto")?))
     }
 
+    /// Run `f` against the store of the project at `root` only (a pass or an
+    /// overlay computed for one project never writes into another one that
+    /// was attached meanwhile).
+    pub(crate) fn with_store_for<T>(
+        &self,
+        root: &Path,
+        f: impl FnOnce(&mut GraphStore) -> GraphResult<T>,
+    ) -> GraphResult<T> {
+        let mut inner = self.lock();
+        match inner.open.as_mut() {
+            Some(open) if open.root == root => f(&mut open.store),
+            _ => Err(GraphError::new("graph.projectChanged", "The project changed while the graph was being updated.")),
+        }
+    }
+
     /// Run `f` against the open store, or fail with `graph.unavailable`.
     pub fn with_store<T>(&self, f: impl FnOnce(&mut GraphStore) -> GraphResult<T>) -> GraphResult<T> {
         let mut inner = self.lock();
