@@ -226,6 +226,9 @@
   width: 100%;
   outline: none;
 }
+.wb-palette__body {
+  display: contents;
+}
 .wb-palette__field {
   position: relative;
   display: flex;
@@ -272,7 +275,9 @@
   cursor: default;
   outline: none;
 }
-.wb-palette__item[data-focused] {
+.wb-palette__item[data-focused],
+/* With a query and nothing highlighted (e.g. after Backspace), Enter runs the top match. */
+.wb-palette__list[data-query]:not(:has(.wb-palette__item[data-focused])) > .wb-palette__item:first-child {
   background: var(--color-accent-subtle);
   box-shadow: inset 2px 0 0 var(--color-accent);
 }

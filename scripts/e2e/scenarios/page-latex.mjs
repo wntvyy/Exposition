@@ -16,6 +16,7 @@ import { basename, join } from "node:path";
 
 import { waitForAsync } from "../wait.mjs";
 import { openFromTree } from "../workspace-helpers.mjs";
+import { runCommand } from "../palette.mjs";
 
 const PATH = "main.tex";
 
@@ -32,13 +33,7 @@ export default async function pageLatex({ launchApp, artifactsDir, assert, fixtu
   /** Reference screenshot in both themes (UI_STANDARD), returning to light. */
   const referenceShots = async (name) => {
     for (const theme of ["dark", "light"]) {
-      await page.keyboard.press("Control+Shift+P");
-      const palette = page.getByRole("textbox", { name: "Command" });
-      await palette.waitFor({ state: "visible", timeout: 5000 });
-      await palette.fill(`color theme ${theme}`);
-      await page.locator(".wb-palette__item").first().waitFor();
-      await page.keyboard.press("Enter");
-      await palette.waitFor({ state: "detached", timeout: 5000 });
+      await runCommand(page, `color theme ${theme}`, theme === "dark" ? /Color Theme: Dark/ : /Color Theme: Light/);
       await page.waitForFunction((t) => document.documentElement.dataset.theme === t, theme);
       await page.waitForTimeout(150);
       const file = join(artifactsDir, `${name}-${theme}.png`);

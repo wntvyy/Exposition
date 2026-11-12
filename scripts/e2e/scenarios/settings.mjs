@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { waitForAsync } from "../wait.mjs";
+import { runCommand } from "../palette.mjs";
 
 const IMAGE = "python:3.13-slim";
 const VIEWPORT = { width: 1440, height: 900 };
@@ -69,18 +70,6 @@ async function settle(page) {
     null,
     { timeout: 5000 },
   );
-}
-
-async function runCommand(page, assert, query, expected) {
-  await page.keyboard.press("Control+Shift+P");
-  const input = page.getByRole("textbox", { name: "Command" });
-  await input.waitFor({ state: "visible", timeout: 5000 });
-  await input.fill(query);
-  const first = page.locator(".wb-palette__item").first();
-  await first.waitFor({ state: "visible" });
-  assert.match(await first.innerText(), expected, `top palette match for "${query}"`);
-  await page.keyboard.press("Enter");
-  await input.waitFor({ state: "detached", timeout: 5000 });
 }
 
 async function prepare(page) {
@@ -146,7 +135,7 @@ export default async function settings({ launchApp, artifactsDir, assert }) {
     await prepare(page);
 
     // --- Open Settings from the palette; Mod+, opens it too.
-    await runCommand(page, assert, "open settings", /Preferences: Open Settings/);
+    await runCommand(page, "open settings", /Preferences: Open Settings/);
     const view = page.getByTestId("settings-view");
     await view.waitFor();
     assert.equal(await page.getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected"), "true");

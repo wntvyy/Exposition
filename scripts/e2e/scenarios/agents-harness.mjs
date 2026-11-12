@@ -14,6 +14,7 @@ import { existsSync } from "node:fs";
 import { copyFile, cp, mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { runCommand } from "../palette.mjs";
 
 const MAIN = "= Notes\nThe cat sat on the mat.\n";
 const FAKE_KEY = "sk-ant-e2e-not-a-real-key-7f3a9c0d1e2b";
@@ -25,18 +26,8 @@ function consoleErrors(app) {
   return app.consoleMessages.filter((m) => m.startsWith("error:") || m.startsWith("pageerror:"));
 }
 
-async function runCommand(page, query) {
-  await page.keyboard.press("Control+Shift+P");
-  const input = page.getByRole("textbox", { name: "Command" });
-  await input.waitFor({ state: "visible", timeout: 5000 });
-  await input.fill(query);
-  await page.locator(".wb-palette__item").first().waitFor({ state: "visible" });
-  await page.keyboard.press("Enter");
-  await input.waitFor({ state: "detached", timeout: 5000 });
-}
-
 async function setTheme(page, theme) {
-  await runCommand(page, theme === "dark" ? "color theme dark" : "color theme light");
+  await runCommand(page, `color theme ${theme}`, theme === "dark" ? /Color Theme: Dark/ : /Color Theme: Light/);
   await page.waitForFunction((t) => document.documentElement.dataset.theme === t, theme);
   await page.waitForTimeout(250);
 }
