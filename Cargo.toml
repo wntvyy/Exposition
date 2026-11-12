@@ -19,6 +19,7 @@ exposition-tex = { path = "crates/exposition-tex" }
 exposition-lean = { path = "crates/exposition-lean" }
 exposition-research = { path = "crates/exposition-research" }
 exposition-attach = { path = "crates/exposition-attach" }
+exposition-markdown = { path = "crates/exposition-markdown" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -39,6 +40,7 @@ tokio-util = "0.7"
 futures-util = "0.3"
 similar = "2"
 notify = "8.2"
+winapi-util = "0.1"
 regex = "1"
 # Execution service OS integration (process-tree containment).
 libc = "0.2"
@@ -53,6 +55,9 @@ windows-sys = { version = "0.61", features = [
 hayro = "0.9"
 flate2 = "1"
 unicode-normalization = "0.1"
+# Markdown print profile (exposition-markdown): CommonMark/GFM parsing with
+# source offsets.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 # Typst compiler as a library (typesetting/page editing). Packages are only read
 # from an existing local cache; no automatic downloads.

@@ -10,7 +10,7 @@ use crate::root::WorkspaceRoot;
 use crate::types::{EntryKind, FileEntry};
 
 /// Directory names never shown in the tree or reported by the watcher.
-pub const HIDDEN_NAMES: &[&str] = &[".git", "node_modules", "target"];
+pub const HIDDEN_NAMES: &[&str] = &[".git", ".lake", "node_modules", "target"];
 
 /// True if a workspace path is inside a hidden directory or is a save temp file.
 pub fn is_ignored(path: &WorkspacePath) -> bool {
@@ -102,7 +102,7 @@ mod tests {
     fn lists_directories_first_and_hides_build_and_vcs_folders() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("p");
-        for d in ["b-dir", "A-dir", ".git", "node_modules", "target", "A-dir/nested"] {
+        for d in ["b-dir", "A-dir", ".git", ".lake", "node_modules", "target", "A-dir/nested"] {
             fs::create_dir_all(project.join(d)).unwrap();
         }
         for f in ["z.typ", "a.tex", "B.md", "A-dir/inner.txt", ".a.tex.exposition-save-1.tmp"] {
@@ -133,6 +133,7 @@ mod tests {
     #[test]
     fn ignores_hidden_and_temporary_paths() {
         assert!(is_ignored(&WorkspacePath::parse(".git/index").unwrap()));
+        assert!(is_ignored(&WorkspacePath::parse(".lake/build/lib/A.olean").unwrap()));
         assert!(is_ignored(&WorkspacePath::parse("app/node_modules/x/y.js").unwrap()));
         assert!(is_ignored(&WorkspacePath::parse("dir/.main.typ.exposition-save-12.tmp").unwrap()));
         assert!(!is_ignored(&WorkspacePath::parse("chapters/target.typ").unwrap()));

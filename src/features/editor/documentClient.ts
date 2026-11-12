@@ -18,7 +18,7 @@ import type { DocumentState } from "../../bindings/DocumentState";
 import type { LineEnding } from "../../bindings/LineEnding";
 import type { TextPatch } from "../../bindings/TextPatch";
 import type { TextRange } from "../../bindings/TextRange";
-import { commands, errorMessage, events, isCommandError } from "../../lib/ipc";
+import { commands, errorMessage, events, isCommandError, isTransactionError } from "../../lib/ipc";
 import { monaco } from "../../lib/monaco";
 import { confirm, confirmUnsaved } from "../../ui/components";
 import { classifyEol, textFitsEol, type EolMode } from "./eol";
@@ -44,6 +44,10 @@ export class DocumentHandle {
   conflict: DiskConflict | null = null;
   saveError: string | null = null;
   eolMode: EolMode;
+  /** The text contains NUL characters (shown as control symbols, kept exactly). */
+  hasNul = false;
+  private composing = 0;
+  private releaseTimer: ReturnType<typeof setTimeout> | null = null;
   /** Bumped on every observable change (for `useSyncExternalStore`). */
   version = 0;
   /** Selection before the next local edit, for undo/redo restoration. */
@@ -58,6 +62,7 @@ export class DocumentHandle {
     this.id = state.info.id;
     this.info = state.info;
     this.eolMode = classifyEol(state.text);
+    this.hasNul = state.text.includes("\0");
     const language = ensureLanguage(state.info.language);
     const uri = monaco.Uri.from({ scheme: "exposition", path: `/${state.info.id}/${state.info.path ?? "untitled"}` });
     this.model = monaco.editor.createModel(state.text, language, uri);
@@ -76,9 +81,23 @@ export class DocumentHandle {
         canApply: (patches) => this.canApply(patches),
         setText: (text) => this.setModelText(text),
         setSelection: (ranges) => this.emitSelection(ranges),
+        getText: () => this.model.getValue(),
       },
       {
         onChange: () => this.changed(),
+        onHistoryRejected: (kind, error) => {
+          // Nothing left to undo/redo is not worth a notification.
+          if (isTransactionError(error) && error.kind === "nothingToUndo") return;
+          const conflict = isTransactionError(error) && error.kind === "conflict";
+          notify({
+            id: `history-${this.id}`,
+            tone: "warning",
+            title: `Could not ${kind} in ${this.name}`,
+            body: conflict
+              ? `A later change overlaps the change to ${kind === "undo" ? "undo" : "redo"}, so it cannot be applied without overwriting that change.`
+              : errorMessage(error),
+          });
+        },
         onRejected: (error) => {
           notify({
             tone: "warning",
@@ -193,6 +212,7 @@ export class DocumentHandle {
     if (this.eolMode === "none" && patches.some((p) => /[\r\n]/.test(p.text))) {
       this.eolMode = this.model.getEOL() === "\r\n" ? "crlf" : "lf";
     }
+    this.trackNul(patches);
     const undo = this.grouper.classify(patches, Date.now());
     let shift = 0;
     const after = patches.map((p) => {
@@ -232,7 +252,42 @@ export class DocumentHandle {
     if (this.eolMode === "none" && patches.some((p) => /[\r\n]/.test(p.text))) {
       this.eolMode = this.model.getEOL() === "\r\n" ? "crlf" : "lf";
     }
+    this.trackNul(patches);
     this.grouper.reset();
+  }
+
+  /** Keep `hasNul` current without rescanning the text on every keystroke. */
+  private trackNul(patches: TextPatch[]) {
+    if (patches.some((p) => p.text.includes("\0"))) {
+      this.hasNul = true;
+    } else if (this.hasNul && patches.some((p) => p.range.end > p.range.start)) {
+      this.hasNul = this.model.getValue().includes("\0");
+    }
+  }
+
+  /**
+   * IME composition in an editor showing this model. While composing, service
+   * changes are held back (a concurrent edit to the model would corrupt the
+   * composition) and applied in order right after it ends.
+   */
+  setComposing(composing: boolean) {
+    this.grouper.setComposing(composing);
+    if (composing) {
+      this.composing += 1;
+      if (this.releaseTimer) {
+        clearTimeout(this.releaseTimer);
+        this.releaseTimer = null;
+      }
+      this.sync.hold();
+      return;
+    }
+    this.composing = Math.max(0, this.composing - 1);
+    if (this.composing > 0 || this.releaseTimer) return;
+    // Let the composition's final commit reach the model first.
+    this.releaseTimer = setTimeout(() => {
+      this.releaseTimer = null;
+      if (this.composing === 0 && !this.closed) this.sync.release();
+    }, 0);
   }
 
   private setModelText(text: string) {
@@ -251,6 +306,7 @@ export class DocumentHandle {
       this.applying = false;
     }
     this.eolMode = mode;
+    this.hasNul = text.includes("\0");
     this.fixEol();
     if (mode !== "mixed" && this.model.getValue() !== text) {
       // Never edit a view that does not mirror the document exactly.
@@ -288,12 +344,7 @@ const guardDisposers = new Map<DocumentId, () => void>();
 const seenKeys = new Set<string>();
 let started = false;
 
-/**
- * `DocumentEvent::Changed` is serialized with two `kind` keys (the enum tag
- * "changed" and `DocumentChanged.kind`); JSON parsing keeps the last one, so a
- * change event arrives with `kind` = "edit" | "undo" | "redo". Recognize it by
- * its revision fields instead of the tag.
- */
+/** The change carried by a document event, if it is one. */
 export function asChanged(event: DocumentEvent): DocumentChanged | null {
   return event.kind === "changed" ? event : null;
 }

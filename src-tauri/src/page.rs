@@ -33,6 +33,9 @@ fn rules_for(path: Option<&WorkspacePath>) -> Option<&'static dyn PageInputRules
     match path?.extension()?.to_ascii_lowercase().as_str() {
         "typ" => Some(&TypstInput),
         "tex" => Some(&exposition_tex::TexInput),
+        // Markdown builds are retained by the typesetting service (the
+        // provider above); its input rules are the print profile's.
+        "md" | "markdown" => Some(&exposition_typesetting::MarkdownInput),
         _ => None,
     }
 }

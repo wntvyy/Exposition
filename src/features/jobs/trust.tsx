@@ -35,7 +35,8 @@ export function requestWorkspaceTrust(root: string): Promise<boolean> {
             </code>
             <p>
               Builds, kernels, and commands in a trusted workspace run on this computer with your account&rsquo;s
-              permissions and can read or change your files. Trust only folders whose contents you trust.
+              privileges. They can read and change your files and can start other programs, including ones that keep
+              running after Exposition stops the job. Trust only folders whose contents you trust.
             </p>
             <p className="exp-muted">
               Without trust you can still open and edit files. Restricted (container) execution stays available when it

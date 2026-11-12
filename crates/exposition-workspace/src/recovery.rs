@@ -40,9 +40,12 @@ pub fn workspace_key(display_root: &str) -> String {
     sha256_hex(normalized.as_bytes())[..16].to_owned()
 }
 
+/// Journal key of a document. Documents are recorded under their canonical
+/// workspace path (one document per physical file), so the exact path is the
+/// identity; it is not case-folded, so distinct files in case-sensitive folders
+/// never share a journal.
 fn path_key(path: &WorkspacePath) -> String {
-    let normalized = if cfg!(windows) { path.as_str().to_lowercase() } else { path.as_str().to_owned() };
-    sha256_hex(normalized.as_bytes())[..16].to_owned()
+    sha256_hex(path.as_str().as_bytes())[..16].to_owned()
 }
 
 #[derive(Debug, Clone)]
@@ -93,32 +96,65 @@ impl RecoveryStore {
         Ok(())
     }
 
-    /// Recovery entries (journals of earlier sessions) with their ids.
-    pub fn entries(&self) -> Vec<(String, Journal)> {
+    /// Recovery entries (journals of earlier sessions). A journal that cannot be
+    /// read (corrupt, truncated, invalid path, or from a newer version) is
+    /// quarantined (renamed `bad-...`, never parsed again, bytes kept) and
+    /// reported as unreadable so the user can inspect or discard it.
+    pub fn entries(&self) -> Vec<StoredEntry> {
         let Ok(read) = fs::read_dir(&self.dir) else { return Vec::new() };
         let mut out = Vec::new();
         for entry in read.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let Some(id) = name.strip_suffix(".json").filter(|id| is_entry_id(id)) else { continue };
-            if let Some(journal) = fs::read(entry.path()).ok().and_then(|bytes| parse(&bytes)) {
-                out.push((id.to_owned(), journal));
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            if id.starts_with("bad-") {
+                let reason = fs::read_to_string(self.dir.join(format!("{id}.reason")))
+                    .unwrap_or_else(|_| "The recovery data is unreadable.".into());
+                let path = fs::read(entry.path()).ok().and_then(|bytes| salvage_path(&bytes));
+                out.push(StoredEntry::Unreadable { id: id.to_owned(), path, reason, location: entry.path(), modified });
+                continue;
+            }
+            let bytes = fs::read(entry.path()).unwrap_or_default();
+            match parse(&bytes) {
+                Ok(journal) => out.push(StoredEntry::Valid { id: id.to_owned(), journal }),
+                Err(reason) => {
+                    let path = salvage_path(&bytes);
+                    // Quarantine: keep the bytes, never parse them again.
+                    let bad_id = format!("bad-{}", &id["rec-".len()..]);
+                    let quarantined = self.dir.join(format!("{bad_id}.json"));
+                    let (id, location) = match fs::rename(entry.path(), &quarantined) {
+                        Ok(()) => {
+                            let _ = fs::write(self.dir.join(format!("{bad_id}.reason")), &reason);
+                            (bad_id, quarantined)
+                        }
+                        Err(_) => (id.to_owned(), entry.path()),
+                    };
+                    out.push(StoredEntry::Unreadable { id, path, reason, location, modified });
+                }
             }
         }
-        out.sort_by(|a, b| b.1.saved_at.cmp(&a.1.saved_at).then(a.0.cmp(&b.0)));
+        out.sort_by(|a, b| b.saved_at().cmp(&a.saved_at()).then(a.id().cmp(b.id())));
         out
     }
 
     pub fn read_entry(&self, id: &str) -> Option<Journal> {
-        if !is_entry_id(id) {
+        if !is_entry_id(id) || id.starts_with("bad-") {
             return None;
         }
-        fs::read(self.dir.join(format!("{id}.json"))).ok().and_then(|bytes| parse(&bytes))
+        fs::read(self.dir.join(format!("{id}.json"))).ok().and_then(|bytes| parse(&bytes).ok())
     }
 
     pub fn remove_entry(&self, id: &str) -> io::Result<()> {
         if !is_entry_id(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid recovery id"));
         }
+        let _ = fs::remove_file(self.dir.join(format!("{id}.reason")));
         match fs::remove_file(self.dir.join(format!("{id}.json"))) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -126,13 +162,67 @@ impl RecoveryStore {
     }
 }
 
-fn parse(bytes: &[u8]) -> Option<Journal> {
-    serde_json::from_slice::<Journal>(bytes).ok().filter(|j| j.version == JOURNAL_VERSION)
+/// A recovery journal on disk.
+#[derive(Debug, Clone)]
+pub enum StoredEntry {
+    Valid {
+        id: String,
+        journal: Journal,
+    },
+    Unreadable {
+        id: String,
+        /// The file the journal belonged to, when it can still be read from the damaged data.
+        path: Option<WorkspacePath>,
+        reason: String,
+        location: PathBuf,
+        modified: u64,
+    },
 }
 
-/// `rec-<16 hex>-<digits>`: ids are never used as raw paths.
+impl StoredEntry {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Valid { id, .. } | Self::Unreadable { id, .. } => id,
+        }
+    }
+
+    fn saved_at(&self) -> u64 {
+        match self {
+            Self::Valid { journal, .. } => journal.saved_at,
+            Self::Unreadable { modified, .. } => *modified,
+        }
+    }
+}
+
+/// Best effort: the workspace path named in damaged journal data (validated).
+fn salvage_path(bytes: &[u8]) -> Option<WorkspacePath> {
+    let text = String::from_utf8_lossy(bytes);
+    let start = text.find("\"path\":")? + "\"path\":".len();
+    let rest = text[start..].trim_start();
+    // Deserialize just the JSON string that follows (handles escapes).
+    let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<String>();
+    let raw = stream.next()?.ok()?;
+    WorkspacePath::parse(&raw).ok()
+}
+
+fn parse(bytes: &[u8]) -> Result<Journal, String> {
+    #[derive(Deserialize)]
+    struct Version {
+        version: u32,
+    }
+    match serde_json::from_slice::<Version>(bytes) {
+        Ok(v) if v.version > JOURNAL_VERSION => {
+            return Err(format!("It was written by a newer version of Exposition (format {}).", v.version));
+        }
+        Ok(v) if v.version != JOURNAL_VERSION => return Err(format!("Unsupported recovery format {}.", v.version)),
+        _ => {}
+    }
+    serde_json::from_slice::<Journal>(bytes).map_err(|e| format!("The recovery data is damaged ({e})."))
+}
+
+/// `rec-<16 hex>-<digits>` (or `bad-...` once quarantined): ids are never used as raw paths.
 pub fn is_entry_id(id: &str) -> bool {
-    let Some(rest) = id.strip_prefix("rec-") else { return false };
+    let Some(rest) = id.strip_prefix("rec-").or_else(|| id.strip_prefix("bad-")) else { return false };
     let Some((key, millis)) = rest.split_once('-') else { return false };
     key.len() == 16
         && key.bytes().all(|b| b.is_ascii_hexdigit())
@@ -169,12 +259,67 @@ mod tests {
         store.promote_live().unwrap();
         let entries = store.entries();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].1.text, "unsaved a, newer");
-        let id = entries[0].0.clone();
+        let StoredEntry::Valid { id, journal } = entries[0].clone() else { panic!("valid entry expected") };
+        assert_eq!(journal.text, "unsaved a, newer");
         assert!(is_entry_id(&id));
         assert_eq!(store.read_entry(&id).unwrap().path.as_str(), "a.typ");
         store.remove_entry(&id).unwrap();
         assert!(store.entries().is_empty());
+    }
+
+    #[test]
+    fn unreadable_journals_are_quarantined_and_reported_not_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(dir.path(), "k");
+        store.write_live(&journal("ok.typ", "intact")).unwrap();
+        fs::write(store.dir().join("live-0123456789abcdef.json"), b"{not json").unwrap();
+        fs::write(
+            store.dir().join("rec-1123456789abcdef-5.json"),
+            br#"{"version":99,"path":"a.txt","baseHash":null,"revision":2,"encoding":"utf8","savedAt":1,"text":"x"}"#,
+        )
+        .unwrap();
+        fs::write(
+            store.dir().join("rec-2123456789abcdef-5.json"),
+            br#"{"version":1,"path":"../../escape.txt","baseHash":null,"revision":2,"encoding":"utf8","savedAt":1,"text":"x"}"#,
+        )
+        .unwrap();
+        store.promote_live().unwrap();
+        let entries = store.entries();
+        assert_eq!(entries.len(), 4, "{entries:?}");
+        let valid: Vec<_> = entries.iter().filter(|e| matches!(e, StoredEntry::Valid { .. })).collect();
+        assert_eq!(valid.len(), 1);
+        let bad: Vec<_> = entries
+            .iter()
+            .filter_map(|e| match e {
+                StoredEntry::Unreadable { id, reason, location, .. } => {
+                    Some((id.clone(), reason.clone(), location.clone()))
+                }
+                StoredEntry::Valid { .. } => None,
+            })
+            .collect();
+        assert_eq!(bad.len(), 3);
+        for (id, _, location) in &bad {
+            assert!(id.starts_with("bad-") && is_entry_id(id), "{id}");
+            assert!(location.exists(), "quarantined bytes are kept");
+            assert!(store.read_entry(id).is_none());
+        }
+        assert!(bad.iter().any(|(_, reason, _)| reason.contains("newer version")));
+        // The damaged data still names its file where possible; invalid paths are not trusted.
+        let named: Vec<String> = entries
+            .iter()
+            .filter_map(|e| match e {
+                StoredEntry::Unreadable { path: Some(path), .. } => Some(path.as_str().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(named, vec!["a.txt".to_owned()]);
+        // Listing again neither re-quarantines nor loses anything.
+        assert_eq!(store.entries().len(), 4);
+        for (id, _, location) in &bad {
+            store.remove_entry(id).unwrap();
+            assert!(!location.exists());
+        }
+        assert_eq!(store.entries().len(), 1);
     }
 
     #[test]

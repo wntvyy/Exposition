@@ -56,6 +56,58 @@ pub fn read_limited(path: &Path, limit: u64) -> io::Result<Result<Vec<u8>, u64>>
     Ok(Ok(bytes))
 }
 
+/// Identity of a physical file (volume + file index on Windows, device + inode
+/// elsewhere). Two paths with the same identity are the same file, including
+/// hard links.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FileIdentity {
+    volume: u64,
+    index: u64,
+}
+
+impl FileIdentity {
+    pub fn of(file: &File) -> io::Result<Self> {
+        #[cfg(windows)]
+        {
+            let info = winapi_util::file::information(file)?;
+            Ok(Self { volume: info.volume_serial_number(), index: info.file_index() })
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = file.metadata()?;
+            Ok(Self { volume: meta.dev(), index: meta.ino() })
+        }
+    }
+
+    pub fn of_path(path: &Path) -> io::Result<Self> {
+        Self::of(&File::open(path)?)
+    }
+}
+
+/// A file read for opening as a document.
+pub struct FileRead {
+    /// The bytes, or the file size when it exceeds the limit.
+    pub bytes: Result<Vec<u8>, u64>,
+    pub identity: Option<FileIdentity>,
+}
+
+/// Read a whole file (refusing files larger than `limit`) together with its identity.
+pub fn read_with_identity(path: &Path, limit: u64) -> io::Result<FileRead> {
+    let mut file = File::open(path)?;
+    let identity = FileIdentity::of(&file).ok();
+    let len = file.metadata()?.len();
+    if len > limit {
+        return Ok(FileRead { bytes: Err(len), identity });
+    }
+    let mut bytes = Vec::with_capacity(len as usize);
+    Read::take(&mut file, limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Ok(FileRead { bytes: Err(bytes.len() as u64), identity });
+    }
+    Ok(FileRead { bytes: Ok(bytes), identity })
+}
+
 pub fn now_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }

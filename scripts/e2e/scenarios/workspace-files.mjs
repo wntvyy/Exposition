@@ -3,6 +3,7 @@
 // (LF, CRLF, UTF-8 BOM, UTF-16), undo/redo through the shared document
 // service, mixed line endings, unavailable files, close/reopen, and rejection of
 // traversal and junction escapes.
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -15,11 +16,13 @@ import {
   invoke,
   invokeError,
   makeProject,
+  monacoState,
   openFromTree,
   openInEditor,
   openWorkspace,
   tabDirty,
   waitFor,
+  waitForMirror,
   waitForText,
 } from "../workspace-helpers.mjs";
 
@@ -34,7 +37,7 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
     assert.equal(info.name, "project");
     const tree = page.locator('[data-testid="file-tree"]');
     const topLevel = await tree.locator('[data-level="1"]').evaluateAll((rows) => rows.map((r) => r.dataset.path));
-    for (const hidden of [".git", "node_modules", "target"]) assert.ok(!topLevel.includes(hidden), `${hidden} hidden`);
+    for (const hidden of [".git", ".lake", "node_modules", "target"]) assert.ok(!topLevel.includes(hidden), `${hidden} hidden`);
     assert.deepEqual(
       topLevel.filter((p) => p !== "escape"),
       ["analysis", "chapters", "encoding", "main.typ", "notes.md", "README.txt"],
@@ -117,6 +120,38 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
     await waitForText(page, mainId, `${composeBase} `, "one undo removes the whole composition");
     await page.keyboard.press("Control+Z");
     await waitForText(page, mainId, composeBase);
+
+    // --- IME composition while an agent edits elsewhere (R-m1 finding) ----------
+    // Remote revisions are held until the composition ends, then applied in order.
+    await page.keyboard.press("Control+End");
+    const imeBase = await waitForMirror(page, "main.typ", mainId);
+    await cdp.send("Input.imeSetComposition", { text: "か", selectionStart: 1, selectionEnd: 1 });
+    await waitFor(async () => (await monacoState(page, "main.typ"))?.text === `${imeBase}か`, {
+      message: "composition shown in Monaco",
+    });
+    // Composition updates are not sent until the composition ends.
+    const atComposition = await documentState(page, mainId);
+    assert.equal(atComposition.text, imeBase, "partial composition text is not committed");
+    await invoke(page, "document_apply", {
+      request: {
+        id: "agent-during-ime",
+        origin: { kind: "agent", taskId: "e2e" },
+        edits: [{ document: mainId, baseRevision: atComposition.info.revision, patches: [{ range: { start: 0, end: 0 }, text: "R:" }] }],
+        undo: { kind: "newGroup" },
+        conflict: "rebaseDisjoint",
+        label: null,
+        selection: null,
+      },
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    await cdp.send("Input.imeSetComposition", { text: "かん", selectionStart: 2, selectionEnd: 2 });
+    await cdp.send("Input.insertText", { text: "漢" });
+    const afterIme = await waitForMirror(page, "main.typ", mainId, "Monaco and the service agree after IME + agent edit");
+    assert.equal(afterIme, `R:${imeBase}漢`, "composed text committed once, agent edit kept, nothing else changed");
+    await page.keyboard.press("Control+Z");
+    await waitForText(page, mainId, `R:${imeBase}`, "undo removes the composition");
+    await page.keyboard.press("Control+Z");
+    await waitForText(page, mainId, imeBase, "undo removes the agent edit");
     await cdp.detach();
 
     // --- close (clean, after saving) and reopen ----------------------------
@@ -246,6 +281,46 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
     assert.equal(junctionList.error?.code, "path.outsideWorkspace");
     const missing = await invokeError(page, "document_open", { path: "missing.typ" });
     assert.equal(missing.error?.code, "path.notFound");
+
+    // --- one document per physical file (R-m1 finding) ---------------------------
+    const lowerDoc = await invoke(page, "document_open", { path: "main.typ" });
+    const upperDoc = await invoke(page, "document_open", { path: "MAIN.TYP" });
+    assert.equal(upperDoc.state.info.id, lowerDoc.state.info.id, "case variant returns the open document");
+    assert.equal(upperDoc.state.info.path, "main.typ");
+    execFileSync("cmd", ["/c", "mklink", "/J", join(project.root, "chapters-link"), join(project.root, "chapters")], {
+      stdio: "ignore",
+    });
+    await page.locator('[data-testid="file-tree"] [data-path="chapters-link"]').waitFor({ timeout: 10_000 });
+    await openFromTree(page, "chapters-link/intro.tex");
+    // The alias tab becomes the canonical file's tab.
+    await page.locator('[data-editor-key="file:chapters/intro.tex"]').waitFor();
+    await waitFor(async () => (await page.locator('[data-editor-key="file:chapters-link/intro.tex"]').count()) === 0, {
+      message: "alias tab replaced",
+    });
+    const introDocs = (await invoke(page, "document_list")).filter((d) => d.path?.endsWith("intro.tex"));
+    assert.deepEqual(introDocs.map((d) => d.path), ["chapters/intro.tex"], "one document for the file");
+
+    // --- NUL characters: opened as text with a notice, saved, reopened -----------
+    await writeFile(join(project.root, "control-chars.txt"), "a\0b\n");
+    await page.locator('[data-testid="file-tree"] [data-path="control-chars.txt"]').waitFor({ timeout: 10_000 });
+    const nulId = await openInEditor(page, "control-chars.txt");
+    await editorLocator(page, "control-chars.txt").locator('[data-testid="nul-banner"]').waitFor();
+    await focusEditor(page, "control-chars.txt", "end");
+    await page.keyboard.type("c");
+    await waitForText(page, nulId, "a\0b\nc");
+    await page.keyboard.press("Control+S");
+    await waitFor(async () => (await readFile(join(project.root, "control-chars.txt"), "utf8")) === "a\0b\nc", { message: "nul saved" });
+    await closeTab(page, "control-chars.txt");
+    await waitFor(async () => (await invoke(page, "document_list")).every((d) => d.id !== nulId), { message: "nul closed" });
+    assert.equal((await invoke(page, "document_open", { path: "control-chars.txt" })).state.text, "a\0b\nc", "reopens as text");
+
+    // --- too-broad folders cannot be opened (R-m1 finding) ------------------------
+    const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+    const broad = await invokeError(page, "workspace_open", { path: systemRoot });
+    assert.equal(broad.error?.code, "workspace.tooBroad", JSON.stringify(broad));
+    const stillOpen = await invoke(page, "workspace_current");
+    assert.equal(stillOpen.name, "project", "the open project stays open");
+    assert.ok((await invokeError(page, "document_open", { path: "win.ini" })).error, "no system file reachable");
     await shot("07-final");
 
     // --- switching folders closes the previous folder's documents and tabs ------

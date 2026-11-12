@@ -6,12 +6,24 @@
 //! A workspace is trusted when it equals or lies inside a trusted directory.
 //! Opening a project never grants trust; only `grant` (called from an explicit
 //! user dialog) does.
+//!
+//! Because trust covers descendants, a trusted directory must be a specific
+//! folder: [`exposition_core::roots::too_broad_reason`] refuses drive roots,
+//! anything equal to or above the users folder, profile, AppData, TEMP,
+//! Desktop/Documents/Downloads, and anything in or above system folders.
+//! Entries persisted by older versions that break this rule are ignored.
+//!
+//! Trust is not a sandbox: trusted native code runs with the user's privileges
+//! and can start processes Exposition cannot track (e.g. through WMI or the
+//! task scheduler), so it may outlive cancellation.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+
+use exposition_core::roots::{BroadDirs, too_broad_reason_in};
 
 use crate::paths::{canonical_directory, is_within, same_path};
 use crate::settings::write_json_atomic;
@@ -31,7 +43,7 @@ pub struct TrustStatus {
 pub enum TrustError {
     #[error(transparent)]
     Path(#[from] crate::paths::PathError),
-    #[error("{0} is too broad to trust; trust a specific project folder instead")]
+    #[error("{0}; trust a specific project folder instead")]
     TooBroad(String),
     #[error("could not save trust settings: {0}")]
     Io(String),
@@ -46,7 +58,9 @@ struct TrustFile {
 pub struct TrustStore {
     path: Option<PathBuf>,
     roots: RwLock<Vec<PathBuf>>,
-    /// Directories that may never be trusted wholesale.
+    /// Broad personal/system locations (from the environment at load time).
+    broad: BroadDirs,
+    /// Additional directories that may never be trusted, nor anything above them.
     too_broad: Vec<PathBuf>,
 }
 
@@ -57,17 +71,34 @@ impl TrustStore {
             .and_then(|b| serde_json::from_slice::<TrustFile>(&b).ok())
             .map(|f| f.roots.into_iter().map(PathBuf::from).collect())
             .unwrap_or_default();
-        Self { path: Some(path), roots: RwLock::new(roots), too_broad }
+        Self { path: Some(path), roots: RwLock::new(roots), broad: BroadDirs::from_env(), too_broad }
     }
 
     pub fn in_memory(too_broad: Vec<PathBuf>) -> Self {
-        Self { path: None, roots: RwLock::new(Vec::new()), too_broad }
+        Self { path: None, roots: RwLock::new(Vec::new()), broad: BroadDirs::from_env(), too_broad }
+    }
+
+    /// Why a canonical directory may not be trusted, if it may not.
+    pub fn too_broad_reason(&self, canonical: &Path) -> Option<String> {
+        too_broad_reason_in(canonical, &self.broad).or_else(|| {
+            self.too_broad.iter().find(|b| is_within(b, canonical)).map(|b| {
+                if same_path(b, canonical) {
+                    format!("{} may not be trusted", canonical.display())
+                } else {
+                    format!("{} contains {}, which may not be trusted", canonical.display(), b.display())
+                }
+            })
+        })
     }
 
     /// Trust status of a canonical directory.
     pub fn status_of(&self, canonical: &Path) -> TrustStatus {
-        let roots = self.roots.read().expect("trust lock");
-        let via = roots.iter().filter(|r| is_within(canonical, r)).min_by_key(|r| r.components().count());
+        let roots = self.roots.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Entries that are too broad (e.g. persisted by an older version) never count.
+        let via = roots
+            .iter()
+            .filter(|r| is_within(canonical, r) && self.too_broad_reason(r).is_none())
+            .min_by_key(|r| r.components().count());
         TrustStatus {
             root: canonical.display().to_string(),
             trusted: via.is_some(),
@@ -85,11 +116,11 @@ impl TrustStore {
 
     pub fn grant(&self, raw: &str) -> Result<TrustStatus, TrustError> {
         let canonical = canonical_directory(raw)?;
-        if canonical.parent().is_none() || self.too_broad.iter().any(|b| same_path(b, &canonical)) {
-            return Err(TrustError::TooBroad(canonical.display().to_string()));
+        if let Some(reason) = self.too_broad_reason(&canonical) {
+            return Err(TrustError::TooBroad(reason));
         }
         {
-            let mut roots = self.roots.write().expect("trust lock");
+            let mut roots = self.roots.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             if !roots.iter().any(|r| same_path(r, &canonical)) {
                 roots.push(canonical.clone());
             }
@@ -103,7 +134,7 @@ impl TrustStore {
     pub fn revoke(&self, raw: &str) -> Result<TrustStatus, TrustError> {
         let canonical = canonical_directory(raw)?;
         {
-            let mut roots = self.roots.write().expect("trust lock");
+            let mut roots = self.roots.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             roots.retain(|r| !is_within(r, &canonical));
             self.persist(&roots)?;
         }
@@ -147,6 +178,35 @@ mod tests {
         let revoked = reloaded.revoke(&raw).unwrap();
         assert!(!revoked.trusted);
         assert!(!TrustStore::load(file, vec![]).status(&raw).unwrap().trusted);
+    }
+
+    #[test]
+    fn refuses_ancestors_of_broad_roots_and_ignores_persisted_broad_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("trust.json");
+        let store = TrustStore::load(file.clone(), vec![]);
+        let profile = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap();
+        let mut broad = vec![profile.clone(), profile.parent().unwrap().to_path_buf()];
+        if cfg!(windows) {
+            for var in ["TEMP", "LOCALAPPDATA", "APPDATA", "ProgramData"] {
+                broad.push(PathBuf::from(std::env::var_os(var).unwrap()));
+            }
+            broad.push(profile.join("AppData"));
+            broad.push(PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32"));
+        }
+        for root in broad.iter().filter(|r| r.is_dir()) {
+            let result = store.grant(&root.display().to_string());
+            assert!(matches!(result, Err(TrustError::TooBroad(_))), "{} was trusted: {result:?}", root.display());
+        }
+        // A project inside TEMP is still trustable, and a broad entry written by
+        // an older version does not make it trusted.
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let users = profile.parent().unwrap().display().to_string();
+        std::fs::write(&file, serde_json::json!({ "version": 1, "roots": [users] }).to_string()).unwrap();
+        let legacy = TrustStore::load(file, vec![]);
+        assert!(!legacy.status(&project.display().to_string()).unwrap().trusted);
+        assert!(legacy.grant(&project.display().to_string()).unwrap().trusted);
     }
 
     #[test]

@@ -23,6 +23,8 @@ typst-kit.workspace = true
 typst-layout.workspace = true
 comemo.workspace = true
 exposition-page.workspace = true
+# Markdown print profile: translation to Typst with a source map, input rules.
+exposition-markdown.workspace = true
 unicode-segmentation.workspace = true
 dirs.workspace = true
 

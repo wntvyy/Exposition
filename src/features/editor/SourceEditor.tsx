@@ -124,8 +124,8 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
         keybindings: [KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyS],
         run: () => void registry.runCommand("file.saveAll"),
       }),
-      editor.onDidCompositionStart(() => handle.grouper.setComposing(true)),
-      editor.onDidCompositionEnd(() => handle.grouper.setComposing(false)),
+      editor.onDidCompositionStart(() => handle.setComposing(true)),
+      editor.onDidCompositionEnd(() => handle.setComposing(false)),
       editor.onDidChangeCursorSelection((e) => {
         if (e.source === "api" && !editor.hasTextFocus()) return;
         const model = editor.getModel();
@@ -283,6 +283,13 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
         </div>
       )}
       {handle?.info.readOnly && <Banner tone="info" title="Read-only">{handle.info.readOnly}</Banner>}
+      {handle?.hasNul && (
+        <div data-testid="nul-banner">
+          <Banner tone="info" title="This file contains NUL characters">
+            They are shown as control symbols and kept exactly as written.
+          </Banner>
+        </div>
+      )}
       <div className="xp-monaco" ref={container} />
     </div>
   );

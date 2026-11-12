@@ -33,10 +33,12 @@ use ts_rs::TS;
 
 use crate::diff::diff_patches;
 use crate::documents::{DocumentService, DocumentSnapshot, OpenDocument};
-use crate::encoding::{DecodeError, Decoded, MAX_TEXT_BYTES, decode, encode, encoding_label, language_for};
+use crate::encoding::{
+    DecodeError, Decoded, MAX_TEXT_BYTES, SaveRefusal, check_reopenable, decode, encode, encoding_label, language_for,
+};
 use crate::error::{WorkspaceError, WorkspaceResult};
-use crate::fsutil::{hash_file, read_limited, sha256_hex, write_atomic};
-use crate::recovery::{JOURNAL_VERSION, Journal, RecoveryStore, workspace_key};
+use crate::fsutil::{FileIdentity, hash_file, read_limited, read_with_identity, sha256_hex, write_atomic};
+use crate::recovery::{JOURNAL_VERSION, Journal, RecoveryStore, StoredEntry, workspace_key};
 use crate::root::WorkspaceRoot;
 use crate::settings::{
     self, AppSettings, Loaded, ProjectSettings, load_app_settings, load_project_settings, store_app_settings,
@@ -117,7 +119,15 @@ impl WorkspaceSnapshot {
     /// Read one input: the captured buffer when the file is open, otherwise
     /// the file on disk (resolved inside the workspace).
     pub fn read(&self, path: &WorkspacePath) -> WorkspaceResult<BuildInput> {
-        if let Some((snapshot, encoding)) = self.buffers.get(path) {
+        // An alias (case variant, short name, link inside the folder) of an open
+        // file reads that file's buffer.
+        let alias = if self.buffers.contains_key(path) {
+            None
+        } else {
+            self.root.resolve_existing(path).ok().and_then(|target| self.root.relativize(&target))
+        };
+        let buffer = self.buffers.get(path).or_else(|| alias.as_ref().and_then(|p| self.buffers.get(p)));
+        if let Some((snapshot, encoding)) = buffer {
             let bytes: Arc<[u8]> = encode(&snapshot.text, *encoding).into();
             return Ok(BuildInput {
                 path: path.clone(),
@@ -159,6 +169,8 @@ pub struct WorkspaceService {
     data_dir: PathBuf,
     state: Mutex<State>,
     io: Mutex<()>,
+    /// Serializes opening documents so aliases of one file resolve to one document.
+    opening: Mutex<()>,
     events: broadcast::Sender<WorkspaceEvent>,
     fs_tx: mpsc::UnboundedSender<FsSignal>,
     fs_rx: Mutex<Option<mpsc::UnboundedReceiver<FsSignal>>>,
@@ -177,6 +189,8 @@ struct OpenWorkspace {
     recovery: RecoveryStore,
     /// Hash of each document's file as last loaded or saved (`None`: no file).
     disk: HashMap<DocumentId, Option<String>>,
+    /// Physical identity of each document's file (unifies hard links).
+    identities: HashMap<DocumentId, FileIdentity>,
     conflicts: HashMap<DocumentId, Conflict>,
     _watcher: Option<RecommendedWatcher>,
 }
@@ -255,6 +269,7 @@ impl WorkspaceService {
             data_dir,
             state: Mutex::new(State::default()),
             io: Mutex::new(()),
+            opening: Mutex::new(()),
             events,
             fs_tx,
             fs_rx: Mutex::new(Some(fs_rx)),
@@ -337,6 +352,7 @@ impl WorkspaceService {
                 root: root.clone(),
                 recovery,
                 disk: HashMap::new(),
+                identities: HashMap::new(),
                 conflicts: HashMap::new(),
                 _watcher: watcher,
             });
@@ -397,8 +413,15 @@ impl WorkspaceService {
     // ----- documents -----------------------------------------------------------
 
     /// Open a project file as a document (or return the already open one).
+    ///
+    /// Documents are identified by the physical file, not the spelling of the
+    /// path: a case variant, an 8.3 short name, a path through a link inside
+    /// the folder, or a hard link to an open file returns the existing
+    /// document. A new document is recorded under the file's canonical
+    /// workspace path (its final path under the root).
     pub fn open_document(&self, path: &WorkspacePath) -> WorkspaceResult<DocumentOpened> {
         let root = self.root()?;
+        let _opening = lock(&self.opening);
         if let Some(id) = self.documents.find_by_path(path) {
             if self.disk_base(&id).is_none() {
                 let hash = root.resolve_existing(path).ok().and_then(|p| hash_file(&p).ok());
@@ -407,28 +430,53 @@ impl WorkspaceService {
             return self.opened(&id);
         }
         let target = root.resolve_existing(path)?;
+        let canonical = root
+            .relativize(&target)
+            .ok_or_else(|| WorkspaceError::new("path.invalid", format!("{path} cannot be opened as a document.")))?;
+        if let Some(id) = self.documents.find_by_path(&canonical) {
+            return self.opened(&id);
+        }
         let meta = fs::metadata(&target).map_err(|e| WorkspaceError::io(path, &e))?;
         if meta.is_dir() {
             return Err(WorkspaceError::new("file.isDirectory", format!("{path} is a folder.")));
         }
-        let bytes = match read_limited(&target, MAX_TEXT_BYTES).map_err(|e| WorkspaceError::io(path, &e))? {
+        let read = read_with_identity(&target, MAX_TEXT_BYTES).map_err(|e| WorkspaceError::io(path, &e))?;
+        if let Some(identity) = read.identity
+            && let Some(id) = self.document_with_identity(&identity)
+        {
+            return self.opened(&id);
+        }
+        let bytes = match read.bytes {
             Ok(bytes) => bytes,
             Err(size) => return Err(too_large(path, size)),
         };
         let decoded = decode(&bytes).map_err(|e| decode_error(path, e))?;
         let info = self.documents.open(OpenDocument {
-            path: Some(path.clone()),
+            path: Some(canonical.clone()),
             text: decoded.text,
-            language: language_for(path.file_name()).to_owned(),
+            language: language_for(canonical.file_name()).to_owned(),
             encoding: decoded.encoding,
             read_only: None,
         });
-        // A concurrent open of the same path returns the same document; the
-        // first recorded disk hash wins.
         if self.disk_base(&info.id).is_none() {
             self.set_disk_base(&info.id, Some(sha256_hex(&bytes)));
         }
+        if let Some(identity) = read.identity
+            && let Some(open) = lock(&self.state).open.as_mut()
+        {
+            open.identities.insert(info.id.clone(), identity);
+        }
         self.opened(&info.id)
+    }
+
+    /// The open document backed by the physical file `identity`, if any.
+    fn document_with_identity(&self, identity: &FileIdentity) -> Option<DocumentId> {
+        let state = lock(&self.state);
+        let open = state.open.as_ref()?;
+        open.identities
+            .iter()
+            .find(|(id, known)| *known == identity && self.documents.info(id).is_ok())
+            .map(|(id, _)| id.clone())
     }
 
     fn opened(&self, id: &DocumentId) -> WorkspaceResult<DocumentOpened> {
@@ -445,6 +493,7 @@ impl WorkspaceService {
             let mut state = lock(&self.state);
             state.open.as_mut().map(|open| {
                 open.disk.remove(id);
+                open.identities.remove(id);
                 open.conflicts.remove(id);
                 open.recovery.clone()
             })
@@ -503,6 +552,23 @@ impl WorkspaceService {
             Err(e) => return Err(WorkspaceError::io(&path, &e)),
         }
         let bytes = encode(&state.text, state.info.encoding);
+        // Never write a file Exposition would then refuse to reopen.
+        check_reopenable(&state.text, bytes.len()).map_err(|refusal| match refusal {
+            SaveRefusal::TooLarge { size } => WorkspaceError::new(
+                "file.tooLarge",
+                format!(
+                    "{path} would be {:.1} MB; Exposition saves and opens text files up to {} MB. Your changes are kept in the editor.",
+                    size as f64 / 1_048_576.0,
+                    MAX_TEXT_BYTES / 1_048_576
+                ),
+            ),
+            SaveRefusal::Binary => WorkspaceError::new(
+                "file.binary",
+                format!(
+                    "{path} contains many control characters (such as NUL) and would be treated as binary when reopened, so it was not saved. Your changes are kept in the editor."
+                ),
+            ),
+        })?;
         write_atomic(&target, &bytes).map_err(|e| match e.kind() {
             std::io::ErrorKind::PermissionDenied => WorkspaceError::new(
                 "file.permissionDenied",
@@ -749,7 +815,22 @@ impl WorkspaceService {
         let store = self.recovery_store()?;
         let root = self.root()?;
         let mut entries = Vec::new();
-        for (id, journal) in store.entries() {
+        for stored in store.entries() {
+            let (id, journal) = match stored {
+                StoredEntry::Valid { id, journal } => (id, journal),
+                StoredEntry::Unreadable { id, path, reason, location, modified } => {
+                    entries.push(RecoveryEntry {
+                        id,
+                        path,
+                        saved_at: modified,
+                        length: 0,
+                        disk: RecoveryDiskState::Unknown,
+                        problem: Some(reason),
+                        location: Some(crate::root::display_path(&location)),
+                    });
+                    continue;
+                }
+            };
             let disk = match read_disk(&root, &journal.path) {
                 DiskRead::Missing => {
                     if journal.base_hash.is_none() {
@@ -773,10 +854,12 @@ impl WorkspaceService {
             };
             entries.push(RecoveryEntry {
                 id,
-                path: journal.path,
+                path: Some(journal.path),
                 saved_at: journal.saved_at,
                 length: u32::try_from(exposition_core::text::utf16_len(&journal.text)).unwrap_or(u32::MAX),
                 disk,
+                problem: None,
+                location: None,
             });
         }
         Ok(entries)
@@ -788,6 +871,12 @@ impl WorkspaceService {
     /// kept (disk on disk, recovered text in the buffer).
     pub fn restore_recovery(&self, entry_id: &str) -> WorkspaceResult<RestoreOutcome> {
         let store = self.recovery_store()?;
+        if entry_id.starts_with("bad-") {
+            return Err(WorkspaceError::new(
+                "recovery.unreadable",
+                "This recovery data is unreadable and cannot be restored; it can only be discarded.",
+            ));
+        }
         let journal = store
             .read_entry(entry_id)
             .ok_or_else(|| WorkspaceError::new("recovery.notFound", "That recovery entry no longer exists."))?;

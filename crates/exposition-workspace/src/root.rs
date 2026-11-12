@@ -48,6 +48,14 @@ impl WorkspaceRoot {
         }
         fs::read_dir(&canonical)
             .map_err(|e| WorkspaceError::new("workspace.unreadable", format!("{shown} cannot be listed: {e}.")))?;
+        // The same rule as workspace trust: no drive roots, nothing that is or
+        // contains a profile/system folder, nothing inside a system folder.
+        if let Some(reason) = exposition_core::roots::too_broad_reason(&canonical) {
+            return Err(WorkspaceError::new(
+                "workspace.tooBroad",
+                format!("{reason}. Open a specific project folder instead."),
+            ));
+        }
         Ok(Self { canonical })
     }
 
@@ -246,6 +254,30 @@ mod tests {
         assert_eq!(WorkspaceRoot::open(&f.outside.join("secret.txt")).unwrap_err().code, "workspace.notDirectory");
         assert!(!f.root.display_path().starts_with(r"\\?\"));
         assert_eq!(f.root.name(), "project");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refuses_too_broad_roots() {
+        let env = |v: &str| PathBuf::from(std::env::var_os(v).expect(v));
+        let system = env("SystemRoot");
+        let profile = env("USERPROFILE");
+        let drive = PathBuf::from(format!("{}\\", std::env::var("SystemDrive").unwrap()));
+        for broad in [
+            system.clone(),
+            system.join("System32"),
+            profile.clone(),
+            profile.parent().unwrap().to_path_buf(),
+            drive,
+            env("ProgramData"),
+            env("LOCALAPPDATA"),
+        ] {
+            let err = WorkspaceRoot::open(&broad).unwrap_err();
+            assert_eq!(err.code, "workspace.tooBroad", "{} → {err:?}", broad.display());
+        }
+        // A project folder inside the profile (here: under the temp directory) is fine.
+        let f = fixture();
+        assert!(WorkspaceRoot::open(f.root.path()).is_ok());
     }
 
     #[test]

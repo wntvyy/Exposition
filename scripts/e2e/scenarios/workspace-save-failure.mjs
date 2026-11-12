@@ -79,6 +79,38 @@ export default async function workspaceSaveFailure({ launchApp, artifactsDir, as
     await page.keyboard.press("Control+S");
     await prompt.getByRole("button", { name: "Overwrite" }).click();
     await waitFor(async () => (await readFile(target, "utf8")) === `${expected} More.`, { message: "explicit overwrite" });
+
+    // A document grown past the open limit is not saved (it could not be reopened).
+    const beforeBig = await documentState(page, id);
+    await invoke(page, "document_apply", {
+      request: {
+        id: "too-big",
+        origin: { kind: "agent", taskId: "e2e" },
+        edits: [
+          {
+            document: id,
+            baseRevision: beforeBig.info.revision,
+            patches: [{ range: { start: 0, end: 0 }, text: "x".repeat(10 * 1024 * 1024) }],
+          },
+        ],
+        undo: { kind: "newGroup" },
+        conflict: "reject",
+        label: null,
+        selection: null,
+      },
+    });
+    const tooBig = await page.evaluate(
+      (doc) =>
+        window.__TAURI_INTERNALS__.invoke("document_save", { document: doc, overwrite: false }).then(
+          () => null,
+          (e) => e,
+        ),
+      id,
+    );
+    assert.equal(tooBig?.code, "file.tooLarge", JSON.stringify(tooBig));
+    assert.equal(await readFile(target, "utf8"), `${expected} More.`, "file untouched");
+    await invoke(page, "document_undo", { document: id, origin: { kind: "source" } });
+    await waitForText(page, id, `${expected} More.`);
   } catch (error) {
     await shot("failure").catch(() => {});
     throw error;
