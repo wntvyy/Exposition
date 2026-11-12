@@ -133,6 +133,9 @@ const COMMANDS: &[&str] = &[
     "lean_record_evidence",
     "lean_associate_declaration",
     "lean_declaration_evidence",
+    "graph_reconcile",
+    "graph_backup",
+    "graph_backups",
     // Agents and the project graph (src/agents.rs).
     "agents_task_keep_investigation",
     "agents_task_create_generation",

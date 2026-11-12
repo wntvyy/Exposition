@@ -7,6 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { ApplyChangeRequest } from "../bindings/ApplyChangeRequest";
 import type { ApplyOutcome } from "../bindings/ApplyOutcome";
+import type { BackupInfo } from "../bindings/BackupInfo";
 import type { ChangeProposal } from "../bindings/ChangeProposal";
 import type { ChangeRequest } from "../bindings/ChangeRequest";
 import type { EntityDetail } from "../bindings/EntityDetail";
@@ -23,6 +24,7 @@ import type { ImpactRequest } from "../bindings/ImpactRequest";
 import type { InspectAtSourceRequest } from "../bindings/InspectAtSourceRequest";
 import type { MathOverview } from "../bindings/MathOverview";
 import type { OperationRecord } from "../bindings/OperationRecord";
+import type { ReconcileReport } from "../bindings/ReconcileReport";
 import type { RecoveryOption } from "../bindings/RecoveryOption";
 import type { SourceInspection } from "../bindings/SourceInspection";
 import type { ViewId } from "../bindings/ViewId";
@@ -53,6 +55,15 @@ export const graphCommands = {
   recover: (option: RecoveryOption) => invoke<GraphStatus>("graph_recover", { option }),
   /** Interrupted cross-service operations that need reconciliation. */
   operations: () => invoke<OperationRecord[]>("graph_operations"),
+  /**
+   * "Reindex project": rebuild derived projections from the files (every file
+   * re-read unless `force` is false). Never touches curated records.
+   */
+  reconcile: (force = true) => invoke<ReconcileReport>("graph_reconcile", { force }),
+  /** Take a consistent backup of the project graph now. */
+  backup: () => invoke<BackupInfo>("graph_backup"),
+  /** Graph backups, newest first (restorable via `recover` when the graph is damaged). */
+  backups: () => invoke<BackupInfo[]>("graph_backups"),
 };
 
 export const graphEvents = {

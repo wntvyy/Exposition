@@ -131,6 +131,9 @@
     "allow-lean-record-evidence",
     "allow-lean-associate-declaration",
     "allow-lean-declaration-evidence",
+    "allow-graph-reconcile",
+    "allow-graph-backup",
+    "allow-graph-backups",
     "allow-agents-task-keep-investigation",
     "allow-agents-task-create-generation"
   ]

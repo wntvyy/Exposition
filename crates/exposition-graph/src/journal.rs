@@ -267,6 +267,30 @@ impl OperationJournal {
         out
     }
 
+    /// Like [`Self::unresolved`] at startup, but only records created before
+    /// `cutoff_ms` (an earlier session) are labelled interrupted: an
+    /// operation this session is still running is left pending.
+    pub fn unresolved_before(&self, project_root: &Path, cutoff_ms: u64) -> Vec<OperationRecord> {
+        let mut out = Vec::new();
+        for mut record in self.list(project_root) {
+            match record.state {
+                OperationState::Pending if record.created_at_ms < cutoff_ms => {
+                    if let Ok(r) = self.needs_reconciliation(
+                        project_root,
+                        &record.id,
+                        "Exposition stopped before this operation finished; check the result before continuing.",
+                    ) {
+                        record = r;
+                    }
+                    out.push(record);
+                }
+                OperationState::Pending | OperationState::NeedsReconciliation { .. } => out.push(record),
+                _ => {}
+            }
+        }
+        out
+    }
+
     fn prune(&self, project_root: &Path) {
         let records = self.list(project_root);
         if records.len() <= MAX_RECORDS {
@@ -305,5 +329,20 @@ mod tests {
         assert_eq!(unresolved[0].steps[0].refs["transaction"], "t-1");
         journal.resolve(project.path(), &op.id, "attachment verified").unwrap();
         assert!(journal.unresolved(project.path(), true).is_empty());
+    }
+
+    #[test]
+    fn only_operations_of_an_earlier_session_are_labelled_interrupted() {
+        let data = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let journal = OperationJournal::new(data.path());
+        let old = journal.begin(OperationKind::ProjectCreation, project.path(), None, "old", vec![]).unwrap();
+        let cutoff = now_ms() + 1;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let running = journal.begin(OperationKind::Promotion, project.path(), None, "running", vec![]).unwrap();
+        let listed = journal.unresolved_before(project.path(), cutoff);
+        let state = |id: &OperationId| listed.iter().find(|r| &r.id == id).unwrap().state.clone();
+        assert!(matches!(state(&old.id), OperationState::NeedsReconciliation { .. }));
+        assert_eq!(state(&running.id), OperationState::Pending, "this session's operation is not interrupted");
     }
 }

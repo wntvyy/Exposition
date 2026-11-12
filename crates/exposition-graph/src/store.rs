@@ -30,14 +30,18 @@ use crate::query::{GraphView, GraphViewSummary, ViewScope};
 use crate::vocabulary::{EntityKind, EvidenceKind, RelationKind, ResourceRole, VOCABULARY_VERSION};
 
 /// Current schema version (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// File name of the graph database inside `.exposition/`.
 pub const DATABASE_FILE: &str = "graph.sqlite3";
 
-const MIGRATIONS: &[(u32, &str)] = &[(
-    1,
-    r#"
+/// Largest graph database file opened (a hostile or runaway file is refused).
+pub const MAX_DATABASE_BYTES: u64 = 1024 * 1024 * 1024;
+
+const MIGRATIONS: &[(u32, &str)] = &[
+    (
+        1,
+        r#"
     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE entities (
         id TEXT PRIMARY KEY,
@@ -131,31 +135,147 @@ const MIGRATIONS: &[(u32, &str)] = &[(
         indexed_at INTEGER NOT NULL
     );
     "#,
-)];
+    ),
+    (
+        // Reconciliation checkpoints: the file state last indexed (size,
+        // modification time, physical identity for rename confirmation) and
+        // the rebuildable per-file source index (labels, symbolic links).
+        2,
+        r#"
+    ALTER TABLE coverage ADD COLUMN size INTEGER;
+    ALTER TABLE coverage ADD COLUMN modified_ms INTEGER;
+    ALTER TABLE coverage ADD COLUMN file_identity TEXT;
+    ALTER TABLE coverage ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE source_index (
+        path TEXT PRIMARY KEY,
+        content_hash TEXT NOT NULL,
+        extractor TEXT NOT NULL,
+        body TEXT NOT NULL,
+        wanted TEXT NOT NULL DEFAULT '[]'
+    );
+    "#,
+    ),
+];
 
-/// Every schema object a valid version-1 database has (type, name).
-const EXPECTED_OBJECTS: &[(&str, &str)] = &[
-    ("table", "meta"),
-    ("table", "entities"),
-    ("index", "entities_kind"),
-    ("index", "entities_key"),
-    ("table", "bindings"),
-    ("index", "bindings_path"),
-    ("table", "relations"),
-    ("index", "relations_from"),
-    ("index", "relations_to"),
-    ("table", "evidence"),
-    ("index", "evidence_subject"),
-    ("table", "changes"),
-    ("table", "views"),
-    ("table", "workflows"),
-    ("table", "coverage"),
+/// Every schema object a valid database of `version` has (type, name).
+fn expected_objects(version: u32) -> Vec<(&'static str, &'static str)> {
+    let mut objects = vec![
+        ("table", "meta"),
+        ("table", "entities"),
+        ("index", "entities_kind"),
+        ("index", "entities_key"),
+        ("table", "bindings"),
+        ("index", "bindings_path"),
+        ("table", "relations"),
+        ("index", "relations_from"),
+        ("index", "relations_to"),
+        ("table", "evidence"),
+        ("index", "evidence_subject"),
+        ("table", "changes"),
+        ("table", "views"),
+        ("table", "workflows"),
+        ("table", "coverage"),
+    ];
+    if version >= 2 {
+        objects.push(("table", "source_index"));
+    }
+    objects
+}
+
+/// Columns of each table of `version` (a hostile file may reuse our table
+/// names with other columns).
+fn expected_columns(version: u32) -> Vec<(&'static str, Vec<&'static str>)> {
+    let mut coverage = vec!["path", "extractor", "state", "unresolved", "detail", "content_hash", "indexed_at"];
+    if version >= 2 {
+        coverage.extend(["size", "modified_ms", "file_identity", "pending"]);
+    }
+    let mut tables = vec![
+        ("meta", vec!["key", "value"]),
+        (
+            "entities",
+            vec![
+                "id",
+                "kind",
+                "roles",
+                "label",
+                "key",
+                "lifecycle",
+                "tombstone_reason",
+                "revision",
+                "origin",
+                "attributes",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "bindings",
+            vec![
+                "entity_id",
+                "ordinal",
+                "path",
+                "selector",
+                "range_start",
+                "range_end",
+                "content_hash",
+                "revision",
+                "saved",
+                "fingerprint",
+                "state",
+                "detail",
+            ],
+        ),
+        (
+            "relations",
+            vec![
+                "id",
+                "kind",
+                "from_id",
+                "to_id",
+                "origin",
+                "status",
+                "evidence_kind",
+                "evidence",
+                "from_version",
+                "to_version",
+                "note",
+                "revision",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        ("evidence", vec!["id", "kind", "subject", "body", "recorded_at"]),
+        ("changes", vec!["revision", "at", "origin", "summary", "delta"]),
+        ("views", vec!["id", "name", "scope", "body", "revision", "updated_at"]),
+        ("workflows", vec!["id", "revision", "hash", "state", "body", "saved_at"]),
+        ("coverage", coverage),
+    ];
+    if version >= 2 {
+        tables.push(("source_index", vec!["path", "content_hash", "extractor", "body", "wanted"]));
+    }
+    tables
+}
+
+/// Row limits per table: a database beyond them is refused rather than read.
+const ROW_LIMITS: &[(&str, i64)] = &[
+    ("meta", 1_000),
+    ("entities", 500_000),
+    ("bindings", 1_000_000),
+    ("relations", 2_000_000),
+    ("evidence", 200_000),
+    ("changes", 20_000),
+    ("views", 10_000),
+    ("workflows", 100_000),
+    ("coverage", 500_000),
+    ("source_index", 500_000),
 ];
 
 /// Upper bounds on what one read returns.
 pub const MAX_ROWS: usize = 20_000;
 /// Text fields read from the database are bounded (hostile files).
 const MAX_FIELD: usize = 256 * 1024;
+/// Short fields (hashes, versions, fingerprints, extractor names).
+const MAX_SHORT_FIELD: usize = 256;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -193,6 +313,15 @@ impl GraphStore {
     /// input. Fails with [`StoreError::NewerSchema`], [`StoreError::Corrupt`],
     /// or [`StoreError::Untrusted`] instead of guessing.
     pub fn open(path: &Path, create: bool) -> StoreResult<Self> {
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.len() > MAX_DATABASE_BYTES
+        {
+            return Err(StoreError::Untrusted(format!(
+                "the file is {} MB; graphs larger than {} MB are not opened",
+                meta.len() / 1_048_576,
+                MAX_DATABASE_BYTES / 1_048_576
+            )));
+        }
         let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         if create {
             flags |= OpenFlags::SQLITE_OPEN_CREATE;
@@ -219,7 +348,7 @@ impl GraphStore {
             if check != "ok" {
                 return Err(StoreError::Corrupt(truncate(&check, 300)));
             }
-            verify_schema_objects(&conn)?;
+            verify_schema_objects(&conn, version)?;
         } else {
             // A database with user_version 0 must be empty before we create
             // our schema in it (never adopt someone else's tables).
@@ -229,9 +358,171 @@ impl GraphStore {
             }
         }
         let mut store = Self { conn, path, project: ProjectId::mint() };
+        if version > 0 && version < SCHEMA_VERSION {
+            // Keep a consistent copy of the older graph before changing it.
+            if let Some(dir) = store.path.as_deref().and_then(Path::parent) {
+                let backups = dir.join(crate::backup::BACKUP_DIR);
+                crate::backup::create(&store, &backups, "premigration").map_err(|e| {
+                    StoreError::Corrupt(format!("the graph could not be backed up before upgrading it: {e}"))
+                })?;
+            }
+        }
         store.migrate(version)?;
+        if version > 0 {
+            store.verify_contents()?;
+        }
         store.project = store.load_or_create_project()?;
         Ok(store)
+    }
+
+    /// Validate every stored record of an existing database (it may come
+    /// from anywhere): row limits per table, no dangling references, every
+    /// row decodable within field bounds, ordered ranges, valid ids, relation
+    /// endpoints that satisfy the vocabulary, at most one project entity.
+    /// Refused databases are left unchanged for recovery.
+    pub fn verify_contents(&self) -> StoreResult<()> {
+        for (table, limit) in ROW_LIMITS {
+            let n: i64 = self.conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
+            if n > *limit {
+                return Err(StoreError::Untrusted(format!("{table} holds {n} rows (at most {limit} are read)")));
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare("PRAGMA foreign_key_check")?;
+            let mut rows = stmt.query([])?;
+            if let Some(row) = rows.next()? {
+                let table: String = row.get(0).unwrap_or_default();
+                return Err(StoreError::Corrupt(format!(
+                    "a record in {} refers to an entity that does not exist",
+                    truncate(&table, 40)
+                )));
+            }
+        }
+        for (key, value) in self.meta_rows()? {
+            if key.len() > MAX_SHORT_FIELD || value.len() > 4096 {
+                return Err(untrusted("metadata"));
+            }
+        }
+        if let Some(rev) = self.meta("revision")?
+            && rev.parse::<u64>().is_err()
+        {
+            return Err(untrusted("graph revision"));
+        }
+        let mut kinds: std::collections::HashMap<EntityId, EntityKind> = std::collections::HashMap::new();
+        let mut projects = 0usize;
+        {
+            let mut stmt = self.conn.prepare(&format!("SELECT {ENTITY_COLUMNS} FROM entities"))?;
+            for row in stmt.query_map([], read_entity)? {
+                let e = row??;
+                if e.kind == EntityKind::Project {
+                    projects += 1;
+                }
+                if e.kind != EntityKind::Resource && !e.roles.is_empty() {
+                    return Err(untrusted("entity roles"));
+                }
+                kinds.insert(e.id, e.kind);
+            }
+        }
+        if projects > 1 {
+            return Err(StoreError::Untrusted("more than one project entity".into()));
+        }
+        {
+            let mut stmt = self.conn.prepare(&format!("SELECT {BINDING_COLUMNS} FROM bindings"))?;
+            for row in stmt.query_map([], read_binding)? {
+                row??;
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare(&format!("SELECT {RELATION_COLUMNS} FROM relations"))?;
+            for row in stmt.query_map([], read_relation)? {
+                let r = row??;
+                let (Some(from), Some(to)) = (kinds.get(&r.from), kinds.get(&r.to)) else {
+                    return Err(StoreError::Corrupt("a relation refers to an entity that does not exist".into()));
+                };
+                if !r.kind.allows(*from, *to) || r.from == r.to {
+                    return Err(StoreError::Untrusted(format!(
+                        "a {} relation between a {} and a {} breaks the vocabulary's endpoint rules",
+                        r.kind.as_str(),
+                        from.as_str(),
+                        to.as_str()
+                    )));
+                }
+                if r.evidence_kind.is_some() != (r.kind == RelationKind::EvidenceFor) {
+                    return Err(untrusted("relation evidence kind"));
+                }
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare("SELECT id, kind, subject, body FROM evidence")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, kind, subject, body) = row?;
+                let e: Evidence = decode(&body)?;
+                if e.id.as_str() != id
+                    || EvidenceKind::parse(&kind) != Some(e.kind)
+                    || subject.as_deref() != e.subject.as_ref().map(EntityId::as_str)
+                {
+                    return Err(untrusted("evidence record"));
+                }
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare(&format!("SELECT {COVERAGE_COLUMNS} FROM coverage"))?;
+            for row in stmt.query_map([], read_coverage)? {
+                row??;
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare("SELECT body FROM views")?;
+            for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+                decode::<GraphView>(&row?)?;
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare("SELECT path, content_hash, extractor, length(body) FROM source_index")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
+            })?;
+            for row in rows {
+                let (path, hash, extractor, len) = row?;
+                WorkspacePath::parse(&path).map_err(|_| untrusted("index path"))?;
+                if hash.len() > MAX_SHORT_FIELD || extractor.len() > MAX_SHORT_FIELD || len > 16 * MAX_FIELD as i64 {
+                    return Err(untrusted("source index record"));
+                }
+            }
+        }
+        {
+            let n: i64 = self.conn.query_row(
+                "SELECT count(*) FROM workflows WHERE length(body) > ?1 OR length(hash) > ?2 OR length(state) > ?2",
+                params![16 * MAX_FIELD as i64, MAX_SHORT_FIELD as i64],
+                |r| r.get(0),
+            )?;
+            if n > 0 {
+                return Err(untrusted("workflow record"));
+            }
+        }
+        Ok(())
+    }
+
+    fn meta_rows(&self) -> StoreResult<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT key, value FROM meta LIMIT 1001")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Write a consistent copy of the whole database to `dest` (`VACUUM
+    /// INTO`; correct even while the database is open, never a raw file copy).
+    pub fn vacuum_into(&self, dest: &Path) -> StoreResult<()> {
+        let dest = dest.to_str().ok_or_else(|| StoreError::Corrupt("backup path is not valid text".into()))?;
+        self.conn.execute("VACUUM INTO ?1", [dest])?;
+        Ok(())
     }
 
     fn migrate(&mut self, from: u32) -> StoreResult<()> {
@@ -366,6 +657,64 @@ impl GraphStore {
         rows.map(|r| r?).collect()
     }
 
+    /// Non-tombstoned entities of any kind with this natural key (bounded).
+    pub fn live_entities_with_key(&self, key: &str) -> StoreResult<Vec<Entity>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {ENTITY_COLUMNS} FROM entities WHERE key = ?1 AND lifecycle != 'tombstoned' LIMIT 64"
+        ))?;
+        let rows = stmt.query_map([key], read_entity)?;
+        rows.map(|r| r?).collect()
+    }
+
+    /// Paths whose coverage reports unresolved bindings or references.
+    pub fn paths_with_unresolved(&self) -> StoreResult<Vec<WorkspacePath>> {
+        let mut stmt = self.conn.prepare_cached("SELECT path FROM coverage WHERE unresolved > 0 LIMIT 50000")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(WorkspacePath::parse(&row?).map_err(|_| untrusted("coverage path"))?);
+        }
+        Ok(out)
+    }
+
+    /// Files waiting for link targets, with the targets they wait for.
+    pub fn index_wanted(&self) -> StoreResult<Vec<(WorkspacePath, Vec<String>)>> {
+        let mut stmt =
+            self.conn.prepare_cached("SELECT path, wanted FROM source_index WHERE wanted != '[]' LIMIT 500000")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (path, wanted) = row?;
+            let path = WorkspacePath::parse(&path).map_err(|_| untrusted("index path"))?;
+            out.push((path, decode::<Vec<String>>(&wanted)?));
+        }
+        Ok(out)
+    }
+
+    /// Every stored source index body's labels (path, body), for building the
+    /// in-memory project label index once per session.
+    pub fn all_source_index(&self) -> StoreResult<Vec<IndexRecord>> {
+        let mut stmt =
+            self.conn.prepare_cached("SELECT path, content_hash, extractor, body FROM source_index LIMIT 500000")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (path, content_hash, extractor, body) = row?;
+            if body.len() > 16 * MAX_FIELD {
+                return Err(untrusted("source index record"));
+            }
+            out.push(IndexRecord {
+                path: WorkspacePath::parse(&path).map_err(|_| untrusted("index path"))?,
+                content_hash: short(content_hash)?,
+                extractor: short(extractor)?,
+                body,
+            });
+        }
+        Ok(out)
+    }
+
     pub fn entities(&self, ids: &[EntityId]) -> StoreResult<Vec<Entity>> {
         let mut out = Vec::with_capacity(ids.len());
         for id in ids.iter().take(MAX_ROWS) {
@@ -406,6 +755,15 @@ impl GraphStore {
             "SELECT {RELATION_COLUMNS} FROM relations WHERE from_id = ?1 ORDER BY kind, id LIMIT {MAX_ROWS}"
         ))?;
         let rows = stmt.query_map([entity.as_str()], read_relation)?;
+        rows.map(|r| r?).collect()
+    }
+
+    /// Every relation of one kind (bounded), e.g. the whole containment tree.
+    pub fn relations_of_kind(&self, kind: RelationKind) -> StoreResult<Vec<Relation>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(&format!("SELECT {RELATION_COLUMNS} FROM relations WHERE kind = ?1 LIMIT 1000000"))?;
+        let rows = stmt.query_map([kind.as_str()], read_relation)?;
         rows.map(|r| r?).collect()
     }
 
@@ -461,24 +819,181 @@ impl GraphStore {
     // ----- coverage -----
 
     pub fn coverage(&self, path: &WorkspacePath) -> StoreResult<Option<ResourceCoverage>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT path, extractor, state, unresolved, detail, content_hash FROM coverage WHERE path = ?1",
-        )?;
+        let mut stmt = self.conn.prepare_cached(&format!("SELECT {COVERAGE_COLUMNS} FROM coverage WHERE path = ?1"))?;
         stmt.query_row([path.as_str()], read_coverage).optional()?.transpose()
     }
 
     pub fn all_coverage(&self) -> StoreResult<Vec<ResourceCoverage>> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT path, extractor, state, unresolved, detail, content_hash FROM coverage ORDER BY path LIMIT {MAX_ROWS}"
-        ))?;
+        let mut stmt = self
+            .conn
+            .prepare_cached(&format!("SELECT {COVERAGE_COLUMNS} FROM coverage ORDER BY path LIMIT {MAX_ROWS}"))?;
         let rows = stmt.query_map([], read_coverage)?;
         rows.map(|r| r?).collect()
     }
 
+    /// Reconciliation checkpoints of every indexed file (bounded by the
+    /// coverage row limit).
+    pub fn checkpoints(&self) -> StoreResult<BTreeMap<WorkspacePath, Checkpoint>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {COVERAGE_COLUMNS}, size, modified_ms, file_identity FROM coverage LIMIT 500000"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            let coverage = read_coverage_stored(r)?;
+            let size: Option<i64> = r.get(7)?;
+            let modified: Option<i64> = r.get(8)?;
+            let identity: Option<String> = r.get(9)?;
+            Ok((coverage, size, modified, identity))
+        })?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (coverage, size, modified, identity) = row?;
+            let coverage = coverage?;
+            out.insert(
+                coverage.path.clone(),
+                Checkpoint {
+                    size: size.map(|s| s.max(0) as u64),
+                    modified_ms: modified.map(|m| m.max(0) as u64),
+                    identity: identity.map(short).transpose()?,
+                    coverage,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// Checkpoints of the files at or under `prefixes`.
+    pub fn checkpoints_under(&self, prefixes: &[WorkspacePath]) -> StoreResult<BTreeMap<WorkspacePath, Checkpoint>> {
+        let mut out = BTreeMap::new();
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {COVERAGE_COLUMNS}, size, modified_ms, file_identity FROM coverage
+             WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' LIMIT 500000"
+        ))?;
+        for prefix in prefixes {
+            let like = format!("{}/%", escape_like(prefix.as_str()));
+            let rows = stmt.query_map(params![prefix.as_str(), like], |r| {
+                let coverage = read_coverage_stored(r)?;
+                Ok((coverage, r.get::<_, Option<i64>>(7)?, r.get::<_, Option<i64>>(8)?, r.get::<_, Option<String>>(9)?))
+            })?;
+            for row in rows {
+                let (coverage, size, modified, identity) = row?;
+                let coverage = coverage?;
+                out.insert(
+                    coverage.path.clone(),
+                    Checkpoint {
+                        size: size.map(|s| s.max(0) as u64),
+                        modified_ms: modified.map(|m| m.max(0) as u64),
+                        identity: identity.map(short).transpose()?,
+                        coverage,
+                    },
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// Resource identities by path, without decoding whole records:
+    /// `(path, id, roles, tombstoned, created_at_ms)`. With `prefixes`, only
+    /// resources at or under them.
+    pub fn resource_keys(&self, prefixes: Option<&[WorkspacePath]>) -> StoreResult<Vec<ResourceKey>> {
+        let mut out = Vec::new();
+        let mut read = |rows: rusqlite::MappedRows<'_, _>| -> StoreResult<()> {
+            for row in rows {
+                let (id, key, roles, lifecycle, created): (String, Option<String>, String, String, i64) = row?;
+                let Some(path) = key.as_deref().and_then(|k| WorkspacePath::parse(k).ok()) else { continue };
+                out.push(ResourceKey {
+                    path,
+                    id: EntityId::parse(&id).map_err(|_| untrusted("entity id"))?,
+                    roles: decode::<Vec<ResourceRole>>(&roles)?,
+                    tombstoned: Lifecycle::parse(&lifecycle).ok_or_else(|| untrusted("lifecycle"))?
+                        == Lifecycle::Tombstoned,
+                    created_at_ms: created.max(0) as u64,
+                });
+            }
+            Ok(())
+        };
+        let map = |r: &rusqlite::Row<'_>| -> rusqlite::Result<(String, Option<String>, String, String, i64)> {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        };
+        match prefixes {
+            None => {
+                let mut stmt = self.conn.prepare_cached(
+                    "SELECT id, key, roles, lifecycle, created_at FROM entities WHERE kind = 'resource' LIMIT 500000",
+                )?;
+                read(stmt.query_map([], map)?)?;
+            }
+            Some(prefixes) => {
+                let mut stmt = self.conn.prepare_cached(
+                    "SELECT id, key, roles, lifecycle, created_at FROM entities
+                     WHERE kind = 'resource' AND (key = ?1 OR key LIKE ?2 ESCAPE '\\') LIMIT 500000",
+                )?;
+                for prefix in prefixes {
+                    let like = format!("{}/%", escape_like(prefix.as_str()));
+                    read(stmt.query_map(params![prefix.as_str(), like], map)?)?;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The stored source index of a file (rebuildable projection).
+    pub fn source_index(&self, path: &WorkspacePath) -> StoreResult<Option<IndexRecord>> {
+        let mut stmt =
+            self.conn.prepare_cached("SELECT content_hash, extractor, body FROM source_index WHERE path = ?1")?;
+        let row = stmt
+            .query_row([path.as_str()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })
+            .optional()?;
+        let Some((content_hash, extractor, body)) = row else { return Ok(None) };
+        if body.len() > 16 * MAX_FIELD {
+            return Err(untrusted("source index record"));
+        }
+        Ok(Some(IndexRecord {
+            path: path.clone(),
+            content_hash: short(content_hash)?,
+            extractor: short(extractor)?,
+            body,
+        }))
+    }
+
+    /// Every resource entity (any lifecycle), bounded.
+    pub fn all_of_kind(&self, kind: EntityKind) -> StoreResult<Vec<Entity>> {
+        let mut stmt =
+            self.conn.prepare_cached(&format!("SELECT {ENTITY_COLUMNS} FROM entities WHERE kind = ?1 LIMIT 500000"))?;
+        let rows = stmt.query_map([kind.as_str()], read_entity)?;
+        rows.map(|r| r?).collect()
+    }
+
+    /// Every binding (bounded), for reconciliation.
+    pub fn all_bindings(&self) -> StoreResult<Vec<SourceBinding>> {
+        let mut stmt = self.conn.prepare_cached(&format!("SELECT {BINDING_COLUMNS} FROM bindings LIMIT 1000000"))?;
+        let rows = stmt.query_map([], read_binding)?;
+        rows.map(|r| r?).collect()
+    }
+
+    /// Relations with the given origin kind (`extracted`) whose `from` is one
+    /// of `ids`.
+    pub fn relations_from_all(&self, ids: &[EntityId]) -> StoreResult<Vec<Relation>> {
+        let mut out = Vec::new();
+        for id in ids {
+            out.extend(self.relations_from(id)?);
+        }
+        Ok(out)
+    }
+
+    /// Coverage as last reconciled, ignoring a pending change (the
+    /// reconciler's own view; others use [`Self::coverage`]).
+    pub fn coverage_stored(&self, path: &WorkspacePath) -> StoreResult<Option<ResourceCoverage>> {
+        let mut stmt = self.conn.prepare_cached(&format!("SELECT {COVERAGE_COLUMNS} FROM coverage WHERE path = ?1"))?;
+        stmt.query_row([path.as_str()], read_coverage_stored).optional()?.transpose()
+    }
+
     pub fn coverage_summary(&self) -> StoreResult<CoverageSummary> {
         let mut summary = CoverageSummary::default();
-        let mut stmt =
-            self.conn.prepare_cached("SELECT state, count(*), sum(unresolved) FROM coverage GROUP BY state")?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT CASE WHEN pending > 0 THEN 'pending' ELSE state END AS s, count(*), sum(unresolved)
+             FROM coverage GROUP BY s",
+        )?;
         let rows =
             stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?)))?;
         for row in rows {
@@ -580,6 +1095,24 @@ impl<'a> Writer<'a> {
     pub fn entity(&self, id: &EntityId) -> StoreResult<Option<Entity>> {
         let mut stmt = self.tx.prepare_cached(&format!("SELECT {ENTITY_COLUMNS} FROM entities WHERE id = ?1"))?;
         stmt.query_row([id.as_str()], read_entity).optional()?.transpose()
+    }
+
+    /// Current bindings of an entity (inside the transaction).
+    pub fn bindings(&self, entity: &EntityId) -> StoreResult<Vec<SourceBinding>> {
+        let mut stmt = self.tx.prepare_cached(&format!(
+            "SELECT {BINDING_COLUMNS} FROM bindings WHERE entity_id = ?1 ORDER BY ordinal LIMIT 64"
+        ))?;
+        let rows = stmt.query_map([entity.as_str()], read_binding)?;
+        rows.map(|r| r?).collect()
+    }
+
+    /// The live resource whose key is `key` (its workspace path), if any.
+    pub fn live_resource(&self, key: &str) -> StoreResult<Option<Entity>> {
+        let mut stmt = self.tx.prepare_cached(&format!(
+            "SELECT {ENTITY_COLUMNS} FROM entities WHERE kind = 'resource' AND key = ?1 AND lifecycle != 'tombstoned'
+             ORDER BY created_at, id LIMIT 1"
+        ))?;
+        stmt.query_row([key], read_entity).optional()?.transpose()
     }
 
     pub fn relation(&self, id: &RelationId) -> StoreResult<Option<Relation>> {
@@ -729,9 +1262,90 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
+    /// Mark files (and everything under folders) as changed and not yet
+    /// reconciled. `token` increases monotonically; a pass clears only marks
+    /// made before it started.
+    pub fn mark_pending(&self, paths: &[WorkspacePath], token: u64) -> StoreResult<usize> {
+        let mut n = 0;
+        for p in paths {
+            n += self.tx.execute(
+                "UPDATE coverage SET pending = ?3 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+                params![p.as_str(), format!("{}/%", escape_like(p.as_str())), token as i64],
+            )?;
+        }
+        Ok(n)
+    }
+
+    /// Clear pending marks made up to `token` for the files a pass covered
+    /// (`None`: every file).
+    pub fn clear_pending(&self, prefixes: Option<&[WorkspacePath]>, token: u64) -> StoreResult<()> {
+        match prefixes {
+            None => {
+                self.tx
+                    .execute("UPDATE coverage SET pending = 0 WHERE pending > 0 AND pending <= ?1", [token as i64])?;
+            }
+            Some(prefixes) => {
+                for p in prefixes {
+                    self.tx.execute(
+                        "UPDATE coverage SET pending = 0 WHERE pending > 0 AND pending <= ?3
+                         AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+                        params![p.as_str(), format!("{}/%", escape_like(p.as_str())), token as i64],
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn remove_coverage(&self, path: &WorkspacePath) -> StoreResult<()> {
         self.tx.execute("DELETE FROM coverage WHERE path = ?1", [path.as_str()])?;
         Ok(())
+    }
+
+    /// Record the file state a coverage row was computed from (the
+    /// incremental-reindex checkpoint). The coverage row must exist.
+    pub fn set_file_state(
+        &self,
+        path: &WorkspacePath,
+        size: Option<u64>,
+        modified_ms: Option<u64>,
+        identity: Option<&str>,
+    ) -> StoreResult<()> {
+        self.tx.execute(
+            "UPDATE coverage SET size = ?2, modified_ms = ?3, file_identity = ?4 WHERE path = ?1",
+            params![path.as_str(), size.map(|s| s as i64), modified_ms.map(|m| m as i64), identity],
+        )?;
+        Ok(())
+    }
+
+    pub fn put_source_index(&self, record: &IndexRecord) -> StoreResult<()> {
+        self.tx.execute(
+            "INSERT INTO source_index (path, content_hash, extractor, body) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET content_hash = excluded.content_hash, extractor = excluded.extractor,
+             body = excluded.body",
+            params![record.path.as_str(), record.content_hash, record.extractor, record.body],
+        )?;
+        Ok(())
+    }
+
+    /// Link targets a file's references are waiting for (`name:<label or
+    /// key>`, `path:<workspace path>`), so it is resolved again only when one
+    /// of them appears.
+    pub fn set_index_wanted(&self, path: &WorkspacePath, wanted: &[String]) -> StoreResult<()> {
+        self.tx.execute(
+            "UPDATE source_index SET wanted = ?2 WHERE path = ?1",
+            params![path.as_str(), serde_json::to_string(wanted)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_source_index(&self, path: &WorkspacePath) -> StoreResult<()> {
+        self.tx.execute("DELETE FROM source_index WHERE path = ?1", [path.as_str()])?;
+        Ok(())
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> StoreResult<()> {
+        set_meta(&self.tx, key, value)
     }
 
     /// Bump the project revision and journal the change. Returns the new revision.
@@ -755,7 +1369,41 @@ impl<'a> Writer<'a> {
     }
 }
 
+/// The file state a coverage row was computed from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub coverage: ResourceCoverage,
+    pub size: Option<u64>,
+    pub modified_ms: Option<u64>,
+    /// Opaque physical file identity (rename confirmation), when known.
+    pub identity: Option<String>,
+}
+
+/// A resource's identity by path (see [`GraphStore::resource_keys`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceKey {
+    pub path: WorkspacePath,
+    pub id: EntityId,
+    pub roles: Vec<ResourceRole>,
+    pub tombstoned: bool,
+    pub created_at_ms: u64,
+}
+
+/// One file's rebuildable source index (JSON body owned by the reconciler).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexRecord {
+    pub path: WorkspacePath,
+    pub content_hash: String,
+    pub extractor: String,
+    pub body: String,
+}
+
 // ----- row decoding -----
+
+/// The last column, `pending`, is a change token: non-zero while the file
+/// changed and has not been reconciled since (read as `CoverageState::Pending`
+/// by [`GraphStore::coverage`]; the stored state is kept underneath).
+const COVERAGE_COLUMNS: &str = "path, extractor, state, unresolved, detail, content_hash, pending";
 
 const ENTITY_COLUMNS: &str =
     "id, kind, roles, label, key, lifecycle, tombstone_reason, revision, origin, attributes, created_at, updated_at";
@@ -771,6 +1419,10 @@ fn untrusted(what: &str) -> StoreError {
 
 fn bounded(s: String) -> StoreResult<String> {
     if s.len() > MAX_FIELD { Err(untrusted("oversized field")) } else { Ok(s) }
+}
+
+fn short(s: String) -> StoreResult<String> {
+    if s.len() > MAX_SHORT_FIELD || s.chars().any(char::is_control) { Err(untrusted("short field")) } else { Ok(s) }
 }
 
 fn decode<T: serde::de::DeserializeOwned>(raw: &str) -> StoreResult<T> {
@@ -834,12 +1486,16 @@ fn read_binding(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<SourceBinding
             path: WorkspacePath::parse(&path).map_err(|_| untrusted("binding path"))?,
             selector: decode::<SourceSelector>(&selector)?,
             range,
-            version: hash.map(|content_hash| SourceVersion {
-                content_hash,
-                revision: revision.map(|r| r.max(0) as u64),
-                saved: saved != 0,
-            }),
-            fingerprint,
+            version: hash
+                .map(|content_hash| -> StoreResult<SourceVersion> {
+                    Ok(SourceVersion {
+                        content_hash: short(content_hash)?,
+                        revision: revision.map(|r| r.max(0) as u64),
+                        saved: saved != 0,
+                    })
+                })
+                .transpose()?,
+            fingerprint: fingerprint.map(short).transpose()?,
             state: BindingState::parse(&state).ok_or_else(|| untrusted("binding state"))?,
             detail: detail.map(bounded).transpose()?,
         })
@@ -873,8 +1529,8 @@ fn read_relation(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<Relation>> {
                 .map(|k| EvidenceKind::parse(&k).ok_or_else(|| untrusted("evidence kind")))
                 .transpose()?,
             evidence: decode::<Vec<EvidenceId>>(&evidence)?,
-            from_version,
-            to_version,
+            from_version: from_version.map(short).transpose()?,
+            to_version: to_version.map(short).transpose()?,
             note: note.map(bounded).transpose()?,
             revision: revision.max(0) as u64,
             created_at_ms: created.max(0) as u64,
@@ -883,7 +1539,19 @@ fn read_relation(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<Relation>> {
     })())
 }
 
+/// Coverage as others see it: a pending change reads as `Pending`.
 fn read_coverage(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<ResourceCoverage>> {
+    let pending: i64 = r.get(6)?;
+    Ok(read_coverage_stored(r)?.map(|mut c| {
+        if pending > 0 {
+            c.state = CoverageState::Pending;
+        }
+        c
+    }))
+}
+
+/// Coverage as last reconciled.
+fn read_coverage_stored(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<ResourceCoverage>> {
     let path: String = r.get(0)?;
     let extractor: Option<String> = r.get(1)?;
     let state: String = r.get(2)?;
@@ -893,11 +1561,11 @@ fn read_coverage(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<ResourceCove
     Ok((|| {
         Ok(ResourceCoverage {
             path: WorkspacePath::parse(&path).map_err(|_| untrusted("coverage path"))?,
-            extractor,
+            extractor: extractor.map(short).transpose()?,
             state: CoverageState::parse(&state).ok_or_else(|| untrusted("coverage state"))?,
             unresolved: unresolved.clamp(0, u32::MAX as i64) as u32,
             detail: detail.map(bounded).transpose()?,
-            content_hash: hash,
+            content_hash: hash.map(short).transpose()?,
         })
     })())
 }
@@ -927,23 +1595,32 @@ fn harden(conn: &Connection) -> StoreResult<()> {
     Ok(())
 }
 
-/// The schema must contain exactly the objects this version creates (no
-/// triggers, views, or extra tables a hostile file could plant).
-fn verify_schema_objects(conn: &Connection) -> StoreResult<()> {
+/// The schema must contain exactly the objects `version` creates (no
+/// triggers, views, or extra tables a hostile file could plant), and each
+/// table exactly its columns.
+fn verify_schema_objects(conn: &Connection, version: u32) -> StoreResult<()> {
+    let expected = expected_objects(version);
     let mut stmt =
         conn.prepare("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_autoindex_%' LIMIT 1000")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut found = BTreeSet::new();
     for row in rows {
         let (ty, name) = row?;
-        if !EXPECTED_OBJECTS.iter().any(|(t, n)| *t == ty && *n == name) {
+        if !expected.iter().any(|(t, n)| *t == ty && *n == name) {
             return Err(StoreError::Untrusted(format!("unexpected {ty} {}", truncate(&name, 80))));
         }
         found.insert(name);
     }
-    for (_, name) in EXPECTED_OBJECTS {
+    for (_, name) in &expected {
         if !found.contains(*name) {
             return Err(StoreError::Corrupt(format!("missing {name}")));
+        }
+    }
+    for (table, columns) in expected_columns(version) {
+        let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
+        let actual: Vec<String> = stmt.query_map([table], |r| r.get::<_, String>(0))?.collect::<Result<_, _>>()?;
+        if actual.len() != columns.len() || actual.iter().zip(&columns).any(|(a, b)| a != b) {
+            return Err(StoreError::Untrusted(format!("table {table} has unexpected columns")));
         }
     }
     Ok(())
@@ -1016,5 +1693,152 @@ mod tests {
         let (_dir, path) = temp_db();
         std::fs::write(&path, b"this is not a database at all, just text").unwrap();
         assert!(GraphStore::open(&path, false).is_err());
+    }
+
+    /// A valid graph with one project entity, then `sql` applied through a
+    /// plain (non-defensive) connection, as a hostile file would be crafted.
+    fn crafted(sql: &str) -> (tempfile::TempDir, PathBuf) {
+        let (dir, path) = temp_db();
+        {
+            let mut store = GraphStore::open(&path, true).unwrap();
+            let w = Writer::new(store.transaction().unwrap());
+            let now = now_ms();
+            w.put_entity(&Entity {
+                id: EntityId::parse("ent-project").unwrap(),
+                kind: EntityKind::Project,
+                roles: vec![],
+                label: "P".into(),
+                key: None,
+                lifecycle: Lifecycle::Active,
+                tombstone_reason: None,
+                revision: 1,
+                origin: Origin::User,
+                attributes: BTreeMap::new(),
+                created_at_ms: now,
+                updated_at_ms: now,
+            })
+            .unwrap();
+            w.commit().unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        conn.execute_batch(sql).unwrap();
+        drop(conn);
+        (dir, path)
+    }
+
+    const ENTITY: &str = "INSERT INTO entities (id, kind, roles, label, key, lifecycle, tombstone_reason, revision, origin, attributes, created_at, updated_at) VALUES";
+
+    #[test]
+    fn crafted_rows_are_refused_without_panicking() {
+        let huge = "x".repeat(MAX_FIELD + 10);
+        let cases: Vec<(&str, String)> = vec![
+            ("bad kind", format!("{ENTITY} ('ent-a', 'bogus', '[]', 'A', NULL, 'active', NULL, 1, '{{\"kind\":\"user\"}}', '{{}}', 0, 0);")),
+            ("bad json", format!("{ENTITY} ('ent-a', 'theorem', '[', 'A', NULL, 'active', NULL, 1, '{{\"kind\":\"user\"}}', '{{}}', 0, 0);")),
+            ("bad id", format!("{ENTITY} ('ent-../x', 'theorem', '[]', 'A', NULL, 'active', NULL, 1, '{{\"kind\":\"user\"}}', '{{}}', 0, 0);")),
+            ("huge text", format!("{ENTITY} ('ent-a', 'theorem', '[]', '{huge}', NULL, 'active', NULL, 1, '{{\"kind\":\"user\"}}', '{{}}', 0, 0);")),
+            ("roles on a theorem", format!("{ENTITY} ('ent-a', 'theorem', '[\"manuscript\"]', 'A', NULL, 'active', NULL, 1, '{{\"kind\":\"user\"}}', '{{}}', 0, 0);")),
+            ("second project", format!("{ENTITY} ('ent-b', 'project', '[]', 'B', NULL, 'active', NULL, 1, '{{\"kind\":\"user\"}}', '{{}}', 0, 0);")),
+            (
+                "inverted range",
+                format!("{ENTITY} ('ent-a', 'theorem', '[]', 'A', NULL, 'active', NULL, 1, '{{\"kind\":\"user\"}}', '{{}}', 0, 0);
+                 INSERT INTO bindings (entity_id, ordinal, path, selector, range_start, range_end, state) VALUES ('ent-a', 0, 'a.tex', '{{\"kind\":\"region\"}}', 10, 2, 'resolved');"),
+            ),
+            (
+                "traversing binding path",
+                format!("{ENTITY} ('ent-a', 'theorem', '[]', 'A', NULL, 'active', NULL, 1, '{{\"kind\":\"user\"}}', '{{}}', 0, 0);
+                 INSERT INTO bindings (entity_id, ordinal, path, selector, state) VALUES ('ent-a', 0, '../x.tex', '{{\"kind\":\"wholeFile\"}}', 'resolved');"),
+            ),
+            (
+                "dangling reference",
+                "INSERT INTO relations (id, kind, from_id, to_id, origin, status, evidence, revision, created_at, updated_at) VALUES ('rel-a', 'references', 'ent-project', 'ent-missing', '{\"kind\":\"user\"}', 'accepted', '[]', 1, 0, 0);".to_owned(),
+            ),
+            (
+                "endpoint rule",
+                format!("{ENTITY} ('ent-a', 'theorem', '[]', 'A', NULL, 'active', NULL, 1, '{{\"kind\":\"user\"}}', '{{}}', 0, 0);
+                 INSERT INTO relations (id, kind, from_id, to_id, origin, status, evidence, revision, created_at, updated_at) VALUES ('rel-a', 'proofOf', 'ent-a', 'ent-project', '{{\"kind\":\"user\"}}', 'accepted', '[]', 1, 0, 0);"),
+            ),
+            (
+                "forged evidence",
+                "INSERT INTO evidence (id, kind, subject, body, recorded_at) VALUES ('evd-a', 'formalCheck', NULL, '{\"id\":\"evd-b\"}', 0);".to_owned(),
+            ),
+            ("long hash", format!("INSERT INTO coverage (path, state, indexed_at, content_hash) VALUES ('a.tex', 'complete', 0, '{}');", "f".repeat(300))),
+            ("coverage state", "INSERT INTO coverage (path, state, indexed_at) VALUES ('a.tex', 'perfect', 0);".to_owned()),
+            ("view body", "INSERT INTO views (id, name, scope, body, revision, updated_at) VALUES ('view-a', 'V', '{}', 'nope', 1, 0);".to_owned()),
+            ("revision text", "UPDATE meta SET value = 'many' WHERE key = 'revision';".to_owned()),
+            ("too many rows", (0..1001).map(|i| format!("INSERT INTO meta (key, value) VALUES ('k{i}', 'v');")).collect::<String>()),
+            ("extra column", "ALTER TABLE entities ADD COLUMN payload TEXT;".to_owned()),
+        ];
+        for (name, sql) in cases {
+            let (_dir, path) = crafted(&sql);
+            let before = std::fs::read(&path).unwrap();
+            let result = std::panic::catch_unwind(|| GraphStore::open(&path, false).map(|_| ()));
+            let outcome = result.unwrap_or_else(|_| panic!("{name}: opening panicked"));
+            assert!(
+                matches!(outcome, Err(StoreError::Untrusted(_) | StoreError::Corrupt(_))),
+                "{name}: expected a refusal, got {outcome:?}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{name}: a refused database is left unchanged");
+        }
+    }
+
+    #[test]
+    fn a_pass_clears_only_pending_marks_made_before_it_started() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let path = WorkspacePath::parse("a.md").unwrap();
+        let coverage = ResourceCoverage {
+            path: path.clone(),
+            extractor: Some("markdown/1".into()),
+            state: CoverageState::Complete,
+            unresolved: 0,
+            detail: None,
+            content_hash: Some("h".into()),
+        };
+        let w = Writer::new(store.transaction().unwrap());
+        w.set_coverage(&coverage).unwrap();
+        w.mark_pending(std::slice::from_ref(&path), 10).unwrap();
+        w.commit().unwrap();
+        assert_eq!(store.coverage(&path).unwrap().unwrap().state, CoverageState::Pending);
+        assert_eq!(store.coverage_stored(&path).unwrap().unwrap().state, CoverageState::Complete);
+        // A pass that started before the mark (token 9) leaves it.
+        let w = Writer::new(store.transaction().unwrap());
+        w.clear_pending(None, 9).unwrap();
+        w.commit().unwrap();
+        assert_eq!(store.coverage(&path).unwrap().unwrap().state, CoverageState::Pending);
+        let w = Writer::new(store.transaction().unwrap());
+        w.clear_pending(Some(std::slice::from_ref(&path)), 10).unwrap();
+        w.commit().unwrap();
+        assert_eq!(store.coverage(&path).unwrap().unwrap().state, CoverageState::Complete);
+        assert_eq!(store.coverage_summary().unwrap().pending, 0);
+    }
+
+    #[test]
+    fn a_version_1_graph_is_backed_up_then_migrated() {
+        let (dir, path) = temp_db();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0].1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute_batch(
+                "INSERT INTO meta (key, value) VALUES ('project_id', 'prj-old'), ('revision', '7'), ('vocabulary_version', '1');
+                 INSERT INTO coverage (path, state, indexed_at, content_hash) VALUES ('a.tex', 'complete', 0, 'abc');",
+            )
+            .unwrap();
+        }
+        let store = GraphStore::open(&path, false).unwrap();
+        assert_eq!(store.project().as_str(), "prj-old");
+        assert_eq!(store.revision().unwrap(), 7);
+        let version: u32 = store.connection().pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let checkpoints = store.checkpoints().unwrap();
+        assert_eq!(checkpoints.len(), 1, "coverage survives the migration");
+        let backups = crate::backup::list(&dir.path().join(crate::backup::BACKUP_DIR));
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].reason, "premigration");
+        assert_eq!(backups[0].revision, 7);
+        // The backup is the old schema, intact.
+        let old = Connection::open(dir.path().join(crate::backup::BACKUP_DIR).join(&backups[0].name)).unwrap();
+        let v: u32 = old.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(v, 1);
     }
 }

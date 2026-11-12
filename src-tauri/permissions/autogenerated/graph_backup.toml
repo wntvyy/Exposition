@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-graph-backup"
+description = "Enables the graph_backup command without any pre-configured scope."
+commands.allow = ["graph_backup"]
+
+[[permission]]
+identifier = "deny-graph-backup"
+description = "Denies the graph_backup command without any pre-configured scope."
+commands.deny = ["graph_backup"]

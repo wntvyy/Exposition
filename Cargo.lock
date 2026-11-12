@@ -1310,6 +1310,7 @@ name = "exposition-graph"
 version = "0.1.0"
 dependencies = [
  "exposition-core",
+ "exposition-workspace",
  "rusqlite",
  "serde",
  "serde_json",

@@ -276,7 +276,7 @@ export function createFakeGraph(seed: { entities?: Entity[]; relations?: Relatio
           action: "needsReview" as const,
           reason: "depends on a changed entity",
         }));
-      return { roots: request.entities, items, cycles: [], truncated: false, workLimitReached: false, unknownCoverage: [], graphRevision: revision };
+      return { roots: request.entities, items, cycles: [], truncated: false, workLimitReached: false, unknownCoverage: [], evidence: [], graphRevision: revision };
     },
     async propose(request) {
       record("propose", request);

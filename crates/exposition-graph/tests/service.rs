@@ -351,3 +351,62 @@ fn ensure_resource_admits_by_policy_once_and_refuses_excluded_paths() {
     let kept = svc.ensure_resource(&out, Some("h"), true, "research").unwrap();
     assert_eq!(kept.roles, vec![ResourceRole::Artifact]);
 }
+
+fn resource_upsert(e: &Entity, id: Option<EntityId>, bindings: Option<Vec<SourceBinding>>) -> EntityUpsert {
+    EntityUpsert {
+        id,
+        kind: EntityKind::Resource,
+        roles: e.roles.clone(),
+        label: e.label.clone(),
+        key: e.key.clone(),
+        attributes: e.attributes.clone(),
+        lifecycle: None,
+        tombstone_reason: None,
+        bindings,
+    }
+}
+
+#[test]
+fn a_service_batch_that_only_changes_bindings_is_committed_and_visible() {
+    let (_d, _p, svc) = service();
+    let path = exposition_core::path::WorkspacePath::parse("notes.md").unwrap();
+    let e = svc.ensure_resource(&path, Some("h1"), false, "test").unwrap();
+    let before = svc.status().revision;
+    let mut binding = svc.entity_detail(&e.id).unwrap().bindings[0].clone();
+    binding.state = BindingState::Ambiguous;
+    binding.detail = Some("two candidates".into());
+    let batch = ServiceBatch {
+        entities: vec![resource_upsert(&e, Some(e.id.clone()), Some(vec![binding]))],
+        summary: "Rebind".into(),
+        ..Default::default()
+    };
+    let out = svc.apply_service_batch(&Origin::Service { service: "test".into() }, &batch).unwrap();
+    assert_eq!(svc.entity_detail(&e.id).unwrap().bindings[0].state, BindingState::Ambiguous, "the binding persisted");
+    assert!(out.revision > before, "a binding change moves the graph revision");
+    assert!(out.delta.entities_updated.contains(&e.id), "and is listed for freshness consumers");
+    // The same batch again changes nothing and commits nothing.
+    let again = svc.apply_service_batch(&Origin::Service { service: "test".into() }, &batch).unwrap();
+    assert_eq!(again.revision, out.revision);
+}
+
+#[test]
+fn a_service_batch_never_creates_a_second_identity_for_a_file() {
+    let (_d, _p, svc) = service();
+    let path = exposition_core::path::WorkspacePath::parse("data/obs.csv").unwrap();
+    let e = svc.ensure_resource(&path, Some("h1"), false, "test").unwrap();
+    let batch = ServiceBatch {
+        entities: vec![resource_upsert(&e, None, None)],
+        summary: "Materialize".into(),
+        ..Default::default()
+    };
+    let out = svc.apply_service_batch(&Origin::Preset { blueprint: "b".into() }, &batch).unwrap();
+    assert_eq!(out.entity_ids, vec![e.id.clone()], "the existing identity is reused");
+    let live = svc
+        .snapshot(&GraphQuery { kinds: Some(vec![EntityKind::Resource]), ..Default::default() })
+        .unwrap()
+        .entities
+        .into_iter()
+        .filter(|r| r.key.as_deref() == Some("data/obs.csv"))
+        .count();
+    assert_eq!(live, 1);
+}

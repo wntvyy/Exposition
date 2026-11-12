@@ -5,12 +5,12 @@ use exposition_core::path::WorkspacePath;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::ids::{EntityId, ProjectId, RelationId, ViewId, WorkflowId};
+use crate::ids::{EntityId, EvidenceId, ProjectId, RelationId, ViewId, WorkflowId};
 use crate::model::{
     CoverageSummary, Entity, Evidence, FormalDependencies, FormalVerdict, Freshness, GraphFreshness, Relation,
     ResourceCoverage, SourceBinding,
 };
-use crate::vocabulary::{EntityKind, RelationKind};
+use crate::vocabulary::{EntityKind, EvidenceKind, RelationKind};
 
 /// Default and maximum numbers of entities a snapshot returns.
 pub const DEFAULT_LIMIT: u32 = 300;
@@ -171,9 +171,28 @@ pub struct ImpactReport {
     pub cycles: Vec<Vec<EntityId>>,
     pub truncated: bool,
     pub work_limit_reached: bool,
-    /// Resources whose extraction is incomplete: impact through them is unknown.
+    /// Files through which impact is unknown (extraction partial, failed,
+    /// pending, or unsupported for a text source; unresolved bindings).
     pub unknown_coverage: Vec<WorkspacePath>,
+    /// Evidence recorded for the changed entities and for dependents that
+    /// are stale or need review, with its current applicability (old
+    /// evidence stays valid history for the inputs it recorded).
+    pub evidence: Vec<EvidenceImpact>,
     pub graph_revision: u64,
+}
+
+/// Evidence affected by a change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceImpact {
+    pub evidence: EvidenceId,
+    pub kind: EvidenceKind,
+    /// The entity it was found through.
+    pub subject: EntityId,
+    /// Applicability to the current sources (unknown is never current).
+    pub freshness: Freshness,
+    pub reason: String,
 }
 
 /// Informal proof/review state of a mathematical entity.

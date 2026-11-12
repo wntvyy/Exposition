@@ -178,6 +178,9 @@ pub fn run() {
             lean::lean_record_evidence,
             lean::lean_associate_declaration,
             lean::lean_declaration_evidence,
+            graph::graph_reconcile,
+            graph::graph_backup,
+            graph::graph_backups,
             agents::agents_task_keep_investigation,
             agents::agents_task_create_generation,
         ])
@@ -189,6 +192,7 @@ pub fn run() {
             if let RunEvent::Exit = event {
                 app.state::<AppState>().tex.shutdown();
                 app.state::<AppState>().execution.shutdown();
+                app.state::<AppState>().reconciler.shutdown();
             }
         });
 }
