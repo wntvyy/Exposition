@@ -76,14 +76,20 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
       const g = await invoke("page_caret", { build: await build(), path: PATH, offset, affinity });
       assert.ok(g, `no geometry for offset ${offset}`);
       const el = page.locator(`[data-testid="page"][data-page="${g.page}"]`);
-      // Scroll the target line into the middle of the page view first.
-      await el.evaluate((pageEl, top) => {
-        const scroller = pageEl.closest('[data-testid="page-scroller"]');
-        const scale = pageEl.getBoundingClientRect().width / Number(pageEl.dataset.widthPt);
-        const y = pageEl.getBoundingClientRect().top + top * scale;
-        const view = scroller.getBoundingClientRect();
-        scroller.scrollTop += y - (view.top + view.height / 2);
-      }, g.top);
+      // Scroll the target into the middle of the page view first (vertically
+      // and, when the page is wider than the view, horizontally).
+      await el.evaluate(
+        (pageEl, [top, x]) => {
+          const scroller = pageEl.closest('[data-testid="page-scroller"]');
+          const scale = pageEl.getBoundingClientRect().width / Number(pageEl.dataset.widthPt);
+          const view = scroller.getBoundingClientRect();
+          const y = pageEl.getBoundingClientRect().top + top * scale;
+          scroller.scrollTop += y - (view.top + view.height / 2);
+          const left = pageEl.getBoundingClientRect().left + x * scale;
+          scroller.scrollLeft += left - (view.left + view.width / 2);
+        },
+        [g.top, g.x + dx],
+      );
       const box = await el.boundingBox();
       const scale = box.width / Number(await el.getAttribute("data-width-pt"));
       return { x: box.x + (g.x + dx) * scale, y: box.y + ((g.top + g.bottom) / 2) * scale, g, scale };
@@ -334,6 +340,33 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     await settled("rebuild after split typing");
     await shot("12-split");
     await referenceShots("page-split");
+
+    // Regression: a zoomed page wider than its pane must stay fully reachable
+    // by horizontal scrolling (a centered flex item used to overflow to the
+    // left, out of scroll range).
+    const splitPage = page.locator('[data-testid="typst-split"] [data-testid="page-editor"]');
+    const zoomIns = 4;
+    for (let i = 0; i < zoomIns; i++) await splitPage.getByRole("button", { name: "Zoom in" }).click();
+    const reach = await splitPage.evaluate((root) => {
+      const scroller = root.querySelector(".page-editor__scroller");
+      const pageEl = root.querySelector(".page-editor__page");
+      scroller.scrollLeft = 0;
+      const atStart = pageEl.getBoundingClientRect().left - scroller.getBoundingClientRect().left;
+      scroller.scrollLeft = scroller.scrollWidth;
+      const atEnd = scroller.getBoundingClientRect().right - pageEl.getBoundingClientRect().right;
+      return {
+        wider: pageEl.getBoundingClientRect().width > scroller.clientWidth,
+        atStart,
+        atEnd,
+      };
+    });
+    assert.ok(reach.wider, "zoomed page is wider than the split pane");
+    assert.ok(reach.atStart >= -1, `left edge of a wide page is reachable (offset ${reach.atStart})`);
+    assert.ok(reach.atEnd >= -1, `right edge of a wide page is reachable (offset ${reach.atEnd})`);
+    for (let i = 0; i < zoomIns; i++) await splitPage.getByRole("button", { name: "Zoom out" }).click();
+    await splitPage.evaluate((root) => {
+      root.querySelector(".page-editor__scroller").scrollLeft = 0;
+    });
     await page.locator('[data-testid="typst-split"] .monaco-editor .view-lines').click();
     await page.keyboard.press("Control+z");
     await page.waitForFunction(
