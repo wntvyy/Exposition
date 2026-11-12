@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parsePowerShellJson } from "../processes.mjs";
 
 const PROBE_LOG_LIMIT = 16 * 1024;
 
@@ -37,7 +38,7 @@ function processTable() {
     ],
     { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
   );
-  return new Map(JSON.parse(out).map((p) => [p.ProcessId, { parent: p.ParentProcessId, name: p.Name }]));
+  return new Map(parsePowerShellJson(out).map((p) => [p.ProcessId, { parent: p.ParentProcessId, name: p.Name }]));
 }
 
 /** The root pid plus all of its descendants (from one table snapshot). */

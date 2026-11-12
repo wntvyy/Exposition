@@ -59,6 +59,7 @@ import {
   waitForMirror,
 } from "../workspace-helpers.mjs";
 import { runCommand } from "../palette.mjs";
+import { parsePowerShellJson } from "../processes.mjs";
 
 const PAPER = "main.typ";
 const FIT = "analysis/fit.py";
@@ -89,7 +90,7 @@ function processTable() {
     { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 },
   );
   return new Map(
-    JSON.parse(out).map((p) => [p.ProcessId, { parent: p.ParentProcessId, name: p.Name, commandLine: p.CommandLine ?? "" }]),
+    parsePowerShellJson(out).map((p) => [p.ProcessId, { parent: p.ParentProcessId, name: p.Name, commandLine: p.CommandLine ?? "" }]),
   );
 }
 

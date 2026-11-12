@@ -18,6 +18,7 @@ import { join } from "node:path";
 
 import { editorLocator, invoke, invokeError, openInEditor, waitFor } from "../workspace-helpers.mjs";
 import { runCommand } from "../palette.mjs";
+import { parsePowerShellJson } from "../processes.mjs";
 
 const KERNEL_TIMEOUT = 120_000;
 
@@ -34,9 +35,7 @@ function processesMentioning(marker) {
     ],
     { encoding: "utf8", env: { ...process.env, XP_MARKER: marker } },
   ).trim();
-  if (!out) return [];
-  const parsed = JSON.parse(out);
-  return Array.isArray(parsed) ? parsed : [parsed];
+  return parsePowerShellJson(out);
 }
 
 function killPid(pid) {

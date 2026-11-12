@@ -30,6 +30,7 @@ import { join } from "node:path";
 
 import { waitForAsync } from "../wait.mjs";
 import { invoke, invokeError, openFromTree, openInEditor, waitFor } from "../workspace-helpers.mjs";
+import { parsePowerShellJson } from "../processes.mjs";
 
 const LEMMA = "Paper/Gauss.lean";
 const SUPPLEMENT = "supplement.tex";
@@ -50,7 +51,7 @@ function processTable() {
     ],
     { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 },
   );
-  return JSON.parse(out).map((p) => ({ pid: p.ProcessId, parent: p.ParentProcessId, name: p.Name, commandLine: p.CommandLine ?? "" }));
+  return parsePowerShellJson(out).map((p) => ({ pid: p.ProcessId, parent: p.ParentProcessId, name: p.Name, commandLine: p.CommandLine ?? "" }));
 }
 
 /** Descendants of `rootPid` whose image name matches `name`. */
