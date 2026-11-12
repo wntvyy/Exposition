@@ -116,6 +116,11 @@ export const editorDefaults: Monaco.editor.IStandaloneEditorConstructionOptions 
   fixedOverflowWidgets: true,
   accessibilitySupport: "auto",
   wordWrap: "off",
+  // Completions only from a language's trigger characters (Lean's `\`
+  // abbreviations) or Ctrl+Space: no word-based list popping up while typing
+  // prose, where Enter would accept a suggestion instead of a new line.
+  quickSuggestions: false,
+  wordBasedSuggestions: "off",
 };
 
 type MonacoApi = typeof Monaco;

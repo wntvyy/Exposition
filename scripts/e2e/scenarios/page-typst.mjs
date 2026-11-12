@@ -378,6 +378,44 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     await settled("rebuild after Monaco undo");
     const undone = await invoke("page_selection", { build: await build(), path: PATH, start: splitAt, end: splitAt + 7 });
     assert.equal(undone.text, "Offices", "the page shows the source-side undo");
+
+    // Build diagnostics are squiggles in the source view; hovering one shows the message.
+    {
+      source = await text();
+      const at = source.indexOf("Exposition Basics");
+      const edit = (patch) =>
+        invoke("document_apply", {
+          request: {
+            id: `e2e-squiggle-${Date.now()}`,
+            origin: { kind: "source" },
+            edits: [{ document: doc, baseRevision: patch.base, patches: [patch.patch] }],
+            undo: { kind: "newGroup" },
+            conflict: "reject",
+            label: null,
+            selection: null,
+          },
+        });
+      await edit({ base: (await state()).info.revision, patch: { range: { start: at, end: at }, text: "#nosuch " } });
+      const squiggle = page.locator('[data-testid="typst-split"] .monaco-editor .squiggly-error').first();
+      await squiggle.waitFor({ timeout: 15000 });
+      const box = await squiggle.boundingBox();
+      const hover = page.locator(".monaco-hover:visible").filter({ hasText: "nosuch" }).first();
+      let shown = false;
+      for (let i = 0; i < 5 && !shown; i++) {
+        await page.mouse.move(box.x + 1, box.y - 30);
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        shown = await hover.waitFor({ state: "visible", timeout: 3000 }).then(() => true, () => false);
+      }
+      assert.ok(shown, "hovering the error squiggle shows a hover");
+      assert.match(await hover.innerText(), /unknown variable: nosuch/, "the hover shows the build diagnostic");
+      await shot("12b-diagnostic-hover");
+      await page.mouse.move(5, 5);
+      await edit({ base: (await state()).info.revision, patch: { range: { start: at, end: at + 8 }, text: "" } });
+      await page.waitForFunction(() => !document.querySelector('[data-testid="typst-split"] .monaco-editor .squiggly-error'), null, {
+        timeout: 15000,
+      });
+      await settled("recovered from the squiggle error");
+    }
     await modeButton("Page").click();
     await page.locator('[data-testid="page-editor"]').waitFor();
     await settled("page view after split");
