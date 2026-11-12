@@ -43,7 +43,8 @@ npm run build:release  # release build and installer
 | Path | Contents |
 |---|---|
 | `crates/exposition-core` | Shared contracts: text positions, document transactions, jobs, builds, artifacts |
-| `crates/exposition-*` | Domain services (workspace/documents, execution, typesetting, ...) |
+| `crates/exposition-graph` | Project graph: typed vocabulary, validated SQLite store with backups and recovery, reconciliation with files and open buffers, impact, operation journal, project blueprints, workflow drafts |
+| `crates/exposition-*` | Other domain services (workspace/documents, execution, typesetting, research, Lean, agents, ...) |
 | `src-tauri` | Application wiring: state, commands, events, capabilities |
 | `src/bindings` | TypeScript types generated from the Rust contracts (`cargo test`); do not edit |
 | `src/app` | Workbench composition contract |

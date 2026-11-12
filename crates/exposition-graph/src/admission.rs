@@ -68,7 +68,6 @@ const GENERATED_EXTENSIONS: &[&str] = &[
     "bbl",
     "blg",
     "bcf",
-    "run.xml",
     "nav",
     "snm",
     "vrb",
@@ -76,7 +75,6 @@ const GENERATED_EXTENSIONS: &[&str] = &[
     "dvi",
     "olean",
     "ilean",
-    "c",
     "o",
     "obj",
     "exe",
@@ -98,7 +96,7 @@ pub fn roles_for(path: &WorkspacePath) -> Option<Vec<ResourceRole>> {
     }
     let ext = lower.rsplit_once('.').map(|(_, e)| e.to_owned()).unwrap_or_default();
     let roles = match ext.as_str() {
-        "tex" | "typ" => vec![ResourceRole::Manuscript],
+        "tex" | "ltx" | "typ" => vec![ResourceRole::Manuscript],
         "md" | "markdown" => vec![ResourceRole::Manuscript],
         "txt" | "rst" | "org" => vec![ResourceRole::Note],
         "bib" => vec![ResourceRole::Bibliography],
@@ -175,8 +173,7 @@ pub fn classify(path: &WorkspacePath) -> Admission {
         return Admission::Exclude("application metadata");
     }
     let lower = path.file_name().to_ascii_lowercase();
-    if let Some((_, ext)) = lower.rsplit_once('.')
-        && GENERATED_EXTENSIONS.contains(&ext)
+    if lower.ends_with(".run.xml") || lower.rsplit_once('.').is_some_and(|(_, ext)| GENERATED_EXTENSIONS.contains(&ext))
     {
         return Admission::Exclude("a generated build or cache file");
     }

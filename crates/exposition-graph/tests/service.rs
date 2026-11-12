@@ -410,3 +410,37 @@ fn a_service_batch_never_creates_a_second_identity_for_a_file() {
         .count();
     assert_eq!(live, 1);
 }
+
+#[test]
+fn privileged_evidence_is_registered_only_by_its_owning_service() {
+    let (_d, _p, svc) = service();
+    let evidence = |kind: EvidenceKind| Evidence {
+        id: EvidenceId::mint(),
+        kind,
+        subject: None,
+        operation: OperationRef { kind: "test".into(), id: "x".into() },
+        inputs: vec![],
+        outcome: EvidenceOutcome::Succeeded,
+        environment: vec![],
+        outputs: vec![],
+        formal: None,
+        recorded_by: Origin::Service { service: "agents".into() },
+        recorded_at_ms: 1,
+    };
+    let agents = Origin::Service { service: "agents".into() };
+    for kind in [EvidenceKind::FormalCheck, EvidenceKind::Computational] {
+        let err = svc.register_evidence(&agents, evidence(kind)).unwrap_err();
+        assert_eq!(err.code, "graph.serviceOwnedEvidence", "{kind:?}");
+    }
+    assert!(
+        svc.register_evidence(&Origin::Service { service: "lean".into() }, evidence(EvidenceKind::FormalCheck)).is_ok()
+    );
+    assert!(
+        svc.register_evidence(&Origin::Service { service: "research".into() }, evidence(EvidenceKind::Computational))
+            .is_ok()
+    );
+    assert!(
+        svc.register_evidence(&agents, evidence(EvidenceKind::Review)).is_ok(),
+        "review evidence is not privileged"
+    );
+}

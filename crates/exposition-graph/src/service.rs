@@ -1052,6 +1052,24 @@ impl GraphService {
         if matches!(origin, Origin::User | Origin::Agent { .. }) {
             return Err(GraphError::new("graph.notService", "service batches are not available to people or agents"));
         }
+        // Privileged evidence is registered only by the service that owns it:
+        // formal checks by the Lean verification service, computational
+        // evidence by the research service.
+        for e in &batch.evidence {
+            let owner = match e.kind {
+                EvidenceKind::FormalCheck => Some("lean"),
+                EvidenceKind::Computational => Some("research"),
+                _ => None,
+            };
+            if let Some(owner) = owner
+                && !matches!(origin, Origin::Service { service } if service == owner)
+            {
+                return Err(GraphError::new(
+                    "graph.serviceOwnedEvidence",
+                    format!("{} evidence is registered only by the {owner} service", e.kind.as_str()),
+                ));
+            }
+        }
         let outcome = self.with_store(|store| {
             let w = Writer::new(store.transaction()?);
             let (mut run, relation_ids) =
@@ -1296,6 +1314,7 @@ fn unavailable_status(root: &Path, reason: String, recovery: Vec<RecoveryOption>
 
 /// Open the project's graph database, or a temporary in-memory graph for a
 /// folder that cannot hold one.
+/// The temporary graph of a read-only folder lives in memory only.
 fn open_project_graph(root: &Path, _data_dir: &Path) -> Result<OpenGraph, (String, Vec<RecoveryOption>)> {
     let dir = root.join(PROJECT_DIR);
     let temporary = |reason: String| -> Result<OpenGraph, (String, Vec<RecoveryOption>)> {

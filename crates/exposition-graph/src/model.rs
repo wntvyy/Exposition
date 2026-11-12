@@ -501,8 +501,8 @@ pub enum GraphState {
     Detached,
     /// The project graph is open for reading and writing.
     Attached,
-    /// The folder cannot hold the graph (read-only): a temporary graph in
-    /// application data is used and nothing curated there persists with the project.
+    /// The folder cannot hold the graph (read-only): a temporary in-memory
+    /// graph is used and nothing curated there persists with the project.
     TemporaryReadOnly { reason: String },
     /// The graph cannot be used. Source editing keeps working; graph-dependent
     /// actions report unavailable instead of claiming success.

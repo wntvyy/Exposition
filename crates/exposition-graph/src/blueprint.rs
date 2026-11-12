@@ -394,8 +394,6 @@ fn source_ok(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, ':' | '.' | '_' | '-'))
 }
 
-/// `main` (the single research space agents create by convention) or `rs-`
-/// followed by 4–32 lowercase letters or digits (what presets mint).
 /// Research space ids follow the research service's convention: `rs-` and
 /// 4–32 lowercase hexadecimal digits.
 pub fn research_id_ok(id: &str) -> bool {

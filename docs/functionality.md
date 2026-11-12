@@ -3,40 +3,54 @@
 | | |
 |---|---|
 | App | Exposition 0.1.0 (`org.exposition.desktop`), Tauri 2: Rust core (`src-tauri/`, `crates/`) + React/TypeScript workbench (`src/`) |
-| Commit | `c8fdca6` (main; inventory taken at `c4669a5`, updated for the later merges: Lean audit hardening, the final agents fixes, credential persistence, `live-restricted`) |
+| Commit | `b2bef49` (`m7/integration`; M1–M6 inventory taken at `c4669a5` and updated through `c8fdca6`; M7 additions (project graph, pages, projects, workflow drafts) and all counts below read at `b2bef49`) |
 | Date | 2026-11-12 |
 | Platform | Windows 11 x64 verified; macOS/Linux structurally supported, unverified |
 | Status | Local alpha; NSIS per-user installer, not code-signed |
 
-**What it is.** A local desktop workspace for mathematical and technical documents. Typst, Markdown (print profile) and LaTeX (pdfLaTeX/LuaLaTeX) sources are edited in Monaco and directly on the compiled pages. Both editors share one revisioned document service and one undo history. Python, R and Julia code runs in Jupyter kernels, and the resulting figures and tables can be inserted into documents. Lean files are checked with the project's own toolchain; the verdict comes from a two-step audit that re-checks the file's declarations with the kernel without running the file's code, and the Lean panel lists exactly which declarations were checked. Agent tasks run on the Anthropic Messages API, and the application gates every tool call by scope, consent, permission profile, execution mode and budgets; changes stay reviewable and revertible. Native tools run only in folders the user trusts. Unattended agent execution runs only in a local Docker container.
+**What it is.** A local desktop workspace for mathematical and technical documents. Typst, Markdown (print profile) and LaTeX (pdfLaTeX/LuaLaTeX) sources are edited in Monaco and directly on the compiled pages. Both editors share one revisioned document service and one undo history. Python, R and Julia code runs in Jupyter kernels, and the resulting figures and tables can be inserted into documents. Lean files are checked with the project's own toolchain; the verdict comes from a two-step audit that re-checks the file's declarations with the kernel without running the file's code, and the Lean panel lists exactly which declarations were checked. Agent tasks run on the Anthropic Messages API, and the application gates every tool call by scope, consent, permission profile, execution mode and budgets; changes stay reviewable and revertible. Every project has a typed project graph, kept reconciled with its files and open buffers, that the Graph, Research, and Agents pages and agent tasks read and change through one validated service. New projects are created from presets or an objective; workflow drafts can be authored and validated but not run. Native tools run only in folders the user trusts. Unattended agent execution runs only in a local Docker container.
 
 **At a glance**
-- IPC commands: **90 release + 3 dev-only** (93 handlers; 90 `allow-*` grants)
-- Events: **16 channels** (10 with payloads + 6 `*:resync`); 7 event enums with 42 variants
-- Command palette: **48 registered commands** (47 listed; Show All Commands hides itself); 14 keybindings
-- Agent tools: **9**; 13 gate refusal codes; 22 agent error codes; 10 task statuses; 8 tool-call states
-- Settings keys: **27 persisted** (App 2, Editor 7, Project 4, Execution 7, Provider 4, Trust 3) + API key (OS store) + 3 frontend-only
-- e2e scenarios: **32** (30 in the default run; `live-agents` and `live-restricted` opt-in)
-- Workbench: 7 views, 7 editors, 6 status-bar items, 12 dialogs, 8 Settings sections
+- IPC commands: **144 release + 4 dev-only** (148 handlers; 144 `allow-*` grants)
+- Events: **18 channels** (11 with payloads + 7 `*:resync`); 8 event enums with 45 variants
+- Command palette: **63 registered commands** (62 listed; Show All Commands hides itself); 18 keybindings
+- Agent tools: **11**; 21 gate refusal codes; 44 distinct `agents.` codes; 10 task statuses; 8 tool-call states
+- Settings keys: **27 persisted** (App 2, Editor 7, Project 4, Execution 7, Provider 4, Trust 3) + API key (OS store) + 4 frontend-only
+- e2e scenarios: **40** (38 in the default run; `live-agents` and `live-restricted` opt-in)
+- Workbench: 4 pages, 8 views, 11 editors, 6 status-bar items, 22 dialogs, 8 Settings sections
+- Project graph: 23 entity kinds, 12 relation kinds, 6 extractors, schema 2; 6 project presets; 2 workflow presets, 7 workflow operations (none runnable)
 - Formats: 4 (Typst, Markdown print profile, pdfLaTeX, LuaLaTeX); 4 page-edit operations
-- Research: 3 languages (Python, R, Julia); Lean: 14 document statuses, 19 `lean.` error codes
+- Research: 3 languages (Python, R, Julia); Lean: 14 document statuses, 23 `lean.` error codes
 - Network: 1 endpoint (`api.anthropic.com/v1/messages`); 18 external tools in the toolchain catalog
 
 ## 1. Workbench and interactions
 
+### Pages (4)
+The window shows one top-level page at a time. The status bar, notifications, command palette and confirmation dialogs are shared by all pages.
+
+| Id | Title · order | Keys | Contents |
+|---|---|---|---|
+| `editor` | Editor · 0 (built into the shell) | Mod+1 | The workbench below: sidebar, editor area, bottom panel, auxiliary panel |
+| `research` | Research · 20 | Mod+2 | Research page (§4.1) |
+| `agents` | Agents · 30 | Mod+3 | Agents page (§6.13) |
+| `graph` | Graph · 40 | Mod+4 | Graph page (§7.2) |
+
+- **Switching:** the rail's "Pages" toolbar (one button per page, `aria-current="page"`, tooltip "<Title> page" + keys; choosing the shown page keeps it shown), or the palette commands "View: Show Editor / Research / Agents / Graph" (`workbench.action.showPage.<id>`, registered per page as pages register). A page shown from a command or key takes keyboard focus (on the Editor page, the editor area); a rail click does not move focus.
+- **Mounting:** a page mounts on its first visit, then stays mounted, hidden and inert, while another page is shown; each renders inside its own error boundary. Sidebar-view toggles and the region toggles used from another page show the Editor page first.
+
 ### Layout
 | Region | Contents | What the user can do |
 |---|---|---|
-| Activity bar (left rail) | One toggle per sidebar view; region toggles; Manage menu | Select a view (selecting the shown view hides the sidebar); toggle Sidebar (Mod+B), Panel (Mod+J), Auxiliary (Mod+Alt+B); Manage: Command Palette… (Mod+Shift+P), Settings… (Mod+,), Color Theme (Light / Dark / Follow system), UI Reference |
+| Activity bar (left rail) | Pages toolbar; one toggle per sidebar view; region toggles; Manage menu | Switch page (Mod+1–4); select a view (selecting the shown view hides the sidebar); toggle Sidebar (Mod+B), Panel (Mod+J), Auxiliary (Mod+Alt+B); Manage: Command Palette… (Mod+Shift+P), Settings… (Mod+,), Color Theme (Light / Dark / Follow system), UI Reference |
 | Sidebar (left) | Files (order 0) | Header with Hide; "No folder open" fallback |
 | Editor area | Two groups (primary, secondary), resizable split 20–80 % (default 50 %) | Tabs: close button, middle-click, Delete on focused tab, double-click pins a preview tab (italic), dirty dot; per-tab "Document mode" Source / Page / Split (only for editors with >1 mode; new tabs open in Source); Split editor right; Close editor group; empty group shows "Show all commands" |
 | Bottom panel | Tabs: Problems (10), Research (20), Jobs (30), Toolchains (90) | Switch tab; Hide (Mod+J); "No output" fallback |
-| Right (auxiliary) panel | Tabs: Agent (10), Lean (20) | Switch tab; Hide (Mod+Alt+B) |
+| Right (auxiliary) panel | Tabs: Agent (10), Lean (20), Dependencies (30) | Switch tab; Hide (Mod+Alt+B) |
 | Status bar | Left: build (20), Lean (40), jobs (50). Right: document status (50), agent (50), app version (1000) | See status items |
 | Window | 1440×900, min 720×480; title "<folder> — Exposition"; OS drag-and-drop disabled | Close with unsaved documents asks first (Save All / Don't Save / Cancel) |
 | Layout persistence | Region visibility, size, active view, editor split (localStorage) | Auto-collapse auxiliary below 1100 px and sidebar below 860 px window width (not persisted; explicit open overrides) |
 
-### Views (7)
+### Views (8)
 | Id | Region · title | What the user can do |
 |---|---|---|
 | `workspace.files` | sidebar · Files | No folder: Open Folder…, Recent list (open; × "Remove <name> from Recent"; max 12). Folder open: Refresh, Open Folder…; lazy tree (arrows, Enter/click opens a file tab; link icon; outside-folder/unavailable entries disabled); recovery banner: Restore / Discard (unreadable: Copy Location / Discard). No create, rename, delete, context menu or drag-and-drop |
@@ -46,10 +60,11 @@
 | `jobs.toolchains` | panel · Toolchains | Tables per category (TeX, Python, R, Julia, Lean, Restricted execution, Version control): status, version, location/guidance; Refresh. "Exposition finds tools on this computer; it never installs them." |
 | `agents.panel` | auxiliary · Agent | Toolbar: New task, Tasks, provider settings; provider chip ("Claude · <model>", "Claude · no API key configured", "Claude · credential store error", "Scripted provider — development only"); task list; composer; task view; review; provider dialog |
 | `lean.infoview` | auxiliary · Lean | Status pill; Restart file (rebuild imports), Restart Lean server; revision/toolchain/axioms facts; progress; banners (Trust workspace…, Install toolchain, Restart server, Retry now, partially checked, not verified); goals (plain text); "Checked declarations (N)" list (kind, line, name, statement printed with toolchain notation, axioms; Enter/click reveals the name in the editor; generated declarations in a collapsed section; ≤ 300); Incomplete list; axioms / compiled-code list; diagnostics (≤200, click to jump) |
+| `graph.dependencies` | auxiliary · Dependencies | Graph items bound at the Monaco caret, their relationships and evidence; Open in Graph / Open in Mathematics (§7.3) |
 
 Agent view sub-screens (task list, composer, task view, approval card, review, provider dialog): see §6.13.
 
-### Editors (7)
+### Editors (11)
 | Id | Opens | Modes |
 |---|---|---|
 | `editor.source` | any `file:` text file (Monaco) | source |
@@ -59,6 +74,10 @@ Agent view sub-screens (task list, composer, task view, approval card, review, p
 | `agents.review` | `agents-review:<task>` (review in an editor tab) | source |
 | `settings.editor` | `settings:` (8 sections: Appearance, Editor, Project, Trusted folders, Execution, Agents, Research, About) | source |
 | `workbench.uiReference` | `ui-reference:` component gallery (all builds) | source |
+| `projects.new` | `new-project:` tab "New Project" (§7.4) | source |
+| `projects.setup` | `project-setup:<operation>` tab "Project Setup" (interrupted creation, §7.4) | source |
+| `workflows.list` | `workflows:` tab "Workflow Drafts" (§7.5) | source |
+| `workflows.editor` | `workflow:<id>` workflow draft editor (§7.5) | source |
 
 Source editor (Monaco): shared document model and shared undo; typing groups until a 1000 ms pause, caret jump, insert/delete switch or line break; banners: changed on disk (Reload from Disk / Keep My Changes), deleted (Keep in Editor), save error (Retry / Dismiss), mixed line endings (read-only; Normalize to LF / CRLF), read-only reason, NUL characters; unavailable states for binary, undecodable and too-large files; aliases (case variants, short names, links) collapse to one canonical tab. Build diagnostics (Typst, LaTeX, Markdown) appear as squiggles with hover text and hints once a build of the shown revision reports; earlier marks stay and move with edits. Lean adds hover, `\` abbreviation completion, go-to-definition and diagnostics. Links in hovers are copied to the clipboard, never opened ("Link copied" / "Link not opened"); URL detection in source text is not bundled.
 
@@ -72,7 +91,7 @@ Source editor (Monaco): shared document model and shared undo; typing groups unt
 | `agents.status` | right | First match: button "Agent: waiting for approval" / "Agent: N waiting for approval" (opens the oldest pending approval); "Agent: N running"; "Agent: N to review" |
 | `workbench.status.app` | right | "Exposition <version>" + " (debug)" in debug builds |
 
-### Dialogs (12)
+### Dialogs (22)
 | Dialog | Choices |
 |---|---|
 | Save changes to <file>? | Cancel / Don't Save / Save |
@@ -87,6 +106,16 @@ Source editor (Monaco): shared document model and shared undo; typing groups unt
 | Agent provider | Provider, API key (Save key / Remove), Model, Effort, Default content consent; Close / Save settings |
 | Command palette | Fuzzy search, Enter runs, Escape closes |
 | Open Folder (native folder picker) | Choose a directory |
+| Add a relationship (Graph) | Related item, Relationship (hand-made kinds; those whose endpoint rule does not list the pair are marked "(not listed for X → Y)" and refused by the backend with its reason), Swap direction; review "Valid. Applying will:" or "Not allowed. Nothing will change."; Cancel / Add relationship |
+| New item / New collection (Graph) | Kind, Name; review; Cancel / Create |
+| Add <item> to a collection (Graph) | Collection (or a new collection name); review; Cancel / Add to collection |
+| Associate a Lean declaration with <item> (Graph, Mathematics) | Formal declaration, Note (optional, ≤ 500); Cancel / Record reviewed association |
+| Remove this relationship? (Graph) | Cancel (default) / Remove relationship; "No file changes; the items stay." |
+| Archive <item>? (Graph) | Cancel / Archive; no file changes |
+| Start a new project graph? (Graph, unavailable graph) | Cancel (default) / Start new graph; the damaged file is kept aside |
+| Recovery failed (Graph) | OK |
+| Associate <declaration> (Lean infoview) | Informal statement, or "Or create a claim"; Cancel / Record reviewed association |
+| New research file (Research page) | Group, File name; Cancel / Create |
 
 ### Notifications
 Default timeouts: info 6 s, success 5 s, warning 10 s, danger sticky; same id replaces; pause on hover/focus.
@@ -103,7 +132,7 @@ Default timeouts: info 6 s, success 5 s, warning 10 s, danger sticky; same id re
 ### Keyboard shortcuts
 | Surface | Keys | Action |
 |---|---|---|
-| Global (registry) | Mod+Shift+P, Mod+B, Mod+J, Mod+Alt+B, F6, Shift+F6, Mod+W, Mod+\, Mod+PageDown, Mod+PageUp, Mod+,, Mod+O, Mod+S, Mod+Alt+S | See §2. Mod = Ctrl (Cmd on macOS). Chords with Ctrl/Alt/F-keys fire in inputs and Monaco unless the editor handled them; text-editing chords (Mod+A/C/V/X/Z/Y, Mod+arrows/Home/End/Backspace/Delete) never dispatch; IME composition and AltGr characters are text |
+| Global (registry) | Mod+Shift+P, Mod+1, Mod+2, Mod+3, Mod+4, Mod+B, Mod+J, Mod+Alt+B, F6, Shift+F6, Mod+W, Mod+\, Mod+PageDown, Mod+PageUp, Mod+,, Mod+O, Mod+S, Mod+Alt+S | See §2. Mod = Ctrl (Cmd on macOS). Chords with Ctrl/Alt/F-keys fire in inputs and Monaco unless the editor handled them; text-editing chords (Mod+A/C/V/X/Z/Y, Mod+arrows/Home/End/Backspace/Delete) never dispatch; IME composition and AltGr characters are text |
 | Monaco (app actions) | Ctrl+Z; Ctrl+Y, Ctrl+Shift+Z; Ctrl+S; Ctrl+Alt+S | Shared undo; shared redo; Save; Save All |
 | Monaco (bundled defaults) | Ctrl+F, Ctrl+H; F8 / Shift+F8; F12, Ctrl+Click (Lean); Ctrl+Space (Lean); Ctrl+/; Alt+↑/↓; Ctrl+D, Alt+Click; Ctrl+Shift+[ / ]; Shift+F10 | Find/replace; next/previous problem; go to definition; suggestions; comment; move line; multi-cursor; fold/unfold; context menu |
 | Lean source | `\name` then Space, Tab, `( ) , [ ] { }` or Enter | Expand abbreviation (202 entries; `\\` does not expand); `\` opens a ≤60-entry completion list |
@@ -114,6 +143,7 @@ Default timeouts: info 6 s, success 5 s, warning 10 s, danger sticky; same id re
 | Research code box | Ctrl/Cmd+Enter | Run selection or all code (starts a session if none) |
 | Files tree | arrows, Enter | Navigate, open file / expand folder |
 | Approval card | Tab | Payload (only if it scrolls), then Approve, Decline |
+| Graph canvas | Space+drag / middle-drag; wheel, pinch, `+`/`-` (`=`/`_`); Shift+1; Shift+2; 0; click, Ctrl/Cmd+click, Shift+drag; Enter/Space; arrows | Pan; zoom; fit to view; fit to selection; reset to 100 %; select, add to selection, box-select; select the focused node or edge; move the selected node (layout only) |
 | Page editor | see below | |
 
 ### Page-editor interactions (Page and Split modes)
@@ -136,11 +166,15 @@ Default timeouts: info 6 s, success 5 s, warning 10 s, danger sticky; same id re
 
 ## 2. Command palette
 
-48 registered commands (17 built-in + 31 feature). The palette lists the 47 other than `workbench.action.showCommands`, only while enabled, as `Category: Title`, ranked by fuzzy match; an empty query shows the session's 20 most recently run first. Keybindings fire only when the command is enabled. None sets a custom keybinding scope.
+63 registered commands (17 built-in + 4 page commands + 42 feature). The palette lists the 62 other than `workbench.action.showCommands`, only while enabled, as `Category: Title`, ranked by fuzzy match; an empty query shows the session's 20 most recently run first. Keybindings fire only when the command is enabled. None sets a custom keybinding scope.
 
 | Label | Id | Keybinding | When available |
 |---|---|---|---|
 | View: Show All Commands | `workbench.action.showCommands` | Mod+Shift+P | always (not listed in the palette) |
+| View: Show Editor | `workbench.action.showPage.editor` | Mod+1 | always (focuses the editor area) |
+| View: Show Research | `workbench.action.showPage.research` | Mod+2 | always (focuses the page) |
+| View: Show Agents | `workbench.action.showPage.agents` | Mod+3 | always (focuses the page) |
+| View: Show Graph | `workbench.action.showPage.graph` | Mod+4 | always (focuses the page) |
 | View: Toggle Sidebar | `workbench.action.toggleSidebar` | Mod+B | always |
 | View: Toggle Panel | `workbench.action.togglePanel` | Mod+J | always |
 | View: Toggle Auxiliary Panel | `workbench.action.toggleAuxiliary` | Mod+Alt+B | always |
@@ -165,6 +199,8 @@ Default timeouts: info 6 s, success 5 s, warning 10 s, danger sticky; same id re
 | LaTeX: Build This File with pdfLaTeX | `latex.usePdfLatex` | — | active file is `.tex` and a folder is open |
 | File: Open Folder… | `workspace.openFolder` | Mod+O | always |
 | File: Close Folder | `workspace.closeFolder` | — | a folder is open |
+| File: New Project… | `projects.new` | — | always (New Project tab, "Start from a preset") |
+| File: New Project from an Objective… | `projects.newFromObjective` | — | always (New Project tab, "Describe an objective") |
 | File: Save | `file.save` | Mod+S | active editor has a document |
 | File: Save All | `file.saveAll` | Mod+Alt+S | always |
 | Jobs: Show Jobs | `jobs.show` | — | always |
@@ -187,8 +223,16 @@ Default timeouts: info 6 s, success 5 s, warning 10 s, danger sticky; same id re
 | Research: Enable Research for This Project | `research.enable` | — | a folder is open (creates the research space; runs nothing) |
 | Agent: New Agent Task | `agents.newTask` | — | always |
 | Agent: Show Agent Tasks | `agents.showTasks` | — | always |
+| Agent: Open Agents Page | `agents.showPage` | — | always (shows the selected task on the Agents page) |
 | Agent: Open Pending Agent Approval | `agents.openApproval` | — | a task is waiting for approval (opens the first; focuses its card) |
 | Agent: Agent Provider Settings | `agents.providerSettings` | — | always |
+| Graph: Show Dependencies at Cursor | `graph.showDependencies` | — | always (Editor page, Dependencies view) |
+| Graph: Show Project Graph | `graph.showProject` | — | always (Graph page, Project section, focused) |
+| Graph: Show Mathematics | `graph.showMathematics` | — | always (Graph page, Mathematics section, focused) |
+| Workflow: Show Workflow Drafts | `workflows.show` | — | a folder is open (opens the `workflows:` tab) |
+| Workflow: New Numerical Experiment Draft | `workflows.newNumericalExperiment` | — | a folder is open (saves a new draft from the preset and opens it) |
+| Workflow: New Formal Audit Draft | `workflows.newFormalAudit` | — | a folder is open (same) |
+| Workflow: Import Workflow Draft… | `workflows.import` | — | a folder is open (opens the drafts tab, whose Import section takes the JSON) |
 
 Engine switch (`latex.*`): changes the engine of the target that builds the active file (default target if it builds that file, else the first LaTeX target for it), or adds a target named after the file; saved to `.exposition/project.json`; open page views rebuild.
 
@@ -347,7 +391,7 @@ The final status is chosen in this order: Errors, Unverified, Partially checked,
 
 - **`lean_check`** (agents, e2e): target = open document or path (disk text as a temporary document); `checked` only for Checked of that exact revision; diagnostics, `sorry` locations, axioms and goals (≤ 32 positions) only when finished; timeout 120 s default, 600 s max (agent tool: 300 s).
 - **Formal evidence (M7):** the service keeps the audit record of each finished revision (`lean_audit_record`: every audited declaration with its statement, axioms, and its own verdict from those axioms (Checked, Checked with axioms, Incomplete, Relies on compiled code) next to the file's status). `lean_record_evidence(document, declarations)` registers service-owned `FormalCheck` evidence per listed declaration (file and declaration verdict, toolchain, sha256 of the audited text, revision, `dependencies: unavailable` "the Lean audit does not report declaration dependencies", no fingerprints, so freshness is never current); names the audit did not list are refused. The declaration is a `FormalDeclaration` entity (key = qualified name, bound to the `.lean` file, `anchoredIn` it). `lean_associate_declaration({declaration: {kind: "audited", document, name} | {kind: "entity", entity}, target, note})` records the reviewed `formalizes` relation (accepted: a correspondence, not a proof of equivalence). `lean_declaration_evidence(document)` lists the evidence history with freshness against the current text (older audits are stale history). The infoview offers Record evidence and Associate with... on checked and audited declarations.
-- **Error codes** (19): `lean.` + `invalidDocument`, `invalidRequest`, `stopped`, `closed`, `cancelled`, `timeout`, `serverStopped`, `server`, `unknownDocument`, `noWorkspace`, `stale`, `notReady`, `invalidOffset`, `toolchainInstalled`, `invalidToolchain`, `untrusted`, `noElan`, `notLean`, `unreadable`.
+- **Error codes** (23): `lean.` + `invalidDocument`, `invalidRequest`, `stopped`, `closed`, `cancelled`, `timeout`, `serverStopped`, `server`, `unknownDocument`, `noWorkspace`, `stale`, `notReady`, `invalidOffset`, `toolchainInstalled`, `invalidToolchain`, `untrusted`, `noElan`, `notLean`, `unreadable`; formal evidence: `noAudit` (no revision has a finished audit), `notAudited` (the audit did not list that declaration), `notDeclaration` (only a formal declaration can formalize), `associationRefused` (the graph refused the association; its reason). Graph errors during evidence commands keep their `graph.*` code.
 
 ## 6. Agents
 
@@ -472,7 +516,7 @@ Process launches (count against `maxCommands`): LaTeX build, `run_python`, `chec
 - **Composer**: Request; project folder (or "No project folder is open" + Open Folder…); Scope; Document changes; Commands and code; Content sent to the model provider; collapsed Budgets (Model turns, Tool calls, Commands, Output tokens, Minutes); Cancel / Start task (enabled with prompt, open folder, complete scope, ready provider).
 - **Task view**: Back, title, status pill, Cancel (active), "Review changes (N)", spec line (permission · execution · consent · model/effort · served by), outcome banner, approval cards, live transcript (You, Agent, Reasoning summary, tool calls with summary/state/input/result, notices, streaming draft "Thinking" / "Running: {tool}" / "Waiting for approval: {tool}"), budget meter (6 bars), Follow-up + Continue task.
 - **Approval card**: banner with title, "Nothing is applied until you approve…", "{lines} · {bytes} · complete, nothing omitted", scrollable payload (a Tab stop only when it scrolls), Approve / Decline. **Attention**: status-bar item (right) "Agent: waiting for approval" / "Agent: N waiting for approval" button → oldest pending approval; else "Agent: N running"; else "Agent: N to review". Persistent notification "Agent needs your approval" ("{title} · Task: {task}", action Open approval), not shown when the card is visible, retired on answer/task end. Opening focuses the card. Finished notifications: completed (success, files to review), budgetExceeded/stopped/interrupted (warning), failed/refused (danger), canceled (none).
-- **Palette:** 4 commands in category Agent, no keybindings (§2); Open Pending Agent Approval is enabled only while a task waits and focuses the first pending card.
+- **Palette:** 5 commands in category Agent, no keybindings (§2); Open Pending Agent Approval is enabled only while a task waits and focuses the first pending card.
 - **Review**: Keep all, Revert all, Open in editor area (editor `agents-review:{id}`, "Review: {title}"), "The task is still running" banner (actions disabled), per-file rows (state pill, "Overlapping edits", "N changes" / "created by the agent", "· edited since", Keep, Revert), results "Done"/"Refused", diff.
 - **Agents page** (top-level page `agents`, order 30, Mod+3): task list (filters All/Running/Needs you/Kept) and "Kept in the project graph" (investigations, workflow definitions); the selected task's header (status, Cancel, Keep as investigation, Show in Agent panel) and tabs Run (the shared task view: approvals, transcript, budgets, follow-up), Graph context, Proposals, Changes (review). Same store as the Agent view: one task list, one approval answerable from either; the panel's task view links here ("Open in Agents page"); a pending approval opens where the user is.
 - **Provider dialog** "Agent provider": Provider select; key status + "stored in {store}"; credential error banner; API key / Replace API key + Save key; Remove (confirm "Remove the API key?" Keep key / Remove key); Model; Effort; Default content consent; Close / Save settings. Settings › Agents shows provider, model, key status, "Provider settings…".
@@ -483,7 +527,121 @@ Process launches (count against `maxCommands`): LaTeX build, `run_python`, `chec
 - **Keep as investigation** (`agents_task_keep_investigation`, stopped tasks): the user's admission of one `investigation` entity (attributes `agentTask`, `taskStatus`; `references` to the task's admitted targets) plus `review` evidence referencing `agentTask:{id}`; idempotent.
 - **Project generation** (`agents_task_create_generation {objective, workspaceRoot, permission, execution?, consent?, budgets?}`): an ordinary whole-project task, execution disabled unless given, whose request is the objective plus a generation brief; TS helper `startProjectGeneration` (`src/features/agents/generation.ts`).
 
-## 7. Settings
+## 7. Project graph, projects, and workflows
+
+Every open project has one typed project graph (`crates/exposition-graph`). It is attached when the folder opens, whether or not a graph view is shown, and a reconciler thread (`graph-reconciler`) keeps it in step with the project's files and open buffers. Rust owns identities, admission, validation, and semantics; the webview reads bounded projections and proposes typed changes (§9 "Project graph"); agents use the same service within their scope (§6.14).
+
+### 7.1 Model, storage, and reconciliation
+
+| Item | Values |
+|---|---|
+| Entity kinds (23) | structure `project`, `folder`, `collection`, `researchSpace`; resources `resource`, `externalResource`; mathematics `definition`, `assumption`, `conjecture`, `lemma`, `theorem`, `proposition`, `corollary`, `claim`, `proof`, `question`, `mathObject`, `formalDeclaration`; citation `reference`; research `experiment`, `finding`, `investigation`; `workflow`. Statements: conjecture, lemma, theorem, proposition, corollary, claim |
+| Indexed only | `project`, `folder`, `resource`, `researchSpace`, `formalDeclaration` (people and agents cannot create them: `graph.notCreatable`) |
+| Resource roles (10) | `manuscript`, `note`, `script`, `dataset`, `artifact`, `asset`, `formalSource`, `bibliography`, `configuration`, `other` (resources only) |
+| Relation kinds (12) | structure `contains`, `memberOf`, `anchoredIn`; resource use `imports`, `usesAsset`; mathematics `dependsOn`, `assumes`, `proofOf`; citation `references`; evidence `evidenceFor`, `derivedFrom`; formal `formalizes`. Endpoint rules per kind (`graph_vocabulary`, `graph.endpointRule`); no self relations; `contains` may not form a cycle and an entity has one container; `contains`, `anchoredIn`, `imports` follow the files and are never added by hand (`graph.notManual`) |
+| Relation status | `observed` (extraction or a service), `suggested` (agent), `accepted` (person or built-in preset), `rejected`. Only a person accepts or rejects; observed relations cannot be reviewed or removed (`graph.observed`); an agent removes only its own suggestions |
+| Origins | `extracted{extractor}` (e.g. `latex/1`), `user`, `agent{taskId}`, `preset{blueprint}`, `service{service}`; set by the backend from the calling surface (IPC = user, agent tool = that task), never by the payload |
+| Lifecycle | `active`, `archived`, `discarded`, `tombstoned` (set only by reconciliation when a file or declaration no longer exists; shown "Removed from source"); the project entity cannot be archived |
+| Evidence kinds | `computational`, `formalCheck`, `build` (service-owned: people and agents can only cite an existing record of that kind, `graph.serviceOwnedEvidence`), `review`, `literature`; carried only by `evidenceFor` relations (≤ 64 evidence ids each) |
+| Evidence freshness | `current` (every recorded input hash equals the file's indexed hash), `stale{reasons}` (an input changed, or every resource with that key was deleted), `unknown{reason}` (hash not recorded, file not indexed, or formal evidence without dependency fingerprints: "changes in imported modules are not detected"). Computed when read, against the last reconciled state of each file; the record is never rewritten |
+| Coverage per file | `complete`, `partial` (what was not interpreted is listed), `unsupported` (no extractor: only the resource is known), `pending` (changed, waiting for a pass), `failed`; plus a count of unresolved links and bindings with explanations (≤ 1500 chars) |
+| Bindings | selector `wholeFile`, `declaration{syntax, name, ordinal}`, or `region`; state `resolved`, `missing`, `ambiguous`, `unresolved` |
+| Ids | `<prefix><32 hex>` with prefixes `prj-`, `ent-`, `rel-`, `evd-`, `view-`, `prop-`, `wf-`, `op-`; ≤ 64 chars; validated when they arrive over IPC or from the database |
+| Change limits | ≤ 500 operations; label ≤ 200 bytes, one line, not blank; key ≤ 1024; note ≤ 500; ≤ 32 attributes (keys `[A-Za-z0-9._-]{1,64}`, values ≤ 4096); summary ≤ 500; no control characters except `\n` and `\t`; temp ids `[A-Za-z0-9_-]{1,32}` |
+| Proposals and revisions | Valid proposals are kept in memory (≤ 256, cleared when a project attaches or detaches) and can be applied only by the origin that made them, in the same project; applying re-validates, all or nothing; per-entity `expectedRevision` decides conflicts (`graph.staleEntity`). Each applied change increments the project revision once; a service batch with no effect does not |
+
+**Admission** (which files become `resource` entities; one identity per path, `graph.excluded` otherwise):
+- By extension: manuscript `tex`, `typ`, `md`, `markdown`; note `txt`, `rst`, `org`; bibliography `bib`; script `py`, `ipy`, `pyw`, `r`, `jl`, `ipynb`; formalSource `lean`; dataset `csv`, `tsv`, `json`, `jsonl`, `parquet`, `feather`, `xlsx`, `xls`, `h5`, `hdf5`, `nc`, `npz`, `npy`, `mat`, `rds`, `rdata`, `arrow`; asset `png`, `jpg`, `jpeg`, `gif`, `svg`, `pdf`, `eps`, `webp`; configuration `sty`, `cls`, `bst`, `toml`, `yaml`, `yml`, `cfg`, `ini`, `lakefile.lean`, `lakefile.toml`, `lean-toolchain`, `lake-manifest.json`, `.exposition/project.json`. Any other file is excluded.
+- Excluded folders (any path component): `.git`, `.hg`, `.svn`, `.lake`, `lake-packages`, `node_modules`, `target`, `.venv`, `venv`, `__pycache__`, `.ipynb_checkpoints`, `.pytest_cache`, `.mypy_cache`, `.tox`, `.cache`, `_minted`, `.claude`, `.agents`, `.exposition-dev`, `.worktrees`, `.vscode`, `.idea`. Excluded files: `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.local.md`, save temps (`.exposition-save-`), and generated extensions `aux`, `log`, `out`, `toc`, `lof`, `lot`, `fls`, `fdb_latexmk`, `synctex`, `gz`, `bbl`, `blg`, `bcf`, `nav`, `snm`, `vrb`, `xdv`, `dvi`, `olean`, `ilean`, `c`, `o`, `obj`, `exe`, `dll`, `pyc`, `tmp`, `swp`.
+- Under `.exposition/`: only `research/` (recognised types) and `project.json` are scanned. The graph's own storage (`graph.sqlite3*`, `graph-backups/`, `graph.damaged*`), run records (`runs/`), and other metadata are never entities; `artifacts/` files are admitted only on request (a kept result, an attached figure).
+
+**Scan:** bounds of 32 folder levels, 200,000 folder entries, and 20,000 admitted files per scan; past a bound, `ReconcileReport.truncated` names it and files beyond it stay as they were (unknown, not removed). Links and junctions are never followed, and a path with a link in its folder chain is not read. Files over 256 MiB are admitted but not fingerprinted; files over 8 MiB are not extracted (coverage `failed`). Per file ≤ 5000 declarations, 20,000 links, 20,000 labels; names ≤ 256 characters without whitespace. A file whose size, modification time, and extractor are unchanged is not read; one whose SHA-256 is unchanged is not re-extracted. Each file's checkpoint (schema v2) holds size, modification time, physical file identity, content hash, extractor, and its extracted index.
+
+| Extractor · files | Entities | Relations | Not interpreted (reported as partial coverage) |
+|---|---|---|---|
+| `latex/1` · `.tex` | Theorem-like environments: standard names (theorem/thm, lemma/lem, proposition/prop, corollary/cor, definition/defn/dfn, conjecture/conj, claim, assumption(s)/hypothesis/hyp, question/problem/openproblem, proof; starred too) and literal `\newtheorem` / `\declaretheorem` earlier in the same file (kind from the display name); `\label` names the innermost declaration; title from `[…]` | `\ref`, `\eqref`, `\cref`, `\Cref`, `\autoref`, `\pageref`, `\vref`, `\nameref`, 20 `\cite` variants → `references`; `\input`, `\include`, `\subfile`, `\import`, `\subimport` → `imports` (`.tex`); `\bibliography`, `\addbibresource` → `imports` (`.bib`); `\includegraphics` → `usesAsset`; `\begin{proof}[…\ref{x}…]` → `proofOf` x, otherwise a proof immediately after a statement → `proofOf` that statement | Macros are never expanded (a definition that could hide tracked constructs is reported); `\newtheorem` in another file; non-literal environment names, labels, or cite keys; remarks and examples (not entities); comments, `\verb`, verbatim-like environments, and text after `\endinput` are masked |
+| `typst/1` · `.typ` | Calls with the default theorem-like names (`#theorem[…]`, `#lemma("Title")[…]`, …) and ctheorems `#let NAME = thmbox/thmplain/thmproof(…)` in the same file; a following `<label>` names it | `@x`, `ref(<x>)`, `cite(…)` → `references`; `#import "file"`, `#include "file"`, `bibliography(…)` → `imports` (packages `@…` are not links); `image("…")` → `usesAsset` | Nothing is evaluated; theorem packages other than ctheorems; no `proofOf` |
+| `markdown/1` · `.md`, `.markdown` | Pandoc fenced divs with the default class names (`::: {.theorem #id title="…"}`, `::: theorem`) | `[t](path)`, `[id]: dest`, `[@key]`, `@key` → `references` (URLs, anchors, schemes dropped); `![](p)`, `<img src>` → `usesAsset` | Front matter, code, comments, and math are masked; footnotes ignored; headings are context only |
+| `lean/1` · `.lean` | `formalDeclaration` per `theorem`, `lemma`, `def`, `abbrev`, `structure`, `inductive`, `class` (incl. `class inductive`), named `instance`, `axiom`, `opaque`, qualified by `namespace` | Header `import M` → `imports` (resolved through folders with a lakefile, else the root) | Commands that generate declarations (`macro`, `syntax`, `elab`, `notation`, …); anonymous instances and `example` (not entities); no use-site references |
+| `bibtex/1` · `.bib` | `reference` per `@type{key,…}` (title cleaned of TeX; literal year and DOI) | — | `@string`, `@preamble`, `@comment` skipped; duplicate keys and malformed entries (or > 1 MiB) reported |
+| `code/1` · `.py`, `.pyw`, `.ipy`, `.r`, `.jl` | — | Literal imports of project files only → `imports`: Python `import a.b`, `from a.b import c`, relative imports; R `source("x")`, `sys.source(…)`; Julia `include("x")` | Non-literal arguments; files a script reads at run time |
+| none · `.ipynb`, datasets, assets, configuration, notes | — | — | Coverage `unsupported`: only the resource is known |
+
+- **Attachment markers** (`// exposition:begin|end <key>` in Typst, `% …` in LaTeX, `<!-- … -->` in Markdown): the first image inside a single begin/end pair → `usesAsset` (a generated artifact is admitted, origin `attachment/1`); unpaired or repeated markers yield nothing and are reported.
+- **Resolution:** a label resolves to a declaration in the same file, then to a unique live keyed entity; section and equation labels are not entities; a citation resolves to a `reference` by key. A missing or ambiguous target is counted as unresolved and explained, never guessed.
+- **References are not dependencies:** extraction produces only `imports`, `usesAsset`, `references`, and `proofOf` (plus `contains` and `anchoredIn` structure). `dependsOn` and `assumes` come only from people, agents (suggested), and presets.
+- **File identity:** a rename or move keeps its identity when, within one reconciliation pass, the gone and new paths match one to one by physical file identity, then by identical content; a copy gets a new identity; a file reappearing with identical content at a tombstoned path revives it. Old and new paths seen in different passes are not matched. A folder keeps its identity when all its renamed files agree on one new folder.
+- **Declaration identity:** matched by name and kind, then identical text, then identical context, then the same context with one candidate left on each side; only unique matches, never by position. A name declared twice keeps the existing entity with an `ambiguous` binding ("declared n times … none was chosen"), counted, not merged.
+- **Tombstones:** a removed declaration, a changed kind, or a deleted file tombstones the entity (bindings `missing`, observed relations removed). A pass never deletes an entity, alters a curated record, or reassigns an identity on an uncertain match. Tombstones are revived only by an exact name or exact text match. Declarations admitted from a Lean audit are never tombstoned (binding `missing` when no longer declared literally).
+- **Region bindings** (curated) follow their exact text: found once → resolved at the new range; not found → `missing` ("The bound text was changed or removed."); found several times → `ambiguous`.
+- **Unsaved overlay:** 150 ms after an edit, an open buffer with unsaved changes is extracted like a file and kept in memory as an overlay labelled with its revision (`freshness.overlay`). Only queries naming that revision (`graph_inspect_at_source`) see it, marked unsaved; declarations that exist only in the buffer get provisional `ent-unsaved-…` ids that cannot be change targets. Nothing is written to the graph; saving, or undoing back to the saved text, drops it. Buffers over 8 MiB get no overlay.
+- **Driver:** file events are coalesced (250 ms quiet, at most 2 s after the first event); a rescan or more than 200 changed paths runs a full pass. Changed paths read as `pending` until a pass that started after the change has processed them. Sync states: `synchronized` (with the last checkpoint time), `reconciling`, `pending{n}`, `unavailable`. `graph_reconcile` ("Reindex project") re-reads every file and rebuilds derived projections without touching curated records.
+- **Impact** (`graph_impact`): breadth-first from 1–100 roots, depth 4 by default (≤ 8), ≤ 200 items (≤ 1000), ≤ 20,000 edges examined. Follows incoming `dependsOn`, `assumes`, `proofOf`, `evidenceFor`, `formalizes` (action `needsReview`), `references` (`citationReview`), `usesAsset`, `imports`, `derivedFrom` (`stale`), and `anchoredIn` into a file root (`informational`: declarations in a changed file are listed, their dependents are not); outgoing `proofOf`, `evidenceFor`, `formalizes`; never `contains` or `memberOf`. Rejected relations are skipped; suggested ones are followed and labelled "(suggested relationship)". Reports ≤ 50 cycles, files with unknown coverage (≤ 200), and the evidence of roots and affected items with freshness.
+
+**Storage and recovery**
+- `.exposition/graph.sqlite3`, schema 2 (`PRAGMA user_version`; v2 adds the per-file reconciliation checkpoints: coverage `size`, `modified_ms`, `file_identity`, `pending`, and table `source_index`). Tables `meta`, `entities`, `bindings`, `relations`, `evidence`, `changes` (newest 10,000 kept), `views`, `workflows`, `coverage`, `source_index`. Rollback journal (`journal_mode=DELETE`, not WAL), `synchronous=FULL`, 5 s busy timeout. Every statement is parameterized and every read bounded (≤ 20,000 rows).
+- **Validated open** (the database is untrusted input): ≤ 1 GiB; SQLite defensive mode with triggers, views, and untrusted schema disabled; a newer `user_version` or vocabulary is refused and left unchanged; `quick_check`; every schema object and every table's column list must be exactly the expected ones (planted triggers, views, or tables are refused); `foreign_key_check`; per-table row limits; every row decoded and bounded (ids, paths without traversal, ranges, short fields ≤ 256, text ≤ 256 KiB, JSON ≤ 1 MiB, relation endpoint rules, at most one project entity). A v1 graph is backed up (`premigration`) before it is upgraded; the upgrade is refused if the backup fails. A refused database is left byte for byte unchanged.
+- **Graph states:** `attached`. `temporaryReadOnly{reason}` when `.exposition` cannot be created, the folder is read-only and has no graph yet, or the database cannot be created: an in-memory graph that is indexed and readable but persists nothing (the Graph page offers no changes or saved layouts). `unavailable{reason, recovery}` when `.exposition` or the database is a link, not a regular file, or leaves the project, or the schema is newer (Retry), or the database is damaged or refused (Restore one of the ≤ 5 newest backups, Start new, Retry). An unavailable graph is never replaced automatically; source editing keeps working and graph-dependent actions report unavailable.
+- **Recovery** (`graph_recover`): `restoreBackup` copies the backup to `restore-<ms>.sqlite3`, validates and migrates it like any open, then sets the current database aside; `startNew` renames the damaged database and its side files to `graph.damaged-<ms>.sqlite3`. Nothing is deleted.
+- **Backups:** `.exposition/graph-backups/graph-<ms>-r<revision>-<reason>.sqlite3` via `VACUUM INTO` (written as `.partial`, then renamed); the newest 8 are kept and leftovers older than 1 h removed. Reasons: `auto` (after the first successful reconciliation of each open, when the newest backup is older than 24 h), `premigration`, `manual` (`graph_backup`). A temporary graph has none (`graph.temporary`).
+- **Operation journal** (application data): `<data>/graph-operations/<24 hex of SHA-256 of the lowercased root>/<op>.json`, written via fsync + rename; ≤ 200 records per project (finished ones pruned), ≤ 1 MiB each. Kinds `promotion`, `projectCreation`, `crossService`; states `pending`, `completed`, `failed{message}`, `needsReconciliation{message}`, `resolved{resolution}`. When a project attaches, operations an earlier session left pending become `needsReconciliation`; none is re-run.
+- **Saved views:** table `views`; ≤ 5000 positioned nodes, hidden, or collapsed entries; zoom 0.05–8; ≤ 500 listed; replacing needs the view's revision (`graph.staleView`). Saving a view never changes the graph revision or any relation.
+- **Events:** `graph:event` (`status{status}`, `changed{delta, origin}` with ≤ 500 ids per delta field then `truncated`, `reconciled{revision, freshness}`; broadcast capacity 1024); `graph:resync` on lag. `EXPOSITION_GRAPH_TRACE` (any value) prints reconciliation timings to stderr.
+
+### 7.2 Graph page (`graph`, Mod+4)
+- **Loading:** graph reads start only when the Graph page or the Dependencies view is shown; ordinary editing never mounts the page. Header: "Graph", section control **Project** / **Mathematics** (not persisted), freshness pill, "{n} items · {n} relationships · revision {n}".
+- **States:** No folder open (Open Folder…); "Opening the project graph…"; "Attaching the project graph…"; "The project graph could not be read" (Retry); "The project graph is unavailable" + reason, "Editing files keeps working. Graph-dependent actions are paused until the graph is recovered." with Try again / Start a new project graph (confirm "Start a new project graph?": curated relationships, collections, and saved views of the damaged graph are not carried over; the damaged file is kept aside) / "Restore the backup from <date>"; failure → "Recovery failed". Changes are offered only while `attached`; a temporary graph shows "Temporary read-only graph … Changes and saved layouts cannot be kept for this folder."
+- **Sync:** Synchronized, Reconciling, Reconciliation pending (N files), Not yet reconciled, Synchronization unavailable; "N unsaved buffers". While pending: "N changed files are waiting to be reconciled" / "The graph has not reconciled with the project's files yet" / "The graph is catching up with recent file changes", "Answers may not include the latest edits yet; answers from unsaved buffers are labelled as such."
+- **Project section:** Display Canvas / Table (localStorage `exposition.graph.mode.project`); "Search items" (non-matches are dimmed, not removed); Filters; New (New collection…, New item…); Arrange (canvas); "Show N hidden"; layout save indicator; Inspector. Loads ≤ 300 items ("Showing X of Y items": Search all, Show up to 1000). Neighbourhood focus "Showing N steps around X" (depth 1–4; Both directions / What it relates to / What relates to it; Show whole project).
+- **Canvas** (React Flow): pan by dragging the background, Space+drag, or middle-drag; zoom with the wheel, pinch, the buttons, or `+`/`-` (10–250 %); Fit to view (Shift+1), Fit to selection (Shift+2), Reset view 100 % (0); click, Ctrl/Cmd+click, or Shift+drag box to select; Enter or Space selects the focused node or edge; drag or arrow keys move a node (layout only). Dragging from a node's right handle onto another node opens "Add a relationship"; the canvas never creates a relation itself. Nothing is deleted from the canvas (Delete is not bound); no context menu; double-click does nothing. Group nodes (project, folder, collection, research space) collapse and expand ("N inside"); relations into a collapsed group are aggregated (×N). Edge labels on every edge up to 60 edges, otherwise on the selection and its neighbours; status shown as "Suggested" / "Observed" / "Rejected" and by dash pattern (accepted solid), colour by relation family, citations with an open arrowhead. Edges are straight lines between node borders (parallel relations bowed 22 px apart), not routed around other nodes.
+- **Arrange:** deterministic layered layout, left to right (layers 96 px apart, nodes 28 px, components 72 px). It runs only on Arrange or to place nodes without a saved position (to the right of the existing layout) and never moves positioned nodes on its own; "Arranged N items" with Undo.
+- **Saved layout:** one saved view per section (scope Project / Mathematics) in the project graph: positions, viewport, filters, hidden and collapsed items. Saved 600 ms after a change with the view's revision ("Saving layout…", "Layout saved", "Layout not saved" + Retry); when the view changed elsewhere the newer one is shown ("The {name} view changed elsewhere"). The UI has no create, rename, or delete for views.
+- **Filters:** "Show archived items and rejected suggestions"; item kinds by family (Structure, Resources, Mathematics, Citations, Research, Workflows); relationships by family (Structure, Resource use, Mathematical dependencies, References, Evidence and provenance, Formal association).
+- **Table** (keyboard alternative to the canvas): tabs "Items (N)" (Name, Kind, Status, Source or key, Relations) and "Relationships (N)" (From, Relationship, To, Status).
+- **Inspector** (docked at ≥ 1100 px window width, otherwise a drawer): type, title, lifecycle and origin badges (You, Agent task, Extracted (x), Preset x, Service (x)); Open source, Show neighborhood (depth 2), Relate to…, More actions (Add to collection…, Hide from view / Show in view, Archive / Restore for items not backed by a file, with confirmation). Sections: Source, Relationships (by family; Accept suggestion / Reject suggestion / Remove relationship (confirmed) for hand-made, non-observed relations, otherwise "Observed in the sources: to change it, change the source." or "This kind of relationship follows the files; it is not edited by hand."), Evidence (with freshness), Change impact ("What needs review if this changes?": Needs review / Stale / Citation review / Informational), Provenance (collapsed: admitted by, key, item and graph revision, id). Labels are not editable.
+- **Changes:** dialogs "Add a relationship" (Swap direction), "New item" / "New collection", "Add <item> to a collection" propose a typed change (`graph_propose_change`) and show "Valid. Applying will:" with every effect, or "Not allowed. Nothing will change." with the backend's reasons; applying calls `graph_apply_change` ("The graph changed while you reviewed this change: …" on conflict).
+- **Mathematics section:** mathematical kinds only. "Mathematics view" **Dependencies** (canvas) / **Verification** (table); Show All / No proof / No formal association / Stale or unknown; "Extraction coverage: … Unknown coverage is not verified." Verification columns: **Statement**, **Informal proof** (No proof linked / Proof linked / Proof suggested / Not applicable), **Formal association** (None / Suggested association / Reviewed association (N) / Is a formal declaration), **Verifier verdict** (Checked, Checked with axioms, Incomplete (sorry), Relies on compiled code, Partially checked, Not verified, Errors, or No formal evidence; the declaration's own verdict, else the file's, from the latest `formalCheck` evidence), **Freshness** (Current / Stale / Unknown / No evidence), **Source** (path or Not bound). Inspector adds Depends on (`dependsOn` and `assumes`, depth 4, ≤ 200; assumptions listed apart from results and definitions), Proofs targeting this / Proves, and Formal verification ("Formal dependency edges unavailable: …", "Freshness against formal dependencies is unknown (no dependency fingerprints)").
+- **Associate a Lean declaration…** (conjecture, lemma, theorem, proposition, corollary, claim, definition, assumption, mathObject): dialog "Associate a Lean declaration with X", Formal declaration, Note (optional, ≤ 500), "Record reviewed association" → `lean_associate_declaration` (entity form). States that the association is a reviewed correspondence, not a machine proof of equivalence, and does not change the verifier verdict. Disabled without formal declarations ("No formal declarations in this project yet. Check a Lean file and record its audited declarations to associate one.") or while changes are not allowed.
+
+### 7.3 Dependencies view (Editor page, auxiliary `graph.dependencies`)
+Follows the Monaco caret (250 ms debounce) through `graph_inspect_at_source`: path and line, "Unsaved buffer (revision N)" when the overlay answered, freshness pill, "Extraction: …" coverage (unknown coverage: "absence of results is not evidence of absence"). "At the caret (N)" lists bound items innermost first with their relationships by family, binding badges (Binding missing, Ambiguous binding, Unresolved binding), and the innermost item's evidence; Open in Graph / Open in Mathematics (selects the item, or shows its 1-step neighbourhood when the view does not include it). File section with Open in Graph. Other states: No folder open, Dependencies unavailable, No source file active, Inspecting…, "This file is not a graph resource (not indexed, or excluded).", "No graph item is bound at this position.", "Could not inspect this position". Opened by "Graph: Show Dependencies at Cursor".
+
+### 7.4 New Project and project setup
+- **New Project tab** (`new-project:`; "File: New Project…" / "…from an Objective…"): "Start from a preset" or "Describe an objective".
+
+| Preset (`id`) | Creates |
+|---|---|
+| Mathematical paper (`paper`) | Manuscript (`main.typ`, `main.tex` for pdfLaTeX or LuaLaTeX, or `main.md`) + `figures/`; build target "Paper (<engine>)"; Key definition, Standing assumptions, Main result bound to the manuscript (Main result `dependsOn` the definition, `assumes` the assumptions); collection Manuscript |
+| Computational study (`computational`) | Research space (`.exposition/research/rs-<12 hex>/`) with `notes/notes.md`, a Research question, `sources/analysis.{py,R,jl}`, `data/`, a Baseline experiment referencing the script and question; optional Numerical experiment workflow draft (Python only) |
+| Lean investigation (`lean`) | `lean-toolchain` (an installed toolchain, else `leanprover/lean4:v4.35.0`), `lakefile.toml`, `Investigation.lean`; Main conjecture bound to it; collection Formal development; optional Formal audit workflow draft |
+| Blank research project (`research`) | Research space with notes and a Research question; no manuscript |
+| Paper with computation (`paperComputation`) | Paper + computational study |
+| Paper with Lean (`paperLean`) | Paper + Lean investigation (collection Formalization holds the main result) |
+
+- **Preset form:** preset, title, manuscript format, research runtime ("installed / not found / checking…"), Lean toolchain (installed ones, default marked "(not installed)"), "Include a … workflow draft (saved, not runnable in this version)". Preview "What will be created": files and folders with roles, the project structure, "Required tools (declared, never installed or run)" with Available / Not available, diagnostics.
+- **Objective form:** "What is this project for?" (≤ 4000 chars used as the purpose), title, Document changes (default Ask before each change), Commands and code (default No commands). "Create and Start Agent" creates an empty project with a research space (hidden preset `empty`), then starts an ordinary whole-project agent task with the objective (`agents_task_create_generation`) on the Agents page; if the task does not start: "The project was created, but the agent task did not start".
+- **Location:** "Project folder" + Browse…; the folder name follows the title until edited; the parent defaults to that of the most recent project. Checked after 250 ms (`project_check_destination`): "A new folder will be created: …" / "The empty folder … will be used." A folder inside a trusted folder needs "Create the project inside this trusted folder" (`project.trustedLocation` otherwise).
+- **Create:** closes open file editors, opens the entry (manuscript in the Editor, or the Research page), and reports "Nothing was trusted or run."
+- **Materialization** (`project_create`): validate the blueprint → destination checks → refuse if any path already exists (`project.collision`, nothing created) → journal → write each file create-new + fsync (journaled with its SHA-256) → open the folder as Open Folder does → admit resources, save workflow drafts, apply the graph content in one batch → write build targets only if the project has none → complete. Files and the graph are not one transaction; graph content is keyed `blueprint:<op>/<tempId>` so re-applying never duplicates. Full record (blueprint + per-file SHA-256, ≤ 32 MiB) in `<data>/project-creations/<op>.json`. Built-in presets assert their relations; any other blueprint (agent proposal, import) only suggests. Nothing is trusted, run, installed, or sent to a model.
+- **Interrupted creation:** an unfinished creation from an earlier session is shown when the project opens ("Project setup did not finish", Review) in the **Project Setup** tab (`project-setup:<operation>`): each file Created / Missing / Different content, "Workflow drafts saved: x of y"; Finish Setup (re-validates the stored record, creates only missing files, applies the rest) or Keep as Is (admits what exists: "Kept as created; the rest of the setup was not applied."). Never replayed automatically or reported complete. Debug builds: `EXPOSITION_TEST_INTERRUPT_PROJECT_CREATION=<n>` aborts the process after n files (e2e).
+- **Blueprint rules** (`exposition.blueprint/1`, ≤ 16 MiB JSON, unknown fields refused, so no trust, run, startup-hook, or grant fields): ≤ 200 files (≤ 1 MiB each, ≤ 8 MiB total), 200 folders, 500 entities, 1000 relations, 50 collections (≤ 500 members), 10 workflow drafts, 16 capabilities, 8 build targets; title ≤ 120, purpose ≤ 4000; `source` `[a-z0-9:._-]{1,64}`; research space id `rs-` + 4–32 lowercase hex. Relations limited to `memberOf`, `usesAsset`, `dependsOn`, `assumes`, `proofOf`, `references`, `derivedFrom`; entity kinds must be creatable (not collection or workflow). Paths: relative, ≤ 240 bytes, components ≤ 120, ≤ 12 levels; no backslashes, drive letters, `:`, `..`, `.` or empty components, 8.3 short names, reserved device names; no version-control or tool folders (`.git`, `.hg`, `.svn`, `.exposition-dev`, `.claude`, `.agents`, `.worktrees`, `.vscode`, `.idea`, and the admission's excluded folders); nothing under `.exposition/` except the project's own research space; no startup-hook files (`CLAUDE.md`, `AGENTS.md`, `latexmkrc`, `texmf.cnf`, `sitecustomize.py`, `usercustomize.py`, `.Rprofile`, `Rprofile.site`, `.Renviron`, `lakefile.lean`, `kernel.json`, `.envrc`, `.pythonstartup`, `desktop.ini`, `autorun.inf`, `ipykernel_launcher.py`, …); no executable extensions (`exe`, `dll`, `bat`, `cmd`, `ps1`, `vbs`, `msi`, `lnk`, `js`, `jar`, `pth`, …); no bare Git layout; compared case-insensitively. A dry run against an in-memory graph follows the static checks.
+
+### 7.5 Workflow drafts
+- **Drafts tab** (`workflows:` "Workflow Drafts"): preset cards (New Numerical Experiment Draft, New Formal Audit Draft: saved at once with the active file bound when its type fits, then opened), saved drafts (revision, "imported", "not runnable in this version", status, Open), Import (JSON + Import Draft).
+- **Editor** (`workflow:<id>`): banner "Draft — not runnable in this version"; Save Revision (with the draft's revision); validation in Rust 200 ms after each change; General (title, "Most this workflow may run", description, ceiling checkboxes), Inputs (type, project file, version at run start or pinned SHA-256), Steps from the registered operations (port bindings offer only compatible, non-downstream sources; parameters; prompt; "Write the code here" opens a Python Monaco editor whose code is data of the definition, never a project file and never run), "Runs after" prerequisites, Outcomes, "Plan (for review)"; closing with unsaved changes asks first.
+- **Contract** (`exposition.workflow/1`): inputs (`unset` or a project file at run start or pinned by hash), steps (operation id + version, parameters, optional Python code or prompt payload), connections (`data`, `prerequisite`, `annotation`), outcomes (transformedDataset, retainedFigure, retainedTable, investigationReport, auditEvidence, reviewableProposal, manuscriptPromotion), ceiling (execution none / restricted / trustedNative, model requests, retain results, propose changes). Rules: inputs bound, every step reaches an outcome, typed data between steps, effects within the ceiling, outputs validated by the runner, service-owned types produced only by their services; no cycles, loops, conditionals, or nesting. Limits: 50 steps, 200 connections, 50 inputs, 20 outcomes, 32 parameters per step, code 256 KiB, prompt 32 KiB, title 200, description 4000, definition 1 MiB, ids `[A-Za-z0-9_-]{1,32}`.
+- **Operations** (registry; every runner unavailable: "Workflow execution arrives in a later version of Exposition."): `research.pythonBatch` (restricted container), `research.nativePython`, `lean.audit`, `formal.associateEvidence`, `agent.review` (prompt), `artifact.retain`, `manuscript.requestPromotion`.
+- **Presets:** Numerical experiment (script, optional data → Python batch run → retain figure → optional manuscript promotion; ceiling restricted) and Formal audit (Lean file → audit → associate evidence; ceiling trusted native). Unset files leave an incomplete draft.
+- **Storage:** rows of table `workflows` in `.exposition/graph.sqlite3` (immutable revisions; identical content saves nothing; ≤ 4 MiB per body); each draft is a `Workflow` entity (attributes `workflow.id`, `.revision`, `.hash`, `.state`, `.runnable` = `false`, `.preset`, `.imported`). Validation state `incomplete` or `wellFormed`; `runnable` is always false (a stored claim is overridden on read). Imports get a fresh id and are marked imported.
+
+### 7.6 Codes
+- `graph.` (operations): `empty`, `tooLarge`, `invalidTemp`, `duplicateTemp`, `unknownTemp`, `unknownEntity`, `tombstoned`, `notCreatable`, `invalidLabel`, `invalidKey`, `invalidAttributes`, `invalidRoles`, `invalidBinding`, `staleEntity`, `fileBacked`, `lifecycle`, `unknownRelation`, `reviewOnly`, `invalidStatus`, `observed`, `notManual`, `selfRelation`, `endpointRule`, `invalidNote`, `evidenceKind`, `serviceOwnedEvidence`, `unknownEvidence`, `duplicateRelation`, `alreadyContained`, `cycle`.
+- `graph.` (service): `unavailable`, `damaged`, `storage`, `noProject`, `temporary`, `noRecovery`, `recovery`, `projectChanged`, `invalidQuery` (text > 200, impact roots not 1–100), `invalidRequest`, `unknownProposal`, `notService`, `invalidBatch`, `excluded`, `unknownView`, `staleView`, `invalidView`, `reconciler` (the reconciler stopped), `reconcileTimeout` (reindexing still running after 5 min); `injectedFailure` only from the debug fault command `research_dev_fail_next_graph_write`.
+- `blueprint.`: `tooLarge`, `schema`, `source`, `title`, `purpose`, `research`, `path`, `collision`, `content`, `tempId`, `entityKind`, `label`, `attributes`, `endpointRule`, `reference`, `duplicate`, `relationKind`, `selfRelation`, `note`, `capability`, `buildTarget`, `entry`, `graph`, `invalid`; warning `workflowIncomplete`.
+- `project.`: `preset`, `destination`, `existingProject`, `notEmpty`, `trustedLocation`, `link`, `collision`, `io`, `outside`, `alias`, `journal`, `interrupted`, `researchSpace`, `inProgress`, `unknownOperation`, `resolved`, `recordMissing`; plus `workspace.*` destination codes.
+- `workflow.` (validation): `schema`, `title`, `description`, `preset`, `tooLarge`, `invalidId`, `duplicateId`, `label`, `unsupportedVersion`, `unknownOperation`, `cycle`, `ambiguousCode`, `empty`, `unknownParameter`, `invalidParameter`, `unexpectedPayload`, `payloadLanguage`, `payload`, `payloadKind`, `inputUnset`, `inputVersion`, `inputMissing`, `unboundInput`, `missingCode`, `missingParameter`, `missingPrompt`, `noOutcome`, `orphanStep`, `inputTypeMismatch`, `unknownStep`, `unknownPort`, `unknownInput`, `incompatibleTypes`, `multipleBindings`, `outcomeType`, `ceilingExceeded`, `inputNotResource`, `effectNotAllowed`, `containment`, `inputType`, `serviceOwnedType`; warning `unusedInput`. Commands: `invalid` (import), `unknown`, `stale`, `unknownPreset`.
+
+## 8. Settings
 
 `<data>` = `EXPOSITION_DATA_DIR`, else `%LOCALAPPDATA%\org.exposition.desktop`. Settings editor sections: Appearance, Editor, Project, Trusted folders, Execution, Agents, Research, About.
 
@@ -558,12 +716,13 @@ Process launches (count against `maxCommands`): LaTeX build, `run_python`, `chec
 | `exposition.theme` | localStorage | `"system"` | Settings › Appearance › Color theme; Manage menu; theme palette commands |
 | `exposition.workbench.layout` | localStorage | sidebar 260 px, panel 240 px, auxiliary 320 px (all visible), split 50 % | Drag/keyboard resize, toggles, View: Reset Layout |
 | `exposition.startupReopenAttempted` | sessionStorage | absent | — (one reopen attempt per application start) |
+| `exposition.graph.mode.project` | localStorage | `"canvas"` | Graph page › Project › Display (Canvas / Table) |
 
-In-memory only: Jobs "Show tool probes", selected Settings section (default Appearance), Files tree expansion, job output buffers.
+In-memory only: Jobs "Show tool probes", selected Settings section (default Appearance), Files tree expansion, job output buffers, Graph page section (Project / Mathematics) and Mathematics view (Dependencies / Verification). Graph layouts (positions, viewport, filters, hidden, collapsed) are saved views in the project graph, not browser storage (§7.2).
 
-## 8. IPC endpoints (webview → core)
+## 9. IPC endpoints (webview → core)
 
-Manifest `src-tauri/build.rs` (`COMMANDS` 90 release, `DEV_COMMANDS` 3 debug-only); handlers `src-tauri/src/lib.rs` `generate_handler!` (93 = 90 + 3 `#[cfg(debug_assertions)]`); grants `src-tauri/capabilities/default.json` (capability `main-window`, window `main`: exactly the 90 `allow-*` plus `core:event:default`, `core:window:allow-set-title`, `core:window:allow-destroy`, `dialog:allow-open`). Args are camelCase over IPC. Errors: `CommandError{code,message}`; document commands and `page_edit` reject with `TransactionError{kind}`; Lean commands with `LeanError{code,message,currentRevision}`. † = no UI caller (e2e or agent path only).
+Manifest `src-tauri/build.rs` (`COMMANDS` 144 release, `DEV_COMMANDS` 4 debug-only); handlers `src-tauri/src/lib.rs` `generate_handler!` (148 = 144 + 4 `#[cfg(debug_assertions)]`); grants `src-tauri/capabilities/default.json` (capability `main-window`, window `main`: exactly the 144 `allow-*` plus `core:event:default`, `core:window:allow-set-title`, `core:window:allow-destroy`, `dialog:allow-open`). Args are camelCase over IPC. Errors: `CommandError{code,message}`; document commands and `page_edit` reject with `TransactionError{kind}`; Lean commands with `LeanError{code,message,currentRevision}`; graph errors arrive as `CommandError` with the graph's `graph.*` code. † = no UI caller (e2e or agent path only).
 ### App and documents (6)
 | Command | Args | Returns | Purpose |
 |---|---|---|---|
@@ -611,7 +770,7 @@ Manifest `src-tauri/build.rs` (`COMMANDS` 90 release, `DEV_COMMANDS` 3 debug-onl
 | execution_settings_update | change: ExecutionSettingsChange | ExecutionSettingsState | One validated change: `dockerImage{image?}` or `toolPath{tool,path?}` |
 | docker_images_list | — | DockerImage[] | Local tagged images via `docker image ls`; never pulls |
 | trust_list | — | TrustList | Trusted folders with grant times, plus trust rules |
-### Lean (9)
+### Lean (13)
 | Command | Args | Returns | Purpose |
 |---|---|---|---|
 | lean_documents | — | LeanDocumentState[] | Status and diagnostics of open Lean documents |
@@ -623,6 +782,10 @@ Manifest `src-tauri/build.rs` (`COMMANDS` 90 release, `DEV_COMMANDS` 3 debug-onl
 | lean_restart_file | document: DocumentId | () | Re-elaborate file, rebuilding out-of-date imports |
 | lean_install_toolchain | document: DocumentId | JobId | Install project's pinned toolchain via elan (trusted folder only) |
 | lean_check † | request: LeanCheckRequest | LeanCheckReport | Check exact text, audited verdict; ≤32 goal positions; timeout ≤600 s (default 120 s) |
+| lean_audit_record | document: DocumentId | LeanAuditRecord \| null | Axiom audit of the last finished revision: every declaration with statement, axioms, verdict |
+| lean_record_evidence | document: DocumentId, declarations: String[] (1–200, each ≤1024 bytes) | EvidenceOutcomeReport | Service-owned `FormalCheck` evidence for declarations the last audit listed (others refused); `lean.noAudit` when no revision has a finished audit |
+| lean_associate_declaration | request: LeanAssociateRequest{declaration: audited{document, name} \| entity{entity}, target, note? ≤500} | LeanAssociation | Reviewed `formalizes` relation (accepted; an existing suggestion is accepted); an audited name records its evidence first (`lean.notAudited`); `lean.notDeclaration`, `lean.associationRefused` |
+| lean_declaration_evidence | document: DocumentId | DeclarationEvidence[] | Formal declarations of an open Lean document: evidence history with freshness against the current text, associations |
 ### LaTeX build service (5, all †; the UI uses `typesetting_*`/`page_*`)
 | Command | Args | Returns | Purpose |
 |---|---|---|---|
@@ -650,7 +813,7 @@ Manifest `src-tauri/build.rs` (`COMMANDS` 90 release, `DEV_COMMANDS` 3 debug-onl
 | agents_review_accept | task: TaskId, path: WorkspacePath? | ReviewActionResult[] | Accept one or all pending files; `agents.taskRunning` while active |
 | agents_task_keep_investigation | task: TaskId | EntityId | Keep a stopped task as an investigation in the project graph (idempotent) |
 | agents_task_create_generation | request: GenerationTaskRequest | TaskSummary | Start a new project's generation task (whole project, execution disabled by default) |
-### Research and artifact attachment (14)
+### Research and artifact attachment (28)
 | Command | Args | Returns | Purpose |
 |---|---|---|---|
 | research_workspace | — | WorkspaceStatus \| null | Open folder root and trust (synced from workspace service) |
@@ -667,6 +830,20 @@ Manifest `src-tauri/build.rs` (`COMMANDS` 90 release, `DEV_COMMANDS` 3 debug-onl
 | research_run_output | runId: String, after: u32?, limit: u32? (200) | RunOutputPage | Output entries after seq |
 | research_artifact | runId: String, artifactId: String | raw bytes | Artifact bytes on demand |
 | artifact_attach | request: AttachRunArtifactRequest | AttachArtifactResult | Insert/update a run's figure or table in an open document |
+| research_space † | — | ResearchSpaceInfo \| null | The project's research space, if Research is enabled (no side effects) |
+| research_space_enable | — | ResearchSpaceInfo | Enable Research: one research space and its folders; launches nothing (§4.1) |
+| research_listing | — | ResearchListing | Research explorer groups over resource identities (sources, data, notes, references, experiments, results, workflows read-only); `truncated`, `graphUnavailable` |
+| research_space_create_file | request: CreateSpaceFileRequest{group, name (one path component)} | SpaceFile | Create an empty research file through the document service |
+| research_space_import | request: ImportRequest{group, source (absolute), mode} | ImportOutcome | Explicit copy with recorded origin, or a read-only reference |
+| research_retain | request: RetainRequest{runId, artifactId, state, experiment?} | RetainOutcome | Keep / archive / discard a run's figure, table, or data output |
+| research_result_state | request: SetResultStateRequest{entity, state} | RetainOutcome | Change a retained result's lifecycle (never deletes) |
+| research_experiment_save | input: ExperimentInput{entity?, expectedRevision?, title, objective, procedure?, inputs, outcomes} | ExperimentDetail | Create or update an experiment |
+| research_experiment | entity: EntityId | ExperimentDetail | One experiment with its attempts |
+| research_promotion_prepare | request: PromotionRequest{runId, artifactId, document, baseRevision?, placement, caption?, attachmentKey?} | PromotionPreview | Review step: exact markup, target revision, artifact digest |
+| research_promotion_approve | promotion: String | PromotionOutcome | Apply a reviewed promotion (refused if the document or artifact changed) |
+| research_promotion_cancel | promotion: String | bool | Drop a prepared promotion |
+| research_promotions | — | PromotionsState | Promotions needing reconciliation and attachments research follows |
+| research_promotion_reconcile | operation: OperationId | ReconcileOutcome | Reconcile an interrupted promotion against the actual document (never re-applies the edit) |
 ### Typesetting and exact-page editing (10)
 | Command | Args | Returns | Purpose |
 |---|---|---|---|
@@ -680,18 +857,66 @@ Manifest `src-tauri/build.rs` (`COMMANDS` 90 release, `DEV_COMMANDS` 3 debug-onl
 | page_navigate | build, path, offset, affinity, motion: Motion, goalX: f64? | NavigationResult \| null | Caret motion on the page |
 | page_selection | build: String, path: WorkspacePath, start: u32, end: u32 | SelectionGeometry | Highlight rects and rendered text of a range |
 | page_edit | request: PageEditRequest | PageEditOutcome | Insert, delete back/forward, paragraph break; origin `page` |
-### Dev-only (3; debug builds only, granted by runtime capabilities `dev-execution-probe`, `dev-agents-scripted`)
+### Project graph (18)
+Every change from these commands is validated in Rust and attributed to the user (`Origin::User`, set by the backend, never by the payload). No SQL, no service-owned records (evidence, observed relations), and no execution are reachable. Saved views are presentation only.
+
+| Command | Args | Returns | Purpose |
+|---|---|---|---|
+| graph_status | — | GraphStatus | `state` (`detached` / `attached` / `temporaryReadOnly{reason}` / `unavailable{reason, recovery[]}`), project id, root, schema version, revision, entity/relation counts, freshness, coverage |
+| graph_vocabulary | — | Vocabulary | The closed entity/relation vocabulary with endpoint rules (display only) |
+| graph_snapshot | query: GraphQuery{kinds?, text? (≤200 chars, case-insensitive on label or key), around?, includeInactive, limit? (default 300, ≤2000)} | GraphSnapshot | Bounded slice of the graph (`truncated` when cut) |
+| graph_entity | entity: EntityId | EntityDetail | One entity with its bindings, ≤ 500 related items, ≤ 200 evidence records with freshness |
+| graph_inspect_at_source | request: InspectAtSourceRequest{path, offset? (UTF-16; whole file when absent), revision?} | SourceInspection | Entities bound at a source position; unsaved overlays labelled |
+| graph_impact | request: ImpactRequest{entities, maxDepth? (default 4, ≤8), maxItems? (default 200, ≤1000)} | ImpactReport | What a change to the entities may affect, with the path that explains each item |
+| graph_math_overview | — | MathOverview | Mathematics view: statements, dependencies, proof targets, formal evidence |
+| graph_propose_change | request: ChangeRequest{baseRevision, operations, summary? (≤500)} | ChangeProposal | Validate a typed change as the user; nothing is applied |
+| graph_apply_change | request: ApplyChangeRequest{proposal, expectedRevision} | ApplyOutcome | Apply a stored proposal, re-validated, all or nothing: `applied{revision, rebased, created, delta}` / `conflict{currentRevision, diagnostics}` / `invalid{…}` |
+| graph_views | — | GraphViewSummary[] | Saved views |
+| graph_view_get | view: ViewId | GraphView | One saved view |
+| graph_view_save | view: GraphViewInput{id?, name, scope, nodes, viewport, filters, hidden, collapsed, expectedRevision?} | GraphView | Create, or replace (`expectedRevision` must match); never changes relations |
+| graph_view_delete † | view: ViewId | bool | Delete a saved view |
+| graph_recover | option: RecoveryOption | GraphStatus | Recover an unavailable graph with the user's choice: `restoreBackup{backup, takenAtMs, revision}` / `startNew` / `retry` (never automatic) |
+| graph_operations † | — | OperationRecord[] | Unresolved cross-service operations of the open project (interrupted promotions, project creation) |
+| graph_reconcile † | force: bool? (default true) | ReconcileReport | "Reindex project": rebuild derived projections (resources, extracted declarations, observed links, coverage) from the files; curated records never touched; waits ≤ 5 min, then continues reporting through `graph:event` |
+| graph_backup † | — | BackupInfo | Consistent backup now (`VACUUM INTO`, reason `manual`) |
+| graph_backups † | — | BackupInfo[] | Backups newest first (`name`, `takenAtMs`, `revision`, `reason` `premigration`/`auto`/`manual`, `sizeBytes`) |
+### Project creation (8)
+| Command | Args | Returns | Purpose |
+|---|---|---|---|
+| project_presets | — | PresetCatalog | Built-in presets (answered at once; tool availability separately) |
+| project_capabilities | — | CapabilityReport | What this computer has for the capabilities presets declare (existing toolchain and research-environment discovery; installs nothing, runs no project code; may wait for first-time discovery) |
+| project_preset_blueprint | request: ProjectPresetRequest{preset, title?, format?, runtime?, leanToolchain?, includeWorkflow, purpose?} | ProjectBlueprint | A preset's blueprint with the chosen options (fresh ids each time) |
+| project_blueprint_validate | blueprint: String (JSON) | BlueprintValidation | Strict validation of a blueprint (presets, agent proposals, imports alike) |
+| project_check_destination | destination: String | DestinationCheck | Check a destination without changing anything (`ok`, `message`, `createsFolder`, `trustedVia`) |
+| project_create | request: CreateProjectRequest{destination, blueprint (JSON), acceptTrustedLocation} | ProjectCreated | Create from a blueprint in a new or empty folder, open it, apply its graph content; an interruption leaves a recoverable record |
+| project_creation_status | — | CreationStatus[] | Unfinished creations of the open project (interrupted ones need reconciliation; never re-run) |
+| project_creation_resolve | operation: OperationId, action: `finish` \| `keep` | CreationResolution | Resolve an interrupted creation with the user's explicit choice |
+### Workflow drafts (8)
+Nothing here runs a workflow: every draft is reported as not runnable.
+
+| Command | Args | Returns | Purpose |
+|---|---|---|---|
+| workflow_operations | — | OperationContract[] | The registered operation contracts (the only operations a step can name) |
+| workflow_presets | — | WorkflowPresetInfo[] | Workflow presets |
+| workflow_from_preset | request: WorkflowPresetRequest{preset, script?, data?, manuscript?, leanFile?} | WorkflowDefinition | A new, unsaved draft from a preset |
+| workflow_validate | definition: WorkflowDefinition | WorkflowValidation | Validate against the strict contract (files checked in the open project) |
+| workflow_save | request: SaveWorkflowRequest{id?, expectedRevision?, definition} | SavedWorkflow | Save as a new immutable revision (admitted as a `Workflow` entity, attributed to the user); incomplete drafts saved with their diagnostics |
+| workflow_import | text: String (JSON) | SavedWorkflow | Import a definition as a new draft (strict schema, size limits, fresh id) |
+| workflow_list | — | WorkflowSummary[] | Saved workflow drafts of the open project |
+| workflow_get | id: WorkflowId, revision: u64? | SavedWorkflow | One draft (latest, or the given revision) |
+### Dev-only (4; debug builds only, granted by runtime capabilities `dev-execution-probe`, `dev-agents-scripted`, `dev-research-faults`)
 | Command | Args | Returns | Purpose |
 |---|---|---|---|
 | dev_start_probe_job † (dev) | — | JobId | Fixed Python process tree for cancellation evidence |
 | dev_start_workspace_job † (dev) | root: String, holdSeconds: u32? (≤600) | JobId | Register root; trust-gated job writes `exposition-dev-ran.txt` |
 | agents_dev_load_script † (dev) | script: JSON (≤1 MiB) | () | Queue a script for the scripted provider |
+| research_dev_fail_next_graph_write † (dev) | — | () | Make the next promotion's graph write fail (pending-reconciliation e2e) |
 
-Typesetting rules: in-process targets by extension only (`.typ` Typst, `.md`/`.markdown` Markdown print profile; anything else `typesetting.unsupported`). Builds, pages, maps and exports are served only for the folder open now. Export destination: an absolute `.pdf` path in an existing folder; an existing file there must be a regular file starting `%PDF-`, not a build input, not an open document (`typesetting.export`). Not called by the UI (release): `lean_projects`, `lean_check`, `tex_build`, `tex_status`, `tex_cancel`, `tex_page_image`, `tex_page_map` (7).
+Typesetting rules: in-process targets by extension only (`.typ` Typst, `.md`/`.markdown` Markdown print profile; anything else `typesetting.unsupported`). Builds, pages, maps and exports are served only for the folder open now. Export destination: an absolute `.pdf` path in an existing folder; an existing file there must be a regular file starting `%PDF-`, not a build input, not an open document (`typesetting.export`). Not called by the UI (release): `lean_projects`, `lean_check`, `tex_build`, `tex_status`, `tex_cancel`, `tex_page_image`, `tex_page_map`, `research_space`, `graph_view_delete`, `graph_operations`, `graph_reconcile`, `graph_backup`, `graph_backups` (13).
 
-## 9. Events (core → webview)
+## 10. Events (core → webview)
 
-16 channels; forwarders read broadcast channels and emit `*:resync` on lag (workspace instead re-emits `filesChanged{changes:[], rescan:true}`; trust emits `null`).
+18 channels; forwarders read broadcast channels and emit `*:resync` on lag (workspace instead re-emits `filesChanged{changes:[], rescan:true}`; trust emits `null`).
 
 | Channel | Payload variants | When |
 |---|---|---|
@@ -711,10 +936,12 @@ Typesetting rules: in-process targets by extension only (`.typ` Typst, `.md`/`.m
 | `agents:resync` | `()` | Lag |
 | `research:event` | `ResearchEvent`: `sessionChanged{session}`, `sessionRemoved{sessionId}`, `runQueued{run}`, `runStarted{runId, sessionId, executionCount?}`, `output{runId, entry}`, `runFinished{run}` | Session and run lifecycle, bounded run output |
 | `research:resync` | `()` | Lag; also after workspace `opened`/`closed` |
+| `graph:event` | `GraphEvent`: `status{status: GraphStatus}`, `changed{delta: GraphDelta, origin}`, `reconciled{revision, freshness}` | Graph attached/detached or its sync state changed; every applied change, non-empty service batch, new resource admission, workflow save, and reconciliation pass (origin `extracted{reconcile/1}`); synchronized again; unsaved overlay set or cleared |
+| `graph:resync` | `()` | Lag (broadcast capacity 1024); re-read graph state |
 
-Listeners (`src/lib/ipc.ts` `events`): documents → editor, page, agents; workspace → workspace, editor, agents; jobs → jobs; trust → page, research; lean → lean; typesetting:build → page, typesetting; typesetting:status → typesetting; agents → agents; research → research. The window's close request (Tauri built-in) is handled by the editor's unsaved-changes guard. Backend-internal (no webview event): TeX and typesetting rebuild watched entries on `changed` documents and `filesChanged`; workspace `closed` forgets watched entries (typesetting also drops its retained builds; TeX builds of a closed folder are no longer served).
+Listeners (`src/lib/ipc.ts` `events`; graph channels in `src/lib/graphIpc.ts` `graphEvents`): documents → editor, page, agents; workspace → workspace, editor, agents, research; graph → graph, research; jobs → jobs; trust → page, research; lean → lean; typesetting:build → page, typesetting; typesetting:status → typesetting; agents → agents; research → research. The window's close request (Tauri built-in) is handled by the editor's unsaved-changes guard. Backend-internal (no webview event): TeX and typesetting rebuild watched entries on `changed` documents and `filesChanged`; workspace `closed` forgets watched entries (typesetting also drops its retained builds; TeX builds of a closed folder are no longer served).
 
-## 10. Connections and processes
+## 11. Connections and processes
 
 | Network endpoint (the only one in app code) | Request | Rules |
 |---|---|---|
@@ -748,11 +975,11 @@ Listeners (`src/lib/ipc.ts` `events`): documents → editor, page, agents; works
 | `elan toolchain install <qualified name>` | explicit "Install toolchain" | TrustedNative |
 | approved program + args; container `python -` (code from `/exposition-input/stdin`) | agent `run_command` / `run_python` | TrustedNative after approval or Restricted, 10 min |
 
-Not launched: latexmk, makeindex, kpsewhich, synctex CLI, Typst CLI, any rasterizer (Typst, Markdown and PDF rendering run in-process); `exposition-testproc` is a test fixture.
+Not launched: latexmk, makeindex, kpsewhich, synctex CLI, Typst CLI, any rasterizer (Typst, Markdown and PDF rendering run in-process); `exposition-testproc` is a test fixture. The project graph (reconciliation, extraction, backups), project creation, and workflow drafts start no process and use no network; `project_capabilities` reuses the toolchain and research-environment discovery above and reads elan's toolchains folder.
 
 | IPC channel | Transport and rules |
 |---|---|
-| Webview ↔ core | Tauri IPC (`ipc:` / `http://ipc.localhost`) + events; ACL-gated (§8–9) |
+| Webview ↔ core | Tauri IPC (`ipc:` / `http://ipc.localhost`) + events; ACL-gated (§9–10) |
 | Research supervisor ↔ kernel host | stdio, one JSON object per line; protocol version 1 handshake; protocol stdout reserved by fd dup; malformed lines ignored |
 | Kernel host ↔ Jupyter kernel | ZeroMQ, jupyter_client default (TCP 127.0.0.1), HMAC-signed; CurveZMQ only for Python kernels when pyzmq, jupyter_client and ipykernel support it, else `transportEncryption: "none"` |
 | Lean server; Lean audit | LSP JSON-RPC over stdio, Content-Length framing, header ≤ 8 KiB, body ≤ 64 MiB, no widgets/RPC; audit results read from stdout lines tagged with a per-run secret/nonce |
@@ -764,14 +991,16 @@ Not launched: latexmk, makeindex, kpsewhich, synctex CLI, Typst CLI, any rasteri
 | File watching | `notify` (ReadDirectoryChangesW), recursive on the open root; batch handled 150 ms after its first event; journals throttled to 300 ms |
 | WebView2 / dialog | Tauri defaults, no extra browser args; window `main` 1440×900, min 720×480, drag-drop off; native folder picker via `dialog:allow-open` |
 
-## 11. Data and storage
+## 12. Data and storage
 
 `<data>` = `EXPOSITION_DATA_DIR` if non-empty, else `app_local_data_dir()` (Windows `%LOCALAPPDATA%\org.exposition.desktop`); never a project, never trustable.
 
 ```
 <data>/settings.json            AppSettings; invalid → kept as settings.json.invalid-<ms> (original removed only after a byte-identical copy), defaults + one warning
 <data>/recent-projects.json     {version:1, projects:[{path,name,openedAt}]}, ≤12, newest first (+ .invalid-<ms>)
-<data>/agents.sqlite3 (-wal, -shm)   tables tasks, transcript, tool_calls, checkpoints, task_files, changes, settings
+<data>/agents.sqlite3 (-wal, -shm)   tables tasks, transcript, tool_calls, checkpoints, task_files, changes, settings; v2 task_graph, task_graph_contexts, task_targets, task_proposals
+<data>/graph-operations/<24 hex>/   operation journal per project (SHA-256 of the lowercased root): <op-id>.json (promotion, projectCreation, crossService; ≤200 per project, ≤1 MiB each)
+<data>/project-creations/       <op-id>.json: full blueprint + per-file SHA-256 of a project creation (≤32 MiB), for Finish Setup / Keep as Is
 <data>/recovery/<wskey>/        live-<pkey>.json (dirty buffer), rec-<pkey>-<ms>.json (earlier session), bad-<pkey>-<ms>.json + .reason (quarantined); keys = 16 hex of SHA-256
 <data>/execution/               settings.json (+ .tmp, .invalid-<ms>; bad values reset with warning), trust.json (+ .tmp), probe/, cache/par/ (PAR_GLOBAL_TEMP)
 <data>/execution/jobs/<job>/    tmp/ (removed), out/ (/out, kept if non-empty), container.env (removed), in/ (restricted batch input, removed when the job ends)
@@ -781,9 +1010,9 @@ Not launched: latexmk, makeindex, kpsewhich, synctex CLI, Typst CLI, any rasteri
 %TEMP%\exposition-lean\audit\   runs/<id>/ (removed after each audit), tools-<session>/ (removed when the service drops)
 ```
 
-- **Project-side:** `.exposition/project.json` (+ `.invalid-<ms>`, `ProjectSettingsInvalid` event); `.exposition/runs/<run-id>.json`; `.exposition/artifacts/<run-id>/output-N.{png,jpg,gif,svg,html,csv}` + `transcript.json` (text artifacts redacted).
-- **Project-side, transient or tool-owned:** `.<name>.exposition-save-<hex>.tmp` (atomic save, hidden); exported `<stem>.pdf` via `<stem>.pdf.<pid>.tmp`; `.lake/` (Lake); `exposition-dev-ran.txt` (debug dev job).
-- **Browser storage:** localStorage `exposition.theme`, `exposition.workbench.layout`; sessionStorage `exposition.startupReopenAttempted`; never document content or secrets. Credential: OS store (§10).
+- **Project-side:** `.exposition/project.json` (+ `.invalid-<ms>`, `ProjectSettingsInvalid` event); `.exposition/runs/<run-id>.json`; `.exposition/artifacts/<run-id>/output-N.{png,jpg,gif,svg,html,csv}` + `transcript.json` (text artifacts redacted); `.exposition/graph.sqlite3` (+ `-journal` while writing; project graph schema 2, also holds saved views and workflow drafts, §7.1); `.exposition/graph-backups/graph-<ms>-r<revision>-<reason>.sqlite3` (newest 8); `.exposition/graph.damaged-<ms>.sqlite3` (a damaged graph set aside by recovery, never deleted); `.exposition/research/<rs-id>/{sources,data,notes}/` (research space, §4.1).
+- **Project-side, transient or tool-owned:** `.<name>.exposition-save-<hex>.tmp` (atomic save, hidden); `.exposition/graph-backups/*.partial` and `restore-<ms>.sqlite3` (backup and restore in progress; leftovers older than 1 h removed); exported `<stem>.pdf` via `<stem>.pdf.<pid>.tmp`; `.lake/` (Lake); `exposition-dev-ran.txt` (debug dev job).
+- **Browser storage:** localStorage `exposition.theme`, `exposition.workbench.layout`, `exposition.graph.mode.project` (Graph page Canvas / Table); sessionStorage `exposition.startupReopenAttempted`; never document content or secrets. Credential: OS store (§11).
 
 | Environment variable(s) read | Purpose | Build |
 |---|---|---|
@@ -794,16 +1023,18 @@ Not launched: latexmk, makeindex, kpsewhich, synctex CLI, Typst CLI, any rasteri
 | `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `DOCKER_CERT_PATH`, `DOCKER_TLS_VERIFY` | docker client only | all |
 | all host variables | credential-named values become redaction literals; 28-name base list copied to children (`SystemRoot`, `windir`, `SystemDrive`, `ComSpec`, `PATHEXT`, `OS`, `PROCESSOR_ARCHITECTURE`, `PROCESSOR_IDENTIFIER`, `PROCESSOR_LEVEL`, `PROCESSOR_REVISION`, `NUMBER_OF_PROCESSORS`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `ProgramData`, `ProgramFiles`, `ProgramFiles(x86)`, `ProgramW6432`, `CommonProgramFiles`, `CommonProgramFiles(x86)`, `CommonProgramW6432`, `PUBLIC`, `ALLUSERSPROFILE`, `USERNAME`, `USERDOMAIN`, `COMPUTERNAME`) | all |
 | `HTTP(S)_PROXY`, `ALL_PROXY`, `NO_PROXY` | provider proxy (reqwest, implicit) | all |
+| `EXPOSITION_GRAPH_TRACE` (any value) | print project-graph reconciliation timings to stderr | all |
+| `EXPOSITION_TEST_INTERRUPT_PROJECT_CREATION` (`<n>`) | abort the process after n files of a project creation (recovery e2e) | **debug only** |
 | `PROFILE`; `CARGO_PKG_VERSION` | dev commands in ACL manifest; version string | build time |
 | `EXPOSITION_E2E_EXECUTABLE`, `WEBVIEW2_USER_DATA_FOLDER`, `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, `EXPOSITION_DEV_HOME`, `EXPOSITION_REQUIRE_LEAN`, `ELAN_HOME` (e2e); `EXPOSITION_REQUIRE_TEX`, `EXPOSITION_TEX_BIN`, `EXPOSITION_REQUIRE_RESEARCH_PYTHON`, `EXPOSITION_REQUIRE_RESEARCH_KERNELS`, `EXPOSITION_PROBE_DIR`, `EXPOSITION_TEST_DOCKER_IMAGE`, `EXPOSITION_TEST_DOCKER_PYTHON_IMAGE`, `EXPOSITION_TEST_HOST_ONLY`, `EXPOSITION_LIVE_ANTHROPIC_KEY`, `EXPOSITION_LIVE_MODEL`, `SWEEP_VERBOSE` (cargo tests) | test harnesses | test only |
 
 Set for children: job `TEMP`/`TMP`, constructed `PATH`, `PAR_GLOBAL_TEMP`; research `PYTHONUTF8`, `PYTHONIOENCODING`, `PYTHONUNBUFFERED`, `PYTHONDONTWRITEBYTECODE`, `PYDEVD_DISABLE_FILE_VALIDATION`, `JUPYTER_RUNTIME_DIR`, `R_LIBS_USER`/`JULIA_DEPOT_PATH`; TeX `TEXINPUTS`, `BIBINPUTS`, `BSTINPUTS`, `max_print_line`, `error_line`, `half_error_line`, `openout_any=p`, `openin_any=p`, `shell_escape=f`; Lean audit `LEAN_PATH`; containers `PATH`, `HOME=/tmp`, `TMPDIR=/tmp`, `LANG=C.UTF-8`.
 
-## 12. Security boundaries
+## 13. Security boundaries
 
 - **CSP:** `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'`.
-- **ACL:** one capability `main-window` (window `main`): `core:event:default`, `core:window:allow-set-title`, `core:window:allow-destroy`, `dialog:allow-open` + 90 `allow-<command>`; no `core:default`, no fs/shell/http/opener plugin; debug builds add `dev-execution-probe` and `dev-agents-scripted` at runtime.
-- **Check-permissions gate:** `npm run check` fails when any `src-tauri/permissions/autogenerated/*.toml` matches no `COMMANDS`/`DEV_COMMANDS` entry (now 93 files = 90 + 3); the same pipeline runs the private-path guard and bindings drift check.
+- **ACL:** one capability `main-window` (window `main`): `core:event:default`, `core:window:allow-set-title`, `core:window:allow-destroy`, `dialog:allow-open` + 144 `allow-<command>`; no `core:default`, no fs/shell/http/opener plugin; debug builds add `dev-execution-probe`, `dev-agents-scripted`, and `dev-research-faults` at runtime.
+- **Check-permissions gate:** `npm run check` fails when any `src-tauri/permissions/autogenerated/*.toml` matches no `COMMANDS`/`DEV_COMMANDS` entry (now 148 files = 144 + 4); the same pipeline runs the private-path guard and bindings drift check.
 - **IPC boundary:** no command runs an arbitrary program; ids, sizes, page indexes, coordinates validated; `WorkspacePath` rejects absolute, `..`, reserved names and invalid characters during deserialization.
 - **Trust model:** trust lives in `<data>/execution/trust.json`, never in the project; opening never runs code or grants trust; native jobs (TeX, kernels, Lean, commands) need a trusted folder, re-checked at spawn; revoke cancels the folder's jobs (≤10 s each) and broadcasts `trust:changed` to every view.
 - **Too-broad folders:** drive/share roots, personal folders and their ancestors, system folders and anything inside them cannot be opened or trusted; compared by canonical text and by file identity (volume serial + file index), so `\\localhost\C$\…`, `\\127.0.0.1\C$\…`, `\\?\UNC\localhost\C$\…`, `\\localhost\ADMIN$` aliases are refused.
@@ -811,7 +1042,7 @@ Set for children: job `TEMP`/`TMP`, constructed `PATH`, `PAR_GLOBAL_TEMP`; resea
 - **Tool-location re-check:** a configured tool path inside an open project or the execution data folder (name or identity) is refused when set and at every use (jobs, probes, TeX, Docker, sweep) → `RefusedOverride` / `programRefused`.
 - **Program validation:** absolute path or catalog id; Windows runs `.exe` only (`.bat`, `.cmd`, `cmd.exe` refused); no `..`; argument arrays, no shell; NUL refused.
 - **Environment scrubbing:** child env built from empty (28-name base list, constructed `PATH`, job allowlist); credential-like names or secret-looking values make the job fail (`environmentRefused`), never silently filtered.
-- **Restricted backend:** Docker only; explicit, locally present image checked by one reference grammar in settings and at launch; flags in §10; settings refuse root `uid:gid`, invalid memory/cpus/pids; never a native fallback.
+- **Restricted backend:** Docker only; explicit, locally present image checked by one reference grammar in settings and at launch; flags in §11; settings refuse root `uid:gid`, invalid memory/cpus/pids; never a native fallback.
 - **Container lifetime:** batch jobs hold stdin as a liveness pipe, so the container kills itself when the app exits or crashes; in-container `sleep <limit+5 s> && kill -9`; `--rm`; cancel/timeout `docker rm -f`; leftovers of this data folder swept at startup and before the first restricted job.
 - **Redaction:** job output, events and summaries redact literal values of credential-named host variables (≥8 chars) and token shapes (`sk-ant-`, `sk-`, `gh[pousr]_`, `github_pat_`, `glpat-`, `npm_`, `hf_`, `xox?-`, `AKIA|ASIA`, `AIza`, `bearer`, PEM keys) to `[REDACTED]`; kernel stream/display/error output redacted; text artifacts (HTML, SVG, CSV, JSON) redacted and rewritten before registration; provider errors replace the key with `<redacted>`.
 - **Credentials:** the key lives only in the OS store, kept machine-local on Windows; the webview learns only "configured"; it never enters child envs, the database or logs; validation errors never echo it; debug builds use a `development` entry unless told otherwise; output redaction matches it by its value (registered when read or saved) and by token shape; it is sent only to the fixed endpoint, redirects never followed; code trusted to run as the user can still read it.
@@ -823,8 +1054,11 @@ Set for children: job `TEMP`/`TMP`, constructed `PATH`, `PAR_GLOBAL_TEMP`; resea
 - **Research:** sessions need trust and are bound to one root; only discovered environment ids launch; project venvs probed only when trusted (`-I`); the folder reaches R/Julia as bytes, never spliced into code; webview sessions are owner `User`; interrupt/restart/shutdown/cancel have no owner check (the user may stop agent sessions).
 - **Lean:** server, audit and install run TrustedNative; elan shims never run; no implicit downloads; audit step 2 runs none of the file's code; audit programs SHA-256-pinned and held open deny-write; outputs tagged with per-run secret/nonce; name tripwire against the server's index.
 - **Agents:** one central gate checks each tool call's declared reads/changes/runs against scope, consent, profile, execution mode and budgets before anything happens (§6).
+- **Project graph:** the project's `graph.sqlite3` is untrusted input: opened only if ≤ 1 GiB, a regular file inside a real `.exposition` folder (no links), with SQLite defensive mode and triggers, views, and untrusted schema disabled, exactly the expected schema objects and columns, `quick_check`, foreign keys, and every row decoded and bounded; a refused database is left unchanged and never replaced automatically (§7.1). Statements are parameterized and reads bounded. No SQL, no service-owned records (evidence, observed relations, service batches: `graph.notService`), and no execution are reachable over IPC; the webview's changes are attributed to the user and agents' to their task by the backend, never by the payload; agents' relations stay suggestions; validated proposals can be applied only by the origin that made them. Ids from IPC or the database are validated and never interpreted. The graph's own storage is never an agent file-tool target (`agents.graphStorage`). Saved views are presentation only.
+- **Project creation:** blueprints (presets, agent proposals, imports) are parsed strictly in Rust before anything is written; no trust, run, startup-hook, or grant fields exist; paths are relative and confined, with tool folders, startup-hook files, executable extensions, and `.exposition/` content (except the research space) refused; files are created with create-new semantics (never replaced) in a new or empty folder that the workspace would open; a trusted parent folder needs explicit acknowledgement. Creation grants no trust, runs no code, installs nothing, and sends nothing to a model; only built-in presets assert relations.
+- **Workflow drafts:** imported definitions are untrusted data (strict schema, ≤ 1 MiB, fresh ids); nothing runs a workflow in this version and `runnable` is always false, whatever a stored or imported draft claims.
 
-## 13. Dev/test-only features
+## 14. Dev/test-only features
 
 **Compiled out of release builds** (`cfg(debug_assertions)`; ACL entries only when `PROFILE=debug`)
 
@@ -833,7 +1067,9 @@ Set for children: job `TEMP`/`TMP`, constructed `PATH`, `PAR_GLOBAL_TEMP`; resea
 | `dev_start_probe_job` | `src-tauri/src/execution.rs` | "Dev probe: process tree": `python -E -u -c` spawns a sleeping grandchild, 400 burst lines, ticks every 0.5 s; Application kind, 10 min |
 | `dev_start_workspace_job(root, holdSeconds?)` | same | registers `root` directly, Batch python writes `exposition-dev-ran.txt`; `holdSeconds` ≤600 adds a two-process tree; trust still required |
 | `agents_dev_load_script` (≤1 MiB) | `src-tauri/src/agents.rs` | loads a scripted provider turn queue |
-| Runtime capabilities `dev-execution-probe`, `dev-agents-scripted` | `execution::add_dev_capability`, `agents::add_dev_capability` | added in `setup` |
+| `research_dev_fail_next_graph_write` | `src-tauri/src/research.rs` | makes the next promotion's graph write fail (`graph.injectedFailure`) to exercise pending reconciliation |
+| Runtime capabilities `dev-execution-probe`, `dev-agents-scripted`, `dev-research-faults` | `execution::add_dev_capability`, `agents::add_dev_capability`, `research::add_dev_capability` | added in `setup` |
+| Simulated crash during project creation | `src-tauri/src/projects.rs` (`EXPOSITION_TEST_INTERRUPT_PROJECT_CREATION=<n>`) | aborts the process after n files; release builds ignore the variable |
 | Scripted provider (`provider::scripted`, `allow_scripted`) | `crates/exposition-agents` | release stub → `agents.scriptedUnavailable`; UI shows "Scripted provider — development only" only when `scriptedAvailable` |
 | Credential namespace | `src-tauri/src/state.rs` | debug default entry `org.exposition.desktop.development`; `EXPOSITION_CREDENTIAL_NAMESPACE`; `EXPOSITION_USE_REAL_CREDENTIAL=1`; release always uses the real entry |
 | Console window | `src-tauri/src/main.rs` | release sets `windows_subsystem = "windows"` |
@@ -842,19 +1078,20 @@ Set for children: job `TEMP`/`TMP`, constructed `PATH`, `PAR_GLOBAL_TEMP`; resea
 
 **Present in release although developer-oriented:** `EXPOSITION_DATA_DIR`, `EXPOSITION_TOOL_CACHE_DIR`; palette command "Developer: Show UI Reference" and the activity-bar menu item "UI Reference" (`ui-reference:` component gallery); `data-testid`, `data-offset`, `data-anchor` attributes; test hooks `queueEventForTest`/`flushEvents` (research store), `PageSession.caretPosition()`.
 
-**Test-only code:** `exposition-testproc` binary (never launched by the app); `LocalProcessRunner`, `TexToolchain::discover`, `Fonts::embedded_only`; `crates/exposition-tex/examples/dump_glyphs.rs`; ignored measurements (`typesetting/tests/{dump,latency}.rs`, `tex/tests/latency.rs`, `lean/tests/{lean_audit_probe,review_m4_lean}.rs`); WMI-escape limitation test `execution/tests/review_exec.rs`.
+**Test-only code:** `exposition-testproc` binary (never launched by the app); `LocalProcessRunner`, `TexToolchain::discover`, `Fonts::embedded_only`; `crates/exposition-tex/examples/dump_glyphs.rs`; ignored measurements (`typesetting/tests/{dump,latency}.rs`, `tex/tests/latency.rs`, `graph/tests/perf.rs`, `lean/tests/{lean_audit_probe,review_m4_lean}.rs`); WMI-escape limitation test `execution/tests/review_exec.rs`.
 
 **Checks** (`npm run check`): private paths → permission files → typecheck → vitest → Vite build → rustfmt → clippy `-D warnings` → `cargo test --workspace` → bindings drift (restores the previous bindings if regeneration fails).
 
 **e2e harness** (`npm run e2e [-- <names>]`, `scripts/e2e/run.mjs`): launches `EXPOSITION_E2E_EXECUTABLE` or `target/debug/exposition.exe` with isolated `EXPOSITION_DATA_DIR`, `WEBVIEW2_USER_DATA_FOLDER`, `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<free port>`; connects with Playwright `connectOverCDP`; raw IPC via `window.__TAURI_INTERNALS__.invoke`; strips `EXPOSITION_USE_REAL_CREDENTIAL` except for `live-*`; artifacts and last-state screenshot/console in `test-results/e2e/<name>/`. Helpers: `agent-scope-check.mjs`, `app.mjs`, `app-env.mjs`, `palette.mjs`, `processes.mjs`, `wait.mjs`, `workspace-helpers.mjs`, `repro/page-race-keystrokes.mjs`.
 
-**32 scenarios** (`scripts/e2e/scenarios/*.mjs`): agents-attention, agents-harness, consistency, execution-jobs, lean-check, live-agents, live-restricted, m6-paper-project, page-latex, page-markdown, page-typst, research-attach-build, research-isolation, research-output, research-python, review-m4-lean-ui, review-m5-agents, review-sec-acl, review-sec-exec, review-sec-ipc, review-sec-render, review-sec-secrets, settings, smoke, tex-build, trust-propagation, ui-shell, workspace-external, workspace-files, workspace-recovery, workspace-save-failure, workspace-window-close.
+**40 scenarios** (`scripts/e2e/scenarios/*.mjs`): agents-attention, agents-graph, agents-harness, consistency, execution-jobs, graph-canvas, graph-core, graph-lean-association, lean-check, lean-evidence, live-agents, live-restricted, m6-paper-project, page-latex, page-markdown, pages-review, page-typst, project-create, research-attach-build, research-isolation, research-output, research-python, research-workspace, review-m4-lean-ui, review-m5-agents, review-sec-acl, review-sec-exec, review-sec-ipc, review-sec-render, review-sec-secrets, settings, smoke, tex-build, trust-propagation, ui-shell, workspace-external, workspace-files, workspace-recovery, workspace-save-failure, workspace-window-close.
 - Excluded from the default run: `live-agents` and `live-restricted` (runner skips `live-*`; real key, spends API credit). `live-restricted` uses no development-only command, so it also runs against release/installed builds: an unattended task's `run_python` in the Docker sandbox, then the same request refused with no image configured.
 - Self-skip unless named: `review-m5-agents`, `review-sec-acl`, `review-sec-exec`, `review-sec-ipc`, `review-sec-render`, `review-sec-secrets`.
-- Need a debug build (scripted provider, dev commands or credential namespace): `agents-attention`, `agents-harness`, `execution-jobs`, `review-m5-agents`, `review-sec-exec`, `review-sec-render`, `review-sec-secrets`, `settings`, `trust-propagation`; `m6-paper-project` runs its agent step only in debug builds.
-- Report SKIPPED without Lean `leanprover/lean4:v4.35.0` via elan (fail instead with `EXPOSITION_REQUIRE_LEAN=1`): `lean-check`, `review-m4-lean-ui`, the Lean step of `agents-harness`.
+- Need a debug build (scripted provider, dev commands or credential namespace): `agents-attention`, `agents-harness`, `execution-jobs`, `review-m5-agents`, `review-sec-exec`, `review-sec-render`, `review-sec-secrets`, `settings`, `trust-propagation`, `agents-graph`, `project-create` (also the simulated crash), `research-workspace` (`research_dev_fail_next_graph_write`); `lean-evidence` runs its restricted-mode agent step only in debug builds; `m6-paper-project` runs its agent step only in debug builds.
+- Report SKIPPED without Lean `leanprover/lean4:v4.35.0` via elan (fail instead with `EXPOSITION_REQUIRE_LEAN=1`): `lean-check`, `review-m4-lean-ui`, `lean-evidence`, `graph-lean-association`, the Lean step of `agents-harness`.
+- Project graph coverage: `graph-core` (indexing and exclusions, stable ids across reopen, unsaved overlay from Monaco and the page editor, external rename/move/delete, a branch-switch-like mass change, forced reindex, references vs dependencies, impact, coverage, a hostile database refused and restored from a backup; timings on a generated 3,000-file project, `EXPOSITION_GRAPH_TRACE=1`), `graph-canvas` (Graph page, saved layout across relaunch, relationship authoring, table, Mathematics, Dependencies view), `pages-review` (pages with and without a folder, Mod+2–4, F6, narrow window, both themes), `project-create` (presets, objective, refusals, interrupted creation).
 
-## 14. Known limitations
+## 15. Known limitations
 
 From `docs/capabilities.md` (verified where code allows) plus code findings (marked *code*).
 - Windows 11 x64 is the only verified platform; macOS/Linux build but are unverified (Unix process-group containment unverified).
@@ -890,23 +1127,39 @@ From `docs/capabilities.md` (verified where code allows) plus code findings (mar
 - Files with mixed line endings open read-only until normalized.
 - Binary, legacy-encoded (not UTF-8 / UTF-16 with BOM) and >10 MiB files are not opened as text.
 - Editor links are never opened; they are copied to the clipboard.
+- Project graph extraction never expands macros or evaluates code: LaTeX theorem-like environments count only with standard names or a literal `\newtheorem`/`\declaretheorem` earlier in the same file (not one in another file or a package); Typst recognises the default theorem function names and ctheorems (`thmbox`/`thmplain`/`thmproof`) definitions in the same file only, and links no proofs; Markdown only Pandoc fenced divs with the default class names; remarks and examples are not entities. What is not interpreted is reported as partial coverage.
+- Lean declarations generated by macros, elaborators, or notation are not recognised, and Lean use-site references are not extracted. The Lean audit reports no declaration dependencies, so formal dependency edges are unavailable and formal evidence is never current against imported modules (freshness unknown, then stale after the file changes).
+- Scripts contribute only literal imports of project files; data files a script reads at run time are not recorded (research pins them only when declared as experiment inputs). Notebooks (`.ipynb`), datasets, assets, and configuration files are known only as resources (coverage unsupported).
+- *code*: `.ltx` files are not indexed (the LaTeX extractor accepts them, the admission policy does not).
+- A reconciliation scan covers at most 32 folder levels, 200,000 folder entries, and 20,000 files; files beyond a bound stay as they were (unknown, not removed). *code*: the bound reached is reported in `graph_reconcile`'s result only, not in the UI.
+- A rename or move keeps its identity only when the old and new paths are seen in the same reconciliation pass and match uniquely; otherwise the new path gets a new identity and the old one is tombstoned. *code*: tombstones are never purged.
+- Evidence freshness is computed against the last reconciled content of each file; while files are pending, the Graph page says answers may not include the latest edits.
+- A folder that cannot hold `.exposition/graph.sqlite3` (read-only) gets a temporary in-memory graph: nothing curated persists, and the Graph page offers no changes or saved layouts.
+- Graph canvas: edges are straight lines (parallel ones bowed) and can pass behind other nodes; there is no edge routing; no context menu; one saved layout per section, with no UI to create, rename, or delete views.
+- *code*: "Reindex project" (`graph_reconcile`), manual backups and the backup list (`graph_backup`, `graph_backups`), and the operation list (`graph_operations`) have no UI; backups are restored from the unavailable-graph recovery choices.
+- Workflow drafts are never runnable: workflow execution arrives in a later version. Workflow presets exist for Python and Lean only (an R or Julia computational study gets no draft).
+- Research sessions run trusted native; a restricted research execution mode is not available.
+- Project creation declares required tools but never installs them; a project is created only in a new or empty folder.
 
 ## Verification
 
-All counts were read from `c4669a5` (working tree clean); the two later merges (Lean audit hardening, final agents fixes) add no IPC commands, events, palette commands, tools or settings keys.
+All counts were read at `b2bef49` (`m7/integration`) by reading the sources; nothing was built or run for this inventory. The acceptance run below is the M6 run at `c8fdca6` and predates M7.
 
 | Count | Value | How obtained |
 |---|---|---|
-| Release IPC commands | 90 | `sed -n '/^const COMMANDS/,/^];/p' src-tauri/build.rs \| grep -c '^    "'`; equals the 90 `allow-*` grants in `src-tauri/capabilities/default.json` |
-| Dev-only IPC commands | 3 | `DEV_COMMANDS` in `build.rs`; `generate_handler!` in `src-tauri/src/lib.rs` lists 93 (3 under `#[cfg(debug_assertions)]`); `permissions/autogenerated/` holds 93 files |
-| §8 rows | 93 | Row names sorted and diffed against `COMMANDS` + `DEV_COMMANDS`: identical |
-| Event channels | 16 | `pub const …: &str = "<x>:<y>"` in `src-tauri/src/*.rs` (16) = `listen(` calls in `src/lib/ipc.ts` (16) |
-| Event variants | 42 | Distinct `kind` tags in `src/bindings/{Document,Workspace,Job,Lean,Tex,Agent,Research}Event.ts`: 4+9+5+2+3+13+6 |
-| Palette commands | 48 | 17 `id:` entries in `builtinCommands` (`src/app/shell/builtins.tsx`) + 31 `registry.registerCommand(` in `src/features/*/register.ts(x)` (agents 4, editor 2, jobs 4, lean 6, research 7, settings 6, workspace 2); 14 `keybinding:` on commands |
-| Views / editors / status items | 7 / 7 / 6 | `registry.registerView` / `registerEditor` / `registerStatusItem` calls (non-test sources) |
-| Agent tools | 9 | `grep -c 'ToolDefinition {' crates/exposition-agents/src/tools/mod.rs` = 9 tool-name constants |
-| Gate refusal codes / agent error codes | 13 / 22 | `pub const` in `pub mod codes` (`tools/exec.rs`); unique `"agents.*"` strings in `service.rs` + `src-tauri/src/agents.rs` |
-| Settings keys | 27 | Fields of `AppSettings`/`FilesSettings`/`EditorSettings`, `ProjectSettings`, `ExecutionSettings`/`DockerSettings`, `ProviderSettings`, trust file; frontend keys from `readStored`/`writeStored`/`sessionStorage` callers |
-| e2e scenarios | 32 | `ls scripts/e2e/scenarios/*.mjs`; `run.mjs` loads all and skips `live-*` unless named |
+| Release IPC commands | 144 | `sed -n '/^const COMMANDS/,/^];/p' src-tauri/build.rs \| grep -c '^    "'`; equals the 144 `allow-*` grants in `src-tauri/capabilities/default.json` |
+| Dev-only IPC commands | 4 | `DEV_COMMANDS` in `build.rs`; `generate_handler!` in `src-tauri/src/lib.rs` lists 148 (4 under `#[cfg(debug_assertions)]`); `permissions/autogenerated/` holds 148 files |
+| §9 rows | 148 | Row names sorted and diffed against `COMMANDS` + `DEV_COMMANDS`: identical |
+| Event channels | 18 | `pub const …: &str = "<x>:<y>"` in `src-tauri/src/*.rs` (18) = `listen(` calls in `src/lib/ipc.ts` (16) + `src/lib/graphIpc.ts` (2) |
+| Event variants | 45 | Distinct `kind` tags in `src/bindings/{Document,Workspace,Job,Lean,Tex,Agent,Research,Graph}Event.ts`: 4+9+5+2+3+13+6+3 |
+| Palette commands | 63 | 17 `id:` entries in `builtinCommands` (`src/app/shell/builtins.tsx`) + 4 page commands (`registerPageCommands`, `src/app/pages.ts`, one per page) + 42 `registry.registerCommand(` in `src/features/*/register.ts(x)` (agents 5, editor 2, graph 3, jobs 4, lean 6, projects 2, research 8, settings 6, workflows 4, workspace 2); 18 keybindings (10 built-in, 4 pages, 4 feature) |
+| Pages / views / editors / status items | 4 / 8 / 11 / 6 | Editor page + `registry.registerPage` (3); `registry.registerView` / `registerEditor` / `registerStatusItem` calls (non-test sources) |
+| Dialogs | 22 | §1 table: the 12 earlier dialogs + 10 `Dialog`/`confirm` titles added in M7 (graph, Lean infoview, Research page) |
+| Agent tools | 11 | `grep -c 'ToolDefinition {' crates/exposition-agents/src/tools/mod.rs` |
+| Gate refusal codes / `agents.` codes | 21 / 44 | `pub const` in `pub mod codes` (`tools/exec.rs`); unique `"agents.*"` strings in `crates/exposition-agents/src` + `src-tauri/src/agents.rs` |
+| `lean.` error codes | 23 | unique `"lean.*"` strings in `crates/exposition-lean/src` + `src-tauri/src/lean.rs`, less the syntax/attribute names `lean.declaration`, `lean.kind` |
+| Settings keys | 27 + 4 | Fields of `AppSettings`/`FilesSettings`/`EditorSettings`, `ProjectSettings`, `ExecutionSettings`/`DockerSettings`, `ProviderSettings`, trust file; frontend keys from `readStored`/`writeStored`/`sessionStorage` callers |
+| Graph vocabulary | 23 / 12 | `EntityKind` / `RelationKind` variants in `crates/exposition-graph/src/vocabulary.rs` (`RelationKind::ALL`) |
+| e2e scenarios | 40 | `ls scripts/e2e/scenarios/*.mjs`; `run.mjs` loads all and skips `live-*` unless named |
 
 **Final acceptance run (main `c8fdca6`, 2026-11-12, Windows 11 x64).** `npm run check` 9/9 (1033 Rust tests, 9 ignored; 231 frontend tests). Debug app: default e2e 24/24 including `m6-paper-project` 16/16; reviewer scenarios by name all pass with no defect (`review-m5-agents`, `review-sec-*`, the M2/M3 reviewer's seven scenarios at `f6404c2`). Release: NSIS installer 26.63 MiB; silent per-user install (`/S /D=…`) in 3.2 s without elevation. Against the installed app: 23 of 26 scenarios pass; the 3 that fail need development-only commands or the scripted provider, which the release refuses by design (`execution-jobs`, `settings`, `review-sec-render`). Scenarios that save or remove a key are never run against a release build (it always uses the real credential entry). Installed `m6-paper-project`: every step passes except the two that need an agent (draft; unattended Docker run), which the live scenarios cover against the installed app with the real provider: `live-restricted` 19/19 (at `c8fdca6`) and `live-agents` 20/20 (at `f6404c2`). Silent uninstall removes the program folder, the uninstall entry and the Start Menu shortcut; Tauri's uninstaller keeps `HKCU\Software\exposition\Exposition` (the install path) and the app data unless its "delete app data" option is chosen.

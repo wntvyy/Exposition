@@ -5,8 +5,9 @@
 // That starts an ordinary agent task in the new project: whole-project scope,
 // process execution disabled unless the user chose otherwise, the user's
 // permission and consent choices. The task receives the (near-empty) graph
-// context like every task and builds files, research structure
-// (`.exposition/research/main/…`), and graph associations only through the
+// context like every task (including the research space the empty project
+// gets, with its folder) and builds files, research structure, and graph
+// associations only through the
 // validated agent tools; it has no access outside the project folder and
 // grants no trust. The task appears in the Agent view and on the Agents page.
 import type { Budgets } from "../../bindings/Budgets";

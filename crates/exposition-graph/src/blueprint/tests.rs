@@ -484,16 +484,19 @@ fn agent_proposed_blueprints_create_suggestions() {
     assert!(detail.entity.lifecycle == Lifecycle::Active);
 }
 
+/// Research space ids follow the research service's convention (`rs-` and
+/// lowercase hex), so "Enable Research" adopts a preset's space.
 #[test]
-fn research_space_ids_follow_the_preset_or_agent_convention() {
+fn research_space_ids_follow_the_research_service_convention() {
     let original = blueprint(&request(RESEARCH)).unwrap();
     let old_id = original.research.as_ref().unwrap().id.clone();
-    let text = serde_json::to_string(&original).unwrap().replace(&old_id, "main");
+    assert!(old_id.starts_with("rs-"), "{old_id}");
+    let text = serde_json::to_string(&original).unwrap().replace(&old_id, "rs-0123abcd");
     let bp: ProjectBlueprint = serde_json::from_str(&text).unwrap();
-    assert_eq!(bp.research.as_ref().unwrap().id, "main");
+    assert_eq!(bp.research.as_ref().unwrap().id, "rs-0123abcd");
     let v = validate_blueprint(&bp);
     assert!(v.valid, "{:?}", errors(&v));
-    for bad in ["Main", "rs-", "rs-AB12", "../x", "research"] {
+    for bad in ["main", "Main", "rs-", "rs-AB12", "rs-xyz1", "../x", "research"] {
         let mut b = bp.clone();
         b.research.as_mut().unwrap().id = bad.into();
         assert!(!validate_blueprint(&b).valid, "{bad}");
