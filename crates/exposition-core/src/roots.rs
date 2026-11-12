@@ -141,6 +141,9 @@ pub fn too_broad_reason_in(path: &Path, dirs: &BroadDirs) -> Option<String> {
         return Some(format!("{shown} is a drive or filesystem root"));
     }
     for loc in &dirs.system {
+        if same(path, &loc.path) {
+            return Some(format!("{shown} is {}; system folders cannot be a workspace", loc.description));
+        }
         if within(path, &loc.path) {
             return Some(format!(
                 "{shown} is inside {} ({}); system folders cannot be a workspace",
