@@ -7,7 +7,11 @@ import { finishedRevision, statusSentence, statusView } from "./status";
 describe("Lean status vocabulary", () => {
   const toolchain = "leanprover/lean4:v4.35.0";
   const cases: [LeanStatus, string, string][] = [
-    [{ kind: "checked", revision: 3, toolchain, warnings: 0, axioms: ["propext"] }, "succeeded", "Checked"],
+    [
+      { kind: "checked", revision: 3, toolchain, warnings: 0, axioms: ["propext"], declarations: [], declarationCount: 0 },
+      "succeeded",
+      "Checked",
+    ],
     [{ kind: "checkedWithSorry", revision: 2, toolchain, count: 1, locations: [], warnings: 0 }, "warning", "Incomplete (sorry)"],
     [{ kind: "errors", revision: 1, toolchain, count: 2, sorryCount: 1 }, "failed", "2 errors"],
     [{ kind: "checking", revision: 4, toolchain, starting: false, auditing: false, processing: [] }, "running", "Checking"],

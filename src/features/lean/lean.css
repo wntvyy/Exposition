@@ -166,6 +166,36 @@
   font-size: var(--font-size-sm);
 }
 
+.exp-lean__checked {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.exp-lean__note {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  user-select: text;
+}
+
+.exp-lean__decl {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+}
+
+.exp-lean__kind {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.exp-lean__decl-axioms {
+  margin: 0;
+  padding-left: var(--space-2);
+  font-size: var(--font-size-sm);
+  user-select: text;
+}
+
 .exp-lean__message {
   margin: 0;
   padding-left: var(--space-2);

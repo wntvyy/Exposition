@@ -73,7 +73,6 @@ const USES_AUDIT_AWARE: &str = "import LeanBasic.SecAuditAware\n\ntheorem again 
 /// whose `one_eq_two : 1 = 2` rests on `axiom cheat : False` in the language
 /// server's and Lake's environment is never `Checked`. Observed: `Checked`.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "R-sec2 F1: a file that detects the audit's compile step elaborates without its axiom there; 1 = 2 reported Checked"]
 async fn review_sec2_f1_file_that_detects_the_audit_is_checked() {
     if !lean_available() {
         return;
@@ -149,7 +148,6 @@ theorem main : False := boom
 /// defines a kernel-accelerated constant, or uses `prelude`). Observed:
 /// `Checked`, no axioms, for `theorem main : False`.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "R-sec2 F2: a prelude file redefining Nat.add (kernel GMP trusts the name) proves False; reported Checked"]
 async fn review_sec2_f2_prelude_redefining_kernel_accelerated_nat_add_is_checked() {
     if !lean_available() {
         return;
@@ -250,7 +248,6 @@ run_cmd do
 /// delays give `Unverified` "programs were modified", later ones the genuine
 /// verdict).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "R-sec2 F3: the language server's worker swaps the pinned check stub between verification and use; 1 = 2 reported Checked"]
 async fn review_sec2_f3_worker_swaps_the_check_program_after_verification() {
     if !lean_available() {
         return;

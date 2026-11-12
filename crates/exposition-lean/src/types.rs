@@ -72,6 +72,30 @@ pub struct AxiomUse {
     pub axioms: Vec<String>,
 }
 
+/// A declaration of a checked file as the audit verified it: re-checked by
+/// Lean's kernel in the audit's own elaboration of the text, its type printed
+/// by a process that runs none of the file's code (the toolchain's notation,
+/// none of the project's).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckedDeclaration {
+    pub name: String,
+    /// `theorem`, `def`, `axiom`, `opaque`, `inductive`, `constructor`, `recursor`.
+    pub kind: String,
+    /// The declaration's type (its statement, for a theorem).
+    pub statement: String,
+    /// Range of the declaration name in the checked text; `None` for
+    /// declarations Lean generated (equation lemmas, recursors, ...).
+    pub range: Option<TextRange>,
+    pub line: Option<u32>,
+    /// The (standard) axioms it depends on.
+    pub axioms: Vec<String>,
+}
+
+/// At most this many declarations are listed in [`LeanStatus::Checked`].
+pub const CHECKED_DECLARATIONS_SHOWN: usize = 300;
+
 /// Checking status of one Lean document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -93,7 +117,16 @@ pub enum LeanStatus {
     /// A checked proof: Lean elaborated all of `revision` with no errors, no
     /// `sorry` (also not through imports or suppressed warnings), the kernel
     /// checked it, and its declarations use only the standard axioms listed.
-    Checked { revision: u64, toolchain: String, warnings: u32, axioms: Vec<String> },
+    /// `declarations` is what was verified (those written in the text first;
+    /// at most [`CHECKED_DECLARATIONS_SHOWN`]), out of `declaration_count`.
+    Checked {
+        revision: u64,
+        toolchain: String,
+        warnings: u32,
+        axioms: Vec<String>,
+        declarations: Vec<CheckedDeclaration>,
+        declaration_count: u32,
+    },
     /// Incomplete: no errors, but `count` declarations depend on `sorry`
     /// (directly, through an import, or with the warning suppressed).
     CheckedWithSorry { revision: u64, toolchain: String, count: u32, locations: Vec<SorryLocation>, warnings: u32 },

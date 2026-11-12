@@ -25,6 +25,7 @@ Output: lines `<tag> <json>` on stdout; the last one is `{"end":true}`.
 import Lean.Replay
 import Lean.Util.CollectAxioms
 import Lean.Util.Path
+import Lean.PrettyPrinter
 
 open Lean
 
@@ -52,6 +53,38 @@ instance : MonadEnv (StateM Environment) where
 
 def axiomsOf (env : Environment) (n : Name) : Array Name :=
   (collectAxioms n : StateM Environment (Array Name)).run' env
+
+/-- Constants Lean's kernel treats specially by name: `Nat` literals and their
+built-in (GMP) arithmetic and comparisons, the `Bool` results of those
+comparisons, `String`/`Char` literals, quotients, and native reduction. A
+declaration outside the toolchain with one of these names would inherit that
+trust whatever its definition says. -/
+def kernelSpecial : NameSet := NameSet.ofList [
+  `Nat, `Nat.zero, `Nat.succ, `Nat.add, `Nat.sub, `Nat.mul, `Nat.div, `Nat.mod, `Nat.pow, `Nat.gcd,
+  `Nat.beq, `Nat.ble, `Nat.blt, `Nat.land, `Nat.lor, `Nat.xor, `Nat.shiftLeft, `Nat.shiftRight, `Nat.log2,
+  `Bool, `Bool.true, `Bool.false, `String, `String.ofList, `String.mk, `String.ofByteArray, `Char,
+  `Char.ofNat, `List, `List.nil, `List.cons, `Eq, `Eq.refl, `Quot, `Quot.mk, `Quot.lift, `Quot.ind,
+  `Lean.reduceBool, `Lean.reduceNat, `Lean.ofReduceBool, `Lean.ofReduceNat]
+
+/-- The declaration's type as Lean prints it here: the toolchain's notation,
+none of the project's (its extensions are never loaded). -/
+def ppType (env : Environment) (type : Expr) : IO String := do
+  let x : CoreM String := do
+    let f ← (PrettyPrinter.ppExpr type).run' {} {}
+    return f.pretty 100
+  match ← (x.toIO { fileName := "<audit>", fileMap := default, maxHeartbeats := 0 } { env }).toBaseIO with
+  | .ok (s, _) => return if s.length > 2000 then (s.take 2000).copy ++ " …" else s
+  | .error _ => return "(the type could not be printed)"
+
+def kindOf : ConstantInfo → String
+  | .axiomInfo _ => "axiom"
+  | .defnInfo _ => "def"
+  | .thmInfo _ => "theorem"
+  | .opaqueInfo _ => "opaque"
+  | .quotInfo _ => "quot"
+  | .inductInfo _ => "inductive"
+  | .ctorInfo _ => "constructor"
+  | .recInfo _ => "recursor"
 
 /-- `[tag, toolchain-lib, module]`. -/
 def run (args : List String) : IO UInt32 := do
@@ -84,9 +117,20 @@ def run (args : List String) : IO UInt32 := do
       queue := queue.push i.module
   let some (_, checked) := projectModules.find? (·.1 == module)
     | return ← fail "the checked module was not found"
+  let refuse (message : String) : IO UInt32 := do
+    emit tag (Json.mkObj [("refused", toJson message)])
+    emit tag (Json.mkObj [("end", true)])
+    return 0
+  -- A module outside the toolchain that does not import `Init` (`prelude`) can
+  -- declare the constants the kernel computes with by name.
+  for (m, data) in projectModules do
+    unless data.imports.any (·.module == `Init) do
+      return ← refuse s!"`{m}` does not import Lean's `Init` (it is a `prelude` module), so it can define the constants Lean's kernel evaluates with built-in arithmetic"
   let mut project : Std.HashMap Name ConstantInfo := {}
-  for (_, data) in projectModules do
+  for (m, data) in projectModules do
     for c in data.constants do
+      if kernelSpecial.contains c.name then
+        return ← refuse s!"`{m}` declares `{c.name}`, a constant Lean's kernel evaluates by name"
       project := project.insert c.name c
   -- Non-toolchain declarations reachable from the checked module's declarations.
   let mut todo : Array Name := checked.constants.map (·.name)
@@ -105,8 +149,11 @@ def run (args : List String) : IO UInt32 := do
     | .ctorInfo v => todo := todo.push v.induct
     | .recInfo v => todo := todo ++ v.all.toArray
     | _ => pure ()
-  -- The toolchain alone, as data.
-  let base ← importModules toolchainImports {} (loadExts := false)
+  -- The toolchain alone. Its own environment extensions are loaded (they are
+  -- the toolchain's code, needed to print types with the toolchain's notation);
+  -- no module outside the toolchain is part of this import.
+  unsafe enableInitializersExecution
+  let base ← importModules toolchainImports {} (loadExts := true)
   -- Kernel replay of the closure on top of the toolchain.
   let kernel ← try
       pure (Except.ok (← base.toKernelEnv.replay closure))
@@ -126,7 +173,10 @@ def run (args : List String) : IO UInt32 := do
       let replayed := !ci.isUnsafe && !ci.isPartial
       let axs := if replayed then axiomsOf env n else #[]
       let ax := axs.map fun a => Json.mkObj [("n", toJson a.toString), ("t", toJson (base.find? a).isSome)]
-      emit tag (Json.mkObj [("n", toJson n.toString), ("i", toJson n.isInternal), ("k", toJson replayed), ("ax", Json.arr ax)])
+      let mut fields := [("n", toJson n.toString), ("i", toJson n.isInternal), ("k", toJson replayed), ("ax", Json.arr ax)]
+      if replayed && !n.isInternal then
+        fields := fields ++ [("kd", toJson (kindOf ci)), ("ty", toJson (← ppType env ci.type))]
+      emit tag (Json.mkObj fields)
     emit tag (Json.mkObj [("end", true)])
     return 0
 
