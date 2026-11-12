@@ -17,6 +17,7 @@
 //! - [`journal`]: app-owned journal of cross-service operations.
 
 pub mod admission;
+pub mod blueprint;
 pub mod ids;
 pub mod journal;
 pub mod model;
@@ -26,6 +27,7 @@ pub mod service;
 pub mod store;
 pub mod validate;
 pub mod vocabulary;
+pub mod workflow;
 
 pub use admission::{Admission, classify};
 pub use ids::{EntityId, EvidenceId, OperationId, ProjectId, ProposalId, RelationId, ViewId, WorkflowId};
@@ -37,4 +39,8 @@ pub use service::{GraphConfig, GraphError, GraphResult, GraphService, is_graph_s
 pub use validate::{BatchOutcome, BatchRef, EntityUpsert, RelationUpsert, ServiceBatch};
 pub use vocabulary::{
     EntityFamily, EntityKind, EvidenceKind, RelationFamily, RelationKind, ResourceRole, Vocabulary, vocabulary,
+};
+pub use workflow::{
+    DraftState, SaveWorkflowRequest, SavedWorkflow, ValidationContext, WorkflowDefinition, WorkflowSummary,
+    WorkflowValidation, validate_workflow,
 };

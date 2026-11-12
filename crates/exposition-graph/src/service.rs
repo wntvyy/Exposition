@@ -904,6 +904,18 @@ impl GraphService {
     }
 }
 
+// ----- lane E hooks (blueprint/workflow modules; additive) -----
+
+impl GraphService {
+    /// Announce a change applied outside `apply_change`/`apply_service_batch`
+    /// (saving a workflow revision admits/updates its entity).
+    pub(crate) fn emit_changed(&self, delta: crate::model::GraphDelta, origin: Origin) {
+        if !delta.is_empty() {
+            self.emit(GraphEvent::Changed { delta, origin });
+        }
+    }
+}
+
 fn store_revision_in(w: &Writer<'_>) -> GraphResult<u64> {
     Ok(w.revision()?)
 }
