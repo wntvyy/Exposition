@@ -264,6 +264,47 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     await secondary.waitFor({ state: "detached" });
     assert.equal(await page.locator('[data-group="primary"] .wb-editor-group__header [role="tab"]').count(), 1, "closing in one group keeps the other");
 
+    // However the right group closes (its last tab above, the palette command,
+    // its close button), the left group becomes active and takes keyboard
+    // focus: "Split Editor Right" works again at once, with no click.
+    const leftGroupTakesOver = async (how) => {
+      await page
+        .waitForFunction(
+          () => {
+            const left = document.querySelector('[data-group="primary"]');
+            return left?.hasAttribute("data-group-active") && left.contains(document.activeElement);
+          },
+          null,
+          { timeout: 5000 },
+        )
+        .catch(() => {});
+      const state = await page.evaluate(() => {
+        const left = document.querySelector('[data-group="primary"]');
+        return {
+          active: left?.hasAttribute("data-group-active") ?? false,
+          focused: left?.contains(document.activeElement) ?? false,
+          focus: document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.nodeName,
+        };
+      });
+      assert.ok(state.active, `after ${how}, the left group is active`);
+      assert.ok(state.focused, `after ${how}, focus is in the left group (focus: ${state.focus})`);
+    };
+    await leftGroupTakesOver("closing the right group's last tab");
+    await runCommand(page, "Split Editor Right", /Split Editor Right/);
+    await secondary.getByTestId("ui-reference").waitFor({ timeout: 10000 });
+    await runCommand(page, "Close Right Editor Group", /Close Right Editor Group/);
+    await secondary.waitFor({ state: "detached" });
+    await leftGroupTakesOver('"Close Right Editor Group"');
+    await runCommand(page, "Split Editor Right", /Split Editor Right/);
+    await secondary.getByTestId("ui-reference").waitFor({ timeout: 10000 });
+    await secondary.getByRole("button", { name: "Close editor group" }).click();
+    await secondary.waitFor({ state: "detached" });
+    await leftGroupTakesOver("the group's close button");
+    await page.keyboard.press("Control+Backslash");
+    await secondary.getByTestId("ui-reference").waitFor({ timeout: 10000 });
+    await secondary.getByRole("button", { name: "Close editor group" }).click();
+    await secondary.waitFor({ state: "detached" });
+
     // Dark theme.
     await runCommand(page, "color theme dark", /Color Theme: Dark/);
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), "dark");

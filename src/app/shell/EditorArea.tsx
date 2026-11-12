@@ -1,4 +1,5 @@
 import { Columns2, Command as CommandIcon, FileQuestion, Files, PanelRightClose } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { Group, Panel as ResizablePanel } from "react-resizable-panels";
 
 import { Button, IconButton, SegmentedControl } from "../../ui/components/Button";
@@ -37,11 +38,42 @@ function EditorHost({ editor, groupActive }: { editor: OpenEditor; groupActive: 
   );
 }
 
-/** Close every editor in a group (each honoring its close guard). */
-export async function closeGroup(id: EditorGroupId): Promise<void> {
-  for (const editor of [...useEditors.getState().groups[id].editors]) {
-    if (!(await editors.closeInGroup(editor.resource.key, id))) return;
-  }
+const EDITING_SURFACE = 'textarea:not([disabled]), input:not([disabled]), [contenteditable="true"]';
+const FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+const usable = (element: Element | null | undefined): element is HTMLElement =>
+  element instanceof HTMLElement && element.isConnected && !element.closest("[inert], [hidden]");
+
+/**
+ * Move keyboard focus into a group that became active because another group
+ * closed: the element last focused in it, else the active editor's editing
+ * surface, else its first focusable element, else the group itself. While a
+ * dialog holds focus or makes the workbench inert (e.g. the command palette
+ * that ran the close, still animating out), it waits for the dialog to go.
+ */
+function focusSurvivingGroup(section: HTMLElement, remembered: HTMLElement | null) {
+  const deadline = performance.now() + 2000;
+  const attempt = () => {
+    if (!section.isConnected || performance.now() > deadline) return;
+    const current = document.activeElement;
+    if (section.contains(current)) return;
+    if (section.closest("[inert]") || current?.closest('[role="dialog"], [role="alertdialog"]')) {
+      requestAnimationFrame(attempt);
+      return;
+    }
+    const panel = [...section.querySelectorAll('[role="tabpanel"]')].find(usable);
+    const target =
+      (usable(remembered) && section.contains(remembered) ? remembered : undefined) ??
+      [...(panel?.querySelectorAll(EDITING_SURFACE) ?? [])].find(usable) ??
+      [...(panel?.querySelectorAll(FOCUSABLE) ?? [])].find(usable);
+    if (target) target.focus({ preventScroll: true });
+    if (!section.contains(document.activeElement)) {
+      if (!section.hasAttribute("tabindex")) section.tabIndex = -1;
+      section.focus({ preventScroll: true });
+    }
+  };
+  attempt();
 }
 
 function EmptyGroup({ id }: { id: EditorGroupId }) {
@@ -72,6 +104,15 @@ function EditorGroupView({ id }: { id: EditorGroupId }) {
   useRegistryVersion();
   const group = useEditors((s) => s.groups[id]);
   const isActive = useEditors((s) => s.activeGroup === id);
+  const focusRequest = useEditors((s) => s.focusRequest);
+  const section = useRef<HTMLElement>(null);
+  const lastFocused = useRef<HTMLElement | null>(null);
+  const handledFocusRequest = useRef(focusRequest);
+  useEffect(() => {
+    if (focusRequest === handledFocusRequest.current) return;
+    handledFocusRequest.current = focusRequest;
+    if (isActive && section.current) focusSurvivingGroup(section.current, lastFocused.current);
+  }, [focusRequest, isActive]);
   if (group.editors.length === 0) return <EmptyGroup id={id} />;
 
   const active = group.editors.find((e) => e.resource.key === group.activeKey) ?? group.editors[0]!;
@@ -81,11 +122,15 @@ function EditorGroupView({ id }: { id: EditorGroupId }) {
 
   return (
     <section
+      ref={section}
       className="wb-editor-group"
       data-group={id}
       data-group-active={isActive || undefined}
       aria-label={groupNames[id]}
-      onFocusCapture={() => editors.focusGroup(id)}
+      onFocusCapture={(event) => {
+        if (event.target instanceof HTMLElement) lastFocused.current = event.target;
+        editors.focusGroup(id);
+      }}
       onPointerDownCapture={() => editors.focusGroup(id)}
     >
       <Tabs
@@ -131,7 +176,7 @@ function EditorGroupView({ id }: { id: EditorGroupId }) {
                 icon={PanelRightClose}
                 size="sm"
                 aria-label="Close editor group"
-                onPress={() => void closeGroup("secondary")}
+                onPress={() => void editors.closeGroup("secondary")}
               />
             )}
           </div>

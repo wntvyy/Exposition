@@ -10,7 +10,6 @@ import { editors, useEditors, type EditorGroupId } from "../editors";
 import { defaultLayout, layout, useLayout } from "../layout";
 import { registry, type CommandContribution, type EditorResource } from "../registry";
 import { commandPalette, SHOW_COMMANDS_ID } from "./CommandPalette";
-import { closeGroup } from "./EditorArea";
 import { focusNextRegion } from "./regions";
 
 export const UI_REFERENCE: EditorResource = { key: "ui-reference:", title: "UI Reference" };
@@ -128,7 +127,9 @@ const builtinCommands: CommandContribution[] = [
     title: "Close Right Editor Group",
     category: "View",
     enabled: () => useEditors.getState().groups.secondary.editors.length > 0,
-    run: () => closeGroup("secondary" satisfies EditorGroupId),
+    run: async () => {
+      await editors.closeGroup("secondary" satisfies EditorGroupId);
+    },
   },
   {
     id: "workbench.action.nextEditor",
