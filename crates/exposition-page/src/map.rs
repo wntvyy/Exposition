@@ -488,7 +488,11 @@ fn finish_line(clusters: Vec<Cluster>, baseline: f64) -> Line {
             continue;
         }
         let last = cluster.stops.len() - 1;
-        for (si, stop) in cluster.stops.iter().enumerate() {
+        // Navigation is visual (left to right); a right-to-left cluster has
+        // its stops in logical order with decreasing x.
+        let mut visual: Vec<(usize, &Stop)> = cluster.stops.iter().enumerate().collect();
+        visual.sort_by(|a, b| a.1.x.total_cmp(&b.1.x));
+        for (si, stop) in visual {
             let edge = if si == 0 {
                 Edge::Start
             } else if si == last {

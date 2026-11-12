@@ -197,7 +197,7 @@ impl PageMap {
             affinity: affinity_of(stop),
             exact,
             equation: stop.equation.map(|e| self.equation_outline(e)).unwrap_or_default(),
-            line_text: line.clusters.iter().map(|c| c.text.as_str()).collect(),
+            line_text: logical_text(line),
         })
     }
 
@@ -482,9 +482,9 @@ impl PageMap {
             let Some(line) = self.line(p, l) else { continue };
             let mut x0 = f64::INFINITY;
             let mut x1 = f64::NEG_INFINITY;
-            let mut line_text = String::new();
-            let mut first_start: Option<u32> = None;
-            let mut line_end: Option<u32> = None;
+            // Selected pieces as (source start, source end, text); joined in
+            // logical (source) order so right-to-left runs read correctly.
+            let mut pieces: Vec<(u32, u32, &str)> = Vec::new();
             for cluster in &line.clusters {
                 let Some(source) = cluster.source.filter(|s| s.file == file) else { continue };
                 let range = source.range;
@@ -500,17 +500,17 @@ impl PageMap {
                     }
                     x0 = x0.min(a.x.min(b.x));
                     x1 = x1.max(a.x.max(b.x));
-                    line_text.push_str(&cluster.text[a.text_byte as usize..b.text_byte as usize]);
-                    first_start.get_or_insert(a.offset);
-                    line_end = Some(b.offset);
+                    pieces.push((a.offset, b.offset, &cluster.text[a.text_byte as usize..b.text_byte as usize]));
                 } else if range.start >= start && range.end <= end && !range.is_empty() {
                     x0 = x0.min(cluster.x0);
                     x1 = x1.max(cluster.x1);
-                    line_text.push_str(&cluster.text);
-                    first_start.get_or_insert(range.start);
-                    line_end = Some(range.end);
+                    pieces.push((range.start, range.end, &cluster.text));
                 }
             }
+            pieces.sort_by_key(|(start, ..)| *start);
+            let line_text: String = pieces.iter().map(|(.., t)| *t).collect();
+            let first_start = pieces.first().map(|(start, ..)| *start);
+            let line_end = pieces.iter().map(|(_, end, _)| *end).max();
             if x0.is_finite() {
                 rects.push(PageRect {
                     page: p,
@@ -530,6 +530,25 @@ impl PageMap {
         }
         SelectionGeometry { rects, text }
     }
+}
+
+/// Rendered text of a line in logical (source) order: clusters with a source
+/// sort by their start; others keep their place after the preceding cluster.
+fn logical_text(line: &crate::map::Line) -> String {
+    let mut key = 0u32;
+    let mut keyed: Vec<(u32, usize, &str)> = line
+        .clusters
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if let Some(source) = c.source {
+                key = source.range.start;
+            }
+            (key, i, c.text.as_str())
+        })
+        .collect();
+    keyed.sort_by_key(|(key, i, _)| (*key, *i));
+    keyed.into_iter().map(|(.., t)| t).collect()
 }
 
 fn nearest_stop_in_line(line: &crate::map::Line, x: f64) -> Option<u32> {

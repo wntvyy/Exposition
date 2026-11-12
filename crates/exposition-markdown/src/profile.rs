@@ -159,8 +159,7 @@ const TEMPLATE: &str = r##"#set par(justify: true)
 }
 #let exmd-quote(body) = block(inset: (left: 10pt, y: 3pt), stroke: (left: 2pt + luma(170)), body)
 #let exmd-rule() = align(center, line(length: 100%, stroke: 0.5pt + luma(140)))
-#let exmd-task(done) = box(width: 0.72em, height: 0.72em, stroke: 0.6pt, inset: 0.14em, baseline: 0.06em,
-  if done { box(width: 100%, height: 100%, fill: black) })
+#let exmd-task(box-glyph) = box(text(font: "DejaVu Sans Mono", size: 1.1em, box-glyph))
 #let exmd-alert-fill = rgb("#fbe9e7")
 #let exmd-alert-ink = rgb("#b3261e")
 #let exmd-unsupported(body) = box(fill: exmd-alert-fill, stroke: 0.5pt + exmd-alert-ink, inset: (x: 2pt),

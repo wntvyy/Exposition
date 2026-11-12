@@ -91,14 +91,16 @@ as a warning. It is never dropped. Examples are unknown commands, `\color`,
 
 | Context | Behaviour |
 |---|---|
-| Prose | Typed text is escaped only where it would change meaning. `\`, `` ` `` and `$` are always escaped. `#`, `>`, `-`, `+`, `*`, `=` and `1.` are escaped at the start of a line, `\|` in table cells, and `<` and `&` before tag or entity text. Emphasis characters are escaped when they would pair up. |
+| Prose | Typed text is escaped only where it would change meaning. `\`, `` ` `` and `$` are always escaped. `#`, `>`, `-`, `+`, `*`, `=`, `1.` and `1)` are escaped at the start of a line (also when the marker was typed first and the following space would make it a list), `\|` in table cells, and `<` and `&` before tag or entity text. Emphasis characters are escaped when they would pair up. |
 | Backspace and Delete | Removes one rendered character, together with its escape or entity. At the start of a paragraph it joins the paragraph to the one before. A hard line break becomes a soft one. |
 | Enter | Splits a paragraph. In a quote it keeps the `>` prefix. In a list item it starts a new item, numbered next for ordered lists and unchecked for task lists. In a heading it moves the rest into a new paragraph. |
 | Mathematics | Typing inserts LaTeX: `{ } $ # % &` are escaped, `\` becomes `\backslash`, and `^` or `_` opens `^{}` with the caret inside. A space is added after a control word when needed. Backspace removes a whole command, or a one-token script together with its `^` or `_`. Deleting the last token removes the equation. Structural commands such as `\frac` and `\left` are edited in source. |
 | Front matter | Values are edited as YAML. A plain value that would need quoting is quoted. |
 
-Code, raw HTML, generated text (list markers, footnote numbers, page numbers)
-and marker text cannot be edited on the page. Every edit is checked by
+Code, raw HTML, generated text (list markers, task boxes, footnote numbers,
+page numbers, equation structure such as radicals) and marker text cannot be
+edited on the page; clicking them says why (verbatim or generated content) and
+points to the source. Every edit is checked by
 re-parsing: the rendered result must equal the intended change, and
 mathematics must not gain errors. Otherwise the edit is refused and the source
 is left unchanged.
