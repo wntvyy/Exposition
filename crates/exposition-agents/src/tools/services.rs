@@ -13,7 +13,8 @@ use async_trait::async_trait;
 use exposition_core::artifact::ArtifactRecord;
 use exposition_core::job::ExecutionPolicy;
 use exposition_core::path::WorkspacePath;
-use serde_json::Value;
+use exposition_research::project::types::{AttachmentNotice, AttachmentRecorded};
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::model::TaskScope;
@@ -136,9 +137,24 @@ pub trait ToolServices: Send + Sync {
         Err(ServiceError::NotAvailable(ServiceKind::Research))
     }
 
+    /// Record an attachment the agent inserted with the format-owned
+    /// transform, as a reviewed promotion records its own: the research
+    /// project retains the artifact (one resource identity, computational
+    /// evidence, provenance), records `manuscript usesAsset artifact`,
+    /// journals the operation, and follows it through undo/redo. A failed
+    /// graph write is reported as `PendingReconciliation`, never as recorded.
+    fn record_attachment(&self, _notice: &AttachmentNotice) -> Result<AttachmentRecorded, ServiceError> {
+        Err(ServiceError::NotAvailable(ServiceKind::Research))
+    }
+
     /// A task run ended: release what the services hold for it (e.g. the
     /// agent's research sessions).
     async fn task_finished(&self, _task_id: &str) {}
+}
+
+/// A research-side refusal (with its stable code) as a service outcome.
+pub fn research_outcome(code: &str, message: impl Into<String>) -> ServiceError {
+    ServiceError::Outcome(json!({"code": code, "error": message.into()}))
 }
 
 /// No process services: every call fails with `NotAvailable`.
