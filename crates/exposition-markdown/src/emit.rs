@@ -263,6 +263,26 @@ impl<'s> Emitter<'s> {
     }
 }
 
+/// The call of the unsupported-content marker for `source`. The source text
+/// is passed as markup (every punctuation character escaped) so the marker's
+/// glyphs carry spans of this call and navigate to the unsupported construct.
+pub(crate) fn unsupported_marker(source: &str) -> String {
+    let mut s = String::with_capacity(source.len() * 2 + 24);
+    s.push_str("#exmd-unsupported[");
+    for c in source.chars() {
+        if c.is_whitespace() {
+            s.push(' ');
+        } else {
+            if c.is_ascii_punctuation() {
+                s.push('\\');
+            }
+            s.push(c);
+        }
+    }
+    s.push(']');
+    s
+}
+
 /// A Typst string literal for generated (unmapped) text.
 pub(crate) fn typst_string(text: &str) -> String {
     let mut s = String::with_capacity(text.len() + 2);

@@ -1,0 +1,331 @@
+// Exact-page editing of a Markdown document (print profile
+// exposition-markdown-print/1) in the real app: click in a paragraph and type
+// characters that need Markdown escapes (exact Markdown patch, page shows the
+// text), a line-start escape, change an exponent inside inline math, reflow
+// from a large insertion, select and delete, undo, an unsupported-math marker
+// visible on the page and listed in Problems, Split mode where Ctrl+Z in
+// Monaco reverts a page edit, PDF export matching the pages, in-app latency.
+// Opens a temporary copy of tests/fixtures/markdown-basic through the real
+// workspace flow. Screenshots go to test-results/e2e/page-markdown (and
+// reference shots to $EXPOSITION_DEV_HOME/ui-reference).
+import { copyFile, cp, mkdir, mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
+
+import { openFromTree, openWorkspace } from "../workspace-helpers.mjs";
+
+const PATH = "main.md";
+
+export default async function pageMarkdown({ launchApp, artifactsDir, assert, fixture }) {
+  const workspace = join(await mkdtemp(join(tmpdir(), "exposition-markdown-")), "project");
+  await cp(fixture("markdown-basic"), workspace, { recursive: true });
+  const app = await launchApp();
+  const { page } = app;
+  const shot = (name) => page.screenshot({ path: join(artifactsDir, `${name}.png`) });
+  const references = [];
+  /** Reference screenshot in both themes (UI_STANDARD), returning to light. */
+  const referenceShots = async (name) => {
+    for (const theme of ["dark", "light"]) {
+      await page.keyboard.press("Control+Shift+P");
+      const palette = page.getByRole("textbox", { name: "Command" });
+      await palette.waitFor({ state: "visible", timeout: 5000 });
+      await palette.fill(`color theme ${theme}`);
+      await page.locator(".wb-palette__item").first().waitFor();
+      await page.keyboard.press("Enter");
+      await palette.waitFor({ state: "detached", timeout: 5000 });
+      await page.waitForFunction((t) => document.documentElement.dataset.theme === t, theme);
+      await page.waitForTimeout(150);
+      const file = join(artifactsDir, `${name}-${theme}.png`);
+      await page.screenshot({ path: file });
+      references.push(file);
+    }
+    await page.locator('[data-testid="page-input"]').focus();
+  };
+  const invoke = (cmd, args = {}) => page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args]);
+  const timings = [];
+
+  try {
+    await openWorkspace(page, workspace);
+    await openFromTree(page, PATH);
+    const modeButton = (label) => page.locator(".ui-segmented__item", { hasText: label }).first();
+    await modeButton("Page").waitFor({ timeout: 10000 });
+    await modeButton("Page").click();
+    await page.locator('[data-testid="page-editor"]').waitFor({ timeout: 10000 });
+    const doc = (await invoke("document_list")).find((d) => d.path === PATH).id;
+    const state = () => invoke("document_state", { document: doc });
+    const text = async () => (await state()).text;
+    const textIs = (expected) =>
+      page.waitForFunction(
+        async ([d, t]) => (await window.__TAURI_INTERNALS__.invoke("document_state", { document: d })).text === t,
+        [doc, expected],
+        { timeout: 10000 },
+      );
+
+    const editor = page.locator('[data-testid="page-editor"]');
+    /** Wait until the shown build covers the current revision (not stale). */
+    const settled = async (label) => {
+      const started = Date.now();
+      await page.waitForFunction(
+        () => {
+          const el = document.querySelector('[data-testid="page-editor"]');
+          const img = document.querySelector('[data-testid="page"] img');
+          return el?.dataset.stale === "false" && el.dataset.build && img?.complete;
+        },
+        null,
+        { timeout: 15000 },
+      );
+      timings.push({ label, ms: Date.now() - started });
+      return editor.getAttribute("data-build");
+    };
+    const build = () => editor.getAttribute("data-build");
+    const selection = async (start, end) => (await invoke("page_selection", { build: await build(), path: PATH, start, end })).text;
+
+    /** Screen point of a source offset (center of the caret line), via the page map. */
+    const point = async (offset, affinity = "downstream", dx = 0) => {
+      const g = await invoke("page_caret", { build: await build(), path: PATH, offset, affinity });
+      assert.ok(g, `no geometry for offset ${offset}`);
+      const el = page.locator(`[data-testid="page"][data-page="${g.page}"]`);
+      await el.evaluate((pageEl, top) => {
+        const scroller = pageEl.closest('[data-testid="page-scroller"]');
+        const scale = pageEl.getBoundingClientRect().width / Number(pageEl.dataset.widthPt);
+        const y = pageEl.getBoundingClientRect().top + top * scale;
+        const view = scroller.getBoundingClientRect();
+        scroller.scrollTop += y - (view.top + view.height / 2);
+      }, g.top);
+      const box = await el.boundingBox();
+      const scale = box.width / Number(await el.getAttribute("data-width-pt"));
+      return { x: box.x + (g.x + dx) * scale, y: box.y + ((g.top + g.bottom) / 2) * scale, g, scale };
+    };
+    const caret = async () => {
+      const c = page.locator('[data-testid="page-caret"]');
+      await c.waitFor();
+      return { offset: Number(await c.getAttribute("data-offset")), box: await c.boundingBox() };
+    };
+    const waitCaretOffset = async (offset) => {
+      try {
+        await page.waitForFunction(
+          (o) => document.querySelector('[data-testid="page-caret"]')?.getAttribute("data-offset") === String(o),
+          offset,
+          { timeout: 10000 },
+        );
+      } catch (error) {
+        const actual = await page.locator('[data-testid="page-caret"]').getAttribute("data-offset").catch(() => null);
+        throw new Error(`caret offset ${actual}, expected ${offset}`, { cause: error });
+      }
+    };
+    const clickAt = async (offset, affinity = "downstream", dx = 0.3) => {
+      const p = await point(offset, affinity, dx);
+      await page.mouse.click(p.x, p.y);
+      await waitCaretOffset(offset);
+    };
+    /** Type one character at a time; returns the caret after it. */
+    const typeChars = async (chars) => {
+      for (const ch of chars) await page.keyboard.type(ch);
+    };
+
+    await settled("initial build");
+    await shot("01-opened");
+    const original = await text();
+
+    // 1. Click inside "second" and type text that needs Markdown escapes:
+    //    `$` and backticks are escaped, the rest is typed as is.
+    const at = original.indexOf("second paragraph") + 3;
+    await clickAt(at);
+    assert.equal(await page.locator('[data-testid="page-mode"]').textContent(), "Text");
+    const typed = "a $5 `x` & #1 ";
+    await typeChars(typed);
+    const escaped = "a \\$5 \\`x\\` & #1 ";
+    await waitCaretOffset(at + escaped.length);
+    const afterTyping = await text();
+    assert.equal(afterTyping, original.slice(0, at) + escaped + original.slice(at), "exact Markdown patch at the click");
+    await settled("rebuild after typing");
+    assert.equal(await selection(at, at + escaped.length), typed, "the page renders the typed text where it was typed");
+    await shot("02-typed-escapes");
+
+    // 2. A line-start marker typed at the start of a paragraph is escaped.
+    let source = await text();
+    const final = source.indexOf("Final paragraph");
+    await clickAt(final);
+    await typeChars("# ");
+    await waitCaretOffset(final + 3);
+    source = await text();
+    assert.equal(source.slice(final, final + 18), "\\# Final paragraph", "line-start `#` escaped");
+    await settled("rebuild after line-start escape");
+    assert.equal(await selection(final, final + 8), "# Final", "rendered as text, not a heading");
+
+    // 3. Change an exponent inside inline math: select the `2` of `\alpha^2`
+    //    (click before it, Shift+Right) and type 3.
+    source = await text();
+    const two = source.indexOf("\\alpha^2") + 7;
+    await clickAt(two, "downstream", 0.2);
+    assert.equal(await page.locator('[data-testid="page-mode"]').textContent(), "Math");
+    await page.keyboard.press("Shift+ArrowRight");
+    await waitCaretOffset(two + 1);
+    await page.keyboard.type("3");
+    await waitCaretOffset(two + 1);
+    source = await text();
+    assert.ok(source.includes("$\\alpha^3 + \\beta_1 \\le \\sqrt{x}$"), "the exponent changed in the Markdown");
+    await settled("rebuild after math edit");
+    assert.equal(await selection(two, two + 1), "3", "the page shows the new exponent");
+    await shot("03-exponent");
+    await referenceShots("markdown-page-editing");
+
+    // 4. Select "snake_case, " with click + shift-click and delete; undo.
+    source = await text();
+    const snake = source.indexOf("snake_case, ");
+    await clickAt(snake, "downstream", 0.2);
+    const s2 = await point(snake + 12, "downstream", 0.2);
+    await page.keyboard.down("Shift");
+    await page.mouse.click(s2.x, s2.y);
+    await page.keyboard.up("Shift");
+    await waitCaretOffset(snake + 12);
+    await page.waitForSelector(".page-editor__selection", { timeout: 5000 });
+    await shot("04-selection");
+    const beforeDelete = await text();
+    await page.keyboard.press("Backspace");
+    await textIs(beforeDelete.slice(0, snake) + beforeDelete.slice(snake + 12));
+    await settled("rebuild after delete");
+    await shot("05-deleted");
+    await page.keyboard.press("Control+z");
+    await textIs(beforeDelete);
+    await settled("rebuild after undo");
+
+    // 5. Reflow: a large insertion in the first paragraph moves later
+    //    content (the table, the figure caption) down or onto a new page.
+    source = await text();
+    const geometry = async (needle) => {
+      const s = await text();
+      const o = s.indexOf(needle);
+      const r = await invoke("page_selection", { build: await build(), path: PATH, start: o, end: o + needle.length });
+      return r.rects[0];
+    };
+    const tableBefore = await geometry("circle constant");
+    const captionBefore = await geometry("A small test figure");
+    const insertAt = source.indexOf("Characters such as");
+    await clickAt(insertAt, "downstream", 0.2);
+    const long = "This inserted passage is long enough to push the following material further down the page. ".repeat(8);
+    await page.keyboard.insertText(long);
+    await page.waitForFunction(
+      async ([d]) => (await window.__TAURI_INTERNALS__.invoke("document_state", { document: d })).text.includes("push the following"),
+      [doc],
+      { timeout: 10000 },
+    );
+    await settled("rebuild after large insertion");
+    const tableAfter = await geometry("circle constant");
+    const captionAfter = await geometry("A small test figure");
+    assert.ok(tableAfter.page > tableBefore.page || tableAfter.y > tableBefore.y + 20, `table moved: ${JSON.stringify([tableBefore, tableAfter])}`);
+    assert.ok(
+      captionAfter.page > captionBefore.page || captionAfter.y > captionBefore.y + 20,
+      `figure moved: ${JSON.stringify([captionBefore, captionAfter])}`,
+    );
+    await shot("06-reflowed");
+
+    // 6. Unsupported mathematics: a visible marker on the page, listed in Problems.
+    source = await text();
+    const unsupportedAt = source.indexOf("Final paragraph") - 3;
+    const construct = "\\color{red}{x}";
+    await invoke("document_apply", {
+      request: {
+        id: "e2e-unsupported",
+        origin: { kind: "source" },
+        edits: [
+          {
+            document: doc,
+            baseRevision: (await state()).info.revision,
+            patches: [{ range: { start: unsupportedAt, end: unsupportedAt }, text: `Bad $${construct} + y$ math. ` }],
+          },
+        ],
+        undo: { kind: "newGroup" },
+        conflict: "reject",
+        label: null,
+        selection: null,
+      },
+    });
+    await settled("rebuild with unsupported math");
+    source = await text();
+    const markerAt = source.indexOf(construct);
+    assert.equal(await selection(markerAt, markerAt + construct.length), construct, "marker text on the page");
+    await page.getByRole("tab", { name: "Problems" }).click();
+    await page.waitForSelector('[data-testid="problem"]');
+    const problems = await page.locator('[data-testid="problem"]').allTextContents();
+    assert.ok(problems.some((p) => p.includes("\\color")), `problem listed: ${problems.join(" | ")}`);
+    await shot("07-unsupported-marker");
+    await referenceShots("markdown-unsupported-math");
+
+    // 7. Split mode: the page and Monaco share one document; Ctrl+Z in Monaco
+    //    reverts a page edit.
+    await modeButton("Split").click();
+    await page.locator('[data-testid="typst-split"] [data-testid="source-editor"] .monaco-editor').waitFor({ timeout: 10000 });
+    await page.locator('[data-testid="typst-split"] [data-testid="page-editor"]').waitFor();
+    await settled("split view shown");
+    source = await text();
+    const splitAt = source.indexOf("Nested ordered item");
+    await clickAt(splitAt, "downstream", 0.2);
+    await page.keyboard.type("Busy ");
+    await waitCaretOffset(splitAt + 5);
+    const sawInMonaco = await page
+      .waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="typst-split"] .monaco-editor .view-lines')?.textContent ?? "")
+            .replace(/ /g, " ")
+            .includes("Busy Nested"),
+        null,
+        { timeout: 10000 },
+      )
+      .then(() => true, () => false);
+    assert.ok(sawInMonaco, "page edit visible in Monaco");
+    await settled("rebuild after split typing");
+    await shot("08-split");
+    await referenceShots("markdown-page-split");
+    await page.locator('[data-testid="typst-split"] .monaco-editor .view-lines').click();
+    await page.keyboard.press("Control+z");
+    await page.waitForFunction(
+      async ([d]) => !(await window.__TAURI_INTERNALS__.invoke("document_state", { document: d })).text.includes("Busy Nested"),
+      [doc],
+      { timeout: 10000 },
+    );
+    await settled("rebuild after Monaco undo");
+    assert.equal(await selection(splitAt, splitAt + 6), "Nested", "the page shows the source-side undo");
+    await modeButton("Page").click();
+    await page.locator('[data-testid="page-editor"]').waitFor();
+    await settled("page view after split");
+
+    // 8. Export PDF from the shown build: same page count and sizes.
+    const pages = await page.locator('[data-testid="page"]').count();
+    const exported = await invoke("typesetting_export_pdf", { build: await build(), destination: null });
+    assert.ok(exported.path.endsWith("main.pdf"), exported.path);
+    const pdf = (await readFile(exported.path)).toString("latin1");
+    const pdfPages = [...pdf.matchAll(/\/Type\/Page(?!s)/g)].length;
+    assert.equal(pdfPages, pages, "PDF page count equals rendered pages");
+    const boxes = [...pdf.matchAll(/\/MediaBox\[([^\]]+)\]/g)].map((m) => m[1].trim().split(/\s+/).map(Number));
+    const shown = await page.$$eval('[data-testid="page"]', (els) => els.map((e) => Number(e.dataset.widthPt)));
+    assert.equal(boxes.length, pages, "one media box per page");
+    for (const [i, b] of boxes.entries()) assert.ok(Math.abs(b[2] - b[0] - shown[i]) < 0.01, "PDF page width matches");
+
+    // 9. In-app build latency (warm): build timings reported by the service.
+    const warm = [];
+    for (let i = 0; i < 5; i++) warm.push((await invoke("typesetting_build", { entry: PATH })).timings);
+    const median = (xs) => xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+    const pill = await page.locator('[data-testid="page-build-status"]').textContent();
+    await shot("09-final");
+
+    console.log(`      pages ${pages}; export ${exported.path}`);
+    console.log(
+      `      warm build (service): total ${median(warm.map((t) => t.totalMs)).toFixed(1)} ms ` +
+        `(translate+compile ${median(warm.map((t) => t.compileMs)).toFixed(1)} ms, map ${median(warm.map((t) => t.mapMs)).toFixed(1)} ms); status pill: ${pill}`,
+    );
+    for (const t of timings) console.log(`      ${t.label}: ${t.ms} ms`);
+    if (process.env.EXPOSITION_DEV_HOME) {
+      const dir = join(process.env.EXPOSITION_DEV_HOME, "ui-reference");
+      await mkdir(dir, { recursive: true });
+      for (const file of references) await copyFile(file, join(dir, basename(file)));
+    }
+    const errors = app.consoleMessages.filter((m) => m.startsWith("error") || m.startsWith("pageerror"));
+    assert.deepEqual(errors, [], "no console errors");
+  } catch (error) {
+    await shot("failure").catch(() => {});
+    throw error;
+  } finally {
+    await app.close();
+  }
+}

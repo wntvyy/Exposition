@@ -15,7 +15,9 @@ use exposition_core::document::{
 };
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::{TextRange, utf16_len, utf16_range_to_bytes};
-use exposition_markdown::{EditMode, MarkdownInput, PageEditOp, SegmentKind, TranslateOptions, Translation, translate};
+use exposition_markdown::{
+    EditMode, MarkdownInput, PageEditOp, PageInputRules, SegmentKind, TranslateOptions, Translation, translate,
+};
 use exposition_workspace::{DocumentService, OpenDocument};
 
 const FIXTURE: &str = "markdown-basic";
@@ -425,6 +427,7 @@ fn unsupported_math_is_reported_and_visibly_marked() {
     // Marker glyphs are not editable and navigate to the unsupported source.
     let unsupported: Vec<_> = tr.map.segments().iter().filter(|s| s.kind == SegmentKind::Unsupported).collect();
     assert_eq!(unsupported.len(), 4);
+    assert!(cov.markers > 30, "marker glyphs carry spans of their construct: {cov:?}");
     for s in unsupported {
         let m = tr.map.generated_to_markdown(s.generated.start + 1).unwrap();
         assert_eq!((m.mode, m.markdown), (None, s.markdown.start));
@@ -543,6 +546,8 @@ fn escaping_corpus_compiles_and_maps() {
         "Footnotes[^a] twice[^a] and nested[^b].\n\n[^a]: First *note*.\n\n[^b]: Second with $y$.\n\n    Indented paragraph.",
         "1) first\n2) second\n\n3. third\n\n- [ ] open\n- [x] done\n\n> quote\n>\n> > nested\n\n***",
         "```\nplain \"code\" \\ with `ticks` and $\n```\n\n    indented code\n\n<div>\nhtml block\n</div>",
+        // Research attachment markers are HTML comments: never printed.
+        "See below.\n<!-- exposition:begin fig-1 -->\n![Squares](figure.png)\n<!-- exposition:end fig-1 -->\n\nInline <!-- note --> comment.",
     ];
     for (i, md) in corpus.iter().enumerate() {
         let tr = translate(md, &options());
@@ -565,6 +570,11 @@ fn escaping_corpus_compiles_and_maps() {
             2 => assert!(text.contains("3-5, -2, a-?b, x–y, x—y, … and …."), "{text}"),
             3 => assert!(text.contains("& <tag> © # A"), "{text}"),
             4 => assert!(text.contains("数学") && text.contains("it’s"), "{text}"),
+            12 => {
+                assert!(!text.contains("exposition") && !text.contains("note"), "comments are not printed: {text}");
+                assert!(text.contains("See below.") && text.contains("Squares") && text.contains("Inline"), "{text}");
+                assert!(tr.diagnostics.is_empty(), "{:?}", tr.diagnostics);
+            }
             _ => {}
         }
     }

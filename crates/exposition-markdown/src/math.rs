@@ -9,7 +9,7 @@
 
 use std::ops::Range;
 
-use crate::emit::{Emitter, typst_string};
+use crate::emit::{Emitter, typst_string, unsupported_marker};
 use crate::map::SegmentKind;
 
 /// A problem found while translating mathematics.
@@ -1727,7 +1727,7 @@ impl MathEmitter<'_, '_> {
                 } else {
                     source.to_owned()
                 };
-                let text = format!("#exmd-unsupported({})", typst_string(&label));
+                let text = unsupported_marker(&label);
                 self.e.unsupported(&text, range);
                 self.need_space = true;
             }

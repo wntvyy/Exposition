@@ -1,9 +1,8 @@
 //! Page input rules for Markdown: typing, deletion and paragraph breaks at a
 //! caret or selection in the Markdown source become minimal Markdown patches.
 //!
-//! The interface mirrors the page editor's `PageInputRules` (`plan` and
-//! `mode_at` with the same signatures and semantics as the Typst rules), so
-//! the shared page editor can call either.
+//! [`MarkdownInput`] implements the page editor's [`PageInputRules`], so the
+//! shared page editor treats Markdown like any other format.
 //!
 //! Typed prose is escaped only where a character would otherwise change
 //! meaning (`\`, `` ` ``, `$` always; `#`, `>`, `-`, `+`, `*`, `1.` at a
@@ -20,55 +19,19 @@ use exposition_core::text::{TextRange, byte_to_utf16, utf16_range_to_bytes};
 use pulldown_cmark::{Event, Parser, Tag};
 use unicode_segmentation::UnicodeSegmentation;
 
+pub use exposition_page::{EditMode, EditPlan, EditRefusal, PageEditOp, PageInputRules};
+
 use crate::front_matter::{self, FrontMatter, Scalar, ScalarStyle};
-pub use crate::map::EditMode;
 use crate::math::{self, UnitKind};
 use crate::translate::{escaped_at, parser_options};
-
-/// What the user did at the caret or selection (mirrors the page editor's
-/// `PageEditOp`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PageEditOp {
-    /// Typed or pasted plain text (newlines become paragraph breaks in prose).
-    Insert {
-        text: String,
-    },
-    DeleteBackward,
-    DeleteForward,
-    ParagraphBreak,
-}
-
-/// Why an edit was not applied (mirrors the page editor's `EditRefusal`).
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum EditRefusal {
-    #[error("not editable on the page ({reason})")]
-    NotEditable { reason: String },
-    #[error("the edit would change document structure; edit in source")]
-    WouldChangeStructure,
-    #[error("invalid position")]
-    InvalidPosition,
-    #[error("nothing to change")]
-    NoChange,
-}
-
-/// Planned source change for one page edit (mirrors the page editor's
-/// `EditPlan`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EditPlan {
-    /// Sorted, non-overlapping patches relative to the planned text.
-    pub patches: Vec<TextPatch>,
-    /// Caret after the edit, as a UTF-16 offset in the new text.
-    pub caret: u32,
-    pub mode: EditMode,
-}
 
 /// Markdown input rules of the print profile.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MarkdownInput;
 
-impl MarkdownInput {
+impl PageInputRules for MarkdownInput {
     /// Plan `op` at `selection` (UTF-16, either order) over `text`.
-    pub fn plan(
+    fn plan(
         &self,
         text: &str,
         selection: TextRange,
@@ -89,7 +52,7 @@ impl MarkdownInput {
     }
 
     /// The input mode at an offset, or `None` where page input is not accepted.
-    pub fn mode_at(&self, text: &str, offset: u32) -> Option<EditMode> {
+    fn mode_at(&self, text: &str, offset: u32) -> Option<EditMode> {
         let byte = utf16_range_to_bytes(text, TextRange::empty(offset)).ok()?.start;
         match Doc::new(text).context(byte) {
             Ok(Context::Markup) | Ok(Context::FrontMatter(_)) => Some(EditMode::Markup),
@@ -347,15 +310,16 @@ fn collapse_math(tok: &Tok) -> Tok {
 const LEVEL1: &[char] = &['*', '_', '~', '[', ']', '<', '>'];
 
 /// Escape `typed` (no newlines) for insertion into Markdown prose.
-fn escape_markdown(
-    typed: &str,
-    prev: Option<char>,
-    next: Option<char>,
-    line_start: bool,
-    table: bool,
-    level: u8,
-) -> String {
+fn escape_markdown(typed: &str, prev: Option<char>, rest: &str, line_start: bool, table: bool, level: u8) -> String {
+    let next = rest.chars().next();
     let chars: Vec<char> = typed.chars().collect();
+    // `&` only changes meaning when it completes an entity (`&name;`, `&#35;`).
+    let entity_after = |i: usize| {
+        let ahead: String = chars[i + 1..].iter().copied().chain(rest.chars()).take(40).collect();
+        let body = ahead.strip_prefix('#').unwrap_or(&ahead);
+        let name = body.chars().take_while(char::is_ascii_alphanumeric).count();
+        name > 0 && body[name..].starts_with(';')
+    };
     let mut out = String::with_capacity(typed.len() + 4);
     let mut at_start = line_start;
     let mut digits_only = line_start;
@@ -368,7 +332,7 @@ fn escape_markdown(
                 '\\' | '`' | '$' => true,
                 '|' => table,
                 '<' => following.is_some_and(|f| f.is_ascii_alphabetic() || matches!(f, '/' | '!' | '?')),
-                '&' => following.is_some_and(|f| f.is_ascii_alphanumeric() || f == '#'),
+                '&' => entity_after(i),
                 '#' | '>' => at_start,
                 '-' | '+' | '*' => at_start && space_after,
                 '=' => at_start,
@@ -381,7 +345,7 @@ fn escape_markdown(
                 LEVEL1.contains(&c)
                     || matches!(c, '\\' | '`' | '$')
                     || (c == '|' && table)
-                    || (c == '&' && following.is_some_and(|f| f.is_ascii_alphanumeric() || f == '#'))
+                    || (c == '&' && entity_after(i))
                     || (c == '!' && following == Some('['))
                     || (at_start && matches!(c, '#' | '-' | '+' | '='))
                     || (digits_only && prev.is_some_and(|p| p.is_ascii_digit()) && matches!(c, '.' | ')'))
@@ -807,7 +771,7 @@ impl<'a> Doc<'a> {
         let typed: String = if top_paragraph { typed.to_owned() } else { typed.replace('\n', " ") };
         let deleted_end = deletions.iter().map(|d| d.end).max().unwrap_or(p).max(p);
         let prev = self.text[..p].chars().next_back();
-        let next = self.text[deleted_end..].chars().next();
+        let next = &self.text[deleted_end..];
         let table = self.in_table(p);
         let prefix = chain.first().map(|&b| self.container_prefix(b)).unwrap_or_default();
         let parts: Vec<&str> = typed.split('\n').collect();
@@ -834,7 +798,7 @@ impl<'a> Doc<'a> {
                     line_start = true;
                     prev_char = None;
                 }
-                let following = if i + 1 == parts.len() { next } else { None };
+                let following = if i + 1 == parts.len() { next } else { "" };
                 source.push_str(&escape_markdown(part, prev_char, following, line_start, table, level));
                 if let Some(last) = part.chars().last() {
                     prev_char = Some(last);
@@ -1528,9 +1492,14 @@ mod tests {
 
     #[test]
     fn markdown_specials_are_escaped_where_they_change_meaning() {
-        for (typed, expected) in
-            [("\\", "a\\\\b"), ("`", "a\\`b"), ("$", "a\\$b"), ("<i", "a\\<ib"), ("&amp", "a\\&ampb")]
-        {
+        for (typed, expected) in [
+            ("\\", "a\\\\b"),
+            ("`", "a\\`b"),
+            ("$", "a\\$b"),
+            ("<i", "a\\<ib"),
+            ("&amp;", "a\\&amp;b"),
+            ("& c", "a& cb"),
+        ] {
             assert_eq!(run("ab", 1, ins(typed)).unwrap().0, expected, "typed {typed}");
         }
         // Emphasis that would form is escaped.

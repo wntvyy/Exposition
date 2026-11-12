@@ -4,6 +4,7 @@
 
 pub mod fonts;
 pub mod glyphs;
+pub mod markdown;
 pub mod service;
 pub mod snapshot;
 pub mod typst_adapter;
@@ -12,6 +13,7 @@ use exposition_core::build::{DocumentFormat, Engine};
 use exposition_page::PageInputRules;
 
 pub use fonts::Fonts;
+pub use markdown::{MarkdownAdapter, MarkdownInput};
 pub use service::{BuildRecord, BuildTimings, TypesettingError, TypesettingService};
 pub use snapshot::BuildSnapshot;
 

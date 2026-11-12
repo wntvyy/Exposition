@@ -90,6 +90,21 @@ fn collect<'a>(frame: &'a Frame, ts: Transform, out: &mut Vec<Placed<'a>>) {
 
 /// Build the page map of a document.
 pub fn extract(world: &dyn World, document: &PagedDocument) -> PageMap {
+    let raw = extract_raw(world, document);
+    PageMap::build(raw.files, raw.equations, raw.pages)
+}
+
+/// Clusters of a document before they are grouped into lines: lets a format
+/// translated to Typst (Markdown) remap source ranges to its own source
+/// before building the page map.
+pub struct RawExtraction {
+    pub files: Vec<WorkspacePath>,
+    pub equations: Vec<EquationInfo>,
+    pub pages: Vec<RawPage>,
+}
+
+/// Extract the clusters of every page (source ranges as compiled).
+pub fn extract_raw(world: &dyn World, document: &PagedDocument) -> RawExtraction {
     let mut ex = Extractor {
         world,
         files: Vec::new(),
@@ -120,7 +135,7 @@ pub fn extract(world: &dyn World, document: &PagedDocument) -> PageMap {
         }
         pages.push(RawPage { width: *width, height: *height, clusters });
     }
-    PageMap::build(ex.files, ex.equations, pages)
+    RawExtraction { files: ex.files, equations: ex.equations, pages }
 }
 
 struct GlyphBox {

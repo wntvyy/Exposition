@@ -82,9 +82,25 @@ impl TypstCompiler {
     /// Compile `entry` from `snapshot`, producing the paged document, its
     /// diagnostics, and its glyph map.
     pub fn compile(&self, entry: &WorkspacePath, snapshot: &BuildSnapshot) -> TypstOutput {
+        self.compile_with(entry, snapshot, None, &|raw| PageMap::build(raw.files, raw.equations, raw.pages))
+    }
+
+    /// Compile `entry` with `main_text` (when given) as its Typst source in
+    /// place of the file's own text — the translation of another format, e.g.
+    /// Markdown — and build the page map with `finish`. Diagnostics and page
+    /// map ranges in `entry` are then in `main_text` coordinates; the caller
+    /// maps them back to the file's text. Nothing is written to the workspace.
+    pub fn compile_with(
+        &self,
+        entry: &WorkspacePath,
+        snapshot: &BuildSnapshot,
+        main_text: Option<Arc<str>>,
+        finish: &dyn Fn(glyphs::RawExtraction) -> PageMap,
+    ) -> TypstOutput {
         let _guard = self.compile_lock.lock().unwrap_or_else(|p| p.into_inner());
         let main = file_id(entry);
-        let world = SnapshotWorld { compiler: self, snapshot, main, today: civil_date(snapshot.captured_at) };
+        let world =
+            SnapshotWorld { compiler: self, snapshot, main, main_text, today: civil_date(snapshot.captured_at) };
         let started = Instant::now();
         let Warned { output, warnings } = typst::compile::<PagedDocument>(&world);
         let compile_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -97,7 +113,7 @@ impl TypstCompiler {
             diagnostics.push(convert_diagnostic(&world, diag));
         }
         let started = Instant::now();
-        let map = document.as_ref().map(|doc| Arc::new(glyphs::extract(&world, doc)));
+        let map = document.as_ref().map(|doc| Arc::new(finish(glyphs::extract_raw(&world, doc))));
         let map_ms = started.elapsed().as_secs_f64() * 1000.0;
         // Keep memoized results of recent compiles only.
         comemo::evict(10);
@@ -180,11 +196,18 @@ struct SnapshotWorld<'a> {
     compiler: &'a TypstCompiler,
     snapshot: &'a BuildSnapshot,
     main: FileId,
+    /// Typst source standing in for the main file (a translated format).
+    main_text: Option<Arc<str>>,
     today: (i32, u8, u8),
 }
 
 impl SnapshotWorld<'_> {
     fn text(&self, id: FileId) -> FileResult<Arc<str>> {
+        if id == self.main
+            && let Some(text) = &self.main_text
+        {
+            return Ok(Arc::clone(text));
+        }
         match id.root() {
             VirtualRoot::Project => {
                 let path = workspace_path(id)?;
@@ -237,6 +260,11 @@ impl World for SnapshotWorld<'_> {
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
+        if id == self.main
+            && let Some(text) = &self.main_text
+        {
+            return Ok(Bytes::from_string(SharedText(Arc::clone(text))));
+        }
         match id.root() {
             VirtualRoot::Project => {
                 let path = workspace_path(id)?;

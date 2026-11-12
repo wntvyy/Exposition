@@ -27,9 +27,10 @@
 //!   autolinks, images (inline at text height), hard and soft line breaks.
 //! - **Images** are workspace files given relative to the document (or `/`
 //!   for the workspace root); URLs, absolute paths and paths leaving the
-//!   workspace are refused with an error and a visible marker.
+//!   workspace are refused with a warning and a visible marker; a missing
+//!   file is a compiler error located at the image.
 //! - **Raw HTML** is not interpreted: it prints verbatim (subdued) and is
-//!   reported.
+//!   reported. HTML comments (e.g. research attachment markers) print nothing.
 //! - **Mathematics**: `$...$` inline and `$$...$$` display, in the LaTeX
 //!   subset listed in [`math`] (letters, digits, operators, `^`/`_`,
 //!   `\frac`, `\sqrt`, `\left`/`\right`, `\text`, Greek, relations, arrows,
@@ -56,7 +57,7 @@ use exposition_core::path::WorkspacePath;
 use exposition_core::text::TextRange;
 
 pub use front_matter::FrontMatter;
-pub use input::{EditPlan, EditRefusal, MarkdownInput, PageEditOp};
+pub use input::{EditPlan, EditRefusal, MarkdownInput, PageEditOp, PageInputRules};
 pub use map::{EditMode, MappedOffset, MappedRange, Segment, SegmentKind, SourceMap};
 pub use profile::{Layout, PROFILE_ID};
 pub use translate::{parser_options, resolve_image_path};

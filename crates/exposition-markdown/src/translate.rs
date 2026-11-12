@@ -8,7 +8,7 @@ use exposition_core::path::WorkspacePath;
 use exposition_core::text::TextRange;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, LinkType, Options, Parser, Tag};
 
-use crate::emit::{Emitter, typst_string};
+use crate::emit::{Emitter, typst_string, unsupported_marker};
 use crate::front_matter::{self, FrontMatter, Scalar};
 use crate::map::{SegmentKind, SourceMap};
 use crate::math;
@@ -385,6 +385,9 @@ impl<'s> Tx<'s> {
                 self.close_code("]", range);
             }
             Tag::CodeBlock(kind) => self.code_block(kind, range, children),
+            // HTML comments (e.g. research attachment markers) print nothing.
+            Tag::HtmlBlock
+                if only_comments(&self.leaf_text_pieces(children).iter().map(|p| p.0).collect::<String>()) => {}
             Tag::HtmlBlock => {
                 self.diag(
                     Severity::Warning,
@@ -575,6 +578,7 @@ impl<'s> Tx<'s> {
             Event::Code(t) => self.code_span(t, range),
             Event::InlineMath(t) => self.math(t, range, false),
             Event::DisplayMath(t) => self.math(t, range, true),
+            Event::Html(t) | Event::InlineHtml(t) if only_comments(t) => {}
             Event::Html(t) | Event::InlineHtml(t) => {
                 self.diag(
                     Severity::Warning,
@@ -650,7 +654,8 @@ impl<'s> Tx<'s> {
                 Some(i) => inner = range.start + i..range.start + i + content.len(),
                 None => {
                     self.diag(Severity::Error, "could not locate the mathematics source".into(), range.clone());
-                    self.e.unsupported(&format!("#exmd-unsupported({})", typst_string(content)), range);
+                    self.e.unsupported(&unsupported_marker(content), range);
+                    self.e.end_code();
                     return;
                 }
             }
@@ -676,7 +681,8 @@ impl<'s> Tx<'s> {
     fn footnote(&mut self, label: &str, range: &Range<usize>) {
         let Some(&index) = self.footnotes.get(label) else {
             self.diag(Severity::Warning, format!("footnote `{label}` is not defined"), range.clone());
-            self.e.unsupported(&format!("#exmd-unsupported({})", typst_string(&format!("[^{label}]"))), range);
+            self.e.unsupported(&unsupported_marker(&format!("[^{label}]")), range);
+            self.e.end_code();
             return;
         };
         self.referenced[index] = true;
@@ -686,7 +692,8 @@ impl<'s> Tx<'s> {
         }
         if self.in_progress.iter().any(|l| l == label) {
             self.diag(Severity::Warning, format!("footnote `{label}` refers to itself"), range.clone());
-            self.e.unsupported(&format!("#exmd-unsupported({})", typst_string(&format!("[^{label}]"))), range);
+            self.e.unsupported(&unsupported_marker(&format!("[^{label}]")), range);
+            self.e.end_code();
             return;
         }
         let n = self.printed.len() + 1;
@@ -713,7 +720,7 @@ impl<'s> Tx<'s> {
             Err(reason) => {
                 self.images.push((range.clone(), None, dest.to_owned()));
                 self.diagnostics.push((
-                    Severity::Error,
+                    Severity::Warning,
                     format!("image `{dest}` cannot be used: {reason}"),
                     range.clone(),
                     vec!["Images must be files inside the workspace, given relative to the document.".into()],
@@ -731,7 +738,9 @@ impl<'s> Tx<'s> {
         };
         let alt = plain_text(children);
         self.syntax(
-            &format!("#figure(exmd-image({}, alt: {})", typst_string(&format!("/{path}")), typst_string(&alt)),
+            // `image` is called here (not in a template helper) so that a
+            // missing file is reported at this image.
+            &format!("#figure(image({}, alt: {})", typst_string(&format!("/{path}")), typst_string(&alt)),
             range,
         );
         if !children.is_empty() {
@@ -749,7 +758,7 @@ impl<'s> Tx<'s> {
         };
         let alt = plain_text(children);
         self.close_code(
-            &format!("#exmd-inline-image({}, alt: {})", typst_string(&format!("/{path}")), typst_string(&alt)),
+            &format!("#box(image({}, alt: {}, height: 1.2em))", typst_string(&format!("/{path}")), typst_string(&alt)),
             range,
         );
     }
@@ -759,6 +768,22 @@ impl<'s> Tx<'s> {
         self.e.unsupported(&text, range);
         self.e.end_code();
     }
+}
+
+/// Whether HTML is nothing but comments (they are not printed, like in any
+/// rendering of Markdown).
+fn only_comments(html: &str) -> bool {
+    let mut rest = html.trim();
+    if rest.is_empty() {
+        return false;
+    }
+    while let Some(body) = rest.strip_prefix("<!--") {
+        match body.find("-->") {
+            Some(end) => rest = body[end + 3..].trim_start(),
+            None => return false,
+        }
+    }
+    rest.is_empty()
 }
 
 /// The paragraph's only content is one image (surrounding whitespace aside).

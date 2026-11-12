@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use common::*;
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::TextRange;
-use exposition_markdown::{EditMode, EditRefusal, MarkdownInput, PageEditOp, TranslateOptions, translate};
+use exposition_markdown::{
+    EditMode, EditRefusal, MarkdownInput, PageEditOp, PageInputRules, TranslateOptions, translate,
+};
 
 fn options() -> TranslateOptions {
     TranslateOptions { document: Some(WorkspacePath::parse("main.md").unwrap()) }

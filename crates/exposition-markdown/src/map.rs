@@ -21,15 +21,7 @@
 
 use exposition_core::text::TextRange;
 
-/// How typed input is interpreted at a position (mirrors the page editor's
-/// `EditMode`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum EditMode {
-    /// Prose/markup.
-    Markup,
-    /// Mathematics (the declared LaTeX subset).
-    Math,
-}
+pub use exposition_page::EditMode;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SegmentKind {

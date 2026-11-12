@@ -163,15 +163,12 @@ const TEMPLATE: &str = r##"#set par(justify: true)
   if done { box(width: 100%, height: 100%, fill: black) })
 #let exmd-alert-fill = rgb("#fbe9e7")
 #let exmd-alert-ink = rgb("#b3261e")
-#let exmd-unsupported(source) = box(fill: exmd-alert-fill, stroke: 0.5pt + exmd-alert-ink, inset: (x: 2pt),
-  outset: (y: 2pt), radius: 1pt, text(font: "DejaVu Sans Mono", size: 7.5pt, fill: exmd-alert-ink,
-  "unsupported: " + source))
+#let exmd-unsupported(body) = box(fill: exmd-alert-fill, stroke: 0.5pt + exmd-alert-ink, inset: (x: 2pt),
+  outset: (y: 2pt), radius: 1pt, text(font: "DejaVu Sans Mono", size: 7.5pt, fill: exmd-alert-ink)[unsupported: #body])
 #let exmd-html(source, block: false) = {
   let body = text(font: "DejaVu Sans Mono", size: 0.8em, fill: luma(90), source)
   if block { std.block(stroke: (left: 1pt + luma(170)), inset: (left: 6pt, y: 2pt), body) } else { body }
 }
-#let exmd-image(path, alt: "") = image(path, alt: alt)
-#let exmd-inline-image(path, alt: "") = box(image(path, alt: alt, height: 1.2em))
 #let exmd-missing-image(path) = box(fill: exmd-alert-fill, stroke: 0.5pt + exmd-alert-ink, inset: 3pt, radius: 1pt,
   text(font: "DejaVu Sans Mono", size: 7.5pt, fill: exmd-alert-ink, "image not available: " + path))
 "##;

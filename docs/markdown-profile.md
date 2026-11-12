@@ -17,7 +17,8 @@ change the layout of existing documents.
   ellipsis, and straight quotes print as curly quotes. Every other character
   prints literally.
 - Raw HTML is not interpreted. It prints verbatim in a subdued style and is
-  reported as a warning.
+  reported as a warning. HTML comments (`<!-- ... -->`, including the
+  markers research attachments use) are not printed.
 
 ## Front matter
 
@@ -51,7 +52,7 @@ Title, author and date values can be edited on the page.
 - Emphasis, strong, strikethrough, links and autolinks, and hard and soft
   line breaks are supported.
 - Images must be files in the workspace, given relative to the document or
-  with `/` for the workspace root. Other forms are refused with an error and
+  with `/` for the workspace root. Other forms are refused with a warning and
   a visible marker: URLs, data URIs, absolute paths, and paths that leave the
   workspace. A paragraph that holds only an image becomes a figure, captioned
   with the alt text. Other images print inline at text height.

@@ -8,9 +8,9 @@ publish.workspace = true
 
 [dependencies]
 exposition-core.workspace = true
+# The format-neutral page editing contract (input rules, edit modes).
+exposition-page.workspace = true
 pulldown-cmark.workspace = true
-serde.workspace = true
-thiserror.workspace = true
 unicode-segmentation.workspace = true
 
 [dev-dependencies]
