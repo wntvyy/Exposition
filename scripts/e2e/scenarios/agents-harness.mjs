@@ -90,6 +90,15 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
 
   let app = await launchApp({ env });
   const dataDir = app.dataDir;
+  // Only debug builds honor EXPOSITION_CREDENTIAL_NAMESPACE; a release build
+  // always uses the real credential entry. This scenario saves and clears a
+  // test key, so it must never run against a release/installed build, where
+  // it would overwrite or delete the user's actual API key.
+  const info = await app.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("app_info"));
+  if (!info.debugBuild) {
+    await app.close();
+    throw new Error("agents-harness requires a debug build (it would modify the real credential entry of a release build)");
+  }
   try {
     const { page } = app;
     await page.setViewportSize({ width: 1440, height: 900 });
