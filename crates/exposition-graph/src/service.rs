@@ -23,7 +23,7 @@ use crate::model::{
     AssertionStatus, BindingState, CoverageState, Entity, EntityDetail, Evidence, Freshness, GraphEvent,
     GraphFreshness, GraphState, GraphStatus, Lifecycle, Origin, RecoveryOption, Relation, SyncState,
 };
-use crate::ops::{ApplyChangeRequest, ApplyOutcome, ChangeProposal, ChangeRequest};
+use crate::ops::{ApplyChangeRequest, ApplyOutcome, ChangeProposal, ChangeRequest, GraphOperation};
 use crate::query::{
     DEFAULT_LIMIT, Direction, EvidenceImpact, FormalAssociationState, GraphQuery, GraphSnapshot, GraphView,
     GraphViewInput, GraphViewSummary, ImpactAction, ImpactItem, ImpactReport, ImpactRequest, ImpactStep, InformalState,
@@ -1065,6 +1065,28 @@ impl GraphService {
         if let ApplyOutcome::Applied { delta, .. } = &outcome {
             self.proposals.lock().unwrap_or_else(|p| p.into_inner()).map.remove(&request.proposal);
             self.emit(GraphEvent::Changed { delta: delta.clone(), origin: origin.clone() });
+            // A new source binding is resolved against its file now: an
+            // unchanged file is not revisited by ordinary passes, so without
+            // this the binding would stay unresolved until the file changed.
+            let mut bound: Vec<WorkspacePath> = proposal
+                .operations
+                .iter()
+                .filter_map(|op| match op {
+                    GraphOperation::BindSource { binding, .. } => Some(binding.path.clone()),
+                    GraphOperation::CreateEntity { binding: Some(binding), .. } => Some(binding.path.clone()),
+                    _ => None,
+                })
+                .collect();
+            bound.sort();
+            bound.dedup();
+            if !bound.is_empty() {
+                // Best effort: a failure leaves the binding unresolved (shown
+                // as such) and the next pass of that file resolves it.
+                let _ = self.reconcile(&crate::reconcile::ReconcileOptions {
+                    scope: crate::reconcile::Scope::Paths(bound),
+                    force: true,
+                });
+            }
         }
         Ok(outcome)
     }

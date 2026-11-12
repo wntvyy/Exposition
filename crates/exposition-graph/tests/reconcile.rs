@@ -835,3 +835,43 @@ fn audit_admitted_lean_declarations_are_adopted_not_duplicated() {
         .count();
     assert_eq!(again, 1);
 }
+
+/// A region a person binds in an unchanged, already indexed file is resolved
+/// at once (ordinary passes skip unchanged files), not left "waiting for the
+/// source to be indexed".
+#[test]
+fn a_manual_region_binding_resolves_without_a_file_change() {
+    let text = "Intro.\nAssume hypothesis H. Then the image is compact.\nEnd.\n";
+    let p = project(&[("notes.md", text)]);
+    p.full();
+    let start = text.find("Assume").unwrap() as u32;
+    let end = start + "Assume hypothesis H. Then the image is compact.".len() as u32;
+    let (proposal, outcome) = p
+        .svc
+        .propose_and_apply(
+            Origin::User,
+            &ChangeRequest {
+                base_revision: p.svc.status().revision,
+                operations: vec![GraphOperation::CreateEntity {
+                    temp_id: "c".into(),
+                    kind: EntityKind::Claim,
+                    roles: vec![],
+                    label: "Image claim".into(),
+                    key: None,
+                    attributes: BTreeMap::new(),
+                    binding: Some(NewBinding {
+                        path: wp("notes.md"),
+                        selector: SourceSelector::Region,
+                        range: Some(exposition_core::text::TextRange::new(start, end)),
+                    }),
+                }],
+                summary: None,
+            },
+        )
+        .unwrap();
+    assert!(proposal.valid, "{:?}", proposal.diagnostics);
+    let ApplyOutcome::Applied { created, .. } = outcome else { panic!("{outcome:?}") };
+    let binding = p.svc.entity_detail(&created[0].id).unwrap().bindings.remove(0);
+    assert_eq!(binding.state, BindingState::Resolved, "{binding:?}");
+    assert!(binding.fingerprint.is_some(), "anchored by its text");
+}
