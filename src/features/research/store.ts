@@ -16,7 +16,15 @@ import type { WorkspaceStatus } from "../../bindings/WorkspaceStatus";
 import { commands, errorMessage, events, isCommandError } from "../../lib/ipc";
 import { activeHandle } from "../editor";
 import { requestWorkspaceTrust } from "../jobs/trust";
-import { EMPTY_RUN_OUTPUT, applyEvent, appendEntries, defaultInsertOffset, documentFormat, type RunOutput } from "./model";
+import {
+  EMPTY_RUN_OUTPUT,
+  applyEvent,
+  appendEntries,
+  defaultInsertOffset,
+  documentFormat,
+  mergeSnapshot,
+  type RunOutput,
+} from "./model";
 
 export interface ResearchState {
   workspace: WorkspaceStatus | null;
@@ -91,14 +99,45 @@ export function flushEvents(): void {
 
 /** Queue an event as if it came from Rust (tests). */
 export function queueEventForTest(event: ResearchEvent): void {
+  noteChange(event);
   pending.push(event);
 }
+
+// When each session and run last changed (by event arrival order), so a
+// snapshot fetched before a change never replaces the newer state.
+let eventSerial = 0;
+const changedAt = new Map<string, number>();
+
+function noteChange(event: ResearchEvent): void {
+  eventSerial += 1;
+  switch (event.kind) {
+    case "sessionChanged":
+      changedAt.set(`session:${event.session.id}`, eventSerial);
+      break;
+    case "sessionRemoved":
+      changedAt.set(`session:${event.sessionId}`, eventSerial);
+      break;
+    case "runQueued":
+    case "runFinished":
+      changedAt.set(`run:${event.run.id}`, eventSerial);
+      break;
+    case "runStarted":
+      changedAt.set(`run:${event.runId}`, eventSerial);
+      break;
+    case "output":
+      break;
+  }
+}
+
+const changedSince = (kind: "session" | "run", since: number) => (id: string) =>
+  (changedAt.get(`${kind}:${id}`) ?? 0) > since;
 
 /** Subscribe to research events once and load the current state. */
 export function startResearchTracking(): void {
   if (started) return;
   started = true;
   void events.research((event) => {
+    noteChange(event);
     pending.push(event);
     if (event.kind === "runFinished" && event.run.status.kind === "failed" && document.visibilityState !== "visible") {
       notify({ tone: "danger", title: "Research run failed", body: event.run.status.message });
@@ -116,10 +155,22 @@ export function startResearchTracking(): void {
 
 /** Re-read the workspace's trust and, when it changed, the environments. */
 export async function refreshTrust(): Promise<void> {
+  // Only the trust flag (and what depends on it): sessions and runs follow
+  // their own events (a revoke detaches this folder's sessions in the service).
   const before = useResearch.getState().workspace;
-  await refreshAll();
-  const after = useResearch.getState().workspace;
-  if (before && after && before.root === after.root && before.trusted !== after.trusted) {
+  let after: WorkspaceStatus | null;
+  try {
+    after = await commands.researchWorkspace();
+  } catch (e) {
+    useResearch.setState({ error: errorMessage(e) });
+    return;
+  }
+  if (!before || !after || before.root !== after.root) {
+    await refreshAll();
+    return;
+  }
+  useResearch.setState({ workspace: after });
+  if (before.trusted !== after.trusted) {
     // An error shown before the change (e.g. a refused start) no longer applies.
     useResearch.setState({ error: null });
     if (useResearch.getState().environments) await loadEnvironments(false);
@@ -128,10 +179,11 @@ export async function refreshTrust(): Promise<void> {
 
 export async function refreshAll(): Promise<void> {
   try {
+    const since = eventSerial;
     const [workspace, sessions] = await Promise.all([commands.researchWorkspace(), commands.researchSessions()]);
     useResearch.setState((state) =>
       state.workspace?.root === workspace?.root
-        ? { workspace, sessions }
+        ? { workspace, sessions: mergeSnapshot(state.sessions, sessions, (s) => s.id, changedSince("session", since)) }
         : { workspace, sessions, runs: [], outputs: {}, selectedRun: null },
     );
     if (workspace) await refreshRuns();
@@ -142,8 +194,9 @@ export async function refreshAll(): Promise<void> {
 
 export async function refreshRuns(): Promise<void> {
   try {
+    const since = eventSerial;
     const runs = await commands.researchRuns();
-    useResearch.setState({ runs });
+    useResearch.setState((state) => ({ runs: mergeSnapshot(state.runs, runs, (r) => r.id, changedSince("run", since)) }));
   } catch (e) {
     if (!(isCommandError(e) && e.code === "research.noWorkspace")) useResearch.setState({ error: errorMessage(e) });
   }

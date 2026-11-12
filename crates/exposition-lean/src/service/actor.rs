@@ -184,6 +184,8 @@ pub(super) struct Actor {
     versions: HashMap<PathBuf, Option<String>>,
     next_generation: u64,
     next_temp: u64,
+    /// [`ExecutionService::trust_generation`] when trust was last checked.
+    trust_seen: u64,
 }
 
 impl Actor {
@@ -195,6 +197,7 @@ impl Actor {
         events: broadcast::Sender<LeanEvent>,
         tx: mpsc::UnboundedSender<Msg>,
     ) -> Self {
+        let trust_seen = exec.trust_generation();
         Actor {
             exec,
             workspace,
@@ -208,6 +211,7 @@ impl Actor {
             versions: HashMap::new(),
             next_generation: 0,
             next_temp: 0,
+            trust_seen,
         }
     }
 
@@ -242,7 +246,10 @@ impl Actor {
                 },
                 // Before API requests: a check asked for after a grant sees it.
                 event = trust_rx.recv(), if trust_open => match event {
-                    Ok(_) | Err(RecvError::Lagged(_)) => self.sync_trust(),
+                    Ok(_) | Err(RecvError::Lagged(_)) => {
+                        self.trust_seen = self.exec.trust_generation();
+                        self.sync_trust();
+                    }
                     Err(RecvError::Closed) => trust_open = false,
                 },
                 msg = rx.recv() => match msg {
@@ -777,6 +784,19 @@ impl Actor {
                 Err(workspace_root) if !untrusted => self.untrust(&key, workspace_root.clone()),
                 _ => {}
             }
+        }
+    }
+
+    /// Trust changed since the actor last checked: re-check before handling
+    /// anything. A revoke changes the counter before it kills the folder's
+    /// server, so a message caused by that kill (a failed start, the server's
+    /// exit, a failed answer) is handled after the server is held Untrusted
+    /// (its generation is then stale) and never shows as a crash.
+    fn follow_trust(&mut self) {
+        let generation = self.exec.trust_generation();
+        if generation != self.trust_seen {
+            self.trust_seen = generation;
+            self.sync_trust();
         }
     }
 
@@ -1379,12 +1399,6 @@ impl Actor {
         // Stopping servers finish through `Stopped`; only a running server crashed.
         let Some(running) = server.running() else { return };
         let job = running.job.clone();
-        // A trust revoke stops the folder's jobs before it is announced: this
-        // server did not crash, its folder is no longer trusted.
-        if let Err(workspace_root) = self.workspace_trusted() {
-            self.untrust(&key, workspace_root);
-            return;
-        }
         let outcome = match result.map(|r| r.outcome) {
             Some(JobOutcome::Exited { code }) => format!("The Lean server exited unexpectedly with code {code}."),
             Some(JobOutcome::Terminated { description }) => format!("The Lean server was terminated ({description})."),
@@ -1417,6 +1431,12 @@ impl Actor {
     }
 
     fn crashed(&mut self, key: &ServerKey, message: String) {
+        // In a folder that is no longer trusted the server was stopped by the
+        // revoke: that is not a crash.
+        if let Err(workspace_root) = self.workspace_trusted() {
+            self.untrust(key, workspace_root);
+            return;
+        }
         let Some(server) = self.servers.get_mut(key) else { return };
         server.attempts += 1;
         let attempts = server.attempts;
@@ -1549,6 +1569,7 @@ impl Actor {
     // ----- API ---------------------------------------------------------------------
 
     fn on_message(&mut self, msg: Msg) {
+        self.follow_trust();
         match msg {
             Msg::States(reply) => {
                 let mut states: Vec<_> =
@@ -2045,5 +2066,228 @@ impl Classification {
         c.all_axioms = all.into_iter().collect();
         c.nonstandard_axioms = nonstandard_all.into_iter().collect();
         c
+    }
+}
+
+/// A trust revoke kills the folder's Lean server before the trust event is
+/// delivered, so the actor can see the server die (or fail to start) first.
+/// These drive the actor's handlers directly, in each order, without a real
+/// Lean: the documents must report Untrusted and never a crash.
+#[cfg(test)]
+mod trust_race_tests {
+    use super::*;
+    use exposition_execution::env::HostEnv;
+    use exposition_execution::{ExecutionConfig, ExecutionSettings};
+
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        root: PathBuf,
+        exec: ExecutionService,
+        actor: Actor,
+        key: ServerKey,
+        doc: DocumentId,
+        events: broadcast::Receiver<LeanEvent>,
+        _rx: mpsc::UnboundedReceiver<Msg>,
+    }
+
+    impl Fixture {
+        /// A trusted folder with one Lean document whose server is in `phase`.
+        fn new(phase: impl FnOnce(&ExecutionService, &Path) -> Phase) -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let project = tmp.path().join("workspace");
+            std::fs::create_dir_all(&project).unwrap();
+            let exec = ExecutionService::with_config(ExecutionConfig {
+                data_dir: tmp.path().join("data"),
+                host_env: HostEnv::capture(),
+                settings: Some(ExecutionSettings::default()),
+                too_broad_to_trust: Some(vec![]),
+                tool_cache_dir: None,
+            })
+            .unwrap();
+            let root = exec.register_workspace_root(&project).unwrap();
+            exec.grant_trust(&root.display().to_string()).unwrap();
+            let documents = Arc::new(DocumentService::new());
+            let workspace = WorkspaceService::new(Arc::clone(&documents), tmp.path().join("app"));
+            let (events_tx, events) = broadcast::channel(256);
+            let (tx, rx) = mpsc::unbounded_channel();
+            let mut actor = Actor::new(exec.clone(), workspace, documents, LeanConfig::default(), events_tx, tx);
+            actor.set_root(Some(root.display().to_string()));
+            let key = ServerKey { root: root.clone(), toolchain: root.join("toolchain") };
+            let doc = DocumentId("doc-1".into());
+            let mut entry = Doc::new(doc.clone(), WorkspacePath::parse("A.lean").unwrap(), 1);
+            entry.key = Some(key.clone());
+            entry.project_root = Some(root.clone());
+            actor.docs.insert(doc.clone(), entry);
+            let toolchain = ResolvedToolchain {
+                requested: "leanprover/lean4:v4.35.0".into(),
+                name: "leanprover/lean4:v4.35.0".into(),
+                dir: key.toolchain.clone(),
+                lean: key.toolchain.join("lean"),
+                lake: key.toolchain.join("lake"),
+                note: None,
+            };
+            let info = LeanToolchainInfo {
+                requested: toolchain.requested.clone(),
+                name: toolchain.name.clone(),
+                version: None,
+                source: "test".into(),
+                note: None,
+            };
+            let phase = phase(&exec, &root);
+            actor.next_generation = 1;
+            actor.servers.insert(
+                key.clone(),
+                Server {
+                    project: LeanProject { root: root.clone(), kind: ProjectKind::Standalone, pin: Ok(None) },
+                    toolchain,
+                    info,
+                    generation: 1,
+                    phase,
+                    attempts: 0,
+                    idle_since: None,
+                },
+            );
+            Fixture { _tmp: tmp, root, exec, actor, key, doc, events, _rx: rx }
+        }
+
+        /// Revoke through the execution service. The actor has not seen the
+        /// trust event (its loop is not running), as when a message caused by
+        /// the revoke's kill is handled first.
+        fn revoke(&self) {
+            self.exec.revoke_trust(&self.root.display().to_string()).unwrap();
+        }
+
+        fn statuses(&mut self) -> Vec<LeanStatus> {
+            let mut out = Vec::new();
+            while let Ok(event) = self.events.try_recv() {
+                if let LeanEvent::Document { state } = event {
+                    out.push(state.status);
+                }
+            }
+            out
+        }
+
+        fn assert_untrusted_never_crashed(&mut self, order: &str) {
+            let seen = self.statuses();
+            assert!(
+                !seen.iter().any(|s| matches!(s, LeanStatus::ServerCrashed { .. } | LeanStatus::Unavailable { .. })),
+                "{order}: a crash or failure was shown after the revoke: {seen:?}"
+            );
+            let status = &self.actor.docs[&self.doc].status;
+            assert!(matches!(status, LeanStatus::Untrusted { .. }), "{order}: {status:?} (shown {seen:?})");
+            assert!(
+                matches!(self.actor.servers[&self.key].phase, Phase::Untrusted { .. }),
+                "{order}: the server is not held untrusted"
+            );
+        }
+    }
+
+    fn starting(_: &ExecutionService, _: &Path) -> Phase {
+        Phase::Starting
+    }
+
+    /// The server was starting when trust was revoked: the revoke killed it,
+    /// so its start fails before the trust event arrives.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_start_failing_after_the_revoke_is_untrusted_not_crashed() {
+        let mut f = Fixture::new(starting);
+        f.revoke();
+        f.actor.on_message(Msg::Started {
+            key: f.key.clone(),
+            generation: 1,
+            result: Err(StartError::Failed { message: "the Lean server exited during initialization".into() }),
+        });
+        f.assert_untrusted_never_crashed("start failure before the trust event");
+        // The trust event arriving afterwards changes nothing.
+        f.actor.sync_trust();
+        f.assert_untrusted_never_crashed("start failure, then the trust event");
+    }
+
+    /// A crashed server's scheduled restart comes due after the revoke.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restart_due_after_the_revoke_is_untrusted() {
+        let mut f = Fixture::new(|_, _| Phase::Crashed { message: "earlier crash".into(), restarting: true });
+        f.revoke();
+        f.actor.on_message(Msg::Retry { key: f.key.clone(), generation: 1 });
+        f.assert_untrusted_never_crashed("retry after the revoke");
+    }
+
+    #[cfg(windows)]
+    fn running(exec: &ExecutionService, root: &Path) -> Phase {
+        // A long-lived interactive job standing in for the language server.
+        let sort = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
+            .join("System32")
+            .join("sort.exe");
+        let spec = JobSpec {
+            label: "stand-in language server".into(),
+            program: sort.display().to_string(),
+            args: vec![],
+            environment: EnvironmentSpec::default(),
+            working_directory: root.display().to_string(),
+            policy: ExecutionPolicy::TrustedNative,
+            timeout_ms: None,
+            log_limit_bytes: None,
+            stdin: None,
+        };
+        let job = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(exec.launch_interactive(spec, exposition_execution::InteractiveOptions::default()))
+        })
+        .unwrap();
+        let (client, _incoming) = LspClient::start(job.input, job.output);
+        Phase::Running(Running { client, job: job.id, pid: job.pid, sorry_type: None })
+    }
+
+    /// The running server died from the revoke and the actor hears of its
+    /// exit before the trust event.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_server_exit_seen_before_the_trust_event_is_untrusted() {
+        let mut f = Fixture::new(running);
+        let job = f.actor.servers[&f.key].running().unwrap().job.clone();
+        f.revoke();
+        let result = f.exec.wait(&job).await;
+        f.actor.on_message(Msg::JobExited { key: f.key.clone(), generation: 1, result });
+        f.assert_untrusted_never_crashed("server exit before the trust event");
+        f.actor.sync_trust();
+        f.assert_untrusted_never_crashed("server exit, then the trust event");
+    }
+
+    /// A check in flight when trust was revoked: Lean's answer for it fails
+    /// (the server is gone) before the trust event arrives.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_check_failing_after_the_revoke_is_untrusted() {
+        let mut f = Fixture::new(running);
+        let text: Arc<str> = Arc::from("theorem t : True := trivial\n");
+        f.actor.docs.get_mut(&f.doc).unwrap().sync = Some(SyncState {
+            generation: 1,
+            version: 1,
+            index: Arc::new(LineIndex::new(&text)),
+            text,
+            lsp_diagnostics: Vec::new(),
+            fatal: false,
+        });
+        f.revoke();
+        f.actor.on_message(Msg::WaitDone {
+            generation: 1,
+            doc: f.doc.clone(),
+            version: 1,
+            result: Err(LspError::Timeout),
+        });
+        f.assert_untrusted_never_crashed("check failure before the trust event");
+    }
+
+    /// The trust event arrives first, then the killed server's exit.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_server_exit_seen_after_the_trust_event_is_untrusted() {
+        let mut f = Fixture::new(running);
+        let job = f.actor.servers[&f.key].running().unwrap().job.clone();
+        f.revoke();
+        f.actor.sync_trust();
+        let result = f.exec.wait(&job).await;
+        f.actor.on_message(Msg::JobExited { key: f.key.clone(), generation: 1, result });
+        f.assert_untrusted_never_crashed("trust event before the server exit");
     }
 }

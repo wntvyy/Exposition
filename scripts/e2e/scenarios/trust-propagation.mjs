@@ -218,6 +218,21 @@ export default async function trustPropagation({ launchApp, artifactsDir, assert
     }
 
     // ---- 4: revoke from Settings; trusted work stops, every surface says so --
+    // Every state the Research panel shows from here on (diagnostics).
+    await page.evaluate(() => {
+      const log = (window.__researchStates = []);
+      let last = "";
+      setInterval(() => {
+        const status = document.querySelector('[data-testid="research-session-status"]')?.getAttribute("data-state") ?? "-";
+        const reason =
+          document.querySelector('[data-testid="research-detached-reason"]')?.textContent ??
+          document.querySelector('[data-testid="research-crash-reason"]')?.textContent ??
+          "";
+        const now = `${status}: ${reason}`;
+        if (now !== last) log.push(now);
+        last = now;
+      }, 20);
+    });
     await runCommand(page, "Manage Trusted Folders", /Manage Trusted Folders/);
     const trustedRoot = (await invoke(page, "trust_status", { root: opened.root })).root;
     const row = page.getByTestId("trusted-folder").filter({ hasText: trustedRoot }).first();
@@ -259,10 +274,14 @@ export default async function trustPropagation({ launchApp, artifactsDir, assert
       message: "no Lean process after the revoke",
     });
     // The research session is detached and its kernel is gone.
-    await waitFor(
-      async () => (await invoke(page, "research_sessions")).find((s) => s.id === session.id)?.state.kind === "detached",
+    const detached = await waitFor(
+      async () => {
+        const state = (await invoke(page, "research_sessions")).find((s) => s.id === session.id)?.state;
+        return state?.kind === "detached" ? state : null;
+      },
       { timeout: FOLLOW, message: "research session detached after the revoke" },
     );
+    assert.match(detached.reason, /trust was revoked/i, `the service's detach reason: ${JSON.stringify(detached)}`);
     await waitFor(() => processesMentioning(researchDir).length === 0, {
       timeout: FOLLOW,
       interval: 500,
@@ -275,7 +294,27 @@ export default async function trustPropagation({ launchApp, artifactsDir, assert
     await waitFor(async () => (await leanStatus()) === "untrusted", { timeout: FOLLOW, message: "Lean infoview shows Untrusted after the revoke" });
     await runCommand(page, "Show Research", /Show Research/);
     await researchBanner().waitFor({ timeout: FOLLOW });
-    await page.getByTestId("research-detached-reason").getByText(/trust/i).waitFor({ timeout: FOLLOW });
+    // The panel shows the session detached because trust was revoked (the
+    // message names what the panel and the service each show if it does not).
+    const panelSession = () =>
+      page.evaluate(() => ({
+        state: document.querySelector('[data-testid="research-session-status"]')?.getAttribute("data-state") ?? null,
+        detached: document.querySelector('[data-testid="research-detached-reason"]')?.textContent ?? null,
+        crashed: document.querySelector('[data-testid="research-crash-reason"]')?.textContent ?? null,
+      }));
+    const shown = await waitFor(async () => {
+      const ui = await panelSession();
+      return ui.state === "detached" && /trust/i.test(ui.detached ?? "") ? ui : null;
+    }, { timeout: FOLLOW, message: "the Research panel shows the session detached because trust was revoked" }).catch(
+      async (error) => {
+        const service = (await invoke(page, "research_sessions")).map((s) => s.state);
+        const seen = await page.evaluate(() => window.__researchStates);
+        throw new Error(
+          `${error.message}; panel: ${JSON.stringify(await panelSession())}; service: ${JSON.stringify(service)}; panel states: ${JSON.stringify(seen)}`,
+        );
+      },
+    );
+    assert.match(shown.detached, /trust was revoked/i);
     await openFromTree(page, SUPPLEMENT);
     await pageEditor.waitFor({ timeout: 10_000 });
     await pageEditor.locator(".page-editor__untrusted").getByText("Workspace not trusted", { exact: true }).waitFor({ timeout: FOLLOW });
@@ -306,6 +345,7 @@ export default async function trustPropagation({ launchApp, artifactsDir, assert
     const errors = app.consoleMessages.filter((m) => m.startsWith("error") || m.startsWith("pageerror"));
     assert.deepEqual(errors, [], "no console errors");
     console.log(`      timings (ms): ${JSON.stringify(timings)}`);
+    console.log(`      research panel states after the revoke: ${JSON.stringify(await page.evaluate(() => window.__researchStates))}`);
   } finally {
     await app.close();
   }
