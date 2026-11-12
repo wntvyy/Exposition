@@ -16,6 +16,7 @@ pub mod compile;
 pub mod latex;
 pub mod log;
 pub mod mapping;
+pub mod mirror;
 pub mod normalize;
 pub mod page_input;
 pub mod page_map;

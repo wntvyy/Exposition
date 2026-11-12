@@ -242,6 +242,140 @@ fn writes_outside_the_build_and_process_execution_are_refused() {
     }
 }
 
+/// Explicitly relative names (`./x`, `../x`) are opened relative to the
+/// engine's working directory (kpathsea does not search `TEXINPUTS` for them),
+/// so they must resolve from the entry's directory exactly as in the project,
+/// while open buffers still override the files on disk and nothing is written
+/// into the project.
+#[test]
+fn explicitly_relative_paths_resolve_from_the_entry_directory_as_in_the_project() {
+    for engine in ENGINES {
+        let Some(h) = common::Harness::new("latex-basic", engine) else { continue };
+        let root = h.project.path();
+        let write = |path: &str, text: &str| {
+            let file = root.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
+        };
+        std::fs::create_dir_all(root.join("figs")).unwrap();
+        std::fs::copy(root.join("figures/box.png"), root.join("figs/x.png")).unwrap();
+        std::fs::create_dir_all(root.join(".exposition/artifacts/run-1")).unwrap();
+        std::fs::copy(root.join("figures/box.png"), root.join(".exposition/artifacts/run-1/output-1.png")).unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::copy(root.join("figures/box.png"), root.join("sub/local.png")).unwrap();
+        write("shared/macros.tex", "\\newcommand{\\shared}{SHAREDDISK}\n");
+        write(
+            "sub/report.tex",
+            concat!(
+                "\\documentclass{article}\n\\usepackage{graphicx}\n\\input{../shared/macros}\n",
+                "\\begin{document}\nReport \\shared.\n",
+                "\\includegraphics[width=1cm]{../figs/x.png}\n",
+                "\\includegraphics[width=1cm]{../.exposition/artifacts/run-1/output-1.png}\n",
+                "\\includegraphics[width=1cm]{./local.png}\n\\end{document}\n"
+            ),
+        );
+        write(
+            "book.tex",
+            "\\documentclass{article}\n\\usepackage{graphicx}\n\\begin{document}\nBook.\n\\input{chapters/ch1}\n\\end{document}\n",
+        );
+        write(
+            "chapters/ch1.tex",
+            concat!(
+                "Chapter one.\n\\input{./chapters/part}\n",
+                "\\includegraphics[width=1cm]{./figs/x.png}\n\\includegraphics[width=1cm]{figs/x.png}\n"
+            ),
+        );
+        write("chapters/part.tex", "PARTDISK.\n");
+        let before = tree(root);
+        let request = |entry: &str, mode| {
+            let mut request = h.request(mode);
+            request.target.entry = exposition_core::path::WorkspacePath::parse(entry).unwrap();
+            request.buffers = h.documents.snapshots();
+            request
+        };
+        let sources = |build: &exposition_tex::TexBuild| -> Vec<String> {
+            build.result.sources.iter().map(|s| s.path.as_str().to_owned()).collect()
+        };
+
+        // A document built as its own entry from a subdirectory.
+        let report = h.builder.build(&request("sub/report.tex", BuildMode::Draft));
+        assert_eq!(report.result.status, BuildStatus::Succeeded, "{engine:?}: {:#?}", report.result.diagnostics);
+        assert!(page_text(&report).contains("ReportSHAREDDISK."), "{engine:?}: {}", page_text(&report));
+        let paths = sources(&report);
+        for expected in
+            ["sub/report.tex", "shared/macros.tex", "figs/x.png", ".exposition/artifacts/run-1/output-1.png"]
+        {
+            assert!(paths.iter().any(|p| p == expected), "{engine:?} missing {expected} in {paths:?}");
+        }
+        assert!(paths.iter().any(|p| p == "sub/local.png"), "{engine:?}: {paths:?}");
+
+        // An open buffer overrides the disk file reached through `../`.
+        let macros = h.open("shared/macros.tex");
+        let disk = h.text(&macros).find("DISK").unwrap() as u32;
+        h.documents
+            .apply(TransactionRequest {
+                id: TransactionId("m1".into()),
+                origin: EditOrigin::Source,
+                edits: vec![DocumentEdit {
+                    document: macros.clone(),
+                    base_revision: 1,
+                    patches: vec![TextPatch::replace(disk, disk + 4, "BUFFER")],
+                }],
+                undo: UndoBehavior::NewGroup,
+                conflict: ConflictPolicy::Reject,
+                label: None,
+                selection: None,
+            })
+            .unwrap();
+        assert!(h.text(&macros).contains("SHAREDBUFFER"), "{}", h.text(&macros));
+        let buffered = h.builder.build(&request("sub/report.tex", BuildMode::Draft));
+        assert!(page_text(&buffered).contains("ReportSHAREDBUFFER."), "{engine:?}: {}", page_text(&buffered));
+        let source = buffered.result.sources.iter().find(|s| s.path.as_str() == "shared/macros.tex").unwrap();
+        assert_eq!(source.document.as_ref(), Some(&macros));
+        // Closing the buffer returns to the disk file; a disk change is seen.
+        h.documents.close(&macros).unwrap();
+        let closed = h.builder.build(&request("sub/report.tex", BuildMode::Draft));
+        assert!(page_text(&closed).contains("ReportSHAREDDISK."), "{engine:?}: {}", page_text(&closed));
+        write("shared/macros.tex", "\\newcommand{\\shared}{SHAREDCHANGEDONDISK}\n");
+        let changed = h.builder.build(&request("sub/report.tex", BuildMode::Draft));
+        assert!(page_text(&changed).contains("ReportSHAREDCHANGEDONDISK."), "{engine:?}: {}", page_text(&changed));
+        write("shared/macros.tex", "\\newcommand{\\shared}{SHAREDDISK}\n");
+
+        // The root entry's included chapter uses root-relative names, as TeX
+        // resolves them from the working directory, not the including file.
+        let book = h.builder.build(&request("book.tex", BuildMode::Draft));
+        assert_eq!(book.result.status, BuildStatus::Succeeded, "{engine:?}: {:#?}", book.result.diagnostics);
+        assert!(page_text(&book).contains("PARTDISK."), "{engine:?}: {}", page_text(&book));
+        let paths = sources(&book);
+        for expected in ["book.tex", "chapters/ch1.tex", "chapters/part.tex", "figs/x.png"] {
+            assert!(paths.iter().any(|p| p == expected), "{engine:?} missing {expected} in {paths:?}");
+        }
+        let part = h.open("chapters/part.tex");
+        let disk = h.text(&part).find("DISK").unwrap() as u32;
+        h.documents
+            .apply(TransactionRequest {
+                id: TransactionId("p1".into()),
+                origin: EditOrigin::Source,
+                edits: vec![DocumentEdit {
+                    document: part.clone(),
+                    base_revision: 1,
+                    patches: vec![TextPatch::replace(disk, disk + 4, "BUFFER")],
+                }],
+                undo: UndoBehavior::NewGroup,
+                conflict: ConflictPolicy::Reject,
+                label: None,
+                selection: None,
+            })
+            .unwrap();
+        let book = h.builder.build(&request("book.tex", BuildMode::Draft));
+        assert!(page_text(&book).contains("PARTBUFFER."), "{engine:?}: {}", page_text(&book));
+        h.documents.close(&part).unwrap();
+
+        // Nothing was written into the project.
+        assert_eq!(tree(root), before, "{engine:?} modified the project directory");
+    }
+}
+
 #[test]
 fn biblatex_projects_run_biber() {
     for engine in ENGINES {
