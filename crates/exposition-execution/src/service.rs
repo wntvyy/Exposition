@@ -19,7 +19,7 @@ use crate::credentials::Redactor;
 use crate::docker::{self, DockerImage, DockerListError};
 use crate::env::{EnvContext, Environment, HostEnv, build_container_environment, build_environment};
 use crate::log::{DEFAULT_LOG_LIMIT, OutputPage, RingLog, StreamCapture, page};
-use crate::paths::{PathError, RootKind, Roots, canonical_directory, canonicalize};
+use crate::paths::{PathError, RootKind, Roots, canonical_directory, canonicalize, is_within};
 use crate::process::{Containment, outcome_from_status, spawn_contained};
 use crate::settings::{
     ExecutionSettings, ExecutionSettingsChange, ExecutionSettingsState, SettingsError, SettingsStore,
@@ -474,6 +474,7 @@ impl ExecutionService {
                         // Same gate as job launch, so an accepted override is runnable.
                         validate_executable(&path.display().to_string())
                             .map_err(|refusal| SettingsError::InvalidToolPath(refusal.message))?;
+                        self.check_override_location(&path)?;
                         self.update_settings(|s| {
                             s.tool_paths.insert(id, path.display().to_string());
                         })
@@ -487,6 +488,31 @@ impl ExecutionService {
             }
         }
         Ok(self.settings_state())
+    }
+
+    /// Tool probes run without workspace trust, so a tool location may not be
+    /// project content (an open workspace) or job output (the execution data
+    /// directory): either would let files Exposition did not install choose
+    /// what runs.
+    fn check_override_location(&self, path: &Path) -> Result<(), SettingsError> {
+        let resolved = canonicalize(path).ok().or_else(|| {
+            let parent = canonicalize(path.parent()?).ok()?;
+            Some(parent.join(path.file_name()?))
+        });
+        let Some(resolved) = resolved else { return Ok(()) };
+        let shown = path.display();
+        if let Some(root) = self.inner.roots.locked().workspace_roots().find(|r| is_within(&resolved, r)) {
+            return Err(SettingsError::InvalidToolPath(format!(
+                "{shown} is inside the open project {}. Project files never choose which programs Exposition runs; use an installed copy of the tool.",
+                root.display()
+            )));
+        }
+        if is_within(&resolved, &self.inner.exec_dir) {
+            return Err(SettingsError::InvalidToolPath(format!(
+                "{shown} is inside Exposition's execution data folder (job output); use an installed copy of the tool."
+            )));
+        }
+        Ok(())
     }
 
     /// Images present locally, for choosing the restricted-execution image.

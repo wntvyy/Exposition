@@ -66,8 +66,12 @@ export function AboutSection() {
         <table className="exp-settings__table">
           <thead>
             <tr>
-              <th scope="col">Capability</th>
-              <th scope="col">Status</th>
+              <th scope="col" className="exp-settings__col-name">
+                Capability
+              </th>
+              <th scope="col" className="exp-settings__col-fit">
+                Status
+              </th>
               <th scope="col">Details</th>
             </tr>
           </thead>

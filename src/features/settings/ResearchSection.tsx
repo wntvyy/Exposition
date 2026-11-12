@@ -52,8 +52,12 @@ export function ResearchSection() {
             <table className="exp-settings__table" data-testid="research-environments" aria-busy={loading}>
               <thead>
                 <tr>
-                  <th scope="col">Environment</th>
-                  <th scope="col">Status</th>
+                  <th scope="col" className="exp-settings__col-name">
+                    Environment
+                  </th>
+                  <th scope="col" className="exp-settings__col-fit">
+                    Status
+                  </th>
                   <th scope="col">Executable and kernel</th>
                 </tr>
               </thead>

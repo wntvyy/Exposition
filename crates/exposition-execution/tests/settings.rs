@@ -134,6 +134,32 @@ async fn tool_override_invalidates_cached_discovery() {
     assert!(git.version.as_deref().is_some_and(|v| v.contains("4.12.0")), "{git:?}");
 }
 
+/// Probes run without trust, so a tool location may not be project content
+/// (even in a trusted project: trust can be revoked, the override would stay)
+/// or job output.
+#[test]
+fn tool_overrides_may_not_point_into_projects_or_job_output() {
+    let f = fixture_with(ExecutionSettings::default(), true);
+    let name = if cfg!(windows) { "python.exe" } else { "python" };
+    let in_project = f.workspace.join("tools").join(name);
+    std::fs::create_dir_all(in_project.parent().unwrap()).unwrap();
+    std::fs::write(&in_project, "x").unwrap();
+    let error =
+        f.service.apply_settings_change(tool_path("python", Some(&in_project.display().to_string()))).unwrap_err();
+    assert!(error.to_string().contains("inside the open project"), "{error}");
+
+    let job_output = f.service.job_dir(&exposition_core::job::JobId("job-x".into())).join("out").join(name);
+    std::fs::create_dir_all(job_output.parent().unwrap()).unwrap();
+    std::fs::write(&job_output, "x").unwrap();
+    let error =
+        f.service.apply_settings_change(tool_path("python", Some(&job_output.display().to_string()))).unwrap_err();
+    assert!(error.to_string().contains("execution data folder"), "{error}");
+    assert!(f.service.settings().tool_paths.is_empty());
+
+    // An installed copy outside projects and job output is fine.
+    assert!(f.service.apply_settings_change(tool_path("python", Some(&testproc()))).is_ok());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn docker_listing_reports_a_missing_client() {
     let tmp = tempfile::tempdir().unwrap();

@@ -180,7 +180,9 @@ function runtimeCapability(language: RuntimeLanguage, environments: EnvironmentR
       id,
       label,
       state: "available",
-      detail: usable.map((r) => [r.displayName, r.version].filter(Boolean).join(" ")).join("; "),
+      detail: usable
+        .map((r) => (r.version && !r.displayName.includes(r.version) ? `${r.displayName} ${r.version}` : r.displayName))
+        .join("; "),
     };
   }
   const first = runtimes[0]?.availability;

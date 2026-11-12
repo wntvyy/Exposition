@@ -332,6 +332,16 @@
   white-space: nowrap;
 }
 
+.exp-settings__table .exp-settings__col-name {
+  width: 28%;
+}
+
+/* Shrink to content (status pills, action buttons). */
+.exp-settings__table .exp-settings__col-fit {
+  width: 1%;
+  white-space: nowrap;
+}
+
 .exp-settings__actions {
   white-space: nowrap;
   text-align: right;

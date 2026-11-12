@@ -25,7 +25,8 @@ function DockerGroup() {
   const imagesLoading = useSettings((s) => s.imagesLoading);
   const saving = useSettings((s) => s.savingImage);
   useEffect(() => {
-    void loadImages();
+    // Listed once per session; "Reload images" re-lists after `docker pull`.
+    if (useSettings.getState().images === null) void loadImages();
   }, []);
   if (!execution) return null;
   const docker = dockerAvailability(toolchains);
@@ -229,10 +230,14 @@ function ToolsGroup() {
       <table className="exp-settings__table" aria-busy={loading}>
         <thead>
           <tr>
-            <th scope="col">Tool</th>
-            <th scope="col">Status</th>
+            <th scope="col" className="exp-settings__col-name">
+              Tool
+            </th>
+            <th scope="col" className="exp-settings__col-fit">
+              Status
+            </th>
             <th scope="col">Location</th>
-            <th scope="col">
+            <th scope="col" className="exp-settings__col-fit">
               <span className="exp-settings__sr-only">Actions</span>
             </th>
           </tr>
