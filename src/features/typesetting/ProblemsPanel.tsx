@@ -5,10 +5,18 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CircleCheck, CircleX, Info } from "lucide-react";
 
 import { useProblems } from "../../app/problems";
+import { registry } from "../../app/registry";
 import type { Diagnostic } from "../../bindings/Diagnostic";
 import { commands } from "../../lib/ipc";
-import { EmptyState } from "../../ui/components";
-import { requestReveal, useTypesetting } from "./store";
+import { Button, EmptyState } from "../../ui/components";
+import {
+  mentionsToolSettings,
+  requestReveal,
+  statusProblem,
+  TOOL_SETTINGS_COMMAND,
+  TOOL_SETTINGS_LABEL,
+  useTypesetting,
+} from "./store";
 import "./typesetting.css";
 
 /** 1-based line/column of a UTF-16 offset. */
@@ -32,6 +40,8 @@ interface ProblemRow {
   /** Source label (e.g. "Lean"); build diagnostics have none. */
   label: string | null;
   reveal: () => void;
+  /** Offer to open the tool locations in Settings. */
+  toolSettings: boolean;
 }
 
 function revealBuildDiagnostic(diagnostic: Diagnostic) {
@@ -43,17 +53,31 @@ export function ProblemsPanel() {
   const entries = useTypesetting((s) => s.entries);
   const sources = useProblems((s) => s.sources);
   const rows = useMemo<ProblemRow[]>(() => {
+    // A build that could not run (missing compiler, failed to start) reports
+    // it in its status, not as a diagnostic: list it as a problem too.
+    const status = Object.values(entries).flatMap((e): ProblemRow[] => {
+      const problem = statusProblem(e.latest);
+      if (!problem) return [];
+      const diagnostic: Diagnostic = { severity: "error", message: problem.message, location: null, hints: problem.hints };
+      return [{ diagnostic, label: null, reveal: () => {}, toolSettings: problem.toolSettings }];
+    });
     const build = Object.values(entries)
       .flatMap((e) => e.latest?.result.diagnostics ?? [])
-      .map((diagnostic) => ({ diagnostic, label: null, reveal: () => revealBuildDiagnostic(diagnostic) }));
+      .map((diagnostic) => ({
+        diagnostic,
+        label: null,
+        reveal: () => revealBuildDiagnostic(diagnostic),
+        toolSettings: mentionsToolSettings(diagnostic.hints),
+      }));
     const published = Object.values(sources).flatMap((source) =>
       source.diagnostics.map((diagnostic) => ({
         diagnostic,
         label: source.label,
         reveal: () => source.reveal(diagnostic),
+        toolSettings: false,
       })),
     );
-    return [...build, ...published];
+    return [...status, ...build, ...published];
   }, [entries, sources]);
   const diagnostics = useMemo(() => rows.map((r) => r.diagnostic), [rows]);
   const key = JSON.stringify(diagnostics);
@@ -97,7 +121,7 @@ export function ProblemsPanel() {
   }
   return (
     <ul className="problems" data-testid="problems-panel" aria-label="Problems">
-      {rows.map(({ diagnostic, label, reveal }, i) => {
+      {rows.map(({ diagnostic, label, reveal, toolSettings }, i) => {
         const Icon = ICONS[diagnostic.severity];
         const loc = diagnostic.location;
         return (
@@ -122,6 +146,18 @@ export function ProblemsPanel() {
                   <li key={j}>{h}</li>
                 ))}
               </ul>
+            )}
+            {toolSettings && (
+              <div className="problems__actions">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  data-testid="problem-tool-settings"
+                  onPress={() => void registry.runCommand(TOOL_SETTINGS_COMMAND)}
+                >
+                  {TOOL_SETTINGS_LABEL}
+                </Button>
+              </div>
             )}
           </li>
         );

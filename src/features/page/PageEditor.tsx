@@ -9,7 +9,7 @@ import type { CSSProperties, KeyboardEvent, MouseEvent as ReactMouseEvent } from
 import { FileDown, FileWarning, RefreshCw, ZoomIn, ZoomOut } from "lucide-react";
 
 import { notify } from "../../app/notifications";
-import type { EditorProps } from "../../app/registry";
+import { registry, type EditorProps } from "../../app/registry";
 import type { Motion } from "../../bindings/Motion";
 import type { PageRect } from "../../bindings/PageRect";
 import { commands, errorMessage } from "../../lib/ipc";
@@ -23,7 +23,14 @@ import {
   Toolbar,
   UnavailableState,
 } from "../../ui/components";
-import { summarize, useTypesetting } from "../typesetting/store";
+import {
+  mentionsToolSettings,
+  statusProblem,
+  summarize,
+  TOOL_SETTINGS_COMMAND,
+  TOOL_SETTINGS_LABEL,
+  useTypesetting,
+} from "../typesetting/store";
 import { PageSession } from "./session";
 import "./page.css";
 
@@ -188,6 +195,16 @@ export function PageEditor({ resource, active }: EditorProps) {
     ? { left: caret.x * scale, top: caret.top * scale, height: Math.max(caret.bottom - caret.top, 4) * scale }
     : undefined;
   const errors = `${model.errorCount} error${model.errorCount === 1 ? "" : "s"}`;
+  // A build that could not run (missing or wrong compiler) says why itself.
+  const problem = model.failed ? statusProblem(buildState?.latest) : null;
+  // ... or a build diagnostic points at the tool locations (a wrong compiler path).
+  const toolDiagnostic =
+    model.failed && !!buildState?.latest?.result.diagnostics.some((d) => mentionsToolSettings(d.hints));
+  const toolSettings = problem?.toolSettings || toolDiagnostic ? (
+    <Button size="sm" variant="secondary" onPress={() => void registry.runCommand(TOOL_SETTINGS_COMMAND)}>
+      {TOOL_SETTINGS_LABEL}
+    </Button>
+  ) : null;
 
   if (model.phase === "missing" || model.phase === "error") {
     return (
@@ -202,7 +219,12 @@ export function PageEditor({ resource, active }: EditorProps) {
     status === "building" ? (
       <StatusPill status="running" label={`Building ${resource.title}`} size="sm" />
     ) : model.failed ? (
-      <StatusPill status="failed" label="Build failed" detail={errors} size="sm" />
+      <StatusPill
+        status={problem ? "unavailable" : "failed"}
+        label={problem ? "Not built" : "Build failed"}
+        detail={problem ? undefined : errors}
+        size="sm"
+      />
     ) : model.buildId ? (
       <StatusPill
         status="succeeded"
@@ -251,13 +273,17 @@ export function PageEditor({ resource, active }: EditorProps) {
           tone="stale"
           title="Showing pages from an earlier revision"
           actions={
-            <Button variant="ghost" size="sm" icon={RefreshCw} onPress={() => void commands.typesettingBuild(path)}>
-              Rebuild
-            </Button>
+            <>
+              {toolSettings}
+              <Button variant="ghost" size="sm" icon={RefreshCw} onPress={() => void commands.typesettingBuild(path)}>
+                Rebuild
+              </Button>
+            </>
           }
         >
-          The document has {errors} (see Problems). Placing the caret and moving on these pages is disabled until it
-          builds; typing and deleting continue at the caret.
+          {problem ? `${problem.message} ${problem.hints.join(" ")}` : `The document has ${errors} (see Problems).`}{" "}
+          Placing the caret and moving on these pages is disabled until it builds; typing and deleting continue at the
+          caret.
         </Banner>
       )}
 
@@ -317,10 +343,17 @@ export function PageEditor({ resource, active }: EditorProps) {
                 </Button>
               }
             />
+          ) : model.failed && problem ? (
+            <UnavailableState
+              title={problem.message}
+              description={`${problem.hints.join(" ")} Pages appear after the first successful build.`}
+              actions={toolSettings ?? undefined}
+            />
           ) : model.failed ? (
             <ErrorState
               title="The document did not build"
               description={`${errors} — see Problems. Pages appear after the first successful build.`}
+              actions={toolSettings ?? undefined}
             />
           ) : (
             <LoadingState title="Building pages…" />
