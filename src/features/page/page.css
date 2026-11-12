@@ -61,13 +61,17 @@
   padding: var(--space-6);
   display: flex;
   flex-direction: column;
-  align-items: center;
+  /* Pages center with auto margins, not align-items: center. A centered flex
+     item wider than the scroller overflows on both sides, and the left overflow
+     cannot be scrolled to; auto margins collapse to zero instead. */
+  align-items: flex-start;
   gap: var(--space-6);
 }
 
 .page-editor__page {
   position: relative;
   flex: none;
+  margin-inline: auto;
   background: var(--color-surface);
   box-shadow: var(--shadow-2);
   cursor: text;

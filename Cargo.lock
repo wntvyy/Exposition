@@ -1237,8 +1237,13 @@ name = "exposition-agents"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "exposition-attach",
  "exposition-core",
  "exposition-execution",
+ "exposition-lean",
+ "exposition-research",
+ "exposition-tex",
+ "exposition-typesetting",
  "exposition-workspace",
  "futures-util",
  "keyring",
