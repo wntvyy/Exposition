@@ -73,6 +73,16 @@ const COMMANDS: &[&str] = &[
     "research_run_output",
     "research_artifact",
     "artifact_attach",
+    "typesetting_watch",
+    "typesetting_unwatch",
+    "typesetting_build",
+    "page_image",
+    "typesetting_export_pdf",
+    "page_hit_test",
+    "page_caret",
+    "page_navigate",
+    "page_selection",
+    "page_edit",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

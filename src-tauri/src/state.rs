@@ -9,8 +9,11 @@ use exposition_execution::{ExecutionConfig, ExecutionService};
 use exposition_research::launcher::ExecutionLauncher;
 use exposition_research::{ResearchConfig, ResearchService, ResolvedSource, SourceReader};
 use exposition_tex::{TexService, TexServiceConfig};
+use exposition_typesetting::{Fonts, TypesettingService};
 use exposition_workspace::{DocumentService, WorkspaceService};
 use tauri::{AppHandle, Manager};
+
+use crate::typesetting::TypesettingRuntime;
 
 /// Application-wide services. One instance is managed by Tauri.
 pub struct AppState {
@@ -23,6 +26,8 @@ pub struct AppState {
     pub research: Arc<ResearchService>,
     /// LaTeX/LuaLaTeX builds (through `execution`) and their pages.
     pub tex: TexService,
+    /// Typesetting builds, page maps, and rendering (Typst).
+    pub typesetting: Arc<TypesettingRuntime>,
     /// Application data directory (settings, recovery, session metadata).
     pub data_dir: PathBuf,
     /// Agent tasks (provider, task loop, review); task history in `agents.sqlite3`.
@@ -48,6 +53,12 @@ impl AppState {
             tauri::async_runtime::handle().inner().clone(),
             TexServiceConfig::new(&data_dir),
         )?;
+        let typesetting =
+            TypesettingRuntime::new(Arc::new(TypesettingService::new(Arc::clone(&workspace), Fonts::with_system)));
+        // Discover fonts in the background so the first build does not wait for it.
+        std::thread::spawn(|| {
+            Fonts::with_system();
+        });
         let agents = AgentService::new(AgentConfig {
             database: Some(data_dir.join("agents.sqlite3")),
             documents: Arc::clone(&documents),
@@ -69,7 +80,7 @@ impl AppState {
         );
         research_config.source_reader = Some(Arc::new(WorkspaceSources(Arc::clone(&workspace))));
         let research = Arc::new(ResearchService::new(research_config));
-        Ok(Self { documents, workspace, execution, research, tex, data_dir, agents })
+        Ok(Self { documents, workspace, execution, research, tex, typesetting, data_dir, agents })
     }
 }
 

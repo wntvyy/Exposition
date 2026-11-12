@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-page-selection"
+description = "Enables the page_selection command without any pre-configured scope."
+commands.allow = ["page_selection"]
+
+[[permission]]
+identifier = "deny-page-selection"
+description = "Denies the page_selection command without any pre-configured scope."
+commands.deny = ["page_selection"]

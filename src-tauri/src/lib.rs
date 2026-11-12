@@ -7,9 +7,11 @@ mod app;
 mod documents;
 mod error;
 mod execution;
+mod page;
 mod research;
 mod state;
 mod tex;
+mod typesetting;
 mod workspace;
 
 use tauri::{Manager, RunEvent};
@@ -33,6 +35,7 @@ pub fn run() {
             #[cfg(debug_assertions)]
             agents::add_dev_capability(app.handle())?;
             research::forward_events(app.handle().clone());
+            app.state::<AppState>().typesetting.start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -109,6 +112,16 @@ pub fn run() {
             research::research_run_output,
             research::research_artifact,
             research::artifact_attach,
+            typesetting::typesetting_watch,
+            typesetting::typesetting_unwatch,
+            typesetting::typesetting_build,
+            page::page_image,
+            typesetting::typesetting_export_pdf,
+            page::page_hit_test,
+            page::page_caret,
+            page::page_navigate,
+            page::page_selection,
+            page::page_edit,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

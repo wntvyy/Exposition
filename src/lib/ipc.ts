@@ -4,6 +4,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import type { Affinity } from "../bindings/Affinity";
 import type { AgentEvent } from "../bindings/AgentEvent";
 import type { AppInfo } from "../bindings/AppInfo";
 import type { AppSettings } from "../bindings/AppSettings";
@@ -13,6 +14,9 @@ import type { AttachArtifactRequest } from "../bindings/AttachArtifactRequest";
 import type { AttachArtifactResult } from "../bindings/AttachArtifactResult";
 import type { BuildId } from "../bindings/BuildId";
 import type { BuildTarget } from "../bindings/BuildTarget";
+import type { BuildEvent } from "../bindings/BuildEvent";
+import type { BuildStatusEvent } from "../bindings/BuildStatusEvent";
+import type { CaretGeometry } from "../bindings/CaretGeometry";
 import type { CommandError } from "../bindings/CommandError";
 import type { CreateTaskRequest } from "../bindings/CreateTaskRequest";
 import type { DocumentChanged } from "../bindings/DocumentChanged";
@@ -24,12 +28,18 @@ import type { DocumentState } from "../bindings/DocumentState";
 import type { EditOrigin } from "../bindings/EditOrigin";
 import type { EnvironmentReport } from "../bindings/EnvironmentReport";
 import type { ExecuteRequest } from "../bindings/ExecuteRequest";
+import type { ExportArtifact } from "../bindings/ExportArtifact";
 import type { FileEntry } from "../bindings/FileEntry";
 import type { JobEvent } from "../bindings/JobEvent";
 import type { JobId } from "../bindings/JobId";
 import type { JobSummary } from "../bindings/JobSummary";
 import type { LineEnding } from "../bindings/LineEnding";
+import type { Motion } from "../bindings/Motion";
+import type { NavigationResult } from "../bindings/NavigationResult";
 import type { OutputPage } from "../bindings/OutputPage";
+import type { PageEditOutcome } from "../bindings/PageEditOutcome";
+import type { PageEditRequest } from "../bindings/PageEditRequest";
+import type { PageHit } from "../bindings/PageHit";
 import type { ProjectSettings } from "../bindings/ProjectSettings";
 import type { ProjectSettingsState } from "../bindings/ProjectSettingsState";
 import type { RecentProject } from "../bindings/RecentProject";
@@ -47,6 +57,7 @@ import type { TexEvent } from "../bindings/TexEvent";
 import type { TexPageMapping } from "../bindings/TexPageMapping";
 import type { TexTargetRef } from "../bindings/TexTargetRef";
 import type { TexTargetStatus } from "../bindings/TexTargetStatus";
+import type { SelectionGeometry } from "../bindings/SelectionGeometry";
 import type { ToolchainInfo } from "../bindings/ToolchainInfo";
 import type { FileDiff } from "../bindings/FileDiff";
 import type { ProviderSettings } from "../bindings/ProviderSettings";
@@ -175,6 +186,26 @@ export const commands = {
     invoke<ArrayBuffer>("research_artifact", { runId, artifactId }),
   /** Format-owned insert/update of a figure or table in an open document. */
   artifactAttach: (request: AttachArtifactRequest) => invoke<AttachArtifactResult>("artifact_attach", { request }),
+
+  // Typesetting (builds, rendered pages, export).
+  typesettingWatch: (entry: string) => invoke<BuildEvent | null>("typesetting_watch", { entry }),
+  typesettingUnwatch: (entry: string) => invoke<void>("typesetting_unwatch", { entry }),
+  typesettingBuild: (entry: string) => invoke<BuildEvent>("typesetting_build", { entry }),
+  typesettingExportPdf: (build: string, destination: string | null = null) =>
+    invoke<ExportArtifact>("typesetting_export_pdf", { build, destination }),
+
+  // Exact-page editing (offsets are UTF-16 in the named build's snapshot).
+  pageHitTest: (build: string, page: number, x: number, y: number) =>
+    invoke<PageHit>("page_hit_test", { build, page, x, y }),
+  pageCaret: (build: string, path: string, offset: number, affinity: Affinity) =>
+    invoke<CaretGeometry | null>("page_caret", { build, path, offset, affinity }),
+  pageNavigate: (build: string, path: string, offset: number, affinity: Affinity, motion: Motion, goalX: number | null) =>
+    invoke<NavigationResult | null>("page_navigate", { build, path, offset, affinity, motion, goalX }),
+  pageSelection: (build: string, path: string, start: number, end: number) =>
+    invoke<SelectionGeometry>("page_selection", { build, path, start, end }),
+  pageEdit: (request: PageEditRequest) => invoke<PageEditOutcome>("page_edit", { request }),
+  /** A rendered page image (SVG or PNG bytes) by its `renderRef`. */
+  pageImage: (renderRef: string) => invoke<ArrayBuffer>("page_image", { renderRef }),
 };
 
 export const events = {
@@ -206,6 +237,14 @@ export const events = {
     listen<ResearchEvent>("research:event", (e) => handler(e.payload)),
   /** The frontend fell behind; re-read sessions and runs. */
   researchResync: (handler: () => void): Promise<UnlistenFn> => listen("research:resync", () => handler()),
+
+
+  /** A finished build of a watched typesetting entry. */
+  typesettingBuild: (handler: (event: BuildEvent) => void): Promise<UnlistenFn> =>
+    listen<BuildEvent>("typesetting:build", (e) => handler(e.payload)),
+  /** Build activity (queued/building/idle) of a watched entry. */
+  typesettingStatus: (handler: (event: BuildStatusEvent) => void): Promise<UnlistenFn> =>
+    listen<BuildStatusEvent>("typesetting:status", (e) => handler(e.payload)),
 };
 
 export function isCommandError(value: unknown): value is CommandError {

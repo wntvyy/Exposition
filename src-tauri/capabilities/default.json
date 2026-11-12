@@ -74,6 +74,16 @@
     "allow-research-run",
     "allow-research-run-output",
     "allow-research-artifact",
-    "allow-artifact-attach"
+    "allow-artifact-attach",
+    "allow-typesetting-watch",
+    "allow-typesetting-unwatch",
+    "allow-typesetting-build",
+    "allow-page-image",
+    "allow-typesetting-export-pdf",
+    "allow-page-hit-test",
+    "allow-page-caret",
+    "allow-page-navigate",
+    "allow-page-selection",
+    "allow-page-edit"
   ]
 }

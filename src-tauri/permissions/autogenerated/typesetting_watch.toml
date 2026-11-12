@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-typesetting-watch"
+description = "Enables the typesetting_watch command without any pre-configured scope."
+commands.allow = ["typesetting_watch"]
+
+[[permission]]
+identifier = "deny-typesetting-watch"
+description = "Denies the typesetting_watch command without any pre-configured scope."
+commands.deny = ["typesetting_watch"]
