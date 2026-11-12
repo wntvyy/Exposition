@@ -54,6 +54,7 @@ function executionState(image: string | null, toolPaths: Record<string, string> 
       maxConcurrentJobs: null,
     },
     overridableTools: ["python", "docker"],
+    warning: null,
   };
 }
 

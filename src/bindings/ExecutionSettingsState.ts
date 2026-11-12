@@ -9,4 +9,10 @@ export type ExecutionSettingsState = { settings: ExecutionSettings,
  * Tool ids whose location can be overridden (kernel components follow
  * their interpreter and are not listed).
  */
-overridableTools: Array<string>, };
+overridableTools: Array<string>, 
+/**
+ * The settings file was invalid when the application started: what was
+ * wrong, that defaults replace the invalid values, and where the
+ * original file was kept.
+ */
+warning: string | null, };

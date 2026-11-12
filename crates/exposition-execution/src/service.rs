@@ -530,11 +530,13 @@ impl ExecutionService {
         self.inner.settings.get()
     }
 
-    /// Settings plus the tool ids whose location may be overridden.
+    /// Settings plus the tool ids whose location may be overridden, and why
+    /// the settings file was set aside at startup, if it was.
     pub fn settings_state(&self) -> ExecutionSettingsState {
         ExecutionSettingsState {
             settings: self.settings(),
             overridable_tools: TOOLS.iter().filter(|t| t.component_of.is_none()).map(|t| t.id.to_owned()).collect(),
+            warning: self.inner.settings.warning(),
         }
     }
 

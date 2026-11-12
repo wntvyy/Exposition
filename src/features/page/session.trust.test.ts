@@ -88,7 +88,9 @@ vi.mock("../../lib/ipc", () => ({
   isCommandError: () => false,
   newId: (prefix: string) => `${prefix}-1`,
 }));
-vi.mock("../editor", () => ({ openDocument: async () => ({ id: "doc-1" }) }));
+vi.mock("../editor", () => ({
+  openDocument: async () => ({ id: "doc-1", editReason: null, subscribe: () => () => {} }),
+}));
 const prompt = vi.hoisted(() => ({ confirm: vi.fn(async () => "trust") }));
 vi.mock("../../ui/components", () => ({ confirm: prompt.confirm }));
 vi.mock("../../app/notifications", () => ({ notify: vi.fn(), dismiss: vi.fn() }));
