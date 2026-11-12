@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runCommand } from "../palette.mjs";
-import { editorLocator, invoke, openFromTree, waitFor, waitForText } from "../workspace-helpers.mjs";
+import { editorLocator, invoke, invokeError, openFromTree, waitFor, waitForText } from "../workspace-helpers.mjs";
 
 const WIDE = { width: 1440, height: 900 };
 
@@ -449,6 +449,13 @@ export default async function graphCanvas({ launchApp, artifactsDir, assert, fix
     assert.ok(await page.getByTestId("graph-proof").and(page.locator(`[data-entity-id="${ids.prf}"]`)).count(), "the proof targeting the theorem is listed");
     assert.match(await page.getByTestId("graph-formal-section").innerText(), /No formal evidence/);
     assert.match(await page.getByTestId("graph-formal-deps-unavailable").innerText(), /Formal dependency edges unavailable/);
+    // Associating a Lean declaration needs a formal declaration entity (from a Lean audit; see graph-lean-association).
+    assert.equal(await page.getByTestId("graph-associate-button").isDisabled(), true, "no declaration to associate yet");
+    assert.match(await page.getByTestId("graph-associate-unavailable").innerText(), /No formal declarations/);
+    const notDeclaration = await invokeError(page, "lean_associate_declaration", {
+      request: { declaration: { kind: "entity", entity: ids.lem }, target: ids.thm, note: null },
+    });
+    assert.equal(notDeclaration.error?.code, "lean.notDeclaration", `only a formal declaration can formalize (${JSON.stringify(notDeclaration)})`);
     await shot(page, "graph-math-verification-light");
 
     // --- 5c. Editor dependency inspector at a Monaco caret ------------------------------
@@ -522,7 +529,7 @@ export default async function graphCanvas({ launchApp, artifactsDir, assert, fix
     const target = join(devHome, "ui-reference", "graph");
     await mkdir(target, { recursive: true });
     const names = shots.map((path) => path.split(/[\\/]/).pop());
-    for (const stale of (await readdir(target)).filter((f) => f.endsWith(".png") && !names.includes(f))) await rm(join(target, stale));
+    for (const stale of (await readdir(target)).filter((f) => f.endsWith(".png") && f.startsWith("graph-") && !f.startsWith("graph-lean-") && !names.includes(f))) await rm(join(target, stale));
     for (const [i, path] of shots.entries()) await copyFile(path, join(target, names[i]));
     console.log(`copied ${shots.length} screenshots to ${target}`);
   }
