@@ -59,6 +59,23 @@ function killTree(pid) {
   }
 }
 
+/**
+ * Simulate a crash: terminate the app process immediately (no close handlers,
+ * no saves), then best-effort clean up any surviving descendants. `taskkill /T`
+ * alone is unreliable for this because it reports failure whenever a process in
+ * the tree exits on its own mid-walk (WebView2 children often do), even though
+ * the app itself was killed. Callers should still wait for the child's exit.
+ */
+export function hardKill(pid) {
+  if (!pid) return;
+  try {
+    process.kill(pid, "SIGKILL"); // TerminateProcess on Windows
+  } catch {
+    // already gone
+  }
+  killTree(pid);
+}
+
 const APP_ORIGINS = ["http://tauri.localhost", "https://tauri.localhost", "tauri://localhost"];
 
 /** Wait until the webview has navigated to the bundled app and React has rendered. */
