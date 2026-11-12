@@ -6,6 +6,7 @@ use exposition_agents::tools::execution::AppToolServices;
 use exposition_agents::{AgentConfig, AgentService};
 use exposition_core::path::WorkspacePath;
 use exposition_execution::{ExecutionConfig, ExecutionService};
+use exposition_lean::{LeanConfig, LeanService};
 use exposition_research::launcher::ExecutionLauncher;
 use exposition_research::{ResearchConfig, ResearchService, ResolvedSource, SourceReader};
 use exposition_tex::{TexService, TexServiceConfig};
@@ -22,6 +23,8 @@ pub struct AppState {
     pub workspace: Arc<WorkspaceService>,
     /// Supervised process execution (jobs, toolchains, trust).
     pub execution: ExecutionService,
+    /// Lean language servers and per-revision checking status.
+    pub lean: LeanService,
     /// Research sessions, runs, and provenance (M4). Launches through `execution`.
     pub research: Arc<ResearchService>,
     /// LaTeX/LuaLaTeX builds (through `execution`) and their pages.
@@ -47,6 +50,8 @@ impl AppState {
         }
         let execution = ExecutionService::with_config(execution_config)?;
         let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
+        let (lean, lean_actor) = LeanService::new(execution.clone(), Arc::clone(&workspace), LeanConfig::default());
+        tauri::async_runtime::spawn(lean_actor);
         let tex = TexService::new(
             execution.clone(),
             Arc::clone(&workspace),
@@ -72,8 +77,8 @@ impl AppState {
             workspace: Some(Arc::clone(&workspace)),
             credentials: Arc::new(KeyringStore::new(credential_namespace().as_deref())),
             // Agent tools call the same services people use: Typst and LaTeX
-            // builds, research sessions (agent-owned), and execution jobs. Lean
-            // checks report "not available" until the Lean service lands.
+            // builds, research sessions (agent-owned), and execution jobs. The
+            // Lean check tool is not wired to the Lean service yet.
             services: Arc::new(
                 AppToolServices::new(execution.clone())
                     .with_workspace(Arc::clone(&workspace))
@@ -86,7 +91,7 @@ impl AppState {
             anthropic_base_url: None,
             retry: None,
         })?;
-        Ok(Self { documents, workspace, execution, research, tex, typesetting, data_dir, agents })
+        Ok(Self { documents, workspace, execution, lean, research, tex, typesetting, data_dir, agents })
     }
 }
 

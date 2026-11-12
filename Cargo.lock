@@ -1216,6 +1216,7 @@ dependencies = [
  "exposition-attach",
  "exposition-core",
  "exposition-execution",
+ "exposition-lean",
  "exposition-page",
  "exposition-research",
  "exposition-tex",
@@ -1297,6 +1298,22 @@ dependencies = [
  "ts-rs",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "exposition-lean"
+version = "0.1.0"
+dependencies = [
+ "exposition-core",
+ "exposition-execution",
+ "exposition-workspace",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "ts-rs",
 ]
 
 [[package]]
