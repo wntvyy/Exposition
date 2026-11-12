@@ -18,9 +18,10 @@ import type { Motion } from "../../bindings/Motion";
 import type { NonEditableReason } from "../../bindings/NonEditableReason";
 import type { PageEditOp } from "../../bindings/PageEditOp";
 import type { PageRect } from "../../bindings/PageRect";
-import { commands, errorMessage, events, newId } from "../../lib/ipc";
+import { commands, errorMessage, events, isCommandError, newId } from "../../lib/ipc";
 import { openDocument } from "../editor";
 import { requestWorkspaceTrust } from "../jobs/trust";
+import { buildSequence, isOlder } from "./buildOrder";
 import { imageType } from "./images";
 import { RevisionHistory } from "./mapping";
 
@@ -90,6 +91,10 @@ function refusalText(refusal: EditRefusal): string {
 }
 
 
+function isUnknownBuild(error: unknown): boolean {
+  return isCommandError(error) && (error.code === "page.unknownBuild" || error.code === "page.noMap");
+}
+
 export class PageSession {
   private model: PageViewModel = {
     phase: "attaching",
@@ -125,8 +130,16 @@ export class PageSession {
   private readonly urls = new Map<string, string>();
   private geometrySeq = 0;
   private showSeq = 0;
+  /** Newest build this view has accepted for display (shown or loading). */
+  private newest: { revision: number; seq: number } | null = null;
+  /** Newest build result handled (successful or not). */
+  private newestEvent: { revision: number; seq: number } | null = null;
+  private recovering: Promise<boolean> | null = null;
   private unlisten: Array<() => void> = [];
   private disposed = false;
+  /** Bumped by attach/detach so a superseded attach stops (React remounts). */
+  private attachGen = 0;
+  private watching = false;
   private editAt: { revision: number; time: number } | null = null;
   private trustPrompted = false;
 
@@ -146,28 +159,50 @@ export class PageSession {
   }
 
   async attach(): Promise<void> {
+    const gen = ++this.attachGen;
+    this.disposed = false;
+    const current = () => gen === this.attachGen && !this.disposed;
     try {
-      this.unlisten.push(await events.documents((e) => this.onDocumentEvent(e)));
-      this.unlisten.push(await events.typesettingBuild((e) => void this.onBuild(e)));
+      const unDocuments = await events.documents((e) => this.onDocumentEvent(e));
+      const unBuilds = await events.typesettingBuild((e) => void this.onBuild(e));
+      if (!current()) {
+        unDocuments();
+        unBuilds();
+        return;
+      }
+      this.unlisten.push(unDocuments, unBuilds);
       // Open (or join) the document through the workspace, sharing the one
       // document handle with the source editor.
       const handle = await openDocument(this.path);
       const info = await commands.documentState(handle.id);
+      if (!current()) return;
       this.docId = handle.id;
       this.docRevision = info.info.revision;
       this.set({ phase: "ready", documentId: handle.id });
+      // Each view counts as one watcher of its entry (unwatched on detach).
       const latest = await commands.typesettingWatch(this.path);
+      if (!current()) {
+        void commands.typesettingUnwatch(this.path).catch(() => {});
+        return;
+      }
+      this.watching = true;
+      // A newer build may already have arrived as an event; onBuild keeps
+      // whichever is newest.
       if (latest) await this.onBuild(latest);
     } catch (error) {
-      this.set({ phase: "error", error: errorMessage(error) });
+      if (current()) this.set({ phase: "error", error: errorMessage(error) });
     }
   }
 
   detach(): void {
+    this.attachGen += 1;
     this.disposed = true;
     for (const un of this.unlisten) un();
     this.unlisten = [];
-    void commands.typesettingUnwatch(this.path).catch(() => {});
+    if (this.watching) {
+      this.watching = false;
+      void commands.typesettingUnwatch(this.path).catch(() => {});
+    }
     for (const url of this.urls.values()) URL.revokeObjectURL(url);
     this.urls.clear();
   }
@@ -175,7 +210,12 @@ export class PageSession {
   // ---- builds -------------------------------------------------------------
 
   async onBuild(event: BuildEvent): Promise<void> {
-    if (event.result.target.entry !== this.path || this.disposed) return;
+    if (event.result.target.entry !== this.path || this.disposed || !this.docId) return;
+    // Ignore results older than one already handled (events and the watch
+    // reply can arrive in either order).
+    const key = { revision: this.revisionOf(event.result) ?? 0, seq: buildSequence(event.result.id) };
+    if (this.newestEvent && isOlder(key, this.newestEvent)) return;
+    this.newestEvent = key;
     // LaTeX builds run the TeX engine and need a trusted workspace: offer the
     // shared trust prompt (once per view) instead of building.
     if (event.refusal?.code === "untrustedWorkspace" && event.refusal.workspaceRoot) {
@@ -212,7 +252,11 @@ export class PageSession {
 
   private async show(result: BuildResult): Promise<void> {
     const revision = this.revisionOf(result) ?? this.docRevision;
-    if (this.build && revision < this.buildRevision) return;
+    // Never regress to an older build: builds arrive both as events and from
+    // `typesetting_watch`, in either order, and display is asynchronous.
+    const key = { revision, seq: buildSequence(result.id) };
+    if (this.newest && isOlder(key, this.newest)) return;
+    this.newest = key;
     const seq = ++this.showSeq;
     const pages: PageImage[] = await Promise.all(
       result.pages.map(async (p) => ({
@@ -324,9 +368,29 @@ export class PageSession {
         selectionText,
         hasSelection: this.anchor !== null && this.anchor.offset !== caret.offset,
       });
-    } catch {
-      // The build was evicted; the next build event refreshes geometry.
+    } catch (error) {
+      // The shown build is no longer retained: fetch a current one.
+      if (isUnknownBuild(error)) void this.recover();
     }
+  }
+
+  /** The shown build was evicted: build now and show the result. */
+  private recover(): Promise<boolean> {
+    this.recovering ??= (async () => {
+      try {
+        const event = await commands.typesettingBuild(this.path);
+        if (this.disposed) return false;
+        this.newest = null;
+        this.newestEvent = null;
+        await this.onBuild(event);
+        return event.result.status.kind === "succeeded";
+      } catch {
+        return false;
+      } finally {
+        this.recovering = null;
+      }
+    })();
+    return this.recovering;
   }
 
   // ---- pointer ------------------------------------------------------------
@@ -342,10 +406,18 @@ export class PageSession {
     return true;
   }
 
-  async click(page: number, x: number, y: number, extend: boolean): Promise<void> {
+  async click(page: number, x: number, y: number, extend: boolean, retried = false): Promise<void> {
     const build = this.build;
     if (!build || this.staleRefusal()) return;
-    const hit = await commands.pageHitTest(build.id, page, x, y);
+    let hit;
+    try {
+      hit = await commands.pageHitTest(build.id, page, x, y);
+    } catch (error) {
+      // The shown build was evicted: rebuild, then place the caret once more.
+      if (isUnknownBuild(error) && !retried && (await this.recover())) return this.click(page, x, y, extend, true);
+      this.set({ message: { tone: "warning", text: errorMessage(error) } });
+      return;
+    }
     const message = hit.nonEditable ? { tone: "info" as const, text: NON_EDITABLE[hit.nonEditable] } : null;
     if (!hit.caret || hit.caret.path !== this.path) {
       this.set({
@@ -395,7 +467,13 @@ export class PageSession {
       const offset = this.toBuild(caret);
       if (offset === null) return;
       const vertical = motion === "up" || motion === "down";
-      const result = await commands.pageNavigate(build.id, this.path, offset, caret.affinity, motion, vertical ? this.goalX : null);
+      let result;
+      try {
+        result = await commands.pageNavigate(build.id, this.path, offset, caret.affinity, motion, vertical ? this.goalX : null);
+      } catch (error) {
+        if (isUnknownBuild(error)) void this.recover();
+        return;
+      }
       if (!result || result.caret.path !== this.path) return;
       const position = this.fromBuild(result.caret.offset, result.caret.affinity);
       if (!position) return;
