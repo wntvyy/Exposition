@@ -1157,6 +1157,7 @@ dependencies = [
  "typst-kit",
  "typst-layout",
  "typst-pdf",
+ "unicode-normalization",
  "unicode-segmentation",
 ]
 

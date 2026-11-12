@@ -650,7 +650,10 @@ impl<'s> Parser<'s> {
         &self.src[t.range.start + 1..t.range.end]
     }
 
-    fn unsupported(&mut self, range: Range<usize>, message: String) -> Node {
+    fn unsupported(&mut self, mut range: Range<usize>, message: String) -> Node {
+        // Trailing whitespace is not part of the construct.
+        let trimmed = self.src[range.clone()].trim_end().len();
+        range.end = range.start + trimmed;
         self.problems.push(MathProblem { range: range.clone(), message, marker: true });
         Node::Unsupported { range }
     }
@@ -1321,6 +1324,15 @@ fn split_trailing_points(items: Vec<Node>) -> Vec<Node> {
 
 // --------------------------------------------------------------- emitter --
 
+/// Whether `nodes` produce no Typst content (empty groups, no-ops).
+fn renders_nothing(nodes: &[Node]) -> bool {
+    nodes.iter().all(|n| match n {
+        Node::NoOp => true,
+        Node::Group { items, .. } => renders_nothing(items),
+        _ => false,
+    })
+}
+
 /// Location of an emitted equation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EmittedEquation {
@@ -1479,7 +1491,7 @@ impl MathEmitter<'_, '_> {
         let (saved_args, saved_space) = (self.in_args, self.need_space);
         self.in_args = true;
         self.need_space = false;
-        if nodes.iter().all(|n| matches!(n, Node::NoOp)) {
+        if renders_nothing(nodes) {
             // An empty argument still needs content.
             let owner = self.owner.clone();
             self.syntax("\"\"", &owner);

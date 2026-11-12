@@ -21,6 +21,7 @@ typst-layout.workspace = true
 typst-pdf.workspace = true
 typst-kit.workspace = true
 comemo.workspace = true
+unicode-normalization.workspace = true
 
 [lints]
 workspace = true

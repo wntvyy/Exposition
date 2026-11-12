@@ -310,6 +310,8 @@ fn normalize(tokens: impl IntoIterator<Item = Tok>) -> Vec<Tok> {
         match tok {
             Tok::Space => match out.last() {
                 Some(Tok::Space) | Some(Tok::Open(_, true)) | None => {}
+                // The text after a task box starts after its separating space.
+                Some(Tok::Atom(a)) if a.starts_with("task:") => {}
                 _ => out.push(Tok::Space),
             },
             Tok::Close(key, true) => {
@@ -341,8 +343,8 @@ fn collapse_math(tok: &Tok) -> Tok {
     }
 }
 
-/// Characters CommonMark lets a backslash escape and that can start syntax.
-const LEVEL1: &[char] = &['\\', '`', '*', '_', '~', '[', ']', '<', '>', '#', '|', '$', '&', '!'];
+/// Inline syntax openers, escaped everywhere at the second level.
+const LEVEL1: &[char] = &['*', '_', '~', '[', ']', '<', '>'];
 
 /// Escape `typed` (no newlines) for insertion into Markdown prose.
 fn escape_markdown(
@@ -377,8 +379,12 @@ fn escape_markdown(
             },
             1 => {
                 LEVEL1.contains(&c)
-                    || (at_start && matches!(c, '-' | '+' | '='))
-                    || (digits_only && matches!(c, '.' | ')'))
+                    || matches!(c, '\\' | '`' | '$')
+                    || (c == '|' && table)
+                    || (c == '&' && following.is_some_and(|f| f.is_ascii_alphanumeric() || f == '#'))
+                    || (c == '!' && following == Some('['))
+                    || (at_start && matches!(c, '#' | '-' | '+' | '='))
+                    || (digits_only && prev.is_some_and(|p| p.is_ascii_digit()) && matches!(c, '.' | ')'))
             }
             _ => c.is_ascii_punctuation(),
         };
@@ -541,7 +547,7 @@ impl<'a> Doc<'a> {
     /// Whether only whitespace and container markers precede `p` on its line.
     fn at_line_start(&self, p: usize) -> bool {
         let line = self.text[..p].rsplit(['\n', '\r']).next().unwrap_or("");
-        let rest = line.trim_start_matches(|c: char| c == ' ' || c == '\t' || c == '>');
+        let rest = line.trim_start_matches([' ', '\t', '>']);
         if rest.is_empty() {
             return true;
         }
@@ -1189,7 +1195,7 @@ impl<'a> Doc<'a> {
         if start < end {
             return Err(EditRefusal::WouldChangeStructure);
         }
-        let deletions = vec![end..start];
+        let gap = end..start;
         // Expected: everything except the Close/Open pair.
         let mut expected = Vec::new();
         for (i, t) in self.tokens.iter().enumerate() {
@@ -1197,7 +1203,7 @@ impl<'a> Doc<'a> {
                 expected.push(t.tok.clone());
             }
         }
-        match self.try_plan(end, &deletions, "", expected, false, EditMode::Markup, 0, &|_| true)? {
+        match self.try_plan(end, std::slice::from_ref(&gap), "", expected, false, EditMode::Markup, 0, &|_| true)? {
             Some(plan) => Ok(plan),
             None => Err(EditRefusal::WouldChangeStructure),
         }
