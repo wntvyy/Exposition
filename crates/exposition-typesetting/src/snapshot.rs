@@ -7,6 +7,10 @@
 //! compiling (imports, images). Each file is read at most once per snapshot
 //! and then stays fixed for the build. The snapshot identity hashes every file
 //! the compiler actually read together with the build configuration.
+//!
+//! A snapshot may carry a read filter (agent builds confined to a task's
+//! scope): a path the filter refuses reads as "access denied", whatever the
+//! file contains, so the compiler's diagnostics cannot carry its content.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,9 +29,15 @@ pub struct ReadError {
     pub message: String,
 }
 
-#[derive(Debug)]
+/// Decides whether a build may read a workspace path.
+pub type ReadFilter = Arc<dyn Fn(&WorkspacePath) -> bool + Send + Sync>;
+
+/// Code of the read error for a path outside the build's read filter.
+pub const OUTSIDE_SCOPE: &str = "path.outsideScope";
+
 pub struct BuildSnapshot {
     workspace: WorkspaceSnapshot,
+    filter: Option<ReadFilter>,
     /// Files read so far, in path order. Once read, a file never changes
     /// within this snapshot.
     read: Mutex<BTreeMap<WorkspacePath, Result<BuildInput, ReadError>>>,
@@ -46,7 +56,13 @@ impl BuildSnapshot {
     pub fn new(workspace: WorkspaceSnapshot) -> Self {
         let captured_at =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        Self { workspace, read: Mutex::new(BTreeMap::new()), captured_at }
+        Self { workspace, filter: None, read: Mutex::new(BTreeMap::new()), captured_at }
+    }
+
+    /// Confine every read of this snapshot to the paths `filter` allows.
+    pub fn with_filter(mut self, filter: ReadFilter) -> Self {
+        self.filter = Some(filter);
+        self
     }
 
     /// Canonical workspace root.
@@ -60,8 +76,15 @@ impl BuildSnapshot {
         if let Some(existing) = read.get(path) {
             return existing.clone();
         }
-        let input =
-            self.workspace.read(path).map_err(|e| ReadError { code: e.code.to_owned(), message: e.message.clone() });
+        let input = match &self.filter {
+            Some(filter) if !filter(path) => Err(ReadError {
+                code: OUTSIDE_SCOPE.to_owned(),
+                message: format!("{path} is outside the files this build may read."),
+            }),
+            _ => {
+                self.workspace.read(path).map_err(|e| ReadError { code: e.code.to_owned(), message: e.message.clone() })
+            }
+        };
         read.insert(path.clone(), input.clone());
         input
     }
@@ -109,6 +132,16 @@ impl BuildSnapshot {
             }
         }
         SnapshotId(hex(&hasher.finalize()[..16]))
+    }
+}
+
+impl std::fmt::Debug for BuildSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuildSnapshot")
+            .field("workspace", &self.workspace)
+            .field("filtered", &self.filter.is_some())
+            .field("captured_at", &self.captured_at)
+            .finish_non_exhaustive()
     }
 }
 

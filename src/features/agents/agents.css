@@ -250,6 +250,17 @@
   user-select: text;
 }
 
+/* The complete payload of an approval: taller than other code blocks, and
+   keyboard-scrollable (it is focusable). */
+.agents-approval__payload {
+  max-height: min(60vh, 560px);
+}
+
+.agents-approval__payload:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
 .agents-notice {
   margin: 0;
   padding: var(--space-1) var(--space-2);

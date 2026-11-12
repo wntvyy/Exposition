@@ -19,7 +19,7 @@ vi.mock("../../lib/ipc", () => ({
 const { budgetRows, statusLabel, toolStatusLabel, toolSummary } = await import("./format");
 const { buildScope, DEFAULT_BUDGETS } = await import("./TaskComposer");
 const { finishedNotification, initialAgentsState, mergeDetail, reduceEvent, useAgents } = await import("./store");
-const { TaskView } = await import("./TaskView");
+const { payloadSize, TaskView } = await import("./TaskView");
 
 function summary(overrides: Partial<TaskSummary> = {}): TaskSummary {
   return {
@@ -182,5 +182,19 @@ describe("task view", () => {
       fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     });
     expect(ipc.agentsApprovalResolve).toHaveBeenCalledWith("task-1", "approval-1", true);
+  });
+
+  it("shows the complete approval payload, however long, in a focusable scroll area", () => {
+    const code = `${"x = 1  # prelude\n".repeat(400)}import shutil  # TAIL`;
+    const detail = useAgents.getState().details["task-1"]!;
+    const approval = { ...detail.approvals[0]!, tool: "run_python", title: "Run Python code", detail: code };
+    useAgents.setState({ details: { "task-1": { ...detail, approvals: [approval] } } });
+    render(<TaskView id="task-1" />);
+    const payload = screen.getByTestId("agents-approval-payload");
+    expect(payload.textContent).toBe(code);
+    expect(payload.getAttribute("tabindex")).toBe("0");
+    expect(screen.getByLabelText("Complete content to approve: Run Python code")).toBe(payload);
+    expect(screen.getByTestId("agents-approval-size").textContent).toContain("401 lines");
+    expect(payloadSize("a\nb")).toBe("2 lines · 3 bytes");
   });
 });

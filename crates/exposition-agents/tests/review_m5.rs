@@ -198,7 +198,6 @@ fn tool(id: &str, name: &str, input: Value) -> Value {
 /// can read, an unattended agent scoped to ONE document puts a file from
 /// OUTSIDE the project into its tool result (sent to the model provider).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "R-m5 F1: LaTeX builds run TeX natively without approval in restricted/approve-each tasks; TeX reads files outside the project into the agent's tool result"]
 async fn r_m5_f1_latex_build_runs_natively_unattended_and_leaks_files_outside_the_project() {
     let mut a = app();
     if !matches!(a.execution.locate_tool("pdflatex"), Located::Found { .. }) {
@@ -273,7 +272,6 @@ async fn r_m5_f1_latex_build_runs_natively_unattended_and_leaks_files_outside_th
 /// message — the out-of-scope file's content — comes back in the build
 /// diagnostics and goes to the model provider.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "R-m5 F2: Typst build diagnostics return out-of-scope file content, even with metadata-only consent and execution disabled"]
 async fn r_m5_f2_typst_build_diagnostics_reveal_out_of_scope_content_despite_metadata_only_consent() {
     let mut a = app();
     let script = json!({"turns": [
@@ -345,7 +343,6 @@ impl ToolServices for RecordingServices {
 /// restricted backend, which mounts the WHOLE project at /workspace — so the
 /// code can print any project file back to the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "R-m5 F3: run_python (restricted, unattended) is not limited by task scope or metadata-only consent; the whole project is mounted"]
 async fn r_m5_f3_restricted_run_python_ignores_scope_and_metadata_only_consent() {
     let recording = Arc::new(RecordingServices { python: Mutex::new(Vec::new()) });
     let project = tempfile::tempdir().unwrap();
@@ -402,7 +399,6 @@ async fn r_m5_f3_restricted_run_python_ignores_scope_and_metadata_only_consent()
 /// Same as F3 on the real restricted backend (Docker, local image only; the
 /// test never pulls). Shows the file content actually reaching the result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "R-m5 F3 (real Docker): document-scoped metadata-only task prints an out-of-scope project file via run_python"]
 async fn r_m5_f3_real_docker_run_python_reads_out_of_scope_file() {
     const IMAGE: &str = "python:3.13-slim";
     let present = std::process::Command::new("docker")
@@ -446,7 +442,6 @@ async fn r_m5_f3_real_docker_run_python_reads_out_of_scope_file() {
 /// lexical path passes the scope check and the workspace resolves the link.
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "R-m5 F4: task scope is checked on the requested path spelling; a link inside the scope reads an out-of-scope file"]
 async fn r_m5_f4_link_inside_scope_reads_out_of_scope_file() {
     let mut a = app();
     let made = std::process::Command::new("cmd")
@@ -524,7 +519,6 @@ async fn r_m5_f5_revert_of_created_then_edited_file_is_refused() {
 /// approval. A create_file approval requested in project A, approved after
 /// the user opened project B, creates the file in project B.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "R-m5 F6: a create_file approved after switching projects writes into the newly opened project"]
 async fn r_m5_f6_create_approved_after_workspace_switch_writes_into_other_project() {
     let mut a = app();
     let other = tempfile::tempdir().unwrap();
@@ -634,7 +628,6 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
 /// (Authorization, Cookie) on a host change; the custom `x-api-key` header and
 /// the request body (document context) are replayed to the new host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "R-m5 F8: the provider client follows a 307 to another host and sends x-api-key and the request body there"]
 async fn r_m5_f8_api_key_is_sent_to_a_redirect_target_on_another_host() {
     const KEY: &str = "sk-ant-review-m5-fake-key-0123456789";
     let other = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -770,7 +763,6 @@ impl ToolServices for TrustedNativeServices {
 /// card the user approves from — truncates the code at 4000 bytes, so code
 /// after a long harmless prefix runs natively without ever being shown there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "R-m5 F10: native-execution approval shows a truncated payload; the hidden tail runs once approved"]
 async fn r_m5_f10_native_python_approval_hides_the_tail_of_the_code() {
     let services = Arc::new(TrustedNativeServices { python: Mutex::new(Vec::new()) });
     let project = tempfile::tempdir().unwrap();

@@ -1096,12 +1096,17 @@ impl Run<'_> {
             let env = self.env();
             exec::gate(&call, &env)
         };
-        let policy = match gate {
+        let authorization = match gate {
             Gate::Refused(output) => return Ok(output),
-            Gate::Allowed { policy } => policy,
-            Gate::NeedsApproval { title, detail, policy } => {
+            Gate::Allowed(authorization) => authorization,
+            Gate::NeedsApproval { title, detail, authorization } => {
                 match self.request_approval(tool_use_id, name, input, title, detail).await {
-                    ApprovalOutcome::Approved => policy,
+                    // The approval binds the call to exactly what was shown, in
+                    // the task's own project: checked again now.
+                    ApprovalOutcome::Approved => match exec::confirm(&call, &self.env(), authorization) {
+                        Ok(authorization) => authorization,
+                        Err(refusal) => return Ok(refusal),
+                    },
                     ApprovalOutcome::Declined => {
                         return Ok(ToolOutput::error("The user declined this action. Do not retry it unchanged."));
                     }
@@ -1130,7 +1135,7 @@ impl Run<'_> {
         // A tool that is still running when the task is canceled (or the time
         // budget ends) has its own token canceled and gets a short grace period
         // to stop its process and report; its outcome is recorded as it is.
-        let tool = exec::run(call, &env, &mut self.seen, tool_use_id, policy, cancel.clone());
+        let tool = exec::run(call, &env, &mut self.seen, tool_use_id, authorization, cancel.clone());
         tokio::pin!(tool);
         let interrupt = tokio::select! {
             biased;

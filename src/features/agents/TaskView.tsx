@@ -70,6 +70,13 @@ function OutcomeBanner({ status }: { status: TaskStatus }) {
   }
 }
 
+/** Size of an approval payload, so the user knows how much there is to review. */
+export function payloadSize(text: string): string {
+  const lines = text.split("\n").length;
+  const bytes = new TextEncoder().encode(text).length;
+  return `${lines.toLocaleString()} ${lines === 1 ? "line" : "lines"} · ${bytes.toLocaleString()} ${bytes === 1 ? "byte" : "bytes"}`;
+}
+
 function Approval({ approval }: { approval: ApprovalRequest }) {
   const [busy, setBusy] = useState(false);
   async function resolve(approved: boolean) {
@@ -80,9 +87,20 @@ function Approval({ approval }: { approval: ApprovalRequest }) {
   return (
     <section className="agents-approval agents-stack" aria-label={`Approval needed: ${approval.title}`} data-testid="agents-approval">
       <Banner tone="warning" title={approval.title}>
-        The agent is waiting for your decision. Nothing is applied until you approve.
+        The agent is waiting for your decision. Nothing is applied until you approve. Below is the complete content of
+        what will run or change; scroll to review all of it.
       </Banner>
-      <pre className="agents-pre">{approval.detail}</pre>
+      <p className="agents-small agents-muted" data-testid="agents-approval-size">
+        {payloadSize(approval.detail)} · complete, nothing omitted
+      </p>
+      <pre
+        className="agents-pre agents-approval__payload"
+        tabIndex={0}
+        aria-label={`Complete content to approve: ${approval.title}`}
+        data-testid="agents-approval-payload"
+      >
+        {approval.detail}
+      </pre>
       <div className="agents-row">
         <Button size="sm" variant="primary" icon={Check} isDisabled={busy} onPress={() => void resolve(true)} data-testid="agents-approve">
           Approve

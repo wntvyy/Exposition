@@ -11,6 +11,7 @@
 
 pub mod exec;
 pub mod execution;
+pub mod scope;
 pub mod services;
 
 use serde::Deserialize;
@@ -110,7 +111,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: BUILD_DOCUMENT,
             description: "Typeset a document (Typst .typ or LaTeX .tex) from the current editor state, unsaved \
                 changes included, and report the real status, diagnostics with locations, and page count. Use it to \
-                check that your changes build; report its result honestly, including failures.",
+                check that your changes build; report its result honestly, including failures. A Typst or Markdown \
+                build reads only files in the task's scope; a LaTeX build runs TeX natively, so it needs a task \
+                scoped to the whole project and the user's approval.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -145,7 +148,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: RUN_PYTHON,
             description: "Run Python code in a separate process for this task (never the user's own sessions) and \
                 return its real exit code and output. Use it for calculations and data analysis the user asked for. \
-                In the restricted sandbox the project is read-only at /workspace and files can be written to /out.",
+                In the restricted sandbox the project is read-only at /workspace and files can be written to /out. \
+                Available only for tasks scoped to the whole project.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -158,7 +162,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: CHECK_LEAN,
             description: "Check a Lean file with the project's Lean toolchain and return the real diagnostics and \
-                proof status (incomplete proofs and `sorry` are reported as such).",
+                proof status (incomplete proofs and `sorry` are reported as such). Lean runs natively, so this needs a \
+                task scoped to the whole project and the user's approval.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -172,7 +177,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: RUN_COMMAND,
             description: "Run one program with an argument list (no shell, no pipes or redirection) in the project \
                 folder and return its exit code and bounded output. Use only when no dedicated tool fits. In the \
-                restricted sandbox the project is read-only at /workspace and files can be written to /out.",
+                restricted sandbox the project is read-only at /workspace and files can be written to /out. \
+                Available only for tasks scoped to the whole project.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -274,7 +280,162 @@ pub enum ToolCall {
     RunCommand(RunCommandInput),
 }
 
+/// How a call uses a project path it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathUse {
+    /// Read the file's content.
+    Read,
+    /// List a folder (names and sizes) or use it as a working folder.
+    Folder,
+    /// Change an existing (or open) document.
+    Write,
+    /// Create a new file.
+    Create,
+}
+
+/// What a result can carry back to the model provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exposure {
+    /// File names and metadata only (listings, revisions, sizes, keys).
+    Metadata,
+    /// Content derived from files in the task's scope only (reads of other
+    /// files are refused by the application, including reads a compiler
+    /// discovers while building).
+    ScopedContent,
+    /// Content of any file the tool can reach: the whole project (restricted
+    /// container) or any file the user's account can read (native processes,
+    /// TeX).
+    Unconfined,
+}
+
+/// Whether and how a call starts a process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    /// No process (in-process work through the application's services).
+    None,
+    /// A native process only: there is no restricted backend for it.
+    NativeOnly,
+    /// Native after the user's approval, or unattended in the restricted backend.
+    NativeOrRestricted,
+}
+
+/// What a call does. Every rule of the application's gate is applied to these
+/// effects, never to a tool by name; [`ToolCall::effects`] has no default arm,
+/// so a new tool cannot run before it declares them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Effects<'a> {
+    /// Project paths the call names, as requested.
+    pub paths: Vec<(&'a str, PathUse)>,
+    pub exposes: Exposure,
+    pub launch: Launch,
+    /// Whether the call changes documents or files.
+    pub changes: bool,
+    /// The application service the call needs.
+    pub service: Option<services::ServiceKind>,
+    /// What the call is, for messages ("Python code", "a LaTeX build").
+    pub what: &'static str,
+}
+
 impl ToolCall {
+    /// What this call does (see [`Effects`]).
+    pub fn effects(&self) -> Effects<'_> {
+        use services::ServiceKind;
+        let effects =
+            |paths, exposes, launch, changes, service, what| Effects { paths, exposes, launch, changes, service, what };
+        match self {
+            ToolCall::ListFiles(input) => {
+                let paths =
+                    if is_root(&input.path) { Vec::new() } else { vec![(input.path.as_str(), PathUse::Folder)] };
+                effects(paths, Exposure::Metadata, Launch::None, false, None, "Listing files")
+            }
+            ToolCall::ReadFile(input) => effects(
+                vec![(input.path.as_str(), PathUse::Read)],
+                Exposure::ScopedContent,
+                Launch::None,
+                false,
+                None,
+                "Reading a file",
+            ),
+            ToolCall::EditDocument(input) => effects(
+                vec![(input.path.as_str(), PathUse::Write)],
+                Exposure::Metadata,
+                Launch::None,
+                true,
+                None,
+                "Editing a document",
+            ),
+            ToolCall::CreateFile(input) => effects(
+                vec![(input.path.as_str(), PathUse::Create)],
+                Exposure::Metadata,
+                Launch::None,
+                true,
+                None,
+                "Creating a file",
+            ),
+            ToolCall::BuildDocument(input) if is_latex(&input.entry) => effects(
+                vec![(input.entry.as_str(), PathUse::Read)],
+                // TeX can read any file the user can (an absolute \input path)
+                // and its log comes back as diagnostics.
+                Exposure::Unconfined,
+                Launch::NativeOnly,
+                false,
+                Some(ServiceKind::Typesetting),
+                "A LaTeX build (TeX)",
+            ),
+            ToolCall::BuildDocument(input) => effects(
+                vec![(input.entry.as_str(), PathUse::Read)],
+                // In-process build confined to the scope; status, pages, and
+                // diagnostics are derived from file content.
+                Exposure::ScopedContent,
+                Launch::None,
+                false,
+                Some(ServiceKind::Typesetting),
+                "A document build",
+            ),
+            ToolCall::InsertArtifact(input) => effects(
+                vec![(input.path.as_str(), PathUse::Write)],
+                Exposure::Metadata,
+                Launch::None,
+                true,
+                Some(ServiceKind::Research),
+                "Inserting a research artifact",
+            ),
+            ToolCall::RunPython(_) => effects(
+                Vec::new(),
+                Exposure::Unconfined,
+                Launch::NativeOrRestricted,
+                false,
+                Some(ServiceKind::Research),
+                "Python code",
+            ),
+            ToolCall::CheckLean(input) => effects(
+                vec![(input.path.as_str(), PathUse::Read)],
+                // Lean elaborates imports and runs project code (#eval can read
+                // any file); its messages come back as diagnostics.
+                Exposure::Unconfined,
+                Launch::NativeOnly,
+                false,
+                Some(ServiceKind::Lean),
+                "Lean checking (the project's own toolchain)",
+            ),
+            ToolCall::RunCommand(input) => {
+                let paths = if is_root(&input.working_directory) {
+                    Vec::new()
+                } else {
+                    vec![(input.working_directory.as_str(), PathUse::Folder)]
+                };
+                effects(
+                    paths,
+                    Exposure::Unconfined,
+                    Launch::NativeOrRestricted,
+                    false,
+                    Some(ServiceKind::Execution),
+                    "A command",
+                )
+            }
+        }
+    }
+
     /// Validate `input` against the tool's schema.
     pub fn parse(name: &str, input: &Value) -> Result<Self, String> {
         fn typed<T: serde::de::DeserializeOwned>(input: &Value) -> Result<T, String> {
@@ -309,19 +470,22 @@ impl ToolCall {
     /// Whether the call launches a process (counted against the command
     /// budget). Typst builds run in-process; LaTeX builds run TeX tools.
     pub fn is_process(&self) -> bool {
-        match self {
-            ToolCall::BuildDocument(input) => {
-                let entry = input.entry.to_ascii_lowercase();
-                entry.ends_with(".tex") || entry.ends_with(".ltx")
-            }
-            ToolCall::RunPython(_) | ToolCall::CheckLean(_) | ToolCall::RunCommand(_) => true,
-            _ => false,
-        }
+        self.effects().launch != Launch::None
     }
 
     pub fn changes_documents(&self) -> bool {
-        matches!(self, ToolCall::EditDocument(_) | ToolCall::CreateFile(_) | ToolCall::InsertArtifact(_))
+        self.effects().changes
     }
+}
+
+/// `""`, `"."`, or `"./"`: the project root.
+pub(crate) fn is_root(raw: &str) -> bool {
+    matches!(raw.trim(), "" | "." | "./")
+}
+
+fn is_latex(entry: &str) -> bool {
+    let entry = entry.to_ascii_lowercase();
+    entry.ends_with(".tex") || entry.ends_with(".ltx")
 }
 
 #[cfg(test)]

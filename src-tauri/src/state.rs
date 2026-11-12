@@ -49,6 +49,14 @@ impl AppState {
             execution_config.tool_cache_dir = Some(PathBuf::from(dir));
         }
         let execution = ExecutionService::with_config(execution_config)?;
+        // Remove restricted containers an earlier session left behind (e.g. the
+        // app was killed while one ran); the first restricted job waits for it.
+        let sweeper = execution.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = sweeper.sweep_stale_containers() {
+                eprintln!("could not remove containers left by an earlier session: {e}");
+            }
+        });
         let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
         let (lean, lean_actor) = LeanService::new(execution.clone(), Arc::clone(&workspace), LeanConfig::default());
         tauri::async_runtime::spawn(lean_actor);

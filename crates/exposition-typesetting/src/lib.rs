@@ -15,7 +15,7 @@ use exposition_page::PageInputRules;
 pub use fonts::Fonts;
 pub use markdown::{MarkdownAdapter, MarkdownInput};
 pub use service::{BuildRecord, BuildTimings, TypesettingError, TypesettingService};
-pub use snapshot::BuildSnapshot;
+pub use snapshot::{BuildSnapshot, ReadFilter};
 
 /// A format adapter: what a document format contributes to building and page
 /// editing. LaTeX and Markdown adapters implement the same interface.
