@@ -151,15 +151,27 @@ export default async function researchPython({ launchApp, artifactsDir, fixture,
 
     if (unavailable) {
       const envSelect = page.getByRole("button", { name: /Research environment/ }).first();
-      await envSelect.click();
-      await page.getByRole("option", { name: new RegExp(`^${unavailable.displayName.replace(/[()+.]/g, "\\$&")}`) }).click();
+      // The panel re-reads environments right after trust is granted, which can
+      // close a picker that was just opened; reopen it until the option is chosen.
+      const choose = async (pattern) => {
+        for (let attempt = 1; ; attempt++) {
+          await envSelect.click();
+          try {
+            await page.getByRole("option", { name: pattern }).click({ timeout: 5_000 });
+            return;
+          } catch (error) {
+            if (attempt >= 4) throw error;
+            await page.keyboard.press("Escape").catch(() => {});
+          }
+        }
+      };
+      await choose(new RegExp(`^${unavailable.displayName.replace(/[()+.]/g, "\\$&")}`));
       const notice = page.getByTestId("research-unavailable");
       await notice.waitFor();
       const text = await notice.innerText();
       assert.ok(text.includes(unavailable.availability.guidance.slice(0, 40)), "unavailable state shows exact guidance");
       await shot(page, "research-unavailable-light");
-      await envSelect.click();
-      await page.getByRole("option", { name: new RegExp(`^${python.displayName.replace(/[()+.]/g, "\\$&")}$`) }).click();
+      await choose(new RegExp(`^${python.displayName.replace(/[()+.]/g, "\\$&")}$`));
     }
 
     await page.getByRole("button", { name: "Start session" }).click();
