@@ -241,6 +241,9 @@ pub struct MathRow {
     pub formal_dependencies: Option<FormalDependencies>,
     /// The latest formal evidence, when any.
     pub evidence: Option<Evidence>,
+    /// That evidence was not recorded by this installation (imported with the
+    /// project's graph): a historical claim, never current verification.
+    pub imported: bool,
 }
 
 /// The Mathematics projection of the canonical graph.

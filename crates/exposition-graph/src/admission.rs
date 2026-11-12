@@ -91,7 +91,7 @@ pub fn roles_for(path: &WorkspacePath) -> Option<Vec<ResourceRole>> {
     if matches!(lower.as_str(), "lakefile.lean" | "lakefile.toml" | "lean-toolchain" | "lake-manifest.json") {
         return Some(vec![ResourceRole::Configuration]);
     }
-    if path.as_str() == ".exposition/project.json" {
+    if path.as_str().eq_ignore_ascii_case(".exposition/project.json") {
         return Some(vec![ResourceRole::Configuration]);
     }
     let ext = lower.rsplit_once('.').map(|(_, e)| e.to_owned()).unwrap_or_default();
@@ -118,31 +118,71 @@ pub fn roles_for(path: &WorkspacePath) -> Option<Vec<ResourceRole>> {
 /// (`.exposition/research/`). Generated artifacts, run records, and the
 /// graph's own storage are never scanned (artifacts are admitted explicitly).
 pub fn scan_directory(path: &WorkspacePath) -> bool {
-    if path.components().any(|c| EXCLUDED_DIRS.contains(&c)) {
+    let components: Vec<&str> = path.components().collect();
+    if components.iter().any(|c| excluded_dir(c)) || nested_metadata(&components, components.len()) {
         return false;
     }
-    let p = path.as_str();
-    match p.strip_prefix(".exposition") {
-        Some("") => true,
-        Some(rest) => rest.starts_with("/research/") || rest == "/research",
-        None => true,
+    if is_metadata_dir(components[0]) {
+        return match components.get(1) {
+            None => true,
+            Some(sub) => sub.eq_ignore_ascii_case("research"),
+        };
     }
+    true
+}
+
+/// The project metadata folder `.exposition` (Windows names ignore case:
+/// `.Exposition` is the same folder).
+pub fn is_metadata_dir(name: &str) -> bool {
+    name.eq_ignore_ascii_case(".exposition")
+}
+
+/// A cache, dependency, version-control, or tooling folder (any case).
+pub fn excluded_dir(name: &str) -> bool {
+    EXCLUDED_DIRS.iter().any(|d| d.eq_ignore_ascii_case(name))
+}
+
+/// Another project's metadata folder below the top level (a nested project):
+/// any of the first `dirs` components after the first is `.exposition`.
+fn nested_metadata(components: &[&str], dirs: usize) -> bool {
+    components.iter().take(dirs).skip(1).any(|c| is_metadata_dir(c))
+}
+
+/// Changes at `path` can never concern a project resource (the graph's own
+/// storage, run records, tooling/cache folders, a nested project's
+/// metadata), so they need no reconciliation pass.
+pub fn never_resource(path: &WorkspacePath) -> bool {
+    let components: Vec<&str> = path.components().collect();
+    if components.iter().any(|c| excluded_dir(c)) || nested_metadata(&components, components.len()) {
+        return true;
+    }
+    if components.len() >= 2 && is_metadata_dir(components[0]) {
+        let sub = components[1].to_ascii_lowercase();
+        return sub == "runs" || sub == "graph-backups" || sub == "graph-temporary" || sub.starts_with("graph.");
+    }
+    false
 }
 
 /// Classify a workspace path under the inclusion policy.
 pub fn classify(path: &WorkspacePath) -> Admission {
-    let p = path.as_str();
     let components: Vec<&str> = path.components().collect();
-    if components.iter().any(|c| EXCLUDED_DIRS.contains(c)) {
+    if components.iter().any(|c| excluded_dir(c)) {
         return Admission::Exclude("inside a cache, dependency, version-control, or tooling folder");
     }
-    if EXCLUDED_FILES.contains(&path.file_name()) {
+    if EXCLUDED_FILES.iter().any(|f| f.eq_ignore_ascii_case(path.file_name())) {
         return Admission::Exclude("a development-planning or agent-instruction file");
     }
-    if path.file_name().contains(".exposition-save-") {
+    if path.file_name().to_ascii_lowercase().contains(".exposition-save-") {
         return Admission::Exclude("a temporary save file");
     }
-    if let Some(rest) = p.strip_prefix(".exposition/") {
+    if nested_metadata(&components, components.len().saturating_sub(1)) {
+        return Admission::Exclude("another project's metadata (a nested project's .exposition folder)");
+    }
+    // The project's own metadata folder, compared without regard to case
+    // (`.Exposition` is the same folder on Windows).
+    let lowered = path.as_str().to_ascii_lowercase();
+    if components.len() > 1 && is_metadata_dir(components[0]) {
+        let rest = &lowered[components[0].len() + 1..];
         if rest.starts_with("graph.sqlite3")
             || (rest == "graph-backups" || rest.starts_with("graph-backups/"))
             || rest.starts_with("graph.damaged")
@@ -169,7 +209,7 @@ pub fn classify(path: &WorkspacePath) -> Admission {
                 None => Admission::Exclude("not a recognised research source type"),
             };
         }
-        if p == ".exposition/project.json" {
+        if rest == "project.json" {
             return Admission::Admit(vec![ResourceRole::Configuration]);
         }
         return Admission::Exclude("application metadata");
@@ -249,6 +289,36 @@ mod tests {
         ] {
             assert!(!d(p), "{p}");
         }
+    }
+
+    #[test]
+    fn metadata_rules_ignore_case_and_nested_projects_metadata_is_excluded() {
+        for p in [
+            ".Exposition/runs/run-1.json",
+            ".EXPOSITION/graph.sqlite3-journal",
+            ".Exposition/graph-backups/graph-1-r1-auto.sqlite3",
+            ".Exposition/settings.json",
+            "examples/demo/.exposition/runs/run-1.json",
+            "examples/demo/.exposition/artifacts/run-1/output-0.png",
+            "examples/demo/.exposition/graph-backups/x.json",
+            "examples/demo/.exposition/research/rs-1/fit.py",
+            "examples/demo/.Exposition/project.json",
+            "a/.GIT/HEAD",
+            "lib/Node_Modules/x.js",
+            "claude.md",
+        ] {
+            assert!(matches!(c(p), Admission::Exclude(_)), "{p}");
+        }
+        assert_eq!(c(".Exposition/research/rs-1/fit.py"), Admission::Admit(vec![ResourceRole::Script]));
+        assert_eq!(c(".EXPOSITION/project.json"), Admission::Admit(vec![ResourceRole::Configuration]));
+        assert!(matches!(c(".Exposition/artifacts/run-1/output-0.png"), Admission::OnRequest(_)));
+        assert_eq!(c("examples/demo/main.typ"), Admission::Admit(vec![ResourceRole::Manuscript]));
+        let d = |p: &str| scan_directory(&WorkspacePath::parse(p).unwrap());
+        assert!(d(".Exposition") && d(".Exposition/Research"));
+        assert!(!d(".Exposition/runs") && !d("examples/demo/.exposition") && !d("examples/demo/.Exposition/research"));
+        let n = |p: &str| never_resource(&WorkspacePath::parse(p).unwrap());
+        assert!(n(".Exposition/graph.sqlite3-journal") && n(".exposition/runs/r.json") && n("x/.exposition/a"));
+        assert!(!n(".exposition/artifacts/run-1/o.png") && !n(".exposition/research/a.py") && !n("main.tex"));
     }
 
     #[test]

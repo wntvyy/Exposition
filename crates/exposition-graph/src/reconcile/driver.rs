@@ -287,10 +287,7 @@ impl Driver {
         for p in paths {
             // The graph's own storage, run records, and tooling/cache folders
             // never hold project resources: changes there need no pass.
-            let excluded_dir = p.components().any(|c| crate::admission::EXCLUDED_DIRS.contains(&c))
-                || p.as_str() == ".exposition/runs"
-                || p.as_str().starts_with(".exposition/runs/");
-            if crate::service::is_graph_storage(&p) || excluded_dir {
+            if crate::service::is_graph_storage(&p) || crate::admission::never_resource(&p) {
                 continue;
             }
             marked.push(p.clone());

@@ -1435,7 +1435,34 @@ impl<'a> Planner<'a> {
                     let mut changed = false;
                     for b in bindings.iter_mut().filter(|b| b.path == path) {
                         let audit_bound = matches!(&b.selector, SourceSelector::Declaration { syntax, .. } if syntax == LEAN_AUDIT_SYNTAX);
-                        if !audit_bound && b.state != BindingState::Missing {
+                        if audit_bound {
+                            // Not declared literally (generated, anonymous):
+                            // the audit located it; that location holds for
+                            // exactly the version it audited.
+                            let audited = b.version.as_ref().map(|v| v.content_hash.as_str());
+                            let (state, detail) = if audited.is_some() && audited == hash.as_deref() {
+                                (
+                                    BindingState::Resolved,
+                                    format!(
+                                        "Located by the Lean audit of this version of {path} (not declared literally)."
+                                    ),
+                                )
+                            } else {
+                                (
+                                    BindingState::Unresolved,
+                                    format!(
+                                        "Located by a Lean audit of another version of {path}; audit it again to locate it."
+                                    ),
+                                )
+                            };
+                            if b.state != state || b.detail.as_deref() != Some(detail.as_str()) {
+                                b.state = state;
+                                b.detail = Some(detail);
+                                changed = true;
+                            }
+                            continue;
+                        }
+                        if b.state != BindingState::Missing {
                             b.state = BindingState::Missing;
                             b.range = None;
                             b.detail =
@@ -1547,7 +1574,13 @@ impl<'a> Planner<'a> {
         let mut problems = Vec::new();
         for id in ids {
             let Some(e) = self.entity(&id)? else { continue };
-            if e.kind == EntityKind::Resource || is_extracted_declaration(&e) || e.kind == EntityKind::Folder {
+            // Audit-admitted Lean declarations are matched (adopted) by name
+            // with the extracted declarations, not re-anchored here.
+            if e.kind == EntityKind::Resource
+                || is_extracted_declaration(&e)
+                || is_adoptable_declaration(&e)
+                || e.kind == EntityKind::Folder
+            {
                 continue;
             }
             let mut bindings = self.bindings_of(&id)?;
@@ -1679,7 +1712,7 @@ impl<'a> Planner<'a> {
         let mut index_updates = Vec::new();
         for (path, body) in &self.index_records {
             let (hash, extractor) = self.index_hashes.get(path).cloned().unwrap_or_default();
-            if let Ok(json) = serde_json::to_string(&**body) {
+            if let Some(json) = bounded_index_json(body) {
                 index.push(IndexRecord { path: path.clone(), content_hash: hash, extractor, body: json });
                 index_updates.push((path.clone(), Some((body.extraction.labels.clone(), body.latex_main))));
             }
@@ -1710,6 +1743,25 @@ impl<'a> Planner<'a> {
             clear_pending: None,
         }
     }
+}
+
+/// A file's stored index, kept within the bound the validated open enforces:
+/// a huge extraction keeps its declarations and drops what can be rebuilt
+/// by re-reading the file (links, then labels).
+fn bounded_index_json(body: &IndexBody) -> Option<String> {
+    let json = serde_json::to_string(body).ok()?;
+    if json.len() <= crate::store::MAX_INDEX_BODY {
+        return Some(json);
+    }
+    let mut reduced = body.clone();
+    reduced.extraction.links.clear();
+    let json = serde_json::to_string(&reduced).ok()?;
+    if json.len() <= crate::store::MAX_INDEX_BODY {
+        return Some(json);
+    }
+    reduced.extraction.labels.clear();
+    let json = serde_json::to_string(&reduced).ok()?;
+    (json.len() <= crate::store::MAX_INDEX_BODY).then_some(json)
 }
 
 /// The key under which a file waits for a link target (see `wanted`).
@@ -1845,6 +1897,14 @@ pub(crate) fn declaration_label(d: &extract::Declaration, path: &WorkspacePath) 
 }
 
 /// Confirmed renames among files that disappeared and appeared in one pass.
+/// Files smaller than this are never matched by content alone.
+const MIN_CONTENT_MATCH_BYTES: u64 = 128;
+
+/// A confirmed move keeps the kind of file (its extension, ignoring case).
+fn same_kind_of_file(a: &WorkspacePath, b: &WorkspacePath) -> bool {
+    a.extension().map(str::to_ascii_lowercase) == b.extension().map(str::to_ascii_lowercase)
+}
+
 fn confirm_renames(
     gone: &[WorkspacePath],
     new: &[WorkspacePath],
@@ -1856,10 +1916,20 @@ fn confirm_renames(
     let mut taken_new: BTreeSet<WorkspacePath> = BTreeSet::new();
     type Key = fn(Option<&Checkpoint>, Option<&Fresh>) -> (Option<String>, Option<String>);
     let keys: [Key; 2] = [
+        // The same physical file (a rename or move by any tool).
         |c, f| (c.and_then(|c| c.identity.clone()), f.and_then(|f| f.content.identity.clone())),
-        |c, f| (c.and_then(|c| c.coverage.content_hash.clone()), f.and_then(|f| f.content.hash.clone())),
+        // Unique identical content — never for empty or trivially small files,
+        // whose equal bytes say nothing about being the same file.
+        |c, f| {
+            (
+                c.filter(|c| c.size.is_some_and(|s| s >= MIN_CONTENT_MATCH_BYTES))
+                    .and_then(|c| c.coverage.content_hash.clone()),
+                f.filter(|f| f.meta.size >= MIN_CONTENT_MATCH_BYTES).and_then(|f| f.content.hash.clone()),
+            )
+        },
     ];
-    for key in keys {
+    for (step, key) in keys.into_iter().enumerate() {
+        let by_content = step == 1;
         let mut olds: HashMap<String, Vec<&WorkspacePath>> = HashMap::new();
         for g in gone.iter().filter(|g| !taken_old.contains(*g)) {
             if let (Some(k), _) = key(checkpoints.get(g), None) {
@@ -1877,6 +1947,7 @@ fn confirm_renames(
             if let Some(n) = news.get(k)
                 && o.len() == 1
                 && n.len() == 1
+                && (!by_content || same_kind_of_file(o[0], n[0]))
             {
                 pairs.push((o[0].clone(), n[0].clone()));
             }

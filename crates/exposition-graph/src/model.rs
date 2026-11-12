@@ -599,6 +599,10 @@ pub struct EntityDetail {
     pub evidence: Vec<Evidence>,
     /// Applicability of each evidence record to current sources.
     pub evidence_freshness: Vec<(EvidenceId, Freshness)>,
+    /// Evidence not recorded by this installation (e.g. copied in with the
+    /// project's graph): historical claims of their recorded origin, never
+    /// current local verification.
+    pub imported_evidence: Vec<EvidenceId>,
     pub coverage: Option<ResourceCoverage>,
     pub graph_revision: u64,
 }

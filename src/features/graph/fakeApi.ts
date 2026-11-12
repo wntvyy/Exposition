@@ -237,6 +237,7 @@ export function createFakeGraph(seed: { entities?: Entity[]; relations?: Relatio
         neighbors: entities.filter((x) => neighborIds.has(x.id)),
         evidence: [],
         evidenceFreshness: [],
+        importedEvidence: [],
         coverage: null,
         graphRevision: revision,
       };
