@@ -81,6 +81,8 @@ unsafe_code = "deny"
 [profile.dev.package."*"]
 opt-level = 2
 
+# Release builds favour predictable build memory over the last few percent of
+# runtime: LTO across the Typst/PDF dependency graph exhausted memory on a
+# 32 GB build machine running parallel builds.
 [profile.release]
-lto = "thin"
-codegen-units = 4
+lto = false
