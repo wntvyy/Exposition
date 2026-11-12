@@ -6,10 +6,11 @@
 //! here ever returns it.
 
 use exposition_agents::{
-    AgentError, Budgets, CreateTaskRequest, FileDiff, ProviderSettings, ProviderStatus, ReviewActionResult, TaskDetail,
-    TaskId, TaskReview, TaskSummary,
+    AgentError, Budgets, CreateTaskRequest, FileDiff, GenerationTaskRequest, ProviderSettings, ProviderStatus,
+    ReviewActionResult, TaskDetail, TaskId, TaskReview, TaskSummary,
 };
 use exposition_core::path::WorkspacePath;
+use exposition_graph::EntityId;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
 
@@ -134,6 +135,35 @@ pub async fn agents_review_accept(
     path: Option<WorkspacePath>,
 ) -> Result<Vec<ReviewActionResult>, CommandError> {
     state.agents.accept(&task_id(task)?, path.as_ref()).map_err(command_error)
+}
+
+/// Keep a stopped task as an investigation in the project graph (the user's
+/// deliberate admission; returns the investigation entity).
+#[tauri::command]
+pub async fn agents_task_keep_investigation(
+    state: State<'_, AppState>,
+    task: TaskId,
+) -> Result<EntityId, CommandError> {
+    let task = task_id(task)?;
+    let agents = state.agents.clone();
+    tauri::async_runtime::spawn_blocking(move || agents.keep_as_investigation(&task))
+        .await
+        .map_err(|e| CommandError::new("internal.task", format!("Agent task failed: {e}")))?
+        .map_err(command_error)
+}
+
+/// Start the project-generation task of a newly created project (New
+/// Project › describe an objective): an ordinary whole-project task in the
+/// open project, execution disabled unless requested.
+#[tauri::command]
+pub async fn agents_task_create_generation(
+    state: State<'_, AppState>,
+    request: GenerationTaskRequest,
+) -> Result<TaskSummary, CommandError> {
+    if request.objective.len() > 100_000 {
+        return Err(CommandError::new("agents.promptTooLong", "The objective is too long."));
+    }
+    state.agents.create_generation_task(request).map_err(command_error)
 }
 
 /// Queue a script for the scripted provider — development builds only. The

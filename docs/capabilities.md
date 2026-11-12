@@ -173,6 +173,21 @@ happens:
 | Build LaTeX, check Lean | refused | trusted folder + approval | refused | whole project + content consent |
 | Run Python, run a command | refused | trusted folder + approval | container only, unattended | whole project + content consent |
 
+The project graph is part of every agent task, enforced by the application:
+each run starts with a scoped graph context (the project's identity and
+revision, the files and research entities in the task's scope with their
+versions, coverage, evidence freshness, and relations, and the operations the
+task may perform; under "file names only" no labels or notes), file tools
+resolve the paths they act on to graph identities, and an action whose target
+the graph has not reconciled, cannot identify, or cannot reach at all is
+paused with a stable code instead of falling back to plain file access. Agents
+can query the graph within their scope and propose typed entities and
+relations; changes are approved like edits, and the relations an agent adds
+remain suggestions until you accept them. Keeping a task as an investigation
+admits it into the graph; ordinary tasks stay operational records. The Agents
+page and the Agent panel show the same tasks and approvals, with each task's
+graph context, proposals, and changes.
+
 Approvals show the complete code or text that will run or change, with
 invisible and direction-changing characters made visible; what runs is
 exactly what was shown, and an approval answered after the project changed

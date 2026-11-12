@@ -95,6 +95,10 @@ export function toolStatusLabel(status: ToolCallStatus, result: string | null = 
     case "canceled":
       return { status: "canceled", label: "Canceled" };
     case "notRun":
+      // Paused by the application because the project graph could not be used.
+      if (result?.includes('"code":"agents.graphUnavailable"')) return { status: "unavailable", label: "Paused: graph unavailable" };
+      if (result?.includes('"code":"agents.graphPending"')) return { status: "stale", label: "Paused: graph not reconciled" };
+      if (result?.includes('"code":"agents.graphAmbiguous"')) return { status: "warning", label: "Paused: ambiguous in graph" };
       return { status: "canceled", label: "Not run" };
   }
 }
@@ -229,6 +233,12 @@ export function toolSummary(name: string, input: unknown): string {
       return str(obj.path) || "project root";
     case "build_document":
       return str(obj.entry);
+    case "graph_query":
+      return [str(obj.query), str(obj.text) || str(obj.path) || str(obj.entity)].filter(Boolean).join(" ");
+    case "graph_propose": {
+      const ops = Array.isArray(obj.operations) ? obj.operations.length : 0;
+      return `${ops} operation${ops === 1 ? "" : "s"}${str(obj.summary) ? ` — ${str(obj.summary)}` : ""}`;
+    }
     case "insert_artifact":
       return `${str(obj.path)} ← ${str(obj.artifact_id)}`;
     case "run_command": {

@@ -133,6 +133,9 @@ const COMMANDS: &[&str] = &[
     "lean_record_evidence",
     "lean_associate_declaration",
     "lean_declaration_evidence",
+    // Agents and the project graph (src/agents.rs).
+    "agents_task_keep_investigation",
+    "agents_task_create_generation",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

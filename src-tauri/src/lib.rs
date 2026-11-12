@@ -178,6 +178,8 @@ pub fn run() {
             lean::lean_record_evidence,
             lean::lean_associate_declaration,
             lean::lean_declaration_evidence,
+            agents::agents_task_keep_investigation,
+            agents::agents_task_create_generation,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

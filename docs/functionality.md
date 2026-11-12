@@ -374,7 +374,7 @@ The final status is chosen in this order: Errors, Unverified, Partially checked,
 | `refused{category?, explanation?}` | Declined by provider · `stop_reason: refusal`; nothing from it stored or run | `failed{message}` | Task failed · provider, storage, checkpoint or folder error |
 | `stopped{stopReason, message}` | Stopped: response cut off / context window full / response paused / unexpected response · `max_tokens` (per-turn 64 000), `model_context_window_exceeded`, `pause_turn`, unknown stop; its calls `notRun` | `interrupted` | Interrupted · app closed while active; set at next start |
 
-### 6.3 Tools (9; strict schemas, every property required, unknown fields rejected)
+### 6.3 Tools (11; strict schemas, every property required, unknown fields rejected)
 | Tool | Parameters | Effect | Declared effects (exposure · launch · service) |
 |---|---|---|---|
 | `list_files` | `path` ("" = root), `recursive` | In-scope entries, breadth-first, ≤500 (`truncated`); skips `.git`, `node_modules`, `target`, `.venv`, `__pycache__`, `.lake`; no recursion into links; open docs get `openRevision`, `unsavedChanges` | metadata · none · — |
@@ -385,6 +385,8 @@ The final status is chosen in this order: Errors, Unverified, Partially checked,
 | `insert_artifact` | `path`, `run_id`, `artifact_id`, `after_text`, `caption`, `update_key` | Research artifact as format-owned figure/table markup in a `.typ`/`.tex`/`.md` document (`after_text` unique, "" = end; `update_key` replaces an earlier insertion); returns `revision, attachmentKey, warnings`; artifact file must be in scope | metadata · none · research (changes) |
 | `run_python` | `code` | Ask mode: agent-owned research session `agent-{task}` (never the user's); stdout/stderr tail 16 KiB, displays, error with last 12 traceback lines, artifacts, provenance `.exposition/runs/{run}.json`. Restricted: Docker job `python -` with code on stdin | unconfined · native or restricted · research |
 | `check_lean` | `path` | Lean service check (project toolchain, `lake serve`), 300 s; report + note; error result unless `checked` | unconfined · native-only · lean |
+| `graph_query` | `query` (`search`/`entity`/`neighborhood`/`inspect`/`impact`), `text`, `kinds[]`, `entity`, `path`, `depth` 1–3, `limit` 1–100 | Bounded reads of the project graph filtered to the task (§6.14); never returns, traverses through, or text-matches invisible records; result ≤64 KiB with `graph {project, revision, freshness}` | consent-filtered · none · graph |
+| `graph_propose` | `summary`, `base_revision`, `operations[]` (one strict object per `op`: `create_entity`, `add_relation`, `update_entity`, `set_lifecycle`, `remove_relation`, `bind_source`; `""`/`[]`/`-1` for unused fields) | Validated by the graph service as `Origin::Agent{task}`; applied as one graph change (agent relations `suggested`); returns `applied, revision, created[{tempId,id}], delta, effects`; invalid → `agents.graphInvalid` + diagnostics (messages only with `scopeContent`); conflicting → `agents.graphConflict` | consent-filtered · none · graph (changes; bound paths scope-checked) |
 | `run_command` | `program`, `args[]`, `working_directory` ("" = root) | Execution job, no shell, empty environment, 10 min timeout, 256 KiB log/stream, 16 KiB tail/stream in result; label "Agent: {program} {args}" ≤120 chars; restricted note: project read-only at `/workspace`, `/out` kept in job folder | unconfined · native or restricted · execution |
 
 Process launches (count against `maxCommands`): LaTeX build, `run_python`, `check_lean`, `run_command`. Invalid streamed JSON → error result "not valid JSON", not counted. Results to the model are JSON (`{"error", "code"?}` on failure); transcript copy ≤4000 bytes.
@@ -399,6 +401,9 @@ Process launches (count against `maxCommands`): LaTeX build, `run_python`, `chec
 | 5 | Launch with `readOnly` or execution `disabled`; native-only tool in a `restricted` task | `agents.executionDisabled`, `agents.nativeNotAllowed` |
 | 6 | Backing service present | `agents.serviceUnavailable` |
 | 7 | Restricted launch needs a configured Docker image (never downgraded); Ask launch needs a trusted folder, then approval of the full payload | `agents.restrictedUnavailable`, `agents.nativeRefused` |
+| 3a | Path policy: the graph's own storage is never a file-tool target; run records, generated artifacts, and other `.exposition/` metadata (except `.exposition/research/` and `project.json`) are never written or created | `agents.graphStorage`, `agents.serviceOwned` |
+| 6a | The project graph is usable (attached or temporary), of the task's folder, with the identity recorded with the task; every target path is not pending reconciliation (`coverage = pending`, binding `missing`) or ambiguous — after a bounded wait (3 s) for reconciliation | `agents.graphUnavailable`, `agents.projectChanged`, `agents.graphPending`, `agents.graphAmbiguous` (calls recorded `notRun`) |
+| 7a | `graph_propose`: every referenced entity/relation/bound file visible to the task; narrower scopes bind new entities to a file in scope; no investigations/workflows; the graph validator accepts the operations (approval card = every effect + every operation) | `agents.outOfScope`, `agents.graphReservedKind`, `agents.graphInvalid` |
 | 8 | After approval: same project folder still open; gate re-run yields the identical payload | `agents.projectChanged`, `agents.changedSinceApproval` |
 
 | Tool | Execution off | Ask before each | Restricted (Docker) | Scope and consent |
@@ -409,7 +414,7 @@ Process launches (count against `maxCommands`): LaTeX build, `run_python`, `chec
 | `build_document` LaTeX, `check_lean` | refused | trusted folder + approval | refused (`nativeNotAllowed`) | whole project + `scopeContent` |
 | `run_python`, `run_command` | refused | trusted folder + approval | unattended in container | whole project + `scopeContent`; working folder in scope |
 
-¹ `readOnly`: refused; `reviewEdits`: approval first; `autoApply`: applied directly. Process tools in a `readOnly` task: `agents.executionDisabled`. Verified by `tests/central_gate.rs` (every tool × 3 modes × 3 profiles × 3 scopes × 2 consents).
+¹ `readOnly`: refused; `reviewEdits`: approval first; `autoApply`: applied directly. Process tools in a `readOnly` task: `agents.executionDisabled`. Verified by `tests/central_gate.rs` (every tool × 3 modes × 3 profiles × 3 scopes × 2 consents, with the project graph attached) and `tests/graph_agents.rs` (`graph_query`/`graph_propose` × the same matrix; `graph_query` is allowed in every mode, an `inspect` path must be in scope; `graph_propose` follows the document-change column).
 
 ### 6.5 Task settings
 | Setting | Values (composer label) | Meaning |
@@ -449,17 +454,18 @@ Process launches (count against `maxCommands`): LaTeX build, `run_python`, `chec
 - Diff: read-only Monaco diff, left = without this task's changes, right = after its latest change; side-by-side, inline below 700 px.
 
 ### 6.10 Persistence and crash behaviour
-- `<data dir>/agents.sqlite3` (WAL, foreign keys, 5 s busy timeout, schema v1; newer schema refused). Tables: `tasks`, `transcript` (full provider history incl. file text read), `tool_calls`, `checkpoints`, `task_files`, `changes` (patches + inverse), `settings`. No delete or prune: tasks kept indefinitely. Startup: active tasks → `interrupted`; `pending`/`running`/`awaitingApproval` calls → `notRun`; warning notice "Exposition closed while this task was running…". Pending approvals are lost (memory only). Continue resumes.
+- `<data dir>/agents.sqlite3` (WAL, foreign keys, 5 s busy timeout, schema v2; newer schema refused). Tables: `tasks`, `transcript` (full provider history incl. file text read), `tool_calls`, `checkpoints`, `task_files`, `changes` (patches + inverse), `settings`; v2 adds `task_graph` (bound project graph id, kept investigation), `task_graph_contexts` (one per run), `task_targets`, `task_proposals`. No delete or prune: tasks kept indefinitely. Startup: active tasks → `interrupted`; `pending`/`running`/`awaitingApproval` calls → `notRun`; warning notice "Exposition closed while this task was running…". Pending approvals are lost (memory only). Continue resumes.
 - Events: `agents:event` (13 kinds: taskChanged, transcriptChanged, streamStarted, textDelta, thinkingDelta, streamReset, toolCallStarted, toolCallFinished, approvalRequested, approvalResolved, fallback, reviewChanged, providerChanged); broadcast capacity 4096; lag → `agents:resync`.
 
 ### 6.11 Credentials
 - Windows: generic credential target `anthropic-api-key.org.exposition.desktop` (user `anthropic-api-key`), persistence local machine (not roaming). Persistence is never changed in place (Credential Manager would keep the old copy in its other store and bring it back on the next write of that persistence by any program): a roaming copy is deleted before the local one is written, and every save, move, and removal is checked after both stores reload (a throwaway roaming and a throwaway local credential `<target>.settle-roaming` / `.settle-local`, no secret, written and deleted at once), up to 4 attempts. A key saved with roaming persistence by an earlier version is moved to local-machine on first read; one moved in place by an earlier build has its leftover roaming copy removed on first read, keeping the local bytes. macOS Keychain / Linux keyutils via `keyring` (unverified). Debug builds: entry `org.exposition.desktop.development` unless `EXPOSITION_CREDENTIAL_NAMESPACE` (≤64 `[A-Za-z0-9-]`) or `EXPOSITION_USE_REAL_CREDENTIAL=1`; release builds ignore both and use the real entry.
 - Key: trimmed, 16–512 ASCII graphic chars (IPC rejects >1 024 bytes); never returned, logged, stored in SQLite or project files; webview clears the field before saving (restored only on failure). Agent jobs start from an empty environment; provider errors replace the key with `<redacted>`; process output and text artifacts pass the execution redactor, which matches the stored key by value (registered when read or saved, removed when cleared) as well as by token shape. Trusted native code runs as the user and could read the stored key.
 
-### 6.12 Agent error codes (22)
+### 6.12 Agent error codes (22 + graph)
 - Provider/storage: `agents.storage` (SQLite/store or serialization), `agents.credentials` (credential store read/write/delete failed), `agents.notConfigured` (no API key), `agents.provider` (HTTP client creation failed), `agents.invalidModel`, `agents.invalidKey` (fails validation or > 1 024 bytes), `agents.scriptedUnavailable` (scripted provider in release/disabled), `agents.invalidScript` (dev script invalid or > 1 MiB), `agents.noScript` (no dev script queued).
 - Task requests: `agents.emptyPrompt`, `agents.promptTooLong` (> 100 000 chars), `agents.invalidWorkspace` (not absolute/existing/folder, or a root), `agents.workspaceNotOpen` (task folder not the open project), `agents.invalidBudgets`, `agents.invalidScope` (empty files scope; selection document not open or bad range), `agents.staleSelection`, `agents.invalidTask` (id not `task-[A-Za-z0-9-]` ≤ 64), `agents.invalidApproval` (approval id > 128 chars).
 - Lifecycle: `agents.taskRunning` (continue/accept/revert while active), `agents.taskFinishing` (continue while the worker releases services), `agents.noApproval` (approval no longer pending), `agents.notFound` (unknown task, or file not changed by it).
+- Project graph: `agents.graphRequired` (service configured with a workspace but no graph), `agents.graphUnavailable`, `agents.graphPending`, `agents.graphAmbiguous`, `agents.graphStorage`, `agents.serviceOwned`, `agents.graphInvalid`, `agents.graphConflict`, `agents.graphReservedKind`; `agents.projectChanged` also when the folder's graph identity is not the task's.
 
 ### 6.13 UI surfaces
 - **Agent view** (right panel, icon Bot): toolbar New task / Tasks / provider settings; provider chip "Claude · {model}" / "Claude · no API key configured" / "Claude · credential store error" / "Scripted provider — development only"; error banner "Agent action failed" (Dismiss). **Task list**: newest first; title, status pill, "{n} to review", relative time; empty "No agent tasks yet".
@@ -468,7 +474,14 @@ Process launches (count against `maxCommands`): LaTeX build, `run_python`, `chec
 - **Approval card**: banner with title, "Nothing is applied until you approve…", "{lines} · {bytes} · complete, nothing omitted", scrollable payload (a Tab stop only when it scrolls), Approve / Decline. **Attention**: status-bar item (right) "Agent: waiting for approval" / "Agent: N waiting for approval" button → oldest pending approval; else "Agent: N running"; else "Agent: N to review". Persistent notification "Agent needs your approval" ("{title} · Task: {task}", action Open approval), not shown when the card is visible, retired on answer/task end. Opening focuses the card. Finished notifications: completed (success, files to review), budgetExceeded/stopped/interrupted (warning), failed/refused (danger), canceled (none).
 - **Palette:** 4 commands in category Agent, no keybindings (§2); Open Pending Agent Approval is enabled only while a task waits and focuses the first pending card.
 - **Review**: Keep all, Revert all, Open in editor area (editor `agents-review:{id}`, "Review: {title}"), "The task is still running" banner (actions disabled), per-file rows (state pill, "Overlapping edits", "N changes" / "created by the agent", "· edited since", Keep, Revert), results "Done"/"Refused", diff.
+- **Agents page** (top-level page `agents`, order 30, Mod+3): task list (filters All/Running/Needs you/Kept) and "Kept in the project graph" (investigations, workflow definitions); the selected task's header (status, Cancel, Keep as investigation, Show in Agent panel) and tabs Run (the shared task view: approvals, transcript, budgets, follow-up), Graph context, Proposals, Changes (review). Same store as the Agent view: one task list, one approval answerable from either; the panel's task view links here ("Open in Agents page"); a pending approval opens where the user is.
 - **Provider dialog** "Agent provider": Provider select; key status + "stored in {store}"; credential error banner; API key / Replace API key + Save key; Remove (confirm "Remove the API key?" Keep key / Remove key); Model; Effort; Default content consent; Close / Save settings. Settings › Agents shows provider, model, key status, "Provider settings…".
+
+### 6.14 Project graph (M7)
+- **Mandatory context**: create and continue attach a scoped graph context (refused with the graph codes when the graph cannot be used): project id + revision, freshness, in-scope pending files, coverage, counts by kind, ≤160 entities (`id, kind, roles, label?, path, lifecycle, revision, origin kind, source version, binding, coverage, evidence kind+freshness`), ≤300 relations among them (`kind, status, origin kind, note?`), authorized operations; ≤48 KiB; `truncated` when summarized. Whole project: project entity, research/mathematical entities first, then files. Narrower scopes: files in scope, entities whose every binding is in scope, relations whose both endpoints are listed; unanchored entities only for whole-project tasks. Metadata-only: labels of anything but files/folders/project, notes, attributes, reasons, diagnostics withheld. Sent as `<graph_context>` JSON (`<`/`>` escaped), hidden from the transcript, recorded with the task; the first context binds the task to that graph identity.
+- **Targets**: paths of `read_file`, `edit_document`, `create_file`, `build_document`, `insert_artifact`, `check_lean` resolve to resource identities (`ensure_resource`; generated outputs and excluded files such as logs and run records stay operational references, never admitted); results carry `graph {resource, admitted?, revision, freshness, note?}`; `create_file` journals a provisional identity (`CrossService` operation) before writing and completes it after admission (failed admission → needs reconciliation). Targets are recorded per task (uses: read, edit, create, build, check, insert).
+- **Keep as investigation** (`agents_task_keep_investigation`, stopped tasks): the user's admission of one `investigation` entity (attributes `agentTask`, `taskStatus`; `references` to the task's admitted targets) plus `review` evidence referencing `agentTask:{id}`; idempotent.
+- **Project generation** (`agents_task_create_generation {objective, workspaceRoot, permission, execution?, consent?, budgets?}`): an ordinary whole-project task, execution disabled unless given, whose request is the objective plus a generation brief; TS helper `startProjectGeneration` (`src/features/agents/generation.ts`).
 
 ## 7. Settings
 
@@ -618,7 +631,7 @@ Manifest `src-tauri/build.rs` (`COMMANDS` 90 release, `DEV_COMMANDS` 3 debug-onl
 | tex_cancel † | target: BuildTarget? | bool | Cancel running build and drop pending request |
 | tex_page_image † | build: BuildId (`tex-…`), page: u32 (<10000), scale: f32 | PNG bytes | Page raster, capped at 32 Mi pixels; open-folder builds only |
 | tex_page_map † | build: BuildId, page: u32 | TexPageMapping | Glyph-level mapping of one page |
-### Agents (14)
+### Agents (16)
 | Command | Args | Returns | Purpose |
 |---|---|---|---|
 | agents_provider_status | — | ProviderStatus | Settings, key configured, credential store name/error, scripted available |
@@ -626,7 +639,7 @@ Manifest `src-tauri/build.rs` (`COMMANDS` 90 release, `DEV_COMMANDS` 3 debug-onl
 | agents_provider_set_key | key: String (≤1024) | ProviderStatus | Store API key in Credential Manager; never returned |
 | agents_provider_clear_key | — | ProviderStatus | Delete the stored key |
 | agents_task_list | — | TaskSummary[] | All tasks |
-| agents_task_detail | task: TaskId | TaskDetail | Summary, transcript, pending approvals |
+| agents_task_detail | task: TaskId | TaskDetail | Summary, transcript, pending approvals, graph record (context, targets, proposals, investigation) |
 | agents_task_create | request: CreateTaskRequest | TaskSummary | Validate and start a task (prompt ≤100,000 chars, open folder only) |
 | agents_task_continue | task: TaskId, prompt: String, budgets: Budgets? | TaskSummary | Follow-up on a stopped task, optional new budgets |
 | agents_task_cancel | task: TaskId | TaskSummary | Cancel the stream or running tool |
@@ -635,6 +648,8 @@ Manifest `src-tauri/build.rs` (`COMMANDS` 90 release, `DEV_COMMANDS` 3 debug-onl
 | agents_review_diff | task: TaskId, path: WorkspacePath | FileDiff | Original, modified, checkpoint texts of one file |
 | agents_review_revert | task: TaskId, path: WorkspacePath? | ReviewActionResult[] | Revert one or all files; `agents.taskRunning` while active |
 | agents_review_accept | task: TaskId, path: WorkspacePath? | ReviewActionResult[] | Accept one or all pending files; `agents.taskRunning` while active |
+| agents_task_keep_investigation | task: TaskId | EntityId | Keep a stopped task as an investigation in the project graph (idempotent) |
+| agents_task_create_generation | request: GenerationTaskRequest | TaskSummary | Start a new project's generation task (whole project, execution disabled by default) |
 ### Research and artifact attachment (14)
 | Command | Args | Returns | Purpose |
 |---|---|---|---|

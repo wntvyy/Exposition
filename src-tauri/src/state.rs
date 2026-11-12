@@ -123,6 +123,9 @@ impl AppState {
             allow_scripted: cfg!(debug_assertions),
             anthropic_base_url: None,
             retry: None,
+            // Every project task gets a scoped graph context and resolves its
+            // targets through the project graph.
+            graph: Some(Arc::clone(&graph)),
         })?;
         let research_project =
             Arc::new(ResearchProject::new(Arc::clone(&graph), Arc::clone(&research), Arc::clone(&documents)));

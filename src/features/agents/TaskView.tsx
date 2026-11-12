@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, FileDiff, Square, X } from "lucide-react";
+import { ArrowLeft, Check, FileDiff, PanelTop, Square, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { ApprovalRequest } from "../../bindings/ApprovalRequest";
@@ -19,6 +19,7 @@ import {
   toolStatusLabel,
   toolSummary,
 } from "./format";
+import { freshnessLabel, graphSummary } from "./GraphViews";
 import { agents, useAgents, type StreamDraft } from "./store";
 import { TextArea } from "./TaskComposer";
 
@@ -230,7 +231,37 @@ function ContinueForm({ id }: { id: TaskId }) {
   );
 }
 
-export function TaskView({ id }: { id: TaskId }) {
+/**
+ * The graph context line: what the agent was given, and a way to the full
+ * view on the Agents page (from the panel) or to the graph tab (on the page).
+ */
+function GraphSummaryLine({ id, variant }: { id: TaskId; variant: "panel" | "page" }) {
+  const context = useAgents((s) => s.details[id]?.graph?.context ?? null);
+  if (!context) return null;
+  const fresh = freshnessLabel(context.freshness);
+  return (
+    <div className="agents-row agents-small" data-testid="agents-graph-summary" data-revision={context.revision}>
+      <StatusPill status={fresh.status} label={fresh.label} size="sm" />
+      <span className="agents-muted">{graphSummary(context)}</span>
+      <Button
+        size="sm"
+        variant="ghost"
+        icon={PanelTop}
+        onPress={() => agents.showInPage(id, "graph")}
+        data-testid={variant === "panel" ? "agents-open-page" : "agents-show-graph"}
+      >
+        {variant === "panel" ? "Open in Agents page" : "Show graph context"}
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * One task: status, approvals, transcript, budgets, follow-up. The Agent view
+ * (`panel`) and the Agents page (`page`) render the same task from the same
+ * store; on the page the heading and review navigation belong to the page.
+ */
+export function TaskView({ id, variant = "panel" }: { id: TaskId; variant?: "panel" | "page" }) {
   const detail = useAgents((s) => s.details[id]);
   const summary = useAgents((s) => s.tasks.find((t) => t.id === id));
   const draft = useAgents((s) => s.drafts[id]);
@@ -259,34 +290,39 @@ export function TaskView({ id }: { id: TaskId }) {
       : "";
 
   return (
-    <article className="agents-stack" aria-label={task.title} data-testid="agents-task-view">
-      <div className="agents-heading">
-        <IconButton icon={ArrowLeft} size="sm" aria-label="Back to tasks" onPress={() => agents.show("tasks", null)} />
-        <h3 className="agents-heading__title">{task.title}</h3>
-      </div>
-      <div className="agents-row">
-        <span data-testid="agents-task-status" data-status={task.status.kind}>
-          <StatusPill status={pill.status} label={pill.label} />
-        </span>
-        {active && (
-          <Button size="sm" variant="secondary" icon={Square} onPress={() => void agents.run(() => commands.agentsTaskCancel(id))} data-testid="agents-cancel">
-            Cancel
+    <article className="agents-stack" aria-label={task.title} data-testid="agents-task-view" data-variant={variant}>
+      {variant === "panel" && (
+        <div className="agents-heading">
+          <IconButton icon={ArrowLeft} size="sm" aria-label="Back to tasks" onPress={() => agents.show("tasks", null)} />
+          <h3 className="agents-heading__title">{task.title}</h3>
+        </div>
+      )}
+      {variant === "panel" && (
+        <div className="agents-row">
+          <span data-testid="agents-task-status" data-status={task.status.kind}>
+            <StatusPill status={pill.status} label={pill.label} />
+          </span>
+          {active && (
+            <Button size="sm" variant="secondary" icon={Square} onPress={() => void agents.run(() => commands.agentsTaskCancel(id))} data-testid="agents-cancel">
+              Cancel
+            </Button>
+          )}
+          <Button
+            size="sm"
+            icon={FileDiff}
+            isDisabled={task.changedFiles === 0}
+            onPress={() => agents.show("review", id)}
+            data-testid="agents-open-review"
+          >
+            Review changes{task.pendingReview > 0 ? ` (${task.pendingReview})` : ""}
           </Button>
-        )}
-        <Button
-          size="sm"
-          icon={FileDiff}
-          isDisabled={task.changedFiles === 0}
-          onPress={() => agents.show("review", id)}
-          data-testid="agents-open-review"
-        >
-          Review changes{task.pendingReview > 0 ? ` (${task.pendingReview})` : ""}
-        </Button>
-      </div>
+        </div>
+      )}
       <p className="agents-muted agents-small">
         {PERMISSION_LABELS[task.spec.permission]} · {EXECUTION_LABELS[task.spec.execution]} · {CONSENT_LABELS[task.spec.consent]} · {provider}
         {servedBy}
       </p>
+      <GraphSummaryLine id={id} variant={variant} />
       {!active && <OutcomeBanner status={task.status} />}
       {detail?.approvals.map((approval) => <Approval key={approval.id} approval={approval} />)}
       <div className="agents-transcript" role="log" aria-live="polite" aria-label="Transcript" ref={logRef} data-testid="agents-transcript">
