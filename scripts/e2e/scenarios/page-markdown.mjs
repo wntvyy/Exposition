@@ -194,7 +194,7 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
     source = await text();
     assert.equal(source.slice(quote - 2, quote + 17), "> 1\\. A block quote", "line-start `1. ` escaped in a quote");
     await rebuilt(beforeMarker, "rebuild after list-marker escape");
-    assert.equal(await selection(quote, quote + 7), "1. A bl", "rendered literally, not a list");
+    assert.equal(await selection(quote, quote + 8), "1. A bl", "rendered literally, not a list");
 
     // 2c. Appending words at the end of a paragraph (R-m23 F1): every
     //     keystroke after the trailing space goes in.
