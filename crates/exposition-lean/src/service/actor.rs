@@ -186,6 +186,7 @@ pub(super) struct Actor {
     next_temp: u64,
     /// [`ExecutionService::trust_generation`] when trust was last checked.
     trust_seen: u64,
+    auditor: Arc<audit::Auditor>,
 }
 
 impl Actor {
@@ -198,6 +199,7 @@ impl Actor {
         tx: mpsc::UnboundedSender<Msg>,
     ) -> Self {
         let trust_seen = exec.trust_generation();
+        let auditor = Arc::new(audit::Auditor::new(config.scratch_dir.join("audit")));
         Actor {
             exec,
             workspace,
@@ -212,6 +214,7 @@ impl Actor {
             next_generation: 0,
             next_temp: 0,
             trust_seen,
+            auditor,
         }
     }
 
@@ -1074,25 +1077,17 @@ impl Actor {
         if server.running().is_none() {
             return;
         }
-        let (exec, tx) = (self.exec.clone(), self.tx.clone());
+        let (exec, tx, auditor) = (self.exec.clone(), self.tx.clone(), Arc::clone(&self.auditor));
         let (project, toolchain) = (server.project.clone(), server.toolchain.clone());
         let text = sync.text.clone();
         let file_name = format!("{} (revision {version})", doc.path.file_name());
-        let scratch = self.config.scratch_dir.join("audit");
         let (cancel, cancel_rx) = watch::channel(false);
         let doc = self.docs.get_mut(id).expect("present");
         doc.work = Some(CheckWork { generation, version, cancel, audit: None, tokens: None, lean_done: false });
         let doc_id = id.clone();
         tokio::spawn(async move {
-            let request = audit::AuditRequest {
-                project: &project,
-                toolchain: &toolchain,
-                text,
-                scratch,
-                nonce: audit::nonce(),
-                file_name,
-            };
-            let outcome = audit::run_audit(&exec, request, cancel_rx).await;
+            let request = audit::AuditRequest { project: &project, toolchain: &toolchain, text, file_name };
+            let outcome = auditor.run(&exec, request, cancel_rx).await;
             let _ = tx.send(Msg::Audited { generation, doc: doc_id, version, outcome });
         });
     }
@@ -1969,7 +1964,7 @@ fn audit_diagnostic(path: &WorkspacePath, range: Option<TextRange>, message: Str
 
 /// What the axiom audit says about a revision Lean reported without errors.
 struct Classification {
-    /// Kernel checking disabled, or the audit could not run.
+    /// The kernel rejected a declaration on replay, or the audit could not run.
     unverified: Option<String>,
     /// Elaboration stopped before the end (`#exit`).
     stop_reason: Option<String>,
@@ -1987,8 +1982,9 @@ struct Classification {
 
 impl Classification {
     fn new(outcome: &audit::AuditOutcome, text: &str, index: &LineIndex) -> Self {
+        use audit::AxiomKind;
         let mut c = Classification {
-            unverified: audit::trust_weakening(text),
+            unverified: None,
             stop_reason: None,
             stop_line: None,
             sorry_decls: Vec::new(),
@@ -2000,23 +1996,36 @@ impl Classification {
         };
         let decls = match outcome {
             audit::AuditOutcome::Complete(d) => d,
-            audit::AuditOutcome::Stopped(d) => {
-                c.stop_line = audit::exit_line(text);
+            audit::AuditOutcome::Stopped { decls, line } => {
+                c.stop_line = *line;
+                let at_exit = line
+                    .and_then(|l| text.lines().nth(l as usize))
+                    .is_some_and(|t| t.trim_start().starts_with("#exit"));
                 c.stop_reason = Some(match c.stop_line {
-                    Some(line) => format!(
+                    Some(line) if at_exit => format!(
                         "Lean stopped elaborating at `#exit` on line {}; everything after it was never checked.",
                         line + 1
                     ),
+                    Some(line) => {
+                        format!("Lean stopped elaborating at line {}; everything after it was never checked.", line + 1)
+                    }
                     None => {
                         "Lean stopped elaborating before the end of the file; the rest was never checked.".to_owned()
                     }
                 });
-                d
+                decls
+            }
+            audit::AuditOutcome::KernelRejected(message) => {
+                c.unverified = Some(format!(
+                    "Lean's kernel rejected a declaration when the audit checked this revision again, so the \
+                     file contains or relies on declarations that were never checked by the kernel (for example \
+                     ones added with `debug.skipKernelTC`): {message}"
+                ));
+                return c;
             }
             audit::AuditOutcome::Failed(reason) => {
-                c.unverified.get_or_insert_with(|| {
-                    format!("The axiom audit could not run, so this result is not verified: {reason}.")
-                });
+                c.unverified =
+                    Some(format!("The axiom audit could not run, so this result is not verified: {reason}."));
                 return c;
             }
         };
@@ -2028,40 +2037,36 @@ impl Classification {
             });
             AxiomUse { declaration: d.name.clone(), range, line: d.range.map(|((l, _), _)| l), axioms }
         };
-        let standard = |a: &str| audit::STANDARD_AXIOMS.contains(&a);
+        let names = |d: &audit::DeclAxioms, pred: &dyn Fn(AxiomKind) -> bool| -> Vec<String> {
+            d.axioms.iter().filter(|a| pred(a.kind())).map(audit::AxiomRef::display).collect()
+        };
         let mut all = std::collections::BTreeSet::new();
         let mut nonstandard_all = std::collections::BTreeSet::new();
         for d in decls {
-            all.extend(d.axioms.iter().cloned());
-            nonstandard_all.extend(d.axioms.iter().filter(|a| !standard(a) && *a != audit::SORRY_AXIOM).cloned());
+            all.extend(d.axioms.iter().map(audit::AxiomRef::display));
+            nonstandard_all.extend(names(d, &|k| !matches!(k, AxiomKind::Standard | AxiomKind::Sorry)));
         }
         // Report declarations by name; internal (auxiliary) ones only when no
         // visible declaration carries the same finding.
-        let pick = |pred: &dyn Fn(&str) -> bool| -> Vec<&audit::DeclAxioms> {
-            let visible: Vec<_> = decls.iter().filter(|d| !d.internal && d.axioms.iter().any(|a| pred(a))).collect();
-            if visible.is_empty() {
-                decls.iter().filter(|d| d.axioms.iter().any(|a| pred(a))).collect()
-            } else {
-                visible
-            }
+        let pick = |pred: &dyn Fn(AxiomKind) -> bool| -> Vec<&audit::DeclAxioms> {
+            let has = |d: &&audit::DeclAxioms| d.axioms.iter().any(|a| pred(a.kind()));
+            let visible: Vec<_> = decls.iter().filter(|d| !d.internal).filter(has).collect();
+            if visible.is_empty() { decls.iter().filter(has).collect() } else { visible }
         };
-        c.sorry_decls = pick(&|a| a == audit::SORRY_AXIOM)
+        c.sorry_decls =
+            pick(&|k| k == AxiomKind::Sorry).into_iter().map(|d| to_use(d, vec![audit::SORRY_AXIOM.into()])).collect();
+        c.compiled = pick(&|k| k == AxiomKind::CompiledCode)
             .into_iter()
-            .map(|d| to_use(d, vec![audit::SORRY_AXIOM.into()]))
+            .map(|d| to_use(d, names(d, &|k| k == AxiomKind::CompiledCode)))
             .collect();
-        c.compiled = pick(&audit::is_compiled_code_axiom)
+        c.nonstandard = pick(&|k| k == AxiomKind::Other)
             .into_iter()
-            .map(|d| to_use(d, d.axioms.iter().filter(|a| audit::is_compiled_code_axiom(a)).cloned().collect()))
-            .collect();
-        let other = |a: &str| !standard(a) && a != audit::SORRY_AXIOM && !audit::is_compiled_code_axiom(a);
-        c.nonstandard = pick(&other)
-            .into_iter()
-            .map(|d| to_use(d, d.axioms.iter().filter(|a| other(a)).cloned().collect()))
+            .map(|d| to_use(d, names(d, &|k| k == AxiomKind::Other)))
             .collect();
         c.axiom_uses = decls
             .iter()
-            .filter(|d| !d.internal && d.axioms.iter().any(|a| !standard(a)))
-            .map(|d| to_use(d, d.axioms.iter().filter(|a| !standard(a)).cloned().collect()))
+            .filter(|d| !d.internal && d.axioms.iter().any(|a| a.kind() != AxiomKind::Standard))
+            .map(|d| to_use(d, names(d, &|k| k != AxiomKind::Standard)))
             .collect();
         c.all_axioms = all.into_iter().collect();
         c.nonstandard_axioms = nonstandard_all.into_iter().collect();
