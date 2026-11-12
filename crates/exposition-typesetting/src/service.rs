@@ -158,23 +158,37 @@ impl TypesettingService {
 
     /// Compile `entry` now from a fresh snapshot (open buffers override disk).
     pub fn build(&self, target: &BuildTarget) -> Result<Arc<BuildRecord>, TypesettingError> {
-        if target.format != DocumentFormat::Typst || target.engine != Engine::Typst {
-            return Err(TypesettingError::Unsupported(format!("{:?}/{:?}", target.format, target.engine)));
-        }
+        // Typst, and Markdown through its print profile (translated to Typst).
+        let markdown = match (target.format, target.engine) {
+            (DocumentFormat::Typst, Engine::Typst) => false,
+            (DocumentFormat::Markdown, Engine::MarkdownPrint) => true,
+            _ => return Err(TypesettingError::Unsupported(format!("{:?}/{:?}", target.format, target.engine))),
+        };
         let started = Instant::now();
         let snapshot = BuildSnapshot::capture(&self.workspace).map_err(|_| TypesettingError::NoWorkspace)?;
         let context = self.context_for(snapshot.root());
         let snapshot_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let output = context.compiler.compile(&target.entry, &snapshot);
+        let output = if markdown {
+            crate::markdown::compile(&context.compiler, &target.entry, &snapshot)
+        } else {
+            context.compiler.compile(&target.entry, &snapshot)
+        };
         let configuration = BuildConfiguration {
-            engine: Engine::Typst,
+            engine: target.engine,
             compiler: COMPILER.into(),
             font_fingerprint: self.fonts().fingerprint().to_owned(),
-            profile: None,
+            profile: markdown.then(|| crate::markdown::PROFILE_ID.to_owned()),
         };
-        let fingerprint = format!("{}|{}|{}", configuration.compiler, configuration.font_fingerprint, target.entry);
+        let fingerprint = format!(
+            "{}|{}|{}|{}",
+            configuration.compiler,
+            configuration.font_fingerprint,
+            configuration.profile.as_deref().unwrap_or(""),
+            target.entry
+        );
         // Build ids are unique across formats' providers.
-        let id = BuildId(format!("typst-{}", self.counter.fetch_add(1, Ordering::Relaxed) + 1));
+        let prefix = if markdown { "markdown" } else { "typst" };
+        let id = BuildId(format!("{prefix}-{}", self.counter.fetch_add(1, Ordering::Relaxed) + 1));
         let failed = output.document.is_none() || output.diagnostics.iter().any(|d| d.severity == Severity::Error);
         let pages = output
             .document

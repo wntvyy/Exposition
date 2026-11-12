@@ -68,8 +68,23 @@ pub struct TypesettingRuntime {
     wake: Condvar,
 }
 
+/// The build target of an entry by its extension (`None` if not typeset here).
+fn target_of(entry: &WorkspacePath) -> Option<BuildTarget> {
+    let (format, engine) = match entry.extension()?.to_ascii_lowercase().as_str() {
+        "typ" => (DocumentFormat::Typst, Engine::Typst),
+        // Markdown: the declared print profile, laid out by Typst.
+        "md" | "markdown" => (DocumentFormat::Markdown, Engine::MarkdownPrint),
+        _ => return None,
+    };
+    Some(BuildTarget { format, engine, entry: entry.clone() })
+}
+
 fn target(entry: &WorkspacePath) -> BuildTarget {
-    BuildTarget { format: DocumentFormat::Typst, engine: Engine::Typst, entry: entry.clone() }
+    target_of(entry).unwrap_or(BuildTarget {
+        format: DocumentFormat::Typst,
+        engine: Engine::Typst,
+        entry: entry.clone(),
+    })
 }
 
 impl TypesettingRuntime {
@@ -195,8 +210,8 @@ pub async fn typesetting_watch(
     state: State<'_, AppState>,
     entry: WorkspacePath,
 ) -> Result<Option<BuildEvent>, CommandError> {
-    if entry.extension() != Some("typ") {
-        return Err(CommandError::new("typesetting.unsupported", "only .typ entries can be typeset"));
+    if target_of(&entry).is_none() {
+        return Err(CommandError::new("typesetting.unsupported", "only .typ and .md entries can be typeset"));
     }
     let runtime = runtime(&state);
     if runtime.service.workspace().current().is_none() {
