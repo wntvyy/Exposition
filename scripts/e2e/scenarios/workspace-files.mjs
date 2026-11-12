@@ -68,8 +68,10 @@ export default async function workspaceFiles({ launchApp, artifactsDir, assert, 
     await waitForText(page, mainId, `${mainOriginal.toString("utf8")}Typed in Monaco.`, "service text after Ctrl+Z");
     let state = await documentState(page, mainId);
     assert.ok(state.info.canRedo, "the service recorded the undo");
-    const monacoText = await editorLocator(page, "main.typ").locator(".view-lines").innerText();
-    assert.ok(!monacoText.includes("abc"), "Monaco shows the undone text");
+    // Monaco applies the service's change event and repaints asynchronously.
+    await waitFor(async () => !(await editorLocator(page, "main.typ").locator(".view-lines").innerText()).includes("abc"), {
+      message: "Monaco shows the undone text",
+    });
     await page.keyboard.press("Control+Y");
     await waitForText(page, mainId, typed, "service text after Ctrl+Y");
     await page.keyboard.press("Control+Shift+Z"); // nothing more to redo; must not corrupt

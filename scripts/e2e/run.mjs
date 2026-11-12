@@ -4,7 +4,7 @@
 // Each scenario module in ./scenarios exports `default async function (ctx)`
 // where ctx = { launchApp, artifactsDir, fixture(name), assert }.
 import assert from "node:assert/strict";
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -29,8 +29,27 @@ for (const name of selected) {
   await mkdir(artifactsDir, { recursive: true });
   const started = Date.now();
   const module = await import(pathToFileURL(join(scenariosDir, `${name}.mjs`)).href);
+  // Scenarios close their app in `finally`, before a failure reaches this
+  // runner, so each app records its last state (screenshot + console tail)
+  // just before it closes. On failure these files are the evidence.
+  let launched = 0;
+  const launchWithLastState = async (options) => {
+    const app = await launchApp(options);
+    const n = ++launched;
+    const close = app.close.bind(app);
+    app.close = async () => {
+      try {
+        await app.page.screenshot({ path: join(artifactsDir, `last-state-${n}.png`), timeout: 5_000 });
+      } catch {}
+      try {
+        await writeFile(join(artifactsDir, `last-console-${n}.txt`), app.consoleMessages.slice(-200).join("\n"));
+      } catch {}
+      return close();
+    };
+    return app;
+  };
   const ctx = {
-    launchApp,
+    launchApp: launchWithLastState,
     artifactsDir,
     assert,
     fixture: (fixtureName) => join(REPO_ROOT, "tests", "fixtures", fixtureName),
