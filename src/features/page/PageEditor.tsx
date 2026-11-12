@@ -208,6 +208,7 @@ export function PageEditor({ resource, active }: EditorProps) {
       className={`page-editor${focused ? " page-editor--focused" : ""}${model.failed ? " page-editor--stale" : ""}`}
       data-testid="page-editor"
       data-build={model.buildId ?? ""}
+      data-build-revision={model.buildRevision ?? ""}
       data-stale={model.stale ? "true" : "false"}
       data-failed={model.failed ? "true" : "false"}
     >

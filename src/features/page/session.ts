@@ -42,6 +42,8 @@ export interface PageViewModel {
   documentId: string | null;
   pages: PageImage[];
   buildId: string | null;
+  /** Document revision the displayed build was compiled from. */
+  buildRevision: number | null;
   /** The pages shown do not reflect the current source yet (or it has errors). */
   stale: boolean;
   /** The latest build failed; the last good pages remain visible. */
@@ -92,6 +94,7 @@ export class PageSession {
     documentId: null,
     pages: [],
     buildId: null,
+    buildRevision: null,
     stale: true,
     failed: false,
     errorCount: 0,
@@ -220,7 +223,7 @@ export class PageSession {
       latencyMs = performance.now() - this.editAt.time;
       this.editAt = null;
     }
-    this.set({ pages, buildId: result.id, stale: this.docRevision > revision, latencyMs });
+    this.set({ pages, buildId: result.id, buildRevision: revision, stale: this.docRevision > revision, latencyMs });
     await this.refreshGeometry();
   }
 
