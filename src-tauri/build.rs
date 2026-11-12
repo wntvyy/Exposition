@@ -138,8 +138,13 @@ const COMMANDS: &[&str] = &[
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,
 /// granted only by a capability added at runtime in debug builds, and are not
 /// part of release `COMMANDS` or `capabilities/`.
-const DEV_COMMANDS: &[&str] =
-    &["dev_start_probe_job", "dev_start_workspace_job", "agents_dev_load_script", "research_dev_fail_next_graph_write"];
+const DEV_COMMANDS: &[&str] = &[
+    "dev_start_probe_job",
+    "dev_start_workspace_job",
+    "agents_dev_load_script",
+    // Fault injection for the promotion pending-reconciliation e2e (src/research.rs).
+    "research_dev_fail_next_graph_write",
+];
 
 fn main() {
     let debug = std::env::var("PROFILE").as_deref() == Ok("debug");
