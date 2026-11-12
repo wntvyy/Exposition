@@ -28,6 +28,20 @@ const BUDGET_NAMES: Record<BudgetKind, string> = {
   commands: "command",
 };
 
+/** Short label for a response that stopped without finishing its turn. */
+export function stopLabel(stopReason: string): string {
+  switch (stopReason) {
+    case "max_tokens":
+      return "Stopped: response cut off";
+    case "model_context_window_exceeded":
+      return "Stopped: context window full";
+    case "pause_turn":
+      return "Stopped: response paused";
+    default:
+      return "Stopped: unexpected response";
+  }
+}
+
 /** Task status in the shared status vocabulary, with a specific label. */
 export function statusLabel(status: TaskStatus): PillState {
   switch (status.kind) {
@@ -47,6 +61,8 @@ export function statusLabel(status: TaskStatus): PillState {
       return { status: "failed", label: "Declined by provider" };
     case "failed":
       return { status: "failed", label: "Task failed" };
+    case "stopped":
+      return { status: "warning", label: stopLabel(status.stopReason) };
     case "interrupted":
       return { status: "canceled", label: "Interrupted" };
   }

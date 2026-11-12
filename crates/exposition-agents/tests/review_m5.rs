@@ -494,7 +494,6 @@ async fn r_m5_f4_link_inside_scope_reads_out_of_scope_file() {
 /// edits live in the unsaved buffer while the created file on disk still has
 /// the original content.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "R-m5 F5: revert refuses to delete a file the agent created and then edited (false 'changed after the agent created it')"]
 async fn r_m5_f5_revert_of_created_then_edited_file_is_refused() {
     let mut a = app();
     let script = json!({"turns": [
@@ -565,7 +564,6 @@ async fn r_m5_f6_create_approved_after_workspace_switch_writes_into_other_projec
 /// context window is full) ends the task as "Task completed". Its tool calls
 /// are silently not run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "R-m5 F7: an unknown/cut-off stop reason (model_context_window_exceeded) is reported as Completed"]
 async fn r_m5_f7_context_window_stop_is_reported_as_completed() {
     let project = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("main.typ"), MAIN).unwrap();
@@ -705,7 +703,6 @@ async fn r_m5_f8_api_key_is_sent_to_a_redirect_target_on_another_host() {
 /// with an enabled Revert, and Revert is then refused as "Later edits overlap
 /// the agent's changes" although the text is exactly the pre-task text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "R-m5 F9: after the user undoes an agent edit, review stays pending and Revert reports a false overlap"]
 async fn r_m5_f9_user_undo_of_agent_edit_leaves_a_false_overlap_refusal() {
     use exposition_core::document::EditOrigin;
     let mut a = app();

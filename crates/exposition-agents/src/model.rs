@@ -204,6 +204,14 @@ pub enum TaskStatus {
     Failed {
         message: String,
     },
+    /// The model's response ended without finishing its turn (`max_tokens`,
+    /// `model_context_window_exceeded`, `pause_turn`, or a stop reason this
+    /// application does not know). Its tool calls were not run; `message` says
+    /// why and what the user can do.
+    Stopped {
+        stop_reason: String,
+        message: String,
+    },
     /// The application stopped while the task was running.
     Interrupted,
 }
@@ -531,6 +539,11 @@ pub enum ReviewState {
     Pending,
     Accepted,
     Reverted,
+    /// The agent's changes are no longer in the file because someone undid
+    /// them (Ctrl+Z, discarding unsaved changes, retyping the old text).
+    /// Derived from the file's current content when the review is read; never
+    /// stored, so a redo makes the change pending again.
+    Undone,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

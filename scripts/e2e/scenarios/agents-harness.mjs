@@ -131,11 +131,16 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     await page.waitForTimeout(200);
     await shot(page, "agents-settings-configured-light");
     step("key saved to OS credential storage; webview shows Configured only", { store: status.credentialStore });
-    await dialog.getByRole("button", { name: "Remove" }).click();
+    // Removing the key asks first; the safe choice (keep) has focus.
+    await dialog.getByRole("button", { name: "Remove", exact: true }).click();
+    const confirmRemove = page.getByRole("alertdialog", { name: "Remove the API key?" });
+    await confirmRemove.waitFor();
+    await page.waitForFunction(() => document.activeElement?.textContent === "Keep key");
+    await confirmRemove.getByRole("button", { name: "Remove key" }).click();
     await page.waitForFunction(() =>
       (document.querySelector("[data-testid=agents-key-status]")?.textContent ?? "").includes("Not configured"),
     );
-    step("key removed; Not configured");
+    step("key removed after confirmation (Keep focused by default); Not configured");
 
     // Open the project folder through the workspace service (as File ▸ Open Folder does).
     const opened = await invoke(page, "workspace_open", { path: project });
