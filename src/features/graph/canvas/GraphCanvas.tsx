@@ -215,7 +215,7 @@ function CanvasControls({ selection, extra }: { selection: string[]; extra?: Rea
 }
 
 const sameViewport = (a: Viewport | null, b: Viewport | null) =>
-  a !== null && b !== null && Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 && Math.abs(a.zoom - b.zoom) < 0.001;
+  a !== null && b !== null && Math.abs(a.x - b.x) <= 1 && Math.abs(a.y - b.y) <= 1 && Math.abs(a.zoom - b.zoom) < 0.001;
 
 function CanvasInner(props: GraphCanvasProps) {
   const {

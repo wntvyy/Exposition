@@ -143,6 +143,26 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     await page.locator("[data-testid=app-info]").waitFor({ timeout: 5000 });
     await shot(page, "workbench-light");
 
+    // Top-level pages: the rail's page switcher marks the shown page with
+    // aria-current; Mod+<digit> switches pages; a page with nothing to show
+    // says so honestly (Graph with no folder open). The Editor page keeps its
+    // layout across the visit.
+    const pageButtons = page.getByRole("toolbar", { name: "Pages" }).getByRole("button");
+    const pageNames = await pageButtons.evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")));
+    assert.equal(pageNames[0], "Editor", `Editor is the first page (${pageNames.join(", ")})`);
+    assert.ok(pageNames.includes("Graph"), `Graph page registered (${pageNames.join(", ")})`);
+    assert.equal(await page.locator('[data-page-button="editor"]').getAttribute("aria-current"), "page");
+    await page.keyboard.press("Control+4");
+    await page.getByTestId("graph-page").waitFor({ timeout: 10000 });
+    assert.equal(await page.locator('[data-page-button="graph"]').getAttribute("aria-current"), "page", "Ctrl+4 shows the Graph page");
+    assert.equal(await page.locator('[data-page-button="editor"]').getAttribute("aria-current"), null);
+    assert.ok(await page.getByTestId("graph-page").getByText("No folder open", { exact: true }).isVisible(), "Graph page says no folder is open");
+    await shot(page, "page-graph-no-folder-light");
+    await page.keyboard.press("Control+1");
+    await page.locator('[data-page="editor"]:not([hidden])').waitFor();
+    assert.equal(await page.locator('[data-page="graph"]').getAttribute("hidden"), "", "the visited Graph page stays mounted, hidden");
+    assert.ok(await page.getByText("No editor open", { exact: true }).first().isVisible(), "Ctrl+1 returns to the Editor page");
+
     // Region shortcuts.
     await page.keyboard.press("Control+b");
     assert.equal(await regionVisible(page, "sidebar"), false, "Ctrl+B hides the sidebar");

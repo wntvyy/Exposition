@@ -116,6 +116,7 @@ describe("Project graph table (keyboard alternative)", () => {
     expect(within(grid).getAllByRole("rowheader").map((c) => c.textContent)).toEqual(["chapters", "Key lemma", "Main theorem", "Reading list"]);
 
     const row = within(grid).getByRole("rowheader", { name: "Main theorem" }).closest('[role="row"]') as HTMLElement;
+    expect(row.getAttribute("data-entity-id")).toBe("thm");
     act(() => row.focus());
     fireEvent.keyDown(row, { key: " ", code: "Space" });
     fireEvent.keyUp(row, { key: " ", code: "Space" });
