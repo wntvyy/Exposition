@@ -156,6 +156,8 @@ pub fn run() {
             graph::graph_view_delete,
             graph::graph_recover,
             graph::graph_operations,
+            agents::agents_task_keep_investigation,
+            agents::agents_task_create_generation,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

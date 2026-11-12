@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agents-task-keep-investigation"
+description = "Enables the agents_task_keep_investigation command without any pre-configured scope."
+commands.allow = ["agents_task_keep_investigation"]
+
+[[permission]]
+identifier = "deny-agents-task-keep-investigation"
+description = "Denies the agents_task_keep_investigation command without any pre-configured scope."
+commands.deny = ["agents_task_keep_investigation"]

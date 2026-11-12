@@ -5,6 +5,7 @@ import type { Budgets } from "../../bindings/Budgets";
 import type { ContextConsent } from "../../bindings/ContextConsent";
 import type { ExecutionMode } from "../../bindings/ExecutionMode";
 import type { PermissionProfile } from "../../bindings/PermissionProfile";
+import type { TaskId } from "../../bindings/TaskId";
 import type { TaskScope } from "../../bindings/TaskScope";
 import { editors } from "../../app/editors";
 import { registry } from "../../app/registry";
@@ -81,7 +82,14 @@ function NumberField(props: { label: string; value: number; min: number; onChang
 const option = <K extends string>(labels: Record<K, string>) =>
   (Object.keys(labels) as K[]).map((id) => ({ id, label: labels[id] }));
 
-export function TaskComposer() {
+/**
+ * New task form. The Agent view shows the created task in the panel; the
+ * Agents page passes `onCreated`/`onCancel` to keep it on the page.
+ */
+export function TaskComposer({
+  onCreated,
+  onCancel,
+}: { onCreated?: (id: TaskId) => void; onCancel?: () => void } = {}) {
   const status = useAgents((s) => s.status);
   const workspace = useAgents((s) => s.workspace);
   const folder = workspace?.root ?? "";
@@ -109,7 +117,8 @@ export function TaskComposer() {
     setBusy(false);
     if (task) {
       setPrompt("");
-      agents.show("task", task.id);
+      if (onCreated) onCreated(task.id);
+      else agents.show("task", task.id);
     }
   }
 
@@ -198,7 +207,7 @@ export function TaskComposer() {
         </div>
       </Section>
       <div className="agents-row">
-        <Button variant="ghost" onPress={() => agents.show("tasks")}>
+        <Button variant="ghost" onPress={() => (onCancel ? onCancel() : agents.show("tasks"))}>
           Cancel
         </Button>
         <Button

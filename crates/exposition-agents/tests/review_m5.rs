@@ -95,6 +95,9 @@ fn app_with(settings: ExecutionSettings) -> App {
         .with_workspace(Arc::clone(&workspace))
         .with_typesetting(typesetting)
         .with_tex(tex);
+    let graph =
+        exposition_graph::GraphService::new(exposition_graph::GraphConfig { data_dir: data.path().join("graph") });
+    graph.attach(&std::fs::canonicalize(project.path()).unwrap());
     let service = AgentService::new(AgentConfig {
         database: None,
         documents: Arc::clone(&documents),
@@ -105,6 +108,7 @@ fn app_with(settings: ExecutionSettings) -> App {
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: Some(Arc::clone(&graph)),
     })
     .unwrap();
     service
@@ -359,6 +363,7 @@ async fn r_m5_f3_restricted_run_python_ignores_scope_and_metadata_only_consent()
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: None,
     })
     .unwrap();
     service
@@ -571,6 +576,7 @@ async fn r_m5_f7_context_window_stop_is_reported_as_completed() {
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: None,
     })
     .unwrap();
     service
@@ -774,6 +780,7 @@ async fn r_m5_f10_native_python_approval_hides_the_tail_of_the_code() {
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: None,
     })
     .unwrap();
     service
@@ -884,6 +891,9 @@ async fn r_m5_held_canceled_native_python_is_recorded_and_its_session_released()
     let services = AppToolServices::new(execution.clone())
         .with_workspace(Arc::clone(&workspace))
         .with_research(Arc::clone(&research));
+    let graph =
+        exposition_graph::GraphService::new(exposition_graph::GraphConfig { data_dir: data.path().join("graph") });
+    graph.attach(&std::fs::canonicalize(project.path()).unwrap());
     let service = AgentService::new(AgentConfig {
         database: None,
         documents: Arc::clone(&documents),
@@ -894,6 +904,7 @@ async fn r_m5_held_canceled_native_python_is_recorded_and_its_session_released()
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: Some(Arc::clone(&graph)),
     })
     .unwrap();
     service

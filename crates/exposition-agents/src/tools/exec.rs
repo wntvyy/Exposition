@@ -35,6 +35,8 @@ use super::{
     CreateFileInput, EditDocumentInput, Exposure, InsertArtifactInput, Launch, ListFilesInput, PathUse, ReadFileInput,
     RunCommandInput, ToolCall, scope,
 };
+use crate::graph::propose::Prepared;
+use crate::graph::{GraphEnv, TargetUse};
 use crate::model::{ContextConsent, ExecutionMode, PermissionProfile, TaskId, TaskScope, TaskSpec};
 use crate::review::{self, EditRecord};
 use crate::store::Store;
@@ -82,6 +84,11 @@ pub struct ToolEnv<'a> {
     pub workspace: Option<&'a WorkspaceService>,
     pub services: &'a dyn ToolServices,
     pub store: &'a Store,
+    /// The project graph, bound to the task's project. Present in the
+    /// application (the agent service requires it whenever a workspace
+    /// service is present); every call then needs a usable graph and its
+    /// targets resolve through it.
+    pub graph: Option<GraphEnv<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -138,6 +145,24 @@ pub mod codes {
     pub const PROJECT_CHANGED: &str = "agents.projectChanged";
     /// What the call would do changed while it waited for approval.
     pub const CHANGED_SINCE_APPROVAL: &str = "agents.changedSinceApproval";
+    /// The project graph cannot be used now (damaged, detached, not
+    /// synchronized): the project-agent action is paused.
+    pub const GRAPH_UNAVAILABLE: &str = "agents.graphUnavailable";
+    /// A target changed and the graph has not reconciled it: paused.
+    pub const GRAPH_PENDING: &str = "agents.graphPending";
+    /// The graph cannot tell which resource a target is: paused.
+    pub const GRAPH_AMBIGUOUS: &str = "agents.graphAmbiguous";
+    /// The graph's own storage is never a file tool target.
+    pub const GRAPH_STORAGE: &str = "agents.graphStorage";
+    /// Service-owned records (run records, generated artifacts, application
+    /// metadata) are never written by agent file tools.
+    pub const SERVICE_OWNED: &str = "agents.serviceOwned";
+    /// A proposed graph change is invalid (validator diagnostics attached).
+    pub const GRAPH_INVALID: &str = "agents.graphInvalid";
+    /// A proposed graph change conflicts with changes made since.
+    pub const GRAPH_CONFLICT: &str = "agents.graphConflict";
+    /// Investigations and workflows are admitted deliberately, not by graph_propose.
+    pub const GRAPH_RESERVED: &str = "agents.graphReservedKind";
 }
 
 /// A refusal with its stable code.
@@ -157,12 +182,19 @@ pub struct Authorization {
     approved: Option<String>,
     /// An artifact insertion planned (and shown) at the gate.
     insertion: Option<PlannedInsertion>,
+    /// A graph change validated (and shown) at the gate.
+    proposal: Option<Box<Prepared>>,
 }
 
 impl Authorization {
     /// Execution policy for a process launch (`None` for in-process tools).
     pub fn policy(&self) -> Option<&ExecutionPolicy> {
         self.policy.as_ref()
+    }
+
+    /// The graph change this authorization covers, if it is one.
+    pub fn proposal(&self) -> Option<&Prepared> {
+        self.proposal.as_deref()
     }
 }
 
@@ -273,9 +305,12 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     }
     for (raw, path_use) in &effects.paths {
         check_path(env, raw, *path_use)?;
+        if *path_use != PathUse::Folder || !tools::is_root(raw) {
+            crate::graph::targets::check_path_policy(&parse_path(raw.trim())?, *path_use)?;
+        }
     }
     match effects.exposes {
-        Exposure::Metadata => {}
+        Exposure::Metadata | Exposure::ConsentFiltered => {}
         Exposure::ScopedContent => require_content_consent(spec, effects.what)?,
         Exposure::Unconfined => {
             if spec.scope != TaskScope::Workspace {
@@ -311,8 +346,26 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     {
         return Err(refusal(codes::SERVICE_UNAVAILABLE, ServiceError::NotAvailable(kind).to_string()));
     }
+    // The project graph: usable, bound to the task's own project, and every
+    // target in a usable graph state. Never skipped for "legacy" file tools.
+    match env.graph {
+        Some(graph) => {
+            crate::graph::bound_status(graph, root)?;
+            crate::graph::targets::check_targets(graph, &effects)?;
+        }
+        None if matches!(call, ToolCall::GraphQuery(_) | ToolCall::GraphPropose(_)) => {
+            return Err(crate::graph::unavailable("no project graph is attached to this task"));
+        }
+        None => {}
+    }
     let insertion = match call {
         ToolCall::InsertArtifact(input) => prepare_insertion(env, input)?,
+        _ => None,
+    };
+    let proposal = match (call, env.graph) {
+        (ToolCall::GraphPropose(input), Some(graph)) => {
+            Some(crate::graph::propose::prepare(graph, root, spec, env.task_id, input)?)
+        }
         _ => None,
     };
     let policy = match (effects.launch, spec.execution) {
@@ -341,12 +394,18 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     };
     let native = policy == Some(ExecutionPolicy::TrustedNative);
     let review = effects.changes && spec.permission == PermissionProfile::ReviewEdits;
-    let mut authorization = Authorization { policy, root: root.to_path_buf(), approved: None, insertion: None };
+    let mut authorization =
+        Authorization { policy, root: root.to_path_buf(), approved: None, insertion: None, proposal: None };
     if !(native || review) {
         authorization.insertion = insertion.map(|(planned, _)| planned);
+        authorization.proposal = proposal.map(Box::new);
         return Ok(Gate::Allowed(authorization));
     }
-    let (title, mut detail) = describe(call, insertion.as_ref().map(|(_, shown)| shown.as_str()));
+    let (title, mut detail) = match &proposal {
+        Some(prepared) => (prepared.title.clone(), prepared.detail.clone()),
+        None => describe(call, insertion.as_ref().map(|(_, shown)| shown.as_str())),
+    };
+    authorization.proposal = proposal.map(Box::new);
     if native {
         detail.push_str("\n\nRuns natively with your account's privileges.");
     }
@@ -508,7 +567,9 @@ fn describe(call: &ToolCall, insertion: Option<&str>) -> (String, String) {
                 ),
             )
         }
-        ToolCall::ListFiles(_) | ToolCall::ReadFile(_) => (String::new(), String::new()),
+        ToolCall::ListFiles(_) | ToolCall::ReadFile(_) | ToolCall::GraphQuery(_) | ToolCall::GraphPropose(_) => {
+            (String::new(), String::new())
+        }
     };
     let detail = if detail.contains("⟨U+") {
         format!(
@@ -664,8 +725,24 @@ pub async fn run(
     if let Err(reason) = workspace::check_root(env.workspace, &authorization.root) {
         return project_changed(&reason);
     }
-    let Authorization { policy, insertion, .. } = authorization;
+    let Authorization { policy, insertion, proposal, .. } = authorization;
     let result = match call {
+        ToolCall::GraphQuery(input) => match env.graph {
+            Some(graph) => crate::graph::query::run(graph, env.files.root(), env.spec, &input),
+            None => Err(crate::graph::unavailable("no project graph is attached to this task")),
+        },
+        ToolCall::GraphPropose(_) => match (env.graph, proposal) {
+            (Some(graph), Some(prepared)) => crate::graph::propose::apply(
+                graph,
+                env.files.root(),
+                env.spec,
+                env.task_id,
+                env.store,
+                tool_use_id,
+                &prepared,
+            ),
+            _ => Err(crate::graph::unavailable("the graph change was not validated by the gate")),
+        },
         ToolCall::ListFiles(input) => list_files(env, input),
         ToolCall::ReadFile(input) => read_file(env, seen, input),
         ToolCall::EditDocument(input) => edit_document(env, seen, tool_use_id, input),
@@ -677,6 +754,7 @@ pub async fn run(
                     "lualatex" => LatexEngine::LuaLatex,
                     _ => LatexEngine::Auto,
                 };
+                let graph_info = resolve_target(env, &entry, TargetUse::Build);
                 let request = BuildRequest {
                     entry,
                     engine,
@@ -685,7 +763,7 @@ pub async fn run(
                     scope: env.spec.scope.clone(),
                     policy,
                 };
-                service_result(env.services.build_document(request, cancel).await)
+                with_graph(service_result(env.services.build_document(request, cancel).await), graph_info)
             }
             Err(e) => Err(e),
         },
@@ -711,13 +789,66 @@ pub async fn run(
         ToolCall::CheckLean(input) => {
             let Some(policy) = policy else { return ToolOutput::error("missing execution policy") };
             match parse_path(&input.path) {
-                Ok(path) => service_result(env.services.check_lean(LeanRequest { path, policy }, cancel).await),
+                Ok(path) => {
+                    let graph_info = resolve_target(env, &path, TargetUse::Check);
+                    with_graph(
+                        service_result(env.services.check_lean(LeanRequest { path, policy }, cancel).await),
+                        graph_info,
+                    )
+                }
                 Err(e) => Err(e),
             }
         }
         ToolCall::RunCommand(input) => run_command(env, input, policy, cancel).await,
     };
     result.unwrap_or_else(|e| e)
+}
+
+/// The saved version of a file (its hash on disk), never an unsaved buffer.
+fn saved_hash(env: &ToolEnv<'_>, path: &WorkspacePath) -> Option<String> {
+    if let Some(id) = env.documents.find_by_path(path)
+        && let Ok(info) = env.documents.info(&id)
+        && info.saved_revision != Some(info.revision)
+    {
+        return None;
+    }
+    let bytes = std::fs::read(scope::resolve(env.files.root(), path).ok().flatten().map(|p| {
+        let mut abs = env.files.root().to_path_buf();
+        for part in p.components() {
+            abs.push(part);
+        }
+        abs
+    })?)
+    .ok()?;
+    Some(sha256_hex(&bytes))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Resolve a target to its graph identity (when the task has a graph) and
+/// record it with the task; the description goes into the tool result.
+fn resolve_target(env: &ToolEnv<'_>, path: &WorkspacePath, target_use: TargetUse) -> Option<Value> {
+    let graph = env.graph?;
+    let hash = saved_hash(env, path);
+    Some(crate::graph::targets::resolve(graph, env.store, env.task_id, path, target_use, hash.as_deref()))
+}
+
+/// Add the graph description to a result (success or error object).
+fn with_graph(result: Result<ToolOutput, ToolOutput>, graph: Option<Value>) -> Result<ToolOutput, ToolOutput> {
+    let Some(graph) = graph else { return result };
+    let add = |mut output: ToolOutput| {
+        if let Some(obj) = output.content.as_object_mut() {
+            obj.insert("graph".into(), graph.clone());
+        }
+        output
+    };
+    match result {
+        Ok(output) => Ok(add(output)),
+        Err(output) => Err(add(output)),
+    }
 }
 
 fn service_result(result: Result<Value, ServiceError>) -> Result<ToolOutput, ToolOutput> {
@@ -816,20 +947,45 @@ fn list_files(env: &ToolEnv<'_>, input: ListFilesInput) -> Result<ToolOutput, To
             info.path.map(|p| (p.as_str().to_owned(), (info.revision, unsaved)))
         })
         .collect();
+    let resources = env.graph.map(graph_resources).unwrap_or_default();
     let entries: Vec<Value> = listing
         .entries
         .into_iter()
         .filter(|e| entry_visible(&e.path, &env.spec.scope))
+        .filter(|e| WorkspacePath::parse(&e.path).map(|p| !exposition_graph::is_graph_storage(&p)).unwrap_or(true))
         .map(|e| {
             let mut value = serde_json::to_value(&e).unwrap_or(Value::Null);
             if let Some((revision, unsaved)) = open.get(&e.path) {
                 value["openRevision"] = json!(revision);
                 value["unsavedChanges"] = json!(unsaved);
             }
+            if let Some(id) = resources.get(&e.path) {
+                value["resource"] = json!(id);
+            }
             value
         })
         .collect();
-    Ok(ToolOutput::ok(json!({"entries": entries, "truncated": listing.truncated})))
+    let mut result = json!({"entries": entries, "truncated": listing.truncated});
+    if let Some(graph) = env.graph {
+        let status = graph.service.status();
+        result["graph"] = crate::graph::header(&status);
+    }
+    Ok(ToolOutput::ok(result))
+}
+
+/// Resource identities of the project's files, by path (bounded).
+fn graph_resources(graph: GraphEnv<'_>) -> HashMap<String, exposition_graph::EntityId> {
+    graph
+        .service
+        .with_store(|store| {
+            let (found, _) = store.find_entities(Some(&[exposition_graph::EntityKind::Resource]), None, true, 5000)?;
+            Ok(found
+                .into_iter()
+                .filter(|e| e.lifecycle != exposition_graph::Lifecycle::Tombstoned)
+                .filter_map(|e| e.key.clone().map(|k| (k, e.id)))
+                .collect())
+        })
+        .unwrap_or_default()
 }
 
 fn read_file(env: &ToolEnv<'_>, seen: &mut SeenTexts, input: ReadFileInput) -> Result<ToolOutput, ToolOutput> {
@@ -853,13 +1009,19 @@ fn read_file(env: &ToolEnv<'_>, seen: &mut SeenTexts, input: ReadFileInput) -> R
         .filter(|input| input.revision == Some(snapshot.revision))
         .map(|input| input.content_hash)
         .unwrap_or_else(|| workspace::content_hash(&snapshot.text));
-    Ok(ToolOutput::ok(json!({
+    let unsaved = info.saved_revision != Some(info.revision);
+    let graph_info = resolve_target(env, &path, TargetUse::Read);
+    let mut result = json!({
         "path": path.as_str(),
         "revision": snapshot.revision,
-        "unsavedChanges": info.saved_revision != Some(info.revision),
+        "unsavedChanges": unsaved,
         "contentHash": content_hash,
         "text": &*snapshot.text,
-    })))
+    });
+    if let Some(graph) = graph_info {
+        result["graph"] = graph;
+    }
+    Ok(ToolOutput::ok(result))
 }
 
 /// Locate each `old_text` exactly once in `base` and build sorted patches.
@@ -967,12 +1129,16 @@ fn edit_document(
     };
     let applied = &outcome.applied[0];
     record_applied(env, seen, tool_use_id, &path, &id, &before_apply, applied)?;
+    let graph_info = resolve_target(env, &path, TargetUse::Edit);
     let mut result = json!({
         "path": path.as_str(),
         "revision": applied.revision,
         "previousRevision": applied.previous_revision,
         "note": "Applied to the open document (not saved). The user reviews agent changes.",
     });
+    if let Some(graph) = graph_info {
+        result["graph"] = graph;
+    }
     if applied.rebased {
         result["rebased"] = json!(true);
         result["note"] = json!(
@@ -1058,13 +1224,18 @@ fn insert_artifact(
         .find(|edit| edit.document == id)
         .ok_or_else(|| ToolOutput::error("the document service applied no edit"))?;
     record_applied(env, seen, tool_use_id, &path, &id, &snapshot, applied)?;
-    Ok(ToolOutput::ok(json!({
+    let graph_info = resolve_target(env, &path, TargetUse::Insert);
+    let mut result = json!({
         "path": path.as_str(),
         "revision": applied.revision,
         "attachmentKey": plan.attachment_key,
         "warnings": plan.warnings,
         "note": "Inserted with the format's figure/table markup into the open document (not saved); reviewable like any agent edit.",
-    })))
+    });
+    if let Some(graph) = graph_info {
+        result["graph"] = graph;
+    }
+    Ok(ToolOutput::ok(result))
 }
 
 fn create_file(
@@ -1075,6 +1246,53 @@ fn create_file(
 ) -> Result<ToolOutput, ToolOutput> {
     let path = parse_path(&input.path)?;
     let exists = || ToolOutput::error(format!("{path} already exists; use read_file and edit_document to change it."));
+    // A provisional identity (operation journal) before the file exists.
+    let provisional = env.graph.map(|graph| (graph, crate::graph::targets::reserve(graph, env.task_id, &path)));
+    let created = create_file_inner(env, &path, &input, exists);
+    let opened = match created {
+        Ok(opened) => opened,
+        Err(e) => {
+            if let Some((graph, provisional)) = provisional {
+                crate::graph::targets::abandon(graph, provisional, "the file was not created");
+            }
+            return Err(e);
+        }
+    };
+    let graph_info = provisional.map(|(graph, provisional)| {
+        let hash = sha256_hex(input.content.as_bytes());
+        crate::graph::targets::finalize(graph, env.store, env.task_id, &path, provisional, &hash)
+    });
+    let document = opened.as_ref().and_then(|id| env.documents.snapshot(id).ok().map(|s| (id.clone(), s)));
+    if let Some((id, snapshot)) = &document {
+        seen.insert(id, snapshot.revision, Arc::clone(&snapshot.text));
+    }
+    review::record_create(
+        env.store,
+        env.task_id,
+        tool_use_id,
+        &path,
+        &input.content,
+        document.as_ref().map(|(id, s)| (id, s.revision)),
+    )
+    .map_err(|e| ToolOutput::error(format!("The file was created but could not be recorded for review: {e}")))?;
+    let mut result = json!({"path": path.as_str(), "created": true, "bytes": input.content.len()});
+    if let Some((_, snapshot)) = &document {
+        result["revision"] = json!(snapshot.revision);
+    }
+    if let Some(graph) = graph_info {
+        result["graph"] = graph;
+    }
+    Ok(ToolOutput::ok(result))
+}
+
+/// Create the file (never overwriting) and open it as a document.
+fn create_file_inner(
+    env: &ToolEnv<'_>,
+    path: &WorkspacePath,
+    input: &CreateFileInput,
+    exists: impl Fn() -> ToolOutput,
+) -> Result<Option<DocumentId>, ToolOutput> {
+    let path = path.clone();
     let opened = match env.workspace {
         // The workspace service creates the file (never overwriting) and opens it.
         Some(workspace) => {
@@ -1094,24 +1312,7 @@ fn create_file(
             workspace::open_document_in(None, env.documents, env.files, &path).ok()
         }
     };
-    let document = opened.as_ref().and_then(|id| env.documents.snapshot(id).ok().map(|s| (id.clone(), s)));
-    if let Some((id, snapshot)) = &document {
-        seen.insert(id, snapshot.revision, Arc::clone(&snapshot.text));
-    }
-    review::record_create(
-        env.store,
-        env.task_id,
-        tool_use_id,
-        &path,
-        &input.content,
-        document.as_ref().map(|(id, s)| (id, s.revision)),
-    )
-    .map_err(|e| ToolOutput::error(format!("The file was created but could not be recorded for review: {e}")))?;
-    let mut result = json!({"path": path.as_str(), "created": true, "bytes": input.content.len()});
-    if let Some((_, snapshot)) = &document {
-        result["revision"] = json!(snapshot.revision);
-    }
-    Ok(ToolOutput::ok(result))
+    Ok(opened)
 }
 
 #[cfg(test)]

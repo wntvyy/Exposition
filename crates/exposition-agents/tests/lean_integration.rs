@@ -60,6 +60,10 @@ fn harness() -> Harness {
     let documents = Arc::new(DocumentService::new());
     let workspace = WorkspaceService::new(Arc::clone(&documents), data.path().join("workspace"));
     workspace.open_workspace(project.path()).unwrap();
+    // The project graph, attached to the open project (agents require it with a workspace).
+    let graph =
+        exposition_graph::GraphService::new(exposition_graph::GraphConfig { data_dir: data.path().join("graph") });
+    graph.attach(&std::fs::canonicalize(project.path()).unwrap());
     let mut config = ExecutionConfig::new(data.path());
     config.settings = Some(ExecutionSettings::default());
     config.too_broad_to_trust = Some(Vec::new());
@@ -78,6 +82,7 @@ fn harness() -> Harness {
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: Some(graph),
     })
     .unwrap();
     service

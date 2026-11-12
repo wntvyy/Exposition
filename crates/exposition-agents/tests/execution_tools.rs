@@ -47,6 +47,7 @@ fn harness(docker_image: Option<String>) -> Harness {
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: None,
     })
     .unwrap();
     service
