@@ -1,4 +1,5 @@
-// Monaco environment: bundle the editor worker locally (no CDN, CSP-compatible).
+// Monaco environment: bundle the editor worker and icon font locally (no CDN,
+// CSP-compatible).
 // Import Monaco only through this module so the environment is set first.
 // `monaco-editor/editor` is the core editor API without the bundled language
 // catalogue; Exposition registers the languages it needs itself.
@@ -8,6 +9,10 @@
 // options and never call `monaco.editor.setTheme` directly.
 import * as monaco from "monaco-editor/editor";
 import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
+// The codicon icon font (diff gutter +/-, find widget, folding, hovers). The
+// core editor entry does not include it; this registers its @font-face, and
+// Vite bundles codicon.ttf as a local asset (CSP font-src 'self').
+import "monaco-editor/features/codicon/register";
 
 import { applyMonacoTheme, defineMonacoThemes, editorDefaults, followAppTheme, MONACO_THEMES } from "../ui/monaco-theme";
 

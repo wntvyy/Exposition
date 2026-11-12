@@ -19,6 +19,7 @@ const STATES: Record<FileReview["state"], { status: Status; label: string }> = {
   pending: { status: "warning", label: "Pending review" },
   accepted: { status: "succeeded", label: "Kept" },
   reverted: { status: "canceled", label: "Reverted" },
+  undone: { status: "canceled", label: "Undone in editor" },
 };
 
 function FileRow(props: {
@@ -41,7 +42,9 @@ function FileRow(props: {
           {editedSince ? " · edited since" : ""}
         </span>
       </button>
-      <StatusPill status={state.status} label={state.label} size="sm" />
+      <span data-testid="agents-review-state" data-state={file.state}>
+        <StatusPill status={state.status} label={state.label} size="sm" />
+      </span>
       {file.entangled && <StatusPill status="failed" label="Overlapping edits" size="sm" />}
       <span className="agents-row">
         <Button size="sm" variant="ghost" icon={Check} isDisabled={props.disabled || file.state !== "pending"} onPress={() => props.onAction("accept")}>
@@ -51,7 +54,7 @@ function FileRow(props: {
           size="sm"
           variant="ghost"
           icon={Undo2}
-          isDisabled={props.disabled || file.state === "reverted"}
+          isDisabled={props.disabled || file.state === "reverted" || file.state === "undone"}
           onPress={() => props.onAction("revert")}
           data-testid="agents-revert-file"
         >

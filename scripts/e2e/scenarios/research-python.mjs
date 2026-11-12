@@ -17,21 +17,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { editorLocator, invoke, invokeError, openInEditor, waitFor } from "../workspace-helpers.mjs";
+import { runCommand } from "../palette.mjs";
 
 const KERNEL_TIMEOUT = 120_000;
-
-async function runCommand(page, query, expectedTitle) {
-  await page.keyboard.press("Control+Shift+P");
-  const input = page.getByRole("textbox", { name: "Command" });
-  await input.waitFor({ state: "visible", timeout: 5000 });
-  await input.fill(query);
-  const first = page.locator(".wb-palette__item").first();
-  await first.waitFor({ state: "visible" });
-  const title = await first.innerText();
-  if (!expectedTitle.test(title)) throw new Error(`palette top match for "${query}" was "${title}"`);
-  await page.keyboard.press("Enter");
-  await input.waitFor({ state: "detached", timeout: 5000 });
-}
 
 /** Command lines of processes that mention `marker` (Windows process table). */
 function processesMentioning(marker) {

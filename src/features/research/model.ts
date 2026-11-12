@@ -89,6 +89,34 @@ function upsert<T>(items: T[], item: T, same: (a: T) => boolean, prepend = false
   return copy;
 }
 
+/**
+ * Combine a snapshot read from the service with the current list. An item an
+ * event changed (or removed, or added) while the snapshot was being fetched is
+ * newer than the snapshot: the current version wins. Every service change is
+ * followed by its event, so the list still converges on the service's state.
+ */
+export function mergeSnapshot<T>(
+  current: T[],
+  snapshot: T[],
+  idOf: (item: T) => string,
+  changedDuringFetch: (id: string) => boolean,
+): T[] {
+  const merged: T[] = [];
+  for (const item of snapshot) {
+    const id = idOf(item);
+    if (!changedDuringFetch(id)) merged.push(item);
+    else {
+      const now = current.find((c) => idOf(c) === id);
+      if (now) merged.push(now);
+    }
+  }
+  for (const item of current) {
+    const id = idOf(item);
+    if (changedDuringFetch(id) && !merged.some((m) => idOf(m) === id)) merged.push(item);
+  }
+  return merged;
+}
+
 export function applyEvent(model: ResearchModel, event: ResearchEvent): ResearchModel {
   switch (event.kind) {
     case "sessionChanged":

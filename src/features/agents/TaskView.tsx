@@ -65,6 +65,12 @@ function OutcomeBanner({ status }: { status: TaskStatus }) {
           {status.message}
         </Banner>
       );
+    case "stopped":
+      return (
+        <Banner tone="warning" title={statusLabel(status).label}>
+          {status.message}
+        </Banner>
+      );
     default:
       return null;
   }

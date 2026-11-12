@@ -31,8 +31,11 @@ navigation between source and pages, and direct editing on the final pages.
 Text that the compiler or a template generates (numbering, references,
 citations, bibliography entries, list markers, footnote marks, hyphens
 inserted by line breaking), text produced by code or macros (Typst code
-expressions and show rules, LaTeX user macros), raw/verbatim text, and content
+expressions, `#let` and function bodies, loops, `#set`, imported modules and
+`#show` rule replacements; LaTeX user macros), raw/verbatim text, and content
 from packages is shown with a "not editable here — edit in source" message.
+Content written in place stays editable, including Typst content blocks
+passed to a function (captions, footnotes) and `#if` bodies.
 Edits that would change document structure (for example deleting a delimiter
 of `\left`/`\right`, or typing a character that would open markup) are refused
 rather than guessed.
@@ -42,6 +45,27 @@ LaTeX source, and alignment with the PDF's glyphs) and checked glyph by glyph;
 text it cannot map is not editable on the page. Exotic catcode changes and
 packages that rewrite text (e.g. `siunitx`, `cleveref` names, TikZ) stay
 source-only.
+
+When you type a character that is special in LaTeX, the page editor inserts
+its escaped form (`\&`, `\textless{}`, `\textasciitilde{}`, ...). pdfLaTeX's
+default font encoding has no straight double quote, so a typed `"` becomes
+an opening or closing quote (` `` ` / `''`) in both engines. pdfLaTeX reports
+non-Latin text and combining marks as LaTeX errors, listed in Problems as
+when you type them in source; LuaLaTeX reports characters missing from the
+font as one warning per font.
+
+Right-to-left text can be selected, copied, and navigated on the page; in
+lines that mix directions the caret is approximate exactly at a direction
+boundary. Content that a Typst document includes twice is not detected as
+duplicated and stays editable in both places.
+
+If an edit arrives from elsewhere (the source editor or an agent) while you
+type on the page, your keystrokes apply at the correspondingly moved
+position; if the page cannot place them, typing pauses with a message naming
+the text that was not applied, and nothing is applied at a guessed position.
+
+If a TeX engine is missing or its configured path is wrong, Problems, the
+status bar, and the page view say so and link to Settings → Tool locations.
 
 Markdown mathematics uses a declared LaTeX-math subset (see
 [markdown-profile.md](markdown-profile.md)); unsupported commands render as a
@@ -80,7 +104,17 @@ Agents use the same services as people: they read and edit documents through
 the shared document service (every change is reviewable and revertible), build
 documents, run Python in their own research sessions, and check Lean files.
 Scope, permission profile, and budgets are enforced by the application, not by
-the model. The API key is stored only in Windows Credential Manager.
+the model, for reading, editing, creating, and deleting files and for running
+commands. The API key is stored only in Windows Credential Manager.
+
+**Known gaps (being fixed):** an independent review found that building a
+document and running Python do not yet honor a task's narrowed scope or its
+"file names only" consent (build diagnostics and Python output can reveal
+files outside the scope), that LaTeX builds started by an agent neither ask
+for approval nor respect the restricted (container) mode, and that a scope
+check can be bypassed through a link inside the scope. Until these are
+fixed, run agents with whole-project scope in projects you trust, and review
+the approval details before approving.
 
 A live end-to-end run against the real provider is covered by the opt-in
 scenario `npm run e2e -- live-agents` (it spends API credit): it computes with
@@ -94,6 +128,9 @@ uses a scripted development provider that release builds do not contain.
 - Opening a project never runs its code. Running native tools (TeX, kernels,
   Lean, commands) requires trusting the folder; system, profile, and other
   overly broad folders cannot be trusted or opened as projects.
+- Trusting or revoking a folder applies at once in every view. Revoking stops
+  the folder's Lean server, research kernels, LaTeX builds, and other trusted
+  jobs before it completes.
 - Child processes get an environment built from scratch; credential-like
   variables are refused. Logs and events are bounded and redacted.
 - Trusted native code runs with your account's privileges. Exposition kills

@@ -12,23 +12,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { invoke, invokeError, waitFor } from "../workspace-helpers.mjs";
+import { runCommand } from "../palette.mjs";
 
 const KERNEL_TIMEOUT = 120_000;
 /** Largest acceptable main-thread stall while output streams in. */
 const FRAME_BUDGET_MS = 200;
-
-async function runCommand(page, query, expectedTitle) {
-  await page.keyboard.press("Control+Shift+P");
-  const input = page.getByRole("textbox", { name: "Command" });
-  await input.waitFor({ state: "visible", timeout: 5000 });
-  await input.fill(query);
-  const first = page.locator(".wb-palette__item").first();
-  await first.waitFor({ state: "visible" });
-  const title = await first.innerText();
-  if (!expectedTitle.test(title)) throw new Error(`palette top match for "${query}" was "${title}"`);
-  await page.keyboard.press("Enter");
-  await input.waitFor({ state: "detached", timeout: 5000 });
-}
 
 const submit = (page, sessionId, code) =>
   invoke(page, "research_execute", { request: { sessionId, source: { kind: "input", code }, requester: { kind: "user" } } });

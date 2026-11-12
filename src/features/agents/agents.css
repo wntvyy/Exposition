@@ -337,3 +337,30 @@
 .agents-diff[data-fill] {
   flex: 1;
 }
+
+/* Status bar: a task is waiting for approval (attention; opens the approval). */
+.agents-status-attention {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.agents-status-attention:hover .ui-status-pill {
+  border-color: var(--color-warning-text);
+}
+.agents-status-attention:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* The approval card when focused from a notification or the status bar. */
+.agents-approval:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: var(--radius-lg);
+}

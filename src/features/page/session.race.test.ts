@@ -106,6 +106,7 @@ vi.mock("../../lib/ipc", () => ({
       backend.state.buildHandlers.push(handler);
       return () => {};
     },
+    trustChanged: async () => () => {},
   },
   errorMessage: (e: unknown) => String(e),
   isCommandError: () => false,
@@ -115,7 +116,7 @@ vi.mock("../../lib/ipc", () => ({
   })(),
 }));
 vi.mock("../editor", () => ({ openDocument: async () => ({ id: "doc-1" }) }));
-vi.mock("../jobs/trust", () => ({ requestWorkspaceTrust: async () => false, onWorkspaceTrusted: () => () => {} }));
+vi.mock("../jobs/trust", () => ({ requestWorkspaceTrust: async () => false }));
 
 import { PageSession } from "./session";
 

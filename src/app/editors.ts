@@ -22,9 +22,22 @@ export interface EditorGroup {
   activeKey: string | null;
 }
 
+/**
+ * Invariants (kept by every change made through `editors`):
+ * - The right group shows editors only while the left one does: when the left
+ *   group's last editor closes, the right group takes its place.
+ * - The active group holds an editor whenever any group does; an empty right
+ *   group (not shown) is never active.
+ * - A group's `activeKey` names one of its editors (null only when empty).
+ */
 export interface EditorsState {
   groups: Record<EditorGroupId, EditorGroup>;
   activeGroup: EditorGroupId;
+  /**
+   * Bumped when a group closes (its last editor closed) and another group is
+   * left with editors: the workbench moves keyboard focus into the active group.
+   */
+  focusRequest: number;
 }
 
 export interface OpenEditorOptions {
@@ -41,12 +54,56 @@ const emptyGroup = (id: EditorGroupId): EditorGroup => ({ id, editors: [], activ
 export const useEditors = create<EditorsState>(() => ({
   groups: { primary: emptyGroup("primary"), secondary: emptyGroup("secondary") },
   activeGroup: "primary",
+  focusRequest: 0,
 }));
 
 const guards = new Map<string, CloseGuard>();
 
+function withValidActiveKey(group: EditorGroup): EditorGroup {
+  if (group.activeKey !== null && group.editors.some((e) => e.resource.key === group.activeKey)) return group;
+  const activeKey = group.editors[0]?.resource.key ?? null;
+  return activeKey === group.activeKey ? group : { ...group, activeKey };
+}
+
+/** Restore the `EditorsState` invariants after a change from `prev` to `next`. */
+export function normalizeEditors(next: EditorsState, prev: EditorsState): EditorsState {
+  let primary = withValidActiveKey(next.groups.primary);
+  let secondary = withValidActiveKey(next.groups.secondary);
+  let activeGroup = next.activeGroup;
+  if (primary.editors.length === 0 && secondary.editors.length > 0) {
+    // The left group closed: the right group takes its place (VS Code closes an empty group).
+    primary = { ...secondary, id: "primary" };
+    secondary = emptyGroup("secondary");
+    activeGroup = "primary";
+  }
+  if (activeGroup === "secondary" && secondary.editors.length === 0) activeGroup = "primary";
+  const closedGroup = (["primary", "secondary"] as const).some(
+    (id) => prev.groups[id].editors.length > 0 && next.groups[id].editors.length === 0,
+  );
+  const survivor = activeGroup === "primary" ? primary : secondary;
+  const focusRequest = closedGroup && survivor.editors.length > 0 ? prev.focusRequest + 1 : next.focusRequest;
+  const groups =
+    primary === next.groups.primary && secondary === next.groups.secondary ? next.groups : { primary, secondary };
+  return { ...next, groups, activeGroup, focusRequest };
+}
+
+/** Apply a change to the open-editor state, keeping its invariants. */
+function change(fn: (state: EditorsState) => Partial<EditorsState>) {
+  useEditors.setState((state) => normalizeEditors({ ...state, ...fn(state) }, state));
+}
+
 function updateGroup(id: EditorGroupId, fn: (group: EditorGroup) => EditorGroup) {
-  useEditors.setState((state) => ({ groups: { ...state.groups, [id]: fn(state.groups[id]) } }));
+  change((state) => ({ groups: { ...state.groups, [id]: fn(state.groups[id]) } }));
+}
+
+/** The group without `key`; when it was the active tab, its neighbor becomes active. */
+function withoutEditor(group: EditorGroup, key: string): EditorGroup {
+  const index = group.editors.findIndex((e) => e.resource.key === key);
+  if (index < 0) return group;
+  const remaining = group.editors.filter((e) => e.resource.key !== key);
+  const activeKey =
+    group.activeKey === key ? (remaining[Math.min(index, remaining.length - 1)]?.resource.key ?? null) : group.activeKey;
+  return { ...group, editors: remaining, activeKey };
 }
 
 function findEditor(key: string): { group: EditorGroupId; editor: OpenEditor } | undefined {
@@ -95,7 +152,7 @@ export const editors = {
         return { ...group, editors: [...kept, entry], activeKey: resource.key };
       });
     }
-    useEditors.setState({ activeGroup: groupId });
+    change(() => ({ activeGroup: groupId }));
   },
 
   /** Close a resource in every group, honoring its close guard. Resolves false if vetoed. */
@@ -103,18 +160,14 @@ export const editors = {
     const guard = guards.get(key);
     if (guard && !(await guard())) return false;
     guards.delete(key);
-    for (const id of ["primary", "secondary"] as const) {
-      updateGroup(id, (group) => {
-        const index = group.editors.findIndex((e) => e.resource.key === key);
-        if (index < 0) return group;
-        const remaining = group.editors.filter((e) => e.resource.key !== key);
-        const activeKey =
-          group.activeKey === key
-            ? (remaining[Math.min(index, remaining.length - 1)]?.resource.key ?? null)
-            : group.activeKey;
-        return { ...group, editors: remaining, activeKey };
-      });
-    }
+    // Both groups in one change: closing the left group's last editor moves the
+    // right group into its place.
+    change((state) => ({
+      groups: {
+        primary: withoutEditor(state.groups.primary, key),
+        secondary: withoutEditor(state.groups.secondary, key),
+      },
+    }));
     return true;
   },
 
@@ -126,27 +179,36 @@ export const editors = {
     const other: EditorGroupId = group === "primary" ? "secondary" : "primary";
     const { groups } = useEditors.getState();
     if (!groups[other].editors.some((e) => e.resource.key === key)) return editors.close(key);
-    updateGroup(group, (g) => {
-      const index = g.editors.findIndex((e) => e.resource.key === key);
-      if (index < 0) return g;
-      const remaining = g.editors.filter((e) => e.resource.key !== key);
-      const activeKey =
-        g.activeKey === key ? (remaining[Math.min(index, remaining.length - 1)]?.resource.key ?? null) : g.activeKey;
-      return { ...g, editors: remaining, activeKey };
-    });
+    updateGroup(group, (g) => withoutEditor(g, key));
     return true;
   },
 
-  /** Make a group active (keyboard/pointer focus moved into it), even when it is empty. */
+  /**
+   * Close every editor in a group, each honoring its close guard; stops at the
+   * first veto. The neighbor group becomes active (see `EditorsState`).
+   */
+  async closeGroup(group: EditorGroupId): Promise<boolean> {
+    for (const editor of [...useEditors.getState().groups[group].editors]) {
+      if (!(await editors.closeInGroup(editor.resource.key, group))) return false;
+    }
+    return true;
+  },
+
+  /**
+   * Make a group active (keyboard/pointer focus moved into it). An empty group
+   * becomes active only when no group has editors (then the left one is).
+   */
   focusGroup(group: EditorGroupId): void {
-    if (useEditors.getState().activeGroup !== group) useEditors.setState({ activeGroup: group });
+    if (useEditors.getState().activeGroup !== group) change(() => ({ activeGroup: group }));
   },
 
   activate(key: string, group?: EditorGroupId): void {
     const found = group ? { group } : findEditor(key);
     if (!found) return;
-    updateGroup(found.group, (g) => ({ ...g, activeKey: key }));
-    useEditors.setState({ activeGroup: found.group });
+    change((state) => ({
+      groups: { ...state.groups, [found.group]: { ...state.groups[found.group], activeKey: key } },
+      activeGroup: found.group,
+    }));
   },
 
   setMode(key: string, mode: DocumentMode): void {

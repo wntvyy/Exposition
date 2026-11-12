@@ -11,6 +11,7 @@ import { basename, join } from "node:path";
 
 import { openFromTree, openWorkspace } from "../workspace-helpers.mjs";
 import { waitForAsync } from "../wait.mjs";
+import { runCommand } from "../palette.mjs";
 
 const PATH = "main.typ";
 
@@ -24,13 +25,7 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
   /** Reference screenshot in both themes (UI_STANDARD), returning to light. */
   const referenceShots = async (name) => {
     for (const theme of ["dark", "light"]) {
-      await page.keyboard.press("Control+Shift+P");
-      const palette = page.getByRole("textbox", { name: "Command" });
-      await palette.waitFor({ state: "visible", timeout: 5000 });
-      await palette.fill(`color theme ${theme}`);
-      await page.locator(".wb-palette__item").first().waitFor();
-      await page.keyboard.press("Enter");
-      await palette.waitFor({ state: "detached", timeout: 5000 });
+      await runCommand(page, `color theme ${theme}`, theme === "dark" ? /Color Theme: Dark/ : /Color Theme: Light/);
       await page.waitForFunction((t) => document.documentElement.dataset.theme === t, theme);
       await page.waitForTimeout(150);
       const file = join(artifactsDir, `${name}-${theme}.png`);
@@ -398,24 +393,6 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     await shot("10-final");
 
     // 10. Regressions from the R-m23 review, in the real app.
-    const runCommand = async (query) => {
-      await page.keyboard.press("Control+Shift+P");
-      const palette = page.getByRole("textbox", { name: "Command" });
-      await palette.waitFor({ state: "visible", timeout: 5000 });
-      await palette.fill(query);
-      // Wait until the filtered list ranks the command first, then run it
-      // (Enter on a list that is still filtering does nothing).
-      await page.waitForFunction(
-        (q) => (document.querySelector(".wb-palette__item")?.textContent ?? "").toLowerCase().includes(q.toLowerCase()),
-        query,
-        { timeout: 5000 },
-      );
-      for (let i = 0; i < 3; i++) {
-        await page.keyboard.press("Enter");
-        if (await palette.waitFor({ state: "detached", timeout: 1500 }).then(() => true, () => false)) return;
-      }
-      throw new Error(`the command palette did not run "${query}"`);
-    };
     const applySource = async (at, insert) =>
       invoke("document_apply", {
         request: {
@@ -503,9 +480,9 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
 
     // F5: closing one of two views of the document keeps the other rebuilding.
     {
-      await runCommand("Split Editor Right");
+      await runCommand(page, "Split Editor Right", /Split Editor Right/);
       await page.waitForFunction(() => document.querySelectorAll('[data-testid="page-editor"]').length === 2, null, { timeout: 10000 });
-      await runCommand("Close Right Editor Group");
+      await runCommand(page, "Close Right Editor Group", /Close Right Editor Group/);
       await page.waitForFunction(() => document.querySelectorAll('[data-testid="page-editor"]').length === 1, null, { timeout: 10000 });
       await page.waitForTimeout(300);
       source = await text();
