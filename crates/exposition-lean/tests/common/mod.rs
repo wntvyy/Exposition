@@ -210,7 +210,12 @@ pub fn status_name(status: &LeanStatus) -> &'static str {
         LeanStatus::Checking { .. } => "checking",
         LeanStatus::Checked { .. } => "checked",
         LeanStatus::CheckedWithSorry { .. } => "checkedWithSorry",
+        LeanStatus::CheckedWithAxioms { .. } => "checkedWithAxioms",
+        LeanStatus::ReliesOnCompiledCode { .. } => "reliesOnCompiledCode",
+        LeanStatus::PartiallyChecked { .. } => "partiallyChecked",
+        LeanStatus::Unverified { .. } => "unverified",
         LeanStatus::Errors { .. } => "errors",
+        LeanStatus::ServerUnavailable { .. } => "serverUnavailable",
         LeanStatus::ServerCrashed { .. } => "serverCrashed",
     }
 }

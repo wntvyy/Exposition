@@ -10,11 +10,17 @@
 //!   goals/hover/definition, toolchain installation as an explicit action, and
 //!   the [`LeanService::check`] seam for agents.
 //!
+//! - [`audit`]: the axiom audit of every revision Lean reports without errors.
+//!
 //! Statuses are distinct by construction: [`LeanStatus::Checked`] means Lean
-//! finished exactly that revision with no errors and no `sorry`;
-//! [`LeanStatus::CheckedWithSorry`] marks incomplete proofs; errors, missing
-//! toolchains, untrusted workspaces, and crashes are separate states.
+//! elaborated exactly that revision completely with no errors, and the axiom
+//! audit found no `sorry` (including imported or suppressed ones), kernel
+//! checking enabled, and only the standard axioms. Incomplete proofs, extra
+//! axioms, compiled-code trust, partial (`#exit`) and unverified checks,
+//! errors, missing toolchains, untrusted workspaces, and server problems are
+//! separate states.
 
+pub mod audit;
 pub mod convert;
 pub mod lsp;
 pub mod project;

@@ -279,3 +279,58 @@ async fn changing_the_pinned_toolchain_invalidates_the_status() {
     assert_eq!(state.toolchain.unwrap().name, TOOLCHAIN);
     h.lean.shutdown().await;
 }
+
+/// When every interactive session slot is taken, Lean never started: the
+/// status says so (not "crashed") and the server starts once a slot frees up.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exhausted_sessions_are_reported_unavailable_and_retried() {
+    use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobSpec};
+    use exposition_execution::{InteractiveOptions, RefusalCode};
+    if !lean_available() {
+        return;
+    }
+    let mut h = harness("lean-basic", Options::default()).await;
+    // Occupy every slot with idle processes that wait on stdin.
+    let sort = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
+        .join("System32")
+        .join("sort.exe");
+    let spec = JobSpec {
+        label: "idle session".into(),
+        program: sort.display().to_string(),
+        args: vec![],
+        environment: EnvironmentSpec::default(),
+        working_directory: h.root.display().to_string(),
+        policy: ExecutionPolicy::TrustedNative,
+        timeout_ms: None,
+        log_limit_bytes: None,
+        stdin: None,
+    };
+    let mut held = Vec::new();
+    loop {
+        match h.exec.launch_interactive(spec.clone(), InteractiveOptions::default()).await {
+            Ok(job) => held.push(job),
+            Err(result) => {
+                let refusal = h.exec.summary(&result.id).and_then(|s| s.refusal).expect("refusal");
+                assert_eq!(refusal.code, RefusalCode::TooManySessions);
+                break;
+            }
+        }
+        assert!(held.len() <= 64, "no session limit");
+    }
+    let doc = h.open("LeanBasic/Proofs.lean");
+    let (state, _) = h
+        .wait_for(&doc, NEXT, "server unavailable", |s| matches!(s.status, LeanStatus::ServerUnavailable { .. }))
+        .await;
+    let LeanStatus::ServerUnavailable { reason } = &state.status else { unreachable!() };
+    assert!(reason.contains("interactive sessions"), "{reason}");
+    // Free one slot: the automatic retry starts the server.
+    let freed = held.pop().unwrap();
+    h.exec.cancel(&freed.id);
+    let state = h.finished(&doc, 1, FIRST).await;
+    assert!(matches!(state.status, LeanStatus::Errors { revision: 1, .. }), "{:?}", state.status);
+    for job in &held {
+        h.exec.cancel(&job.id);
+    }
+    h.lean.shutdown().await;
+}

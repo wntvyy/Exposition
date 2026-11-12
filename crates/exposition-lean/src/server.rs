@@ -35,8 +35,16 @@ pub(crate) struct StartedServer {
 
 #[derive(Debug, Clone)]
 pub(crate) enum StartError {
-    Untrusted { workspace_root: String },
-    Failed { message: String },
+    Untrusted {
+        workspace_root: String,
+    },
+    /// Could not start for a reason that may pass (too many sessions).
+    Unavailable {
+        reason: String,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 pub(crate) fn server_spec(project: &LeanProject, toolchain: &ResolvedToolchain) -> JobSpec {
@@ -96,6 +104,12 @@ pub(crate) async fn start(
             return Err(match refusal {
                 Some(r) if r.code == RefusalCode::UntrustedWorkspace => StartError::Untrusted {
                     workspace_root: r.workspace_root.unwrap_or_else(|| project.root.display().to_string()),
+                },
+                Some(r) if r.code == RefusalCode::TooManySessions => StartError::Unavailable {
+                    reason: format!(
+                        "The Lean server could not start: {}. Close other sessions (kernels, servers) or wait; it is retried automatically.",
+                        r.message
+                    ),
                 },
                 Some(r) => StartError::Failed { message: r.message },
                 None => StartError::Failed { message: format!("{:?}", result.outcome) },

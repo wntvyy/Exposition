@@ -12,6 +12,7 @@ import type { LeanGoals } from "../../bindings/LeanGoals";
 import { commands, errorMessage, events, isCommandError } from "../../lib/ipc";
 import type { monaco } from "../../lib/monaco";
 import { handleFor } from "../editor";
+import { finishedRevision } from "./status";
 
 export interface LeanCursor {
   document: DocumentId;
@@ -142,7 +143,7 @@ export function scheduleGoals(): void {
 function serverHasRevision(state: LeanDocumentState): boolean {
   const s = state.status;
   if (s.kind === "checking") return !s.starting && s.revision === state.revision;
-  return (s.kind === "checked" || s.kind === "checkedWithSorry" || s.kind === "errors") && s.revision === state.revision;
+  return finishedRevision(s) === state.revision;
 }
 
 async function fetchGoals(): Promise<void> {
