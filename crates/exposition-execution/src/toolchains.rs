@@ -8,6 +8,13 @@
 //! native execution that does not require workspace trust.
 //!
 //! Missing tools get actionable guidance; nothing is ever installed.
+//!
+//! Lean is special: the `lean`/`lake` programs in `ELAN_HOME/bin` are elan
+//! shims that select — and, if necessary, DOWNLOAD — a toolchain. Discovery
+//! never runs or returns them: Lean and Lake are found in the installed
+//! toolchains under `ELAN_HOME/toolchains/<name>/bin` (highest version first),
+//! only `elan --version` runs through `ELAN_HOME/bin`, and elan's bin directory
+//! is not added to job `PATH`s.
 
 use std::path::{Path, PathBuf};
 
@@ -371,11 +378,8 @@ impl Locator<'_> {
                         dirs.push(local.join("Microsoft").join("WindowsApps"));
                     }
                 }
-                "lean" | "lake" | "elan" => {
-                    if let Some(profile) = &profile {
-                        dirs.push(profile.join(".elan").join("bin"));
-                    }
-                }
+                "lean" | "lake" => dirs.extend(self.elan_toolchain_bins()),
+                "elan" => dirs.extend(self.elan_home().map(|h| h.join("bin"))),
                 "docker" => {
                     dirs.push(program_files.join("Docker").join("Docker").join("resources").join("bin"));
                     if let Some(local) = &local {
@@ -393,8 +397,12 @@ impl Locator<'_> {
         }
         #[cfg(not(windows))]
         {
+            match exe {
+                "lean" | "lake" => dirs.extend(self.elan_toolchain_bins()),
+                "elan" => dirs.extend(self.elan_home().map(|h| h.join("bin"))),
+                _ => {}
+            }
             if let Some(home) = self.env_dir("HOME") {
-                dirs.push(home.join(".elan").join("bin"));
                 dirs.push(home.join(".juliaup").join("bin"));
             }
             dirs.push(PathBuf::from("/Library/TeX/texbin"));
@@ -417,7 +425,30 @@ impl Locator<'_> {
             .map(|d| PathBuf::from(d.trim()))
             .filter(|d| d.is_absolute())
             .filter(|d| !(exe == "python" && d.to_string_lossy().to_ascii_lowercase().contains("windowsapps")))
+            // elan's lean/lake shims may download toolchains: never use them.
+            .filter(|d| !(matches!(exe, "lean" | "lake") && self.is_elan_bin(d)))
             .collect()
+    }
+
+    /// `ELAN_HOME`, or `.elan` in the user's profile/home.
+    fn elan_home(&self) -> Option<PathBuf> {
+        self.env_dir("ELAN_HOME")
+            .or_else(|| self.env_dir(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|h| h.join(".elan")))
+    }
+
+    /// `bin` directories of installed elan toolchains, highest version first.
+    fn elan_toolchain_bins(&self) -> Vec<PathBuf> {
+        let Some(home) = self.elan_home() else { return Vec::new() };
+        versioned_dirs(&home.join("toolchains"), "").into_iter().map(|d| d.join("bin")).collect()
+    }
+
+    /// A directory holding elan shims (`ELAN_HOME/bin` or any `.elan/bin`).
+    fn is_elan_bin(&self, dir: &Path) -> bool {
+        if self.elan_home().is_some_and(|h| crate::paths::same_path(&h.join("bin"), dir)) {
+            return true;
+        }
+        let mut parts = dir.components().rev().map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase());
+        parts.next().as_deref() == Some("bin") && parts.next().as_deref() == Some(".elan")
     }
 
     /// Locate a tool executable by tool id.
@@ -452,7 +483,9 @@ impl Locator<'_> {
     /// order: the toolchain part of a constructed child `PATH`.
     pub fn toolchain_dirs(&self) -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = Vec::new();
-        for def in TOOLS.iter().filter(|t| t.component_of.is_none()) {
+        // elan's bin directory holds shims that may download toolchains; the
+        // located lean/lake come from an installed toolchain's own bin instead.
+        for def in TOOLS.iter().filter(|t| t.component_of.is_none() && t.id != "elan") {
             if let Located::Found { path, .. } = self.locate(def.id)
                 && let Some(dir) = path.parent()
             {
