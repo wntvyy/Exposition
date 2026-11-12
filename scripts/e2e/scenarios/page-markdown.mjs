@@ -183,6 +183,32 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
     await settled("rebuild after line-start escape");
     assert.equal(await selection(final, final + 8), "# Final", "rendered as text, not a heading");
 
+    // 2b. A list marker typed at the start of a paragraph, then a space, is
+    //     escaped (prints literally) rather than refused (R-m23 F11).
+    source = await text();
+    const quote = source.indexOf("A block quote");
+    await clickAt(quote);
+    let beforeMarker = await build();
+    await typeChars("1. ");
+    await waitCaretOffset(quote + 4);
+    source = await text();
+    assert.equal(source.slice(quote - 2, quote + 17), "> 1\\. A block quote", "line-start `1. ` escaped in a quote");
+    await rebuilt(beforeMarker, "rebuild after list-marker escape");
+    assert.equal(await selection(quote, quote + 7), "1. A bl", "rendered literally, not a list");
+
+    // 2c. Appending words at the end of a paragraph (R-m23 F1): every
+    //     keystroke after the trailing space goes in.
+    source = await text();
+    const paragraphEnd = source.indexOf("print literally.") + "print literally.".length;
+    await clickAt(paragraphEnd, "upstream", -0.3);
+    beforeMarker = await build();
+    await typeChars(" More words.");
+    await waitCaretOffset(paragraphEnd + 12);
+    source = await text();
+    assert.equal(source.slice(paragraphEnd - 16, paragraphEnd + 13), "print literally. More words.\n", "appended at the paragraph end");
+    await rebuilt(beforeMarker, "rebuild after appending");
+    assert.equal(await selection(paragraphEnd - 10, paragraphEnd + 12), "literally. More words.", "the page shows the appended words");
+
     // 3. Change an exponent inside inline math: select the `2` of `\alpha^2`
     //    (click at its right edge, Shift+Left) and type 3.
     source = await text();
@@ -219,6 +245,46 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
     await page.keyboard.press("Control+z");
     await textIs(beforeDelete);
     await settled("rebuild after undo");
+
+    // 4b. Content the page cannot edit says why when clicked (R-m23 F13):
+    //     the code block (verbatim) and the task box (generated).
+    const clickRect = async (rect) => {
+      const el = page.locator(`[data-testid="page"][data-page="${rect.page}"]`);
+      await el.evaluate(
+        (pageEl, [top, left]) => {
+          const scroller = pageEl.closest('[data-testid="page-scroller"]');
+          const scale = pageEl.getBoundingClientRect().width / Number(pageEl.dataset.widthPt);
+          const view = scroller.getBoundingClientRect();
+          scroller.scrollTop += pageEl.getBoundingClientRect().top + top * scale - (view.top + view.height / 2);
+          scroller.scrollLeft += pageEl.getBoundingClientRect().left + left * scale - (view.left + view.width / 2);
+        },
+        [rect.y + rect.height / 2, rect.x + rect.width / 2],
+      );
+      const box = await el.boundingBox();
+      const scale = box.width / Number(await el.getAttribute("data-width-pt"));
+      await page.mouse.click(box.x + (rect.x + rect.width / 2) * scale, box.y + (rect.y + rect.height / 2) * scale);
+    };
+    const messageShows = (needle) =>
+      page.waitForFunction(
+        (n) => (document.querySelector('[data-testid="page-message"]')?.textContent ?? "").includes(n),
+        needle,
+        { timeout: 5000 },
+      );
+    source = await text();
+    const fence = source.indexOf("```rust");
+    const fenceEnd = source.indexOf("```", fence + 3) + 3;
+    const codeRects = (await invoke("page_selection", { build: await build(), path: PATH, start: fence, end: fenceEnd })).rects;
+    assert.ok(codeRects.length >= 1, "the code block is on the page map");
+    const codeRect = codeRects[1] ?? codeRects[0];
+    await clickRect(codeRect);
+    await messageShows("Raw/verbatim text");
+    await shot("05b-code-not-editable");
+    const taskAt = source.indexOf("[x]");
+    const taskRect = (await invoke("page_selection", { build: await build(), path: PATH, start: taskAt, end: taskAt + 3 })).rects[0];
+    assert.ok(taskRect, "the task box is on the page map");
+    await clickRect(taskRect);
+    await messageShows("Generated content");
+    assert.equal(await text(), source, "clicking non-editable content changes nothing");
 
     // 5. Reflow: a large insertion in the first paragraph moves later
     //    content (the table, the figure caption) down or onto a new page.
