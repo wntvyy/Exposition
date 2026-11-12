@@ -1,0 +1,187 @@
+/* Page editor. Shared tokens only (src/ui/tokens.css). The page itself is the
+   document's own rendering (white paper in both themes), so overlays drawn on
+   it use the accent rather than theme text colors. */
+.page-editor {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--color-surface-sunken);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-md);
+}
+
+.page-editor--focused {
+  box-shadow: inset 0 0 0 var(--focus-ring-width) var(--color-focus-ring);
+}
+
+.page-editor__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--pane-header-height);
+  padding: 0 var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+  flex: none;
+}
+
+.page-editor__status {
+  display: inline-flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.page-editor__mode {
+  padding: 0 var(--space-1-5);
+  border-radius: var(--radius-full);
+  background: var(--color-accent-subtle);
+  color: var(--color-accent-text);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.page-editor__zoom {
+  min-width: 3.5em;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.page-editor__scroller {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-6);
+}
+
+.page-editor__page {
+  position: relative;
+  flex: none;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-2);
+  cursor: text;
+  user-select: none;
+}
+
+.page-editor__page img {
+  display: block;
+  pointer-events: none;
+}
+
+.page-editor--stale .page-editor__page {
+  outline: 1px dashed var(--color-status-stale-border);
+  cursor: not-allowed;
+}
+
+.page-editor__caret {
+  position: absolute;
+  width: 0;
+  border-left: 2px solid var(--color-accent);
+  margin-left: -1px;
+  pointer-events: none;
+  animation: page-editor-blink 1.06s steps(1) infinite;
+}
+
+.page-editor__caret--selecting,
+.page-editor:not(.page-editor--focused) .page-editor__caret {
+  animation: none;
+}
+
+.page-editor:not(.page-editor--focused) .page-editor__caret {
+  opacity: 0.45;
+}
+
+@keyframes page-editor-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-editor__caret {
+    animation: none;
+  }
+}
+
+.page-editor__composition {
+  position: absolute;
+  left: var(--space-0-5);
+  bottom: 0;
+  white-space: pre;
+  padding: 0 var(--space-0-5);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border-bottom: 2px solid var(--color-accent);
+  box-shadow: var(--shadow-2);
+  line-height: var(--line-height-tight);
+}
+
+.page-editor__selection {
+  position: absolute;
+  background: var(--color-accent);
+  opacity: 0.22;
+  pointer-events: none;
+}
+
+.page-editor__equation {
+  position: absolute;
+  margin: calc(-1 * var(--space-0-5));
+  padding: var(--space-0-5);
+  box-sizing: content-box;
+  border: 1px dashed var(--color-accent);
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+}
+
+.page-editor__input {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1em;
+  padding: 0;
+  border: 0;
+  margin: 0;
+  opacity: 0;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  pointer-events: none;
+}
+
+.page-editor__message {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  min-height: var(--statusbar-height);
+  padding: 0 var(--space-2);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  flex: none;
+}
+
+.page-editor__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.typst-split {
+  height: 100%;
+}

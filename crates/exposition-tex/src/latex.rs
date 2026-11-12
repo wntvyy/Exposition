@@ -17,7 +17,8 @@ use std::ops::Range;
 
 use unicode_normalization::UnicodeNormalization;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, rename = "TexSourceMode")]
 #[serde(rename_all = "camelCase")]
 pub enum Mode {
     Text,
@@ -25,7 +26,8 @@ pub enum Mode {
 }
 
 /// The construct a unit belongs to (for scope decisions and statistics).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, rename = "TexConstruct")]
 #[serde(rename_all = "camelCase")]
 pub enum Construct {
     Prose,
@@ -73,6 +75,16 @@ pub struct SourceModel {
     /// 1-based inclusive line spans of constructs whose page content SyncTeX
     /// attributes to their *last* line (math, multi-line arguments).
     pub spans: Vec<(u32, u32)>,
+    /// Byte ranges of math constructs including delimiters (`$…$`, `\[…\]`,
+    /// `\begin{equation}…\end{equation}`), with whether each is a display.
+    pub math_regions: Vec<(Range<usize>, bool)>,
+}
+
+impl SourceModel {
+    /// The outermost math construct containing byte `offset`.
+    pub fn math_region_at(&self, offset: usize) -> Option<&(Range<usize>, bool)> {
+        self.math_regions.iter().filter(|(r, _)| r.start <= offset && offset < r.end).max_by_key(|(r, _)| r.len())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,13 +117,19 @@ pub fn parse(source: &str) -> SourceModel {
         units: Vec::new(),
         deferred: Vec::new(),
         spans: Vec::new(),
+        math_regions: Vec::new(),
         in_preamble: source.contains("\\begin{document}"),
         finished: false,
         line_starts: std::iter::once(0).chain(source.match_indices('\n').map(|(i, _)| i + 1)).collect(),
     };
     let ctx = Ctx { mode: Mode::Text, construct: Construct::Prose, stream: 0, force_visible: false, hidden: false };
     parser.run(ctx, End::Eof);
-    SourceModel { units: parser.units, deferred_streams: parser.deferred, spans: parser.spans }
+    SourceModel {
+        units: parser.units,
+        deferred_streams: parser.deferred,
+        spans: parser.spans,
+        math_regions: parser.math_regions,
+    }
 }
 
 struct Parser<'a> {
@@ -120,6 +138,7 @@ struct Parser<'a> {
     units: Vec<SourceUnit>,
     deferred: Vec<u32>,
     spans: Vec<(u32, u32)>,
+    math_regions: Vec<(Range<usize>, bool)>,
     in_preamble: bool,
     finished: bool,
     line_starts: Vec<usize>,
@@ -697,6 +716,9 @@ impl Parser<'_> {
         if l1 > l0 {
             self.spans.push((l0, l1));
         }
+        if ctx.mode == Mode::Math && end != End::Brace && end != End::Bracket {
+            self.math_regions.push((start..self.pos, ctx.construct == Construct::DisplayMath));
+        }
     }
 
     fn run(&mut self, ctx: Ctx, end: End) {
@@ -809,7 +831,7 @@ impl Parser<'_> {
             "]" => return end == End::BracketMath,
             "begin" => {
                 let Some(env) = self.read_brace_word() else { return false };
-                return self.begin_env(ctx, &env);
+                return self.begin_env(ctx, &env, start);
             }
             "end" => {
                 let Some(env) = self.read_brace_word() else { return false };
@@ -977,7 +999,7 @@ impl Parser<'_> {
         false
     }
 
-    fn begin_env(&mut self, ctx: Ctx, env: &str) -> bool {
+    fn begin_env(&mut self, ctx: Ctx, env: &str, begin: usize) -> bool {
         if env == "document" {
             self.in_preamble = false;
             return false;
@@ -1012,8 +1034,7 @@ impl Parser<'_> {
                 .rfind(env)
                 .map(|i| (i, i + env.len()))
                 .unwrap_or((name_start, name_end));
-            let start = located.0;
-            self.spanned(math, End::Env(located.0, located.1), start);
+            self.spanned(math, End::Env(located.0, located.1), begin);
             return false;
         }
         self.skip_optional_args();
@@ -1273,6 +1294,16 @@ mod tests {
             let seen: String = parse(&src).units.iter().map(|u| u.text.as_str()).collect();
             assert_eq!(seen, typed.replace(' ', ""));
         }
+    }
+
+    #[test]
+    fn math_regions_cover_delimiters() {
+        let src = "a $x$ b \\[ y \\] c \\begin{align} z \\end{align} d";
+        let model = parse(src);
+        let regions: Vec<(&str, bool)> = model.math_regions.iter().map(|(r, b)| (&src[r.clone()], *b)).collect();
+        assert_eq!(regions, [("$x$", false), ("\\[ y \\]", true), ("\\begin{align} z \\end{align}", true)]);
+        let z = src.find('z').unwrap();
+        assert_eq!(model.math_region_at(z).map(|(r, _)| &src[r.clone()]), Some("\\begin{align} z \\end{align}"));
     }
 
     #[test]

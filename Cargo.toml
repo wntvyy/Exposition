@@ -11,8 +11,13 @@ publish = false
 [workspace.dependencies]
 exposition-core = { path = "crates/exposition-core" }
 exposition-workspace = { path = "crates/exposition-workspace" }
+exposition-agents = { path = "crates/exposition-agents" }
+exposition-typesetting = { path = "crates/exposition-typesetting" }
+exposition-page = { path = "crates/exposition-page" }
 exposition-execution = { path = "crates/exposition-execution" }
 exposition-tex = { path = "crates/exposition-tex" }
+exposition-research = { path = "crates/exposition-research" }
+exposition-attach = { path = "crates/exposition-attach" }
 exposition-markdown = { path = "crates/exposition-markdown" }
 
 serde = { version = "1", features = ["derive"] }
@@ -24,6 +29,15 @@ uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 tracing = "0.1"
 tempfile = "3"
+# Agents: provider HTTPS (Rust owns model-provider requests), task persistence,
+# OS credential storage, cancellation, and text diffing for change review.
+reqwest = { version = "0.13", default-features = false, features = ["default-tls", "http2", "charset", "system-proxy", "stream"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
+keyring = { version = "3.6", features = ["windows-native", "apple-native", "linux-native"] }
+async-trait = "0.1"
+tokio-util = "0.7"
+futures-util = "0.3"
+similar = "2"
 notify = "8.2"
 regex = "1"
 # Execution service OS integration (process-tree containment).
@@ -40,14 +54,21 @@ hayro = "0.9"
 flate2 = "1"
 unicode-normalization = "0.1"
 # Markdown print profile (exposition-markdown): CommonMark/GFM parsing with
-# source offsets; Typst crates (same pins as the Typst adapter) for tests.
+# source offsets.
 pulldown-cmark = { version = "0.13", default-features = false }
-unicode-segmentation = "1"
+
+# Typst compiler as a library (typesetting/page editing). Packages are only read
+# from an existing local cache; no automatic downloads.
 typst = "=0.15.1"
-typst-layout = "=0.15.1"
+typst-syntax = "=0.15.1"
+typst-library = "=0.15.1"
+typst-svg = "=0.15.1"
 typst-pdf = "=0.15.1"
-typst-kit = { version = "=0.15.1", default-features = false, features = ["embedded-fonts"] }
+typst-layout = "=0.15.1"
+typst-kit = { version = "=0.15.1", default-features = false, features = ["embedded-fonts", "scan-fonts"] }
 comemo = "0.5"
+unicode-segmentation = "1"
+dirs = "6"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -1,0 +1,33 @@
+[package]
+name = "exposition-typesetting"
+description = "Typesetting: format adapters, immutable build snapshots, the Typst compiler adapter, page rendering, glyph maps, and export."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+exposition-core.workspace = true
+exposition-workspace.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ts-rs.workspace = true
+sha2.workspace = true
+typst.workspace = true
+typst-syntax.workspace = true
+typst-library.workspace = true
+typst-svg.workspace = true
+typst-pdf.workspace = true
+typst-kit.workspace = true
+typst-layout.workspace = true
+comemo.workspace = true
+exposition-page.workspace = true
+unicode-segmentation.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

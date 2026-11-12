@@ -59,6 +59,23 @@ function killTree(pid) {
   }
 }
 
+/**
+ * Simulate a crash: terminate the app process immediately (no close handlers,
+ * no saves), then best-effort clean up any surviving descendants. `taskkill /T`
+ * alone is unreliable for this because it reports failure whenever a process in
+ * the tree exits on its own mid-walk (WebView2 children often do), even though
+ * the app itself was killed. Callers should still wait for the child's exit.
+ */
+export function hardKill(pid) {
+  if (!pid) return;
+  try {
+    process.kill(pid, "SIGKILL"); // TerminateProcess on Windows
+  } catch {
+    // already gone
+  }
+  killTree(pid);
+}
+
 const APP_ORIGINS = ["http://tauri.localhost", "https://tauri.localhost", "tauri://localhost"];
 
 /** Wait until the webview has navigated to the bundled app and React has rendered. */
@@ -92,6 +109,33 @@ export async function launchApp(options = {}) {
   const dataDir = options.dataDir ?? (await mkdtemp(join(tmpdir(), "exposition-e2e-")));
   const webviewDir = join(dataDir, "webview");
   await mkdir(webviewDir, { recursive: true });
+  // A relaunch on the same data directory can race the previous instance's
+  // WebView2 browser processes, which hold the profile for a moment after the
+  // app is killed (HRESULT 0x800700AA "requested resource is in use"). Retry
+  // only that specific startup failure; any other early exit fails at once.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await launchOnce(executable, dataDir, webviewDir, options);
+    } catch (error) {
+      const profileBusy = /0x800700AA/i.test(String(error?.message));
+      if (!profileBusy || attempt >= 8) throw error;
+      await new Promise((r) => setTimeout(r, 750 * attempt));
+    }
+  }
+}
+
+async function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise((resolveExit) => {
+    const timer = setTimeout(resolveExit, timeoutMs);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolveExit();
+    });
+  });
+}
+
+async function launchOnce(executable, dataDir, webviewDir, options) {
   const port = await freePort();
 
   const logs = [];
@@ -127,6 +171,7 @@ export async function launchApp(options = {}) {
       async close() {
         await browser.close().catch(() => {});
         killTree(child.pid);
+        await waitForExit(child, 10_000);
       },
     };
   } catch (error) {

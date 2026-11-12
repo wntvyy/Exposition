@@ -124,11 +124,13 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     await page.getByTestId("workbench").waitFor({ timeout: 15000 });
 
     // Honest empty states for regions whose features are not built yet. (The
-    // bottom panel now hosts registered views such as Jobs, so it shows tabs.)
-    for (const text of ["No folder open", "No editor open", "Not available yet"]) {
+    // bottom and auxiliary panels now host registered views — Jobs, Agent —
+    // so they show tabs instead of placeholders.)
+    for (const text of ["No folder open", "No editor open"]) {
       assert.ok(await page.getByText(text, { exact: true }).first().isVisible(), `shows "${text}"`);
     }
     assert.ok(await page.getByRole("tab", { name: "Jobs" }).isVisible(), "panel shows registered views");
+    assert.ok(await page.getByRole("tab", { name: "Agent" }).isVisible(), "auxiliary region shows the Agent view");
 
     // Command palette: filter + Enter runs the top match.
     await runCommand(page, assert, "color theme light", /Color Theme: Light/);

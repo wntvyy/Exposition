@@ -3,10 +3,10 @@
 // restored text comes back as a recovery transaction (undo returns to the disk
 // version). When the file changed on disk after the edits, both versions are
 // kept. Discard removes an entry without touching the file.
-import { execFileSync } from "node:child_process";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { hardKill } from "../app.mjs";
 import {
   documentState,
   focusEditor,
@@ -65,7 +65,7 @@ export default async function workspaceRecovery({ launchApp, artifactsDir, asser
     throw error;
   }
   // Hard kill: no save, no close, no shutdown handlers.
-  execFileSync("taskkill", ["/PID", String(app.child.pid), "/T", "/F"], { stdio: "ignore" });
+  hardKill(app.child.pid);
   await app.browser.close().catch(() => {});
   await waitFor(() => app.child.exitCode !== null || app.child.signalCode !== null, { message: "app exit" });
   assert.equal(await readFile(mainPath, "utf8"), mainOriginal, "nothing was saved");
