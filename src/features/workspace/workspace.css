@@ -1,0 +1,102 @@
+/* Files view layout. Visual treatment comes from the shared components and tokens. */
+.xp-files {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.xp-files__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-height-md);
+  padding: 0 var(--space-1) 0 var(--space-3);
+}
+
+.xp-files__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.xp-tree {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.xp-tree-note {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-subtle);
+}
+
+.xp-recent {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.xp-recent__item {
+  width: 100%;
+  justify-content: flex-start;
+  height: auto;
+  padding-block: var(--space-1);
+}
+
+.xp-recent__item .ui-button__label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.xp-recent__name {
+  font-weight: 500;
+}
+
+.xp-recent__path {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.xp-recovery {
+  margin: var(--space-2);
+}
+
+.xp-recovery__list {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.xp-recovery__list li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+}
+
+.xp-recovery__path {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.xp-recovery__meta {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.xp-recovery__actions {
+  display: flex;
+  gap: var(--space-1-5);
+}

@@ -9,6 +9,28 @@ const COMMANDS: &[&str] = &[
     "document_apply",
     "document_undo",
     "document_redo",
+    // Workspace, files, saves, recovery, settings (src/workspace.rs).
+    "workspace_open",
+    "workspace_close",
+    "workspace_current",
+    "workspace_recent",
+    "workspace_forget_recent",
+    "workspace_list_dir",
+    "document_open",
+    "document_close",
+    "document_save",
+    "document_save_all",
+    "document_reload",
+    "document_keep_buffer",
+    "document_normalize_line_endings",
+    "recovery_list",
+    "recovery_restore",
+    "recovery_discard",
+    "settings_get",
+    "settings_update",
+    "project_settings_get",
+    "project_settings_update",
+    // Execution (src/execution.rs).
     "job_list",
     "job_output",
     "job_cancel",
@@ -32,8 +54,7 @@ const COMMANDS: &[&str] = &[
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,
 /// granted only by a capability added at runtime in debug builds, and are not
 /// part of release `COMMANDS` or `capabilities/`.
-/// `dev_open_document` is removed once the workspace service opens files.
-const DEV_COMMANDS: &[&str] = &["dev_start_probe_job", "dev_start_workspace_job", "dev_open_document"];
+const DEV_COMMANDS: &[&str] = &["dev_start_probe_job", "dev_start_workspace_job"];
 
 fn main() {
     let debug = std::env::var("PROFILE").as_deref() == Ok("debug");

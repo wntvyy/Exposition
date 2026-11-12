@@ -181,3 +181,7 @@
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+.typst-split {
+  height: 100%;
+}

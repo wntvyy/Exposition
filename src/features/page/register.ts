@@ -1,15 +1,13 @@
-// Page editing feature: the exact-page editor for Typst files.
+// Page editing feature: Typst documents in Source, Page, and Split modes.
 import { registry } from "../../app/registry";
-import { installDevHarness } from "./devHarness";
-import { PageEditor } from "./PageEditor";
+import { TypstEditor } from "./TypstEditor";
 
 registry.registerEditor({
-  id: "typst-page",
+  id: "typst.document",
+  // Above the generic source editor for workspace .typ files.
   priority: 10,
-  matches: (resource) => resource.path?.toLowerCase().endsWith(".typ") ?? false,
-  // Source and Split are composed with the workspace SourceEditor at integration.
-  modes: ["page"],
-  component: PageEditor,
+  matches: (resource) =>
+    resource.key.startsWith("file:") && (resource.path?.toLowerCase().endsWith(".typ") ?? false),
+  modes: ["source", "page", "split"],
+  component: TypstEditor,
 });
-
-installDevHarness();

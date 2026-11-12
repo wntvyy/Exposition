@@ -70,22 +70,3 @@ fn dump_svg_header() {
     println!("{}", &svg[..300.min(svg.len())]);
     println!("len {}", svg.len());
 }
-
-#[test]
-#[ignore = "diagnostic output only"]
-fn dump_document_event_json() {
-    use exposition_core::document::*;
-    let event = DocumentEvent::Changed(DocumentChanged {
-        document: DocumentId("doc-1".into()),
-        transaction: None,
-        origin: EditOrigin::Page,
-        kind: ChangeKind::Edit,
-        previous_revision: 1,
-        revision: 2,
-        patches: vec![],
-        selection: None,
-        can_undo: true,
-        can_redo: false,
-    });
-    println!("{}", serde_json::to_string(&event).unwrap());
-}

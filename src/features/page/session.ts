@@ -19,6 +19,8 @@ import type { NonEditableReason } from "../../bindings/NonEditableReason";
 import type { PageEditOp } from "../../bindings/PageEditOp";
 import type { PageRect } from "../../bindings/PageRect";
 import { commands, errorMessage, events, newId } from "../../lib/ipc";
+import { openDocument } from "../editor";
+import { imageType } from "./images";
 import { RevisionHistory } from "./mapping";
 
 export interface PageImage {
@@ -82,22 +84,6 @@ function refusalText(refusal: EditRefusal): string {
   }
 }
 
-/** Media type of a page image from its leading bytes (SVG from Typst, PNG from TeX). */
-export function imageType(bytes: Uint8Array): string {
-  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
-  if (bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
-  return "image/svg+xml";
-}
-
-/** Changed events are recognised by shape: the change's own `kind`
- *  (edit/undo/redo) shares the event's tag field. */
-function asChange(event: DocumentEvent): DocumentChanged | null {
-  const e = event as unknown as Partial<DocumentChanged> & { kind: string };
-  if (Array.isArray(e.patches) && typeof e.previousRevision === "number" && typeof e.revision === "number") {
-    return e as DocumentChanged;
-  }
-  return null;
-}
 
 export class PageSession {
   private model: PageViewModel = {
@@ -155,14 +141,13 @@ export class PageSession {
     try {
       this.unlisten.push(await events.documents((e) => this.onDocumentEvent(e)));
       this.unlisten.push(await events.typesettingBuild((e) => void this.onBuild(e)));
-      const info = (await commands.documentList()).find((d) => d.path === this.path);
-      if (!info) {
-        this.set({ phase: "missing", error: `${this.path} is not open` });
-        return;
-      }
-      this.docId = info.id;
-      this.docRevision = info.revision;
-      this.set({ phase: "ready", documentId: info.id });
+      // Open (or join) the document through the workspace, sharing the one
+      // document handle with the source editor.
+      const handle = await openDocument(this.path);
+      const info = await commands.documentState(handle.id);
+      this.docId = handle.id;
+      this.docRevision = info.info.revision;
+      this.set({ phase: "ready", documentId: handle.id });
       const latest = await commands.typesettingWatch(this.path);
       if (latest) await this.onBuild(latest);
     } catch (error) {
@@ -246,12 +231,12 @@ export class PageSession {
       this.set({ phase: "missing", error: `${this.path} was closed` });
       return;
     }
-    const change = asChange(event);
-    if (!change || change.document !== this.docId) return;
+    if (event.kind !== "changed" || event.document !== this.docId) return;
+    const change: DocumentChanged = event;
     this.history.add({ previous: change.previousRevision, revision: change.revision, patches: change.patches });
     this.docRevision = Math.max(this.docRevision, change.revision);
     const ownChange = change.transaction !== null && this.own.has(change.transaction);
-    const restore = change.kind !== "edit" && change.origin.kind === "page" ? change.selection?.[0] : undefined;
+    const restore = change.change !== "edit" && change.origin.kind === "page" ? change.selection?.[0] : undefined;
     if (restore) {
       // Undo/redo from this view restores the recorded selection.
       this.caret = { offset: restore.end, revision: change.revision, affinity: "downstream" };

@@ -28,8 +28,7 @@ use typst_layout::PagedDocument;
 
 use crate::fonts::Fonts;
 use crate::glyphs;
-use crate::resolver::{ResolveError, dunce_canonicalize};
-use crate::snapshot::{BuildSnapshot, FileContent};
+use crate::snapshot::{BuildSnapshot, ReadError};
 
 pub const COMPILER: &str = "typst 0.15.1";
 
@@ -134,17 +133,34 @@ fn workspace_path(id: FileId) -> FileResult<WorkspacePath> {
     WorkspacePath::parse(id.vpath().get_without_slash()).map_err(|_| FileError::AccessDenied)
 }
 
-fn file_error(error: ResolveError) -> FileError {
-    match error {
+fn file_error(path: &WorkspacePath, error: ReadError) -> FileError {
+    match error.code.as_str() {
         // Report workspace-relative paths only.
-        ResolveError::NotFound(path) => FileError::NotFound(PathBuf::from(path.as_str())),
-        ResolveError::OutsideWorkspace(_) => FileError::AccessDenied,
-        ResolveError::NotAFile(_) => FileError::IsDirectory,
-        ResolveError::Io { message, .. } => FileError::Other(Some(message.into())),
+        "path.notFound" | "path.brokenLink" => FileError::NotFound(PathBuf::from(path.as_str())),
+        "path.outsideWorkspace" | "file.permissionDenied" => FileError::AccessDenied,
+        "file.isDirectory" => FileError::IsDirectory,
+        _ => FileError::Other(Some(error.message.into())),
     }
 }
 
-struct SharedBytes(Arc<Vec<u8>>);
+/// Canonicalize without the Windows verbatim prefix when the plain form is
+/// equivalent, so prefix checks use ordinary paths.
+fn dunce_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    let canonical = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        let text = canonical.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\")
+            && !rest.starts_with("UNC\\")
+            && rest.len() < 260
+        {
+            return Ok(PathBuf::from(rest));
+        }
+    }
+    Ok(canonical)
+}
+
+struct SharedBytes(Arc<[u8]>);
 
 impl AsRef<[u8]> for SharedBytes {
     fn as_ref(&self) -> &[u8] {
@@ -170,10 +186,15 @@ struct SnapshotWorld<'a> {
 impl SnapshotWorld<'_> {
     fn text(&self, id: FileId) -> FileResult<Arc<str>> {
         match id.root() {
-            VirtualRoot::Project => match self.snapshot.read(&workspace_path(id)?).map_err(file_error)? {
-                FileContent::Buffer(overlay) => Ok(overlay.text),
-                FileContent::Disk(bytes) => decode(&bytes),
-            },
+            VirtualRoot::Project => {
+                let path = workspace_path(id)?;
+                let input = self.snapshot.read(&path).map_err(|e| file_error(&path, e))?;
+                match input.text {
+                    // Decoded per the file's encoding (buffers and BOM/UTF-16 files).
+                    Some(text) => Ok(text),
+                    None => decode(&input.bytes),
+                }
+            }
             VirtualRoot::Package(spec) => decode(&self.compiler.package_file(spec, id.vpath())?),
         }
     }
@@ -217,10 +238,15 @@ impl World for SnapshotWorld<'_> {
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         match id.root() {
-            VirtualRoot::Project => match self.snapshot.read(&workspace_path(id)?).map_err(file_error)? {
-                FileContent::Buffer(overlay) => Ok(Bytes::from_string(SharedText(overlay.text))),
-                FileContent::Disk(bytes) => Ok(Bytes::new(SharedBytes(bytes))),
-            },
+            VirtualRoot::Project => {
+                let path = workspace_path(id)?;
+                let input = self.snapshot.read(&path).map_err(|e| file_error(&path, e))?;
+                match (input.document.is_some(), input.text) {
+                    // Open buffers: the text as compiled (not its saved encoding).
+                    (true, Some(text)) => Ok(Bytes::from_string(SharedText(text))),
+                    _ => Ok(Bytes::new(SharedBytes(input.bytes))),
+                }
+            }
             VirtualRoot::Package(spec) => Ok(Bytes::new(self.compiler.package_file(spec, id.vpath())?)),
         }
     }

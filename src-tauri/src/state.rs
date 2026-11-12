@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use exposition_execution::{ExecutionConfig, ExecutionService};
 use exposition_typesetting::{Fonts, TypesettingService};
-use exposition_workspace::DocumentService;
+use exposition_workspace::{DocumentService, WorkspaceService};
 use tauri::{AppHandle, Manager};
 
 use crate::typesetting::TypesettingRuntime;
@@ -11,6 +11,8 @@ use crate::typesetting::TypesettingRuntime;
 /// Application-wide services. One instance is managed by Tauri.
 pub struct AppState {
     pub documents: Arc<DocumentService>,
+    /// Open folder, files, saves, recovery, watcher, and settings.
+    pub workspace: Arc<WorkspaceService>,
     /// Supervised process execution (jobs, toolchains, trust).
     pub execution: ExecutionService,
     /// Typesetting builds, page maps, and rendering (Typst).
@@ -31,13 +33,14 @@ impl AppState {
         }
         let execution = ExecutionService::with_config(execution_config)?;
         let documents = Arc::new(DocumentService::new());
+        let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
         let typesetting =
-            TypesettingRuntime::new(Arc::new(TypesettingService::new(Arc::clone(&documents), Fonts::with_system)));
+            TypesettingRuntime::new(Arc::new(TypesettingService::new(Arc::clone(&workspace), Fonts::with_system)));
         // Discover fonts in the background so the first build does not wait for it.
         std::thread::spawn(|| {
             Fonts::with_system();
         });
-        Ok(Self { documents, execution, typesetting, data_dir })
+        Ok(Self { documents, workspace, execution, typesetting, data_dir })
     }
 }
 

@@ -1,18 +1,20 @@
 // Exact-page editing of a Typst document in the real app: click in a word and
 // type, reflow across a line, edit inside a display equation, select and
 // delete, undo, large insertion moving the figure/footnote, failed build with
-// last-good pages, PDF export. Screenshots go to test-results/e2e/page-typst.
-//
-// Uses the debug-only `__expositionDev.openPage` harness (dev_open_document)
-// until the workbench shell and workspace file opening are integrated.
+// last-good pages, IME, Split mode with the shared Monaco model and undo,
+// PDF export. Opens a temporary copy of the fixture project through the real
+// workspace flow (open folder, file tree, mode switcher). Screenshots go to
+// test-results/e2e/page-typst (and reference shots to $EXPOSITION_DEV_HOME).
 import { copyFile, cp, mkdir, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
+import { openFromTree, openWorkspace } from "../workspace-helpers.mjs";
+
 const PATH = "main.typ";
 
 export default async function pageTypst({ launchApp, artifactsDir, assert, fixture }) {
-  const workspace = await mkdtemp(join(tmpdir(), "exposition-typst-"));
+  const workspace = join(await mkdtemp(join(tmpdir(), "exposition-typst-")), "project");
   await cp(fixture("typst-basic"), workspace, { recursive: true });
   const app = await launchApp();
   const { page } = app;
@@ -40,9 +42,14 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
   const timings = [];
 
   try {
-    await page.waitForFunction(() => window.__expositionDev !== undefined, null, { timeout: 15000 });
-    const info = await page.evaluate((p) => window.__expositionDev.openPage(p), join(workspace, PATH));
-    const doc = info.id;
+    // Open the folder and the file through the workbench, then switch to Page mode.
+    await openWorkspace(page, workspace);
+    await openFromTree(page, PATH);
+    const modeButton = (label) => page.locator(".ui-segmented__item", { hasText: label }).first();
+    await modeButton("Page").waitFor({ timeout: 10000 });
+    await modeButton("Page").click();
+    await page.locator('[data-testid="page-editor"]').waitFor({ timeout: 10000 });
+    const doc = (await invoke("document_list")).find((d) => d.path === PATH).id;
     const state = () => invoke("document_state", { document: doc });
     const text = async () => (await state()).text;
 
@@ -259,7 +266,7 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
       timeout: 10000,
     });
     assert.equal(await build(), goodBuild, "last good pages stay visible");
-    await page.evaluate(() => window.__expositionDev.showProblems());
+    await page.getByRole("tab", { name: "Problems" }).click();
     await page.waitForSelector('[data-testid="problem"]');
     const problem = await page.locator('[data-testid="problem"]').first().textContent();
     assert.ok(problem.includes("nosuch"), `problem listed: ${problem}`);
@@ -298,7 +305,49 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     assert.equal(imeSel.text, "über𝔸", "committed text renders at the caret");
     await cdp.detach();
 
-    // 8. Export PDF from the shown build: same page count and sizes.
+    // 8. Split mode: the source (Monaco) and page views share one document.
+    //    Typing on the page appears in Monaco; Ctrl+Z in Monaco undoes it.
+    await modeButton("Split").click();
+    await page.locator('[data-testid="typst-split"] [data-testid="source-editor"] .monaco-editor').waitFor({ timeout: 10000 });
+    await page.locator('[data-testid="typst-split"] [data-testid="page-editor"]').waitFor();
+    await settled("split view shown");
+    source = await text();
+    const splitAt = source.indexOf("Offices");
+    const p8 = await point(splitAt, "downstream", 0.2);
+    await page.mouse.click(p8.x, p8.y);
+    await waitCaretOffset(splitAt);
+    await page.keyboard.type("Busy ");
+    await waitCaretOffset(splitAt + 5);
+    const monacoText = () =>
+      page.evaluate(() => document.querySelector('[data-testid="typst-split"] .monaco-editor .view-lines')?.textContent ?? "");
+    const sawInMonaco = await page
+      .waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="typst-split"] .monaco-editor .view-lines')?.textContent ?? "")
+            .replace(/ /g, " ")
+            .includes("Busy Offices"),
+        null,
+        { timeout: 10000 },
+      )
+      .then(() => true, () => false);
+    assert.ok(sawInMonaco, `page edit visible in Monaco: ${(await monacoText()).slice(0, 200)}`);
+    await settled("rebuild after split typing");
+    await shot("12-split");
+    await page.locator('[data-testid="typst-split"] .monaco-editor .view-lines').click();
+    await page.keyboard.press("Control+z");
+    await page.waitForFunction(
+      async ([d]) => !(await window.__TAURI_INTERNALS__.invoke("document_state", { document: d })).text.includes("Busy Offices"),
+      [doc],
+      { timeout: 10000 },
+    );
+    await settled("rebuild after Monaco undo");
+    const undone = await invoke("page_selection", { build: await build(), path: PATH, start: splitAt, end: splitAt + 7 });
+    assert.equal(undone.text, "Offices", "the page shows the source-side undo");
+    await modeButton("Page").click();
+    await page.locator('[data-testid="page-editor"]').waitFor();
+    await settled("page view after split");
+
+    // 9. Export PDF from the shown build: same page count and sizes.
     const exported = await invoke("typesetting_export_pdf", { build: await build(), destination: null });
     const pdf = (await readFile(exported.path)).toString("latin1");
     const pdfPages = [...pdf.matchAll(/\/Type\/Page(?!s)/g)].length;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { imageType } from "./session";
+import { imageType } from "./images";
 
 describe("page images", () => {
   it("detects the media type of page images by content", () => {

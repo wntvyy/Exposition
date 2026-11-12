@@ -3,17 +3,12 @@
 //! `cargo test [--release] -p exposition-typesetting --test latency -- --ignored --nocapture`.
 mod common;
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use common::Fixture;
-use exposition_core::build::{BuildStatus, BuildTarget, DocumentFormat, Engine};
-use exposition_core::document::TextEncoding;
-use exposition_core::path::WorkspacePath;
+use exposition_core::build::BuildStatus;
 use exposition_core::text::TextRange;
 use exposition_page::{PageEditOp, PageEditOutcome};
-use exposition_typesetting::{Fonts, TypesettingService};
-use exposition_workspace::{DocumentService, OpenDocument};
 
 struct Stats(Vec<f64>);
 
@@ -89,7 +84,7 @@ fn measure(fx: &Fixture, at_needle: &str, iterations: usize) {
     map.report("glyph map");
     render.report("SVG render of changed pages");
     total.report("edit -> compile -> map -> render");
-    changed_pages.report("changed pages per edit (count)");
+    changed_pages.report("changed pages per edit (count, not ms)");
 }
 
 #[test]
@@ -117,24 +112,7 @@ fn warm_incremental_latency_long_document() {
         text.push_str(&format!("= Section {i}\n{body}\n"));
     }
     std::fs::write(dir.path().join("main.typ"), &text).unwrap();
-    let documents = Arc::new(DocumentService::new());
-    let service = TypesettingService::new(Arc::clone(&documents), Fonts::embedded_only);
-    service.open_workspace(dir.path()).unwrap();
-    let path = WorkspacePath::parse("main.typ").unwrap();
-    let info = documents.open(OpenDocument {
-        path: Some(path.clone()),
-        text,
-        language: "typst".into(),
-        encoding: TextEncoding::Utf8,
-        read_only: None,
-    });
-    let fx = Fixture {
-        documents,
-        service,
-        document: info.id,
-        path: path.clone(),
-        target: BuildTarget { format: DocumentFormat::Typst, engine: Engine::Typst, entry: path },
-    };
+    let fx = Fixture::open_dir(dir.path(), "main.typ");
     println!(
         "== synthetic long document, profile: {}",
         if cfg!(debug_assertions) { "dev (deps opt-level 2)" } else { "release" }

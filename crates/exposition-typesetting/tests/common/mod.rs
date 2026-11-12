@@ -1,49 +1,68 @@
 //! Shared helpers for typesetting integration tests (real compiler, real
-//! document service, fixtures from `tests/fixtures`).
+//! workspace and document services, fixtures from `tests/fixtures` copied to a
+//! temporary project so they are never modified).
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use exposition_core::build::{BuildTarget, DocumentFormat, Engine};
-use exposition_core::document::{DocumentId, TextEncoding, TransactionId};
+use exposition_core::document::{DocumentId, TransactionId};
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::{TextRange, utf16_len};
 use exposition_page::{PageEditOp, PageEditOutcome, PageEditRequest, TypstInput, apply_page_edit};
 use exposition_typesetting::{BuildRecord, Fonts, TypesettingService};
-use exposition_workspace::{DocumentService, OpenDocument};
+use exposition_workspace::{DocumentService, WorkspaceService};
 
 pub fn fixture_dir(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures").join(name)
 }
 
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
 pub struct Fixture {
     pub documents: Arc<DocumentService>,
+    pub workspace: Arc<WorkspaceService>,
     pub service: TypesettingService,
     pub document: DocumentId,
     pub path: WorkspacePath,
     pub target: BuildTarget,
+    pub root: PathBuf,
+    _temp: tempfile::TempDir,
 }
 
 impl Fixture {
-    /// Open `entry` of fixture `name` as an in-memory document (the fixture on
-    /// disk is never modified).
+    /// Open a temporary copy of fixture `name` as the workspace and `entry`
+    /// as a document through the workspace service.
     pub fn open(name: &str, entry: &str) -> Self {
-        let dir = fixture_dir(name);
+        Self::open_dir(&fixture_dir(name), entry)
+    }
+
+    pub fn open_dir(dir: &Path, entry: &str) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        copy_dir(dir, &root);
+        let data = temp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
         let documents = Arc::new(DocumentService::new());
-        let service = TypesettingService::new(Arc::clone(&documents), Fonts::embedded_only);
-        service.open_workspace(&dir).expect("fixture dir");
+        let workspace = WorkspaceService::new(Arc::clone(&documents), data);
+        workspace.open_workspace(&root).expect("open workspace");
+        let service = TypesettingService::new(Arc::clone(&workspace), Fonts::embedded_only);
         let path = WorkspacePath::parse(entry).unwrap();
-        let text = std::fs::read_to_string(dir.join(entry)).unwrap();
-        let info = documents.open(OpenDocument {
-            path: Some(path.clone()),
-            text,
-            language: "typst".into(),
-            encoding: TextEncoding::Utf8,
-            read_only: None,
-        });
+        let opened = workspace.open_document(&path).expect("open document");
         let target = BuildTarget { format: DocumentFormat::Typst, engine: Engine::Typst, entry: path.clone() };
-        Self { documents, service, document: info.id, path, target }
+        Self { documents, workspace, service, document: opened.state.info.id, path, target, root, _temp: temp }
     }
 
     pub fn build(&self) -> Arc<BuildRecord> {

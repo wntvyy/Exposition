@@ -13,6 +13,7 @@ use exposition_core::build::{BuildResult, BuildTarget, DocumentFormat, Engine, E
 use exposition_core::document::DocumentEvent;
 use exposition_core::path::WorkspacePath;
 use exposition_typesetting::{BuildRecord, BuildTimings, TypesettingService};
+use exposition_workspace::types::WorkspaceEvent;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
@@ -142,11 +143,34 @@ impl TypesettingRuntime {
             .expect("spawn typesetting thread");
 
         let runtime = Arc::clone(self);
+        let documents_app = app.clone();
         let mut rx = app.state::<AppState>().documents.subscribe();
         tauri::async_runtime::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(DocumentEvent::Changed(_)) | Err(RecvError::Lagged(_)) => runtime.request_watched(&app),
+                    Ok(DocumentEvent::Changed(_)) | Err(RecvError::Lagged(_)) => {
+                        runtime.request_watched(&documents_app)
+                    }
+                    Ok(_) => {}
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
+        // Files changed on disk (images, included files that are not open)
+        // rebuild too; closing the folder forgets its builds.
+        let runtime = Arc::clone(self);
+        let mut rx = app.state::<AppState>().workspace.subscribe();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(WorkspaceEvent::FilesChanged { .. }) | Err(RecvError::Lagged(_)) => {
+                        runtime.request_watched(&app)
+                    }
+                    Ok(WorkspaceEvent::Closed) => {
+                        runtime.watched.lock().unwrap_or_else(|p| p.into_inner()).clear();
+                        runtime.service.reset();
+                    }
                     Ok(_) => {}
                     Err(RecvError::Closed) => break,
                 }
@@ -175,7 +199,7 @@ pub async fn typesetting_watch(
         return Err(CommandError::new("typesetting.unsupported", "only .typ entries can be typeset"));
     }
     let runtime = runtime(&state);
-    if runtime.service.workspace_root().is_none() {
+    if runtime.service.workspace().current().is_none() {
         return Err(CommandError::new("typesetting.noWorkspace", "no workspace is open"));
     }
     runtime.watched.lock().unwrap_or_else(|p| p.into_inner()).insert(entry.clone());

@@ -9,7 +9,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use exposition_core::build::{
@@ -19,11 +19,10 @@ use exposition_core::build::{
 use exposition_core::document::DocumentId;
 use exposition_core::path::WorkspacePath;
 use exposition_page::{PageImage, PageMap, PageMapProvider};
-use exposition_workspace::DocumentService;
+use exposition_workspace::WorkspaceService;
 use typst_layout::PagedDocument;
 
 use crate::fonts::Fonts;
-use crate::resolver::{DiskResolver, SourceResolver};
 use crate::snapshot::{BuildSnapshot, sha256_hex};
 use crate::typst_adapter::{self, COMPILER, TypstCompiler};
 
@@ -88,9 +87,10 @@ impl BuildRecord {
     }
 }
 
-struct WorkspaceContext {
+/// Compiler context of one workspace root (kept while the root stays open,
+/// so rebuilds are incremental).
+struct CompilerContext {
     root: PathBuf,
-    resolver: Arc<dyn SourceResolver>,
     compiler: TypstCompiler,
 }
 
@@ -102,24 +102,25 @@ struct Store {
 }
 
 pub struct TypesettingService {
-    documents: Arc<DocumentService>,
+    workspace: Arc<WorkspaceService>,
     /// Loaded on first use (system font discovery can take a moment).
     fonts: OnceLock<Arc<Fonts>>,
     load_fonts: fn() -> Arc<Fonts>,
-    workspace: RwLock<Option<Arc<WorkspaceContext>>>,
+    context: Mutex<Option<Arc<CompilerContext>>>,
     store: Mutex<Store>,
     counter: AtomicU64,
 }
 
 impl TypesettingService {
-    /// `load_fonts` provides the font set on first use, e.g.
-    /// [`Fonts::with_system`] or [`Fonts::embedded_only`].
-    pub fn new(documents: Arc<DocumentService>, load_fonts: fn() -> Arc<Fonts>) -> Self {
+    /// Builds read the open workspace of `workspace` (open buffers first, then
+    /// disk through its path checks). `load_fonts` provides the font set on
+    /// first use, e.g. [`Fonts::with_system`] or [`Fonts::embedded_only`].
+    pub fn new(workspace: Arc<WorkspaceService>, load_fonts: fn() -> Arc<Fonts>) -> Self {
         Self {
-            documents,
+            workspace,
             fonts: OnceLock::new(),
             load_fonts,
-            workspace: RwLock::new(None),
+            context: Mutex::new(None),
             store: Mutex::new(Store::default()),
             counter: AtomicU64::new(0),
         }
@@ -129,39 +130,30 @@ impl TypesettingService {
         self.fonts.get_or_init(self.load_fonts)
     }
 
-    pub fn documents(&self) -> &Arc<DocumentService> {
-        &self.documents
+    pub fn workspace(&self) -> &Arc<WorkspaceService> {
+        &self.workspace
     }
 
-    /// Use the workspace at `root` (canonicalized). Reopening the same root
-    /// keeps the compiler context and its caches.
-    pub fn open_workspace(&self, root: &Path) -> std::io::Result<PathBuf> {
-        let resolver = DiskResolver::new(root)?;
-        let canonical = resolver.root().to_path_buf();
-        if self.workspace_root().as_deref() == Some(canonical.as_path()) {
-            return Ok(canonical);
+    /// The compiler context for `root`; a different root starts a new one
+    /// and forgets the previous workspace's builds.
+    fn context_for(&self, root: &Path) -> Arc<CompilerContext> {
+        let mut context = self.context.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(existing) = context.as_ref().filter(|c| c.root == root) {
+            return Arc::clone(existing);
         }
-        self.open_workspace_with(Arc::new(resolver));
-        Ok(canonical)
-    }
-
-    /// Use a workspace provided by another resolver (e.g. the workspace service).
-    pub fn open_workspace_with(&self, resolver: Arc<dyn SourceResolver>) {
-        let context = WorkspaceContext {
-            root: resolver.root().to_path_buf(),
-            resolver,
+        let fresh = Arc::new(CompilerContext {
+            root: root.to_path_buf(),
             compiler: TypstCompiler::new(Arc::clone(self.fonts())),
-        };
-        *self.workspace.write().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(context));
+        });
+        *context = Some(Arc::clone(&fresh));
         *self.store.lock().unwrap_or_else(|p| p.into_inner()) = Store::default();
+        fresh
     }
 
-    pub fn workspace_root(&self) -> Option<PathBuf> {
-        self.workspace.read().unwrap_or_else(|p| p.into_inner()).as_ref().map(|w| w.root.clone())
-    }
-
-    fn context(&self) -> Result<Arc<WorkspaceContext>, TypesettingError> {
-        self.workspace.read().unwrap_or_else(|p| p.into_inner()).clone().ok_or(TypesettingError::NoWorkspace)
+    /// Forget compiler state and builds (e.g. when the workspace closes).
+    pub fn reset(&self) {
+        *self.context.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.store.lock().unwrap_or_else(|p| p.into_inner()) = Store::default();
     }
 
     /// Compile `entry` now from a fresh snapshot (open buffers override disk).
@@ -169,9 +161,9 @@ impl TypesettingService {
         if target.format != DocumentFormat::Typst || target.engine != Engine::Typst {
             return Err(TypesettingError::Unsupported(format!("{:?}/{:?}", target.format, target.engine)));
         }
-        let context = self.context()?;
         let started = Instant::now();
-        let snapshot = BuildSnapshot::capture(&self.documents, Arc::clone(&context.resolver));
+        let snapshot = BuildSnapshot::capture(&self.workspace).map_err(|_| TypesettingError::NoWorkspace)?;
+        let context = self.context_for(snapshot.root());
         let snapshot_ms = started.elapsed().as_secs_f64() * 1000.0;
         let output = context.compiler.compile(&target.entry, &snapshot);
         let configuration = BuildConfiguration {
@@ -305,8 +297,9 @@ impl TypesettingService {
                 parent.join(path.file_name().expect("has extension"))
             }
             None => {
-                let context = self.context()?;
-                let mut path = context.root.clone();
+                // The display root (no verbatim prefix) of the open folder.
+                let root = PathBuf::from(self.workspace.current().ok_or(TypesettingError::NoWorkspace)?.root);
+                let mut path = root;
                 for component in record.entry.components() {
                     path.push(component);
                 }
