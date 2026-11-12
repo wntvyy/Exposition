@@ -9,9 +9,12 @@
 //!   no fallback to another runner.
 //! * **Workspace.** Builds always target the currently open workspace of the
 //!   [`WorkspaceService`]; each build compiles one atomic
-//!   [`exposition_workspace::WorkspaceSnapshot`] (open buffers as they would
-//!   be saved, disk files through its path checks). Without an explicit target
-//!   the default LaTeX target of `.exposition/project.json` is used.
+//!   [`exposition_workspace::WorkspaceSnapshot`]: open buffers are
+//!   materialized as they would be saved, and the files the engine read from
+//!   disk (unopened sources, images, bibliographies) are hashed and recorded
+//!   through the snapshot's path-checked reads. (TeX itself still opens those
+//!   files through `TEXINPUTS`; see [`crate::compile`].) Without an explicit
+//!   target the default LaTeX target of `.exposition/project.json` is used.
 //! * **Build roots.** Per workspace under `<data_dir>/tex/<hash>`, registered
 //!   with the execution service as an application-owned directory owned by
 //!   that workspace (so its jobs follow the workspace's trust).

@@ -44,12 +44,26 @@ const COMMANDS: &[&str] = &[
     "tex_cancel",
     "tex_page_image",
     "tex_page_map",
+    "agents_provider_status",
+    "agents_provider_update",
+    "agents_provider_set_key",
+    "agents_provider_clear_key",
+    "agents_task_list",
+    "agents_task_detail",
+    "agents_task_create",
+    "agents_task_continue",
+    "agents_task_cancel",
+    "agents_approval_resolve",
+    "agents_review",
+    "agents_review_diff",
+    "agents_review_revert",
+    "agents_review_accept",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,
 /// granted only by a capability added at runtime in debug builds, and are not
 /// part of release `COMMANDS` or `capabilities/`.
-const DEV_COMMANDS: &[&str] = &["dev_start_probe_job", "dev_start_workspace_job"];
+const DEV_COMMANDS: &[&str] = &["dev_start_probe_job", "dev_start_workspace_job", "agents_dev_load_script"];
 
 fn main() {
     let debug = std::env::var("PROFILE").as_deref() == Ok("debug");
