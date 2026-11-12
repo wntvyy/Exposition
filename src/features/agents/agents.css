@@ -365,3 +365,116 @@
   outline-offset: var(--focus-ring-offset);
   border-radius: var(--radius-lg);
 }
+
+/* Agents page (top-level): task list beside the selected task's sections. */
+.agents-page {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--color-surface);
+}
+
+.agents-page__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-3);
+  border-right: var(--border-width) solid var(--color-border);
+  background: var(--color-surface-sunken);
+}
+
+.agents-page__detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-4);
+}
+
+.agents-page__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.agents-page__subtitle {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.agents-page__panel {
+  padding-top: var(--space-3);
+}
+
+.agents-page .agents-task-item[data-selected] {
+  background: var(--color-surface-selected);
+}
+
+.agents-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding-left: var(--space-4);
+}
+
+.agents-proposals {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agents-proposal {
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
+}
+
+.agents-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+  user-select: text;
+}
+
+.agents-table th,
+.agents-table td {
+  padding: var(--space-1) var(--space-2);
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.agents-table th {
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 860px) {
+  .agents-page {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .agents-page__list {
+    max-height: 40vh;
+    border-right: none;
+    border-bottom: var(--border-width) solid var(--color-border);
+  }
+}

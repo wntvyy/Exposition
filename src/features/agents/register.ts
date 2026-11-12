@@ -1,5 +1,6 @@
-// Agent feature registration: the Agent view (auxiliary region), the review
-// editor (`agents-review:<taskId>` resources), commands, and a status item.
+// Agent feature registration: the Agents page (top-level), the Agent view
+// (auxiliary region; the inline Editor entry point to the same tasks), the
+// review editor (`agents-review:<taskId>` resources), commands, and a status item.
 import { Bot } from "lucide-react";
 import { createElement, useEffect } from "react";
 
@@ -8,9 +9,10 @@ import { registry } from "../../app/registry";
 import { layout } from "../../app/layout";
 import { StatusPill } from "../../ui/components";
 import { AgentPanel } from "./AgentPanel";
+import { AgentsPage } from "./AgentsPage";
 import { isActive, waitingLabel } from "./format";
 import { REVIEW_PREFIX, ReviewView } from "./ReviewView";
-import { AGENT_VIEW_ID, agents, openApproval, useAgents } from "./store";
+import { AGENT_VIEW_ID, AGENTS_PAGE_ID, agents, openApproval, useAgents } from "./store";
 
 export { AGENT_VIEW_ID };
 
@@ -65,6 +67,14 @@ function showAgent() {
   layout.showView("auxiliary", AGENT_VIEW_ID);
 }
 
+registry.registerPage({
+  id: AGENTS_PAGE_ID,
+  title: "Agents",
+  icon: Bot,
+  order: 30,
+  render: () => createElement(AgentsPage),
+});
+
 registry.registerView({
   id: AGENT_VIEW_ID,
   location: "auxiliary",
@@ -100,6 +110,13 @@ registry.registerCommand({
     showAgent();
     agents.show("tasks", null);
   },
+});
+
+registry.registerCommand({
+  id: "agents.showPage",
+  title: "Open Agents Page",
+  category: "Agent",
+  run: () => agents.showInPage(useAgents.getState().page.selected),
 });
 
 registry.registerCommand({

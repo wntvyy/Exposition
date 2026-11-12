@@ -10,6 +10,7 @@ import type { TaskSummary } from "../../bindings/TaskSummary";
 import type { WorkspaceInfo } from "../../bindings/WorkspaceInfo";
 import type { DocumentEvent } from "../../bindings/DocumentEvent";
 import { layout, useLayout } from "../../app/layout";
+import { pages } from "../../app/pages";
 import type { Notification } from "../../app/notifications";
 import { dismiss, notify } from "../../app/notifications";
 import { registry } from "../../app/registry";
@@ -18,8 +19,29 @@ import { isActive, statusLabel } from "./format";
 
 /** The Agent view (auxiliary region). */
 export const AGENT_VIEW_ID = "agents.panel";
+/** The Agents page (top-level page): detailed task and workflow management. */
+export const AGENTS_PAGE_ID = "agents";
 
 export type PanelView = "tasks" | "compose" | "task" | "review";
+
+/** Sections of a task on the Agents page. */
+export type PageTab = "run" | "graph" | "proposals" | "changes";
+
+/** Which tasks the Agents page lists. */
+export type TaskFilter = "all" | "active" | "attention" | "kept";
+
+/**
+ * The Agents page's own navigation. Tasks, details, drafts, and approvals are
+ * shared with the Agent view: the page and the panel are two views of the same
+ * service and store, so navigating between them never duplicates a task or
+ * loses an approval or review.
+ */
+export interface PageState {
+  selected: TaskId | null;
+  tab: PageTab;
+  filter: TaskFilter;
+  composing: boolean;
+}
 
 /** Output streaming for the current turn, before it is persisted. */
 export interface StreamDraft {
@@ -47,6 +69,7 @@ export interface AgentsState {
   view: PanelView;
   settingsOpen: boolean;
   error: string | null;
+  page: PageState;
 }
 
 export const initialAgentsState: AgentsState = {
@@ -60,6 +83,7 @@ export const initialAgentsState: AgentsState = {
   view: "tasks",
   settingsOpen: false,
   error: null,
+  page: { selected: null, tab: "run", filter: "all", composing: false },
 };
 
 export const useAgents = create<AgentsState>(() => initialAgentsState);
@@ -290,23 +314,22 @@ function agentViewShowing(): boolean {
   return active === AGENT_VIEW_ID;
 }
 
-/** Whether the task's approval card is on screen right now. */
+/** Whether the Agents page is the page on screen. */
+function agentsPageShowing(): boolean {
+  return pages.active() === AGENTS_PAGE_ID;
+}
+
+/** Whether the task's approval card is on screen right now (panel or page). */
 function approvalShowing(taskId: TaskId): boolean {
-  const { view, selected } = useAgents.getState();
+  const { view, selected, page } = useAgents.getState();
+  if (agentsPageShowing()) return page.selected === taskId && page.tab === "run" && !page.composing;
   return agentViewShowing() && view === "task" && selected === taskId;
 }
 
-/**
- * Show the Agent view on the task and move focus to its approval card, so a
- * keyboard or screen-reader user lands on the decision (the card's label
- * names the action; Approve and Decline are the next Tab stops).
- */
-export function openApproval(taskId: TaskId): void {
-  layout.showView("auxiliary", AGENT_VIEW_ID);
-  agents.show("task", taskId);
+function focusApprovalIn(container: string) {
   let frames = 0;
   const focus = () => {
-    const card = document.querySelector<HTMLElement>("[data-testid=agents-panel] [data-testid=agents-approval]");
+    const card = document.querySelector<HTMLElement>(`[data-testid=${container}] [data-testid=agents-approval]`);
     if (!card) {
       if (++frames < 120) requestAnimationFrame(focus);
       return;
@@ -316,6 +339,23 @@ export function openApproval(taskId: TaskId): void {
     card.focus();
   };
   requestAnimationFrame(focus);
+}
+
+/**
+ * Show the Agent view on the task and move focus to its approval card, so a
+ * keyboard or screen-reader user lands on the decision (the card's label
+ * names the action; Approve and Decline are the next Tab stops).
+ */
+export function openApproval(taskId: TaskId): void {
+  // On the Agents page the approval opens there; elsewhere in the Agent view.
+  if (agentsPageShowing()) {
+    agents.showInPage(taskId, "run");
+    focusApprovalIn("agents-page");
+    return;
+  }
+  layout.showView("auxiliary", AGENT_VIEW_ID);
+  agents.show("task", taskId);
+  focusApprovalIn("agents-panel");
 }
 
 function handleEvent(event: AgentEvent) {
@@ -409,6 +449,24 @@ export const agents = {
     if (selected) void refetch(selected);
     // The task's approval card is on screen now; its notification has done its job.
     if (view === "task" && selected && agentViewShowing()) dismiss(approvalNotificationId(selected));
+  },
+
+  /** Show a task on the Agents page (the same task the Agent view shows). */
+  showInPage(taskId: TaskId | null, tab?: PageTab) {
+    pages.show(AGENTS_PAGE_ID);
+    useAgents.setState((state) => ({
+      page: { ...state.page, selected: taskId, tab: tab ?? (taskId === state.page.selected ? state.page.tab : "run"), composing: false },
+      error: null,
+    }));
+    if (taskId) void refetch(taskId);
+    if (taskId) dismiss(approvalNotificationId(taskId));
+  },
+
+  /** Change the Agents page's navigation without leaving the current page. */
+  setPage(patch: Partial<PageState>) {
+    useAgents.setState((state) => ({ page: { ...state.page, ...patch } }));
+    const selected = patch.selected;
+    if (selected) void refetch(selected);
   },
 
   setStatus(status: ProviderStatus) {
