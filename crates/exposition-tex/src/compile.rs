@@ -45,7 +45,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use exposition_core::build::{
@@ -56,7 +56,8 @@ use exposition_core::document::DocumentId;
 use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobOutcome, JobSpec};
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::{LineColumn, LineIndex, TextRange};
-use exposition_workspace::DocumentSnapshot;
+use exposition_execution::JobRefusal;
+use exposition_workspace::{DocumentSnapshot, WorkspaceSnapshot};
 use sha2::{Digest, Sha256};
 
 use crate::log::{LogMessageKind, parse_log, rerun_requested};
@@ -90,6 +91,53 @@ pub struct TexBuildRequest {
     /// pdfLaTeX only: run with `\pdfgentounicode=1 \input glyphtounicode` so
     /// the PDF carries ToUnicode maps for Type 1 fonts.
     pub tounicode: bool,
+    /// The workspace snapshot to build (the application path). When set, the
+    /// root is the snapshot's root, buffers are materialized exactly as they
+    /// would be saved, and the files the engine read from disk are recorded
+    /// through the snapshot's path-checked reads; `project_root` and `buffers`
+    /// are ignored.
+    pub workspace: Option<WorkspaceSnapshot>,
+}
+
+/// An open buffer materialized into the overlay.
+struct Buffer {
+    bytes: Arc<[u8]>,
+    text: Arc<str>,
+    document: DocumentId,
+    revision: u64,
+}
+
+fn collect_buffers(request: &TexBuildRequest) -> BTreeMap<WorkspacePath, Buffer> {
+    match &request.workspace {
+        Some(workspace) => workspace
+            .buffers()
+            .filter_map(|doc| {
+                let path = doc.path.clone()?;
+                let input = workspace.read(&path).ok()?;
+                let buffer = Buffer {
+                    bytes: input.bytes,
+                    text: doc.text.clone(),
+                    document: doc.id.clone(),
+                    revision: doc.revision,
+                };
+                Some((path, buffer))
+            })
+            .collect(),
+        None => request
+            .buffers
+            .iter()
+            .filter_map(|doc: &DocumentSnapshot| {
+                let path = doc.path.clone()?;
+                let buffer = Buffer {
+                    bytes: Arc::from(doc.text.as_bytes()),
+                    text: doc.text.clone(),
+                    document: doc.id.clone(),
+                    revision: doc.revision,
+                };
+                Some((path, buffer))
+            })
+            .collect(),
+    }
 }
 
 /// One file of a build snapshot.
@@ -159,12 +207,15 @@ pub struct TexBuild {
     pub output: Option<TexOutput>,
     pub snapshot: Option<BuildSnapshot>,
     pub passes: Vec<PassRecord>,
+    /// Why the execution service refused to run a tool (e.g. the workspace is
+    /// not trusted); the status is then `Error`.
+    pub refusal: Option<JobRefusal>,
 }
 
 /// Builds LaTeX targets with pdfLaTeX or LuaLaTeX.
 pub struct TexBuilder<R: JobRunner> {
     runner: R,
-    toolchain: Option<TexToolchain>,
+    toolchain: RwLock<Option<TexToolchain>>,
     build_root: PathBuf,
     versions: Mutex<BTreeMap<TexTool, String>>,
     lock: Mutex<()>,
@@ -182,7 +233,7 @@ impl<R: JobRunner> TexBuilder<R> {
         let build_root = plain_path(&build_root.canonicalize()?);
         Ok(Self {
             runner,
-            toolchain,
+            toolchain: RwLock::new(toolchain),
             build_root,
             versions: Mutex::new(BTreeMap::new()),
             lock: Mutex::new(()),
@@ -194,21 +245,45 @@ impl<R: JobRunner> TexBuilder<R> {
         &self.build_root
     }
 
-    pub fn toolchain(&self) -> Option<&TexToolchain> {
-        self.toolchain.as_ref()
+    pub fn toolchain(&self) -> Option<TexToolchain> {
+        self.toolchain.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Replace the toolchain (e.g. after settings or discovery changed).
+    pub fn set_toolchain(&self, toolchain: Option<TexToolchain>) {
+        *self.toolchain.write().unwrap_or_else(|p| p.into_inner()) = toolchain;
     }
 
     pub fn build(&self, request: &TexBuildRequest) -> TexBuild {
+        let n = self.counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.build_with_id(BuildId(format!("tex-{}-{n}", std::process::id())), request)
+    }
+
+    /// Build under a caller-assigned id (unique per build root; it names the
+    /// immutable output directory, so it must be a plain file name).
+    pub fn build_with_id(&self, id: BuildId, request: &TexBuildRequest) -> TexBuild {
         let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         let started = Instant::now();
-        let n = self.counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let id = BuildId(format!("tex-{}-{n}", std::process::id()));
+        if id.0.is_empty() || !id.0.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return self.early(request, &id, BuildStatus::Error { message: "invalid build id".into() });
+        }
         let mut build = self.build_inner(request, &id);
         build.result.duration_ms = started.elapsed().as_millis() as u64;
         build
     }
 
     fn early(&self, request: &TexBuildRequest, id: &BuildId, status: BuildStatus) -> TexBuild {
+        self.refused(request, id, status, None, Vec::new())
+    }
+
+    fn refused(
+        &self,
+        request: &TexBuildRequest,
+        id: &BuildId,
+        status: BuildStatus,
+        refusal: Option<JobRefusal>,
+        passes: Vec<PassRecord>,
+    ) -> TexBuild {
         TexBuild {
             result: BuildResult {
                 id: id.clone(),
@@ -225,7 +300,8 @@ impl<R: JobRunner> TexBuilder<R> {
             },
             output: None,
             snapshot: None,
-            passes: Vec::new(),
+            passes,
+            refusal,
         }
     }
 
@@ -239,7 +315,8 @@ impl<R: JobRunner> TexBuilder<R> {
                 BuildStatus::Error { message: format!("{:?} is not a TeX engine target", target.engine) },
             );
         };
-        let Some(toolchain) = self.toolchain.as_ref() else {
+        let toolchain = self.toolchain();
+        let Some(toolchain) = toolchain.as_ref() else {
             return self.early(
                 request,
                 id,
@@ -253,7 +330,8 @@ impl<R: JobRunner> TexBuilder<R> {
                 BuildStatus::ToolUnavailable { tool: engine_tool.name().into(), guidance: guidance(engine_tool) },
             );
         };
-        let project_root = match request.project_root.canonicalize() {
+        let requested_root = request.workspace.as_ref().map(|w| w.root().to_path_buf());
+        let project_root = match requested_root.unwrap_or_else(|| request.project_root.clone()).canonicalize() {
             Ok(p) => plain_path(&p),
             Err(e) => {
                 return self.early(request, id, BuildStatus::Error { message: format!("project root: {e}") });
@@ -269,21 +347,16 @@ impl<R: JobRunner> TexBuilder<R> {
             return self.early(request, id, BuildStatus::Error { message: format!("build directory: {e}") });
         }
 
-        // Materialize buffers.
-        let mut buffers: BTreeMap<WorkspacePath, &DocumentSnapshot> = BTreeMap::new();
-        for doc in &request.buffers {
-            if let Some(path) = &doc.path {
-                buffers.insert(path.clone(), doc);
-            }
-        }
-        for (path, doc) in &buffers {
+        // Materialize buffers (bytes exactly as they would be saved).
+        let buffers = collect_buffers(request);
+        for (path, buffer) in &buffers {
             let file = path.components().fold(overlay_root.clone(), |p, c| p.join(c));
             if let Some(parent) = file.parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
             {
                 return self.early(request, id, BuildStatus::Error { message: format!("overlay: {e}") });
             }
-            if let Err(e) = std::fs::write(&file, doc.text.as_bytes()) {
+            if let Err(e) = std::fs::write(&file, &buffer.bytes) {
                 return self.early(request, id, BuildStatus::Error { message: format!("overlay: {e}") });
             }
         }
@@ -320,7 +393,7 @@ impl<R: JobRunner> TexBuilder<R> {
             );
         }
         let job_name = entry_name.rsplit_once('.').map(|(stem, _)| stem.to_owned()).unwrap_or(entry_name.clone());
-        let env = self.environment(toolchain, &overlay_entry_dir, &project_entry_dir);
+        let env = self.environment(&overlay_entry_dir, &project_entry_dir);
         let out_arg = slash(&out_dir);
         let mut engine_args = vec![
             "-synctex=1".to_owned(),
@@ -355,7 +428,8 @@ impl<R: JobRunner> TexBuilder<R> {
         let pdf_path = out_dir.join(format!("{job_name}.pdf"));
         let _ = std::fs::remove_file(&pdf_path);
 
-        let run_engine = |passes: &mut Vec<PassRecord>| -> Result<ProcessOutput, BuildStatus> {
+        type Stop = (BuildStatus, Option<JobRefusal>);
+        let run_engine = |passes: &mut Vec<PassRecord>| -> Result<ProcessOutput, Stop> {
             let output = self.runner.run(&engine_spec);
             passes.push(PassRecord {
                 tool: engine_tool.name().into(),
@@ -364,16 +438,21 @@ impl<R: JobRunner> TexBuilder<R> {
             });
             match &output.outcome {
                 JobOutcome::Exited { .. } => Ok(output),
-                JobOutcome::Canceled => Err(BuildStatus::Canceled),
-                JobOutcome::TimedOut => Err(BuildStatus::Error { message: "the TeX engine timed out".into() }),
-                JobOutcome::FailedToStart { reason } => Err(BuildStatus::Error { message: reason.clone() }),
-                JobOutcome::Terminated { description } => Err(BuildStatus::Error { message: description.clone() }),
+                JobOutcome::Canceled => Err((BuildStatus::Canceled, None)),
+                JobOutcome::TimedOut => Err((BuildStatus::Error { message: "the TeX engine timed out".into() }, None)),
+                JobOutcome::FailedToStart { reason } => {
+                    let message = output.refusal.as_ref().map(|r| r.message.clone()).unwrap_or_else(|| reason.clone());
+                    Err((BuildStatus::Error { message }, output.refusal.clone()))
+                }
+                JobOutcome::Terminated { description } => {
+                    Err((BuildStatus::Error { message: description.clone() }, None))
+                }
             }
         };
 
         let mut last = match run_engine(&mut passes) {
             Ok(o) => o,
-            Err(status) => return self.early(request, id, status),
+            Err((status, refusal)) => return self.refused(request, id, status, refusal, passes),
         };
         if request.mode == BuildMode::Full {
             let mut aux_hash = file_hash(&aux_path);
@@ -400,6 +479,10 @@ impl<R: JobRunner> TexBuilder<R> {
                         });
                     }
                     BibOutcome::NotNeeded => {}
+                    BibOutcome::Canceled(record) => {
+                        passes.push(record);
+                        return self.refused(request, id, BuildStatus::Canceled, None, passes);
+                    }
                 }
                 let log = read_lossy(&log_path);
                 let new_aux = file_hash(&aux_path);
@@ -412,7 +495,7 @@ impl<R: JobRunner> TexBuilder<R> {
                 }
                 last = match run_engine(&mut passes) {
                     Ok(o) => o,
-                    Err(status) => return self.early(request, id, status),
+                    Err((status, refusal)) => return self.refused(request, id, status, refusal, passes),
                 };
                 if file_hash(&aux_path) == aux_hash && !rerun_requested(&read_lossy(&log_path)) {
                     break;
@@ -422,10 +505,11 @@ impl<R: JobRunner> TexBuilder<R> {
         }
 
         // Snapshot: recorder inputs inside the overlay or project.
-        let snapshot = self.snapshot(
+        let snapshot = Self::snapshot(
             target,
             &out_dir.join(format!("{job_name}.fls")),
             &buffers,
+            request.workspace.as_ref(),
             &overlay_root,
             &project_root,
             entry_dir.clone(),
@@ -520,23 +604,16 @@ impl<R: JobRunner> TexBuilder<R> {
             output,
             snapshot: Some(snapshot),
             passes,
+            refusal: None,
         }
     }
 
-    fn environment(&self, toolchain: &TexToolchain, overlay_dir: &Path, project_dir: &Path) -> EnvironmentSpec {
+    /// The TeX-specific variables. The runner supplies the platform base
+    /// (PATH with the program's directory, system root, temp, profile).
+    fn environment(&self, overlay_dir: &Path, project_dir: &Path) -> EnvironmentSpec {
         let sep = if cfg!(windows) { ";" } else { ":" };
         let search = format!("{}{sep}{}{sep}", slash(overlay_dir), slash(project_dir));
         let mut set = BTreeMap::new();
-        let mut path = toolchain.bin_dir.display().to_string();
-        if cfg!(windows)
-            && let Some(root) = std::env::var_os("SystemRoot")
-        {
-            path.push(';');
-            path.push_str(&Path::new(&root).join("System32").display().to_string());
-        } else if !cfg!(windows) {
-            path.push_str(":/usr/bin:/bin");
-        }
-        set.insert("PATH".to_owned(), path);
         set.insert("TEXINPUTS".to_owned(), search.clone());
         set.insert("BIBINPUTS".to_owned(), search.clone());
         set.insert("BSTINPUTS".to_owned(), search);
@@ -546,24 +623,7 @@ impl<R: JobRunner> TexBuilder<R> {
         set.insert("openout_any".to_owned(), "p".to_owned());
         set.insert("openin_any".to_owned(), "p".to_owned());
         set.insert("shell_escape".to_owned(), "f".to_owned());
-        let inherit = [
-            "SystemRoot",
-            "windir",
-            "TEMP",
-            "TMP",
-            "TMPDIR",
-            "USERPROFILE",
-            "HOMEDRIVE",
-            "HOMEPATH",
-            "HOME",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "LANG",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        EnvironmentSpec { inherit, set }
+        EnvironmentSpec { inherit: Vec::new(), set }
     }
 
     fn version(&self, tool: TexTool, program: &Path, env: &EnvironmentSpec, cwd: &Path) -> String {
@@ -653,6 +713,9 @@ impl<R: JobRunner> TexBuilder<R> {
         let output = self.runner.run(&spec);
         let record =
             PassRecord { tool: tool.name().into(), duration_ms: output.duration_ms, exit_code: output.exit_code() };
+        if output.outcome == JobOutcome::Canceled {
+            return BibOutcome::Canceled(record);
+        }
         match output.exit_code() {
             // bibtex exits 1 for warnings, 2 for errors.
             Some(0) | Some(1) if bbl.is_file() => {
@@ -667,23 +730,23 @@ impl<R: JobRunner> TexBuilder<R> {
     }
 
     fn snapshot(
-        &self,
         target: &BuildTarget,
         fls: &Path,
-        buffers: &BTreeMap<WorkspacePath, &DocumentSnapshot>,
+        buffers: &BTreeMap<WorkspacePath, Buffer>,
+        workspace: Option<&WorkspaceSnapshot>,
         overlay_root: &Path,
         project_root: &Path,
         entry_dir: Option<WorkspacePath>,
     ) -> BuildSnapshot {
         let mut files: BTreeMap<WorkspacePath, SnapshotFile> = BTreeMap::new();
-        for (path, doc) in buffers {
+        for (path, buffer) in buffers {
             files.insert(
                 path.clone(),
                 SnapshotFile {
-                    content_hash: hex_sha256(doc.text.as_bytes()),
-                    text: Some(doc.text.clone()),
-                    document: Some(doc.id.clone()),
-                    revision: Some(doc.revision),
+                    content_hash: hex_sha256(&buffer.bytes),
+                    text: Some(buffer.text.clone()),
+                    document: Some(buffer.document.clone()),
+                    revision: Some(buffer.revision),
                 },
             );
         }
@@ -705,11 +768,22 @@ impl<R: JobRunner> TexBuilder<R> {
             if files.contains_key(&path) {
                 continue;
             }
-            let disk = path.components().fold(project_root.to_path_buf(), |p, c| p.join(c));
-            let Ok(bytes) = std::fs::read(&disk) else { continue };
             let is_text = matches!(path.extension(), Some("tex" | "ltx" | "sty" | "cls" | "bib" | "bbx" | "cbx"));
-            let text = if is_text { String::from_utf8(bytes.clone()).ok().map(Arc::from) } else { None };
-            files.insert(path, SnapshotFile { content_hash: hex_sha256(&bytes), text, document: None, revision: None });
+            // Through the workspace's checked reads when building a workspace
+            // snapshot (no traversal or link escapes), else the project folder.
+            let (content_hash, text) = match workspace {
+                Some(workspace) => {
+                    let Ok(input) = workspace.read(&path) else { continue };
+                    (input.content_hash, input.text.filter(|_| is_text))
+                }
+                None => {
+                    let disk = path.components().fold(project_root.to_path_buf(), |p, c| p.join(c));
+                    let Ok(bytes) = std::fs::read(&disk) else { continue };
+                    let text = if is_text { String::from_utf8(bytes.clone()).ok().map(Arc::from) } else { None };
+                    (hex_sha256(&bytes), text)
+                }
+            };
+            files.insert(path, SnapshotFile { content_hash, text, document: None, revision: None });
         }
         let mut hasher = Sha256::new();
         hasher.update(format!("{:?}|{}|", target.engine, target.entry).as_bytes());
@@ -731,6 +805,7 @@ impl<R: JobRunner> TexBuilder<R> {
 
 enum BibOutcome {
     NotNeeded,
+    Canceled(PassRecord),
     Ran(PassRecord),
     Missing(TexTool),
     Failed(PassRecord, String),
@@ -927,8 +1002,16 @@ fn slash(path: &Path) -> String {
     plain_path(path).display().to_string().replace('\\', "/")
 }
 
+/// Whether two directory paths name the same directory (after canonicalization).
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Strip the Windows verbatim prefix (`\\?\C:\...`) that TeX cannot read.
-fn plain_path(path: &Path) -> PathBuf {
+pub(crate) fn plain_path(path: &Path) -> PathBuf {
     let s = path.display().to_string();
     match s.strip_prefix(r"\\?\") {
         Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),

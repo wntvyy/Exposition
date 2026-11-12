@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tex-page-map"
+description = "Enables the tex_page_map command without any pre-configured scope."
+commands.allow = ["tex_page_map"]
+
+[[permission]]
+identifier = "deny-tex-page-map"
+description = "Denies the tex_page_map command without any pre-configured scope."
+commands.deny = ["tex_page_map"]

@@ -94,7 +94,8 @@ impl SourceSet {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, rename = "TexUnmappedReason")]
 #[serde(rename_all = "camelCase")]
 pub enum UnmappedReason {
     /// The PDF gives no Unicode for the glyph.
@@ -110,7 +111,8 @@ pub enum UnmappedReason {
 }
 
 /// Where a glyph came from.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, rename = "TexGlyphTarget")]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum GlyphTarget {
     Source {
@@ -126,6 +128,8 @@ pub enum GlyphTarget {
         /// character by character); otherwise it is an atomic macro such as
         /// `\'e`, `--`, or `\alpha`.
         literal: bool,
+        /// UTF-16 range of the enclosing math construct, delimiters included.
+        equation: Option<TextRange>,
     },
     Unmapped {
         reason: UnmappedReason,
@@ -138,7 +142,8 @@ impl GlyphTarget {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, rename = "TexMappingStats")]
 #[serde(rename_all = "camelCase")]
 pub struct MappingStats {
     pub glyphs: u32,
@@ -152,7 +157,8 @@ pub struct MappingStats {
 }
 
 /// The mapping of one page.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, rename = "TexPageMapping")]
 #[serde(rename_all = "camelCase")]
 pub struct PageMapping {
     /// 0-based page index.
@@ -164,13 +170,16 @@ pub struct PageMapping {
     /// Source units (per file index) expected in this page's windows, and
     /// those matched — for document-level coverage.
     #[serde(skip)]
+    #[ts(skip)]
     pub expected_units: BTreeSet<(usize, usize)>,
     #[serde(skip)]
+    #[ts(skip)]
     pub matched_units: BTreeSet<(usize, usize)>,
 }
 
 /// A caret position on the page.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, rename = "TexCaretHit")]
 #[serde(rename_all = "camelCase")]
 pub struct CaretHit {
     pub glyph: u32,
@@ -743,6 +752,10 @@ fn assign_targets(
                     boundaries = vec![to16(start), to16(end)];
                 }
                 let first = model_units[0];
+                let equation = (first.mode == Mode::Math)
+                    .then(|| file.model.math_region_at(first.range.start))
+                    .flatten()
+                    .map(|(r, _)| TextRange::new(to16(r.start), to16(r.end)));
                 GlyphTarget::Source {
                     path: file.path.clone(),
                     range: TextRange::new(to16(start), to16(end)),
@@ -750,6 +763,7 @@ fn assign_targets(
                     mode: first.mode,
                     construct: first.construct,
                     literal: model_units.iter().all(|u| u.is_literal(&file.text)),
+                    equation,
                 }
             }
             None => {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tex-cancel"
+description = "Enables the tex_cancel command without any pre-configured scope."
+commands.allow = ["tex_cancel"]
+
+[[permission]]
+identifier = "deny-tex-cancel"
+description = "Denies the tex_cancel command without any pre-configured scope."
+commands.deny = ["tex_cancel"]

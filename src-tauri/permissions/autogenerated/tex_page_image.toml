@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tex-page-image"
+description = "Enables the tex_page_image command without any pre-configured scope."
+commands.allow = ["tex_page_image"]
+
+[[permission]]
+identifier = "deny-tex-page-image"
+description = "Denies the tex_page_image command without any pre-configured scope."
+commands.deny = ["tex_page_image"]

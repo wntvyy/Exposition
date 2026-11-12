@@ -4,10 +4,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import type { AgentEvent } from "../bindings/AgentEvent";
 import type { AppInfo } from "../bindings/AppInfo";
 import type { AppSettings } from "../bindings/AppSettings";
 import type { AppSettingsState } from "../bindings/AppSettingsState";
+import type { Budgets } from "../bindings/Budgets";
+import type { AttachArtifactRequest } from "../bindings/AttachArtifactRequest";
+import type { AttachArtifactResult } from "../bindings/AttachArtifactResult";
+import type { BuildId } from "../bindings/BuildId";
+import type { BuildTarget } from "../bindings/BuildTarget";
 import type { CommandError } from "../bindings/CommandError";
+import type { CreateTaskRequest } from "../bindings/CreateTaskRequest";
 import type { DocumentChanged } from "../bindings/DocumentChanged";
 import type { DocumentEvent } from "../bindings/DocumentEvent";
 import type { DocumentId } from "../bindings/DocumentId";
@@ -15,6 +22,8 @@ import type { DocumentInfo } from "../bindings/DocumentInfo";
 import type { DocumentOpened } from "../bindings/DocumentOpened";
 import type { DocumentState } from "../bindings/DocumentState";
 import type { EditOrigin } from "../bindings/EditOrigin";
+import type { EnvironmentReport } from "../bindings/EnvironmentReport";
+import type { ExecuteRequest } from "../bindings/ExecuteRequest";
 import type { FileEntry } from "../bindings/FileEntry";
 import type { JobEvent } from "../bindings/JobEvent";
 import type { JobId } from "../bindings/JobId";
@@ -33,9 +42,28 @@ import type { ProjectSettings } from "../bindings/ProjectSettings";
 import type { ProjectSettingsState } from "../bindings/ProjectSettingsState";
 import type { RecentProject } from "../bindings/RecentProject";
 import type { RecoveryEntry } from "../bindings/RecoveryEntry";
+import type { ResearchEvent } from "../bindings/ResearchEvent";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
+import type { RunManifest } from "../bindings/RunManifest";
+import type { RunOutputPage } from "../bindings/RunOutputPage";
+import type { RunSummary } from "../bindings/RunSummary";
 import type { SaveAllOutcome } from "../bindings/SaveAllOutcome";
+import type { SessionInfo } from "../bindings/SessionInfo";
+import type { StartSessionRequest } from "../bindings/StartSessionRequest";
+import type { TexBuildMode } from "../bindings/TexBuildMode";
+import type { TexEvent } from "../bindings/TexEvent";
+import type { TexPageMapping } from "../bindings/TexPageMapping";
+import type { TexTargetRef } from "../bindings/TexTargetRef";
+import type { TexTargetStatus } from "../bindings/TexTargetStatus";
 import type { ToolchainInfo } from "../bindings/ToolchainInfo";
+import type { FileDiff } from "../bindings/FileDiff";
+import type { ProviderSettings } from "../bindings/ProviderSettings";
+import type { ProviderStatus } from "../bindings/ProviderStatus";
+import type { ReviewActionResult } from "../bindings/ReviewActionResult";
+import type { TaskDetail } from "../bindings/TaskDetail";
+import type { TaskId } from "../bindings/TaskId";
+import type { TaskReview } from "../bindings/TaskReview";
+import type { TaskSummary } from "../bindings/TaskSummary";
 import type { TransactionError } from "../bindings/TransactionError";
 import type { TransactionOutcome } from "../bindings/TransactionOutcome";
 import type { TransactionRequest } from "../bindings/TransactionRequest";
@@ -43,6 +71,7 @@ import type { TrustStatus } from "../bindings/TrustStatus";
 import type { WorkspaceEvent } from "../bindings/WorkspaceEvent";
 import type { WorkspaceInfo } from "../bindings/WorkspaceInfo";
 import type { WorkspacePath } from "../bindings/WorkspacePath";
+import type { WorkspaceStatus } from "../bindings/WorkspaceStatus";
 
 export const commands = {
   appInfo: () => invoke<AppInfo>("app_info"),
@@ -117,6 +146,60 @@ export const commands = {
   /** Explicit user action only: install the toolchain the project pins (runs a job). */
   leanInstallToolchain: (document: DocumentId) => invoke<JobId>("lean_install_toolchain", { document }),
   leanCheck: (request: LeanCheckRequest) => invoke<LeanCheckReport>("lean_check", { request }),
+  /** Build a LaTeX target of the open workspace (`null`: the project's default target). */
+  texBuild: (target: BuildTarget | null, mode: TexBuildMode) =>
+    invoke<TexTargetRef>("tex_build", { target, mode }),
+  texStatus: (target: BuildTarget | null) => invoke<TexTargetStatus | null>("tex_status", { target }),
+  texCancel: (target: BuildTarget | null) => invoke<boolean>("tex_cancel", { target }),
+  /** PNG bytes of a page of a finished build (`scale` pixels per point); wrap in a Blob for an object URL. */
+  texPageImage: (build: BuildId, page: number, scale: number) =>
+    invoke<ArrayBuffer>("tex_page_image", { build, page, scale }),
+  texPageMap: (build: BuildId, page: number) => invoke<TexPageMapping>("tex_page_map", { build, page }),
+
+  // Agents. The API key is sent once to be stored in OS credential storage;
+  // no command ever returns it.
+  agentsProviderStatus: () => invoke<ProviderStatus>("agents_provider_status"),
+  agentsProviderUpdate: (settings: ProviderSettings) => invoke<ProviderStatus>("agents_provider_update", { settings }),
+  agentsProviderSetKey: (key: string) => invoke<ProviderStatus>("agents_provider_set_key", { key }),
+  agentsProviderClearKey: () => invoke<ProviderStatus>("agents_provider_clear_key"),
+  agentsTaskList: () => invoke<TaskSummary[]>("agents_task_list"),
+  agentsTaskDetail: (task: TaskId) => invoke<TaskDetail>("agents_task_detail", { task }),
+  agentsTaskCreate: (request: CreateTaskRequest) => invoke<TaskSummary>("agents_task_create", { request }),
+  agentsTaskContinue: (task: TaskId, prompt: string, budgets: Budgets | null) =>
+    invoke<TaskSummary>("agents_task_continue", { task, prompt, budgets }),
+  agentsTaskCancel: (task: TaskId) => invoke<TaskSummary>("agents_task_cancel", { task }),
+  agentsApprovalResolve: (task: TaskId, approval: string, approved: boolean) =>
+    invoke<void>("agents_approval_resolve", { task, approval, approved }),
+  agentsReview: (task: TaskId) => invoke<TaskReview>("agents_review", { task }),
+  agentsReviewDiff: (task: TaskId, path: string) => invoke<FileDiff>("agents_review_diff", { task, path }),
+  agentsReviewRevert: (task: TaskId, path: string | null) =>
+    invoke<ReviewActionResult[]>("agents_review_revert", { task, path }),
+  agentsReviewAccept: (task: TaskId, path: string | null) =>
+    invoke<ReviewActionResult[]>("agents_review_accept", { task, path }),
+  /** Development builds only (scripted provider); rejected in release builds. */
+  agentsDevLoadScript: (script: unknown) => invoke<void>("agents_dev_load_script", { script }),
+
+  // Research (M4). The project root comes from the workspace service; trust from the execution service.
+  researchWorkspace: () => invoke<WorkspaceStatus | null>("research_workspace"),
+  researchEnvironments: (refresh: boolean, extraInterpreters?: string[]) =>
+    invoke<EnvironmentReport>("research_environments", { refresh, extraInterpreters: extraInterpreters ?? null }),
+  researchSessionStart: (request: StartSessionRequest) => invoke<SessionInfo>("research_session_start", { request }),
+  researchSessions: () => invoke<SessionInfo[]>("research_sessions"),
+  researchSessionInterrupt: (sessionId: string) => invoke<SessionInfo>("research_session_interrupt", { sessionId }),
+  researchSessionRestart: (sessionId: string) => invoke<SessionInfo>("research_session_restart", { sessionId }),
+  researchSessionShutdown: (sessionId: string) => invoke<void>("research_session_shutdown", { sessionId }),
+  researchExecute: (request: ExecuteRequest) => invoke<RunSummary>("research_execute", { request }),
+  researchRunCancel: (runId: string) => invoke<void>("research_run_cancel", { runId }),
+  researchRuns: () => invoke<RunSummary[]>("research_runs"),
+  researchRun: (runId: string) => invoke<RunManifest>("research_run", { runId }),
+  /** Retained output entries after sequence number `after` (exclusive). */
+  researchRunOutput: (runId: string, after: number | null, limit?: number) =>
+    invoke<RunOutputPage>("research_run_output", { runId, after, limit: limit ?? null }),
+  /** Raw artifact bytes, fetched on demand for display (never pushed in events). */
+  researchArtifact: (runId: string, artifactId: string) =>
+    invoke<ArrayBuffer>("research_artifact", { runId, artifactId }),
+  /** Format-owned insert/update of a figure or table in an open document. */
+  artifactAttach: (request: AttachArtifactRequest) => invoke<AttachArtifactResult>("artifact_attach", { request }),
 };
 
 export const events = {
@@ -138,6 +221,21 @@ export const events = {
     listen<LeanEvent>("lean:event", (e) => handler(e.payload)),
   /** The frontend fell behind; re-read `leanDocuments`. */
   leanResync: (handler: () => void): Promise<UnlistenFn> => listen("lean:resync", () => handler()),
+  /** LaTeX build lifecycle (queued, started, finished with the build result). */
+  tex: (handler: (event: TexEvent) => void): Promise<UnlistenFn> =>
+    listen<TexEvent>("tex:event", (e) => handler(e.payload)),
+  /** The frontend fell behind; re-read TeX target status. */
+  texResync: (handler: () => void): Promise<UnlistenFn> => listen("tex:resync", () => handler()),
+  /** Agent task events (status, streamed text, tool calls, approvals, review). */
+  agents: (handler: (event: AgentEvent) => void): Promise<UnlistenFn> =>
+    listen<AgentEvent>("agents:event", (e) => handler(e.payload)),
+  /** The frontend fell behind; re-read agent state. */
+  agentsResync: (handler: () => void): Promise<UnlistenFn> => listen("agents:resync", () => handler()),
+  /** Research sessions, runs, and bounded run output, in order. */
+  research: (handler: (event: ResearchEvent) => void): Promise<UnlistenFn> =>
+    listen<ResearchEvent>("research:event", (e) => handler(e.payload)),
+  /** The frontend fell behind; re-read sessions and runs. */
+  researchResync: (handler: () => void): Promise<UnlistenFn> => listen("research:resync", () => handler()),
 };
 
 export function isCommandError(value: unknown): value is CommandError {

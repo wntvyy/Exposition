@@ -11,9 +11,12 @@ publish = false
 [workspace.dependencies]
 exposition-core = { path = "crates/exposition-core" }
 exposition-workspace = { path = "crates/exposition-workspace" }
+exposition-agents = { path = "crates/exposition-agents" }
 exposition-execution = { path = "crates/exposition-execution" }
 exposition-tex = { path = "crates/exposition-tex" }
 exposition-lean = { path = "crates/exposition-lean" }
+exposition-research = { path = "crates/exposition-research" }
+exposition-attach = { path = "crates/exposition-attach" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -24,6 +27,15 @@ uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 tracing = "0.1"
 tempfile = "3"
+# Agents: provider HTTPS (Rust owns model-provider requests), task persistence,
+# OS credential storage, cancellation, and text diffing for change review.
+reqwest = { version = "0.13", default-features = false, features = ["default-tls", "http2", "charset", "system-proxy", "stream"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
+keyring = { version = "3.6", features = ["windows-native", "apple-native", "linux-native"] }
+async-trait = "0.1"
+tokio-util = "0.7"
+futures-util = "0.3"
+similar = "2"
 notify = "8.2"
 regex = "1"
 # Execution service OS integration (process-tree containment).
