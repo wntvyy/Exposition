@@ -25,6 +25,11 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
   const references = [];
   /** Reference screenshot in both themes (UI_STANDARD), returning to light. */
   const referenceShots = async (name) => {
+    await page.evaluate(() =>
+      document.querySelectorAll('[data-testid="page-scroller"]').forEach((s) => {
+        s.scrollLeft = 0;
+      }),
+    );
     for (const theme of ["dark", "light"]) {
       await page.keyboard.press("Control+Shift+P");
       const palette = page.getByRole("textbox", { name: "Command" });
@@ -266,6 +271,17 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
     source = await text();
     const markerAt = source.indexOf(construct);
     assert.equal(await selection(markerAt, markerAt + construct.length), construct, "marker text on the page");
+    // Bring the marker into view for the screenshots.
+    const markerRect = (
+      await invoke("page_selection", { build: await build(), path: PATH, start: markerAt, end: markerAt + construct.length })
+    ).rects[0];
+    await page.locator(`[data-testid="page"][data-page="${markerRect.page}"]`).evaluate((pageEl, top) => {
+      const scroller = pageEl.closest('[data-testid="page-scroller"]');
+      const scale = pageEl.getBoundingClientRect().width / Number(pageEl.dataset.widthPt);
+      const view = scroller.getBoundingClientRect();
+      scroller.scrollTop += pageEl.getBoundingClientRect().top + top * scale - (view.top + view.height / 2);
+      scroller.scrollLeft = 0;
+    }, markerRect.y);
     await page.getByRole("tab", { name: "Problems" }).click();
     await page.waitForSelector('[data-testid="problem"]');
     const problems = await page.locator('[data-testid="problem"]').allTextContents();
