@@ -596,7 +596,10 @@ impl<'s> Tx<'s> {
             Event::SoftBreak => self.e.mapped(" ", range, SegmentKind::Atom),
             Event::HardBreak => self.close_code("#linebreak()", range),
             Event::TaskListMarker(done) => {
-                self.close_code(&format!("#exmd-task({done})"), range);
+                // The box is a glyph written here (not drawn by the template),
+                // so the page map has a non-editable cluster for `[ ]`/`[x]`.
+                let glyph = if *done { "☑" } else { "☐" };
+                self.close_code(&format!("#exmd-task[{glyph}]"), range);
                 self.syntax(" ", range);
             }
             Event::Rule => {

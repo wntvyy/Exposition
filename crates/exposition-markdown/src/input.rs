@@ -719,9 +719,32 @@ impl<'a> Doc<'a> {
                         return Ok(plan);
                     }
                 }
+                // A space typed after a list marker typed at a line start
+                // (`-`, `+`, `*`, `1.`, `1)`) would start a list: re-type the
+                // marker escaped, so it prints literally as documented.
+                if let Some(q) = self.marker_before(p) {
+                    let retyped = format!("{}{typed}", &self.text[q..p]);
+                    if let Ok(plan) = self.insert_markup(q, std::slice::from_ref(&(q..p)), &retyped, line_ending) {
+                        return Ok(plan);
+                    }
+                }
                 first
             }
         }
+    }
+
+    /// Start of a list marker (`-`, `+`, `*`, `1.`, `1)`) that ends at `p`
+    /// and starts a line (after container prefixes).
+    fn marker_before(&self, p: usize) -> Option<usize> {
+        let before = &self.text[..p];
+        let run = before.len() - before.trim_end_matches(|c: char| !c.is_whitespace() && c != '>').len();
+        let q = p - run;
+        let marker = &self.text[q..p];
+        let numbered = marker.len() >= 2
+            && marker.len() <= 10
+            && marker.ends_with(['.', ')'])
+            && marker[..marker.len() - 1].bytes().all(|b| b.is_ascii_digit());
+        ((matches!(marker, "-" | "+" | "*") || numbered) && self.at_line_start(q)).then_some(q)
     }
 
     /// Positions across inline delimiter runs (`*`, `_`, `~`) adjacent to `p`.
@@ -776,12 +799,26 @@ impl<'a> Doc<'a> {
         let prefix = chain.first().map(|&b| self.container_prefix(b)).unwrap_or_default();
         let parts: Vec<&str> = typed.split('\n').collect();
         let mut rendered: Vec<Tok> = Vec::new();
+        // Whitespace CommonMark drops at the end of a line or paragraph is not
+        // in the token stream; once text follows it, it renders again.
+        // (Whitespace inside another rendered unit, e.g. a hard break, is not dropped.)
+        let covered = |at: usize| {
+            self.tokens
+                .iter()
+                .any(|t| !matches!(t.tok, Tok::Open(..) | Tok::Close(..)) && t.extent.start <= at && at < t.extent.end)
+        };
+        if self.text[..p].ends_with([' ', '\t']) && !covered(p - 1) {
+            rendered.push(Tok::Space);
+        }
         for (i, part) in parts.iter().enumerate() {
             if i > 0 {
                 rendered.push(Tok::Close("Paragraph".into(), true));
                 rendered.push(Tok::Open("Paragraph".into(), true));
             }
             rendered.extend(part.chars().map(|c| if c == ' ' { Tok::Space } else { Tok::Ch(c) }));
+        }
+        if next.starts_with([' ', '\t']) && !covered(deleted_end) {
+            rendered.push(Tok::Space);
         }
         let expected = self.expected(deletions, p, &rendered, false);
         let blank = prefix.trim_end().to_owned();
