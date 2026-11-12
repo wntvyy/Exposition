@@ -45,6 +45,21 @@ async fn report(h: &Harness, path: &str, text: &str) -> LeanCheckReport {
     report
 }
 
+/// Have Lake build `module` (as in a project being worked in): check a file
+/// that only imports it.
+async fn build(h: &Harness, module: &str) {
+    let path = format!("LeanBasic/Build{}.lean", module.replace('.', ""));
+    write(
+        h,
+        &path,
+        &format!(
+            "import {module}
+"
+        ),
+    );
+    check_path(h, &path).await;
+}
+
 fn assert_unverified_by_kernel(path: &str, report: &LeanCheckReport) {
     assert!(!report.checked, "{path}: reported checked");
     match &report.status {
@@ -91,6 +106,7 @@ async fn adversarial_imported_hijacker_cannot_forge_the_audit() {
     }
     let h = harness("lean-basic", Options::default()).await;
     write(&h, "LeanBasic/HijackDep.lean", HIJACK_DEP);
+    build(&h, "LeanBasic.HijackDep").await;
     let r = report(&h, "LeanBasic/UsesHijack.lean", USES_HIJACK).await;
     h.lean.shutdown().await;
     assert_axioms("UsesHijack", &r, &["cheat"]);
@@ -198,6 +214,7 @@ async fn adversarial_kernel_checking_disabled_through_any_syntax_or_import() {
     }
     let h = harness("lean-basic", Options::default()).await;
     write(&h, "LeanBasic/KernelDep.lean", KERNEL_DEP);
+    build(&h, "LeanBasic.KernelDep").await;
     let cases = [
         ("LeanBasic/SkipScoped.lean", SKIP_SCOPED),
         ("LeanBasic/SkipLocal.lean", SKIP_LOCAL),
@@ -481,4 +498,84 @@ async fn positive_statuses_survive_the_kernel_replay() {
     assert!(matches!(sorry.status, LeanStatus::CheckedWithSorry { count: 1, .. }), "{:?}", sorry.status);
     assert_axioms("WithAxiom", &axiom, &["choice'"]);
     assert!(matches!(exit.status, LeanStatus::PartiallyChecked { line: Some(1), .. }), "{:?}", exit.status);
+}
+
+/// A dependency that takes Lake several seconds to build.
+const SLOW_DEP: &str =
+    "namespace LeanBasic\n#eval IO.sleep 8000\ntheorem slow_fact : 2 + 2 = 4 := rfl\nend LeanBasic\n";
+
+/// Was a race (pre-fix: `Unverified`, "compiling the checked text failed"):
+/// the audit of a freshly opened file started 0.8 s after the open, while
+/// Lake was still building its imports. It now starts before Lean is done
+/// only for imports Lean has already finished with, and a failed early audit
+/// is run again once Lean is done.
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_waits_for_imports_lake_is_still_building() {
+    if !lean_available() {
+        return;
+    }
+    let h = harness("lean-basic", Options::default()).await;
+    write(&h, "LeanBasic/SlowDep.lean", SLOW_DEP);
+    let r = report(
+        &h,
+        "LeanBasic/UsesSlowDep.lean",
+        "import LeanBasic.SlowDep\n\ntheorem uses_slow : 2 + 2 = 4 := LeanBasic.slow_fact\n",
+    )
+    .await;
+    h.lean.shutdown().await;
+    assert!(r.checked, "{:?}", r.status);
+}
+
+/// While it is compiled for the audit (with the user's privileges, like any
+/// trusted Lean code), the file finds the audit's checking program next to the
+/// directories on its `LEAN_PATH` and replaces it with one that reports no
+/// declarations, for this audit and every later one.
+const TOOL_SWAP: &str = r##"import Lean
+open Lean
+
+axiom cheat : False
+theorem one_eq_two : (1 : Nat) = 2 := cheat.elim
+
+run_cmd do
+  let some path ← IO.getEnv "LEAN_PATH" | return
+  let entries := System.SearchPath.parse path
+  let some lib := entries.head? | return
+  let some sysroot := lib.parent.bind (·.parent) | return
+  let lean := sysroot / "bin" / (if System.Platform.isWindows then "lean.exe" else "lean")
+  let fake := "def main (args : List String) : IO UInt32 := do\n" ++
+    "  let tag := args.headD \"\"\n" ++
+    "  IO.println (tag ++ \" {\\\"kernel\\\":null,\\\"replayed\\\":0}\")\n" ++
+    "  IO.println (tag ++ \" {\\\"end\\\":true}\")\n" ++
+    "  return 0\n"
+  for e in entries do
+    for root in [e, (e.parent.getD e) / "check"] do
+      let target := root / "ExpositionAuditTool" / "Check.olean"
+      if ← target.pathExists then
+        let src := root / "ExpositionAuditTool" / "Check.lean"
+        IO.FS.writeFile src fake
+        discard <| IO.Process.output {
+          cmd := lean.toString, args := #["-R", root.toString, "-o", target.toString, src.toString],
+          env := #[("LEAN_PATH", some lib.toString)] }
+"##;
+
+/// Was DEFECT in the first version of this fix (`Checked`, the swapped program
+/// ran): the programs are now pinned by SHA-256 when compiled and verified
+/// before each step (the file's process tree is gone by then), kept in a
+/// directory that is not on the compile step's `LEAN_PATH`, and compiled again
+/// after a mismatch.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversarial_audit_programs_replaced_during_the_compile_step_never_run() {
+    if !lean_available() {
+        return;
+    }
+    let h = harness("lean-basic", Options::default()).await;
+    let swapped = report(&h, "LeanBasic/ToolSwap.lean", TOOL_SWAP).await;
+    let after = report(&h, "LeanBasic/AfterSwap.lean", "theorem fine : (1 : Nat) = 1 := rfl\n").await;
+    h.lean.shutdown().await;
+    assert!(!swapped.checked, "ToolSwap: {:?}", swapped.status);
+    match &swapped.status {
+        LeanStatus::Unverified { reason, .. } => assert!(reason.contains("were modified"), "{reason}"),
+        other => panic!("ToolSwap: expected Unverified, got {other:?}"),
+    }
+    assert!(after.checked, "the next check uses freshly compiled programs: {:?}", after.status);
 }

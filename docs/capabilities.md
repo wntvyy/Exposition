@@ -93,9 +93,27 @@ elaborated exactly that text with no errors, no `sorry` (including through
 imports), kernel checking enabled, and only the standard axioms (`propext`,
 `Classical.choice`, `Quot.sound`). Anything else gets its own status:
 Incomplete (`sorry`), Checked with axioms, Relies on compiled code
-(`native_decide`), Partially checked (`#exit`), Not verified, Errors. Goals
-are shown as plain text; third-party infoview widgets are not executed.
-Toolchains are never downloaded implicitly.
+(`native_decide` and other native evaluation), Partially checked (`#exit`),
+Not verified, Errors. Goals are shown as plain text; third-party infoview
+widgets are not executed. Toolchains are never downloaded implicitly.
+
+The verdict comes from an audit the checked file cannot steer. Exposition
+compiles exactly the checked text, then a separate Lean program that runs none
+of the file's code (no elaborators, macros, attributes, or `initialize` blocks,
+its own or its imports') reads the result as data, re-checks every project and
+dependency declaration it relies on with Lean's kernel (as lean4checker does),
+and lists the axioms from those declarations. A declaration added without the
+kernel, however the file did it, makes the file Not verified; a standard axiom
+counts only if it is the toolchain's own; the audit programs are pinned by
+hash, so a file that rewrites them gets Not verified. Limits: Checked
+describes the declarations Lean produced, and a file can redefine its own
+syntax so that its text reads differently; a trusted file's code runs with
+your account's privileges while it is compiled (as in the language server),
+and code that deliberately tampers with the Lean toolchain itself or with
+other processes is not contained.
+The audit programs are written for Lean 4.35's APIs; a toolchain they do not
+compile on reports Not verified. Re-checking large dependencies (such as
+Mathlib) with the kernel takes correspondingly long.
 
 ## Agents
 

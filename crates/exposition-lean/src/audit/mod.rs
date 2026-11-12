@@ -32,20 +32,26 @@
 //!    toolchain's own constant.
 //!
 //! Both programs are written by the application into its own directory and
-//! compiled once per toolchain and session. They and every audit job run the
-//! toolchain's `lean` directly with the toolchain's library first on
-//! `LEAN_PATH` (a project cannot shadow `Init`/`Std`/`Lean`); the project's
-//! own module path comes from `lake env`. All jobs are supervised
+//! compiled once per toolchain and session, each in its own directory (only
+//! the compile program's is on step 1's `LEAN_PATH`). Their files are pinned
+//! by SHA-256 when compiled and verified before each step, after step 1's
+//! process tree has ended (job objects), so a file that rewrites them while it
+//! is compiled gets `Unverified` and the next audit compiles a fresh copy.
+//! Every job runs the toolchain's `lean` directly with the toolchain's library
+//! first on `LEAN_PATH` (a project cannot shadow `Init`/`Std`/`Lean`); the
+//! project's own module path comes from `lake env`. All jobs are supervised
 //! `TrustedNative` jobs (step 1 runs project code, like the language server).
-//! Nothing is written to the project.
+//! Nothing is written to the project. A speculative audit (started before
+//! Lean finishes a version) runs only for imports Lean has already finished
+//! with, and one that fails is run again once Lean is done.
 //!
 //! Limits (see `docs/capabilities.md`): a `Checked` result certifies the
 //! environment Lean produced from the text, not how the text reads (a file can
 //! redefine its own syntax); the file's code runs with the user's privileges
-//! during step 1, so code that deliberately tampers with files or processes
-//! outside Lean (rather than with Lean's elaboration) is not contained; and the
-//! audit programs use the Lean 4.35 APIs, so another toolchain whose APIs
-//! differ reports `Unverified` with the compiler's message.
+//! during step 1, so code that deliberately tampers with the toolchain or
+//! other processes outside Lean is not contained; and the audit programs use
+//! the Lean 4.35 APIs, so another toolchain whose APIs differ reports
+//! `Unverified` with the compiler's message.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -188,7 +194,28 @@ pub struct Auditor {
     /// `<scratch>/audit`: runs go to `runs/<id>`, programs to `tools-<session>`.
     dir: PathBuf,
     session: String,
-    tools: Mutex<HashMap<PathBuf, Arc<OnceCell<PathBuf>>>>,
+    tools: Mutex<HashMap<PathBuf, Arc<OnceCell<Tools>>>>,
+}
+
+/// Compiled audit programs and the SHA-256 of every file a run reads. The
+/// two programs live in separate directories: only `compile` is on the
+/// `LEAN_PATH` of the step that runs the checked file's code.
+#[derive(Clone)]
+struct Tools {
+    compile: PathBuf,
+    check: PathBuf,
+    digests: Vec<(PathBuf, Vec<u8>)>,
+}
+
+impl Tools {
+    /// The files are unchanged since they were compiled (a checked file's code
+    /// runs with the user's privileges and could otherwise replace them for
+    /// every later audit).
+    fn intact(&self) -> bool {
+        self.digests
+            .iter()
+            .all(|(path, digest)| std::fs::read(path).is_ok_and(|b| Sha256::digest(&b).as_slice() == digest))
+    }
 }
 
 impl Auditor {
@@ -249,11 +276,18 @@ impl Auditor {
             return AuditOutcome::Failed("canceled".into());
         }
         let lib = toolchain_lib(request.toolchain);
-        let lean_path = match lean_path(&lib, &[&tools, dir], &project_path) {
+        let paths = lean_path(&lib, &[&tools.compile, dir], &project_path)
+            .and_then(|compile| Ok((compile, lean_path(&lib, &[&tools.check, dir], &project_path)?)));
+        let (compile_path, check_path) = match paths {
             Ok(p) => p,
             Err(e) => return AuditOutcome::Failed(e),
         };
         // Step 1: compile (the file's code runs here).
+        if !self.verify_tools(request.toolchain) {
+            return AuditOutcome::Failed(
+                "the audit programs were modified; they are compiled again for the next check".into(),
+            );
+        }
         let secret = nonce();
         let mut compile = job_spec(
             format!("Lean axiom audit: compile {}", request.file_name),
@@ -261,12 +295,12 @@ impl Auditor {
             request.toolchain.lean.display().to_string(),
             vec![
                 "--run".into(),
-                tools.join("RunCompile.lean").display().to_string(),
+                tools.compile.join("RunCompile.lean").display().to_string(),
                 source.display().to_string(),
                 olean.display().to_string(),
                 module.clone(),
             ],
-            Some(&lean_path),
+            Some(&compile_path),
         );
         compile.stdin = Some(format!("{secret}\n"));
         let compiled = match run(exec, compile, cancel).await {
@@ -280,6 +314,11 @@ impl Auditor {
             Err(e) => return AuditOutcome::Failed(format!("compiling the checked text failed ({e})")),
         };
         // Step 2: check (none of the file's code runs here).
+        if !self.verify_tools(request.toolchain) {
+            return AuditOutcome::Failed(
+                "the audit programs were modified; they are compiled again for the next check".into(),
+            );
+        }
         let tag = nonce();
         let check = job_spec(
             format!("Lean axiom audit: {}", request.file_name),
@@ -287,12 +326,12 @@ impl Auditor {
             request.toolchain.lean.display().to_string(),
             vec![
                 "--run".into(),
-                tools.join("RunCheck.lean").display().to_string(),
+                tools.check.join("RunCheck.lean").display().to_string(),
                 tag.clone(),
                 lib.display().to_string(),
                 module.clone(),
             ],
-            Some(&lean_path),
+            Some(&check_path),
         );
         let checked = match run(exec, check, cancel).await {
             Ran::Exited { id, .. } => {
@@ -320,14 +359,25 @@ impl Auditor {
         exec: &ExecutionService,
         project: &LeanProject,
         toolchain: &ResolvedToolchain,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<Tools, String> {
         let cell = {
             let mut tools = self.tools.lock().unwrap_or_else(|e| e.into_inner());
             Arc::clone(tools.entry(toolchain.lean.clone()).or_default())
         };
         let key = hex(&Sha256::digest(toolchain.lean.display().to_string().as_bytes()))[..16].to_owned();
-        let dir = self.dir.join(format!("tools-{}", self.session)).join(key);
+        let dir = self.dir.join(format!("tools-{}", self.session)).join(format!("{key}-{}", &nonce()[..8]));
         cell.get_or_try_init(|| compile_tools(exec, project, toolchain, dir)).await.cloned()
+    }
+
+    /// Check the programs' digests; on a mismatch forget them, so the next
+    /// audit compiles a fresh copy.
+    fn verify_tools(&self, toolchain: &ResolvedToolchain) -> bool {
+        let mut tools = self.tools.lock().unwrap_or_else(|e| e.into_inner());
+        let intact = tools.get(&toolchain.lean).and_then(|cell| cell.get()).is_some_and(Tools::intact);
+        if !intact {
+            tools.remove(&toolchain.lean);
+        }
+        intact
     }
 }
 
@@ -337,50 +387,62 @@ impl Drop for Auditor {
     }
 }
 
-/// Write and compile `Compile.lean` and `Check.lean` into `dir` (in parallel).
+/// Write and compile `Compile.lean` and `Check.lean` into `dir/compile` and
+/// `dir/check` (in parallel).
 async fn compile_tools(
     exec: &ExecutionService,
     project: &LeanProject,
     toolchain: &ResolvedToolchain,
     dir: PathBuf,
-) -> Result<PathBuf, String> {
-    let package = dir.join(TOOL_PACKAGE);
-    let written = std::fs::create_dir_all(&package)
-        .and_then(|_| std::fs::write(package.join("Compile.lean"), COMPILE_SOURCE))
-        .and_then(|_| std::fs::write(package.join("Check.lean"), CHECK_SOURCE))
-        .and_then(|_| std::fs::write(dir.join("RunCompile.lean"), format!("import {TOOL_PACKAGE}.Compile\n")))
-        .and_then(|_| std::fs::write(dir.join("RunCheck.lean"), format!("import {TOOL_PACKAGE}.Check\n")));
-    written.map_err(|e| format!("could not write the audit programs: {e}"))?;
+) -> Result<Tools, String> {
     let lib = toolchain_lib(toolchain);
     let lean_path = lean_path(&lib, &[], &[])?;
-    let spec = |name: &str| {
+    let mut specs = Vec::new();
+    let mut digested = Vec::new();
+    for (name, source) in [("Compile", COMPILE_SOURCE), ("Check", CHECK_SOURCE)] {
+        let root = dir.join(name.to_lowercase());
+        let package = root.join(TOOL_PACKAGE);
+        let stub = root.join(format!("Run{name}.lean"));
+        let olean = package.join(format!("{name}.olean"));
+        let lean = package.join(format!("{name}.lean"));
+        std::fs::create_dir_all(&package)
+            .and_then(|_| std::fs::write(&lean, source))
+            .and_then(|_| std::fs::write(&stub, format!("import {TOOL_PACKAGE}.{name}\n")))
+            .map_err(|e| format!("could not write the audit programs: {e}"))?;
         let mut spec = job_spec(
             format!("Lean axiom audit: prepare ({name})"),
             project,
             toolchain.lean.display().to_string(),
             vec![
                 "-R".into(),
-                dir.display().to_string(),
+                root.display().to_string(),
                 "-o".into(),
-                package.join(format!("{name}.olean")).display().to_string(),
-                package.join(format!("{name}.lean")).display().to_string(),
+                olean.display().to_string(),
+                lean.display().to_string(),
             ],
             Some(&lean_path),
         );
         spec.timeout_ms = Some(TOOLS_TIMEOUT_MS);
-        spec
-    };
+        specs.push(spec);
+        digested.extend([stub, olean]);
+    }
     // Not cancelable by one audit: other audits may be waiting for the same programs.
     let (_never, mut never_a) = watch::channel(false);
     let mut never_b = never_a.clone();
-    let (compile, check) =
-        tokio::join!(run(exec, spec("Compile"), &mut never_a), run(exec, spec("Check"), &mut never_b));
+    let check_spec = specs.pop().expect("two programs");
+    let compile_spec = specs.pop().expect("two programs");
+    let (compile, check) = tokio::join!(run(exec, compile_spec, &mut never_a), run(exec, check_spec, &mut never_b));
     for result in [compile, check] {
         if let Ran::Failed(e) = result {
             return Err(e);
         }
     }
-    Ok(dir)
+    let mut digests = Vec::new();
+    for path in digested {
+        let bytes = std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        digests.push((path, Sha256::digest(&bytes).to_vec()));
+    }
+    Ok(Tools { compile: dir.join("compile"), check: dir.join("check"), digests })
 }
 
 /// `<toolchain>/lib/lean`: the toolchain's own module library.
@@ -631,6 +693,25 @@ fn combine(decls: Vec<CheckedDecl>, ranges: &HashMap<String, Range>, module: &st
         .collect()
 }
 
+/// The lines of `text` that decide what it imports (`prelude`, `module`,
+/// `import …` with its modifiers). A speculative audit (started before Lean
+/// finished a version) needs these unchanged since Lean last finished the
+/// file: otherwise Lake may still be building the imports the audit reads.
+pub fn imports_key(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            let words: Vec<&str> = line.split_whitespace().take(4).collect();
+            matches!(words.first(), Some(&"prelude") | Some(&"module"))
+                || words
+                    .iter()
+                    .position(|w| *w == "import")
+                    .is_some_and(|i| words[..i].iter().all(|w| matches!(*w, "public" | "meta" | "private")))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A fresh random hex token (run ids and secrets), unpredictable to the
 /// audited code.
 pub fn nonce() -> String {
@@ -734,6 +815,15 @@ mod tests {
         let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
         assert_eq!(entries, vec![lib.clone(), tools, project[0].clone()]);
         assert!(parse_lake_env_lean_path("PATH=x\n").is_none());
+    }
+
+    #[test]
+    fn imports_key_tracks_only_the_header() {
+        let a = "module\npublic import A.B\nimport all C\n\ntheorem t : True := trivial\n";
+        assert_eq!(imports_key(a), "module\npublic import A.B\nimport all C");
+        assert_eq!(imports_key(a), imports_key(&a.replace("trivial", "by trivial")));
+        assert_ne!(imports_key(a), imports_key(&a.replace("A.B", "A.D")));
+        assert_eq!(imports_key("public theorem x : True := trivial\n"), "");
     }
 
     #[test]

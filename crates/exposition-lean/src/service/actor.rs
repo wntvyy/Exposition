@@ -97,6 +97,10 @@ struct Doc {
     /// audit (started speculatively once the version is stable, so it runs
     /// alongside Lean), `sorry` token locations, and Lean's own completion.
     work: Option<CheckWork>,
+    /// (server generation, [`audit::imports_key`]) of the last version Lean
+    /// finished without errors: its imports are built, so a speculative audit
+    /// of a version with the same imports cannot race Lake building them.
+    imports_ready: Option<(u64, String)>,
 }
 
 struct CheckWork {
@@ -109,6 +113,10 @@ struct CheckWork {
     tokens: Option<Vec<TextRange>>,
     /// Lean answered `waitForDiagnostics` for `version` with no errors.
     lean_done: bool,
+    /// The audit was started before Lean finished `version`.
+    speculative: bool,
+    /// An audit job for `version` is running.
+    running: bool,
 }
 
 impl Drop for CheckWork {
@@ -141,6 +149,7 @@ impl Doc {
             last_emit: None,
             goal_requests: Vec::new(),
             work: None,
+            imports_ready: None,
         }
     }
 
@@ -954,6 +963,8 @@ impl Actor {
             json!({ "textDocument": { "uri": uri, "languageId": "lean4", "version": revision, "text": &*text } }),
         );
         let doc = self.docs.get_mut(id).expect("present");
+        // Lake (re)builds the imports when a file is opened or restarted.
+        doc.imports_ready = None;
         doc.sync = Some(SyncState {
             generation,
             version: revision,
@@ -1017,8 +1028,16 @@ impl Actor {
                     .lsp_diagnostics
                     .iter()
                     .any(|d| d.get("message").and_then(Value::as_str).is_some_and(is_sorry_message));
-                if !self.docs[&id].work.as_ref().is_some_and(|w| w.version == version && w.generation == generation) {
-                    self.start_audit(&id, generation, version);
+                let key = audit::imports_key(&sync.text);
+                let doc = self.docs.get_mut(&id).expect("present");
+                doc.imports_ready = Some((generation, key));
+                let needs_audit = match doc.work.as_ref().filter(|w| w.version == version && w.generation == generation)
+                {
+                    None => true,
+                    Some(w) => !w.running && w.audit.is_none(),
+                };
+                if needs_audit {
+                    self.start_audit(&id, generation, version, false);
                 }
                 self.request_tokens(&id, generation, version, has_sorry);
                 if let Some(work) = self.docs.get_mut(&id).and_then(|d| d.work.as_mut()) {
@@ -1065,11 +1084,18 @@ impl Actor {
         if busy || doc.status.finished_revision() == Some(version) {
             return;
         }
-        self.start_audit(id, generation, version);
+        // Before Lean has finished a version with these imports, Lake may still
+        // be building them; the audit then starts when Lean is done.
+        let text = &doc.sync.as_ref().expect("current").text;
+        if doc.imports_ready.as_ref() != Some(&(generation, audit::imports_key(text))) {
+            return;
+        }
+        self.start_audit(id, generation, version, true);
     }
 
-    /// Run the axiom audit of exactly the text of `version`.
-    fn start_audit(&mut self, id: &DocumentId, generation: u64, version: u64) {
+    /// Run the axiom audit of exactly the text of `version` (`speculative`:
+    /// before Lean has finished it). Keeps the version's other work.
+    fn start_audit(&mut self, id: &DocumentId, generation: u64, version: u64, speculative: bool) {
         let doc = &self.docs[id];
         let Some(sync) = doc.sync.as_ref() else { return };
         let Some(key) = doc.key.clone() else { return };
@@ -1083,7 +1109,26 @@ impl Actor {
         let file_name = format!("{} (revision {version})", doc.path.file_name());
         let (cancel, cancel_rx) = watch::channel(false);
         let doc = self.docs.get_mut(id).expect("present");
-        doc.work = Some(CheckWork { generation, version, cancel, audit: None, tokens: None, lean_done: false });
+        match doc.work.as_mut().filter(|w| w.generation == generation && w.version == version) {
+            Some(work) => {
+                work.cancel = cancel;
+                work.audit = None;
+                work.speculative = speculative;
+                work.running = true;
+            }
+            None => {
+                doc.work = Some(CheckWork {
+                    generation,
+                    version,
+                    cancel,
+                    audit: None,
+                    tokens: None,
+                    lean_done: false,
+                    speculative,
+                    running: true,
+                })
+            }
+        }
         let doc_id = id.clone();
         tokio::spawn(async move {
             let request = audit::AuditRequest { project: &project, toolchain: &toolchain, text, file_name };
@@ -1657,8 +1702,17 @@ impl Actor {
             Msg::StartAudit { generation, doc, version } => self.on_start_audit(&doc, generation, version),
             Msg::Audited { generation, doc, version, outcome } => {
                 if let Some(work) = self.work_mut(&doc, generation, version) {
-                    work.audit = Some(outcome);
-                    self.try_finalize(&doc);
+                    work.running = false;
+                    if work.speculative && matches!(outcome, audit::AuditOutcome::Failed(_)) {
+                        // Started before Lean finished: run it again once Lean is done
+                        // (now, if it already is) rather than report a transient failure.
+                        if work.lean_done {
+                            self.start_audit(&doc, generation, version, false);
+                        }
+                    } else {
+                        work.audit = Some(outcome);
+                        self.try_finalize(&doc);
+                    }
                 }
             }
             Msg::SorryTokens { generation, doc, version, tokens } => {
