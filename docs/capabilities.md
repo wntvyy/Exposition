@@ -82,9 +82,12 @@ documents, run Python in their own research sessions, and check Lean files.
 Scope, permission profile, and budgets are enforced by the application, not by
 the model. The API key is stored only in Windows Credential Manager.
 
-Not yet demonstrated: a live end-to-end task against the real provider (the
-automated tests use a scripted development provider that release builds do
-not contain).
+A live end-to-end run against the real provider is covered by the opt-in
+scenario `npm run e2e -- live-agents` (it spends API credit): it computes with
+Python, edits the paper, runs a Lean check, builds, reverts through review,
+cancels a running task, handles a concurrent user edit, and has an
+out-of-scope read refused by the application. The default automated suite
+uses a scripted development provider that release builds do not contain.
 
 ## Execution and security
 
