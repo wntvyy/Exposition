@@ -1240,6 +1240,7 @@ dependencies = [
  "exposition-attach",
  "exposition-core",
  "exposition-execution",
+ "exposition-lean",
  "exposition-research",
  "exposition-tex",
  "exposition-typesetting",

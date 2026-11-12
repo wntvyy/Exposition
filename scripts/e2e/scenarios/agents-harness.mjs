@@ -10,8 +10,9 @@
 // errors, and reference screenshots in both themes. Screenshots go to
 // test-results/e2e/agents-harness/ and, when EXPOSITION_DEV_HOME is set, to
 // $EXPOSITION_DEV_HOME/ui-reference/agents/.
-import { copyFile, mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
+import { copyFile, cp, mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const MAIN = "= Notes\nThe cat sat on the mat.\n";
@@ -70,7 +71,10 @@ async function startTask(page, { prompt, permission }) {
   await page.waitForSelector("[data-testid=agents-task-view]");
 }
 
-export default async function agentsHarness({ launchApp, artifactsDir, assert }) {
+const LEAN_TOOLCHAIN_DIR = "leanprover--lean4---v4.35.0";
+
+export default async function agentsHarness({ launchApp, artifactsDir, assert, fixture }) {
+  let leanRan = false;
   const project = await mkdtemp(join(tmpdir(), "exposition-agents-project-"));
   await writeFile(join(project, "main.typ"), MAIN);
   const namespace = `e2e-${Date.now()}`;
@@ -372,6 +376,61 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
     await shot(page, "agents-settings-dark");
     await page.keyboard.press("Escape");
     await setTheme(page, "light");
+    // --- Real Lean check (lean-basic fixture) in a second project.
+    const elanHome = process.env.ELAN_HOME || join(homedir(), ".elan");
+    if (existsSync(join(elanHome, "toolchains", LEAN_TOOLCHAIN_DIR, "bin"))) {
+      const leanRoot = join(await mkdtemp(join(tmpdir(), "exposition-agents-lean-")), "lean-basic");
+      await cp(fixture("lean-basic"), leanRoot, {
+        recursive: true,
+        filter: (src) => !/[\\/]\.lake([\\/]|$)/.test(src) && !src.endsWith("lake-manifest.json"),
+      });
+      await invoke(page, "workspace_open", { path: leanRoot });
+      await invoke(page, "trust_grant", { root: leanRoot });
+      await invoke(page, "agents_dev_load_script", {
+        script: {
+          turns: [
+            {
+              steps: [
+                { text: "Checking both Lean files." },
+                { toolUse: { id: "defs", name: "check_lean", input: { path: "LeanBasic/Defs.lean" } } },
+                { toolUse: { id: "proofs", name: "check_lean", input: { path: "LeanBasic/Proofs.lean" } } },
+              ],
+            },
+            { steps: [{ text: "Defs.lean is checked. Proofs.lean is not: it has an error and a sorry." }] },
+          ],
+        },
+      });
+      await panel.getByTestId("agents-new-task").click();
+      await page.fill("[data-testid=agents-prompt]", "Check the Lean proofs");
+      await selectOption(page, panel, /Commands and code/, "Ask before each command (runs natively)");
+      await panel.getByRole("button", { name: "Start task" }).click();
+      for (let i = 0; i < 2; i++) {
+        await page.waitForSelector("[data-testid=agents-approval]", { timeout: 60_000 });
+        await panel.getByRole("button", { name: "Approve" }).click();
+        await page.waitForSelector("[data-testid=agents-approval]", { state: "detached", timeout: 10_000 });
+      }
+      await waitForStatus(page, "completed", 600_000);
+      const leanTask = (await invoke(page, "agents_task_list"))[0];
+      const leanDetail = await invoke(page, "agents_task_detail", { task: leanTask.id });
+      const checks = leanDetail.transcript.filter((i) => i.kind === "toolCall" && i.name === "check_lean");
+      const defs = JSON.parse(checks[0].result);
+      const proofs = JSON.parse(checks[1].result);
+      assert.equal(checks[0].status, "succeeded", checks[0].result);
+      assert.equal(defs.checked, true);
+      assert.equal(checks[1].status, "failed", "an unchecked file is a failed tool result");
+      assert.equal(proofs.checked, false);
+      assert.ok(proofs.sorries.length >= 1, checks[1].result);
+      assert.ok(proofs.diagnostics.some((d) => d.severity === "error"), checks[1].result);
+      await shot(page, "agents-lean-check-light");
+      step("check_lean: Defs.lean checked, Proofs.lean not checked (error + sorry)", {
+        defs: { checked: defs.checked, revision: defs.revision, toolchain: defs.toolchain },
+        proofs: { checked: proofs.checked, sorries: proofs.sorries.length, errors: proofs.diagnostics.length },
+      });
+      leanRan = true;
+    } else {
+      console.log(`SKIPPED Lean step: toolchain ${LEAN_TOOLCHAIN_DIR} is not installed through elan`);
+    }
+
     assert.deepEqual(consoleErrors(app), [], "no console errors");
   } finally {
     await invoke(app.page, "agents_provider_clear_key").catch(() => {});
@@ -386,7 +445,7 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert })
     await panel.waitFor({ timeout: 15_000 });
     await page.waitForSelector("[data-testid=agents-task-item]");
     const items = await page.$$eval("[data-testid=agents-task-item]", (els) => els.map((e) => e.textContent));
-    assert.equal(items.length, 5, `five tasks persisted: ${items}`);
+    assert.equal(items.length, leanRan ? 6 : 5, `all tasks persisted: ${items}`);
     assert.match(items.join("|"), /Task completed/);
     assert.match(items.join("|"), /Canceled/);
     const tasks = await invoke(page, "agents_task_list");

@@ -305,8 +305,17 @@ pub fn gate(call: &ToolCall, env: &ToolEnv<'_>) -> Gate {
             if !spec.scope.allows(&path) {
                 return Gate::Refused(out_of_scope(&path, &spec.scope));
             }
+            if spec.execution == ExecutionMode::Restricted {
+                return Gate::Refused(ToolOutput::error(
+                    "Lean checks run the project's toolchain natively, which this task does not allow (restricted \
+                     execution only). Nothing was run.",
+                ));
+            }
             process_gate(env, ServiceKind::Lean, || {
-                (format!("Check {path} with Lean"), format!("lake/lean check of {path}"))
+                (
+                    format!("Check {path} with Lean"),
+                    format!("Check {path} with the project's Lean toolchain (lake serve)"),
+                )
             })
         }
         ToolCall::RunCommand(input) => {

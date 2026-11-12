@@ -77,14 +77,15 @@ impl AppState {
             workspace: Some(Arc::clone(&workspace)),
             credentials: Arc::new(KeyringStore::new(credential_namespace().as_deref())),
             // Agent tools call the same services people use: Typst and LaTeX
-            // builds, research sessions (agent-owned), and execution jobs. The
-            // Lean check tool is not wired to the Lean service yet.
+            // builds, research sessions (agent-owned), Lean checks, and
+            // execution jobs.
             services: Arc::new(
                 AppToolServices::new(execution.clone())
                     .with_workspace(Arc::clone(&workspace))
                     .with_typesetting(Arc::clone(&typesetting.service))
                     .with_tex(tex.clone())
-                    .with_research(Arc::clone(&research)),
+                    .with_research(Arc::clone(&research))
+                    .with_lean(lean.clone()),
             ),
             runtime: tauri::async_runtime::handle().inner().clone(),
             allow_scripted: cfg!(debug_assertions),

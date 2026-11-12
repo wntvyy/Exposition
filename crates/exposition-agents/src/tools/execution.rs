@@ -12,6 +12,11 @@
 //! - `run_command`: execution-service jobs (restricted Docker, or trusted
 //!   native after approval) with a clean environment and bounded output.
 //!
+//! - `check_lean`: the Lean service (the project's toolchain through
+//!   `lake serve`), natively and only in a trusted folder after approval.
+//!   `checked` is true only when Lean finished exactly that text with no
+//!   errors and no `sorry`; anything else is reported as not checked.
+//!
 //! Every service result is real; genuine failures (build errors, exceptions,
 //! refusals) come back as error results with their details.
 
@@ -24,6 +29,7 @@ use exposition_core::build::{BuildResult, BuildStatus, BuildTarget, DocumentForm
 use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobOutcome, JobSpec, OutputStream};
 use exposition_core::text::utf16_to_byte;
 use exposition_execution::ExecutionService;
+use exposition_lean::{LeanCheckRequest, LeanCheckTarget, LeanService, LeanStatus};
 use exposition_research::types::{
     Availability, ExecuteRequest, OutputItem, ResearchEvent, RunSource, RunSummary, RuntimeLanguage, SessionOwner,
     SessionState, StreamName,
@@ -55,6 +61,7 @@ pub struct AppToolServices {
     typesetting: Option<Arc<TypesettingService>>,
     tex: Option<TexService>,
     research: Option<Arc<ResearchService>>,
+    lean: Option<LeanService>,
 }
 
 /// Former name, kept for callers that only need command execution.
@@ -62,7 +69,7 @@ pub type ExecutionToolServices = AppToolServices;
 
 impl AppToolServices {
     pub fn new(execution: ExecutionService) -> Self {
-        Self { execution, workspace: None, typesetting: None, tex: None, research: None }
+        Self { execution, workspace: None, typesetting: None, tex: None, research: None, lean: None }
     }
 
     pub fn with_workspace(mut self, workspace: Arc<WorkspaceService>) -> Self {
@@ -82,6 +89,11 @@ impl AppToolServices {
 
     pub fn with_research(mut self, research: Arc<ResearchService>) -> Self {
         self.research = Some(research);
+        self
+    }
+
+    pub fn with_lean(mut self, lean: LeanService) -> Self {
+        self.lean = Some(lean);
         self
     }
 
@@ -466,7 +478,7 @@ impl ToolServices for AppToolServices {
         match kind {
             ServiceKind::Execution | ServiceKind::Research => true,
             ServiceKind::Typesetting => self.typesetting.is_some() || self.tex.is_some(),
-            ServiceKind::Lean => false,
+            ServiceKind::Lean => self.lean.is_some(),
         }
     }
 
@@ -521,8 +533,45 @@ impl ToolServices for AppToolServices {
         }
     }
 
-    async fn check_lean(&self, _: LeanRequest, _: CancellationToken) -> Result<Value, ServiceError> {
-        Err(ServiceError::NotAvailable(ServiceKind::Lean))
+    async fn check_lean(&self, request: LeanRequest, cancel: CancellationToken) -> Result<Value, ServiceError> {
+        let lean = self.lean.clone().ok_or(ServiceError::NotAvailable(ServiceKind::Lean))?;
+        // Lean runs project code (lakefile, macros, #eval); it only runs natively.
+        if !matches!(request.policy, ExecutionPolicy::TrustedNative) {
+            return Err(ServiceError::Failed(
+                "Lean checks run the project's own toolchain natively and cannot run in the restricted sandbox. \
+                 Use per-command approval in a trusted folder to check Lean files."
+                    .into(),
+            ));
+        }
+        let check = lean.check(LeanCheckRequest {
+            target: LeanCheckTarget::Path { path: request.path },
+            goals_at: Vec::new(),
+            timeout_ms: Some(300_000),
+        });
+        let report = tokio::select! {
+            report = check => report.map_err(|e| ServiceError::Failed(e.to_string()))?,
+            _ = cancel.cancelled() => return Err(ServiceError::Canceled),
+        };
+        let mut value = serde_json::to_value(&report).map_err(|e| ServiceError::Failed(e.to_string()))?;
+        let note = match &report.status {
+            _ if report.checked => {
+                "Lean finished exactly this text with no errors and no sorry: the file is checked.".to_owned()
+            }
+            LeanStatus::Untrusted { workspace_root } => format!(
+                "Not checked: checking runs project code and {workspace_root} is not trusted. Ask the user to trust \
+                 the folder."
+            ),
+            LeanStatus::ToolchainMissing { toolchain, guidance, .. } => {
+                format!("Not checked: the Lean toolchain {toolchain} is not installed. {guidance}")
+            }
+            LeanStatus::CheckedWithSorry { count, .. } => {
+                format!("Not checked: {count} declaration(s) use sorry, so the material is incomplete.")
+            }
+            LeanStatus::Errors { count, .. } => format!("Not checked: Lean reported {count} error(s)."),
+            _ => "Not checked: Lean did not finish checking this exact text.".to_owned(),
+        };
+        value["note"] = json!(note);
+        if report.checked { Ok(value) } else { Err(ServiceError::Outcome(value)) }
     }
 
     async fn run_command(&self, request: CommandRequest, cancel: CancellationToken) -> Result<Value, ServiceError> {
