@@ -730,6 +730,13 @@ impl ExecutionService {
         self.inner.redactor.redact(text)
     }
 
+    /// Register (`Some`) or forget (`None`) a secret the application holds
+    /// (e.g. the stored provider API key): job output, logs, events, and
+    /// research output and artifacts redact its value from now on.
+    pub fn register_secret(&self, name: &str, value: Option<&str>) {
+        self.inner.redactor.register(name, value);
+    }
+
     // ----- launching ---------------------------------------------------------------
 
     /// Submit a batch job. Validation failures produce a job that finishes
@@ -1644,7 +1651,7 @@ impl Inner {
             let env_file = job_dir.join("container.env");
             // A batch job's input is a read-only file in the container: its
             // stdin is the liveness pipe (see `docker::supervisor_script`).
-            let input_dir = job_dir.join("in");
+            let input_dir = docker::input_dir(&job_dir);
             let input = match &prepared.stdin {
                 StdinMode::Data(data) => Some(data.as_str()),
                 _ => None,
@@ -2049,9 +2056,13 @@ pub struct InteractiveJob {
 }
 
 /// Remove a job's temporary files; keep `out/` when it has content.
+/// Remove what a job used and nobody keeps: its temporary folder, the
+/// container environment file, and a restricted job's input (the program's
+/// stdin, e.g. approved agent code). Files a job wrote to `out/` are kept.
 fn remove_job_dir(job_dir: &Path) {
     let _ = std::fs::remove_dir_all(job_dir.join("tmp"));
     let _ = std::fs::remove_file(job_dir.join("container.env"));
+    let _ = std::fs::remove_dir_all(docker::input_dir(job_dir));
     let _ = std::fs::remove_dir(docker::out_dir(job_dir));
     let _ = std::fs::remove_dir(job_dir);
 }
@@ -2064,6 +2075,29 @@ fn relative_components(path: &Path, root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A finished job leaves nothing behind but files it wrote to `out/`: in
+    /// particular not its input (a restricted job's stdin file).
+    #[test]
+    fn a_finished_jobs_folder_keeps_only_its_out_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let job_dir = tmp.path().join("job-1");
+        std::fs::create_dir_all(job_dir.join("tmp").join("nested")).unwrap();
+        std::fs::write(job_dir.join("container.env"), "A=1\n").unwrap();
+        std::fs::create_dir_all(docker::input_dir(&job_dir)).unwrap();
+        std::fs::write(docker::input_dir(&job_dir).join(docker::INPUT_FILE), "print('approved code')").unwrap();
+        std::fs::create_dir_all(docker::out_dir(&job_dir)).unwrap();
+        remove_job_dir(&job_dir);
+        assert!(!job_dir.exists(), "the job folder is gone");
+
+        std::fs::create_dir_all(docker::input_dir(&job_dir)).unwrap();
+        std::fs::write(docker::input_dir(&job_dir).join(docker::INPUT_FILE), "code").unwrap();
+        std::fs::create_dir_all(docker::out_dir(&job_dir)).unwrap();
+        std::fs::write(docker::out_dir(&job_dir).join("result.csv"), "1,2\n").unwrap();
+        remove_job_dir(&job_dir);
+        assert!(!docker::input_dir(&job_dir).exists(), "the input is removed");
+        assert!(docker::out_dir(&job_dir).join("result.csv").exists(), "files written to out/ are kept");
+    }
 
     fn service() -> (tempfile::TempDir, ExecutionService) {
         let tmp = tempfile::tempdir().unwrap();

@@ -180,6 +180,51 @@ impl SecretStore for KeyringStore {
     }
 }
 
+/// Name under which the stored provider key is registered for redaction.
+pub const PROVIDER_KEY_SECRET: &str = "agents.provider-api-key";
+
+/// Called with the stored key whenever it is loaded or saved (`Some`) and
+/// when it is gone (`None`).
+pub type SecretObserver = Box<dyn Fn(Option<&str>) + Send + Sync>;
+
+/// A store that reports the key's current value to an observer (the
+/// execution service's redactor), so output redacts the literal key whatever
+/// its shape. The value is passed on only, never logged.
+pub struct ObservedStore<S: SecretStore> {
+    inner: S,
+    observer: SecretObserver,
+}
+
+impl<S: SecretStore> ObservedStore<S> {
+    pub fn new(inner: S, observer: SecretObserver) -> Self {
+        Self { inner, observer }
+    }
+}
+
+impl<S: SecretStore> SecretStore for ObservedStore<S> {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+
+    fn get(&self) -> Result<Option<Secret>, CredentialError> {
+        let secret = self.inner.get()?;
+        (self.observer)(secret.as_ref().map(Secret::expose));
+        Ok(secret)
+    }
+
+    fn set(&self, secret: &str) -> Result<(), CredentialError> {
+        self.inner.set(secret)?;
+        (self.observer)(Some(secret));
+        Ok(())
+    }
+
+    fn delete(&self) -> Result<(), CredentialError> {
+        self.inner.delete()?;
+        (self.observer)(None);
+        Ok(())
+    }
+}
+
 /// In-memory store for tests.
 #[derive(Default)]
 pub struct MemoryStore(Mutex<Option<String>>);

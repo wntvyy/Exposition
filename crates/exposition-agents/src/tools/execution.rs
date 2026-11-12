@@ -1,10 +1,12 @@
 //! Agent process and build tools on the application's services.
 //!
-//! - `build_document`: Typst entries through the typesetting service
-//!   (in-process compiler, the same builds the page view uses), LaTeX entries
-//!   through the TeX build service (which runs on the execution service and
-//!   requires workspace trust; a refusal is reported, never bypassed).
-//!   Markdown builds report "not available" until that format is wired.
+//! - `build_document`: Typst (`.typ`) and Markdown (`.md`, `.markdown`, the
+//!   declared print profile laid out by Typst) entries through the
+//!   typesetting service (in-process compiler, the same builds the page view
+//!   uses; a task scoped to part of the project reads only its scope), LaTeX
+//!   (`.tex`, `.ltx`) entries through the TeX build service (which runs on the
+//!   execution service and requires workspace trust; a refusal is reported,
+//!   never bypassed).
 //! - `run_python`: approved, trusted-native runs go to the research service in
 //!   a session owned by the agent task (never the user's sessions), with run
 //!   provenance recorded in `.exposition/runs/`; unattended runs use the
