@@ -103,6 +103,10 @@ impl AppState {
                 let _ = credentials.get();
             });
         }
+        // Research ↔ project graph (retained artifacts, reviewed promotions);
+        // agent insertions are recorded through it too.
+        let research_project =
+            Arc::new(ResearchProject::new(Arc::clone(&graph), Arc::clone(&research), Arc::clone(&documents)));
         let agents = AgentService::new(AgentConfig {
             database: Some(data_dir.join("agents.sqlite3")),
             documents: Arc::clone(&documents),
@@ -117,6 +121,7 @@ impl AppState {
                     .with_typesetting(Arc::clone(&typesetting.service))
                     .with_tex(tex.clone())
                     .with_research(Arc::clone(&research))
+                    .with_research_project(Arc::clone(&research_project))
                     .with_lean(lean.clone()),
             ),
             runtime: tauri::async_runtime::handle().inner().clone(),
@@ -127,8 +132,6 @@ impl AppState {
             // targets through the project graph.
             graph: Some(Arc::clone(&graph)),
         })?;
-        let research_project =
-            Arc::new(ResearchProject::new(Arc::clone(&graph), Arc::clone(&research), Arc::clone(&documents)));
         Ok(Self {
             documents,
             workspace,

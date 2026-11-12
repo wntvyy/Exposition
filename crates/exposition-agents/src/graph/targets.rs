@@ -231,7 +231,8 @@ pub fn resolve(
     out
 }
 
-fn record_target(
+/// Record a file the task acted on (with its identity, when it has one).
+pub fn record_target(
     store: &Store,
     task: &TaskId,
     path: &WorkspacePath,

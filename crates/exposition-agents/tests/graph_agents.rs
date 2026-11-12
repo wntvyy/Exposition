@@ -1349,3 +1349,205 @@ async fn a_generation_task_builds_structure_through_validated_tools_only() {
     assert!(err && code_of(&py).as_deref() == Some(codes::EXECUTION_DISABLED), "{py}");
     assert!(h.recorder.take().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// 7. An agent's insert_artifact is recorded in the graph like a promotion.
+// ---------------------------------------------------------------------------
+
+mod attachments {
+    use super::*;
+    use exposition_agents::tools::execution::AppToolServices;
+    use exposition_core::artifact::{Producer, RunId, RunInput, RunRecord, RunStatus, ToolVersion};
+    use exposition_core::job::JobSpec;
+    use exposition_execution::{ExecutionConfig, ExecutionService};
+    use exposition_graph::EvidenceKind;
+    use exposition_research::launcher::{KernelProcessLauncher, LaunchError, LaunchFuture, ProbeOutput};
+    use exposition_research::types::{
+        CodeOrigin, CodeProvenance, InterpreterProvenance, KernelDescriptor, OutputSummary, RunManifest, SessionOwner,
+        SessionProvenance,
+    };
+    use exposition_research::{ResearchConfig, ResearchProject, ResearchService};
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nagent figure";
+    const SCRIPT: &str = "print(1)\n";
+
+    /// No kernels: the run is a recorded manifest with its artifact on disk.
+    struct NoLauncher;
+
+    impl KernelProcessLauncher for NoLauncher {
+        fn launch_interactive(&self, _spec: JobSpec) -> LaunchFuture<'_> {
+            Box::pin(async { Err(LaunchError::Refused("no kernels in tests".into())) })
+        }
+        fn run_probe(&self, _spec: &JobSpec) -> Result<ProbeOutput, LaunchError> {
+            Err(LaunchError::Refused("no probes in tests".into()))
+        }
+        fn run_project_probe(&self, _spec: &JobSpec) -> Result<ProbeOutput, LaunchError> {
+            Err(LaunchError::Refused("no probes in tests".into()))
+        }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn record_run(root: &Path, run: &str) -> String {
+        let dir = root.join(".exposition/artifacts").join(run);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("output-1.png"), PNG).unwrap();
+        write(root, "analysis/fit.py", SCRIPT);
+        let artifact_id = format!("{run}/output-1.png");
+        let manifest = RunManifest {
+            format: "exposition.run/1".into(),
+            record: RunRecord {
+                id: RunId(run.into()),
+                producer: Producer::KernelSession { session_id: "s".into(), runtime: "python".into() },
+                inputs: vec![RunInput {
+                    path: p("analysis/fit.py"),
+                    revision: None,
+                    content_hash: Some(format!("sha256:{}", hex(SCRIPT.as_bytes()))),
+                }],
+                environment: vec![ToolVersion { name: "python".into(), version: "3.14.0".into() }],
+                outputs: vec![ArtifactRecord {
+                    id: ArtifactId(artifact_id.clone()),
+                    kind: ArtifactKind::Figure,
+                    path: Some(p(&format!(".exposition/artifacts/{run}/output-1.png"))),
+                    scratch_path: None,
+                    media_type: "image/png".into(),
+                    size_bytes: PNG.len() as u64,
+                    content_hash: format!("sha256:{}", hex(PNG)),
+                }],
+                status: RunStatus::Succeeded,
+                started_at_ms: 1,
+                finished_at_ms: Some(2),
+            },
+            session: SessionProvenance {
+                session_id: "s".into(),
+                owner: SessionOwner::Agent { task_id: "task-earlier".into() },
+                environment_id: "python:x".into(),
+                generation: 1,
+                interpreter: InterpreterProvenance {
+                    implementation: "CPython".into(),
+                    version: "3.14.0".into(),
+                    location: "~".into(),
+                },
+                kernel: KernelDescriptor::default(),
+                helper_version: "1".into(),
+                protocol: 1,
+            },
+            code: CodeProvenance {
+                origin: CodeOrigin::File { path: p("analysis/fit.py"), revision: None },
+                sha256: hex(SCRIPT.as_bytes()),
+                bytes: SCRIPT.len() as u64,
+                text: Some(SCRIPT.into()),
+            },
+            execution_count: Some(1),
+            error: None,
+            output: OutputSummary::default(),
+            unsaved_inputs: Vec::new(),
+        };
+        exposition_research::store::write_manifest(root, &manifest).unwrap();
+        artifact_id
+    }
+
+    fn insert(id: &str, run: &str, artifact: &str, path: &str) -> Value {
+        tool(
+            id,
+            tools::INSERT_ARTIFACT,
+            json!({"path": path, "run_id": run, "artifact_id": artifact, "after_text": "", "caption": "Agent figure", "update_key": ""}),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_insertions_retain_the_artifact_and_record_uses_asset_or_a_pending_reconciliation() {
+        let f = fixture();
+        write(&f.root, "notes/b.typ", "= B\n");
+        let run_id = "run-agent-1";
+        let artifact_id = record_run(&f.root, run_id);
+        let artifact_path = p(&format!(".exposition/artifacts/{run_id}/output-1.png"));
+        // The application's services, wired as the app wires them.
+        let recorder = Recorder::new();
+        let documents = Arc::new(DocumentService::new());
+        let research = Arc::new(ResearchService::new(ResearchConfig::new(
+            f.data.path().join("research"),
+            Arc::new(NoLauncher),
+            Arc::clone(&documents),
+        )));
+        research.set_workspace(&f.root, true).unwrap();
+        let project =
+            Arc::new(ResearchProject::new(Arc::clone(&f.graph), Arc::clone(&research), Arc::clone(&documents)));
+        let mut config = ExecutionConfig::new(f.data.path().join("execution"));
+        config.too_broad_to_trust = Some(Vec::new());
+        let execution = ExecutionService::with_config(config).unwrap();
+        let services = AppToolServices::new(execution)
+            .with_research(Arc::clone(&research))
+            .with_research_project(Arc::clone(&project));
+        let database = f.data.path().join("agents-attach.sqlite3");
+        let service = AgentService::new(AgentConfig {
+            database: Some(database.clone()),
+            documents: Arc::clone(&documents),
+            workspace: None,
+            credentials: Arc::new(MemoryStore::default()),
+            services: Arc::new(services),
+            runtime: tokio::runtime::Handle::current(),
+            allow_scripted: true,
+            anthropic_base_url: None,
+            retry: None,
+            graph: Some(Arc::clone(&f.graph)),
+        })
+        .unwrap();
+        service
+            .update_settings(ProviderSettings { provider: ProviderKind::Scripted, ..ProviderSettings::default() })
+            .unwrap();
+        let mut h = Harness { events: service.subscribe(), service, documents, recorder, database };
+
+        // Recorded: one identity for the artifact, usesAsset, computational evidence.
+        let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+        let (id, _) = run(&mut h, req, vec![insert("ins", run_id, &artifact_id, "main.typ")], true).await;
+        let (status, err, text) = call(&h, &id, "ins");
+        assert!(!err && status == ToolCallStatus::Succeeded, "{text}");
+        let result: Value = serde_json::from_str(&text).unwrap();
+        let attachment = &result["graph"]["attachment"];
+        assert_eq!(attachment["state"], json!("recorded"), "{result}");
+        let artifact = f.graph.resource(&artifact_path).unwrap().expect("the artifact is a retained resource");
+        assert_eq!(attachment["artifact"], json!(artifact.id));
+        assert_eq!(attachment["manuscript"], json!(f.ids.main), "the manuscript's own identity");
+        assert!(artifact.roles.contains(&exposition_graph::ResourceRole::Artifact), "{:?}", artifact.roles);
+        let detail = f.graph.entity_detail(&artifact.id).unwrap();
+        assert!(
+            detail.incoming.iter().any(|r| r.kind == RelationKind::UsesAsset && r.from == f.ids.main),
+            "main.typ usesAsset the artifact: {:?}",
+            detail.incoming
+        );
+        assert!(detail.evidence.iter().any(|e| e.kind == EvidenceKind::Computational), "{:?}", detail.evidence);
+        let op = attachment["operation"].as_str().unwrap();
+        let record = f.graph.journal().list(&f.root).into_iter().find(|r| r.id.as_str() == op).unwrap();
+        assert_eq!(record.state, OperationState::Completed, "{record:?}");
+        assert!(record.description.contains(&id.0), "the journal names the agent task: {}", record.description);
+        let targets = h.service.task_detail(&id).unwrap().graph.targets;
+        let used = targets.iter().find(|t| t.path == artifact_path).expect("the artifact is a task target");
+        assert_eq!(used.entity.as_ref(), Some(&artifact.id));
+        assert!(result.get("graphNote").is_none());
+
+        // A graph failure leaves a pending record, reported as such (not complete).
+        project.fail_next_graph_write();
+        let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+        let (id, _) = run(&mut h, req, vec![insert("ins2", run_id, &artifact_id, "notes/b.typ")], true).await;
+        let (_, err, text) = call(&h, &id, "ins2");
+        assert!(!err, "the insertion itself applied: {text}");
+        let result: Value = serde_json::from_str(&text).unwrap();
+        let attachment = &result["graph"]["attachment"];
+        assert_eq!(attachment["state"], json!("pendingReconciliation"), "{result}");
+        assert_eq!(attachment["code"], json!(codes::GRAPH_PENDING));
+        assert!(result["graphNote"].as_str().unwrap().contains("not complete"), "{result}");
+        let op = attachment["operation"].as_str().unwrap();
+        let record = f.graph.journal().list(&f.root).into_iter().find(|r| r.id.as_str() == op).unwrap();
+        assert!(matches!(record.state, OperationState::NeedsReconciliation { .. }), "{record:?}");
+        let b = f.graph.resource(&p("notes/b.typ")).unwrap().expect("the document's identity");
+        let detail = f.graph.entity_detail(&b.id).unwrap();
+        assert!(
+            !detail.outgoing.iter().any(|r| r.kind == RelationKind::UsesAsset),
+            "nothing claims the failed attachment as recorded"
+        );
+        assert!(h.recorder.take().is_empty());
+    }
+}

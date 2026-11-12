@@ -345,6 +345,17 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     await waitForStatus(page, "completed", 60_000);
     const figTask = (await invoke(page, "agents_task_list"))[0];
     const figDetail = await invoke(page, "agents_task_detail", { task: figTask.id });
+    // The agent's insertion is recorded in the project graph like a reviewed
+    // promotion: the artifact retained, `main.typ usesAsset artifact`.
+    const insertCall = figDetail.transcript.find((i) => i.kind === "toolCall" && i.name === "insert_artifact");
+    const attached = JSON.parse(insertCall.result).graph?.attachment;
+    assert.equal(attached?.state, "recorded", insertCall.result);
+    const artifactEntity = await invoke(page, "graph_entity", { entity: attached.artifact });
+    assert.ok(
+      artifactEntity.incoming.some((r) => r.kind === "usesAsset" && r.from === attached.manuscript),
+      "main.typ usesAsset the inserted artifact",
+    );
+    assert.ok(artifactEntity.evidence.some((e) => e.kind === "computational"), "computational evidence");
     const buildCall = figDetail.transcript.find((i) => i.kind === "toolCall" && i.name === "build_document");
     assert.equal(buildCall.status, "succeeded", buildCall.result);
     const buildResult = JSON.parse(buildCall.result);

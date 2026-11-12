@@ -65,6 +65,8 @@ pub struct AppToolServices {
     typesetting: Option<Arc<TypesettingService>>,
     tex: Option<TexService>,
     research: Option<Arc<ResearchService>>,
+    /// Research ↔ project graph integration (retained artifacts, promotions).
+    research_project: Option<Arc<exposition_research::ResearchProject>>,
     lean: Option<LeanService>,
 }
 
@@ -73,7 +75,15 @@ pub type ExecutionToolServices = AppToolServices;
 
 impl AppToolServices {
     pub fn new(execution: ExecutionService) -> Self {
-        Self { execution, workspace: None, typesetting: None, tex: None, research: None, lean: None }
+        Self {
+            execution,
+            workspace: None,
+            typesetting: None,
+            tex: None,
+            research: None,
+            research_project: None,
+            lean: None,
+        }
     }
 
     pub fn with_workspace(mut self, workspace: Arc<WorkspaceService>) -> Self {
@@ -93,6 +103,13 @@ impl AppToolServices {
 
     pub fn with_research(mut self, research: Arc<ResearchService>) -> Self {
         self.research = Some(research);
+        self
+    }
+
+    /// Attachments the agent inserts are recorded in the project graph
+    /// through the research project, like reviewed promotions.
+    pub fn with_research_project(mut self, project: Arc<exposition_research::ResearchProject>) -> Self {
+        self.research_project = Some(project);
         self
     }
 
@@ -626,6 +643,16 @@ impl ToolServices for AppToolServices {
             .artifact(run_id, artifact_id)
             .map(|(record, _)| record)
             .map_err(|e| ServiceError::Failed(e.to_string()))
+    }
+
+    fn record_attachment(
+        &self,
+        notice: &exposition_research::project::types::AttachmentNotice,
+    ) -> Result<exposition_research::project::types::AttachmentRecorded, ServiceError> {
+        let project = self.research_project.as_ref().ok_or(ServiceError::NotAvailable(ServiceKind::Research))?;
+        project
+            .record_external_attachment(notice)
+            .map_err(|e| super::services::research_outcome(&e.code(), e.to_string()))
     }
 
     async fn task_finished(&self, task_id: &str) {

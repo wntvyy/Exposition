@@ -1200,6 +1200,7 @@ fn insert_artifact(
         .services
         .research_artifact(&input.run_id, &input.artifact_id)
         .map_err(|e| ToolOutput::error(e.to_string()))?;
+    let artifact_path = artifact.path.clone();
     let id = workspace::open_document_in(env.workspace, env.documents, env.files, &path).map_err(file_error)?;
     let snapshot = env.documents.snapshot(&id).map_err(|e| ToolOutput::error(e.to_string()))?;
     let key = approved.as_ref().map(|a| a.key.clone()).filter(|_| input.update_key.is_empty());
@@ -1224,7 +1225,24 @@ fn insert_artifact(
         .find(|edit| edit.document == id)
         .ok_or_else(|| ToolOutput::error("the document service applied no edit"))?;
     record_applied(env, seen, tool_use_id, &path, &id, &snapshot, applied)?;
-    let graph_info = resolve_target(env, &path, TargetUse::Insert);
+    // The attachment in the project graph (artifact retained, usesAsset,
+    // evidence, journal), recorded like a reviewed promotion.
+    let attachment = record_attachment(
+        env,
+        &input,
+        &id,
+        &plan.transaction.id.0,
+        &plan.attachment_key,
+        applied.revision,
+        artifact_path.as_ref(),
+    );
+    let mut graph_info = resolve_target(env, &path, TargetUse::Insert);
+    if let (Some(graph), Some(attachment)) = (graph_info.as_mut(), attachment.as_ref())
+        && let Some(obj) = graph.as_object_mut()
+    {
+        obj.insert("attachment".into(), attachment.clone());
+    }
+    let pending = attachment.as_ref().is_some_and(|a| a["state"] != json!("recorded"));
     let mut result = json!({
         "path": path.as_str(),
         "revision": applied.revision,
@@ -1235,7 +1253,84 @@ fn insert_artifact(
     if let Some(graph) = graph_info {
         result["graph"] = graph;
     }
+    if pending {
+        result["graphNote"] = json!(
+            "The figure is in the document, but the project graph has not recorded the attachment; it is not \
+             complete. Tell the user it needs reconciliation."
+        );
+    }
     Ok(ToolOutput::ok(result))
+}
+
+/// Record an inserted attachment in the project graph through the research
+/// project (when the task has a graph). The outcome is described as it is:
+/// `recorded`, `pendingReconciliation` (the journal keeps a record that needs
+/// reconciliation), or `notRecorded` (the service refused or is missing).
+#[allow(clippy::too_many_arguments)]
+fn record_attachment(
+    env: &ToolEnv<'_>,
+    input: &InsertArtifactInput,
+    document: &DocumentId,
+    transaction: &str,
+    attachment_key: &str,
+    revision: u64,
+    artifact_path: Option<&WorkspacePath>,
+) -> Option<Value> {
+    use exposition_research::project::types::{AttachmentNotice, PromotionGraphState};
+    // Only tasks with a project graph record attachments in it.
+    env.graph?;
+    let notice = AttachmentNotice {
+        run_id: input.run_id.clone(),
+        artifact_id: input.artifact_id.clone(),
+        document: document.clone(),
+        attachment_key: attachment_key.to_owned(),
+        transaction: Some(transaction.to_owned()),
+        revision,
+        actor: format!("agent task {}", env.task_id),
+    };
+    Some(match env.services.record_attachment(&notice) {
+        Ok(recorded) => match recorded.graph {
+            PromotionGraphState::Recorded { graph_revision, manuscript, artifact, relation } => {
+                if let Some(path) = artifact_path {
+                    crate::graph::targets::record_target(
+                        env.store,
+                        env.task_id,
+                        path,
+                        Some(artifact.clone()),
+                        TargetUse::Insert,
+                        Some(format!("retained by attachment {attachment_key}")),
+                        Some(recorded.operation.to_string()),
+                    );
+                }
+                json!({
+                    "state": "recorded",
+                    "operation": recorded.operation,
+                    "manuscript": manuscript,
+                    "artifact": artifact,
+                    "relation": relation,
+                    "graphRevision": graph_revision,
+                })
+            }
+            PromotionGraphState::PendingReconciliation { reason } => {
+                json!({
+                    "state": "pendingReconciliation",
+                    "code": codes::GRAPH_PENDING,
+                    "operation": recorded.operation,
+                    "reason": reason,
+                })
+            }
+        },
+        Err(e) => {
+            let (code, reason) = match &e {
+                ServiceError::Outcome(value) => (
+                    value.get("code").and_then(Value::as_str).unwrap_or("research.failed").to_owned(),
+                    value.get("error").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                ),
+                other => ("agents.serviceUnavailable".to_owned(), other.to_string()),
+            };
+            json!({"state": "notRecorded", "code": code, "reason": reason})
+        }
+    })
 }
 
 fn create_file(
