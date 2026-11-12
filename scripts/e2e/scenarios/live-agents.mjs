@@ -98,7 +98,8 @@ const parse = (text) => {
 
 export default async function liveAgents({ launchApp, artifactsDir, assert }) {
   const root = await makePaperProject();
-  // No EXPOSITION_CREDENTIAL_NAMESPACE: use the real, user-saved key.
+  // No EXPOSITION_CREDENTIAL_NAMESPACE: the runner opts live-* scenarios in to
+  // the real, user-saved key (EXPOSITION_USE_REAL_CREDENTIAL=1).
   const app = await launchApp();
   const { page } = app;
   const evidence = { root, tasks: [], checks: [] };

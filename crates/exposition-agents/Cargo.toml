@@ -31,6 +31,10 @@ tokio-util.workspace = true
 futures-util.workspace = true
 similar.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Credential Manager persistence of the provider key (see src/wincred.rs).
+windows-sys.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 
