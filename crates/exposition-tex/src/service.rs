@@ -35,10 +35,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-use exposition_core::build::{BuildId, BuildResult, BuildStatus, BuildTarget, DocumentFormat, Engine};
+use exposition_core::build::{
+    BuildId, BuildResult, BuildStatus, BuildTarget, DocumentFormat, Engine, ExportArtifact, ExportKind,
+};
+use exposition_core::document::DocumentId;
 use exposition_core::path::WorkspacePath;
 use exposition_execution::toolchains::Located;
 use exposition_execution::{ExecutionService, JobRefusal, RefusalCode};
+use exposition_page::{PageImage, PageMap, PageMapProvider};
 use exposition_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -218,11 +222,22 @@ type PngKey = (u32, u32);
 /// Cached renderings/mappings per build before the cache is reset.
 const MAX_CACHED_PAGES: usize = 48;
 
+/// Pixels per point of page images served to page views (216 dpi: sharp at
+/// the page editor's zoom levels on high-density displays).
+pub const PAGE_IMAGE_SCALE: f32 = 3.0;
+
+/// `<build id>-p<index>` → (build id, page index).
+fn parse_render_ref(render_ref: &str) -> Option<(BuildId, u32)> {
+    let (build, page) = render_ref.rsplit_once("-p")?;
+    Some((BuildId(build.to_owned()), page.parse().ok()?))
+}
+
 /// A finished build with lazily opened page access.
 pub struct StoredBuild {
     pub build: TexBuild,
     pub summary: TexBuildSummary,
     session: OnceLock<Result<Arc<TexPageSession>, String>>,
+    page_map: OnceLock<Option<Arc<PageMap>>>,
     pngs: Mutex<HashMap<PngKey, Arc<Vec<u8>>>>,
     maps: Mutex<HashMap<u32, Arc<PageMapping>>>,
 }
@@ -397,6 +412,47 @@ impl TexService {
         Ok(map)
     }
 
+    /// Write a build's PDF to `destination`, or next to its entry in the
+    /// workspace (atomically replaced).
+    pub fn export_pdf(&self, id: &BuildId, destination: Option<PathBuf>) -> Result<ExportArtifact, TexServiceError> {
+        let stored = self.build(id).ok_or(TexServiceError::UnknownBuild)?;
+        let session = stored.session()?;
+        let target = &stored.summary.result.target;
+        let path = match destination {
+            Some(path) if path.is_absolute() => path,
+            Some(_) => return Err(TexServiceError::Io("the export destination must be an absolute path".into())),
+            None => {
+                let root = self.open_root()?;
+                let stem = target.entry.file_name().rsplit_once('.').map_or(target.entry.file_name(), |(s, _)| s);
+                let dir =
+                    target.entry.parent().map_or(root.clone(), |d| d.components().fold(root.clone(), |p, c| p.join(c)));
+                dir.join(format!("{stem}.pdf"))
+            }
+        };
+        let tmp = path.with_extension(format!("pdf.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, &session.pdf_bytes).and_then(|()| std::fs::rename(&tmp, &path)).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            TexServiceError::Io(e.to_string())
+        })?;
+        Ok(ExportArtifact {
+            kind: ExportKind::Pdf,
+            path: path.display().to_string(),
+            content_hash: crate::compile::hex_sha256(&session.pdf_bytes),
+        })
+    }
+
+    /// The text of `document` at `revision`, if a retained build compiled it.
+    pub fn revision_text(&self, document: &DocumentId, revision: u64) -> Option<Arc<str>> {
+        let store = self.inner.builds.lock().unwrap_or_else(|p| p.into_inner());
+        store.builds.values().find_map(|stored| {
+            stored.build.snapshot.as_ref()?.files.values().find_map(|file| {
+                (file.document.as_ref() == Some(document) && file.revision == Some(revision))
+                    .then(|| file.text.clone())
+                    .flatten()
+            })
+        })
+    }
+
     /// Stop all workers and cancel running builds (application exit).
     pub fn shutdown(&self) {
         let targets: Vec<Arc<Target>> =
@@ -483,6 +539,24 @@ impl TexService {
 }
 
 impl StoredBuild {
+    /// The shared page-editor map of every page (computed once, on demand).
+    pub fn page_map(&self, service: &TexService) -> Option<Arc<PageMap>> {
+        self.page_map
+            .get_or_init(|| {
+                let session = self.session().ok()?;
+                let id = &self.summary.result.id;
+                let pages: Vec<_> = (0..session.page_count() as u32)
+                    .map(|page| {
+                        let mapping = service.page_map(id, page).ok()?;
+                        let size = session.pdf.page_size(page as usize).ok()?;
+                        Some((mapping.as_ref().clone(), size))
+                    })
+                    .collect::<Option<_>>()?;
+                Some(Arc::new(crate::page_map::build_page_map(&pages)))
+            })
+            .clone()
+    }
+
     fn session(&self) -> Result<Arc<TexPageSession>, TexServiceError> {
         if !self.summary.has_output {
             return Err(TexServiceError::NoOutput);
@@ -559,6 +633,7 @@ impl Inner {
                 build,
                 summary: summary.clone(),
                 session: OnceLock::new(),
+                page_map: OnceLock::new(),
                 pngs: Mutex::new(HashMap::new()),
                 maps: Mutex::new(HashMap::new()),
             });
@@ -681,5 +756,27 @@ fn refused_build(request: &TexBuildRequest, id: BuildId, refusal: JobRefusal) ->
         snapshot: None,
         passes: Vec::new(),
         refusal: Some(refusal),
+    }
+}
+
+impl PageMapProvider for TexService {
+    fn page_map(&self, build: &str) -> Option<Arc<PageMap>> {
+        if !build.starts_with("tex-") {
+            return None;
+        }
+        self.build(&BuildId(build.to_owned()))?.page_map(self)
+    }
+
+    fn page_image(&self, render_ref: &str) -> Option<PageImage> {
+        if !render_ref.starts_with("tex-") {
+            return None;
+        }
+        let (build, page) = parse_render_ref(render_ref)?;
+        let png = self.page_png(&build, page, PAGE_IMAGE_SCALE).ok()?;
+        Some(PageImage { media_type: "image/png", bytes: Arc::from(png.as_slice()) })
+    }
+
+    fn revision_text(&self, document: &DocumentId, revision: u64) -> Option<Arc<str>> {
+        TexService::revision_text(self, document, revision)
     }
 }

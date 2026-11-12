@@ -553,7 +553,8 @@ impl<R: JobRunner> TexBuilder<R> {
                         index: i as u32,
                         width_pt: w,
                         height_pt: h,
-                        render_ref: format!("tex-build:{}/page/{i}", id.0),
+                        // `<build id>-p<index>`: plain characters, as page views require.
+                        render_ref: format!("{}-p{i}", id.0),
                     });
                 }
             }
