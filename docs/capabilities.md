@@ -65,8 +65,16 @@ type on the page, your keystrokes apply at the correspondingly moved
 position; if the page cannot place them, typing pauses with a message naming
 the text that was not applied, and nothing is applied at a guessed position.
 
-If a TeX engine is missing or its configured path is wrong, Problems, the
-status bar, and the page view say so and link to Settings → Tool locations.
+If a TeX engine is missing or its configured path is wrong, Problems and the
+page view say so and link to Settings → Tool locations; the status bar names
+the missing engine. The LaTeX engine for each main file is chosen in
+Settings › Project or with the palette commands "LaTeX: Build This File with
+LuaLaTeX" / "...with pdfLaTeX".
+
+Builds, their pages, and their exports are available only while the folder
+that built them is open. Only `.typ`, `.md`, and `.tex` files are built. LaTeX
+page images are capped at about 32 million pixels; larger pages are shown at
+a lower resolution.
 
 Markdown mathematics uses a declared LaTeX-math subset (see
 [markdown-profile.md](markdown-profile.md)); unsupported commands render as a
@@ -78,7 +86,7 @@ visible marker and a diagnostic, never silently.
 |---|---|---|---|
 | Discovery of installed environments | Yes | Yes (with IRkernel) | Yes (with IJulia) |
 | Managed kernel sessions, run input / selection / file | Yes | Yes | Yes |
-| Interrupt | Yes | No — IRkernel ignores interrupts on Windows; Cancel restarts the kernel | Yes |
+| Interrupt | Yes | No — IRkernel ignores interrupts on Windows; Cancel restarts the kernel | Yes (IJulia; a kernel without message-mode interrupts reports it as unsupported, and Cancel restarts it) |
 | Figures and tables captured as artifacts with provenance | Yes | Yes | Yes |
 | Insert and update a figure/table in a Typst, LaTeX, or Markdown document | Yes | Yes | Yes |
 
@@ -121,7 +129,9 @@ Mathlib) with the kernel takes correspondingly long.
 The first provider is Anthropic's Messages API (`claude-opus-5-5` by default).
 Agents use the same services as people: they read and edit documents through
 the shared document service (every change is reviewable and revertible), build
-documents, run Python in their own research sessions, and check Lean files.
+documents, run Python (in their own research sessions when you approve native
+runs, or one run at a time in the container in restricted mode), and check
+Lean files.
 
 The application, not the model, enforces each task's scope, consent, permission
 profile, execution mode, and budgets. Every tool declares what it reads,
@@ -131,7 +141,7 @@ happens:
 | Tool | Execution off | Ask before each | Restricted (container) | Scope and consent |
 |---|---|---|---|---|
 | List, read files | allowed | allowed | allowed | path in scope (links resolved); reading needs content consent |
-| Edit, create files; insert an artifact | allowed (approval when reviewing edits; never in a read-only task) | same | same | path in scope |
+| Edit, create files; insert an artifact | allowed (approval when reviewing edits; never in a read-only task) | same | same | path in scope; for an artifact, its file too |
 | Build Typst or Markdown (in-process) | allowed | allowed | allowed | entry in scope; the build reads only the scope; refused under "file names only" |
 | Build LaTeX, check Lean | refused | trusted folder + approval | refused | whole project + content consent |
 | Run Python, run a command | refused | trusted folder + approval | container only, unattended | whole project + content consent |
@@ -139,8 +149,10 @@ happens:
 Approvals show the complete code or text that will run or change, with
 invisible and direction-changing characters made visible; what runs is
 exactly what was shown, and an approval answered after the project changed
-does nothing. Responses cut off by the output or context limit end as
-"Stopped" with the reason, never as completed. Review reflects the
+does nothing. A read-only task changes nothing and runs nothing. A response
+cut off by the per-turn output or context limit ends as "Stopped" with the
+reason, and a task that uses up its own budget ends as "Budget exceeded";
+neither is reported as completed. Review reflects the
 document's actual content: a change you undid in the editor shows as undone.
 
 The API key is stored in Windows Credential Manager for this computer only
@@ -180,12 +192,15 @@ otherwise.
   network, a read-only project mount, a non-root user, and no host
   environment. It must be configured with a locally present image (which
   must provide `/bin/sh`); Exposition never pulls images and never falls back
-  to native execution. A container stops when Exposition exits or crashes and
-  when its time limit passes; leftovers are removed at the next start.
+  to native execution. An agent's container stops when Exposition exits or
+  crashes and when its time limit passes; leftovers are removed at the next
+  start when an image is configured, or else before the next restricted run.
 - TeX can read any file your account can read, which is why LaTeX builds
   require trust. R and Julia kernels talk to Exposition over local loopback
-  TCP with signed but unencrypted messages; Python kernels use CurveZMQ. The
-  project folder is passed to every kernel as data, never as code.
+  TCP with signed but unencrypted messages; Python kernels use CurveZMQ when
+  the installed pyzmq, jupyter_client, and ipykernel support it, and are
+  otherwise signed but unencrypted as well. The project folder is passed to
+  every kernel as data, never as code.
 - Rendered pages, kernel HTML/SVG, and Lean output are displayed as inert
   content without access to application commands.
 

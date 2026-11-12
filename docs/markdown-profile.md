@@ -26,7 +26,7 @@ change the layout of existing documents.
 |---|---|---|
 | `title` | text | Title block and PDF title |
 | `author` | text, or a list | Title block and PDF authors |
-| `date` | text | Title block |
+| `date` | text | Title block; also the PDF date when it is a `YYYY-MM-DD` date |
 | `papersize` | `a3`, `a4`, `a5`, `b5`, `letter`, `legal` | Page size (default `a4`) |
 | `fontsize` | `6pt` to `24pt` | Body text size (default `11pt`) |
 | `margin` | a length in `cm`, `mm`, `in` or `pt` | Page margins (default `2.5cm`) |
