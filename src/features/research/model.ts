@@ -197,6 +197,83 @@ export function attachmentKeys(text: string, format: DocumentFormat): string[] {
   return keys;
 }
 
+export type AttachmentKind = "figure" | "table";
+
+/** Text between `opener` and its matching `close`, skipping backslash escapes. */
+function balanced(text: string, opener: string, open: string, close: string): { start: number; end: number } | null {
+  const at = text.indexOf(opener);
+  if (at < 0) return null;
+  const start = at + opener.length;
+  let depth = 1;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "\\") i += 1;
+    else if (ch === open) depth += 1;
+    else if (ch === close && --depth === 0) return { start: at, end: i + 1 };
+  }
+  return null;
+}
+
+/** The text of the block with `key` (markers included), or null. */
+function attachmentBlock(text: string, format: DocumentFormat, key: string): string | null {
+  const lines = text.split("\n").map((l) => l.replace(/\r$/, "").trim());
+  const marker = (word: string) =>
+    format === "typst"
+      ? `// exposition:${word} ${key}`
+      : format === "latex"
+        ? `% exposition:${word} ${key}`
+        : `<!-- exposition:${word} ${key} -->`;
+  const begin = lines.indexOf(marker("begin"));
+  const end = lines.indexOf(marker("end"), begin + 1);
+  return begin < 0 || end < 0 ? null : lines.slice(begin, end + 1).join("\n");
+}
+
+/**
+ * Whether the attachment `key` shows a figure or a table. Mirrors the attach
+ * service: the block's content decides (keys are free text and users edit
+ * inside blocks); the generated `fig-`/`tab-` prefix only when the content is
+ * unrecognizable; null when neither tells.
+ */
+export function attachmentKind(text: string, format: DocumentFormat, key: string): AttachmentKind | null {
+  const block = attachmentBlock(text, format, key);
+  let figure = false;
+  let table = false;
+  if (block !== null) {
+    if (format === "typst") {
+      // The caption is user text: "a table(1)" in it says nothing.
+      const caption = balanced(block, "caption: [", "[", "]");
+      const body = caption ? block.slice(0, caption.start) + block.slice(caption.end) : block;
+      figure = body.includes("image(");
+      table = body.includes("table(");
+    } else if (format === "latex") {
+      for (const line of block.split("\n")) {
+        const code = line.replace(/(^|[^\\])%.*$/, "$1");
+        const f = code.indexOf("\\begin{figure");
+        const t = Math.max(code.indexOf("\\begin{table}"), code.indexOf("\\begin{table*}"));
+        if (f >= 0 || t >= 0) {
+          figure = f >= 0 && (t < 0 || f < t);
+          table = !figure;
+          break;
+        }
+      }
+    } else {
+      for (const line of block.split("\n").slice(1, -1)) {
+        figure ||= line.startsWith("![");
+        table ||= line.startsWith("|");
+      }
+    }
+  }
+  if (figure !== table) return figure ? "figure" : "table";
+  if (key.startsWith("fig-")) return "figure";
+  if (key.startsWith("tab-")) return "table";
+  return null;
+}
+
+/** Attachments that an artifact of `kind` may update (same kind only), in document order. */
+export function attachmentsOfKind(text: string, format: DocumentFormat, kind: AttachmentKind): string[] {
+  return attachmentKeys(text, format).filter((key) => attachmentKind(text, format, key) === kind);
+}
+
 /** Figure/table artifacts referenced by one display output. */
 export function displayArtifacts(run: RunSummary | undefined, ids: string[]): {
   figure?: ArtifactRecord;

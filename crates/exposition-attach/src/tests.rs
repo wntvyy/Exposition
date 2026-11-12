@@ -232,6 +232,66 @@ fn update_refuses_missing_or_ambiguous_markers() {
     ));
 }
 
+/// A figure block is updated only by a figure and a table block only by a
+/// table, in every format; the block's content (not its key) decides. A
+/// refused update leaves the document as it was.
+#[test]
+fn update_refuses_a_different_kind() {
+    let documents = [
+        (Format::Typst, "main.typ", "Intro.\n".to_owned()),
+        (
+            Format::Latex,
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{graphicx}\n\\usepackage{booktabs}\n\\begin{document}\nIntro.\n\\end{document}\n"
+                .to_owned(),
+        ),
+        (Format::Markdown, "main.md", "Intro.\n".to_owned()),
+    ];
+    for (format, path, text) in documents {
+        let at = (text.find("Intro.\n").unwrap() + "Intro.\n".len()) as u32;
+        let mut insert = request(AttachmentPlacement::Insert { offset: at }, 1, Some("A figure"), ArtifactKind::Figure);
+        let with_figure = apply(&text, &plan_for(format, path, &text, &insert, &figure()).unwrap());
+        // A table inserted under a key that looks like a figure's.
+        insert = request(AttachmentPlacement::Insert { offset: at }, 1, Some("A table"), ArtifactKind::Table);
+        insert.attachment_key = Some("fig-results".into());
+        let both = apply(&with_figure, &plan_for(format, path, &with_figure, &insert, &table()).unwrap());
+
+        let update =
+            |key: &str, kind| request(AttachmentPlacement::Update { attachment_key: key.into() }, 1, None, kind);
+        // The agent's figure cannot be replaced by a table, nor the table by a figure.
+        for (key, kind, content, existing) in [
+            ("fig-3fa9c2d1", ArtifactKind::Table, table(), "figure"),
+            ("fig-results", ArtifactKind::Figure, figure(), "table"),
+        ] {
+            let refused = plan_for(format, path, &both, &update(key, kind), &content);
+            let error = refused.expect_err(&format!("{format:?}: a {kind:?} replaced the {existing} {key}"));
+            assert_eq!(error.code(), "attach.kindMismatch", "{format:?}: {error:?}");
+            let message = error.to_string();
+            assert!(message.contains(key) && message.contains(existing), "{format:?}: {message}");
+        }
+        // The same kind still updates in place.
+        let new_figure = AttachContent::Figure {
+            path: "../.exposition/artifacts/run-2/output-1.png".into(),
+            media_type: "image/png".into(),
+        };
+        let plan = plan_for(format, path, &both, &update("fig-3fa9c2d1", ArtifactKind::Figure), &new_figure).unwrap();
+        assert_eq!(apply(&both, &plan), both.replace("run-1/output-1.png", "run-2/output-1.png"), "{format:?}");
+        let bigger = AttachContent::Table(TableGrid::from_csv(",n,sq\n0,1,1\n1,2,4\n2,3,9\n").unwrap());
+        let plan = plan_for(format, path, &both, &update("fig-results", ArtifactKind::Table), &bigger).unwrap();
+        assert!(apply(&both, &plan).contains('9'), "{format:?}");
+    }
+    // A hand-written single-line Typst figure is still recognized.
+    let text = "a\n// exposition:begin fig-x\n#figure(image(\"x.png\")) <fig-x>\n// exposition:end fig-x\nb\n";
+    let refused = plan_for(
+        Format::Typst,
+        "main.typ",
+        text,
+        &request(AttachmentPlacement::Update { attachment_key: "fig-x".into() }, 1, None, ArtifactKind::Table),
+        &table(),
+    );
+    assert_eq!(refused.map(|_| ()).map_err(|e| e.code()), Err("attach.kindMismatch"));
+}
+
 #[test]
 fn insert_refusals() {
     let text = "a\n// exposition:begin fig-x\n#figure(image(\"x.png\")) <fig-x>\n// exposition:end fig-x\nb\n";

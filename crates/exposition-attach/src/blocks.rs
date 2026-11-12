@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use crate::{AttachContent, AttachError, Format};
+use crate::{AttachContent, AttachError, BlockKind, Format};
 
 /// A caption: plain text (escaped for the format) or existing source kept verbatim.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,6 +202,50 @@ pub(crate) fn extract_caption(format: Format, block: &str) -> Option<String> {
             }
             balanced(block, "![", '[', ']').filter(|c| !c.is_empty())
         }
+    }
+}
+
+/// Whether an existing block (markers included) shows a figure or a table,
+/// judged by its content: users may edit inside a block and keys are free
+/// text, so the key is not evidence. `None` when the content is not
+/// recognizable (e.g. rewritten by hand).
+pub(crate) fn block_kind(format: Format, block: &str) -> Option<BlockKind> {
+    let (figure, table) = match format {
+        Format::Typst => {
+            // The caption is user text: "a table(1)" in it says nothing.
+            let body = match (block.find("caption: ["), balanced(block, "caption: [", '[', ']')) {
+                (Some(start), Some(caption)) => {
+                    let end = start + "caption: [".len() + caption.len() + 1;
+                    format!("{}{}", &block[..start], &block[end.min(block.len())..])
+                }
+                _ => block.to_owned(),
+            };
+            (body.contains("image("), body.contains("table("))
+        }
+        Format::Latex => {
+            // The first figure or table environment outside comments decides.
+            let first = lines(block).find_map(|(_, line)| {
+                let code = latex_code_part(line);
+                let figure = code.find("\\begin{figure");
+                let table = code.find("\\begin{table}").or_else(|| code.find("\\begin{table*}"));
+                match (figure, table) {
+                    (Some(f), Some(t)) => Some(if f < t { BlockKind::Figure } else { BlockKind::Table }),
+                    (Some(_), None) => Some(BlockKind::Figure),
+                    (None, Some(_)) => Some(BlockKind::Table),
+                    (None, None) => None,
+                }
+            });
+            return first;
+        }
+        Format::Markdown => {
+            let content = lines(block).map(|(_, line)| line.trim_start()).filter(|l| parse_marker(format, l).is_none());
+            content.fold((false, false), |(f, t), line| (f || line.starts_with("!["), t || line.starts_with('|')))
+        }
+    };
+    match (figure, table) {
+        (true, false) => Some(BlockKind::Figure),
+        (false, true) => Some(BlockKind::Table),
+        _ => None,
     }
 }
 

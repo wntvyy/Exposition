@@ -965,11 +965,39 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
         { timeout: 15_000, message: "table inserted into main.typ" },
       );
       tableKey = attachmentKeys(withTable).find((k) => k !== userFigKey && !keysBefore.includes(k));
-      // Observation: which attachment the table's "Update in document" would replace by default.
-      note(
-        "tableUpdateDefaultKey",
-        await table.getByTestId("research-attach").getByRole("button", { name: /Attachment to update/ }).innerText({ timeout: 5000 }).catch(() => null),
+      // The table's "Update in document" offers and defaults to tables only:
+      // never the agent's or the user's figure.
+      const tableKeySelect = table.getByTestId("research-attach").getByRole("button", { name: /Attachment to update/ });
+      const tableDefault = await waitFor(
+        async () => {
+          const text = await tableKeySelect.innerText({ timeout: 1000 });
+          return text.includes(tableKey) ? text : null;
+        },
+        { timeout: 10_000, message: `the table's update choice defaults to ${tableKey}` },
       );
+      note("tableUpdateDefaultKey", tableDefault.trim());
+      await tableKeySelect.click();
+      const offered = (await page.getByRole("option").allInnerTexts()).map((t) => t.trim());
+      await page.keyboard.press("Escape");
+      assert.deepEqual(offered, [tableKey], "only table attachments are offered for a table");
+      // The attach service refuses a table for a figure, whoever asks.
+      const tableArtifact = await table.getAttribute("data-artifact-id");
+      const paperDoc = await docIdOf(PAPER);
+      const beforeMismatch = await documentState(page, paperDoc);
+      const mismatch = await invokeError(page, "artifact_attach", {
+        request: {
+          document: paperDoc,
+          baseRevision: beforeMismatch.info.revision,
+          runId: firstRun,
+          artifactId: tableArtifact,
+          placement: { kind: "update", attachmentKey: userFigKey },
+          caption: null,
+          attachmentKey: null,
+        },
+      });
+      assert.equal(mismatch.error?.code, "attach.kindMismatch", `table over a figure: ${JSON.stringify(mismatch).slice(0, 300)}`);
+      assert.equal((await documentState(page, paperDoc)).text, beforeMismatch.text, "a refused update changes nothing");
+      note("kindMismatchRefusal", mismatch.error.message);
       assert.ok(withTable.includes('"n^2"') && withTable.includes('"0.5"'), "table cells in Typst markup");
       assert.ok(withTable.includes(`caption: [${typstCaption("Fitted coefficients.")}]`), "table caption");
       assert.ok(withFigure.includes(`caption: [${typstCaption("Least-squares fit of the triangular numbers.")}]`), "figure caption");
