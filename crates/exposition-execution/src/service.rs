@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use exposition_core::identity::within_by_identity;
 use exposition_core::job::{
     EnvironmentSpec, ExecutionPolicy, JobEvent, JobId, JobInfo, JobOutcome, JobResult, JobSpec, OutputStream,
 };
@@ -153,7 +154,9 @@ pub struct ExecutionConfig {
     /// In-memory settings instead of `<data>/execution/settings.json`.
     pub settings: Option<ExecutionSettings>,
     /// Additional directories that may never be trusted, nor anything above
-    /// them — on top of the built-in rules of `exposition_core::roots`.
+    /// or inside them — on top of the built-in rules of
+    /// `exposition_core::roots`. The service always adds its own data
+    /// directory (trust and settings files, job output).
     pub too_broad_to_trust: Option<Vec<PathBuf>>,
     /// Persistent cache for self-extracting tools (default
     /// `<data_dir>/execution/cache`). Shared by all native jobs.
@@ -379,7 +382,12 @@ impl ExecutionService {
             Some(s) => SettingsStore::in_memory(s),
             None => SettingsStore::load(exec_dir.join("settings.json")),
         };
-        let too_broad = config.too_broad_to_trust.unwrap_or_default();
+        let mut too_broad = config.too_broad_to_trust.unwrap_or_default();
+        // The application's own data (trust.json, settings.json, job output)
+        // is never project content: it cannot be trusted, nor anything above it.
+        if let Some(data_dir) = exec_dir.parent() {
+            too_broad.push(data_dir.to_path_buf());
+        }
         let trust = TrustStore::load(exec_dir.join("trust.json"), too_broad);
         let mut roots = Roots::default();
         roots
@@ -595,24 +603,10 @@ impl ExecutionService {
     /// directory): either would let files Exposition did not install choose
     /// what runs.
     fn check_override_location(&self, path: &Path) -> Result<(), SettingsError> {
-        let resolved = canonicalize(path).ok().or_else(|| {
-            let parent = canonicalize(path.parent()?).ok()?;
-            Some(parent.join(path.file_name()?))
-        });
-        let Some(resolved) = resolved else { return Ok(()) };
-        let shown = path.display();
-        if let Some(root) = self.inner.roots.locked().workspace_roots().find(|r| is_within(&resolved, r)) {
-            return Err(SettingsError::InvalidToolPath(format!(
-                "{shown} is inside the open project {}. Project files never choose which programs Exposition runs; use an installed copy of the tool.",
-                root.display()
-            )));
+        match self.inner.override_problem(path) {
+            Some(problem) => Err(SettingsError::InvalidToolPath(problem)),
+            None => Ok(()),
         }
-        if is_within(&resolved, &self.inner.exec_dir) {
-            return Err(SettingsError::InvalidToolPath(format!(
-                "{shown} is inside Exposition's execution data folder (job output); use an installed copy of the tool."
-            )));
-        }
-        Ok(())
     }
 
     /// Images present locally, for choosing the restricted-execution image.
@@ -620,13 +614,17 @@ impl ExecutionService {
     /// environment, application-owned directory). Never pulls anything.
     pub async fn docker_images(&self) -> Result<Vec<DockerImage>, DockerListError> {
         let settings = self.inner.settings.get();
-        let docker = match (Locator { host: &self.inner.host, settings: &settings }).locate("docker") {
+        let refuse = |path: &Path| self.inner.override_problem(path);
+        let docker = match (Locator { host: &self.inner.host, settings: &settings, refuse_override: Some(&refuse) })
+            .locate("docker")
+        {
             Located::Found { path, .. } => path,
             Located::BadOverride { path } => {
                 return Err(DockerListError::NotFound(format!(
                     "the configured Docker path {path} is not an executable"
                 )));
             }
+            Located::RefusedOverride { reason, .. } => return Err(DockerListError::NotFound(reason)),
             Located::NotFound => {
                 return Err(DockerListError::NotFound(
                     "Docker was not found. Install Docker Desktop (https://docs.docker.com/desktop/) to use restricted execution."
@@ -949,7 +947,8 @@ impl ExecutionService {
     /// Locate a tool without running it.
     pub fn locate_tool(&self, id: &str) -> Located {
         let settings = self.inner.settings.get();
-        Locator { host: &self.inner.host, settings: &settings }.locate(id)
+        let refuse = |path: &Path| self.inner.override_problem(path);
+        Locator { host: &self.inner.host, settings: &settings, refuse_override: Some(&refuse) }.locate(id)
     }
 
     /// Cached toolchain information (discovers on first use).
@@ -967,7 +966,10 @@ impl ExecutionService {
     pub async fn refresh_toolchains(&self) -> Vec<ToolchainInfo> {
         let mut cache = self.inner.toolchains.lock().await;
         let settings = self.inner.settings.get();
-        let locator = Locator { host: &self.inner.host, settings: &settings };
+        // Overrides are re-checked now: a location set while its folder was
+        // closed may be project content of the folder open now.
+        let refuse = |path: &Path| self.inner.override_problem(path);
+        let locator = Locator { host: &self.inner.host, settings: &settings, refuse_override: Some(&refuse) };
         let mut pending = Vec::new();
         let mut list = Vec::new();
         for def in TOOLS {
@@ -991,6 +993,10 @@ impl ExecutionService {
                 Located::BadOverride { path } => {
                     info.status = ToolStatus::Broken;
                     info.detail = Some(format!("configured path {path} is not an existing executable"));
+                }
+                Located::RefusedOverride { reason, .. } => {
+                    info.status = ToolStatus::Broken;
+                    info.detail = Some(reason);
                 }
                 Located::Found { path, source } => {
                     info.path = Some(path.display().to_string());
@@ -1106,7 +1112,35 @@ impl Session {
 
 impl Inner {
     fn locator_dirs(&self, settings: &ExecutionSettings) -> Vec<PathBuf> {
-        Locator { host: &self.host, settings }.toolchain_dirs()
+        let refuse = |path: &Path| self.override_problem(path);
+        Locator { host: &self.host, settings, refuse_override: Some(&refuse) }.toolchain_dirs()
+    }
+
+    /// Why a configured tool location may not be used: it lies in project
+    /// content (an open workspace) or job output (the execution data
+    /// directory). Compared by name and by file identity, so another name for
+    /// the same folder (e.g. `\\localhost\C$\...`) is refused too. Checked
+    /// when the location is set and every time it is used.
+    fn override_problem(&self, path: &Path) -> Option<String> {
+        let resolved = canonicalize(path).ok().or_else(|| {
+            let parent = canonicalize(path.parent()?).ok()?;
+            Some(parent.join(path.file_name()?))
+        })?;
+        let shown = path.display();
+        let inside = |root: &Path| is_within(&resolved, root) || within_by_identity(&resolved, root);
+        let roots: Vec<PathBuf> = self.roots.locked().workspace_roots().map(Path::to_path_buf).collect();
+        if let Some(root) = roots.iter().find(|r| inside(r)) {
+            return Some(format!(
+                "{shown} is inside the open project {}. Project files never choose which programs Exposition runs; use an installed copy of the tool.",
+                root.display()
+            ));
+        }
+        if inside(&self.exec_dir) {
+            return Some(format!(
+                "{shown} is inside Exposition's execution data folder (job output); use an installed copy of the tool."
+            ));
+        }
+        None
     }
 
     fn resolve_program(&self, raw: &str, settings: &ExecutionSettings) -> Result<PathBuf, JobRefusal> {
@@ -1126,12 +1160,14 @@ impl Inner {
                 format!("`{raw}` is a kernel component, not a program"),
             ));
         }
-        match (Locator { host: &self.host, settings }).locate(raw) {
+        let refuse = |path: &Path| self.override_problem(path);
+        match (Locator { host: &self.host, settings, refuse_override: Some(&refuse) }).locate(raw) {
             Located::Found { path, .. } => validate_executable(&path.display().to_string()),
             Located::BadOverride { path } => Err(JobRefusal::new(
                 RefusalCode::ProgramNotFound,
                 format!("configured path for `{raw}` is not an executable: {path}"),
             )),
+            Located::RefusedOverride { reason, .. } => Err(JobRefusal::new(RefusalCode::ProgramRefused, reason)),
             Located::NotFound => Err(JobRefusal::new(
                 RefusalCode::ProgramNotFound,
                 format!("{} was not found. {}", def.name, def.guidance),
@@ -1232,11 +1268,19 @@ impl Inner {
                         format!("restricted execution is unavailable: {message} The job was not run natively."),
                     )
                 };
-                let docker_path = match (Locator { host: &self.host, settings: &settings }).locate("docker") {
+                let refuse = |path: &Path| self.override_problem(path);
+                let docker_path = match (Locator {
+                    host: &self.host,
+                    settings: &settings,
+                    refuse_override: Some(&refuse),
+                })
+                .locate("docker")
+                {
                     Located::Found { path, .. } => path,
                     Located::BadOverride { path } => {
                         return Err(unavailable(format!("the configured Docker path {path} does not exist.")));
                     }
+                    Located::RefusedOverride { reason, .. } => return Err(unavailable(reason)),
                     Located::NotFound => {
                         return Err(unavailable(
                             "Docker was not found. Install Docker Desktop (https://docs.docker.com/desktop/) and configure a local image."

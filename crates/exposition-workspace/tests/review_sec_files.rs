@@ -152,7 +152,6 @@ fn invalid_project_settings_are_preserved_when_backup_succeeds() {
 /// trusted folder or a tool location without the trust dialog or the
 /// tool-location checks.
 #[test]
-#[ignore = "R-sec F3: the app's own data directory can be opened as a workspace and its files edited"]
 fn the_application_data_directory_is_not_a_workspace() {
     let fx = fixture();
     // Something the app keeps there (the execution service writes trust.json

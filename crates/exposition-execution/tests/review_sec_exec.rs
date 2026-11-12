@@ -336,7 +336,6 @@ async fn review_sec_revoke_of_parent_stops_child_project_job() {
 /// Expected: `TooBroad`. (Skips if the admin share is not reachable.)
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "R-sec F-unc-alias: \\\\localhost\\C$ alias of the user profile / Users / Windows folder can be trusted (too-broad rule bypassed)"]
 async fn review_sec_trust_refuses_admin_share_alias_of_broad_folders() {
     let f = fixture_with(ExecutionSettings::default(), false);
     let profile = PathBuf::from(std::env::var("USERPROFILE").unwrap());
