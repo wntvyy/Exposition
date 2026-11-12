@@ -11,6 +11,12 @@
 //! needs to replay history. Unrecorded (`UndoBehavior::Skip`) changes are
 //! transformed down the stack when they happen; a group such a change overlaps
 //! is blocked, and undoing it is refused rather than guessed.
+//!
+//! A document whose text mixes line endings (LF, CRLF, lone CR) is read-only
+//! for every origin until it is normalized: a change (edit, undo, or redo) is
+//! accepted only when its result no longer mixes them, or when it restores
+//! content (an `external` reload from disk, a `recovery`). Views cannot
+//! mirror mixed text exactly, so nothing edits it silently.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -254,7 +260,7 @@ impl DocumentService {
             }
             seen.push(&edit.document);
             let doc = get(&inner, &edit.document)?;
-            planned.push(plan_edit(doc, edit, request.conflict)?);
+            planned.push(plan_edit(doc, edit, request.conflict, &request.origin)?);
         }
 
         // Phase 2: commit.
@@ -263,7 +269,7 @@ impl DocumentService {
             let doc = get_mut(&mut inner, &plan.document).expect("validated above");
             let previous_revision = doc.revision;
             let inverse = inverse_patches(&doc.text, &plan.patches);
-            doc.commit(plan.text, plan.patches.clone());
+            let line_ending_changed = doc.commit(plan.text, plan.patches.clone());
             doc.redo.clear();
             record_undo(doc, &request, inverse, &plan.patches, previous_revision, &plan.before_text);
             let event = DocumentChanged {
@@ -286,6 +292,9 @@ impl DocumentService {
                 rebased: plan.rebased,
             });
             self.emit(DocumentEvent::Changed(event));
+            if line_ending_changed {
+                self.emit(DocumentEvent::InfoChanged { info: doc.info() });
+            }
         }
         Ok(TransactionOutcome { id: request.id, applied })
     }
@@ -326,10 +335,13 @@ impl DocumentService {
         // The group's inverse is already relative to the current text.
         let patches = group.inverse.clone();
         let text = apply_patches(&doc.text, &patches).map_err(|range| invalid_range(doc, range))?;
+        if doc.line_ending == LineEnding::Mixed && detect_line_ending(&text) == LineEnding::Mixed {
+            return Err(TransactionError::MixedLineEndings { document: id.clone() });
+        }
         let group = if kind == ChangeKind::Undo { doc.undo.pop() } else { doc.redo.pop() }.expect("checked above");
         let previous_revision = doc.revision;
         let inverse = inverse_patches(&doc.text, &patches);
-        doc.commit(text, patches.clone());
+        let line_ending_changed = doc.commit(text, patches.clone());
         let selection =
             if kind == ChangeKind::Undo { group.selection_before.clone() } else { group.selection_after.clone() };
         // The opposite group keeps the original selections: undo restores
@@ -361,6 +373,9 @@ impl DocumentService {
             can_redo: !doc.redo.is_empty(),
         };
         self.emit(DocumentEvent::Changed(event.clone()));
+        if line_ending_changed {
+            self.emit(DocumentEvent::InfoChanged { info: doc.info() });
+        }
         Ok(event)
     }
 }
@@ -391,13 +406,19 @@ impl DocState {
         }
     }
 
-    fn commit(&mut self, text: String, patches: Vec<TextPatch>) {
+    /// Record a new revision. Returns true when the text's line-ending
+    /// convention changed (the caller announces the new info).
+    fn commit(&mut self, text: String, patches: Vec<TextPatch>) -> bool {
         self.revision += 1;
         self.text = Arc::from(text);
         self.history.push_back(HistoryEntry { revision: self.revision, patches });
         while self.history.len() > HISTORY_LIMIT {
             self.history.pop_front();
         }
+        let line_ending = detect_line_ending(&self.text);
+        let changed = line_ending != self.line_ending;
+        self.line_ending = line_ending;
+        changed
     }
 }
 
@@ -410,7 +431,12 @@ struct PlannedEdit {
     before_text: Arc<str>,
 }
 
-fn plan_edit(doc: &DocState, edit: &DocumentEdit, policy: ConflictPolicy) -> Result<PlannedEdit, TransactionError> {
+fn plan_edit(
+    doc: &DocState,
+    edit: &DocumentEdit,
+    policy: ConflictPolicy,
+    origin: &EditOrigin,
+) -> Result<PlannedEdit, TransactionError> {
     if let Some(reason) = &doc.read_only {
         return Err(TransactionError::ReadOnly { document: doc.id.clone(), reason: reason.clone() });
     }
@@ -433,6 +459,12 @@ fn plan_edit(doc: &DocState, edit: &DocumentEdit, policy: ConflictPolicy) -> Res
         }
     };
     let text = apply_patches(&doc.text, &patches).map_err(|range| invalid_range(doc, range))?;
+    // Mixed line endings: only a change that makes them consistent, or one
+    // that restores content from disk or a journal, is accepted.
+    let restores = matches!(origin, EditOrigin::External | EditOrigin::Recovery);
+    if doc.line_ending == LineEnding::Mixed && !restores && detect_line_ending(&text) == LineEnding::Mixed {
+        return Err(TransactionError::MixedLineEndings { document: doc.id.clone() });
+    }
     Ok(PlannedEdit { document: doc.id.clone(), patches, text, rebased, before_text: Arc::clone(&doc.text) })
 }
 
@@ -695,11 +727,22 @@ fn diff_patch(from: &str, to: &str) -> Option<TextPatch> {
     Some(TextPatch { range: TextRange::new(start, end), text: to_rest[..to_rest.len() - suffix].to_owned() })
 }
 
+/// The text's line-ending convention, in one pass (run on every revision).
 fn detect_line_ending(text: &str) -> LineEnding {
-    let crlf = text.matches("\r\n").count();
-    let lf = text.matches('\n').count() - crlf;
-    let cr = text.matches('\r').count() - crlf;
-    match (lf > 0, crlf > 0, cr > 0) {
+    let bytes = text.as_bytes();
+    let (mut lf, mut crlf, mut cr) = (false, false, false);
+    for (i, &byte) in bytes.iter().enumerate() {
+        match byte {
+            b'\n' if i > 0 && bytes[i - 1] == b'\r' => crlf = true,
+            b'\n' => lf = true,
+            b'\r' if bytes.get(i + 1) != Some(&b'\n') => cr = true,
+            _ => continue,
+        }
+        if u8::from(lf) + u8::from(crlf) + u8::from(cr) > 1 {
+            return LineEnding::Mixed;
+        }
+    }
+    match (lf, crlf, cr) {
         (false, false, false) => LineEnding::None,
         (true, false, false) => LineEnding::Lf,
         (false, true, false) => LineEnding::Crlf,
@@ -1002,6 +1045,105 @@ mod tests {
         assert_eq!(detect_line_ending("a\r\nb\r\n"), LineEnding::Crlf);
         assert_eq!(detect_line_ending("a\r\nb\n"), LineEnding::Mixed);
         assert_eq!(detect_line_ending("ab"), LineEnding::None);
+        assert_eq!(detect_line_ending("a\rb"), LineEnding::Mixed, "a lone CR cannot be mirrored exactly");
+        assert_eq!(detect_line_ending("\r\n\r\n"), LineEnding::Crlf);
+        assert_eq!(detect_line_ending("\n\r\n"), LineEnding::Mixed);
+        assert_eq!(detect_line_ending("é\r\nü\r\n"), LineEnding::Crlf);
+    }
+
+    fn with_origin(mut request: TransactionRequest, origin: EditOrigin) -> TransactionRequest {
+        request.origin = origin;
+        request
+    }
+
+    fn line_ending(service: &DocumentService, id: &DocumentId) -> LineEnding {
+        service.info(id).unwrap().line_ending
+    }
+
+    #[test]
+    fn mixed_line_endings_refuse_edits_from_every_origin_until_normalized() {
+        // UTF-16 offsets: a0 \r1 \n2 b3 \n4 c5 \r6 \n7
+        let mixed = "a\r\nb\nc\r\n";
+        let (service, id) = service_with(mixed);
+        assert_eq!(line_ending(&service, &id), LineEnding::Mixed);
+        let insert =
+            |base| tx(&id, base, vec![TextPatch::insert(0, "x")], UndoBehavior::NewGroup, ConflictPolicy::Reject);
+        for origin in [
+            EditOrigin::Source,
+            EditOrigin::Page,
+            EditOrigin::Agent { task_id: "t1".into() },
+            EditOrigin::Research { run_id: "r1".into() },
+            EditOrigin::System,
+        ] {
+            let err = service.apply(with_origin(insert(1), origin.clone())).unwrap_err();
+            assert!(matches!(err, TransactionError::MixedLineEndings { .. }), "{origin:?}: {err:?}");
+        }
+        assert_eq!(text(&service, &id), mixed, "nothing changed");
+        assert_eq!(service.info(&id).unwrap().revision, 1);
+
+        // Normalizing (document_normalize_line_endings sends exactly this) is accepted
+        // and announced as an info change.
+        let mut rx = service.subscribe();
+        let normalize = tx(
+            &id,
+            1,
+            vec![TextPatch::replace(1, 3, "\n"), TextPatch::replace(6, 8, "\n")],
+            UndoBehavior::NewGroup,
+            ConflictPolicy::Reject,
+        );
+        service.apply(with_origin(normalize, EditOrigin::System)).unwrap();
+        assert_eq!(text(&service, &id), "a\nb\nc\n");
+        assert_eq!(line_ending(&service, &id), LineEnding::Lf);
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(events.as_slice(), [DocumentEvent::Changed(_), DocumentEvent::InfoChanged { info }] if info.line_ending == LineEnding::Lf),
+            "{events:?}"
+        );
+
+        // Editable again, from any origin.
+        service.apply(with_origin(insert(2), EditOrigin::Agent { task_id: "t1".into() })).unwrap();
+        assert_eq!(text(&service, &id), "xa\nb\nc\n");
+
+        // Undo back past the normalization: mixed (read-only) again; redo normalizes.
+        service.undo(&id, EditOrigin::Source).unwrap();
+        service.undo(&id, EditOrigin::Source).unwrap();
+        assert_eq!(text(&service, &id), mixed);
+        assert_eq!(line_ending(&service, &id), LineEnding::Mixed);
+        let err = service.apply(with_origin(insert(5), EditOrigin::Page)).unwrap_err();
+        assert!(matches!(err, TransactionError::MixedLineEndings { .. }));
+        service.redo(&id, EditOrigin::Page).unwrap();
+        assert_eq!(line_ending(&service, &id), LineEnding::Lf);
+        service.redo(&id, EditOrigin::Page).unwrap();
+        assert_eq!(text(&service, &id), "xa\nb\nc\n");
+    }
+
+    #[test]
+    fn mixed_documents_accept_content_restores_but_never_undo_into_mixed_text() {
+        let (service, id) = service_with("a\r\nb\n");
+        // A reload from disk and a recovery restore replace content even when
+        // the result still mixes line endings.
+        let reload = tx(&id, 1, vec![TextPatch::insert(0, "disk ")], UndoBehavior::NewGroup, ConflictPolicy::Reject);
+        service.apply(with_origin(reload, EditOrigin::External)).unwrap();
+        let restore =
+            tx(&id, 2, vec![TextPatch::insert(0, "journal ")], UndoBehavior::NewGroup, ConflictPolicy::Reject);
+        service.apply(with_origin(restore, EditOrigin::Recovery)).unwrap();
+        assert_eq!(text(&service, &id), "journal disk a\r\nb\n");
+        // Undoing either would edit mixed text into other mixed text: refused,
+        // and the history is left intact.
+        let err = service.undo(&id, EditOrigin::Source).unwrap_err();
+        assert!(matches!(err, TransactionError::MixedLineEndings { .. }), "{err:?}");
+        assert!(service.info(&id).unwrap().can_undo);
+        assert_eq!(text(&service, &id), "journal disk a\r\nb\n");
+
+        // A document that became mixed through an edit can be undone back.
+        let (service, id) = service_with("a\nb\n");
+        service
+            .apply(tx(&id, 1, vec![TextPatch::insert(1, "\r\n")], UndoBehavior::NewGroup, ConflictPolicy::Reject))
+            .unwrap();
+        assert_eq!(line_ending(&service, &id), LineEnding::Mixed);
+        service.undo(&id, EditOrigin::Source).unwrap();
+        assert_eq!(text(&service, &id), "a\nb\n");
+        assert_eq!(line_ending(&service, &id), LineEnding::Lf);
     }
 
     #[test]

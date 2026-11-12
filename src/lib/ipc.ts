@@ -312,7 +312,11 @@ export function isTransactionError(value: unknown): value is TransactionError {
 /** Human-readable message for any command rejection. */
 export function errorMessage(error: unknown): string {
   if (isCommandError(error)) return error.message;
-  if (isTransactionError(error)) return `Document change rejected (${error.kind})`;
+  if (isTransactionError(error)) {
+    if (error.kind === "mixedLineEndings") return "The file mixes line endings; normalize them to edit it";
+    if (error.kind === "readOnly") return `The document is read-only: ${error.reason}`;
+    return `Document change rejected (${error.kind})`;
+  }
   if (error instanceof Error) return error.message;
   return String(error);
 }

@@ -9,4 +9,4 @@ import type { WorkspacePath } from "./WorkspacePath";
 /**
  * Workspace events, forwarded to the webview as `workspace:event`.
  */
-export type WorkspaceEvent = { "kind": "opened", info: WorkspaceInfo, } | { "kind": "closed" } | { "kind": "filesChanged", changes: Array<FileChange>, rescan: boolean, } | { "kind": "documentReloaded", document: DocumentId, path: WorkspacePath, } | { "kind": "conflict", conflict: DiskConflict, } | { "kind": "conflictResolved", document: DocumentId, } | { "kind": "recoveryChanged", entries: Array<RecoveryEntry>, } | { "kind": "journalFailed", path: WorkspacePath, message: string, };
+export type WorkspaceEvent = { "kind": "opened", info: WorkspaceInfo, } | { "kind": "closed" } | { "kind": "filesChanged", changes: Array<FileChange>, rescan: boolean, } | { "kind": "documentReloaded", document: DocumentId, path: WorkspacePath, } | { "kind": "conflict", conflict: DiskConflict, } | { "kind": "conflictResolved", document: DocumentId, } | { "kind": "recoveryChanged", entries: Array<RecoveryEntry>, } | { "kind": "journalFailed", path: WorkspacePath, message: string, } | { "kind": "projectSettingsInvalid", message: string, };

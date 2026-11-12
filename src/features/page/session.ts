@@ -20,7 +20,7 @@ import type { PageEditOp } from "../../bindings/PageEditOp";
 import type { PageRect } from "../../bindings/PageRect";
 import type { TrustChanged } from "../../bindings/TrustChanged";
 import { commands, errorMessage, events, isCommandError, newId } from "../../lib/ipc";
-import { openDocument } from "../editor";
+import { openDocument, type DocumentHandle } from "../editor";
 import { requestWorkspaceTrust } from "../jobs/trust";
 import { buildSequence, isOlder } from "./buildOrder";
 import { imageType } from "./images";
@@ -63,6 +63,11 @@ export interface PageViewModel {
   latencyMs: number | null;
   /** Builds of this document need workspace trust (LaTeX): the workspace root. */
   untrustedRoot: string | null;
+  /**
+   * Why the document cannot be edited in any view (the document service
+   * refuses its edits), e.g. mixed line endings; null when it can.
+   */
+  readOnly: string | null;
 }
 
 interface Position {
@@ -120,9 +125,12 @@ export class PageSession {
     message: null,
     latencyMs: null,
     untrustedRoot: null,
+    readOnly: null,
   };
   private listeners = new Set<() => void>();
   private docId: string | null = null;
+  /** The shared document handle (also behind any source editor of this file). */
+  private handle: DocumentHandle | null = null;
   private docRevision = 0;
   /** Highest revision whose change (history step) this view has received. */
   private eventRevision = 0;
@@ -191,6 +199,9 @@ export class PageSession {
       const info = await commands.documentState(handle.id);
       if (!current()) return;
       this.docId = handle.id;
+      this.handle = handle;
+      this.unlisten.push(handle.subscribe(() => this.syncReadOnly()));
+      this.syncReadOnly();
       this.docRevision = info.info.revision;
       this.eventRevision = info.info.revision;
       this.set({ phase: "ready", documentId: handle.id });
@@ -221,6 +232,12 @@ export class PageSession {
     }
     for (const url of this.urls.values()) URL.revokeObjectURL(url);
     this.urls.clear();
+  }
+
+  /** Follow the document's read-only state (it changes on normalize/undo). */
+  private syncReadOnly(): void {
+    const reason = this.handle?.editReason ?? null;
+    if (reason !== this.model.readOnly) this.set({ readOnly: reason });
   }
 
   // ---- builds -------------------------------------------------------------
@@ -544,6 +561,11 @@ export class PageSession {
 
   private async sendEdit(op: PageEditOp, attempt: number): Promise<void> {
     if (!this.docId) return;
+    // The document service would refuse it: say why instead of trying.
+    if (this.model.readOnly) {
+      this.set({ message: { tone: "warning", text: this.model.readOnly } });
+      return;
+    }
     // Typing is paused after a refusal: keep collecting (never apply at a
     // guessed position) until the user places the caret again.
     if (this.unapplied !== null) {

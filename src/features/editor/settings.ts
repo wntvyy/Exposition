@@ -1,8 +1,10 @@
-// Application settings cache for the source editor.
+// Application settings cache (source editor preferences, startup behavior).
+// The first load also reports a settings file that was invalid and set aside.
 import { create } from "zustand";
 
 import type { AppSettings } from "../../bindings/AppSettings";
 import { commands } from "../../lib/ipc";
+import { reportSettingsWarning } from "../settings/warnings";
 
 const defaults: AppSettings = {
   version: 1,
@@ -27,7 +29,12 @@ let loading: Promise<void> | null = null;
 
 export function loadAppSettings(): Promise<void> {
   loading ??= commands.settingsGet().then(
-    (state) => useAppSettings.setState({ settings: state.settings, loaded: true }),
+    (state) => {
+      useAppSettings.setState({ settings: state.settings, loaded: true });
+      // The service sets an invalid file aside on the first read, so only
+      // this read can report it.
+      reportSettingsWarning("app", state.warning);
+    },
     () => useAppSettings.setState({ loaded: true }),
   );
   return loading;
@@ -36,4 +43,10 @@ export function loadAppSettings(): Promise<void> {
 export async function updateAppSettings(settings: AppSettings): Promise<void> {
   const saved = await commands.settingsUpdate(settings);
   useAppSettings.setState({ settings: saved, loaded: true });
+}
+
+/** Test hook: forget the cached load. */
+export function resetAppSettingsForTests(): void {
+  loading = null;
+  useAppSettings.setState({ settings: defaults, loaded: false });
 }

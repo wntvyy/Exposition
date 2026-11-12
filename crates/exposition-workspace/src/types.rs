@@ -199,4 +199,10 @@ pub enum WorkspaceEvent {
         path: WorkspacePath,
         message: String,
     },
+    /// `.exposition/project.json` was invalid when read (by any service): it
+    /// was set aside and defaults are in use. `message` names the problem and
+    /// the kept original.
+    ProjectSettingsInvalid {
+        message: String,
+    },
 }

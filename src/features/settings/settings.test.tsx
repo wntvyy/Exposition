@@ -54,6 +54,7 @@ function executionState(image: string | null, toolPaths: Record<string, string> 
       maxConcurrentJobs: null,
     },
     overridableTools: ["python", "docker"],
+    warning: null,
   };
 }
 
@@ -111,6 +112,21 @@ describe("Trusted folders", () => {
     fireEvent.click(screen.getByRole("button", { name: "Revoke trust for C:\\papers\\thesis" }));
     await waitFor(() => expect(ipc.trustRevoke).toHaveBeenCalledWith("C:\\papers\\thesis"));
     await waitFor(() => expect(screen.getAllByTestId("trusted-folder")).toHaveLength(1));
+  });
+});
+
+describe("Trusted folders: revoke prompt", () => {
+  it("says running processes are stopped (the service stops them before it returns)", async () => {
+    render(<TrustSection />);
+    await screen.findAllByTestId("trusted-folder");
+    ui.confirm.mockResolvedValueOnce("cancel");
+    fireEvent.click(screen.getByRole("button", { name: "Revoke trust for C:\\papers\\thesis" }));
+    await waitFor(() => expect(ui.confirm).toHaveBeenCalledTimes(1));
+    cleanup();
+    render(<>{ui.confirm.mock.calls[0]![0].message}</>);
+    const text = screen.getByTestId("revoke-dialog").textContent ?? "";
+    expect(text).toMatch(/running in this folder are stopped now/);
+    expect(text).not.toMatch(/not stopped/);
   });
 });
 

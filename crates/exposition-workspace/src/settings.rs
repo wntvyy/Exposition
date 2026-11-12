@@ -222,7 +222,7 @@ fn load<T: DeserializeOwned + Default + Validate>(file: &Path) -> Loaded<T> {
             Ok(()) => return Loaded { value, exists: true, warning: None },
             Err(e) => e.message,
         },
-        Err(e) => format!("is not valid ({e})"),
+        Err(e) => format!("The file is not valid ({e})."),
     };
     // Keep the original for the user; never overwrite it silently. It moves
     // aside only once an identical backup copy exists; otherwise it stays.
@@ -235,7 +235,18 @@ fn load<T: DeserializeOwned + Default + Validate>(file: &Path) -> Loaded<T> {
         return Loaded { value: T::default(), exists: true, warning: Some(warning) };
     }
     let _ = fs::remove_file(file);
-    Loaded { value: T::default(), exists: true, warning: Some(problem) }
+    Loaded { value: T::default(), exists: true, warning: Some(set_aside_warning(&problem, &backup)) }
+}
+
+/// What was wrong with a settings file and where its original was kept.
+fn set_aside_warning(problem: &str, backup: &Path) -> String {
+    let problem = problem.trim_end_matches('.');
+    if backup.is_file() {
+        let kept = crate::root::display_path(backup);
+        format!("{problem}. Defaults are in use; the original file was kept as {kept}.")
+    } else {
+        format!("{problem}. Defaults are in use; the original file could not be backed up.")
+    }
 }
 
 fn store<T: Serialize>(file: &Path, value: &T) -> io::Result<()> {
@@ -339,13 +350,16 @@ mod tests {
         fs::write(app_settings_file(dir.path()), r#"{"version":1,"editor":{"fontSize":400}}"#).unwrap();
         let loaded = load_app_settings(dir.path());
         assert_eq!(loaded.value, AppSettings::default());
-        assert!(loaded.warning.unwrap().contains("font size"));
+        let warning = loaded.warning.unwrap();
+        assert!(warning.contains("font size"));
         let backups: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with("settings.json.invalid-"))
             .collect();
         assert_eq!(backups.len(), 1);
+        // The warning names the kept original so the user can find it.
+        assert!(warning.contains(&dir.path().join(&backups[0]).display().to_string()), "{warning}");
         fs::write(app_settings_file(dir.path()), b"{ not json").unwrap();
         assert!(load_app_settings(dir.path()).warning.is_some());
 

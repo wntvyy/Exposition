@@ -44,6 +44,7 @@ function execution(image: string | null = null, toolPaths: Record<string, string
       maxConcurrentJobs: null,
     },
     overridableTools: ["pdflatex", "python", "docker"],
+    warning: null,
   };
 }
 
@@ -87,7 +88,7 @@ const provider = (configured: boolean): ProviderStatus => ({
 
 describe("sections", () => {
   it("lists every required section once, with About last", () => {
-    expect(SECTIONS.map((s) => s.id)).toEqual(["appearance", "editor", "trust", "execution", "agents", "research", "about"]);
+    expect(SECTIONS.map((s) => s.id)).toEqual(["appearance", "editor", "project", "trust", "execution", "agents", "research", "about"]);
     expect(isSectionId("trust")).toBe(true);
     expect(isSectionId("nope")).toBe(false);
   });

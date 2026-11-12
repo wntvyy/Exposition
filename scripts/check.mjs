@@ -7,6 +7,7 @@ const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 
 const steps = [
   ["private paths", "node", ["scripts/check-private-paths.mjs"]],
+  ["permission files", "node", ["scripts/check-permissions.mjs"]],
   ["typecheck", npm, ["run", "typecheck"]],
   ["frontend tests", npm, ["test"]],
   ["frontend build", npm, ["run", "build:web"]],

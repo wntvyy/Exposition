@@ -67,6 +67,7 @@ impl From<TransactionError> for WorkspaceError {
         let code = match &error {
             TransactionError::UnknownDocument { .. } => "document.notOpen",
             TransactionError::ReadOnly { .. } => "document.readOnly",
+            TransactionError::MixedLineEndings { .. } => "document.mixedLineEndings",
             TransactionError::StaleRevision { .. } | TransactionError::Conflict { .. } => "document.changed",
             _ => "document.rejected",
         };

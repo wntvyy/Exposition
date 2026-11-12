@@ -322,6 +322,13 @@ export function ExecutionSection() {
         )
       ) : (
         <>
+          {execution.warning && (
+            <div data-testid="execution-settings-warning">
+              <Banner tone="warning" title="Invalid execution settings were reset">
+                {execution.warning}
+              </Banner>
+            </div>
+          )}
           <DockerGroup />
           <ToolsGroup />
         </>

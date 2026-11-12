@@ -162,6 +162,11 @@ pub enum TransactionError {
     DuplicateDocument { document: DocumentId },
     #[error("document {document:?} is read-only: {reason}")]
     ReadOnly { document: DocumentId, reason: String },
+    /// The text mixes line endings (LF, CRLF, lone CR). It cannot be edited
+    /// from any origin until the user normalizes it (only a change whose
+    /// result is consistent, a reload from disk, or a recovery is accepted).
+    #[error("document {document:?} has mixed line endings and is read-only until the user normalizes them")]
+    MixedLineEndings { document: DocumentId },
     #[error("edit to {document:?} is based on revision {base_revision} but the document is at {current_revision}")]
     StaleRevision { document: DocumentId, base_revision: u64, current_revision: u64 },
     #[error("edit to {document:?} overlaps changes made since revision {base_revision} (now {current_revision})")]
@@ -180,7 +185,7 @@ pub enum TransactionError {
     NothingToUndo { document: DocumentId, action: String },
 }
 
-/// Line-ending convention detected when a document was loaded.
+/// Line-ending convention of a document's current text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]

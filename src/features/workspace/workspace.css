@@ -40,7 +40,19 @@
   padding: 0;
 }
 
+.xp-recent__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-0-5);
+}
+
+.xp-recent__remove {
+  flex: none;
+}
+
 .xp-recent__item {
+  flex: 1;
+  min-width: 0;
   width: 100%;
   justify-content: flex-start;
   height: auto;

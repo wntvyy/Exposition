@@ -7,6 +7,8 @@ export {
   fileKey,
   handleFor,
   handleForPath,
+  MIXED_EOL_REASON,
+  normalizeLineEndings,
   openDocument,
   openHandles,
   reloadDocument,

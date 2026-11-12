@@ -31,6 +31,7 @@ import {
   TOOL_SETTINGS_LABEL,
   useTypesetting,
 } from "../typesetting/store";
+import { handleForPath, MIXED_EOL_REASON, normalizeLineEndings } from "../editor";
 import { PageSession } from "./session";
 import "./page.css";
 
@@ -189,6 +190,11 @@ export function PageEditor({ resource, active }: EditorProps) {
     );
   };
 
+  const normalize = async (ending: "lf" | "crlf") => {
+    const handle = handleForPath(path);
+    if (handle) await normalizeLineEndings(handle, ending);
+  };
+
   const status = summarize(buildState);
   const byPage = (rects: PageRect[], page: number) => rects.filter((r) => r.page === page);
   const caretStyle: CSSProperties | undefined = caret
@@ -269,6 +275,31 @@ export function PageEditor({ resource, active }: EditorProps) {
         />
         <IconButton aria-label="Export PDF" icon={FileDown} size="sm" isDisabled={!model.buildId} onPress={exportPdf} />
       </Toolbar>
+
+      {model.readOnly && (
+        <div data-testid="page-read-only" data-reason={model.readOnly}>
+          <Banner
+            tone="info"
+            title={model.readOnly === MIXED_EOL_REASON ? "Mixed line endings" : "Read-only"}
+            actions={
+              model.readOnly === MIXED_EOL_REASON ? (
+                <>
+                  <Button size="sm" onPress={() => void normalize("lf")}>
+                    Normalize to LF
+                  </Button>
+                  <Button size="sm" onPress={() => void normalize("crlf")}>
+                    Normalize to CRLF
+                  </Button>
+                </>
+              ) : undefined
+            }
+          >
+            {model.readOnly === MIXED_EOL_REASON
+              ? "This file mixes line endings, so it cannot be edited here, in source, or by agents until they are normalized. They are never changed silently."
+              : model.readOnly}
+          </Banner>
+        </div>
+      )}
 
       {model.untrustedRoot && model.pages.length > 0 && (
         <Banner

@@ -28,6 +28,9 @@ import { useAppSettings } from "./settings";
 import { DocumentSync } from "./sync";
 import { UndoGrouper } from "./typing";
 
+/** Why a document with mixed line endings is read-only in every view. */
+export const MIXED_EOL_REASON = "This file mixes line endings. Normalize them to edit it.";
+
 /** Editor resource key for a workspace file. */
 export const fileKey = (path: string) => `file:${path}`;
 
@@ -126,12 +129,19 @@ export class DocumentHandle {
     return this.info.savedRevision !== this.sync.revision || this.sync.pendingCount > 0;
   }
 
+  /**
+   * Why the document cannot be edited from any view (the document service
+   * refuses edits from every origin in these cases), if it cannot.
+   */
+  get editReason(): string | null {
+    if (this.info.readOnly) return this.info.readOnly;
+    if (this.eolMode === "mixed") return MIXED_EOL_REASON;
+    return null;
+  }
+
   /** Why the source editor cannot be edited right now, if it cannot. */
   get readOnlyReason(): string | null {
-    if (this.info.readOnly) return this.info.readOnly;
-    if (this.eolMode === "mixed") return "This file mixes line endings. Normalize them to edit it here.";
-    if (this.sync.isResyncing) return "Refreshing…";
-    return null;
+    return this.editReason ?? (this.sync.isResyncing ? "Refreshing…" : null);
   }
 
   subscribe = (listener: Listener): (() => void) => {

@@ -1005,8 +1005,14 @@ impl WorkspaceService {
         self.root()?.resolve_for_write(&path)
     }
 
+    /// Project settings. An invalid file is set aside on the first read,
+    /// whichever service reads it; that read also announces it as
+    /// [`WorkspaceEvent::ProjectSettingsInvalid`] so the user is told.
     pub fn project_settings(&self) -> WorkspaceResult<ProjectSettingsState> {
         let Loaded { value, exists, warning } = load_project_settings(&self.project_settings_file()?);
+        if let Some(message) = &warning {
+            self.emit(WorkspaceEvent::ProjectSettingsInvalid { message: message.clone() });
+        }
         Ok(ProjectSettingsState { settings: value, exists, warning })
     }
 

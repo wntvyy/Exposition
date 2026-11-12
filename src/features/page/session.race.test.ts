@@ -115,7 +115,9 @@ vi.mock("../../lib/ipc", () => ({
     return (prefix: string) => `${prefix}-${++n}`;
   })(),
 }));
-vi.mock("../editor", () => ({ openDocument: async () => ({ id: "doc-1" }) }));
+vi.mock("../editor", () => ({
+  openDocument: async () => ({ id: "doc-1", editReason: null, subscribe: () => () => {} }),
+}));
 vi.mock("../jobs/trust", () => ({ requestWorkspaceTrust: async () => false }));
 
 import { PageSession } from "./session";

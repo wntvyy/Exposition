@@ -110,6 +110,9 @@ pub enum PageEditOutcome {
     Stale { current_revision: u64 },
 }
 
+/// Why a document with mixed line endings cannot be edited on the page.
+pub const MIXED_LINE_ENDINGS: &str = "the file mixes line endings; normalize them to edit it";
+
 fn line_ending_text(ending: LineEnding) -> &'static str {
     match ending {
         LineEnding::Crlf => "\r\n",
@@ -148,6 +151,13 @@ pub fn apply_page_edit(
         return Ok(PageEditOutcome::Refused {
             revision: snapshot.revision,
             refusal: EditRefusal::NotEditable { reason: format!("read-only: {reason}") },
+        });
+    }
+    // The document service refuses these edits too; say why without trying.
+    if info.line_ending == LineEnding::Mixed {
+        return Ok(PageEditOutcome::Refused {
+            revision: snapshot.revision,
+            refusal: EditRefusal::NotEditable { reason: MIXED_LINE_ENDINGS.into() },
         });
     }
     let plan = match rules.plan(&text, request.selection, &request.op, line_ending_text(info.line_ending)) {
@@ -224,5 +234,44 @@ pub fn apply_page_edit(
             Ok(PageEditOutcome::Stale { current_revision: documents.info(&request.document)?.revision })
         }
         Err(other) => Err(other),
+    }
+}
+
+#[cfg(all(test, feature = "typst"))]
+mod tests {
+    use exposition_core::document::{TextEncoding, TransactionId};
+    use exposition_core::path::WorkspacePath;
+    use exposition_workspace::documents::OpenDocument;
+
+    use super::*;
+    use crate::TypstInput;
+
+    #[test]
+    fn mixed_line_endings_are_refused_on_the_page_with_the_reason() {
+        let documents = DocumentService::new();
+        let info = documents.open(OpenDocument {
+            path: Some(WorkspacePath::parse("main.typ").unwrap()),
+            text: "Hello\r\nworld\n".into(),
+            language: "typst".into(),
+            encoding: TextEncoding::Utf8,
+            read_only: None,
+        });
+        let request = PageEditRequest {
+            id: TransactionId("page-1".into()),
+            document: info.id.clone(),
+            base_revision: info.revision,
+            selection: TextRange::new(1, 1),
+            op: PageEditOp::Insert { text: "x".into() },
+            group: 1,
+        };
+        let outcome = apply_page_edit(&documents, &TypstInput, &request, &|_, _| None).unwrap();
+        assert_eq!(
+            outcome,
+            PageEditOutcome::Refused {
+                revision: 1,
+                refusal: EditRefusal::NotEditable { reason: MIXED_LINE_ENDINGS.into() }
+            }
+        );
+        assert_eq!(documents.state(&info.id).unwrap().text, "Hello\r\nworld\n");
     }
 }

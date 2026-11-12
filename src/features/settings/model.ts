@@ -15,6 +15,7 @@ export const SETTINGS_RESOURCE = { key: "settings:", title: "Settings" } as cons
 export const SECTIONS = [
   { id: "appearance", title: "Appearance" },
   { id: "editor", title: "Editor" },
+  { id: "project", title: "Project" },
   { id: "trust", title: "Trusted folders" },
   { id: "execution", title: "Execution" },
   { id: "agents", title: "Agents" },
