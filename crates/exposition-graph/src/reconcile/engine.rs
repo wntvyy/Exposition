@@ -209,6 +209,8 @@ pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<Reco
         Ok((checkpoints, known))
     })?;
 
+    // Pending marks made before this point are reconciled by this pass.
+    let token = graph.next_change_token();
     let t_loaded = started.elapsed();
     // 2. Scan (no lock).
     let mut scan_out = ScanOutcome::default();
@@ -282,7 +284,14 @@ pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<Reco
         let planning = Instant::now();
         let mut planner = Planner::new(store, &root, index, now, force);
         planner.plan(&scan_out, &covered, &checkpoints, &fresh)?;
-        let plan = planner.finish();
+        let mut plan = planner.finish();
+        plan.clear_pending = Some((
+            match &options.scope {
+                Scope::Full => None,
+                Scope::Paths(p) => Some(p.clone()),
+            },
+            token,
+        ));
         let planned = planning.elapsed();
         let revision = plan.write(store)?;
         Ok((plan, revision, planned))
@@ -367,6 +376,8 @@ pub(crate) struct Plan {
     /// Coverage contents changed (bumps the graph revision even without
     /// entity changes: source versions are graph state).
     pub semantic: bool,
+    /// Clear pending marks (scope, up to token) when written.
+    pub clear_pending: Option<(Option<Vec<WorkspacePath>>, u64)>,
 }
 
 impl Plan {
@@ -387,10 +398,15 @@ impl Plan {
 
     /// Write the plan in one transaction. Returns the graph revision after it.
     fn write(&self, store: &mut GraphStore) -> StoreResult<u64> {
-        if self.is_empty() {
-            return store.revision();
-        }
         let w = Writer::new(store.transaction()?);
+        if let Some((scope, token)) = &self.clear_pending {
+            w.clear_pending(scope.as_deref(), *token)?;
+        }
+        if self.is_empty() {
+            let revision = w.revision()?;
+            w.commit()?;
+            return Ok(revision);
+        }
         for e in &self.entities {
             w.put_entity(e)?;
         }
@@ -813,22 +829,55 @@ impl<'a> Planner<'a> {
         let mut active: BTreeMap<WorkspacePath, EntityId> = BTreeMap::new();
         let mut created: HashMap<EntityId, u64> = HashMap::new();
         let mut tombs: HashMap<WorkspacePath, Vec<EntityId>> = HashMap::new();
+        let mut duplicates: Vec<(WorkspacePath, EntityId)> = Vec::new();
         for k in self.store.resource_keys(None)? {
             if k.tombstoned {
                 tombs.entry(k.path).or_default().push(k.id);
                 continue;
             }
+            created.insert(k.id.clone(), k.created_at_ms);
             match active.get(&k.path) {
-                // Two identities for one path (a race elsewhere): keep the oldest, touch neither other.
-                Some(existing) if created.get(existing).is_some_and(|c| *c <= k.created_at_ms) => {}
-                _ => {
-                    created.insert(k.id.clone(), k.created_at_ms);
+                // Two live identities for one path (written outside the
+                // service's checks): the oldest stays the file's resource.
+                Some(existing) if created.get(existing).is_some_and(|c| (*c, existing) <= (k.created_at_ms, &k.id)) => {
+                    duplicates.push((k.path, k.id));
+                }
+                Some(existing) => {
+                    duplicates.push((k.path.clone(), existing.clone()));
+                    active.insert(k.path, k.id);
+                }
+                None => {
                     active.insert(k.path, k.id);
                 }
             }
         }
         for (path, id) in &active {
             self.resources.insert(path.clone(), id.clone());
+        }
+        // Never leave two live identities claiming one file: the newer ones
+        // are tombstoned with the reason (their curated relations stay, and
+        // show the identity as gone); nothing is merged into the kept one.
+        for (path, id) in duplicates {
+            let entity = self.must(&id)?;
+            let kept = active.get(&path).map(|k| k.to_string()).unwrap_or_default();
+            self.tombstone(&entity, format!("a second identity for {path}; {kept} is this file's resource"));
+            let mut bindings = self.bindings_of(&id)?;
+            for b in bindings.iter_mut() {
+                b.state = BindingState::Missing;
+                b.detail = Some(format!("Another identity ({kept}) is the resource of {path}."));
+            }
+            self.set_bindings(&id, bindings);
+            for r in self.store.relations_from(&id)? {
+                if matches!(r.origin, Origin::Extracted { .. }) {
+                    self.unrelate(&r);
+                }
+            }
+            for r in self.store.relations_to(&id)? {
+                if r.kind == RelationKind::Contains && matches!(r.origin, Origin::Extracted { .. }) {
+                    self.unrelate(&r);
+                }
+            }
+            self.semantic = true;
         }
         if fresh.len() > 64 {
             // Many files to index: read all bindings once instead of per file.
@@ -1627,6 +1676,7 @@ impl<'a> Planner<'a> {
             delta: self.delta,
             report: self.report,
             semantic,
+            clear_pending: None,
         }
     }
 }

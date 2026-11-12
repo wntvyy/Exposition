@@ -283,6 +283,7 @@ impl Driver {
         if !self.attached {
             return;
         }
+        let mut marked: Vec<WorkspacePath> = Vec::new();
         for p in paths {
             // The graph's own storage, run records, and tooling/cache folders
             // never hold project resources: changes there need no pass.
@@ -292,10 +293,14 @@ impl Driver {
             if crate::service::is_graph_storage(&p) || excluded_dir {
                 continue;
             }
+            marked.push(p.clone());
             self.paths.insert(p);
         }
         if self.paths.is_empty() && !self.full {
             return;
+        }
+        if !marked.is_empty() {
+            let _ = self.graph.mark_pending(&marked);
         }
         if self.paths.len() > FULL_SCAN_THRESHOLD {
             self.full = true;

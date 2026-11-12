@@ -145,6 +145,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     ALTER TABLE coverage ADD COLUMN size INTEGER;
     ALTER TABLE coverage ADD COLUMN modified_ms INTEGER;
     ALTER TABLE coverage ADD COLUMN file_identity TEXT;
+    ALTER TABLE coverage ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
     CREATE TABLE source_index (
         path TEXT PRIMARY KEY,
         content_hash TEXT NOT NULL,
@@ -186,7 +187,7 @@ fn expected_objects(version: u32) -> Vec<(&'static str, &'static str)> {
 fn expected_columns(version: u32) -> Vec<(&'static str, Vec<&'static str>)> {
     let mut coverage = vec!["path", "extractor", "state", "unresolved", "detail", "content_hash", "indexed_at"];
     if version >= 2 {
-        coverage.extend(["size", "modified_ms", "file_identity"]);
+        coverage.extend(["size", "modified_ms", "file_identity", "pending"]);
     }
     let mut tables = vec![
         ("meta", vec!["key", "value"]),
@@ -837,10 +838,10 @@ impl GraphStore {
             "SELECT {COVERAGE_COLUMNS}, size, modified_ms, file_identity FROM coverage LIMIT 500000"
         ))?;
         let rows = stmt.query_map([], |r| {
-            let coverage = read_coverage(r)?;
-            let size: Option<i64> = r.get(6)?;
-            let modified: Option<i64> = r.get(7)?;
-            let identity: Option<String> = r.get(8)?;
+            let coverage = read_coverage_stored(r)?;
+            let size: Option<i64> = r.get(7)?;
+            let modified: Option<i64> = r.get(8)?;
+            let identity: Option<String> = r.get(9)?;
             Ok((coverage, size, modified, identity))
         })?;
         let mut out = BTreeMap::new();
@@ -870,8 +871,8 @@ impl GraphStore {
         for prefix in prefixes {
             let like = format!("{}/%", escape_like(prefix.as_str()));
             let rows = stmt.query_map(params![prefix.as_str(), like], |r| {
-                let coverage = read_coverage(r)?;
-                Ok((coverage, r.get::<_, Option<i64>>(6)?, r.get::<_, Option<i64>>(7)?, r.get::<_, Option<String>>(8)?))
+                let coverage = read_coverage_stored(r)?;
+                Ok((coverage, r.get::<_, Option<i64>>(7)?, r.get::<_, Option<i64>>(8)?, r.get::<_, Option<String>>(9)?))
             })?;
             for row in rows {
                 let (coverage, size, modified, identity) = row?;
@@ -980,10 +981,19 @@ impl GraphStore {
         Ok(out)
     }
 
+    /// Coverage as last reconciled, ignoring a pending change (the
+    /// reconciler's own view; others use [`Self::coverage`]).
+    pub fn coverage_stored(&self, path: &WorkspacePath) -> StoreResult<Option<ResourceCoverage>> {
+        let mut stmt = self.conn.prepare_cached(&format!("SELECT {COVERAGE_COLUMNS} FROM coverage WHERE path = ?1"))?;
+        stmt.query_row([path.as_str()], read_coverage_stored).optional()?.transpose()
+    }
+
     pub fn coverage_summary(&self) -> StoreResult<CoverageSummary> {
         let mut summary = CoverageSummary::default();
-        let mut stmt =
-            self.conn.prepare_cached("SELECT state, count(*), sum(unresolved) FROM coverage GROUP BY state")?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT CASE WHEN pending > 0 THEN 'pending' ELSE state END AS s, count(*), sum(unresolved)
+             FROM coverage GROUP BY s",
+        )?;
         let rows =
             stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?)))?;
         for row in rows {
@@ -1085,6 +1095,24 @@ impl<'a> Writer<'a> {
     pub fn entity(&self, id: &EntityId) -> StoreResult<Option<Entity>> {
         let mut stmt = self.tx.prepare_cached(&format!("SELECT {ENTITY_COLUMNS} FROM entities WHERE id = ?1"))?;
         stmt.query_row([id.as_str()], read_entity).optional()?.transpose()
+    }
+
+    /// Current bindings of an entity (inside the transaction).
+    pub fn bindings(&self, entity: &EntityId) -> StoreResult<Vec<SourceBinding>> {
+        let mut stmt = self.tx.prepare_cached(&format!(
+            "SELECT {BINDING_COLUMNS} FROM bindings WHERE entity_id = ?1 ORDER BY ordinal LIMIT 64"
+        ))?;
+        let rows = stmt.query_map([entity.as_str()], read_binding)?;
+        rows.map(|r| r?).collect()
+    }
+
+    /// The live resource whose key is `key` (its workspace path), if any.
+    pub fn live_resource(&self, key: &str) -> StoreResult<Option<Entity>> {
+        let mut stmt = self.tx.prepare_cached(&format!(
+            "SELECT {ENTITY_COLUMNS} FROM entities WHERE kind = 'resource' AND key = ?1 AND lifecycle != 'tombstoned'
+             ORDER BY created_at, id LIMIT 1"
+        ))?;
+        stmt.query_row([key], read_entity).optional()?.transpose()
     }
 
     pub fn relation(&self, id: &RelationId) -> StoreResult<Option<Relation>> {
@@ -1234,6 +1262,41 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
+    /// Mark files (and everything under folders) as changed and not yet
+    /// reconciled. `token` increases monotonically; a pass clears only marks
+    /// made before it started.
+    pub fn mark_pending(&self, paths: &[WorkspacePath], token: u64) -> StoreResult<usize> {
+        let mut n = 0;
+        for p in paths {
+            n += self.tx.execute(
+                "UPDATE coverage SET pending = ?3 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+                params![p.as_str(), format!("{}/%", escape_like(p.as_str())), token as i64],
+            )?;
+        }
+        Ok(n)
+    }
+
+    /// Clear pending marks made up to `token` for the files a pass covered
+    /// (`None`: every file).
+    pub fn clear_pending(&self, prefixes: Option<&[WorkspacePath]>, token: u64) -> StoreResult<()> {
+        match prefixes {
+            None => {
+                self.tx
+                    .execute("UPDATE coverage SET pending = 0 WHERE pending > 0 AND pending <= ?1", [token as i64])?;
+            }
+            Some(prefixes) => {
+                for p in prefixes {
+                    self.tx.execute(
+                        "UPDATE coverage SET pending = 0 WHERE pending > 0 AND pending <= ?3
+                         AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+                        params![p.as_str(), format!("{}/%", escape_like(p.as_str())), token as i64],
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn remove_coverage(&self, path: &WorkspacePath) -> StoreResult<()> {
         self.tx.execute("DELETE FROM coverage WHERE path = ?1", [path.as_str()])?;
         Ok(())
@@ -1337,7 +1400,10 @@ pub struct IndexRecord {
 
 // ----- row decoding -----
 
-const COVERAGE_COLUMNS: &str = "path, extractor, state, unresolved, detail, content_hash";
+/// The last column, `pending`, is a change token: non-zero while the file
+/// changed and has not been reconciled since (read as `CoverageState::Pending`
+/// by [`GraphStore::coverage`]; the stored state is kept underneath).
+const COVERAGE_COLUMNS: &str = "path, extractor, state, unresolved, detail, content_hash, pending";
 
 const ENTITY_COLUMNS: &str =
     "id, kind, roles, label, key, lifecycle, tombstone_reason, revision, origin, attributes, created_at, updated_at";
@@ -1473,7 +1539,19 @@ fn read_relation(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<Relation>> {
     })())
 }
 
+/// Coverage as others see it: a pending change reads as `Pending`.
 fn read_coverage(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<ResourceCoverage>> {
+    let pending: i64 = r.get(6)?;
+    Ok(read_coverage_stored(r)?.map(|mut c| {
+        if pending > 0 {
+            c.state = CoverageState::Pending;
+        }
+        c
+    }))
+}
+
+/// Coverage as last reconciled.
+fn read_coverage_stored(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<ResourceCoverage>> {
     let path: String = r.get(0)?;
     let extractor: Option<String> = r.get(1)?;
     let state: String = r.get(2)?;
@@ -1702,6 +1780,36 @@ mod tests {
             );
             assert_eq!(std::fs::read(&path).unwrap(), before, "{name}: a refused database is left unchanged");
         }
+    }
+
+    #[test]
+    fn a_pass_clears_only_pending_marks_made_before_it_started() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let path = WorkspacePath::parse("a.md").unwrap();
+        let coverage = ResourceCoverage {
+            path: path.clone(),
+            extractor: Some("markdown/1".into()),
+            state: CoverageState::Complete,
+            unresolved: 0,
+            detail: None,
+            content_hash: Some("h".into()),
+        };
+        let w = Writer::new(store.transaction().unwrap());
+        w.set_coverage(&coverage).unwrap();
+        w.mark_pending(std::slice::from_ref(&path), 10).unwrap();
+        w.commit().unwrap();
+        assert_eq!(store.coverage(&path).unwrap().unwrap().state, CoverageState::Pending);
+        assert_eq!(store.coverage_stored(&path).unwrap().unwrap().state, CoverageState::Complete);
+        // A pass that started before the mark (token 9) leaves it.
+        let w = Writer::new(store.transaction().unwrap());
+        w.clear_pending(None, 9).unwrap();
+        w.commit().unwrap();
+        assert_eq!(store.coverage(&path).unwrap().unwrap().state, CoverageState::Pending);
+        let w = Writer::new(store.transaction().unwrap());
+        w.clear_pending(Some(std::slice::from_ref(&path)), 10).unwrap();
+        w.commit().unwrap();
+        assert_eq!(store.coverage(&path).unwrap().unwrap().state, CoverageState::Complete);
+        assert_eq!(store.coverage_summary().unwrap().pending, 0);
     }
 
     #[test]

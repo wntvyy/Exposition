@@ -645,3 +645,66 @@ fn attachment_blocks_admit_their_artifact_and_undo_removes_the_observed_use() {
     assert_eq!(uses(&p), 0);
     assert_eq!(p.entity(&artifact.id).lifecycle, Lifecycle::Active, "the retained artifact stays a resource");
 }
+
+fn coverage_state(p: &Project, path: &str) -> CoverageState {
+    p.svc
+        .inspect_at_source(&InspectAtSourceRequest { path: wp(path), offset: None, revision: None })
+        .unwrap()
+        .coverage
+        .expect("indexed")
+        .state
+}
+
+#[test]
+fn changed_paths_read_as_pending_until_a_pass_reconciles_them() {
+    let p = project(&[("a.md", "# A\n"), ("b.md", "# B\n"), ("dir/c.md", "# C\n")]);
+    p.full();
+    assert_eq!(coverage_state(&p, "a.md"), CoverageState::Complete);
+    p.svc.mark_pending(&[wp("a.md")]).unwrap();
+    assert_eq!(coverage_state(&p, "a.md"), CoverageState::Pending, "visible to agents through coverage");
+    assert_eq!(coverage_state(&p, "b.md"), CoverageState::Complete);
+    assert_eq!(p.svc.status().coverage.pending, 1);
+    // An unchanged file: the pass clears the mark and keeps the stored state.
+    p.paths(&["a.md"]);
+    assert_eq!(coverage_state(&p, "a.md"), CoverageState::Complete);
+    // A changed file: reconciled from its new content.
+    write(&p.root, "b.md", "# B, edited\n");
+    p.svc.mark_pending(&[wp("b.md")]).unwrap();
+    assert_eq!(coverage_state(&p, "b.md"), CoverageState::Pending);
+    p.paths(&["b.md"]);
+    assert_eq!(coverage_state(&p, "b.md"), CoverageState::Complete);
+    // A folder mark covers everything beneath it.
+    p.svc.mark_pending(&[wp("dir")]).unwrap();
+    assert_eq!(coverage_state(&p, "dir/c.md"), CoverageState::Pending);
+    p.full();
+    assert_eq!(coverage_state(&p, "dir/c.md"), CoverageState::Complete);
+    assert_eq!(p.svc.status().coverage.pending, 0);
+}
+
+#[test]
+fn two_live_identities_for_one_file_are_never_left_in_place() {
+    let p = project(&[("notes.md", "# Notes\n")]);
+    p.full();
+    let kept = p.resource("notes.md").unwrap();
+    // A second identity written around the service's checks (an old graph, a hand-made batch).
+    let mut dup = kept.clone();
+    dup.id = EntityId::mint();
+    dup.created_at_ms = kept.created_at_ms + 1;
+    p.svc
+        .with_store(|s| {
+            let w = exposition_graph::store::Writer::new(s.transaction()?);
+            w.put_entity(&dup)?;
+            w.commit()?;
+            Ok(())
+        })
+        .unwrap();
+    p.svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: true }).unwrap();
+    let live: Vec<Entity> =
+        p.all(EntityKind::Resource).into_iter().filter(|e| e.key.as_deref() == Some("notes.md")).collect();
+    let alive: Vec<&Entity> = live.iter().filter(|e| e.lifecycle != Lifecycle::Tombstoned).collect();
+    assert_eq!(alive.len(), 1);
+    assert_eq!(alive[0].id, kept.id, "the oldest identity stays the file's resource");
+    let gone = p.entity(&dup.id);
+    assert_eq!(gone.lifecycle, Lifecycle::Tombstoned);
+    assert!(gone.tombstone_reason.unwrap().contains(kept.id.as_str()));
+}

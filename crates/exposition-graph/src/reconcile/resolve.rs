@@ -439,7 +439,7 @@ impl Planner<'_> {
     ) -> StoreResult<()> {
         let (mut coverage, stamp) = match self.base_coverage.get(path) {
             Some((c, s)) => (c.clone(), Some(s.clone())),
-            None => match self.store.coverage(path)? {
+            None => match self.store.coverage_stored(path)? {
                 Some(c) => (c, None),
                 None => return Ok(()),
             },

@@ -34,6 +34,9 @@ pub struct Run {
     pub conflict: bool,
     pub delta: GraphDelta,
     pub created: Vec<CreatedEntity>,
+    /// Something was written that the delta does not list (e.g. only
+    /// bindings changed): the transaction must still be committed.
+    pub wrote: bool,
 }
 
 impl Run {
@@ -459,6 +462,7 @@ fn finish(cx: Ctx<'_, '_>) -> Run {
         conflict: cx.conflict,
         delta: cx.delta,
         created: cx.created,
+        wrote: false,
     }
 }
 
@@ -740,6 +744,7 @@ pub fn run_batch(w: &Writer<'_>, origin: &Origin, batch: &ServiceBatch) -> Resul
             pending_contained: BTreeSet::new(),
         };
         let mut ids: Vec<Entity> = Vec::with_capacity(batch.entities.len());
+        let mut wrote_bindings = false;
         for (i, up) in batch.entities.iter().enumerate() {
             if let Err(m) = check_label(&up.label) {
                 return Ok(Err(format!("entity {i}: {m}")));
@@ -750,7 +755,13 @@ pub fn run_batch(w: &Writer<'_>, origin: &Origin, batch: &ServiceBatch) -> Resul
             if up.kind != EntityKind::Resource && !up.roles.is_empty() {
                 return Ok(Err(format!("entity {i}: only resources have roles")));
             }
-            let entity = match &up.id {
+            // One identity per file: a new resource whose key (workspace
+            // path) already has a live resource updates that resource.
+            let target = match (&up.id, up.kind, &up.key) {
+                (None, EntityKind::Resource, Some(key)) => w.live_resource(key)?.map(|e| e.id),
+                (id, _, _) => id.clone(),
+            };
+            let entity = match &target {
                 Some(id) => {
                     let Some(mut e) = w.entity(id)? else { return Ok(Err(format!("entity {id} does not exist"))) };
                     if e.kind != up.kind {
@@ -805,7 +816,16 @@ pub fn run_batch(w: &Writer<'_>, origin: &Origin, batch: &ServiceBatch) -> Resul
             if let Some(bindings) = &up.bindings {
                 let bindings: Vec<SourceBinding> =
                     bindings.iter().map(|b| SourceBinding { entity: entity.id.clone(), ..b.clone() }).collect();
-                w.set_bindings(&entity.id, &bindings)?;
+                if w.bindings(&entity.id)? != bindings {
+                    w.set_bindings(&entity.id, &bindings)?;
+                    // A binding change (state, range, version) is graph state
+                    // that freshness consumers must see.
+                    if !cx.delta.entities_added.contains(&entity.id) && !cx.delta.entities_removed.contains(&entity.id)
+                    {
+                        cx.mark_entity(|d| &mut d.entities_updated, &entity.id);
+                    }
+                    wrote_bindings = true;
+                }
             }
             ids.push(entity);
         }
@@ -864,7 +884,9 @@ pub fn run_batch(w: &Writer<'_>, origin: &Origin, batch: &ServiceBatch) -> Resul
             w.remove_coverage(p)?;
         }
         cx.created = ids.iter().map(|e| CreatedEntity { temp_id: String::new(), id: e.id.clone() }).collect();
-        Ok(Ok((finish(cx), relation_ids)))
+        let mut run = finish(cx);
+        run.wrote = wrote_bindings;
+        Ok(Ok((run, relation_ids)))
     })();
     match run {
         Ok(r) => r,

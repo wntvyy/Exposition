@@ -124,6 +124,8 @@ pub struct GraphService {
     /// When this service started: journal records older than this that are
     /// still pending were interrupted by an earlier session.
     started_at_ms: u64,
+    /// Monotonic change tokens for pending marks (see `mark_pending`).
+    change_token: AtomicU64,
 }
 
 impl GraphService {
@@ -145,6 +147,7 @@ impl GraphService {
             overlay: Mutex::new(BTreeMap::new()),
             generation: AtomicU64::new(0),
             started_at_ms: now_ms(),
+            change_token: AtomicU64::new(now_ms()),
         })
     }
 
@@ -366,6 +369,38 @@ impl GraphService {
             Err(_) => self.set_freshness(GraphFreshness { state: SyncState::Pending, ..before }),
         }
         result
+    }
+
+    /// A new change token (strictly increasing, above every earlier
+    /// session's tokens unless the clock went back).
+    pub(crate) fn next_change_token(&self) -> u64 {
+        let now = now_ms();
+        let mut current = self.change_token.load(Ordering::SeqCst);
+        loop {
+            let next = current.max(now) + 1;
+            match self.change_token.compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return next,
+                Err(seen) => current = seen,
+            }
+        }
+    }
+
+    /// Mark changed files (or folders: everything beneath) as pending
+    /// reconciliation, observable as `CoverageState::Pending` through
+    /// `GraphStore::coverage` until a pass that started after the mark has
+    /// reconciled them. Files the graph has not indexed yet have no coverage
+    /// (and no resource) until then.
+    pub fn mark_pending(&self, paths: &[WorkspacePath]) -> GraphResult<usize> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        let token = self.next_change_token();
+        self.with_store(|store| {
+            let w = Writer::new(store.transaction()?);
+            let n = w.mark_pending(paths, token)?;
+            w.commit()?;
+            Ok(n)
+        })
     }
 
     /// The reconciliation state, unless a pass holds it right now.
@@ -1023,6 +1058,7 @@ impl GraphService {
                 validate::run_batch(&w, origin, batch).map_err(|m| GraphError::new("graph.invalidBatch", m))?;
             let entity_ids: Vec<EntityId> = run.created.iter().map(|c| c.id.clone()).collect();
             if run.delta.is_empty()
+                && !run.wrote
                 && batch.evidence.is_empty()
                 && batch.coverage.is_empty()
                 && batch.remove_coverage.is_empty()
