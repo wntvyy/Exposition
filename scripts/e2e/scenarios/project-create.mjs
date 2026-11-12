@@ -209,8 +209,8 @@ export default async function projectCreate({ launchApp, artifactsDir, assert })
     });
     const traversal = { ...paperBlueprint, files: [...paperBlueprint.files, { path: "../escape.txt", content: "x" }] };
     const preview = await invoke(page, "project_blueprint_validate", { blueprint: JSON.stringify(traversal) });
-    assert.equal(preview.validation.valid, false);
-    assert.ok(preview.validation.diagnostics.some((d) => d.code === "blueprint.path" && /would leave the project folder/.test(d.message)));
+    assert.equal(preview.valid, false);
+    assert.ok(preview.diagnostics.some((d) => d.code === "blueprint.path" && /would leave the project folder/.test(d.message)));
     const hostileRoot = join(parent, "hostile");
     let refused = await invokeError(page, "project_create", { request: { destination: hostileRoot, blueprint: JSON.stringify(traversal) } });
     assert.equal(refused.error?.code, "blueprint.invalid");
