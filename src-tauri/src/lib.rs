@@ -174,6 +174,8 @@ pub fn run() {
             workflows::workflow_import,
             workflows::workflow_list,
             workflows::workflow_get,
+            agents::agents_task_keep_investigation,
+            agents::agents_task_create_generation,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

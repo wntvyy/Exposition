@@ -365,6 +365,22 @@ pub struct CreateTaskRequest {
     pub budgets: Option<Budgets>,
 }
 
+/// Request to start the generation task of a newly created project.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationTaskRequest {
+    /// The objective the user described.
+    pub objective: String,
+    /// The new project's folder (already created, opened, and its graph attached).
+    pub workspace_root: String,
+    pub permission: PermissionProfile,
+    /// `None` keeps process execution disabled.
+    pub execution: Option<ExecutionMode>,
+    pub consent: Option<ContextConsent>,
+    pub budgets: Option<Budgets>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
@@ -482,6 +498,8 @@ pub struct TaskDetail {
     pub summary: TaskSummary,
     pub transcript: Vec<TranscriptItem>,
     pub approvals: Vec<ApprovalRequest>,
+    /// The task's graph record: its context, targets, proposals, investigation.
+    pub graph: crate::graph::TaskGraphInfo,
 }
 
 /// Events on the `agents:event` channel.

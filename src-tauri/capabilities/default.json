@@ -128,6 +128,8 @@
     "allow-workflow-save",
     "allow-workflow-import",
     "allow-workflow-list",
-    "allow-workflow-get"
+    "allow-workflow-get",
+    "allow-agents-task-keep-investigation",
+    "allow-agents-task-create-generation"
   ]
 }

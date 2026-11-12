@@ -67,7 +67,16 @@ function FileRow(props: {
 }
 
 /** Per-file review of a task's changes: Monaco diff, keep, revert. */
-export function ReviewView({ id, inEditor = false }: { id: TaskId; inEditor?: boolean }) {
+export function ReviewView({
+  id,
+  inEditor = false,
+  showBack = !inEditor,
+}: {
+  id: TaskId;
+  inEditor?: boolean;
+  /** The Agent view shows a way back to the task; the Agents page uses tabs. */
+  showBack?: boolean;
+}) {
   const version = useAgents((s) => s.reviewVersions[id] ?? 0);
   const task = useAgents((s) => s.details[id]?.summary ?? s.tasks.find((t) => t.id === id));
   const [review, setReview] = useState<TaskReview | null>(null);
@@ -118,7 +127,7 @@ export function ReviewView({ id, inEditor = false }: { id: TaskId; inEditor?: bo
   return (
     <article className="agents-stack" data-in-editor={inEditor || undefined} aria-label={`Review: ${title}`} data-testid="agents-review">
       <div className="agents-heading">
-        {!inEditor && <IconButton icon={ArrowLeft} size="sm" aria-label="Back to task" onPress={() => agents.show("task", id)} />}
+        {showBack && <IconButton icon={ArrowLeft} size="sm" aria-label="Back to task" onPress={() => agents.show("task", id)} />}
         <h3 className="agents-heading__title">Review: {title}</h3>
       </div>
       <div className="agents-row">

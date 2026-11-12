@@ -21,11 +21,12 @@ use crate::model::{
 };
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
-const MIGRATIONS: &[(i64, &str)] = &[(
-    1,
-    r#"
+const MIGRATIONS: &[(i64, &str)] = &[
+    (
+        1,
+        r#"
     CREATE TABLE tasks (
         id TEXT PRIMARY KEY,
         created_at INTEGER NOT NULL,
@@ -98,7 +99,43 @@ const MIGRATIONS: &[(i64, &str)] = &[(
         value TEXT NOT NULL
     );
     "#,
-)];
+    ),
+    // The project graph: the graph a task is bound to, the graph contexts
+    // attached to its runs, the files it resolved to graph identities, the
+    // graph changes it proposed, and the investigation the user kept.
+    (
+        2,
+        r#"
+    CREATE TABLE task_graph (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        project TEXT,
+        investigation TEXT,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE task_graph_contexts (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        context TEXT NOT NULL,
+        PRIMARY KEY (task_id, seq)
+    );
+    CREATE TABLE task_targets (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        record TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (task_id, path)
+    );
+    CREATE TABLE task_proposals (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        tool_use_id TEXT NOT NULL,
+        record TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (task_id, tool_use_id)
+    );
+    "#,
+    ),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("task database error: {0}")]
@@ -624,6 +661,134 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    // ---- project graph
+
+    /// The project graph a task is bound to (recorded with its first context).
+    pub fn graph_project(&self, task: &TaskId) -> StoreResult<Option<exposition_graph::ProjectId>> {
+        let raw: Option<Option<String>> = self
+            .lock()
+            .query_row("SELECT project FROM task_graph WHERE task_id = ?1", [&task.0], |r| r.get(0))
+            .optional()?;
+        raw.flatten().map(|p| exposition_graph::ProjectId::parse(&p).map_err(|e| StoreError(e.to_string()))).transpose()
+    }
+
+    pub fn investigation(&self, task: &TaskId) -> StoreResult<Option<exposition_graph::EntityId>> {
+        let raw: Option<Option<String>> = self
+            .lock()
+            .query_row("SELECT investigation FROM task_graph WHERE task_id = ?1", [&task.0], |r| r.get(0))
+            .optional()?;
+        raw.flatten().map(|p| exposition_graph::EntityId::parse(&p).map_err(|e| StoreError(e.to_string()))).transpose()
+    }
+
+    pub fn set_investigation(&self, task: &TaskId, entity: &exposition_graph::EntityId) -> StoreResult<()> {
+        self.lock().execute(
+            "INSERT INTO task_graph (task_id, investigation, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(task_id) DO UPDATE SET investigation = excluded.investigation, updated_at = excluded.updated_at",
+            params![task.0, entity.as_str(), i(now_ms())],
+        )?;
+        Ok(())
+    }
+
+    /// Record a graph context attached to a run; binds the task to the
+    /// context's project graph the first time.
+    pub fn insert_graph_context(&self, task: &TaskId, context: &crate::graph::GraphContext) -> StoreResult<()> {
+        let now = i(now_ms());
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let seq: i64 = tx.query_row(
+            "SELECT coalesce(max(seq), 0) + 1 FROM task_graph_contexts WHERE task_id = ?1",
+            [&task.0],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO task_graph_contexts (task_id, seq, created_at, context) VALUES (?1, ?2, ?3, ?4)",
+            params![task.0, seq, now, to_json(context)?],
+        )?;
+        tx.execute(
+            "INSERT INTO task_graph (task_id, project, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(task_id) DO UPDATE SET project = coalesce(task_graph.project, excluded.project),
+             updated_at = excluded.updated_at",
+            params![task.0, context.project.as_str(), now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The latest graph context of a task and how many were attached.
+    pub fn graph_context(&self, task: &TaskId) -> StoreResult<(Option<crate::graph::GraphContext>, u32)> {
+        let conn = self.lock();
+        let count: i64 =
+            conn.query_row("SELECT count(*) FROM task_graph_contexts WHERE task_id = ?1", [&task.0], |r| r.get(0))?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT context FROM task_graph_contexts WHERE task_id = ?1 ORDER BY seq DESC LIMIT 1",
+                [&task.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok((raw.map(|r| from_json(&r)).transpose()?, count as u32))
+    }
+
+    /// Record (or merge into) a task target.
+    pub fn upsert_target(&self, task: &TaskId, target: &crate::graph::TaskTarget) -> StoreResult<()> {
+        let mut merged = target.clone();
+        if let Some(existing) = self.targets(task)?.into_iter().find(|t| t.path == target.path) {
+            let mut uses = existing.uses;
+            for u in &target.uses {
+                if !uses.contains(u) {
+                    uses.push(*u);
+                }
+            }
+            uses.sort();
+            merged.uses = uses;
+            merged.entity = target.entity.clone().or(existing.entity);
+            merged.operation = target.operation.clone().or(existing.operation);
+        }
+        self.lock().execute(
+            "INSERT INTO task_targets (task_id, path, record, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(task_id, path) DO UPDATE SET record = excluded.record, updated_at = excluded.updated_at",
+            params![task.0, merged.path.as_str(), to_json(&merged)?, i(merged.updated_at_ms)],
+        )?;
+        Ok(())
+    }
+
+    pub fn targets(&self, task: &TaskId) -> StoreResult<Vec<crate::graph::TaskTarget>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT record FROM task_targets WHERE task_id = ?1 ORDER BY path LIMIT 2000")?;
+        let raws = stmt.query_map([&task.0], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        raws.iter().map(|r| from_json(r)).collect()
+    }
+
+    pub fn upsert_proposal(&self, task: &TaskId, proposal: &crate::graph::TaskProposal) -> StoreResult<()> {
+        self.lock().execute(
+            "INSERT INTO task_proposals (task_id, tool_use_id, record, created_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(task_id, tool_use_id) DO UPDATE SET record = excluded.record",
+            params![task.0, proposal.tool_use_id, to_json(proposal)?, i(proposal.created_at_ms)],
+        )?;
+        Ok(())
+    }
+
+    pub fn proposal(&self, task: &TaskId, tool_use_id: &str) -> StoreResult<Option<crate::graph::TaskProposal>> {
+        let raw: Option<String> = self
+            .lock()
+            .query_row(
+                "SELECT record FROM task_proposals WHERE task_id = ?1 AND tool_use_id = ?2",
+                params![task.0, tool_use_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        raw.map(|r| from_json(&r)).transpose()
+    }
+
+    pub fn proposals(&self, task: &TaskId) -> StoreResult<Vec<crate::graph::TaskProposal>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT record FROM task_proposals WHERE task_id = ?1 ORDER BY created_at, tool_use_id LIMIT 1000",
+        )?;
+        let raws = stmt.query_map([&task.0], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        raws.iter().map(|r| from_json(r)).collect()
     }
 }
 

@@ -10,6 +10,9 @@ import type { ProviderStatus } from "../../bindings/ProviderStatus";
 import type { TaskDetail } from "../../bindings/TaskDetail";
 import type { TaskSummary } from "../../bindings/TaskSummary";
 import type { ToolCallStatus } from "../../bindings/ToolCallStatus";
+import type { TaskGraphInfo } from "../../bindings/TaskGraphInfo";
+
+const NO_GRAPH: TaskGraphInfo = { project: null, context: null, contexts: 0, targets: [], proposals: [], investigation: null };
 
 const ipc = vi.hoisted(() => ({
   agentsTaskDetail: vi.fn(),
@@ -115,7 +118,7 @@ describe("tool-call states", () => {
 
 describe("the streaming draft follows the call through approval", () => {
   function renderTask(status: TaskSummary["status"]) {
-    const detail: TaskDetail = { summary: summary({ status }), transcript: [], approvals: [] };
+    const detail: TaskDetail = { summary: summary({ status }), transcript: [], approvals: [], graph: NO_GRAPH };
     ipc.agentsTaskDetail.mockResolvedValue(detail);
     useAgents.setState({ details: { "task-1": detail }, tasks: [detail.summary] });
     return render(<TaskView id="task-1" />);
