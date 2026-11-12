@@ -21,7 +21,13 @@
 //!   backend is unavailable.
 //! - **Containment.** Windows job objects (kill-on-close, assigned while the
 //!   child is suspended) or Unix process groups ([`process`]). Cancel, timeout,
-//!   primary-process exit, and application exit kill the whole tree.
+//!   primary-process exit, and application exit kill the whole tree of
+//!   processes the job starts itself. Trusted native code runs with the user's
+//!   privileges and can still start processes Exposition cannot track (e.g.
+//!   through WMI or the task scheduler); only restricted execution isolates.
+//! - **Robustness.** Locks are poison-tolerant and supervision catches panics:
+//!   a bug in the service ends the job with `Terminated` and releases its
+//!   concurrency slot instead of wedging it.
 //! - **Bounded, redacted output** ([`log`]) with rate-limited events.
 //! - **Interactive jobs** for protocol sessions (kernel helper, language
 //!   servers): stdin kept open, stdout delivered to the owner as ordered bytes.
