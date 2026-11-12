@@ -31,7 +31,7 @@
 //!   served from the build's frozen output through [`TexPageSession`].
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -157,6 +157,8 @@ pub enum TexServiceError {
     NoSuchPage(u32),
     #[error("invalid scale {0}")]
     InvalidScale(f32),
+    #[error("invalid export destination: {0}")]
+    InvalidDestination(String),
     #[error("{0}")]
     Io(String),
 }
@@ -190,8 +192,9 @@ struct Inner {
     idle_full_delay: Option<Duration>,
     keep_builds: usize,
     targets: Mutex<HashMap<TexTargetRef, Arc<Target>>>,
-    /// Entries watched by page views, with the target each builds.
-    watched: Mutex<BTreeMap<WorkspacePath, BuildTarget>>,
+    /// Entries watched by page views: the target each builds and how many
+    /// views watch it.
+    watched: Mutex<BTreeMap<WorkspacePath, (BuildTarget, usize)>>,
     builds: Mutex<BuildStore>,
     events: broadcast::Sender<TexEvent>,
     counter: std::sync::atomic::AtomicU64,
@@ -416,15 +419,27 @@ impl TexService {
         Ok(map)
     }
 
-    /// Write a build's PDF to `destination`, or next to its entry in the
-    /// workspace (atomically replaced).
+    /// Write a build's PDF to `destination` (an absolute `.pdf` path in an
+    /// existing folder), or next to its entry in the workspace (atomically
+    /// replaced). Never replaces an input of the build, an open document, or
+    /// an existing file that is not a PDF.
     pub fn export_pdf(&self, id: &BuildId, destination: Option<PathBuf>) -> Result<ExportArtifact, TexServiceError> {
         let stored = self.build(id).ok_or(TexServiceError::UnknownBuild)?;
         let session = stored.session()?;
         let target = &stored.summary.result.target;
+        let invalid = |message: &str| TexServiceError::InvalidDestination(message.into());
         let path = match destination {
-            Some(path) if path.is_absolute() => path,
-            Some(_) => return Err(TexServiceError::Io("the export destination must be an absolute path".into())),
+            Some(path) => {
+                let pdf = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+                if !path.is_absolute() || !pdf {
+                    return Err(invalid("an absolute .pdf path is required"));
+                }
+                let parent = path
+                    .parent()
+                    .filter(|p| p.is_dir())
+                    .ok_or_else(|| invalid("the destination folder does not exist"))?;
+                parent.join(path.file_name().ok_or_else(|| invalid("an absolute .pdf path is required"))?)
+            }
             None => {
                 let root = self.open_root()?;
                 let stem = target.entry.file_name().rsplit_once('.').map_or(target.entry.file_name(), |(s, _)| s);
@@ -433,6 +448,7 @@ impl TexService {
                 dir.join(format!("{stem}.pdf"))
             }
         };
+        self.check_export_destination(&stored, &path)?;
         let tmp = path.with_extension(format!("pdf.{}.tmp", std::process::id()));
         std::fs::write(&tmp, &session.pdf_bytes).and_then(|()| std::fs::rename(&tmp, &path)).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
@@ -443,6 +459,34 @@ impl TexService {
             path: path.display().to_string(),
             content_hash: crate::compile::hex_sha256(&session.pdf_bytes),
         })
+    }
+
+    /// An existing destination must be a PDF that is neither an input of the
+    /// build nor an open document (a `.pdf` figure the document includes is a
+    /// source file).
+    fn check_export_destination(&self, stored: &StoredBuild, path: &Path) -> Result<(), TexServiceError> {
+        let invalid = |message: &str| TexServiceError::InvalidDestination(message.into());
+        let Ok(meta) = std::fs::symlink_metadata(path) else { return Ok(()) };
+        if !meta.is_file() {
+            return Err(invalid("the destination exists and is not a file"));
+        }
+        let mut head = [0u8; 5];
+        let is_pdf = std::fs::File::open(path).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head)).is_ok()
+            && &head == b"%PDF-";
+        if !is_pdf {
+            return Err(invalid("refusing to replace a file that is not a PDF"));
+        }
+        let canonical = |p: &Path| p.canonicalize().ok();
+        let destination = canonical(path);
+        let root = self.open_root().ok();
+        let in_workspace = |p: &WorkspacePath| root.as_ref().map(|r| p.components().fold(r.clone(), |a, c| a.join(c)));
+        let inputs = stored.build.snapshot.iter().flat_map(|s| s.files.keys());
+        let open = self.inner.workspace.documents().list().into_iter().filter_map(|d| d.path);
+        let sources: Vec<WorkspacePath> = inputs.cloned().chain(open).collect();
+        if sources.iter().filter_map(in_workspace).any(|p| canonical(&p).is_some() && canonical(&p) == destination) {
+            return Err(invalid("refusing to replace a source file of the document"));
+        }
+        Ok(())
     }
 
     /// The text of `document` at `revision`, if a retained build compiled it.
@@ -483,14 +527,30 @@ impl TexService {
     /// build, if any.
     pub fn watch(&self, entry: &WorkspacePath) -> Result<(BuildTarget, Option<TexTargetStatus>), TexServiceError> {
         let target = self.target_for_entry(entry);
-        self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).insert(entry.clone(), target.clone());
+        {
+            let mut watched = self.inner.watched.lock().unwrap_or_else(|p| p.into_inner());
+            let watch = watched.entry(entry.clone()).or_insert_with(|| (target.clone(), 0));
+            *watch = (target.clone(), watch.1 + 1);
+        }
         let status = self.status(Some(&target));
         self.request_build(Some(target.clone()), TexBuildMode::Draft)?;
         Ok((target, status))
     }
 
+    /// One page view of `entry` closed; rebuilds stop when no view watches it.
     pub fn unwatch(&self, entry: &WorkspacePath) {
-        self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).remove(entry);
+        let mut watched = self.inner.watched.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((_, count)) = watched.get_mut(entry) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                watched.remove(entry);
+            }
+        }
+    }
+
+    /// The entries page views currently watch.
+    pub fn watched(&self) -> Vec<WorkspacePath> {
+        self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).keys().cloned().collect()
     }
 
     /// Queue draft builds of every watched entry (after a document or file
@@ -500,7 +560,11 @@ impl TexService {
             self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).keys().cloned().collect();
         for entry in entries {
             let target = self.target_for_entry(&entry);
-            self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).insert(entry, target.clone());
+            if let Some(watch) = self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&entry) {
+                watch.0 = target.clone();
+            } else {
+                continue; // unwatched meanwhile
+            }
             let _ = self.request_build(Some(target), TexBuildMode::Draft);
         }
     }

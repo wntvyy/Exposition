@@ -3,11 +3,15 @@
 //! Page input is translated into source patches that keep the document's
 //! structure intact:
 //!
-//! * **Typing** inserts [`latex::escape_insertion`] text for the mode at the
-//!   caret (prose escapes TeX specials; math turns typed Greek/operators into
-//!   macros). A control word just before the caret is terminated (`{}` in
-//!   prose, a space in math) so `\ldots` + `x` never becomes `\ldotsx`.
-//!   Newlines become a paragraph break in body prose and spaces elsewhere.
+//! * **Typing** inserts [`latex::escape_insertion_after`] text for the mode at
+//!   the caret (prose escapes TeX specials and inserts `<` `>` `|` `"` in
+//!   forms every font encoding shows as typed; math turns typed
+//!   Greek/operators into macros). A control word just before the caret is
+//!   terminated (`{}` in prose, a space in math) so `\ldots` + `x` never
+//!   becomes `\ldotsx`. Newlines become a paragraph break in body prose and
+//!   spaces elsewhere. Typing is accepted inside and next to words (with only
+//!   spaces or ties between on the same line, so also at a paragraph's end or
+//!   before a `%` comment), never on a blank line, in a comment, or in markup.
 //! * **Backspace/Delete** removes one rendered character: the source unit
 //!   behind it as a whole (`\'e`, `--`, `\alpha`, a single letter of a
 //!   ligature), or the whitespace/tie between two words. Deleting an
@@ -88,18 +92,17 @@ impl<'a> Context<'a> {
         let unit = match (ending, starting) {
             (Some(u), _) | (None, Some(u)) => u,
             (None, None) => {
-                // Between words: only whitespace/ties to both neighbouring units.
-                let prev = self.previous_unit(b)?;
-                let next = self.next_unit(b)?;
-                let quiet = |s: &str| s.chars().all(|c| c.is_whitespace() || c == '~') && !has_paragraph_break(s);
-                if prev.mode != Mode::Text
-                    || next.mode != Mode::Text
-                    || !quiet(&self.text[prev.range.end..b])
-                    || !quiet(&self.text[b..next.range.start])
-                {
-                    return None;
-                }
-                prev
+                // Next to a word, with only spaces/ties between on the same
+                // line: text typed here continues that word's paragraph (also
+                // before a line end, a paragraph break, or a `%` comment) or
+                // starts right before the next word. Never on a blank line.
+                let same_line_quiet = |s: &str| s.chars().all(|c| matches!(c, ' ' | '\t' | '~'));
+                let left = self
+                    .previous_unit(b)
+                    .filter(|u| u.mode == Mode::Text && same_line_quiet(&self.text[u.range.end..b]));
+                let right =
+                    self.next_unit(b).filter(|u| u.mode == Mode::Text && same_line_quiet(&self.text[b..u.range.start]));
+                left.or(right)?
             }
         };
         (unit.construct != Construct::Verbatim).then_some((Mode::Text, unit.construct))
@@ -197,7 +200,8 @@ impl TexInput {
                     replacement.push(' ');
                 }
             }
-            replacement.push_str(&latex::escape_insertion(part.trim_end_matches('\r'), mode));
+            let before = if i == 0 { cx.text[..s].chars().next_back() } else { Some('\n') };
+            replacement.push_str(&latex::escape_insertion_after(part.trim_end_matches('\r'), mode, before));
         }
         if replacement.is_empty() {
             return if s == e { Err(EditRefusal::NoChange) } else { self.delete_range(cx, s, e) };

@@ -535,7 +535,10 @@ export class PageSession {
     const trusted = await requestWorkspaceTrust(root);
     if (trusted && !this.disposed) {
       this.set({ untrustedRoot: null });
+      // Request the build again; watches are counted per view, and this view
+      // already holds one from when it opened.
       await commands.typesettingWatch(this.path).catch(() => null);
+      await commands.typesettingUnwatch(this.path).catch(() => null);
     }
     return trusted;
   }

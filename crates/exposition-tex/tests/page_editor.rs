@@ -35,10 +35,18 @@ const MAIN: &str = "main.tex";
 
 impl Env {
     fn new(engine: Engine) -> Option<Self> {
+        Self::with_main(engine, None)
+    }
+
+    /// The latex-basic project, with `main` as main.tex when given.
+    fn with_main(engine: Engine, main: Option<&str>) -> Option<Self> {
         common::toolchain(engine)?;
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let data = tempfile::tempdir().unwrap();
         let project = common::project_from_fixture("latex-basic");
+        if let Some(main) = main {
+            std::fs::write(project.path().join(MAIN), main).unwrap();
+        }
         let mut config = ExecutionConfig::new(data.path());
         config.too_broad_to_trust = Some(Vec::new());
         let exec = ExecutionService::with_config(config).unwrap();
@@ -179,5 +187,66 @@ fn latex_pages_are_edited_through_the_shared_core() {
         let revision = fourth.result.sources.iter().find(|s| s.path == path).unwrap().revision.unwrap();
         let outcome = env.edit(revision, TextRange::new(s - 3, s + 10), PageEditOp::DeleteBackward);
         assert!(matches!(outcome, PageEditOutcome::Refused { .. }), "{outcome:?}");
+    }
+}
+
+/// R-m23 F8, F10, F12: what is typed on the page shows and copies as typed.
+/// `<` `>` `|` `"` `$` typed on a pdfLaTeX (OT1) page are inserted in forms
+/// that typeset as typed and are mapped; accented letters copy as one
+/// character; with LuaLaTeX a base letter with a combining accent is mapped
+/// and characters the font lacks are reported (and still copy).
+#[test]
+fn typed_characters_show_and_copy_as_typed() {
+    for engine in [Engine::PdfLatex, Engine::LuaLatex] {
+        let lua = engine == Engine::LuaLatex;
+        let extra =
+            if lua { "Comb e\u{301} x \u{65E5}\u{672C} \u{05E9}\u{05DC}\u{05D5}\u{05DD} \u{1D538} end.\n" } else { "" };
+        let main = format!(
+            "\\documentclass{{article}}\n\\begin{{document}}\nTyped: X end.\n\nCaf\u{e9} na\\\"ive r\\'ole done.\n\n{extra}\\end{{document}}\n"
+        );
+        let Some(mut env) = Env::with_main(engine, Some(&main)) else { continue };
+        let path = WorkspacePath::parse(MAIN).unwrap();
+        let first = env.build(TexBuildMode::Draft);
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+
+        // Accented letters (UTF-8 and accent macros) copy as one character each.
+        let text = env.text();
+        let (s, e) = (offset_of(&text, "Caf"), offset_of(&text, " done"));
+        assert_eq!(squash(&env.map(&first).selection(&path, s, e).text), "Cafénaïveróle", "{engine:?}");
+
+        // Type the specials on the page, through the shared page-edit core.
+        let at = offset_of(&text, "X end");
+        let base = first.result.sources.iter().find(|s| s.path == path).unwrap().revision.unwrap();
+        let typed = "a<b>c|d \"q\" e$f g_h%#&{} x~y 2^3 a\\b ";
+        let outcome = env.edit(base, TextRange::empty(at), PageEditOp::Insert { text: typed.into() });
+        let PageEditOutcome::Applied { caret, .. } = outcome else { panic!("{outcome:?}") };
+        let second = env.build(TexBuildMode::Draft);
+        let shown = env.map(&second).selection(&path, at, caret).text;
+        // As typed, with LaTeX's curly quotes for `"`.
+        let expected = squash(typed).replace("\"q\"", "“q”");
+        assert_eq!(squash(&shown), expected, "{engine:?}: {:?}", &env.text()[at as usize..caret as usize]);
+
+        if lua {
+            let text = env.text();
+            let combining = offset_of(&text, "e\u{301}");
+            let map = env.map(&second);
+            assert_eq!(map.selection(&path, combining, combining + 2).text, "é");
+            let cjk = offset_of(&text, "\u{65E5}");
+            assert_eq!(map.selection(&path, cjk, cjk + 2).text, "\u{65E5}\u{672C}");
+            let warning = second
+                .result
+                .diagnostics
+                .iter()
+                .find(|d| d.message.starts_with("Missing characters"))
+                .unwrap_or_else(|| panic!("no missing-character warning: {:?}", second.result.diagnostics));
+            assert_eq!(warning.severity, exposition_core::build::Severity::Warning);
+            assert!(
+                warning.message.contains('\u{65E5}') && warning.message.contains('\u{1D538}'),
+                "{}",
+                warning.message
+            );
+            let location = warning.location.as_ref().expect("located");
+            assert_eq!((location.path.as_str(), location.range.start), (MAIN, cjk));
+        }
     }
 }

@@ -19,7 +19,9 @@ text: string | null,
  */
 charCode: number, 
 /**
- * Opaque identifier of the font program (stable within one PDF).
+ * Opaque identifier of the font program (stable within one PDF);
+ * [`RULE_FONT`] for a small rule drawn in place of a glyph (pdfLaTeX's
+ * OT1 `\_` is a 0.3 em rule).
  */
 font: number, 
 /**

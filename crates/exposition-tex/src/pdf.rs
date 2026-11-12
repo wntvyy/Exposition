@@ -76,6 +76,10 @@ impl PageRect {
     }
 }
 
+/// [`PageGlyph::font`] of a rule recorded as a glyph without Unicode: the
+/// mapping may pair it with a source character (`\_`), else drops it.
+pub const RULE_FONT: u64 = u64::MAX;
+
 /// One glyph drawn on a page, in content-stream (= TeX shipout) order.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, rename = "TexPageGlyph")]
@@ -88,7 +92,9 @@ pub struct PageGlyph {
     pub text: Option<String>,
     /// Character code that selected the glyph.
     pub char_code: u32,
-    /// Opaque identifier of the font program (stable within one PDF).
+    /// Opaque identifier of the font program (stable within one PDF);
+    /// [`RULE_FONT`] for a small rule drawn in place of a glyph (pdfLaTeX's
+    /// OT1 `\_` is a 0.3 em rule).
     pub font: u64,
     /// Effective font size in points.
     pub size: f64,
@@ -171,6 +177,17 @@ impl PdfDocument {
 
     /// Every glyph drawn on a page, in drawing order, with recovered Unicode.
     pub fn extract_glyphs(&self, index: usize) -> Result<Vec<PageGlyph>, PdfError> {
+        self.extract(index, false)
+    }
+
+    /// [`Self::extract_glyphs`] plus small rules recorded as glyphs without
+    /// Unicode ([`RULE_FONT`]) in drawing order, for the mapping: pdfLaTeX's
+    /// OT1 `\_` is such a rule.
+    pub fn extract_glyphs_and_rules(&self, index: usize) -> Result<Vec<PageGlyph>, PdfError> {
+        self.extract(index, true)
+    }
+
+    fn extract(&self, index: usize, rules: bool) -> Result<Vec<PageGlyph>, PdfError> {
         let page = self.pdf.pages().get(index).ok_or(PdfError::NoSuchPage(index))?;
         let cache = InterpreterCache::new();
         let (w, h) = page.render_dimensions();
@@ -181,7 +198,7 @@ impl PdfDocument {
             self.pdf.xref(),
             InterpreterSettings { warning_sink: Arc::new(|_| {}), ..InterpreterSettings::default() },
         );
-        let mut collector = GlyphCollector { glyphs: Vec::new() };
+        let mut collector = GlyphCollector { glyphs: Vec::new(), rules };
         interpret_page(page, &mut context, &mut collector);
         Ok(collector.glyphs)
     }
@@ -189,6 +206,8 @@ impl PdfDocument {
 
 struct GlyphCollector {
     glyphs: Vec<PageGlyph>,
+    /// Also record small rules (see [`RULE_FONT`]).
+    rules: bool,
 }
 
 impl GlyphCollector {
@@ -231,8 +250,68 @@ impl GlyphCollector {
     }
 }
 
+impl GlyphCollector {
+    /// A rule the size of a typeset underscore (OT1 `\_`: 0.3 em wide,
+    /// 0.4 pt high, on the baseline), drawn as a filled rectangle or, as
+    /// pdfTeX writes thin rules, a horizontal line stroked at the rule's
+    /// height (`stroke_width`).
+    fn push_rule(&mut self, path: &BezPath, transform: Affine, stroke_width: Option<f64>) {
+        use hayro::kurbo::PathEl;
+        let elements = path.elements();
+        let [_, b, c, d] = transform.as_coeffs()[..4] else { return };
+        if elements.len() > 6
+            || elements.iter().any(|e| matches!(e, PathEl::QuadTo(..) | PathEl::CurveTo(..)))
+            || b.abs() > 1e-9
+            || c.abs() > 1e-9
+        {
+            return;
+        }
+        let r = transform.transform_rect_bbox(path.bounding_box());
+        let r = match stroke_width {
+            // Only a horizontal line, stroked.
+            Some(w) if elements.len() == 2 && r.height() < 1e-6 => {
+                let half = w * d.abs() / 2.0;
+                Rect::new(r.x0, r.y0 - half, r.x1, r.y1 + half)
+            }
+            Some(_) => return,
+            None => r,
+        };
+        let (width, height) = (r.width(), r.height());
+        if !(1.2..=8.0).contains(&width) || height > 1.0 || height <= 0.0 {
+            return;
+        }
+        let rect = PageRect::new(r.x0, r.y0, r.x1, r.y1);
+        // The same rule painted twice is one rule.
+        if self.glyphs.last().is_some_and(|g| g.font == RULE_FONT && g.ink == Some(rect)) {
+            return;
+        }
+        let size = width / 0.3;
+        self.glyphs.push(PageGlyph {
+            index: self.glyphs.len() as u32,
+            text: None,
+            char_code: u32::from(b'_'),
+            font: RULE_FONT,
+            size,
+            origin_x: rect.x0,
+            origin_y: rect.y1,
+            advance: width,
+            bbox: PageRect::new(rect.x0, rect.y1 - 0.75 * size, rect.x1, rect.y1 + 0.25 * size),
+            ink: Some(rect),
+        });
+    }
+}
+
 impl<'a> Device<'a> for GlyphCollector {
-    fn draw_path(&mut self, _: &BezPath, _: DrawProps<'a>, _: &DrawMode) {}
+    fn draw_path(&mut self, path: &BezPath, props: DrawProps<'a>, mode: &DrawMode) {
+        if !self.rules {
+            return;
+        }
+        match mode {
+            DrawMode::Fill(_) => self.push_rule(path, props.transform, None),
+            DrawMode::Stroke(stroke) => self.push_rule(path, props.transform, Some(f64::from(stroke.line_width))),
+            _ => {}
+        }
+    }
     fn push_clip_path(&mut self, _: &ClipPath) {}
     fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
     fn draw_glyph_run(&mut self, glyph_run: &GlyphRun<'_, 'a>, props: DrawProps<'a>, _: &DrawMode) {

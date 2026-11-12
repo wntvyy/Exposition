@@ -30,6 +30,25 @@ pub enum LogMessageKind {
     UndefinedCitation,
     Warning,
     BadBox,
+    /// `Missing character: There is no X in font F!`: the character is left
+    /// out of the page (see [`missing_character`]).
+    MissingCharacter,
+}
+
+/// The character and font of a [`LogMessageKind::MissingCharacter`] message:
+/// `Missing character: There is no 日 (U+65E5) in font [lmroman10-regular]:+tlig;!`
+/// (LuaTeX) or `... There is no ^^A in font cmr10!` (pdfTeX).
+pub fn missing_character(message: &str) -> Option<(String, String)> {
+    let rest = message.strip_prefix("Missing character: There is no ")?;
+    let (character, font) = rest.rsplit_once(" in font ")?;
+    let character = match character.rsplit_once(" (U+") {
+        Some((c, code)) if code.ends_with(')') => c,
+        _ => character,
+    };
+    let font = font.trim_end_matches('!');
+    let font = font.split(':').next().unwrap_or(font).trim_matches(|c| c == '[' || c == ']' || c == '"');
+    let font = font.rsplit(['/', '\\']).next().unwrap_or(font);
+    Some((character.to_owned(), font.to_owned()))
 }
 
 /// Parse a complete log.
@@ -97,6 +116,15 @@ pub fn parse_log(log: &str) -> Vec<LogMessage> {
                 lines: input_line.map(|l| (l, l)),
                 context: Vec::new(),
                 kind,
+            });
+        } else if line.starts_with("Missing character: There is no ") {
+            messages.push(LogMessage {
+                severity: Severity::Warning,
+                message: line.trim().to_owned(),
+                file: None,
+                lines: None,
+                context: Vec::new(),
+                kind: LogMessageKind::MissingCharacter,
             });
         } else if line.starts_with("Overfull \\") || line.starts_with("Underfull \\") {
             let lines_range = box_lines(line);
@@ -254,6 +282,17 @@ fn track_files(line: &str, stack: &mut Vec<Option<String>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R-m23 F10: characters the font cannot show are reported.
+    #[test]
+    fn missing_characters_are_parsed() {
+        let log = "Missing character: There is no 日 (U+65E5) in font [lmroman10-regular]:+tlig;!\nMissing character: There is no ^^A in font cmr10!\n";
+        let messages = parse_log(log);
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|m| m.kind == LogMessageKind::MissingCharacter && m.severity == Severity::Warning));
+        assert_eq!(missing_character(&messages[0].message), Some(("日".into(), "lmroman10-regular".into())));
+        assert_eq!(missing_character(&messages[1].message), Some(("^^A".into(), "cmr10".into())));
+    }
 
     const SAMPLE: &str = r"This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026)
 (./main.tex

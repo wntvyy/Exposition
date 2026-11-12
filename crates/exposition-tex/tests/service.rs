@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -290,4 +291,97 @@ fn the_default_target_comes_from_project_settings() {
     let sources: Vec<&str> = summary.result.sources.iter().map(|s| s.path.as_str()).collect();
     assert!(sources.contains(&"sections/results.tex") && sources.contains(&"figures/box.png"), "{sources:?}");
     assert!(env.service.status(None).is_some_and(|s| s.target == reference));
+}
+
+impl Env {
+    /// The next event within `limit`, if any.
+    fn event_within(&mut self, limit: Duration) -> Option<TexEvent> {
+        self.runtime.block_on(async { tokio::time::timeout(limit, self.events.recv()).await }).ok().map(|e| e.unwrap())
+    }
+
+    /// Wait until no build is running or pending (draining events).
+    fn quiesce(&mut self) {
+        while self.event_within(Duration::from_secs(3)).is_some() {}
+    }
+}
+
+/// R-m23 F5: watches are counted per page view, so closing one of two views
+/// of a document keeps rebuilding it for the other.
+#[test]
+fn closing_one_of_two_page_views_keeps_rebuilding_for_the_other() {
+    let Some(mut env) = Env::new(None) else { return };
+    env.trust();
+    let entry = WorkspacePath::parse("main.tex").unwrap();
+    env.service.watch(&entry).unwrap();
+    env.service.watch(&entry).unwrap();
+    env.next_finished();
+    env.quiesce();
+    env.service.unwatch(&entry);
+    env.service.rebuild_watched();
+    let event = env.event_within(Duration::from_secs(10));
+    assert!(matches!(event, Some(TexEvent::Queued { .. } | TexEvent::Started { .. })), "still watched: {event:?}");
+    env.next_finished();
+    env.quiesce();
+    env.service.unwatch(&entry);
+    env.service.rebuild_watched();
+    assert!(env.event_within(Duration::from_secs(2)).is_none(), "no view watches it any more");
+}
+
+/// R-m23 F6: an export goes only to an absolute `.pdf` path in an existing
+/// folder, never over a source of the document, and never over a file that
+/// is not a PDF.
+#[test]
+fn exports_never_replace_sources_or_other_files() {
+    let Some(mut env) = Env::new(None) else { return };
+    env.trust();
+    env.request(TexBuildMode::Draft);
+    let build = env.next_finished().result.id;
+    let project = env.project.path().to_path_buf();
+    let outside = tempfile::tempdir().unwrap();
+    let notes_txt = outside.path().join("notes.txt");
+    let notes_pdf = outside.path().join("notes.pdf");
+    std::fs::write(&notes_txt, "notes").unwrap();
+    std::fs::write(&notes_pdf, "not really a PDF").unwrap();
+    let refused = [
+        project.join("sections").join("results.tex"),
+        notes_txt.clone(),
+        notes_pdf.clone(),
+        outside.path().join("missing-folder").join("out.pdf"),
+        PathBuf::from("relative.pdf"),
+        outside.path().to_path_buf(),
+    ];
+    for destination in refused {
+        let before = std::fs::read(&destination).ok();
+        let outcome = env.service.export_pdf(&build, Some(destination.clone()));
+        assert!(
+            matches!(outcome, Err(TexServiceError::InvalidDestination(_))),
+            "{}: {outcome:?}",
+            destination.display()
+        );
+        assert_eq!(std::fs::read(&destination).ok(), before, "{} changed", destination.display());
+    }
+
+    // An absolute .pdf path, and replacing a PDF there, work.
+    let out = outside.path().join("paper.pdf");
+    env.service.export_pdf(&build, Some(out.clone())).unwrap();
+    env.service.export_pdf(&build, Some(out.clone())).unwrap();
+    assert!(std::fs::read(&out).unwrap().starts_with(b"%PDF-"));
+    // The default destination is the entry's .pdf, replaced on the next export.
+    let default = env.service.export_pdf(&build, None).unwrap();
+    assert_eq!(PathBuf::from(&default.path).file_name().unwrap(), "main.pdf");
+    env.service.export_pdf(&build, None).unwrap();
+
+    // A PDF the document includes is a source: never replaced.
+    std::fs::copy(&out, project.join("figures").join("fig.pdf")).unwrap();
+    let main = std::fs::read_to_string(project.join("main.tex")).unwrap();
+    let main = main.replace("\\end{document}", "\\includegraphics[width=1cm]{figures/fig.pdf}\n\\end{document}");
+    std::fs::write(project.join("main.tex"), main).unwrap();
+    env.request(TexBuildMode::Draft);
+    let with_figure = env.next_finished();
+    assert!(with_figure.result.sources.iter().any(|s| s.path.as_str() == "figures/fig.pdf"));
+    let figure = project.join("figures").join("fig.pdf");
+    let before = std::fs::read(&figure).unwrap();
+    let outcome = env.service.export_pdf(&with_figure.result.id, Some(figure.clone()));
+    assert!(matches!(outcome, Err(TexServiceError::InvalidDestination(_))), "{outcome:?}");
+    assert_eq!(std::fs::read(&figure).unwrap(), before);
 }

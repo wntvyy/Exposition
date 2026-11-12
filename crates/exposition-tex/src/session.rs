@@ -50,7 +50,7 @@ impl TexPageSession {
     }
 
     pub fn map_page(&self, index: usize) -> Result<PageMapping, PdfError> {
-        let glyphs = self.pdf.extract_glyphs(index)?;
+        let glyphs = self.pdf.extract_glyphs_and_rules(index)?;
         Ok(map_page(index as u32, glyphs, &self.synctex, &self.sources))
     }
 
