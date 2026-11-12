@@ -91,6 +91,103 @@ fn ident_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '\'' | '!' | '?')
 }
 
+/// Keywords that stay escaped (`«theorem»`) when used as a name segment.
+const NAME_KEYWORDS: &[&str] = &[
+    "theorem",
+    "lemma",
+    "def",
+    "abbrev",
+    "structure",
+    "inductive",
+    "class",
+    "instance",
+    "axiom",
+    "opaque",
+    "example",
+    "namespace",
+    "section",
+    "end",
+    "where",
+    "fun",
+    "let",
+    "have",
+    "show",
+    "by",
+    "do",
+    "then",
+    "else",
+    "if",
+    "match",
+    "with",
+    "at",
+    "from",
+    "import",
+    "open",
+    "variable",
+    "universe",
+    "mutual",
+    "private",
+    "protected",
+    "noncomputable",
+    "partial",
+    "unsafe",
+    "in",
+    "deriving",
+    "extends",
+    "Type",
+    "Sort",
+    "Prop",
+];
+
+/// The segments of a dotted Lean name, as Lean prints them: a dot inside
+/// `«…»` belongs to the segment, and guillemets are kept only when the segment
+/// needs them (`«plain»` prints as `plain`, `«weird name»` keeps them).
+fn name_segments(name: &str) -> Vec<String> {
+    let printed = |seg: &str| -> String {
+        if let Some(inner) = seg.strip_prefix('«').and_then(|r| r.strip_suffix('»')) {
+            let plain = inner.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && inner.chars().all(ident_char)
+                && !NAME_KEYWORDS.contains(&inner);
+            if plain {
+                return inner.to_owned();
+            }
+        }
+        seg.to_owned()
+    };
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for c in name.chars() {
+        match c {
+            '«' => {
+                quoted = true;
+                current.push(c);
+            }
+            '»' => {
+                quoted = false;
+                current.push(c);
+            }
+            '.' if !quoted => {
+                if !current.is_empty() {
+                    out.push(printed(&current));
+                }
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        out.push(printed(&current));
+    }
+    out
+}
+
+/// A plausible qualified Lean name: bounded, no control characters, and
+/// whitespace only inside `«…»` segments.
+fn valid_lean_name(name: &str) -> bool {
+    super::valid_name(name)
+}
+
 fn blank(m: &mut [u8], from: usize, to: usize) {
     let to = to.min(m.len());
     for byte in &mut m[from.min(to)..to] {
@@ -404,16 +501,17 @@ impl<'a> Lean<'a> {
                 self.neutral = true;
                 self.header_done = true;
                 let kind = if keyword == "namespace" { ScopeKind::Namespace } else { ScopeKind::Section };
-                let (ns, ne) = self.word_at(self.skip_space(ke, false));
-                let name = &self.m[ns..ne];
-                if name.is_empty() {
-                    self.push_scope(kind, None);
-                } else {
-                    for part in name.split('.').filter(|p| !p.is_empty()) {
-                        self.push_scope(kind, Some(part.to_owned()));
+                let at = self.skip_space(ke, false);
+                match self.read_name(at) {
+                    None => self.push_scope(kind, None),
+                    Some(name) => {
+                        for part in name_segments(&name) {
+                            self.push_scope(kind, Some(part));
+                        }
+                        return at + name.len();
                     }
                 }
-                return ne.max(ke);
+                return ke;
             }
             "mutual" => {
                 self.close_current(start);
@@ -426,10 +524,10 @@ impl<'a> Lean<'a> {
                 self.close_current(start);
                 self.neutral = true;
                 self.header_done = true;
-                let (ns, ne) = self.word_at(self.skip_space(ke, false));
-                let name = self.m[ns..ne].to_owned();
-                self.end(&name);
-                return ne.max(ke);
+                let at = self.skip_space(ke, false);
+                let name = self.read_name(at).unwrap_or_default();
+                self.end(&name_segments(&name));
+                return (at + name.len()).max(ke);
             }
             "import" if !self.header_done => {
                 self.imports(ke);
@@ -483,8 +581,8 @@ impl<'a> Lean<'a> {
         self.scopes.push(Scope { kind, name });
     }
 
-    fn end(&mut self, name: &str) {
-        let parts: Vec<&str> = if name.is_empty() { Vec::new() } else { name.split('.').collect() };
+    fn end(&mut self, parts: &[String]) {
+        let name = parts.join(".");
         if parts.is_empty() {
             match self.scopes.last() {
                 Some(Scope { name: None, .. }) => {
@@ -496,14 +594,14 @@ impl<'a> Lean<'a> {
         }
         let n = parts.len();
         let matches_at = |scopes: &[Scope], top: usize| {
-            top >= n && scopes[top - n..top].iter().zip(&parts).all(|(s, p)| s.name.as_deref() == Some(*p))
+            top >= n && scopes[top - n..top].iter().zip(parts).all(|(s, p)| s.name.as_deref() == Some(p.as_str()))
         };
         let len = self.scopes.len();
         if matches_at(&self.scopes, len) {
             self.scopes.truncate(len - n);
             return;
         }
-        self.out.partial(format!("end {} does not match the open scope", short(name)));
+        self.out.partial(format!("end {} does not match the open scope", short(&name)));
         // Recover: close down to a matching scope if there is one nearby.
         if let Some(top) = (len.saturating_sub(16)..len).rev().find(|&t| matches_at(&self.scopes, t)) {
             self.scopes.truncate(top - n);
@@ -557,12 +655,21 @@ impl<'a> Lean<'a> {
         }
         let ns = self.namespace();
         let name = written.as_deref().and_then(|w| {
-            let full = match w.strip_prefix("_root_.") {
-                Some(rooted) => rooted.to_owned(),
-                None if ns.is_empty() => w.to_owned(),
-                None => format!("{ns}.{w}"),
+            let mut segments = name_segments(w);
+            let rooted = segments.first().is_some_and(|s| s == "_root_");
+            if rooted {
+                segments.remove(0);
+            }
+            let full = match (rooted, ns.is_empty()) {
+                (true, _) | (false, true) => segments.join("."),
+                (false, false) => format!("{ns}.{}", segments.join(".")),
             };
-            self.out.checked_name(&full)
+            if valid_lean_name(&full) {
+                Some(full)
+            } else {
+                // Same reporting as other unusable names.
+                self.out.checked_name(&full)
+            }
         });
         if written.is_none() {
             self.out.partial(format!("a {display} without a recognisable name was indexed without one"));
@@ -635,6 +742,18 @@ fn short(s: &str) -> String {
 mod tests {
     use super::super::latex::common::{check_invariants, garbage, slice, truncations};
     use super::*;
+
+    #[test]
+    fn names_in_guillemets_are_qualified_as_lean_prints_them() {
+        let x = run("namespace Review\ntheorem «weird name» : 1 + 1 = 2 := rfl\ntheorem «plain» : True := trivial\n\
+             namespace «Odd ns»\ndef «a.b» := 1\nend «Odd ns»\nend Review\ntheorem «x y».z : True := trivial\n");
+        let names: Vec<&str> = x.declarations.iter().filter_map(|d| d.name.as_deref()).collect();
+        assert_eq!(names, ["Review.«weird name»", "Review.plain", "Review.«Odd ns».«a.b»", "«x y».z"], "{x:?}");
+        assert!(x.partial.is_empty(), "{:?}", x.partial);
+        assert!(!valid_lean_name("a b"));
+        assert!(valid_lean_name("A.«b c»"));
+        assert!(!valid_lean_name("A.«b"));
+    }
 
     fn run(text: &str) -> Extraction {
         let x = extract(&WorkspacePath::parse("Paper/A.lean").unwrap(), text);

@@ -30,7 +30,7 @@ use crate::query::{GraphView, GraphViewSummary, ViewScope};
 use crate::vocabulary::{EntityKind, EvidenceKind, RelationKind, ResourceRole, VOCABULARY_VERSION};
 
 /// Current schema version (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// File name of the graph database inside `.exposition/`.
 pub const DATABASE_FILE: &str = "graph.sqlite3";
@@ -155,6 +155,14 @@ const MIGRATIONS: &[(u32, &str)] = &[
     );
     "#,
     ),
+    (
+        // Evidence recorded by this installation carries a MAC under an
+        // app-local key; evidence without a valid one was imported.
+        3,
+        r#"
+    CREATE TABLE evidence_seals (id TEXT PRIMARY KEY, mac TEXT NOT NULL);
+    "#,
+    ),
 ];
 
 /// Every schema object a valid database of `version` has (type, name).
@@ -178,6 +186,9 @@ fn expected_objects(version: u32) -> Vec<(&'static str, &'static str)> {
     ];
     if version >= 2 {
         objects.push(("table", "source_index"));
+    }
+    if version >= 3 {
+        objects.push(("table", "evidence_seals"));
     }
     objects
 }
@@ -253,6 +264,9 @@ fn expected_columns(version: u32) -> Vec<(&'static str, Vec<&'static str>)> {
     if version >= 2 {
         tables.push(("source_index", vec!["path", "content_hash", "extractor", "body", "wanted"]));
     }
+    if version >= 3 {
+        tables.push(("evidence_seals", vec!["id", "mac"]));
+    }
     tables
 }
 
@@ -268,6 +282,7 @@ const ROW_LIMITS: &[(&str, i64)] = &[
     ("workflows", 100_000),
     ("coverage", 500_000),
     ("source_index", 500_000),
+    ("evidence_seals", 200_000),
 ];
 
 /// Upper bounds on what one read returns.
@@ -276,6 +291,15 @@ pub const MAX_ROWS: usize = 20_000;
 const MAX_FIELD: usize = 256 * 1024;
 /// Short fields (hashes, versions, fingerprints, extractor names).
 const MAX_SHORT_FIELD: usize = 256;
+/// Largest stored source index body (the validated open refuses larger).
+pub const MAX_INDEX_BODY: usize = 16 * MAX_FIELD;
+/// Bindings read per entity (more would be silently dropped on read).
+pub const MAX_BINDINGS_PER_ENTITY: usize = 64;
+
+/// The row limit of `table` the validated open enforces.
+pub fn row_limit(table: &str) -> i64 {
+    ROW_LIMITS.iter().find(|(t, _)| *t == table).map(|(_, n)| *n).unwrap_or(i64::MAX)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -293,9 +317,31 @@ pub enum StoreError {
     Encoding(#[from] serde_json::Error),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    /// A write would exceed a bound the validated open enforces (the next
+    /// open would refuse the database): refused before it happens.
+    #[error("{0}")]
+    Limit(String),
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
+
+fn limit(what: impl Into<String>) -> StoreError {
+    StoreError::Limit(what.into())
+}
+
+fn check_field(value: Option<&str>, max: usize, what: &str) -> StoreResult<()> {
+    match value {
+        Some(v) if v.len() > max => Err(limit(format!("{what} is longer than {max} bytes"))),
+        _ => Ok(()),
+    }
+}
+
+fn check_record(json: &str, what: &str) -> StoreResult<()> {
+    if json.len() > 4 * MAX_FIELD {
+        return Err(limit(format!("{what} is larger than {} KiB", 4 * MAX_FIELD / 1024)));
+    }
+    Ok(())
+}
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -306,6 +352,7 @@ pub struct GraphStore {
     conn: Connection,
     path: Option<PathBuf>,
     project: ProjectId,
+    evidence_key: Option<[u8; 32]>,
 }
 
 impl GraphStore {
@@ -328,6 +375,46 @@ impl GraphStore {
         }
         let conn = Connection::open_with_flags(path, flags)?;
         Self::init(conn, Some(path.to_path_buf()))
+    }
+
+    /// Open an existing graph without writing to it (read-only storage): the
+    /// file size, schema objects and project identity are checked; it is
+    /// never migrated. Copy it (`vacuum_into`) to work with it.
+    pub fn open_read_only(path: &Path) -> StoreResult<Self> {
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.len() > MAX_DATABASE_BYTES
+        {
+            return Err(StoreError::Untrusted("the graph file is too large".into()));
+        }
+        let conn =
+            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)?;
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_VIEW, false)?;
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+        conn.pragma_update(None, "trusted_schema", "OFF")?;
+        conn.pragma_update(None, "cell_size_check", "ON")?;
+        let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(StoreError::NewerSchema { found: version, supported: SCHEMA_VERSION });
+        }
+        if version == 0 {
+            return Err(StoreError::Untrusted("the file is not a project graph".into()));
+        }
+        let check: String = conn
+            .query_row("PRAGMA quick_check(1)", [], |r| r.get(0))
+            .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        if check != "ok" {
+            return Err(StoreError::Corrupt(truncate(&check, 300)));
+        }
+        verify_schema_objects(&conn, version)?;
+        let raw: Option<String> =
+            conn.query_row("SELECT value FROM meta WHERE key = 'project_id'", [], |r| r.get(0)).optional()?;
+        let project = raw
+            .as_deref()
+            .and_then(|r| ProjectId::parse(r).ok())
+            .ok_or_else(|| StoreError::Untrusted("invalid project identifier".into()))?;
+        Ok(Self { conn, path: Some(path.to_path_buf()), project, evidence_key: None })
     }
 
     /// An in-memory graph (tests, temporary contexts).
@@ -357,7 +444,7 @@ impl GraphStore {
                 return Err(StoreError::Untrusted("the file contains tables this version did not create".into()));
             }
         }
-        let mut store = Self { conn, path, project: ProjectId::mint() };
+        let mut store = Self { conn, path, project: ProjectId::mint(), evidence_key: None };
         if version > 0 && version < SCHEMA_VERSION {
             // Keep a consistent copy of the older graph before changing it.
             if let Some(dir) = store.path.as_deref().and_then(Path::parent) {
@@ -486,6 +573,14 @@ impl GraphStore {
             }
         }
         {
+            let mac_bad: i64 = self.conn.query_row(
+                "SELECT count(*) FROM evidence_seals WHERE length(mac) > ?1 OR length(id) > ?1",
+                [MAX_SHORT_FIELD as i64],
+                |r| r.get(0),
+            )?;
+            if mac_bad > 0 {
+                return Err(untrusted("evidence seal"));
+            }
             let mut stmt = self.conn.prepare("SELECT path, content_hash, extractor, length(body) FROM source_index")?;
             let rows = stmt.query_map([], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
@@ -808,6 +903,33 @@ impl GraphStore {
         body.map(|b| decode::<Evidence>(&b)).transpose()
     }
 
+    /// Whether this installation recorded the evidence: its stored MAC
+    /// matches the app-local key. Evidence without one (copied in with the
+    /// project's graph, or written by anything else) is imported: a
+    /// historical claim of its recorded origin.
+    pub fn evidence_is_local(&self, id: &EvidenceId) -> bool {
+        let Some(key) = &self.evidence_key else { return false };
+        let row: Option<(String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT e.body, s.mac FROM evidence e LEFT JOIN evidence_seals s ON s.id = e.id WHERE e.id = ?1",
+                [id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        match row {
+            Some((body, Some(mac))) => crate::mac::verify_evidence_mac(key, id.as_str(), &body, &mac),
+            _ => false,
+        }
+    }
+
+    /// The app-local key that seals evidence recorded by this installation.
+    pub fn set_evidence_key(&mut self, key: [u8; 32]) {
+        self.evidence_key = Some(key);
+    }
+
     pub fn evidence_for_subject(&self, subject: &EntityId) -> StoreResult<Vec<Evidence>> {
         let mut stmt = self
             .conn
@@ -1048,6 +1170,22 @@ impl GraphStore {
     }
 
     pub fn put_view(&mut self, view: &GraphView) -> StoreResult<()> {
+        let body = serde_json::to_string(view)?;
+        check_record(&body, "the view")?;
+        check_field(Some(&view.name), MAX_FIELD, "the view name")?;
+        let exists: bool = self
+            .conn
+            .query_row("SELECT 1 FROM views WHERE id = ?1", [view.id.as_str()], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !exists {
+            let n: i64 = self.conn.query_row("SELECT count(*) FROM views", [], |r| r.get(0))?;
+            if n >= row_limit("views") {
+                return Err(limit(format!(
+                    "the project holds the most saved views a graph can keep ({n}); delete one first"
+                )));
+            }
+        }
         self.conn.execute(
             "INSERT INTO views (id, name, scope, body, revision, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, scope = excluded.scope, body = excluded.body,
@@ -1056,7 +1194,7 @@ impl GraphStore {
                 view.id.as_str(),
                 view.name,
                 serde_json::to_string(&view.scope)?,
-                serde_json::to_string(view)?,
+                body,
                 view.revision as i64,
                 view.updated_at_ms as i64
             ],
@@ -1082,7 +1220,17 @@ impl<'a> Writer<'a> {
         Self { tx }
     }
 
+    /// Commit, unless the transaction would leave a table beyond the row
+    /// limit the validated open enforces (then nothing is written).
     pub fn commit(self) -> StoreResult<()> {
+        for (table, max) in ROW_LIMITS {
+            let n: i64 = self.tx.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
+            if n > *max {
+                return Err(limit(format!(
+                    "the change would leave {n} rows in {table} (a project graph holds at most {max}); nothing was written"
+                )));
+            }
+        }
         Ok(self.tx.commit()?)
     }
 
@@ -1121,6 +1269,17 @@ impl<'a> Writer<'a> {
     }
 
     pub fn put_entity(&self, e: &Entity) -> StoreResult<()> {
+        check_field(Some(&e.label), MAX_FIELD, "the label")?;
+        check_field(e.key.as_deref(), MAX_FIELD, "the key")?;
+        check_field(e.tombstone_reason.as_deref(), MAX_FIELD, "the tombstone reason")?;
+        let (roles, origin, attributes) = (
+            serde_json::to_string(&e.roles)?,
+            serde_json::to_string(&e.origin)?,
+            serde_json::to_string(&e.attributes)?,
+        );
+        for (json, what) in [(&roles, "the roles"), (&origin, "the origin"), (&attributes, "the attributes")] {
+            check_record(json, what)?;
+        }
         self.tx.execute(
             "INSERT INTO entities (id, kind, roles, label, key, lifecycle, tombstone_reason, revision, origin, attributes, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
@@ -1131,14 +1290,14 @@ impl<'a> Writer<'a> {
             params![
                 e.id.as_str(),
                 e.kind.as_str(),
-                serde_json::to_string(&e.roles)?,
+                roles,
                 e.label,
                 e.key,
                 e.lifecycle.as_str(),
                 e.tombstone_reason,
                 e.revision as i64,
-                serde_json::to_string(&e.origin)?,
-                serde_json::to_string(&e.attributes)?,
+                origin,
+                attributes,
                 e.created_at_ms as i64,
                 e.updated_at_ms as i64
             ],
@@ -1148,6 +1307,15 @@ impl<'a> Writer<'a> {
 
     /// Replace all bindings of an entity.
     pub fn set_bindings(&self, entity: &EntityId, bindings: &[SourceBinding]) -> StoreResult<()> {
+        if bindings.len() > MAX_BINDINGS_PER_ENTITY {
+            return Err(limit(format!("an entity has at most {MAX_BINDINGS_PER_ENTITY} source bindings")));
+        }
+        for b in bindings {
+            check_field(b.detail.as_deref(), MAX_FIELD, "a binding detail")?;
+            check_field(b.fingerprint.as_deref(), MAX_SHORT_FIELD, "a binding fingerprint")?;
+            check_field(b.version.as_ref().map(|v| v.content_hash.as_str()), MAX_SHORT_FIELD, "a content hash")?;
+            check_record(&serde_json::to_string(&b.selector)?, "a binding selector")?;
+        }
         self.tx.execute("DELETE FROM bindings WHERE entity_id = ?1", [entity.as_str()])?;
         for (ordinal, b) in bindings.iter().enumerate() {
             self.tx.execute(
@@ -1173,6 +1341,11 @@ impl<'a> Writer<'a> {
     }
 
     pub fn put_relation(&self, r: &Relation) -> StoreResult<()> {
+        check_field(r.note.as_deref(), MAX_FIELD, "the note")?;
+        check_field(r.from_version.as_deref(), MAX_SHORT_FIELD, "a version")?;
+        check_field(r.to_version.as_deref(), MAX_SHORT_FIELD, "a version")?;
+        check_record(&serde_json::to_string(&r.origin)?, "the origin")?;
+        check_record(&serde_json::to_string(&r.evidence)?, "the evidence list")?;
         self.tx.execute(
             "INSERT INTO relations (id, kind, from_id, to_id, origin, status, evidence_kind, evidence, from_version, to_version, note, revision, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
@@ -1225,15 +1398,28 @@ impl<'a> Writer<'a> {
 
     pub fn put_evidence(&self, e: &Evidence) -> StoreResult<()> {
         let kind = e.kind.as_str();
+        let body = serde_json::to_string(e)?;
+        check_record(&body, "the evidence record")?;
         self.tx.execute(
             "INSERT INTO evidence (id, kind, subject, body, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 e.id.as_str(),
                 kind,
                 e.subject.as_ref().map(|s| s.as_str().to_owned()),
-                serde_json::to_string(e)?,
+                body,
                 e.recorded_at_ms as i64
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Seal an evidence record as recorded by this installation: a MAC over
+    /// its id and stored body under the app-local key.
+    pub fn seal_evidence(&self, id: &EvidenceId, key: &[u8; 32]) -> StoreResult<()> {
+        let body: String = self.tx.query_row("SELECT body FROM evidence WHERE id = ?1", [id.as_str()], |r| r.get(0))?;
+        self.tx.execute(
+            "INSERT INTO evidence_seals (id, mac) VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET mac = excluded.mac",
+            params![id.as_str(), crate::mac::evidence_mac(key, id.as_str(), &body)],
         )?;
         Ok(())
     }
@@ -1243,6 +1429,9 @@ impl<'a> Writer<'a> {
     }
 
     pub fn set_coverage(&self, c: &ResourceCoverage) -> StoreResult<()> {
+        check_field(c.detail.as_deref(), MAX_FIELD, "a coverage detail")?;
+        check_field(c.extractor.as_deref(), MAX_SHORT_FIELD, "an extractor name")?;
+        check_field(c.content_hash.as_deref(), MAX_SHORT_FIELD, "a content hash")?;
         self.tx.execute(
             "INSERT INTO coverage (path, extractor, state, unresolved, detail, content_hash, indexed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -1319,6 +1508,11 @@ impl<'a> Writer<'a> {
     }
 
     pub fn put_source_index(&self, record: &IndexRecord) -> StoreResult<()> {
+        if record.body.len() > MAX_INDEX_BODY {
+            return Err(limit("a source index record is too large"));
+        }
+        check_field(Some(&record.content_hash), MAX_SHORT_FIELD, "a content hash")?;
+        check_field(Some(&record.extractor), MAX_SHORT_FIELD, "an extractor name")?;
         self.tx.execute(
             "INSERT INTO source_index (path, content_hash, extractor, body) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(path) DO UPDATE SET content_hash = excluded.content_hash, extractor = excluded.extractor,
@@ -1345,6 +1539,9 @@ impl<'a> Writer<'a> {
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> StoreResult<()> {
+        if key.len() > MAX_SHORT_FIELD || value.len() > 4096 {
+            return Err(limit("graph metadata is too long"));
+        }
         set_meta(&self.tx, key, value)
     }
 
@@ -1780,6 +1977,44 @@ mod tests {
             );
             assert_eq!(std::fs::read(&path).unwrap(), before, "{name}: a refused database is left unchanged");
         }
+    }
+
+    #[test]
+    fn writes_are_refused_before_they_exceed_a_bound_the_open_enforces() {
+        let (_dir, path) = temp_db();
+        let mut store = GraphStore::open(&path, true).unwrap();
+        // Rows: a transaction that would leave a table over its limit is
+        // refused as a whole.
+        let w = Writer::new(store.transaction().unwrap());
+        for i in 0..row_limit("meta") {
+            w.tx.execute("INSERT INTO meta (key, value) VALUES (?1, 'v')", [format!("k{i}")]).unwrap();
+        }
+        assert!(matches!(w.commit(), Err(StoreError::Limit(_))));
+        assert!(store.meta("k1").unwrap().is_none(), "nothing was written");
+        // Fields and records.
+        let w = Writer::new(store.transaction().unwrap());
+        let mut e = Entity {
+            id: EntityId::mint(),
+            kind: EntityKind::Claim,
+            roles: vec![],
+            label: "x".repeat(MAX_FIELD + 1),
+            key: None,
+            lifecycle: Lifecycle::Active,
+            tombstone_reason: None,
+            revision: 1,
+            origin: Origin::User,
+            attributes: BTreeMap::new(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        assert!(matches!(w.put_entity(&e), Err(StoreError::Limit(_))));
+        e.label = "ok".into();
+        w.put_entity(&e).unwrap();
+        assert!(matches!(w.set_meta("k", &"v".repeat(5000)), Err(StoreError::Limit(_))));
+        drop(w);
+        // The database still opens.
+        drop(store);
+        GraphStore::open(&path, false).unwrap();
     }
 
     #[test]

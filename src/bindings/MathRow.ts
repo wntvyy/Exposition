@@ -26,4 +26,9 @@ freshness: Freshness | null, formalDependencies: FormalDependencies | null,
 /**
  * The latest formal evidence, when any.
  */
-evidence: Evidence | null, };
+evidence: Evidence | null, 
+/**
+ * That evidence was not recorded by this installation (imported with the
+ * project's graph): a historical claim, never current verification.
+ */
+imported: boolean, };

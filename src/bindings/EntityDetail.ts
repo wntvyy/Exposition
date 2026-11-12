@@ -18,4 +18,10 @@ neighbors: Array<Entity>, evidence: Array<Evidence>,
 /**
  * Applicability of each evidence record to current sources.
  */
-evidenceFreshness: Array<[EvidenceId, Freshness]>, coverage: ResourceCoverage | null, graphRevision: number, };
+evidenceFreshness: Array<[EvidenceId, Freshness]>, 
+/**
+ * Evidence not recorded by this installation (e.g. copied in with the
+ * project's graph): historical claims of their recorded origin, never
+ * current local verification.
+ */
+importedEvidence: Array<EvidenceId>, coverage: ResourceCoverage | null, graphRevision: number, };

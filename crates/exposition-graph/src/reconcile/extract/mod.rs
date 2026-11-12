@@ -304,8 +304,21 @@ impl<'a> Utf16Index<'a> {
 
 /// A plausible label/key: non-empty, bounded, no whitespace or control
 /// characters.
+/// Whitespace is allowed only inside Lean's `«…»` name quotes.
 pub fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= MAX_NAME && !name.chars().any(|c| c.is_whitespace() || c.is_control())
+    if name.is_empty() || name.len() > MAX_NAME || name.chars().any(char::is_control) {
+        return false;
+    }
+    let mut quoted = false;
+    for c in name.chars() {
+        match c {
+            '«' => quoted = true,
+            '»' => quoted = false,
+            c if c.is_whitespace() && !quoted => return false,
+            _ => {}
+        }
+    }
+    !quoted
 }
 
 /// Resolve `written` against `dir` (a folder inside the project, `None` = the

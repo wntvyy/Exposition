@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use exposition_core::path::WorkspacePath;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use tokio::sync::broadcast;
 use ts_rs::TS;
 
@@ -61,6 +62,7 @@ impl From<StoreError> for GraphError {
             StoreError::Untrusted(m) | StoreError::Corrupt(m) => {
                 GraphError::new("graph.damaged", format!("The project graph is damaged: {m}"))
             }
+            StoreError::Limit(m) => GraphError::new("graph.limit", format!("Refused: {m}.")),
             other => GraphError::new("graph.storage", other.to_string()),
         }
     }
@@ -74,8 +76,12 @@ pub const PROJECT_DIR: &str = ".exposition";
 /// Paths that belong to the graph's own storage (never indexed as project
 /// resources, never reported by the file watcher as source changes).
 pub fn is_graph_storage(path: &WorkspacePath) -> bool {
-    let p = path.as_str();
-    let Some(rest) = p.strip_prefix(".exposition/") else { return false };
+    // Windows names ignore case: `.Exposition/Graph.sqlite3` is the same file.
+    let Some((first, rest)) = path.as_str().split_once('/') else { return false };
+    if !first.eq_ignore_ascii_case(".exposition") {
+        return false;
+    }
+    let rest = rest.to_ascii_lowercase();
     rest.starts_with("graph.sqlite3")
         || (rest == "graph-backups" || rest.starts_with("graph-backups/"))
         || rest.starts_with("graph.damaged")
@@ -128,10 +134,14 @@ pub struct GraphService {
     started_at_ms: u64,
     /// Monotonic change tokens for pending marks (see `mark_pending`).
     change_token: AtomicU64,
+    /// This installation's key sealing the evidence its services record
+    /// (kept in the application data folder, never in a project).
+    evidence_key: [u8; 32],
 }
 
 impl GraphService {
     pub fn new(config: GraphConfig) -> Arc<Self> {
+        let evidence_key = crate::mac::installation_key(&config.data_dir);
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
             journal: OperationJournal::new(&config.data_dir),
@@ -150,6 +160,7 @@ impl GraphService {
             generation: AtomicU64::new(0),
             started_at_ms: now_ms(),
             change_token: AtomicU64::new(now_ms()),
+            evidence_key,
         })
     }
 
@@ -198,6 +209,7 @@ impl GraphService {
             inner.failed_root = None;
             match open_project_graph(root, &self.config.data_dir) {
                 Ok(mut open) => {
+                    open.store.set_evidence_key(self.evidence_key);
                     if let Err(e) = ensure_project_entity(&mut open) {
                         inner.status = unavailable_status(
                             root,
@@ -249,13 +261,37 @@ impl GraphService {
     /// Recover an unavailable graph with an explicit option. `StartNew` keeps
     /// the damaged database aside (renamed), never deleted.
     pub fn recover(&self, option: &RecoveryOption) -> GraphResult<GraphStatus> {
-        let root = {
+        let (root, offered) = {
             let inner = self.lock();
-            inner
+            let root = inner
                 .failed_root
                 .clone()
-                .ok_or_else(|| GraphError::new("graph.noRecovery", "The project graph does not need recovery."))?
+                .ok_or_else(|| GraphError::new("graph.noRecovery", "The project graph does not need recovery."))?;
+            let offered = match &inner.status.state {
+                GraphState::Unavailable { recovery, .. } => recovery.clone(),
+                _ => Vec::new(),
+            };
+            (root, offered)
         };
+        // Only an option the service offers for this graph is performed.
+        let is_offered = offered.iter().any(|o| match (o, option) {
+            (RecoveryOption::RestoreBackup { backup: a, .. }, RecoveryOption::RestoreBackup { backup: b, .. }) => {
+                a == b
+            }
+            (a, b) => a == b,
+        });
+        if !is_offered {
+            return Err(GraphError::new(
+                "graph.recoveryNotOffered",
+                "That recovery option is not offered for this project's graph; nothing was changed.",
+            ));
+        }
+        if !matches!(option, RecoveryOption::Retry) && !metadata_folder_is_real(&root) {
+            return Err(GraphError::new(
+                "graph.recovery",
+                "The project's .exposition folder is a link or leaves the project; nothing was changed.",
+            ));
+        }
         match option {
             RecoveryOption::Retry => {}
             RecoveryOption::StartNew => {
@@ -582,6 +618,8 @@ impl GraphService {
                 }
             }
             let evidence_freshness = evidence.iter().map(|e| (e.id.clone(), evidence_freshness(store, e))).collect();
+            let imported_evidence =
+                evidence.iter().filter(|e| !store.evidence_is_local(&e.id)).map(|e| e.id.clone()).collect();
             let coverage = match (&entity.kind, bindings.first()) {
                 (EntityKind::Resource, Some(b)) => store.coverage(&b.path)?,
                 _ => None,
@@ -594,6 +632,7 @@ impl GraphService {
                 neighbors,
                 evidence,
                 evidence_freshness,
+                imported_evidence,
                 coverage,
                 graph_revision: store.revision()?,
             })
@@ -910,6 +949,7 @@ impl GraphService {
                 let freshness = latest.as_ref().map(|e| evidence_freshness(store, e));
                 let formal_dependencies =
                     latest.as_ref().and_then(|e| e.formal.as_ref()).map(|f| f.dependencies.clone());
+                let imported = latest.as_ref().is_some_and(|e| !store.evidence_is_local(&e.id));
                 rows.push(MathRow {
                     entity,
                     binding,
@@ -920,6 +960,7 @@ impl GraphService {
                     freshness,
                     formal_dependencies,
                     evidence: latest,
+                    imported,
                 });
             }
             Ok(MathOverview {
@@ -1085,6 +1126,11 @@ impl GraphService {
             {
                 let revision = store_revision_in(&w)?;
                 return Ok(BatchOutcome { revision, delta: run.delta, entity_ids, relation_ids });
+            }
+            // Evidence a service of this installation records is sealed (see
+            // `crate::mac`): only sealed evidence counts as local.
+            for e in &batch.evidence {
+                w.seal_evidence(&e.id, &self.evidence_key)?;
             }
             let summary = if batch.summary.is_empty() { "Service update".to_owned() } else { batch.summary.clone() };
             let revision = w.record_change(origin, &summary, &mut run.delta)?;
@@ -1317,7 +1363,7 @@ fn unavailable_status(root: &Path, reason: String, recovery: Vec<RecoveryOption>
 /// Open the project's graph database, or a temporary in-memory graph for a
 /// folder that cannot hold one.
 /// The temporary graph of a read-only folder lives in memory only.
-fn open_project_graph(root: &Path, _data_dir: &Path) -> Result<OpenGraph, (String, Vec<RecoveryOption>)> {
+fn open_project_graph(root: &Path, data_dir: &Path) -> Result<OpenGraph, (String, Vec<RecoveryOption>)> {
     let dir = root.join(PROJECT_DIR);
     let temporary = |reason: String| -> Result<OpenGraph, (String, Vec<RecoveryOption>)> {
         let store = GraphStore::open_in_memory().map_err(|e| (e.to_string(), vec![RecoveryOption::Retry]))?;
@@ -1330,14 +1376,11 @@ fn open_project_graph(root: &Path, _data_dir: &Path) -> Result<OpenGraph, (Strin
     }
     // `.exposition` must be a real folder inside the project, and the
     // database a regular file (no links leading elsewhere).
-    match (std::fs::canonicalize(root), std::fs::canonicalize(&dir), std::fs::symlink_metadata(&dir)) {
-        (Ok(r), Ok(d), Ok(meta)) if d.starts_with(&r) && !meta.file_type().is_symlink() => {}
-        _ => {
-            return Err((
-                "The project's .exposition folder is a link or leaves the project; the graph was not opened.".into(),
-                vec![RecoveryOption::Retry],
-            ));
-        }
+    if !metadata_folder_is_real(root) {
+        return Err((
+            "The project's .exposition folder is a link or leaves the project; the graph was not opened.".into(),
+            vec![RecoveryOption::Retry],
+        ));
     }
     let db = dir.join(DATABASE_FILE);
     let exists = match std::fs::symlink_metadata(&db) {
@@ -1353,7 +1396,17 @@ fn open_project_graph(root: &Path, _data_dir: &Path) -> Result<OpenGraph, (Strin
     if !exists && std::fs::metadata(&dir).map(|m| m.permissions().readonly()).unwrap_or(false) {
         return temporary("The project folder is read-only; graph changes are not saved with the project.".into());
     }
+    // An existing graph that cannot be written (read-only storage or file)
+    // is used through a temporary copy, labelled as such.
+    let read_only_file = exists && std::fs::metadata(&db).map(|m| m.permissions().readonly()).unwrap_or(false);
+    if read_only_file {
+        return temporary_copy(root, &db, data_dir);
+    }
     match GraphStore::open(&db, !exists) {
+        Ok(store) if store.connection().is_readonly(rusqlite::MAIN_DB).unwrap_or(false) => {
+            drop(store);
+            temporary_copy(root, &db, data_dir)
+        }
         Ok(store) => Ok(OpenGraph { root: root.to_path_buf(), store, temporary: None }),
         Err(StoreError::NewerSchema { found, supported }) => Err((
             format!(
@@ -1370,6 +1423,54 @@ fn open_project_graph(root: &Path, _data_dir: &Path) -> Result<OpenGraph, (Strin
         Err(e) => Err((format!("The project graph could not be opened: {e}"), recovery_options(&dir))),
     }
 }
+
+/// `.exposition` is a real folder inside the project (not a link or a
+/// junction that leads elsewhere).
+fn metadata_folder_is_real(root: &Path) -> bool {
+    let dir = root.join(PROJECT_DIR);
+    matches!(
+        (std::fs::canonicalize(root), std::fs::canonicalize(&dir), std::fs::symlink_metadata(&dir)),
+        (Ok(r), Ok(d), Ok(meta)) if d.starts_with(&r) && !meta.file_type().is_symlink() && meta.is_dir()
+    )
+}
+
+/// Use a project graph that cannot be written through a consistent copy in
+/// the application data folder: the graph's curated records stay readable,
+/// changes are temporary and never claimed as saved with the project.
+fn temporary_copy(root: &Path, db: &Path, data_dir: &Path) -> Result<OpenGraph, (String, Vec<RecoveryOption>)> {
+    let refused = |e: String| {
+        (format!("The project graph is on read-only storage and could not be read: {e}"), vec![RecoveryOption::Retry])
+    };
+    let source = GraphStore::open_read_only(db).map_err(|e| match e {
+        StoreError::NewerSchema { found, supported } => (
+            format!("The project graph was written by a newer version of Exposition (schema {found}; this version reads {supported}). It was left unchanged."),
+            vec![RecoveryOption::Retry],
+        ),
+        other => refused(other.to_string()),
+    })?;
+    let dir = data_dir.join("graph-temporary");
+    std::fs::create_dir_all(&dir).map_err(|e| refused(e.to_string()))?;
+    let digest = sha2::Sha256::digest(root.to_string_lossy().to_lowercase().as_bytes());
+    let name: String = digest.iter().take(12).map(|b| format!("{b:02x}")).collect();
+    let copy = dir.join(format!("{name}.sqlite3"));
+    for suffix in ["", "-journal", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(dir.join(format!("{name}.sqlite3{suffix}")));
+    }
+    source.vacuum_into(&copy).map_err(|e| refused(e.to_string()))?;
+    drop(source);
+    let store = GraphStore::open(&copy, false).map_err(|e| refused(e.to_string()))?;
+    Ok(OpenGraph {
+        root: root.to_path_buf(),
+        store,
+        temporary: Some(
+            "The project's graph is on read-only storage: a temporary copy is used, and changes are not saved with the project."
+                .into(),
+        ),
+    })
+}
+
+/// Why imported evidence is never current.
+pub const IMPORTED_EVIDENCE: &str = "recorded outside this installation (copied with the project); a historical claim, not verification on this computer";
 
 /// Recovery choices for a damaged graph: its consistent backups (newest
 /// first), a new graph (the damaged one kept aside), or retrying.
@@ -1587,6 +1688,9 @@ fn note_unknown_coverage(
 /// (for UTF-8 text without a byte-order mark this equals the hash of the
 /// text), compared with the hash the reconciler indexed.
 pub fn evidence_freshness(store: &GraphStore, evidence: &Evidence) -> Freshness {
+    if !store.evidence_is_local(&evidence.id) {
+        return Freshness::Unknown { reason: IMPORTED_EVIDENCE.into() };
+    }
     let mut stale = Vec::new();
     let mut unknown = None;
     let mut inputs: Vec<(WorkspacePath, Option<String>)> =

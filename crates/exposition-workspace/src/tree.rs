@@ -23,7 +23,12 @@ pub fn is_ignored(path: &WorkspacePath) -> bool {
 
 /// The project graph's own files under `.exposition/`.
 pub fn is_graph_storage(path: &WorkspacePath) -> bool {
-    let Some(rest) = path.as_str().strip_prefix(".exposition/") else { return false };
+    // Windows names ignore case: `.Exposition/Graph.sqlite3` is the same file.
+    let Some((first, rest)) = path.as_str().split_once('/') else { return false };
+    if !first.eq_ignore_ascii_case(".exposition") {
+        return false;
+    }
+    let rest = rest.to_ascii_lowercase();
     rest.starts_with("graph.sqlite3")
         || (rest == "graph-backups" || rest.starts_with("graph-backups/"))
         || rest.starts_with("graph.damaged")
@@ -161,5 +166,10 @@ mod tests {
         assert!(!is_ignored(&WorkspacePath::parse(".exposition/project.json").unwrap()));
         assert!(!is_ignored(&WorkspacePath::parse(".exposition/research/r/fit.py").unwrap()));
         assert!(!is_ignored(&WorkspacePath::parse("chapters/target.typ").unwrap()));
+        // The same folder under another case (Windows): the graph's writes
+        // are never reported as source changes.
+        assert!(is_ignored(&WorkspacePath::parse(".Exposition/graph.sqlite3-journal").unwrap()));
+        assert!(is_ignored(&WorkspacePath::parse(".EXPOSITION/Graph-Backups").unwrap()));
+        assert!(!is_ignored(&WorkspacePath::parse(".Exposition/research/r/fit.py").unwrap()));
     }
 }

@@ -264,15 +264,23 @@ fn ambiguous_moves_are_not_guessed() {
 
 #[test]
 fn a_unique_same_content_move_keeps_identity_even_across_physical_files() {
-    let p = project(&[("draft.typ", "= Draft\nunique content 42\n")]);
+    const DRAFT: &str = "= Draft\nThis draft has enough distinctive content that identical bytes elsewhere are the same \
+                         document moved, not a coincidence: unique content 42.\n";
+    let p = project(&[("draft.typ", DRAFT), ("tiny.typ", "= T\n")]);
     p.full();
     let id = p.resource("draft.typ").unwrap().id;
+    let tiny = p.resource("tiny.typ").unwrap().id;
     // Copy + delete (a new physical file, e.g. a branch switch rewriting files).
-    write(&p.root, "paper/draft.typ", "= Draft\nunique content 42\n");
+    write(&p.root, "paper/draft.typ", DRAFT);
     std::fs::remove_file(p.root.join("draft.typ")).unwrap();
+    // A trivially small file is never matched by content alone (R-M7-G7).
+    write(&p.root, "paper/tiny.typ", "= T\n");
+    std::fs::remove_file(p.root.join("tiny.typ")).unwrap();
     let r = p.full();
     assert_eq!(r.resources_renamed, 1, "{r:?}");
     assert_eq!(p.resource("paper/draft.typ").unwrap().id, id);
+    assert_ne!(p.resource("paper/tiny.typ").unwrap().id, tiny, "no identity transfer on trivial content");
+    assert_eq!(p.entity(&tiny).lifecycle, Lifecycle::Tombstoned);
 }
 
 #[test]
@@ -457,6 +465,57 @@ fn evidence_is_current_only_for_the_indexed_version_and_unknown_is_never_current
     std::fs::remove_file(p.root.join("analysis/fit.py")).unwrap();
     p.full();
     assert!(matches!(freshness(&current), Freshness::Stale { .. }), "a deleted input makes evidence stale");
+}
+
+#[test]
+fn evidence_from_another_installation_is_imported_never_current() {
+    let p = project(&[("analysis/fit.py", "print(1)\n")]);
+    p.full();
+    let fit = p.resource("analysis/fit.py").unwrap();
+    let hash = p.svc.entity_detail(&fit.id).unwrap().bindings[0].version.clone().unwrap().content_hash;
+    let origin = Origin::Service { service: "research".into() };
+    let id = p
+        .svc
+        .register_evidence(
+            &origin,
+            Evidence {
+                id: EvidenceId::mint(),
+                kind: EvidenceKind::Computational,
+                subject: Some(fit.id.clone()),
+                operation: OperationRef { kind: "researchRun".into(), id: "run-1".into() },
+                inputs: vec![VersionedInput {
+                    path: wp("analysis/fit.py"),
+                    content_hash: Some(hash),
+                    revision: None,
+                    unsaved: false,
+                }],
+                outcome: EvidenceOutcome::Succeeded,
+                environment: vec![],
+                outputs: vec![],
+                formal: None,
+                recorded_by: origin.clone(),
+                recorded_at_ms: 1,
+            },
+        )
+        .unwrap();
+    let here = p.svc.entity_detail(&fit.id).unwrap();
+    assert!(here.imported_evidence.is_empty(), "recorded by this installation");
+    assert_eq!(here.evidence_freshness[0].1, Freshness::Current);
+    // The same project opened by another installation (another key).
+    p.svc.detach();
+    let other_data = tempfile::tempdir().unwrap();
+    let other = GraphService::new(GraphConfig { data_dir: other_data.path().to_path_buf() });
+    assert!(other.attach(&p.root).is_usable());
+    let there = other.entity_detail(&fit.id).unwrap();
+    assert_eq!(there.imported_evidence, vec![id.clone()], "a historical claim of its recorded origin");
+    let Freshness::Unknown { reason } = &there.evidence_freshness[0].1 else {
+        panic!("{:?}", there.evidence_freshness)
+    };
+    assert!(reason.contains("recorded outside this installation"), "{reason}");
+    // Back in the recording installation it is local again.
+    other.detach();
+    p.svc.attach(&p.root);
+    assert!(p.svc.entity_detail(&fit.id).unwrap().imported_evidence.is_empty());
 }
 
 /// A folder the user cannot write to gets a temporary graph (nothing is

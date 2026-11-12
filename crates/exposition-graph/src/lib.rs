@@ -40,6 +40,7 @@ pub mod backup;
 pub mod blueprint;
 pub mod ids;
 pub mod journal;
+pub mod mac;
 pub mod model;
 pub mod ops;
 pub mod query;
