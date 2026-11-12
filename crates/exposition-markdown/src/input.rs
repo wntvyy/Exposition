@@ -1195,15 +1195,23 @@ impl<'a> Doc<'a> {
         if start < end {
             return Err(EditRefusal::WouldChangeStructure);
         }
-        let gap = end..start;
-        // Expected: everything except the Close/Open pair.
+        // Spaces typed before the break (not rendered at a paragraph end)
+        // separate the joined words again, so Enter + Backspace round-trips.
+        let kept = self.text[end..start].len() - self.text[end..start].trim_start_matches([' ', '\t']).len();
+        let gap = end + kept..start;
+        // Expected: everything except the Close/Open pair (a space when kept).
         let mut expected = Vec::new();
         for (i, t) in self.tokens.iter().enumerate() {
+            if i == second && kept > 0 {
+                expected.push(Tok::Space);
+            }
             if i != first && i != second {
                 expected.push(t.tok.clone());
             }
         }
-        match self.try_plan(end, std::slice::from_ref(&gap), "", expected, false, EditMode::Markup, 0, &|_| true)? {
+        match self
+            .try_plan(gap.start, std::slice::from_ref(&gap), "", expected, false, EditMode::Markup, 0, &|_| true)?
+        {
             Some(plan) => Ok(plan),
             None => Err(EditRefusal::WouldChangeStructure),
         }
@@ -1571,6 +1579,9 @@ mod tests {
         // Backspace at a paragraph start joins it with the previous one.
         assert_eq!(run("ab\n\ncd\n", 4, PageEditOp::DeleteBackward).unwrap(), ("abcd\n".into(), 2));
         assert_eq!(run("ab\n\ncd\n", 2, PageEditOp::DeleteForward).unwrap(), ("abcd\n".into(), 2));
+        // Enter then Backspace restores the original bytes.
+        let (split, caret) = run("ab cd\n", 3, PageEditOp::ParagraphBreak).unwrap();
+        assert_eq!(run(&split, caret, PageEditOp::DeleteBackward).unwrap(), ("ab cd\n".into(), 3));
     }
 
     #[test]

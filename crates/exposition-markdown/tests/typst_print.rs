@@ -360,6 +360,32 @@ fn shared_undo_restores_markdown_and_layout() {
 }
 
 #[test]
+fn crlf_documents_map_and_edit_with_their_line_endings() {
+    let md = read_fixture(FIXTURE).replace('\n', "\r\n");
+    let compiler = Compiler::new(fixture_dir(FIXTURE));
+    let built = build(&compiler, &md);
+    assert!(built.tr.diagnostics.is_empty(), "{:#?}", built.tr.diagnostics);
+    let cov = coverage(&md, &built.tr, &built.glyphs);
+    assert!(cov.failures.is_empty(), "{:#?}", cov.failures);
+    assert_eq!((cov.prose_mapped, cov.math_mapped), (535, 30));
+    // The code block keeps its lines without carriage returns.
+    assert!(page_texts(&built.glyphs).concat().contains("fn main() {    println!(\"hello\");}"));
+
+    // Enter splits the paragraph with the document's line ending; Backspace
+    // at the new paragraph's start joins it back to the original bytes.
+    let at = md.find("uses the inline formula").unwrap() as u32;
+    let plan = MarkdownInput.plan(&md, TextRange::empty(at), &PageEditOp::ParagraphBreak, "\r\n").unwrap();
+    assert_eq!(plan.patches[0].text, "\r\n\r\n");
+    let split = apply_plan(&md, &plan.patches);
+    let rebuilt = build(&compiler, &split);
+    assert!(rebuilt.tr.typst.contains("<exmd-fn-1> and\n\nuses the inline formula"), "{}", rebuilt.tr.typst);
+    let joined = MarkdownInput.plan(&split, TextRange::empty(plan.caret), &PageEditOp::DeleteBackward, "\r\n").unwrap();
+    let back = apply_plan(&split, &joined.patches);
+    assert_eq!(back, md);
+    assert_eq!(joined.caret, at);
+}
+
+#[test]
 fn unsupported_math_is_reported_and_visibly_marked() {
     let md = "# Limits of the profile\n\nSupported $x^2$ and unsupported $\\color{red}{x} + \\unknowncmd + y$.\n\n\
               $$\n\\begin{array}{cc} a & b \\end{array} = \\frac{1}{} + \\left( x\n$$\n";
