@@ -76,6 +76,22 @@ export interface CommandContribution {
   run: () => void | Promise<void>;
 }
 
+/**
+ * A top-level page (Editor, Research, Agents, Graph). The shell shows one page
+ * at a time beside the activity rail; a page stays mounted (hidden and inert)
+ * after its first visit, so switching pages never recreates its sessions,
+ * tasks, or document models. The Editor page is built into the shell.
+ */
+export interface PageContribution {
+  /** Stable id, e.g. `research`. `editor` is reserved for the shell. */
+  id: string;
+  title: string;
+  icon: ComponentType<{ size?: number; "aria-hidden"?: boolean }>;
+  /** Lower numbers sort first; the Editor page is 0. */
+  order?: number;
+  render: () => ReactNode;
+}
+
 /** An item in the status bar. */
 export interface StatusItemContribution {
   id: string;
@@ -92,8 +108,25 @@ class Registry {
   private editors = new Map<string, EditorContribution>();
   private commands = new Map<string, CommandContribution>();
   private statusItems = new Map<string, StatusItemContribution>();
+  private pageMap = new Map<string, PageContribution>();
   private listeners = new Set<Listener>();
   private version = 0;
+
+  registerPage(page: PageContribution): () => void {
+    if (page.id === "editor") throw new Error("the editor page is built into the shell");
+    return this.add(this.pageMap, page);
+  }
+
+  /** Registered pages (excluding the shell's Editor page), in order. */
+  pages(): PageContribution[] {
+    return [...this.pageMap.values()].sort(
+      (a, b) => (a.order ?? 100) - (b.order ?? 100) || a.title.localeCompare(b.title),
+    );
+  }
+
+  page(id: string): PageContribution | undefined {
+    return this.pageMap.get(id);
+  }
 
   registerView(view: ViewContribution): () => void {
     return this.add(this.views, view);

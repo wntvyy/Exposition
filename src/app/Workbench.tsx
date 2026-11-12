@@ -4,7 +4,7 @@
 // imports feature internals.
 import "./shell/workbench.css";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Group, Panel as ResizablePanel, type PanelImperativeHandle } from "react-resizable-panels";
 
 import { ConfirmHost } from "../ui/components/Dialog";
@@ -12,13 +12,17 @@ import { NotificationRegion } from "../ui/components/Notifications";
 import { ResizeHandle } from "../ui/components/ResizeHandle";
 import { installKeybindings } from "./keybindings";
 import { layout, SIZE_LIMITS, useLayout, useVisibility, type Region } from "./layout";
+import { EDITOR_PAGE, usePages } from "./pages";
+import { registry } from "./registry";
 import { ActivityRail } from "./shell/ActivityRail";
 import { registerBuiltins } from "./shell/builtins";
 import { CommandPalette } from "./shell/CommandPalette";
 import { EditorArea } from "./shell/EditorArea";
 import { focusNextRegion, trackRegionFocus } from "./shell/regions";
 import { StatusBar } from "./shell/StatusBar";
+import { useRegistryVersion } from "./shell/useRegistry";
 import { ViewContainer } from "./shell/ViewContainer";
+import { ViewErrorBoundary } from "./shell/ViewErrorBoundary";
 
 const px = (n: number) => `${n}px`;
 
@@ -56,10 +60,7 @@ export function Workbench() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  return (
-    <div className="wb" data-testid="workbench">
-      <div className="wb-main">
-        <ActivityRail />
+  const editorLayout = (
         <Group
           id="wb-columns"
           orientation="horizontal"
@@ -139,11 +140,56 @@ export function Workbench() {
             </>
           )}
         </Group>
+  );
+
+  return (
+    <div className="wb" data-testid="workbench">
+      <div className="wb-main">
+        <ActivityRail />
+        <Pages editor={editorLayout} />
       </div>
       <StatusBar />
       <NotificationRegion />
       <CommandPalette />
       <ConfirmHost />
+    </div>
+  );
+}
+
+/**
+ * The page area: the Editor page (the workbench layout) and every registered
+ * page that has been visited. Hidden pages stay mounted but `hidden` and
+ * `inert`, so their state survives navigation and they take no focus.
+ */
+function Pages({ editor }: { editor: ReactNode }) {
+  useRegistryVersion();
+  const active = usePages((s) => s.active);
+  const visited = usePages((s) => s.visited);
+  const registered = registry.pages().filter((page) => visited.includes(page.id));
+  return (
+    <div className="wb-pages">
+      <div
+        className="wb-page wb-page--editor"
+        data-page={EDITOR_PAGE}
+        hidden={active !== EDITOR_PAGE}
+        inert={active !== EDITOR_PAGE}
+      >
+        {editor}
+      </div>
+      {registered.map((page) => (
+        <div
+          key={page.id}
+          className="wb-page"
+          data-page={page.id}
+          data-region={active === page.id ? "page" : undefined}
+          aria-label={page.title}
+          role="region"
+          hidden={active !== page.id}
+          inert={active !== page.id}
+        >
+          <ViewErrorBoundary name={page.title}>{page.render()}</ViewErrorBoundary>
+        </div>
+      ))}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { Command as CommandIcon, Monitor, Moon, PanelBottom, PanelLeft, PanelRight, Settings, Shapes, SlidersHorizontal, Sun } from "lucide-react";
+import { Command as CommandIcon, FileText, Monitor, Moon, PanelBottom, PanelLeft, PanelRight, Settings, Shapes, SlidersHorizontal, Sun } from "lucide-react";
 import { ToggleButton as AriaToggleButton } from "react-aria-components";
 
 import { MenuTrigger, Menu, MenuItem, MenuSection, MenuSeparator, SubmenuTrigger } from "../../ui/components/Menu";
@@ -7,7 +7,9 @@ import { Toolbar } from "../../ui/components/Panel";
 import { Tooltip } from "../../ui/components/Tooltip";
 import { setThemePreference, useTheme, type ThemePreference } from "../../ui/theme";
 import { layout, useVisibility, type Region } from "../layout";
+import { EDITOR_PAGE, pages, usePages } from "../pages";
 import { registry } from "../registry";
+import { useRegistryVersion } from "./useRegistry";
 import { useActiveView } from "./ViewContainer";
 
 function RailToggle({
@@ -54,17 +56,38 @@ export function ActivityRail() {
   const visibility = useVisibility();
   const preference = useTheme((s) => s.preference);
 
+  useRegistryVersion();
+  const activePage = usePages((s) => s.active);
+  const registeredPages = registry.pages();
+  const onEditor = activePage === EDITOR_PAGE;
+
   return (
     <nav className="wb-rail" aria-label="Activity bar" data-region="activitybar">
+      {registeredPages.length > 0 && (
+        <Toolbar aria-label="Pages" orientation="vertical" className="wb-rail__group wb-rail__group--pages">
+          {[{ id: EDITOR_PAGE, title: "Editor", icon: FileText }, ...registeredPages].map((page) => (
+            <RailToggle
+              key={page.id}
+              label={page.title}
+              icon={page.icon}
+              isSelected={activePage === page.id}
+              onChange={() => pages.show(page.id)}
+            />
+          ))}
+        </Toolbar>
+      )}
       <Toolbar aria-label="Sidebar views" orientation="vertical" className="wb-rail__group">
         {views.map((view) => (
           <RailToggle
             key={view.id}
             label={view.title}
             icon={view.icon}
-            isSelected={visibility.sidebar && active?.id === view.id}
+            isSelected={onEditor && visibility.sidebar && active?.id === view.id}
             onChange={() => {
-              if (visibility.sidebar && active?.id === view.id) layout.setVisible("sidebar", false);
+              if (!onEditor) {
+                pages.show(EDITOR_PAGE);
+                layout.showView("sidebar", view.id);
+              } else if (visibility.sidebar && active?.id === view.id) layout.setVisible("sidebar", false);
               else layout.showView("sidebar", view.id);
             }}
           />

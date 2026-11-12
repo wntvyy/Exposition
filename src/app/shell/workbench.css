@@ -14,6 +14,27 @@
   min-height: 0;
 }
 
+/* ---------- Pages (Editor, Research, Agents, Graph) ---------- */
+
+.wb-pages {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.wb-page {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-surface);
+}
+
+.wb-page[hidden] {
+  display: none;
+}
+
 .wb-columns,
 .wb-rows {
   flex: 1;
@@ -40,7 +61,7 @@
   display: flex;
   flex: none;
   flex-direction: column;
-  justify-content: space-between;
+  justify-content: flex-start;
   width: var(--activity-rail-width);
   padding: var(--space-1) 0;
   border-right: var(--border-width) solid var(--color-border);
@@ -50,6 +71,15 @@
   align-items: center;
   gap: var(--space-1);
 }
+.wb-rail__group--pages {
+  padding-bottom: var(--space-1);
+  margin-bottom: var(--space-1);
+  border-bottom: var(--border-width) solid var(--color-border);
+}
+.wb-rail__group--end {
+  margin-top: auto;
+}
+
 .wb-rail__button {
   position: relative;
   display: inline-flex;
@@ -74,7 +104,7 @@
 .wb-rail__button[data-selected] {
   color: var(--color-text);
 }
-.wb-rail__group:first-child .wb-rail__button[data-selected]::before {
+.wb-rail__group:not(.wb-rail__group--end) .wb-rail__button[data-selected]::before {
   content: "";
   position: absolute;
   left: -4px;
@@ -84,7 +114,8 @@
   border-radius: 1px;
   background: var(--color-accent);
 }
-.wb-rail__group--end .wb-rail__button[data-selected] {
+.wb-rail__group--end .wb-rail__button[data-selected],
+.wb-rail__group--pages .wb-rail__button[data-selected] {
   background: var(--color-surface-selected);
 }
 .wb-rail__button[data-focus-visible] {
