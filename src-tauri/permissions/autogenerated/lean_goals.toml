@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lean-goals"
+description = "Enables the lean_goals command without any pre-configured scope."
+commands.allow = ["lean_goals"]
+
+[[permission]]
+identifier = "deny-lean-goals"
+description = "Denies the lean_goals command without any pre-configured scope."
+commands.deny = ["lean_goals"]

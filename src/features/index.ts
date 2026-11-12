@@ -4,6 +4,7 @@
 import "./agents/register";
 import "./editor/register";
 import "./jobs/register";
+import "./lean/register";
 import "./research/register";
 import "./page/register";
 import "./typesetting/register";

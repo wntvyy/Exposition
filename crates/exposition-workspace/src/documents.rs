@@ -5,10 +5,12 @@
 //! is held. Views (Monaco, the page editor) apply those patches; they never hold
 //! a second authoritative copy.
 //!
-//! Undo history is per document and shared by every edit origin. Each undo group
-//! stores its inverse patches relative to the text at the end of the group; if
-//! unrecorded changes happened since, the inverse is rebased over them and the
-//! undo is refused when they overlap.
+//! Undo history is per document and shared by every edit origin. Each undo
+//! group stores inverse patches relative to the current text as it would be
+//! once every group above it in the stack had been undone, so undoing never
+//! needs to replay history. Unrecorded (`UndoBehavior::Skip`) changes are
+//! transformed down the stack when they happen; a group such a change overlaps
+//! is blocked, and undoing it is refused rather than guessed.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -20,7 +22,7 @@ use exposition_core::document::{
     UndoBehavior,
 };
 use exposition_core::path::WorkspacePath;
-use exposition_core::text::{TextRange, utf16_len, utf16_range_to_bytes};
+use exposition_core::text::{TextRange, utf16_len};
 use tokio::sync::broadcast;
 
 /// Revisions retained for rebasing stale edits and undo groups.
@@ -84,9 +86,14 @@ struct HistoryEntry {
 struct UndoGroup {
     key: Option<String>,
     origin: EditOrigin,
-    /// Restores the text at the start of the group; relative to `end_revision`.
+    /// Restores the text at the start of the group. Relative to the current
+    /// text once every group above this one in its stack has been applied.
     inverse: Vec<TextPatch>,
+    /// Revision at the end of the group; typing may merge into the group only
+    /// while the document is still at this revision.
     end_revision: u64,
+    /// An unrecorded change overlapped this group; it can no longer be applied.
+    blocked: bool,
     selection_before: Option<Vec<TextRange>>,
     selection_after: Option<Vec<TextRange>>,
 }
@@ -258,7 +265,7 @@ impl DocumentService {
             let inverse = inverse_patches(&doc.text, &plan.patches);
             doc.commit(plan.text, plan.patches.clone());
             doc.redo.clear();
-            record_undo(doc, &request, inverse, previous_revision, &plan.before_text);
+            record_undo(doc, &request, inverse, &plan.patches, previous_revision, &plan.before_text);
             let event = DocumentChanged {
                 document: doc.id.clone(),
                 transaction: Some(request.id.clone()),
@@ -309,8 +316,15 @@ impl DocumentService {
             let action = if kind == ChangeKind::Undo { "undo" } else { "redo" };
             return Err(TransactionError::NothingToUndo { document: id.clone(), action: action.into() });
         };
-        // Rebase the inverse over any unrecorded changes since the group ended.
-        let patches = rebase(doc, group.end_revision, &group.inverse)?;
+        if group.blocked {
+            return Err(TransactionError::Conflict {
+                document: id.clone(),
+                base_revision: group.end_revision,
+                current_revision: doc.revision,
+            });
+        }
+        // The group's inverse is already relative to the current text.
+        let patches = group.inverse.clone();
         let text = apply_patches(&doc.text, &patches).map_err(|range| invalid_range(doc, range))?;
         let group = if kind == ChangeKind::Undo { doc.undo.pop() } else { doc.redo.pop() }.expect("checked above");
         let previous_revision = doc.revision;
@@ -325,6 +339,7 @@ impl DocumentService {
             origin: group.origin.clone(),
             inverse,
             end_revision: doc.revision,
+            blocked: false,
             selection_before: group.selection_before,
             selection_after: group.selection_after,
         };
@@ -448,34 +463,76 @@ fn check_sorted(doc: &DocState, patches: &[TextPatch]) -> Result<(), Transaction
     Ok(())
 }
 
-/// Apply sorted, non-overlapping patches to `text`. Returns the offending range on failure.
+/// Forward-only UTF-16 to byte offset conversion. Converting the sorted
+/// offsets of a whole patch list costs one pass over the text, not one pass
+/// per patch.
+struct Utf16Cursor<'a> {
+    text: &'a str,
+    byte: usize,
+    unit: usize,
+}
+
+impl<'a> Utf16Cursor<'a> {
+    fn new(text: &'a str) -> Self {
+        Self { text, byte: 0, unit: 0 }
+    }
+
+    /// Byte offset of UTF-16 offset `target`; `None` if it lies before the
+    /// previous target, inside a surrogate pair, or past the end.
+    fn seek(&mut self, target: u32) -> Option<usize> {
+        let target = target as usize;
+        if target < self.unit {
+            return None;
+        }
+        let text = self.text;
+        for ch in text[self.byte..].chars() {
+            if self.unit == target {
+                return Some(self.byte);
+            }
+            let width = ch.len_utf16();
+            if self.unit + width > target {
+                return None;
+            }
+            self.unit += width;
+            self.byte += ch.len_utf8();
+        }
+        (self.unit == target).then_some(self.byte)
+    }
+}
+
+/// Apply sorted, non-overlapping patches to `text` in one pass. Returns the
+/// offending range on failure.
 fn apply_patches(text: &str, patches: &[TextPatch]) -> Result<String, TextRange> {
     let mut out = String::with_capacity(text.len() + patches.iter().map(|p| p.text.len()).sum::<usize>());
-    let mut cursor = 0usize;
+    let mut cursor = Utf16Cursor::new(text);
+    let mut copied = 0usize;
     for patch in patches {
-        let bytes = utf16_range_to_bytes(text, patch.range).map_err(|_| patch.range)?;
-        if bytes.start < cursor {
+        if !patch.range.is_ordered() {
             return Err(patch.range);
         }
-        out.push_str(&text[cursor..bytes.start]);
+        let start = cursor.seek(patch.range.start).ok_or(patch.range)?;
+        let end = cursor.seek(patch.range.end).ok_or(patch.range)?;
+        out.push_str(&text[copied..start]);
         out.push_str(&patch.text);
-        cursor = bytes.end;
+        copied = end;
     }
-    out.push_str(&text[cursor..]);
+    out.push_str(&text[copied..]);
     Ok(out)
 }
 
 /// Patches that undo `patches` (sorted, relative to `old`), relative to the new text.
 fn inverse_patches(old: &str, patches: &[TextPatch]) -> Vec<TextPatch> {
+    let mut cursor = Utf16Cursor::new(old);
     let mut shift: i64 = 0;
     patches
         .iter()
         .map(|patch| {
+            let from = cursor.seek(patch.range.start).expect("validated patch");
+            let to = cursor.seek(patch.range.end).expect("validated patch");
             let start = (i64::from(patch.range.start) + shift) as u32;
             let inserted = utf16_len(&patch.text) as u32;
-            let bytes = utf16_range_to_bytes(old, patch.range).expect("validated patch");
             shift += i64::from(inserted) - i64::from(patch.range.len());
-            TextPatch { range: TextRange::new(start, start + inserted), text: old[bytes].to_owned() }
+            TextPatch { range: TextRange::new(start, start + inserted), text: old[from..to].to_owned() }
         })
         .collect()
 }
@@ -507,12 +564,20 @@ fn rebase(doc: &DocState, base_revision: u64, patches: &[TextPatch]) -> Result<V
 /// A concurrent insertion at the start of `range` lands before it; one at the
 /// end of a non-empty range lands after it; one strictly inside conflicts.
 fn map_range(range: TextRange, concurrent: &[TextPatch]) -> Option<TextRange> {
+    map_range_biased(range, concurrent, true)
+}
+
+/// [`map_range`] with an explicit tie rule: `ties_before` decides whether a
+/// concurrent insertion at exactly the point of an empty `range` (another
+/// insertion) lands before it. Transforming two edits against each other must
+/// use opposite rules so both agree on the order.
+fn map_range_biased(range: TextRange, concurrent: &[TextPatch], ties_before: bool) -> Option<TextRange> {
     let mut shift: i64 = 0;
     for q in concurrent {
         let delta = utf16_len(&q.text) as i64 - i64::from(q.range.len());
         if q.range.is_empty() {
             let at = q.range.start;
-            if at <= range.start {
+            if at < range.start || (at == range.start && (ties_before || !range.is_empty())) {
                 shift += delta;
             } else if at < range.end {
                 return None;
@@ -530,15 +595,50 @@ fn map_range(range: TextRange, concurrent: &[TextPatch]) -> Option<TextRange> {
     Some(TextRange::new(u32::try_from(start).ok()?, u32::try_from(end).ok()?))
 }
 
+fn map_patches(patches: &[TextPatch], through: &[TextPatch], ties_before: bool) -> Option<Vec<TextPatch>> {
+    patches
+        .iter()
+        .map(|p| map_range_biased(p.range, through, ties_before).map(|range| TextPatch { range, text: p.text.clone() }))
+        .collect()
+}
+
+/// Re-express an undo stack after an unrecorded change `applied` (relative to
+/// the text before it). Each group's inverse is relative to the text with every
+/// group above it undone, so the change is transformed down the stack alongside
+/// the groups. The first group it overlaps is blocked; groups below a blocked
+/// group are unreachable by linear undo and are left as they are.
+fn transform_stack(stack: &mut [UndoGroup], applied: &[TextPatch]) {
+    let mut concurrent = applied.to_vec();
+    for group in stack.iter_mut().rev() {
+        if group.blocked {
+            return;
+        }
+        match (map_patches(&group.inverse, &concurrent, true), map_patches(&concurrent, &group.inverse, false)) {
+            (Some(inverse), Some(next)) => {
+                group.inverse = inverse;
+                concurrent = next;
+            }
+            _ => {
+                group.blocked = true;
+                return;
+            }
+        }
+    }
+}
+
 fn record_undo(
     doc: &mut DocState,
     request: &TransactionRequest,
     inverse: Vec<TextPatch>,
+    applied: &[TextPatch],
     previous_revision: u64,
     before_text: &Arc<str>,
 ) {
     let (key, merge) = match &request.undo {
-        UndoBehavior::Skip => return,
+        UndoBehavior::Skip => {
+            transform_stack(&mut doc.undo, applied);
+            return;
+        }
         UndoBehavior::NewGroup => (None, false),
         UndoBehavior::Merge { key } => (Some(key.clone()), true),
     };
@@ -547,6 +647,7 @@ fn record_undo(
     if merge
         && let Some(top) = doc.undo.last_mut()
         && top.key == key
+        && !top.blocked
         && std::mem::discriminant(&top.origin) == std::mem::discriminant(&request.origin)
         && top.end_revision == previous_revision
     {
@@ -563,6 +664,7 @@ fn record_undo(
         origin: request.origin.clone(),
         inverse,
         end_revision: doc.revision,
+        blocked: false,
         selection_before,
         selection_after,
     });
@@ -915,5 +1017,114 @@ mod tests {
         assert_eq!(map_range(TextRange::new(5, 8), &[TextPatch::replace(2, 5, "")]), Some(TextRange::new(2, 5)));
         // an insertion point at the start of a concurrent replacement stays before it
         assert_eq!(map_range(TextRange::empty(5), &[TextPatch::replace(5, 7, "xyz")]), Some(TextRange::empty(5)));
+    }
+
+    fn type_chars(service: &DocumentService, id: &DocumentId, at: u32, chars: &str, key: &str) {
+        for (i, ch) in (0u32..).zip(chars.chars()) {
+            let base = service.info(id).unwrap().revision;
+            service
+                .apply(tx(
+                    id,
+                    base,
+                    vec![TextPatch::insert(at + i, ch.to_string())],
+                    UndoBehavior::Merge { key: key.into() },
+                    ConflictPolicy::Reject,
+                ))
+                .unwrap();
+        }
+    }
+
+    /// Review R-m1 #3: fixing a letter inside a just-typed word, then undoing
+    /// twice, must undo both groups (the earlier group must not be "rebased"
+    /// over the later group's edit and its undo).
+    #[test]
+    fn undo_after_undoing_an_edit_inside_an_earlier_group() {
+        let (service, id) = service_with("");
+        type_chars(&service, &id, 0, "helo", "typing-1");
+        type_chars(&service, &id, 3, "l", "typing-2");
+        assert_eq!(text(&service, &id), "hello");
+        service.undo(&id, EditOrigin::Source).unwrap();
+        assert_eq!(text(&service, &id), "helo");
+        service.undo(&id, EditOrigin::Source).expect("second undo removes the word");
+        assert_eq!(text(&service, &id), "");
+        service.redo(&id, EditOrigin::Source).unwrap();
+        service.redo(&id, EditOrigin::Source).unwrap();
+        assert_eq!(text(&service, &id), "hello");
+    }
+
+    /// Review R-m1 #7: undo must reach the first group of a long session, far
+    /// beyond the rebase history window.
+    #[test]
+    fn undo_reaches_the_start_of_a_long_session() {
+        let (service, id) = service_with("");
+        let mut offset = 0u32;
+        for line in 0..120 {
+            let chars = format!("line {line:03} abcdefghijk\n");
+            type_chars(&service, &id, offset, &chars, &format!("typing-{line}"));
+            offset += chars.chars().count() as u32;
+        }
+        assert!(service.info(&id).unwrap().revision > HISTORY_LIMIT as u64);
+        for _ in 0..120 {
+            service.undo(&id, EditOrigin::Source).unwrap();
+        }
+        assert_eq!(text(&service, &id), "");
+    }
+
+    /// An unrecorded change below several groups is transformed down the whole
+    /// stack, so every group still undoes exactly its own edit.
+    #[test]
+    fn unrecorded_changes_are_transformed_down_the_undo_stack() {
+        let (service, id) = service_with("abc");
+        type_chars(&service, &id, 3, "XY", "typing-1");
+        type_chars(&service, &id, 5, "Z", "typing-2");
+        assert_eq!(text(&service, &id), "abcXYZ");
+        // An unrecorded change at the start (e.g. an external reload of a region).
+        service
+            .apply(tx(&id, 4, vec![TextPatch::insert(0, ">>")], UndoBehavior::Skip, ConflictPolicy::Reject))
+            .unwrap();
+        service.undo(&id, EditOrigin::Source).unwrap();
+        assert_eq!(text(&service, &id), ">>abcXY");
+        service.undo(&id, EditOrigin::Source).unwrap();
+        assert_eq!(text(&service, &id), ">>abc");
+    }
+
+    /// Two insertions at the same point: the unrecorded one and the restored
+    /// text keep a consistent order through the stack transform.
+    #[test]
+    fn unrecorded_insertion_at_an_undo_point_keeps_a_consistent_order() {
+        let (service, id) = service_with("ab");
+        // Group deletes "b" (its inverse re-inserts "b" at 1).
+        service
+            .apply(tx(&id, 1, vec![TextPatch::delete(1, 2)], UndoBehavior::NewGroup, ConflictPolicy::Reject))
+            .unwrap();
+        service.apply(tx(&id, 2, vec![TextPatch::insert(1, "!")], UndoBehavior::Skip, ConflictPolicy::Reject)).unwrap();
+        service.undo(&id, EditOrigin::Source).unwrap();
+        assert_eq!(text(&service, &id), "a!b");
+    }
+
+    /// Review R-m1 #6: a transaction with thousands of patches is linear in the
+    /// text size, not quadratic, while holding the service lock.
+    #[test]
+    fn many_patch_transactions_are_linear() {
+        let (service, id) = service_with(&"abcdefghij\n".repeat(100_000));
+        let patches: Vec<TextPatch> = (0..20_000u32).map(|i| TextPatch::insert(i * 55, "x")).collect();
+        let started = std::time::Instant::now();
+        service.apply(tx(&id, 1, patches, UndoBehavior::NewGroup, ConflictPolicy::Reject)).unwrap();
+        service.undo(&id, EditOrigin::Source).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(text(&service, &id), "abcdefghij\n".repeat(100_000));
+        assert!(elapsed < std::time::Duration::from_secs(2), "20k-patch apply + undo on 1.1 MB took {elapsed:?}");
+    }
+
+    #[test]
+    fn cursor_rejects_surrogate_splits_and_backwards_seeks() {
+        let mut cursor = Utf16Cursor::new("a😀b");
+        assert_eq!(cursor.seek(1), Some(1));
+        assert_eq!(cursor.seek(2), None);
+        let mut cursor = Utf16Cursor::new("a😀b");
+        assert_eq!(cursor.seek(3), Some(5));
+        assert_eq!(cursor.seek(1), None);
+        assert_eq!(cursor.seek(4), Some(6));
+        assert_eq!(cursor.seek(5), None);
     }
 }
