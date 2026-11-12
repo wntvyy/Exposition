@@ -297,25 +297,27 @@ export function TaskView({ id, variant = "panel" }: { id: TaskId; variant?: "pan
           <h3 className="agents-heading__title">{task.title}</h3>
         </div>
       )}
-      <div className="agents-row">
-        <span data-testid="agents-task-status" data-status={task.status.kind}>
-          <StatusPill status={pill.status} label={pill.label} />
-        </span>
-        {active && (
-          <Button size="sm" variant="secondary" icon={Square} onPress={() => void agents.run(() => commands.agentsTaskCancel(id))} data-testid="agents-cancel">
-            Cancel
+      {variant === "panel" && (
+        <div className="agents-row">
+          <span data-testid="agents-task-status" data-status={task.status.kind}>
+            <StatusPill status={pill.status} label={pill.label} />
+          </span>
+          {active && (
+            <Button size="sm" variant="secondary" icon={Square} onPress={() => void agents.run(() => commands.agentsTaskCancel(id))} data-testid="agents-cancel">
+              Cancel
+            </Button>
+          )}
+          <Button
+            size="sm"
+            icon={FileDiff}
+            isDisabled={task.changedFiles === 0}
+            onPress={() => agents.show("review", id)}
+            data-testid="agents-open-review"
+          >
+            Review changes{task.pendingReview > 0 ? ` (${task.pendingReview})` : ""}
           </Button>
-        )}
-        <Button
-          size="sm"
-          icon={FileDiff}
-          isDisabled={task.changedFiles === 0}
-          onPress={() => (variant === "page" ? agents.setPage({ tab: "changes" }) : agents.show("review", id))}
-          data-testid="agents-open-review"
-        >
-          Review changes{task.pendingReview > 0 ? ` (${task.pendingReview})` : ""}
-        </Button>
-      </div>
+        </div>
+      )}
       <p className="agents-muted agents-small">
         {PERMISSION_LABELS[task.spec.permission]} · {EXECUTION_LABELS[task.spec.execution]} · {CONSENT_LABELS[task.spec.consent]} · {provider}
         {servedBy}

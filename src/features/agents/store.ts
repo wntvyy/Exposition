@@ -467,6 +467,9 @@ export const agents = {
     useAgents.setState((state) => ({ page: { ...state.page, ...patch } }));
     const selected = patch.selected;
     if (selected) void refetch(selected);
+    // An approval now on screen on the page needs no notification.
+    const { page } = useAgents.getState();
+    if (page.selected && approvalShowing(page.selected)) dismiss(approvalNotificationId(page.selected));
   },
 
   setStatus(status: ProviderStatus) {

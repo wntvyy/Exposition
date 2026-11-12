@@ -69,7 +69,7 @@ function entityName(entity: ContextEntity | undefined, id: string): string {
 /** One-line summary for the task view (panel and page). */
 export function graphSummary(context: GraphContext): string {
   const entities = context.entities.length;
-  return `Graph context: revision ${context.revision} · ${entities} ${entities === 1 ? "entity" : "entities"} in scope${
+  return `Graph context given at the start of the run: revision ${context.revision} · ${entities} ${entities === 1 ? "entity" : "entities"} in scope${
     context.truncated ? " (summarized)" : ""
   }`;
 }
