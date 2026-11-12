@@ -126,7 +126,19 @@ impl AppState {
             anthropic_base_url: None,
             retry: None,
         })?;
-        Ok(Self { documents, workspace, execution, lean, research, tex, typesetting, data_dir, agents, graph, reconciler })
+        Ok(Self {
+            documents,
+            workspace,
+            execution,
+            lean,
+            research,
+            tex,
+            typesetting,
+            data_dir,
+            agents,
+            graph,
+            reconciler,
+        })
     }
 }
 

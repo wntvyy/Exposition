@@ -183,7 +183,8 @@ pub(crate) struct Fresh {
 pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<ReconcileReport> {
     let started = Instant::now();
     let mut state = graph.reconcile_state();
-    let root = graph.attached_root().ok_or_else(|| GraphError::new("graph.noProject", "No project graph is attached."))?;
+    let root =
+        graph.attached_root().ok_or_else(|| GraphError::new("graph.noProject", "No project graph is attached."))?;
     if state.root.as_deref() != Some(root.as_path()) {
         state.root = Some(root.clone());
         state.index = ProjectIndex::default();
@@ -193,20 +194,18 @@ pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<Reco
         if !state.index.loaded {
             state.index.load(s)?;
         }
+        // A few paths are looked up directly; many (a burst of changes) are
+        // cheaper to filter from one read.
         let prefixes = match &options.scope {
-            Scope::Full => None,
-            Scope::Paths(p) => Some(p.as_slice()),
+            Scope::Paths(p) if p.len() <= 16 => Some(p.as_slice()),
+            _ => None,
         };
         let checkpoints = match prefixes {
             None => s.checkpoints()?,
             Some(p) => s.checkpoints_under(p)?,
         };
-        let known: BTreeMap<WorkspacePath, Vec<ResourceRole>> = s
-            .resource_keys(prefixes)?
-            .into_iter()
-            .filter(|k| !k.tombstoned)
-            .map(|k| (k.path, k.roles))
-            .collect();
+        let known: BTreeMap<WorkspacePath, Vec<ResourceRole>> =
+            s.resource_keys(prefixes)?.into_iter().filter(|k| !k.tombstoned).map(|k| (k.path, k.roles)).collect();
         Ok((checkpoints, known))
     })?;
 
@@ -236,7 +235,8 @@ pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<Reco
     // Known resources in scope that the walk does not visit (retained
     // artifacts, files admitted explicitly) are checked individually.
     for (path, roles) in &known {
-        if covered.contains(path) && !scan_out.files.contains_key(path)
+        if covered.contains(path)
+            && !scan_out.files.contains_key(path)
             && let Some(mut meta) = scan::stat_file(&root, path)
         {
             if meta.roles.is_empty() {
@@ -331,9 +331,9 @@ impl Covered {
     pub fn contains(&self, path: &WorkspacePath) -> bool {
         match self {
             Covered::All => true,
-            Covered::Prefixes(ps) => ps.iter().any(|p| {
-                path == p || path.as_str().strip_prefix(p.as_str()).is_some_and(|rest| rest.starts_with('/'))
-            }),
+            Covered::Prefixes(ps) => ps
+                .iter()
+                .any(|p| path == p || path.as_str().strip_prefix(p.as_str()).is_some_and(|rest| rest.starts_with('/'))),
         }
     }
 }
@@ -345,6 +345,9 @@ pub(crate) struct Stamp {
     pub modified_ms: Option<u64>,
     pub identity: Option<String>,
 }
+
+/// Labels of a file and whether it is a LaTeX main file (session index update).
+pub(crate) type IndexLabels = (Vec<String>, bool);
 
 /// Everything a pass writes.
 pub(crate) struct Plan {
@@ -358,7 +361,7 @@ pub(crate) struct Plan {
     pub index: Vec<IndexRecord>,
     pub remove_index: Vec<WorkspacePath>,
     pub wanted: Vec<(WorkspacePath, Vec<String>)>,
-    pub index_updates: Vec<(WorkspacePath, Option<(Vec<String>, bool)>)>,
+    pub index_updates: Vec<(WorkspacePath, Option<IndexLabels>)>,
     pub delta: GraphDelta,
     pub report: ReconcileReport,
     /// Coverage contents changed (bumps the graph revision even without
@@ -688,7 +691,13 @@ impl<'a> Planner<'a> {
     /// Add an observed relation unless one of this kind between these
     /// endpoints exists (any origin/status) or the vocabulary refuses it.
     /// Returns whether the relation exists afterwards.
-    pub(crate) fn relate(&mut self, kind: RelationKind, from: &Entity, to: &Entity, extractor: &str) -> StoreResult<bool> {
+    pub(crate) fn relate(
+        &mut self,
+        kind: RelationKind,
+        from: &Entity,
+        to: &Entity,
+        extractor: &str,
+    ) -> StoreResult<bool> {
         if from.id == to.id || !kind.allows(from.kind, to.kind) {
             return Ok(false);
         }
@@ -765,10 +774,7 @@ impl<'a> Planner<'a> {
 
     /// Planned relations added in this pass from `from`.
     pub(crate) fn added_from(&self, from: &EntityId) -> Vec<Relation> {
-        self.adds_from
-            .get(from)
-            .map(|ix| ix.iter().filter_map(|&i| self.add[i].clone()).collect())
-            .unwrap_or_default()
+        self.adds_from.get(from).map(|ix| ix.iter().filter_map(|&i| self.add[i].clone()).collect()).unwrap_or_default()
     }
 
     pub(crate) fn set_coverage(&mut self, c: ResourceCoverage, stamp: Option<Stamp>) {
@@ -1109,8 +1115,10 @@ impl<'a> Planner<'a> {
         matches: &mut Vec<FileMatch>,
     ) -> StoreResult<()> {
         self.semantic = true;
-        let stamp = Stamp { size: Some(f.meta.size), modified_ms: f.meta.modified_ms, identity: f.content.identity.clone() };
-        let version = f.content.hash.as_ref().map(|h| SourceVersion { content_hash: h.clone(), revision: None, saved: true });
+        let stamp =
+            Stamp { size: Some(f.meta.size), modified_ms: f.meta.modified_ms, identity: f.content.identity.clone() };
+        let version =
+            f.content.hash.as_ref().map(|h| SourceVersion { content_hash: h.clone(), revision: None, saved: true });
         self.set_bindings(
             &resource.id,
             vec![SourceBinding {
@@ -1258,9 +1266,10 @@ impl<'a> Planner<'a> {
             moved_known.insert((*nfi, *nn), e);
         }
 
+        #[allow(clippy::needless_range_loop)] // `matches[fi]` is mutated while `self` is borrowed.
         for fi in 0..matches.len() {
             let path = matches[fi].path.clone();
-            let resource = self.entity(&matches[fi].resource)?.expect("resource planned");
+            let resource = self.must(&matches[fi].resource)?;
             let extractor = matches[fi].extraction.extractor.clone();
             if self.lake_roots_cache.is_none() {
                 self.lake_roots_cache = Some(self.lake_roots()?);
@@ -1329,7 +1338,8 @@ impl<'a> Planner<'a> {
                 for b in bindings.iter_mut().filter(|b| b.path == path) {
                     b.state = BindingState::Ambiguous;
                     b.range = None;
-                    b.version = hash.as_ref().map(|h| SourceVersion { content_hash: h.clone(), revision: None, saved: true });
+                    b.version =
+                        hash.as_ref().map(|h| SourceVersion { content_hash: h.clone(), revision: None, saved: true });
                     b.detail = Some(format!("“{name}” is declared {count} times in {path}; none was chosen."));
                 }
                 self.set_bindings(&id, bindings);
@@ -1342,8 +1352,7 @@ impl<'a> Planner<'a> {
             for k in removed {
                 let e = matches[fi].known[k].entity.clone();
                 let e = self.entity(&e.id)?.unwrap_or(e);
-                let renamed_kind =
-                    decls.iter().any(|d| d.name.is_some() && d.name == matches[fi].known[k].anchor.name);
+                let renamed_kind = decls.iter().any(|d| d.name.is_some() && d.name == matches[fi].known[k].anchor.name);
                 let reason = if renamed_kind {
                     format!("its declaration in {path} changed kind")
                 } else {
@@ -1370,10 +1379,8 @@ impl<'a> Planner<'a> {
             }
             let fm = &matches[fi];
             let body = IndexBody { extraction: fm.extraction.clone(), ids: fm.ids.clone(), latex_main: fm.latex_main };
-            self.index_hashes.insert(
-                path.clone(),
-                (fm.hash.clone().unwrap_or_default(), fm.extraction.extractor.clone()),
-            );
+            self.index_hashes
+                .insert(path.clone(), (fm.hash.clone().unwrap_or_default(), fm.extraction.extractor.clone()));
             self.put_index_record(&path, body);
             self.remove_index.remove(&path);
         }
@@ -1422,7 +1429,12 @@ impl<'a> Planner<'a> {
     /// changed file: whole-file bindings follow the file; declaration
     /// bindings resolve against the new declarations; region bindings are
     /// found again by their text. Unresolvable ones become missing/ambiguous.
-    fn reanchor_curated(&mut self, path: &WorkspacePath, old_path: Option<&WorkspacePath>, f: &Fresh) -> StoreResult<()> {
+    fn reanchor_curated(
+        &mut self,
+        path: &WorkspacePath,
+        old_path: Option<&WorkspacePath>,
+        f: &Fresh,
+    ) -> StoreResult<()> {
         let mut ids: BTreeSet<EntityId> = BTreeSet::new();
         for p in [Some(path), old_path].into_iter().flatten() {
             for b in self.bindings_at(p)? {
@@ -1432,7 +1444,8 @@ impl<'a> Planner<'a> {
         let text = f.content.text.as_deref();
         let decls = f.extraction.as_ref().map(|x| x.declarations.as_slice()).unwrap_or(&[]);
         let ordinals = ordinals(decls);
-        let version = f.content.hash.as_ref().map(|h| SourceVersion { content_hash: h.clone(), revision: None, saved: true });
+        let version =
+            f.content.hash.as_ref().map(|h| SourceVersion { content_hash: h.clone(), revision: None, saved: true });
         let mut problems = Vec::new();
         for id in ids {
             let Some(e) = self.entity(&id)? else { continue };
@@ -1480,7 +1493,8 @@ impl<'a> Planner<'a> {
                             many => {
                                 b.state = BindingState::Ambiguous;
                                 b.range = None;
-                                b.detail = Some(format!("{} matching declarations in {path}; none was chosen.", many.len()));
+                                b.detail =
+                                    Some(format!("{} matching declarations in {path}; none was chosen.", many.len()));
                             }
                         }
                         b.version = version.clone();

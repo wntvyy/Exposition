@@ -116,7 +116,13 @@ impl Planner<'_> {
     }
 
     /// Candidate project paths for a written path.
-    fn path_candidates(&self, from: &WorkspacePath, written: &str, base: PathBase, extensions: &[String]) -> Vec<WorkspacePath> {
+    fn path_candidates(
+        &self,
+        from: &WorkspacePath,
+        written: &str,
+        base: PathBase,
+        extensions: &[String],
+    ) -> Vec<WorkspacePath> {
         let dir = from.parent();
         let mut bases: Vec<Option<WorkspacePath>> = Vec::new();
         match base {
@@ -150,7 +156,8 @@ impl Planner<'_> {
                     out.push(with);
                 }
             }
-            if base == PathBase::Root && extensions.iter().any(|e| e == "py")
+            if base == PathBase::Root
+                && extensions.iter().any(|e| e == "py")
                 && let Ok(init) = p.join("__init__.py")
             {
                 out.push(init);
@@ -229,7 +236,11 @@ impl Planner<'_> {
                 path: path.clone(),
                 selector: SourceSelector::WholeFile,
                 range: None,
-                version: content.hash.as_ref().map(|h| SourceVersion { content_hash: h.clone(), revision: None, saved: true }),
+                version: content.hash.as_ref().map(|h| SourceVersion {
+                    content_hash: h.clone(),
+                    revision: None,
+                    saved: true,
+                }),
                 fingerprint: None,
                 state: BindingState::Resolved,
                 detail: None,
@@ -260,10 +271,7 @@ impl Planner<'_> {
             Some(r) => r.clone(),
             None => self.lake_roots()?,
         };
-        Ok(roots
-            .into_iter()
-            .filter_map(|root| extract::join_relative(root.as_ref(), &rel))
-            .collect())
+        Ok(roots.into_iter().filter_map(|root| extract::join_relative(root.as_ref(), &rel)).collect())
     }
 
     /// Resolve every observed link of `path` and replace its observed
@@ -406,8 +414,8 @@ impl Planner<'_> {
                 continue;
             }
             let (Some(fe), Some(te)) = (self.entity(&from)?, self.entity(&to)?) else { continue };
-            let link_extractor = if kind == RelationKind::UsesAsset && te.origin
-                == (Origin::Extracted { extractor: ATTACHMENT_EXTRACTOR.into() })
+            let link_extractor = if kind == RelationKind::UsesAsset
+                && te.origin == (Origin::Extracted { extractor: ATTACHMENT_EXTRACTOR.into() })
             {
                 ATTACHMENT_EXTRACTOR.to_owned()
             } else {

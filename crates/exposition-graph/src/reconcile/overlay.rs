@@ -56,7 +56,12 @@ fn hex(bytes: &[u8], n: usize) -> String {
 
 /// Compute the overlay of `text` (revision `revision`) for the file `path`.
 /// `None` when the file is not a known resource (nothing to overlay).
-pub fn compute(graph: &GraphService, path: &WorkspacePath, revision: u64, text: &str) -> GraphResult<Option<OverlayEntry>> {
+pub fn compute(
+    graph: &GraphService,
+    path: &WorkspacePath,
+    revision: u64,
+    text: &str,
+) -> GraphResult<Option<OverlayEntry>> {
     let root: PathBuf =
         graph.attached_root().ok_or_else(|| GraphError::new("graph.noProject", "No project graph is attached."))?;
     if text.len() > extract::MAX_EXTRACT_BYTES {
@@ -129,8 +134,11 @@ pub fn compute(graph: &GraphService, path: &WorkspacePath, revision: u64, text: 
                     let mut b = b.clone();
                     b.entity = id.clone();
                     if &b.path == path {
-                        b.version =
-                            Some(SourceVersion { content_hash: content_hash.clone(), revision: Some(revision), saved: false });
+                        b.version = Some(SourceVersion {
+                            content_hash: content_hash.clone(),
+                            revision: Some(revision),
+                            saved: false,
+                        });
                         if provisional.contains(&id) && matches!(b.selector, SourceSelector::Declaration { .. }) {
                             b.detail = Some("Unsaved: this declaration is not in the saved file yet.".into());
                         }

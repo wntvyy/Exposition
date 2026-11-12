@@ -454,7 +454,12 @@ impl GraphStore {
         {
             let mut stmt = self.conn.prepare("SELECT id, kind, subject, body FROM evidence")?;
             let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
             })?;
             for row in rows {
                 let (id, kind, subject, body) = row?;
@@ -813,8 +818,7 @@ impl GraphStore {
     // ----- coverage -----
 
     pub fn coverage(&self, path: &WorkspacePath) -> StoreResult<Option<ResourceCoverage>> {
-        let mut stmt =
-            self.conn.prepare_cached(&format!("SELECT {COVERAGE_COLUMNS} FROM coverage WHERE path = ?1"))?;
+        let mut stmt = self.conn.prepare_cached(&format!("SELECT {COVERAGE_COLUMNS} FROM coverage WHERE path = ?1"))?;
         stmt.query_row([path.as_str()], read_coverage).optional()?.transpose()
     }
 
@@ -932,17 +936,23 @@ impl GraphStore {
 
     /// The stored source index of a file (rebuildable projection).
     pub fn source_index(&self, path: &WorkspacePath) -> StoreResult<Option<IndexRecord>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT content_hash, extractor, body FROM source_index WHERE path = ?1")?;
+        let mut stmt =
+            self.conn.prepare_cached("SELECT content_hash, extractor, body FROM source_index WHERE path = ?1")?;
         let row = stmt
-            .query_row([path.as_str()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .query_row([path.as_str()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })
             .optional()?;
         let Some((content_hash, extractor, body)) = row else { return Ok(None) };
         if body.len() > 16 * MAX_FIELD {
             return Err(untrusted("source index record"));
         }
-        Ok(Some(IndexRecord { path: path.clone(), content_hash: short(content_hash)?, extractor: short(extractor)?, body }))
+        Ok(Some(IndexRecord {
+            path: path.clone(),
+            content_hash: short(content_hash)?,
+            extractor: short(extractor)?,
+            body,
+        }))
     }
 
     /// Every resource entity (any lifecycle), bounded.

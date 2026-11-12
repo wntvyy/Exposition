@@ -21,7 +21,10 @@ use crate::vocabulary::{EntityKind, RelationKind};
 /// Folders that are application metadata, never project folders.
 fn structural(dir: &WorkspacePath) -> bool {
     let p = dir.as_str();
-    !(p == ".exposition" || p == ".exposition/research" || p == ".exposition/artifacts" || p.starts_with(".exposition/artifacts/"))
+    !(p == ".exposition"
+        || p == ".exposition/research"
+        || p == ".exposition/artifacts"
+        || p.starts_with(".exposition/artifacts/"))
 }
 
 impl Planner<'_> {
@@ -80,7 +83,7 @@ impl Planner<'_> {
             if targets.len() != 1 || required.contains(&old) {
                 continue;
             }
-            let new = targets.into_iter().next().expect("one target");
+            let Some(new) = targets.into_iter().next() else { continue };
             if !required.contains(&new) || folders.contains_key(&new) {
                 continue;
             }

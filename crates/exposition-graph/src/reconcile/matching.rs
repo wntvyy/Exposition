@@ -123,7 +123,8 @@ pub fn match_declarations(known: &[KnownAnchor], new: &[Declaration]) -> Matchin
     }
 
     // 2–4. By syntax: exact text, then header/context, then the only one left in its context.
-    let steps: [&dyn Fn(&KnownAnchor, &Declaration) -> Option<(String, String)>; 3] = [
+    type KeyOf<'k> = &'k dyn Fn(&KnownAnchor, &Declaration) -> Option<(String, String)>;
+    let steps: [KeyOf<'_>; 3] = [
         &|k, d| Some((k.body.clone(), d.body_fingerprint.clone())),
         &|k, d| (!k.tombstoned).then(|| (k.context.clone(), d.context_fingerprint.clone())),
         &|k, d| (!k.tombstoned).then(|| (k.scope.clone(), scope_of(d))),
@@ -214,7 +215,7 @@ mod tests {
 
     #[test]
     fn named_declarations_keep_identity_across_edits_and_moves() {
-        let old = vec![decl(T, Some("thm:a"), "h", "A", None), decl(T, Some("thm:b"), "h", "B", None)];
+        let old = [decl(T, Some("thm:a"), "h", "A", None), decl(T, Some("thm:b"), "h", "B", None)];
         // Reordered and both bodies edited.
         let new = vec![decl(T, Some("thm:b"), "h", "B2", None), decl(T, Some("thm:a"), "h", "A2", None)];
         let m = match_declarations(&old.iter().map(known).collect::<Vec<_>>(), &new);
@@ -224,7 +225,7 @@ mod tests {
 
     #[test]
     fn duplicate_names_are_ambiguous_not_merged() {
-        let old = vec![decl(T, Some("x"), "h", "A", None)];
+        let old = [decl(T, Some("x"), "h", "A", None)];
         let new = vec![decl(T, Some("x"), "h", "A", None), decl(T, Some("x"), "h2", "C", None)];
         let m = match_declarations(&old.iter().map(known).collect::<Vec<_>>(), &new);
         assert!(m.pairs.is_empty());
@@ -258,7 +259,7 @@ mod tests {
 
     #[test]
     fn kind_changes_and_tombstones() {
-        let old = vec![decl(EntityKind::Lemma, Some("l"), "h", "A", None)];
+        let old = [decl(EntityKind::Lemma, Some("l"), "h", "A", None)];
         let m = match_declarations(&old.iter().map(known).collect::<Vec<_>>(), &[decl(T, Some("l"), "h", "A", None)]);
         assert!(m.pairs.is_empty(), "a lemma that became a theorem is a new entity");
         assert_eq!(m.unmatched_known, vec![0]);

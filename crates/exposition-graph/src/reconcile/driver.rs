@@ -305,7 +305,8 @@ impl Driver {
         self.due = Some(at);
         let pending = if self.full { 0 } else { self.paths.len() as u32 };
         let current = self.graph.freshness();
-        if current.state == SyncState::Synchronized || (current.state == SyncState::Pending && current.pending != pending)
+        if current.state == SyncState::Synchronized
+            || (current.state == SyncState::Pending && current.pending != pending)
         {
             self.graph.set_freshness(GraphFreshness { state: SyncState::Pending, pending, ..current });
         }
@@ -337,7 +338,8 @@ impl Driver {
         // Undo back to the saved text leaves the buffer at a new revision
         // with no unsaved difference: the bytes it would save are the indexed
         // file, so there is nothing to overlay.
-        let would_save = super::scan::sha256_hex(&exposition_workspace::encoding::encode(&snapshot.text, info.encoding));
+        let would_save =
+            super::scan::sha256_hex(&exposition_workspace::encoding::encode(&snapshot.text, info.encoding));
         let indexed = self.graph.with_store(|s| Ok(s.coverage(&path)?.and_then(|c| c.content_hash))).ok().flatten();
         if indexed.as_deref() == Some(would_save.as_str()) {
             self.graph.clear_overlay(&path);
@@ -357,13 +359,32 @@ impl Driver {
             self.full = false;
             return;
         }
-        let scope = if self.full { Scope::Full } else { Scope::Paths(std::mem::take(&mut self.paths).into_iter().collect()) };
+        let scope =
+            if self.full { Scope::Full } else { Scope::Paths(std::mem::take(&mut self.paths).into_iter().collect()) };
         let force = self.force;
         self.full = false;
         self.force = false;
         self.paths.clear();
         self.first_event = None;
+        let trace = std::env::var_os("EXPOSITION_GRAPH_TRACE").is_some();
+        let described = match &scope {
+            Scope::Full => "full".to_owned(),
+            Scope::Paths(p) => format!("{} paths", p.len()),
+        };
         let result = self.graph.reconcile(&ReconcileOptions { scope, force });
+        if trace && let Ok(r) = &result {
+            eprintln!(
+                "graph pass ({described}, force {force}): {} ms, files {}, read {}, +{} ~{} -{} resources, +{} -{} declarations",
+                r.duration_ms,
+                r.files,
+                r.read,
+                r.resources_added,
+                r.resources_renamed,
+                r.resources_removed,
+                r.declarations_added,
+                r.declarations_removed
+            );
+        }
         if let Err(e) = &result {
             eprintln!("graph reconciliation failed: {e}");
         }

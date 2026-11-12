@@ -85,10 +85,8 @@ async fn the_graph_follows_files_and_buffers_without_any_frontend() {
 
     // A file created outside the app is admitted through the watcher.
     write(&s.root, "chapters/extra.md", "# Extra\n");
-    wait_for("external file admitted", Duration::from_secs(20), || {
-        g.resource(&wp("chapters/extra.md")).ok().flatten()
-    })
-    .await;
+    wait_for("external file admitted", Duration::from_secs(20), || g.resource(&wp("chapters/extra.md")).ok().flatten())
+        .await;
 
     // Edit main.tex in a buffer: an unsaved overlay, never written.
     let opened = s.workspace.open_document(&wp("main.tex")).unwrap();
@@ -129,7 +127,8 @@ async fn the_graph_follows_files_and_buffers_without_any_frontend() {
         i.unsaved.then_some(i)
     })
     .await;
-    let corollary = inspection.entities.iter().find(|e| e.entity.kind == EntityKind::Corollary).expect("unsaved corollary");
+    let corollary =
+        inspection.entities.iter().find(|e| e.entity.kind == EntityKind::Corollary).expect("unsaved corollary");
     assert_eq!(corollary.entity.attributes.get("overlay.provisional").map(String::as_str), Some("true"));
     assert_eq!(corollary.binding.version.as_ref().map(|v| v.saved), Some(false), "labelled unsaved");
     assert!(
@@ -140,17 +139,18 @@ async fn the_graph_follows_files_and_buffers_without_any_frontend() {
     assert!(g.freshness().overlay.iter().any(|o| o.path == wp("main.tex") && o.revision == revision));
     // The saved projection does not contain it.
     assert!(
-        g.snapshot(&GraphQuery { kinds: Some(vec![EntityKind::Corollary]), ..Default::default() }).unwrap().entities.is_empty(),
+        g.snapshot(&GraphQuery { kinds: Some(vec![EntityKind::Corollary]), ..Default::default() })
+            .unwrap()
+            .entities
+            .is_empty(),
         "unsaved text is never written as saved state"
     );
     assert_eq!(std::fs::read_to_string(s.root.join("main.tex")).unwrap(), MAIN);
 
     // Undo back to the saved text: the overlay is dropped.
     s.workspace.documents().undo(&doc, EditOrigin::Source).unwrap();
-    wait_for("overlay dropped after undo", Duration::from_secs(10), || {
-        g.freshness().overlay.is_empty().then_some(())
-    })
-    .await;
+    wait_for("overlay dropped after undo", Duration::from_secs(10), || g.freshness().overlay.is_empty().then_some(()))
+        .await;
 
     // Redo and save: the declaration becomes a saved entity.
     s.workspace.documents().redo(&doc, EditOrigin::Source).unwrap();
@@ -167,10 +167,7 @@ async fn the_graph_follows_files_and_buffers_without_any_frontend() {
     assert_eq!(theorem(g)[0].id, thm.id, "the theorem kept its identity through the edit");
     let detail = g.entity_detail(&saved.id).unwrap();
     assert!(detail.outgoing.iter().any(|r| r.kind == RelationKind::References && r.to == thm.id));
-    assert!(
-        !detail.outgoing.iter().any(|r| r.kind == RelationKind::DependsOn),
-        "a reference is never a dependency"
-    );
+    assert!(!detail.outgoing.iter().any(|r| r.kind == RelationKind::DependsOn), "a reference is never a dependency");
 
     // Forced reindex through the handle.
     let report = s.reconciler.reindex_blocking(true, Duration::from_secs(30)).unwrap();

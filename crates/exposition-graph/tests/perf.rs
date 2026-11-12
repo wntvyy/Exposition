@@ -48,14 +48,22 @@ pub fn generate(root: &std::path::Path, n: usize) {
     for i in 0..typ {
         w(
             &format!("notes/typst/n{i}.typ"),
-            &format!("= Note {i} <note{i}>\n#lemma[Typst lemma {i}] <tl{i}>\nSee @tl{} and @note{i}.\n", i.saturating_sub(1)),
+            &format!(
+                "= Note {i} <note{i}>\n#lemma[Typst lemma {i}] <tl{i}>\nSee @tl{} and @note{i}.\n",
+                i.saturating_sub(1)
+            ),
         );
     }
     let md = n * 20 / 100;
     for i in 0..md {
         w(
             &format!("notes/md/d{}/m{i}.md", i % 30),
-            &format!("# Note {i}\n\nSee [the next](m{}.md) and ![plot](../../../figures/f{}.png) [@ref{}].\n", i + 1, i % 100, i % 200),
+            &format!(
+                "# Note {i}\n\nSee [the next](m{}.md) and ![plot](../../../figures/f{}.png) [@ref{}].\n",
+                i + 1,
+                i % 100,
+                i % 200
+            ),
         );
     }
     let lean = n * 2 / 100;

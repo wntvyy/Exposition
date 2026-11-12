@@ -69,7 +69,7 @@ async function generate(root, n) {
   const md = Math.floor((n * 25) / 100);
   for (let i = 0; i < md; i++) jobs.push(write(root, `notes/d${i % 30}/m${i}.md`, `# Note ${i}\nSee [next](m${i + 1}.md).\n`));
   const py = n - tex - md;
-  for (let i = 0; i < py; i++) jobs.push(write(root, `pkg${i % 40}/m${i}.py`, `import numpy\nX = ${i}\n`));
+  for (let i = 0; i < py; i++) jobs.push(write(root, `src/pkg${i % 40}/m${i}.py`, `import numpy\nX = ${i}\n`));
   for (let i = 0; i < 200; i++) jobs.push(write(root, `node_modules/p/i${i}.js`, "x"));
   await Promise.all(jobs);
 }
@@ -129,7 +129,7 @@ export default async function graphCore({ launchApp, artifactsDir, assert, fixtu
   await generate(big, 3000);
 
   const timings = {};
-  const app = await launchApp({ dataDir });
+  const app = await launchApp({ dataDir, env: { EXPOSITION_GRAPH_TRACE: "1" } });
   const { page } = app;
   const shot = (name) => page.screenshot({ path: join(artifactsDir, `${name}.png`) });
   const call = (cmd, args = {}) => invoke(page, cmd, args);
@@ -543,6 +543,11 @@ export default async function graphCore({ launchApp, artifactsDir, assert, fixtu
     throw error;
   } finally {
     await writeFile(join(artifactsDir, "timings.json"), JSON.stringify(timings, null, 2)).catch(() => {});
+    const trace = app.logs
+      .join("")
+      .split(/\r?\n/)
+      .filter((l) => /^(graph pass|reconcile:|plan:)/.test(l));
+    await writeFile(join(artifactsDir, "reconciler-trace.txt"), trace.join("\n")).catch(() => {});
     console.log(`graph-core timings: ${JSON.stringify(timings)}`);
     await app.close();
   }

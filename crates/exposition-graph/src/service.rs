@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use ts_rs::TS;
 
+use crate::backup::{self, BackupInfo};
 use crate::ids::{EntityId, EvidenceId, ProposalId, ViewId};
 use crate::journal::OperationJournal;
 use crate::model::{
@@ -23,11 +24,10 @@ use crate::model::{
 };
 use crate::ops::{ApplyChangeRequest, ApplyOutcome, ChangeProposal, ChangeRequest};
 use crate::query::{
-    DEFAULT_LIMIT, Direction, EvidenceImpact, FormalAssociationState, GraphQuery, GraphSnapshot, GraphView, GraphViewInput,
-    GraphViewSummary, ImpactAction, ImpactItem, ImpactReport, ImpactRequest, ImpactStep, InformalState,
+    DEFAULT_LIMIT, Direction, EvidenceImpact, FormalAssociationState, GraphQuery, GraphSnapshot, GraphView,
+    GraphViewInput, GraphViewSummary, ImpactAction, ImpactItem, ImpactReport, ImpactRequest, ImpactStep, InformalState,
     InspectAtSourceRequest, InspectedEntity, MAX_DEPTH, MAX_LIMIT, MathOverview, MathRow, SourceInspection, ViewScope,
 };
-use crate::backup::{self, BackupInfo};
 use crate::reconcile::engine::ReconcileState;
 use crate::reconcile::overlay::OverlayEntry;
 use crate::reconcile::{ReconcileOptions, ReconcileReport};
@@ -269,9 +269,8 @@ impl GraphService {
                 }
             }
             RecoveryOption::RestoreBackup { backup: name, .. } => {
-                backup::restore(&root.join(PROJECT_DIR), name).map_err(|e| {
-                    GraphError::new("graph.recovery", format!("The backup could not be restored: {e}"))
-                })?;
+                backup::restore(&root.join(PROJECT_DIR), name)
+                    .map_err(|e| GraphError::new("graph.recovery", format!("The backup could not be restored: {e}")))?;
             }
         }
         {
@@ -1309,7 +1308,11 @@ fn recovery_options(project_dir: &Path) -> Vec<RecoveryOption> {
     let mut options: Vec<RecoveryOption> = backup::list(&project_dir.join(backup::BACKUP_DIR))
         .into_iter()
         .take(5)
-        .map(|b| RecoveryOption::RestoreBackup { backup: b.name, taken_at_ms: b.taken_at_ms, revision: Some(b.revision) })
+        .map(|b| RecoveryOption::RestoreBackup {
+            backup: b.name,
+            taken_at_ms: b.taken_at_ms,
+            revision: Some(b.revision),
+        })
         .collect();
     options.push(RecoveryOption::StartNew);
     options.push(RecoveryOption::Retry);

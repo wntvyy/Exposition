@@ -61,7 +61,12 @@ impl Project {
 
     fn all(&self, kind: EntityKind) -> Vec<Entity> {
         self.svc
-            .snapshot(&GraphQuery { kinds: Some(vec![kind]), include_inactive: true, limit: Some(2000), ..Default::default() })
+            .snapshot(&GraphQuery {
+                kinds: Some(vec![kind]),
+                include_inactive: true,
+                limit: Some(2000),
+                ..Default::default()
+            })
             .unwrap()
             .entities
     }
@@ -180,7 +185,8 @@ fn renames_keep_identity_deletions_tombstone_and_curated_records_survive() {
     let b = p.resource("notes/b.md").unwrap();
     let data = p.resource("data/obs.csv").unwrap();
     // Curated: a collection holding both notes, and a claim using the data.
-    let out = p.user(vec![create("c", EntityKind::Collection, "Reading list"), create("k", EntityKind::Claim, "Claim")]);
+    let out =
+        p.user(vec![create("c", EntityKind::Collection, "Reading list"), create("k", EntityKind::Claim, "Claim")]);
     let ApplyOutcome::Applied { created, .. } = out else { panic!("{out:?}") };
     let (collection, claim) = (created[0].id.clone(), created[1].id.clone());
     p.user(vec![
@@ -324,7 +330,8 @@ fn a_renamed_folder_keeps_its_identity() {
     let parts = p.all(EntityKind::Folder).into_iter().find(|f| f.key.as_deref() == Some("parts")).unwrap();
     assert_eq!(parts.id, folder.id, "the folder kept its identity");
     let one = p.resource("parts/one.tex").unwrap();
-    let container = p.svc.entity_detail(&one.id).unwrap().incoming.into_iter().find(|r| r.kind == RelationKind::Contains);
+    let container =
+        p.svc.entity_detail(&one.id).unwrap().incoming.into_iter().find(|r| r.kind == RelationKind::Contains);
     assert_eq!(container.unwrap().from, folder.id);
 }
 
@@ -410,7 +417,10 @@ fn region_bindings_follow_their_text_or_become_unresolved() {
     let detail = p.svc.entity_detail(&claim).unwrap();
     assert_eq!(detail.bindings[0].state, BindingState::Missing);
     assert_eq!(detail.entity.lifecycle, Lifecycle::Active, "a curated entity keeps its identity");
-    let coverage = p.svc.inspect_at_source(&InspectAtSourceRequest { path: wp("notes.md"), offset: None, revision: None }).unwrap();
+    let coverage = p
+        .svc
+        .inspect_at_source(&InspectAtSourceRequest { path: wp("notes.md"), offset: None, revision: None })
+        .unwrap();
     assert!(coverage.coverage.unwrap().unresolved >= 1);
 }
 

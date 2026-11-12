@@ -17,6 +17,23 @@
 //! - [`journal`]: app-owned journal of cross-service operations.
 //! - [`reconcile`]: incremental reconciliation with the project's files
 //!   (scanning, extractors, identity matching, live-buffer overlay).
+//! - [`backup`]: consistent `VACUUM INTO` backups and restore.
+//!
+//! Contract for services that use the graph (research, Lean, agents,
+//! project creation):
+//! - A resource entity's `key` is its workspace path; the reconciler adopts
+//!   resources other services created with that key (one identity per file).
+//! - After writing files, call [`GraphService::reconcile`] with
+//!   `Scope::Paths` to index them synchronously, then look identities up
+//!   ([`GraphService::resource`], [`GraphService::formal_declaration`]).
+//! - Freshness ([`GraphService::freshness`]) says whether changes are
+//!   pending and which unsaved buffers are overlaid; act on stale or pending
+//!   state instead of assuming the graph is current.
+//! - Observed relations (origin `extracted`) belong to the reconciler and
+//!   are replaced when their file is re-extracted; attachment `usesAsset`
+//!   relations are observed from the marker blocks (removing the block
+//!   removes the relation). Services record their own assertions with a
+//!   `service` origin, which reconciliation never deletes.
 
 pub mod admission;
 pub mod backup;
