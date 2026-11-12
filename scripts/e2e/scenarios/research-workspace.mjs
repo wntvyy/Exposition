@@ -40,6 +40,7 @@ slope = (df.y.iloc[-1] - df.y.iloc[0]) / (df.x.iloc[-1] - df.x.iloc[0])
 print("slope", slope)
 plt.figure(figsize=(3, 2)); plt.plot(df.x, df.y, "o-"); plt.title("observations"); plt.show()
 display(df.describe().round(3))
+df.assign(y2=df.y * 2).to_csv("${space}/data/obs_scaled.csv", index=False)
 `;
 
 const TYPST = "= Results\n\nThe slope is estimated below.\n";
@@ -191,6 +192,8 @@ export default async function researchWorkspace({ launchApp, artifactsDir, asser
     const table = listing.results.find((r) => r.kind === "table");
     note("figure-retained-artifact-role", figure && figure.roles.join("+") === "artifact", figure?.roles);
     note("table-one-identity-dataset-and-artifact", table && table.roles.join("+") === "dataset+artifact", table?.roles);
+    const scaled = listing.data.find((f) => f.name === "obs_scaled.csv");
+    note("dataset-transformed-through-code", Boolean(scaled?.entity) && scaled.roles.includes("dataset"), scaled ?? listing.data.map((f) => f.name));
 
     // Outcomes of the experiment (through the experiment editor).
     await rp.locator(`[data-testid="research-tree"] [data-entity="${experimentId}"]`).first().click();

@@ -9,6 +9,8 @@ import { registry } from "../../app/registry";
 import type { EntityId } from "../../bindings/EntityId";
 import type { ExperimentDetail } from "../../bindings/ExperimentDetail";
 import type { RunManifest } from "../../bindings/RunManifest";
+import type { SourceInspection } from "../../bindings/SourceInspection";
+import { graphCommands } from "../../lib/graphIpc";
 import { commands } from "../../lib/ipc";
 import { Banner, Button, Checkbox, EmptyState, Section, Select, StatusPill, TextField } from "../../ui/components";
 import { fileKey } from "../editor/documentClient";
@@ -83,12 +85,49 @@ function FileInspector({ path }: { path: string }) {
           Open in Editor
         </Button>
       </div>
+      <DeclaredInFile path={path} revision={revision} />
       {file?.entity ? (
         <GraphDependencies entity={file.entity} revision={revision} />
       ) : (
         <p className="exp-muted">{listing?.graphUnavailable ?? "Not yet in the project graph."}</p>
       )}
     </div>
+  );
+}
+
+/** Entities the graph binds inside a file (declarations, findings), with extraction coverage. */
+function DeclaredInFile({ path, revision }: { path: string; revision: number | null | undefined }) {
+  const [inspection, setInspection] = useState<SourceInspection | null>(null);
+  useEffect(() => {
+    let live = true;
+    graphCommands.inspectAtSource({ path, offset: null, revision: null }).then(
+      (i) => live && setInspection(i),
+      () => live && setInspection(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [path, revision]);
+  if (!inspection) return null;
+  return (
+    <Section title={`In this file (${inspection.entities.length})`} collapsible defaultExpanded={inspection.entities.length > 0}>
+      <div data-testid="research-in-file" data-coverage={inspection.coverage?.state ?? "unknown"}>
+        {inspection.entities.length === 0 ? (
+          <p className="exp-muted">No declarations or findings are bound to this file.</p>
+        ) : (
+          <ul className="exp-graph__list">
+            {inspection.entities.map((e) => (
+              <li key={e.entity.id}>
+                {e.entity.kind} <strong>{e.entity.label}</strong> <span className="exp-muted">({e.binding.state})</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="exp-muted">
+          Extraction: {inspection.coverage ? inspection.coverage.state : "not indexed yet (coverage unknown)"}
+        </p>
+      </div>
+    </Section>
   );
 }
 

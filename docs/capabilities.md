@@ -94,6 +94,20 @@ Sessions belong to one project folder and require it to be trusted; switching
 or closing the folder, or revoking trust, detaches them. Agent runs use
 separate sessions. Exposition never installs runtimes or packages.
 
+Research sessions run natively with your account's privileges ("Trusted
+native"); the research space and per-owner sessions organize work but do not
+contain it. A restricted, research-only execution mode is not available yet.
+Enabling Research creates one research space (`.exposition/research/<id>/`
+with sources, data, and notes) and runs nothing; research works without any
+manuscript. Kept results become project resources with the run's evidence and
+provenance; inserting one into a Typst, LaTeX, or Markdown document is
+reviewed first (exact markup, document revision, artifact digest) and is
+refused if either changed before approval. If the project graph cannot be
+updated after an insertion, the insertion stays (undoable) and a pending
+record asks for reconciliation. Data files a script reads are pinned only
+when declared (experiment inputs); the kernel does not report the files it
+reads.
+
 ## Lean
 
 Lean files are checked with the project's own toolchain through the Lean
@@ -128,6 +142,14 @@ tampers with the Lean toolchain itself is not contained. The audit programs
 target Lean 4.35 (another toolchain they do not compile on reports Not
 verified), and re-checking large dependencies such as Mathlib takes
 correspondingly long.
+
+Formal evidence in the project graph is recorded only from the audit Lean
+itself produced for an exact revision, one declaration at a time, with the
+declaration's own verdict next to the file's. The audit does not report
+declaration dependencies, so evidence is never shown as current against
+imported modules; after the file changes it is historical. Associating a Lean
+declaration with a statement in a paper records your reviewed correspondence;
+it is not a machine proof that the two statements are equivalent.
 
 ## Agents
 
