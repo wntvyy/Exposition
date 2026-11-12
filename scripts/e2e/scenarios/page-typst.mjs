@@ -333,6 +333,7 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     assert.ok(sawInMonaco, `page edit visible in Monaco: ${(await monacoText()).slice(0, 200)}`);
     await settled("rebuild after split typing");
     await shot("12-split");
+    await referenceShots("page-split");
     await page.locator('[data-testid="typst-split"] .monaco-editor .view-lines').click();
     await page.keyboard.press("Control+z");
     await page.waitForFunction(
