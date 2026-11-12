@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::utf16_range_to_bytes;
+use exposition_graph::{GraphService, ProjectId};
 use exposition_workspace::{DocumentService, WorkspaceService};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
@@ -24,6 +25,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::credentials::{SecretStore, normalize_api_key};
+use crate::graph::{GraphEnv, TaskGraphInfo};
 use crate::model::*;
 use crate::provider::anthropic::{API_BASE, AnthropicProvider, MAX_TOKENS_PER_TURN, RetryPolicy};
 use crate::provider::{
@@ -34,7 +36,7 @@ use crate::tools::exec::{self, Gate, SeenTexts, ToolEnv, ToolOutput};
 use crate::tools::services::ToolServices;
 use crate::tools::{self, ToolCall};
 use crate::workspace::{LocalProjectFiles, ProjectFiles, content_hash};
-use crate::{prompt, review};
+use crate::{graph, prompt, review};
 
 const SETTINGS_KEY: &str = "provider";
 /// Bound on result text kept for transcript display.
@@ -57,6 +59,12 @@ pub struct AgentConfig {
     pub anthropic_base_url: Option<String>,
     /// Provider retry policy override for tests.
     pub retry: Option<RetryPolicy>,
+    /// The project graph (one per application, attached to the open project).
+    /// Required whenever `workspace` is present: every project task then
+    /// receives a scoped graph context and every tool call resolves through
+    /// the graph. `None` only for embeddings without a project graph (unit
+    /// tests of unrelated behavior).
+    pub graph: Option<Arc<GraphService>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -80,6 +88,22 @@ impl From<StoreError> for AgentError {
     }
 }
 
+impl AgentError {
+    /// A refusal (tool output with a stable code) as an error of a service call.
+    fn from_refusal(output: &ToolOutput) -> Self {
+        let code = output.content.get("code").and_then(Value::as_str).unwrap_or("agents.graphUnavailable");
+        let message =
+            output.content.get("error").and_then(Value::as_str).unwrap_or("The project graph cannot be used.");
+        let message = message.strip_prefix("Not executed: ").unwrap_or(message);
+        let mut chars = message.chars();
+        let message = match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        };
+        AgentError::new(code, message)
+    }
+}
+
 type Result<T, E = AgentError> = std::result::Result<T, E>;
 
 #[derive(Clone)]
@@ -99,6 +123,9 @@ struct Inner {
     retry: RetryPolicy,
     events: broadcast::Sender<AgentEvent>,
     running: Mutex<HashMap<TaskId, Running>>,
+    graph: Option<Arc<GraphService>>,
+    /// How long a call waits for reconciliation of its targets before pausing.
+    graph_settle: Mutex<Duration>,
     #[cfg(debug_assertions)]
     scripts: Mutex<ScriptState>,
 }
@@ -125,6 +152,12 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl AgentService {
     pub fn new(config: AgentConfig) -> Result<Self> {
+        if config.workspace.is_some() && config.graph.is_none() {
+            return Err(AgentError::new(
+                "agents.graphRequired",
+                "Project agents need the project graph: the agent service was configured without it.",
+            ));
+        }
         let store = match &config.database {
             Some(path) => Store::open(path)?,
             None => Store::open_in_memory()?,
@@ -152,6 +185,8 @@ impl AgentService {
                 retry: config.retry.unwrap_or_default(),
                 events,
                 running: Mutex::new(HashMap::new()),
+                graph: config.graph,
+                graph_settle: Mutex::new(graph::targets::DEFAULT_SETTLE),
                 #[cfg(debug_assertions)]
                 scripts: Mutex::new(ScriptState::default()),
             }),
@@ -160,6 +195,12 @@ impl AgentService {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// How long a tool call waits for the graph to reconcile its targets
+    /// before it is paused (tests shorten it).
+    pub fn set_graph_settle(&self, settle: Duration) {
+        *lock(&self.inner.graph_settle) = settle;
     }
 
     // ---- provider settings and credentials
@@ -252,7 +293,8 @@ impl AgentService {
             .get(id)
             .map(|r| r.approvals.values().map(|(a, _)| a.clone()).collect())
             .unwrap_or_default();
-        Ok(TaskDetail { summary, transcript, approvals })
+        let graph = self.inner.graph_info(id)?;
+        Ok(TaskDetail { summary, transcript, approvals, graph })
     }
 
     pub fn create_task(&self, request: CreateTaskRequest) -> Result<TaskSummary> {
@@ -291,6 +333,8 @@ impl AgentService {
             provider: ProviderChoice { provider: settings.provider, model: settings.model, effort: settings.effort },
         };
         let id = TaskId::new();
+        // Mandatory scoped graph context (refused when the graph cannot be used).
+        let graph_context = self.inner.graph_context(files.root(), &spec, None)?;
         let provider = self.inner.make_provider(&spec.provider, &id)?;
         let now = now_ms();
         let row = TaskRow {
@@ -306,11 +350,13 @@ impl AgentService {
         let selection = selection_text.filter(|_| consent == ContextConsent::ScopeContent);
         let context =
             prompt::context_block(&spec, &self.inner.documents, self.inner.services.as_ref(), selection.as_deref());
-        self.inner.store.append_message(
-            &id,
-            "user",
-            &[json!({"type": "text", "text": context}), json!({"type": "text", "text": spec.prompt})],
-        )?;
+        let mut content = vec![json!({"type": "text", "text": context})];
+        if let Some(graph_context) = &graph_context {
+            self.inner.store.insert_graph_context(&id, graph_context)?;
+            content.push(json!({"type": "text", "text": graph::context::block(graph_context)}));
+        }
+        content.push(json!({"type": "text", "text": spec.prompt}));
+        self.inner.store.append_message(&id, "user", &content)?;
         self.spawn(id.clone(), provider);
         let summary = self.inner.summary(&id)?;
         self.inner.emit(AgentEvent::TaskChanged { task: Box::new(summary.clone()) });
@@ -339,8 +385,17 @@ impl AgentService {
         }
         crate::workspace::check_root(self.inner.workspace.as_deref(), Path::new(&row.spec.workspace_root))
             .map_err(|e| AgentError::new("agents.workspaceNotOpen", e))?;
+        // A fresh graph context for this run, from the graph the task is bound to.
+        let files = LocalProjectFiles::open(Path::new(&row.spec.workspace_root))
+            .map_err(|e| AgentError::new("agents.invalidWorkspace", e.to_string()))?;
+        let recorded = self.inner.store.graph_project(id)?;
+        let graph_context = self.inner.graph_context(files.root(), &row.spec, recorded.as_ref())?;
         let provider = self.inner.make_provider(&row.spec.provider, id)?;
         let mut content = self.inner.dangling_tool_results(id)?;
+        if let Some(graph_context) = &graph_context {
+            self.inner.store.insert_graph_context(id, graph_context)?;
+            content.push(json!({"type": "text", "text": graph::context::block(graph_context)}));
+        }
         content.push(json!({"type": "text", "text": prompt}));
         self.inner.store.append_message(id, "user", &content)?;
         self.inner.store.update_task(id, &TaskStatus::Queued, &row.usage)?;
@@ -477,6 +532,158 @@ impl AgentService {
         self.inner.review_changed(id);
         Ok(results)
     }
+
+    // ---- project graph
+
+    /// Keep a stopped task as an investigation: the user's deliberate
+    /// admission of an `Investigation` entity into the project graph that
+    /// references the task (its id, the files it acted on) and its run as
+    /// evidence. An ordinary task stays an operational record until this.
+    /// Keeping the same task again returns the same entity.
+    pub fn keep_as_investigation(&self, id: &TaskId) -> Result<exposition_graph::EntityId> {
+        use exposition_graph::{
+            ApplyOutcome, ChangeRequest, EntityKind, EntityRef, Evidence, EvidenceId, EvidenceKind, EvidenceOutcome,
+            GraphOperation, Lifecycle, OperationRef, Origin, RelationKind, VersionedInput,
+        };
+        let row = self.inner.store.task(id)?.ok_or_else(|| not_found(id))?;
+        if row.status.is_active() || self.is_running(id) {
+            return Err(AgentError::new("agents.taskRunning", "Wait until the task has stopped before keeping it."));
+        }
+        if let Some(existing) = self.inner.store.investigation(id)? {
+            return Ok(existing);
+        }
+        let service = self.inner.graph.as_deref().ok_or_else(|| {
+            AgentError::new("agents.graphUnavailable", "The project graph is not available to agent tasks.")
+        })?;
+        let files = LocalProjectFiles::open(Path::new(&row.spec.workspace_root))
+            .map_err(|e| AgentError::new("agents.invalidWorkspace", e.to_string()))?;
+        crate::workspace::check_root(self.inner.workspace.as_deref(), files.root())
+            .map_err(|e| AgentError::new("agents.workspaceNotOpen", e))?;
+        let recorded = self.inner.store.graph_project(id)?;
+        let env = GraphEnv { service, project: recorded.as_ref() };
+        let status = graph::bound_status(env, files.root()).map_err(|r| AgentError::from_refusal(&r))?;
+        let targets = self.inner.store.targets(id)?;
+        let referenced: Vec<exposition_graph::EntityId> = service
+            .with_store(|store| {
+                let mut out = Vec::new();
+                for t in &targets {
+                    if let Some(e) = &t.entity
+                        && let Some(entity) = store.entity(e)?
+                        && entity.lifecycle != Lifecycle::Tombstoned
+                        && !out.contains(e)
+                    {
+                        out.push(e.clone());
+                    }
+                }
+                Ok(out)
+            })
+            .map_err(|e| AgentError::new("agents.graphUnavailable", e.message))?;
+        let status_kind = serde_json::to_value(&row.status)
+            .ok()
+            .and_then(|v| v.get("kind").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_default();
+        let mut attributes = std::collections::BTreeMap::new();
+        attributes.insert("agentTask".to_owned(), id.0.clone());
+        attributes.insert("taskStatus".to_owned(), status_kind.clone());
+        let label = row.title.trim();
+        let label = if label.is_empty() { "Agent investigation" } else { label };
+        let mut operations = vec![GraphOperation::CreateEntity {
+            temp_id: "investigation".into(),
+            kind: EntityKind::Investigation,
+            roles: Vec::new(),
+            label: label.chars().take(200).collect(),
+            key: Some(format!("agentTask:{}", id.0)),
+            attributes,
+            binding: None,
+        }];
+        for entity in referenced.iter().take(50) {
+            operations.push(GraphOperation::AddRelation {
+                kind: RelationKind::References,
+                from: EntityRef::Temp { temp_id: "investigation".into() },
+                to: EntityRef::Id { id: entity.clone() },
+                evidence_kind: None,
+                evidence: Vec::new(),
+                note: None,
+            });
+        }
+        let request = ChangeRequest {
+            base_revision: status.revision,
+            operations,
+            summary: Some(format!("Keep agent task “{label}” as an investigation")),
+        };
+        // The person's own action (through the task's Keep command).
+        let (_, outcome) =
+            service.propose_and_apply(Origin::User, &request).map_err(|e| AgentError::new(&e.code, e.message))?;
+        let entity = match outcome {
+            ApplyOutcome::Applied { created, .. } => created
+                .into_iter()
+                .find(|c| c.temp_id == "investigation")
+                .map(|c| c.id)
+                .ok_or_else(|| AgentError::new("agents.graphInvalid", "The investigation was not created."))?,
+            ApplyOutcome::Conflict { diagnostics, .. } | ApplyOutcome::Invalid { diagnostics, .. } => {
+                let message = diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ");
+                return Err(AgentError::new(
+                    "agents.graphInvalid",
+                    format!("The investigation was not created: {message}"),
+                ));
+            }
+        };
+        // The task run as evidence of the investigation (a report, not a
+        // verification; input versions are not recorded, so freshness is unknown).
+        let evidence = Evidence {
+            id: EvidenceId::mint(),
+            kind: EvidenceKind::Review,
+            subject: Some(entity.clone()),
+            operation: OperationRef { kind: "agentTask".into(), id: id.0.clone() },
+            inputs: targets
+                .iter()
+                .take(200)
+                .map(|t| VersionedInput { path: t.path.clone(), content_hash: None, revision: None, unsaved: false })
+                .collect(),
+            outcome: EvidenceOutcome::Reported { summary: format!("Agent task “{label}” ({status_kind})") },
+            environment: vec![("model".into(), row.spec.provider.model.clone())],
+            outputs: Vec::new(),
+            formal: None,
+            recorded_by: Origin::Service { service: "agents".into() },
+            recorded_at_ms: now_ms(),
+        };
+        if let Err(e) = service.register_evidence(&Origin::Service { service: "agents".into() }, evidence) {
+            tracing::error!("could not record the investigation's task evidence: {e}");
+        }
+        self.inner.store.set_investigation(id, &entity)?;
+        self.inner.store.append_notice(
+            id,
+            NoticeLevel::Info,
+            "Kept as an investigation in the project graph, referencing this task and the files it worked on.",
+        )?;
+        self.inner.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
+        if let Ok(summary) = self.inner.summary(id) {
+            self.inner.emit(AgentEvent::TaskChanged { task: Box::new(summary) });
+        }
+        Ok(entity)
+    }
+
+    /// Start the project-generation task of a newly created project: an
+    /// ordinary agent task (whole-project scope, execution disabled unless
+    /// requested) whose request is the objective with the generation brief.
+    /// It receives the (near-empty) graph context like any task and creates
+    /// files, research structure, and graph associations through the same
+    /// validated tools; it has no access outside the project folder.
+    pub fn create_generation_task(&self, request: GenerationTaskRequest) -> Result<TaskSummary> {
+        let objective = request.objective.trim();
+        if objective.is_empty() {
+            return Err(AgentError::new("agents.emptyPrompt", "Describe the project's objective."));
+        }
+        self.create_task(CreateTaskRequest {
+            prompt: prompt::project_generation(objective),
+            workspace_root: request.workspace_root,
+            scope: TaskScope::Workspace,
+            permission: request.permission,
+            execution: request.execution.unwrap_or(ExecutionMode::Disabled),
+            consent: request.consent,
+            budgets: request.budgets,
+        })
+    }
 }
 
 fn not_found(id: &TaskId) -> AgentError {
@@ -497,6 +704,34 @@ enum ApprovalOutcome {
 impl Inner {
     fn emit(&self, event: AgentEvent) {
         let _ = self.events.send(event);
+    }
+
+    /// The scoped graph context for a run of a task with `spec` in `root`
+    /// (`None` only without a project graph). Refused with the graph codes
+    /// when the graph cannot be used, or is not the task's own.
+    fn graph_context(
+        &self,
+        root: &Path,
+        spec: &TaskSpec,
+        project: Option<&ProjectId>,
+    ) -> Result<Option<graph::GraphContext>> {
+        let Some(service) = self.graph.as_deref() else { return Ok(None) };
+        let env = GraphEnv { service, project };
+        graph::context::build(env, root, spec, self.services.as_ref())
+            .map(Some)
+            .map_err(|refusal| AgentError::from_refusal(&refusal))
+    }
+
+    fn graph_info(&self, id: &TaskId) -> Result<TaskGraphInfo> {
+        let (context, contexts) = self.store.graph_context(id)?;
+        Ok(TaskGraphInfo {
+            project: self.store.graph_project(id)?,
+            context,
+            contexts,
+            targets: self.store.targets(id)?,
+            proposals: self.store.proposals(id)?,
+            investigation: self.store.investigation(id)?,
+        })
     }
 
     fn settings(&self) -> Result<ProviderSettings> {
@@ -642,7 +877,9 @@ impl Inner {
                     for block in content {
                         let text = block.get("text").and_then(Value::as_str).unwrap_or_default();
                         match (role.as_str(), block_type(&block)) {
-                            ("user", "text") if !text.starts_with("<task_context>") => {
+                            ("user", "text")
+                                if !text.starts_with("<task_context>") && !text.starts_with("<graph_context>") =>
+                            {
                                 items.push(TranscriptItem::UserText { seq, text: text.to_owned() })
                             }
                             ("assistant", "text") if !text.is_empty() => {
@@ -741,8 +978,10 @@ impl Inner {
         let status = match inner.store.task(&id) {
             Ok(Some(row)) => match LocalProjectFiles::open(Path::new(&row.spec.workspace_root)) {
                 Ok(files) => {
+                    let graph_project = inner.store.graph_project(&id).ok().flatten();
                     let mut run = Run {
                         inner: &inner,
+                        graph_project,
                         base_elapsed: row.usage.elapsed_ms,
                         id: id.clone(),
                         spec: row.spec,
@@ -913,6 +1152,8 @@ struct Run<'a> {
     base_elapsed: u64,
     seen: SeenTexts,
     files: LocalProjectFiles,
+    /// The project graph the task is bound to.
+    graph_project: Option<ProjectId>,
 }
 
 impl Run<'_> {
@@ -1243,6 +1484,9 @@ impl Run<'_> {
             ));
             return Ok(ToolOutput::error("Not executed: the task's command budget is used up."));
         }
+        // Targets pending reconciliation get a short, bounded wait before the
+        // gate pauses the call.
+        self.settle_graph(&call).await;
         let gate = {
             let env = self.env();
             exec::gate(&call, &env)
@@ -1251,14 +1495,55 @@ impl Run<'_> {
             Gate::Refused(output) => return Ok(output),
             Gate::Allowed(authorization) => authorization,
             Gate::NeedsApproval { title, detail, authorization } => {
+                if let Some(prepared) = authorization.proposal() {
+                    graph::propose::record(
+                        &self.inner.store,
+                        &self.id,
+                        tool_use_id,
+                        prepared,
+                        graph::ProposalState::AwaitingApproval,
+                        None,
+                        None,
+                    );
+                }
+                let shown = authorization.proposal().cloned();
                 match self.request_approval(tool_use_id, name, input, title, detail).await {
                     // The approval binds the call to exactly what was shown, in
                     // the task's own project: checked again now.
-                    ApprovalOutcome::Approved => match exec::confirm(&call, &self.env(), authorization) {
-                        Ok(authorization) => authorization,
-                        Err(refusal) => return Ok(refusal),
-                    },
+                    ApprovalOutcome::Approved => {
+                        self.settle_graph(&call).await;
+                        match exec::confirm(&call, &self.env(), authorization) {
+                            Ok(authorization) => authorization,
+                            Err(refusal) => {
+                                if let Some(prepared) = &shown {
+                                    let message =
+                                        refusal.content.get("error").and_then(Value::as_str).map(str::to_owned);
+                                    graph::propose::record(
+                                        &self.inner.store,
+                                        &self.id,
+                                        tool_use_id,
+                                        prepared,
+                                        graph::ProposalState::Failed,
+                                        None,
+                                        message,
+                                    );
+                                }
+                                return Ok(refusal);
+                            }
+                        }
+                    }
                     ApprovalOutcome::Declined => {
+                        if let Some(prepared) = &shown {
+                            graph::propose::record(
+                                &self.inner.store,
+                                &self.id,
+                                tool_use_id,
+                                prepared,
+                                graph::ProposalState::Declined,
+                                None,
+                                None,
+                            );
+                        }
                         return Ok(ToolOutput::error(DECLINED));
                     }
                     ApprovalOutcome::Canceled => return Err((Interrupt::Canceled, None)),
@@ -1282,6 +1567,7 @@ impl Run<'_> {
             workspace: inner.workspace.as_deref(),
             services: inner.services.as_ref(),
             store: &inner.store,
+            graph: inner.graph.as_deref().map(|service| GraphEnv { service, project: self.graph_project.as_ref() }),
         };
         // A tool that is still running when the task is canceled (or the time
         // budget ends) has its own token canceled and gets a short grace period
@@ -1312,7 +1598,20 @@ impl Run<'_> {
             workspace: self.inner.workspace.as_deref(),
             services: self.inner.services.as_ref(),
             store: &self.inner.store,
+            graph: self
+                .inner
+                .graph
+                .as_deref()
+                .map(|service| GraphEnv { service, project: self.graph_project.as_ref() }),
         }
+    }
+
+    /// Wait (bounded) while the call's targets are pending reconciliation.
+    async fn settle_graph(&self, call: &ToolCall) {
+        let Some(service) = self.inner.graph.as_deref() else { return };
+        let max = *lock(&self.inner.graph_settle);
+        let env = GraphEnv { service, project: self.graph_project.as_ref() };
+        graph::targets::settle(env, &call.effects(), max, &self.cancel).await;
     }
 
     async fn request_approval(
@@ -1386,6 +1685,7 @@ mod tests {
             allow_scripted: true,
             anthropic_base_url: None,
             retry: None,
+            graph: None,
         })
         .unwrap();
         assert_eq!(service.provider_status().scripted_available, cfg!(debug_assertions));

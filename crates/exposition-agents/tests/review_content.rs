@@ -48,6 +48,7 @@ fn harness() -> Harness {
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: None,
     })
     .unwrap();
     service

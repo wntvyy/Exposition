@@ -114,6 +114,9 @@ const COMMANDS: &[&str] = &[
     "graph_view_delete",
     "graph_recover",
     "graph_operations",
+    // Agents and the project graph (src/agents.rs).
+    "agents_task_keep_investigation",
+    "agents_task_create_generation",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

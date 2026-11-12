@@ -39,6 +39,7 @@ async fn live_anthropic_task_fixes_a_typo_through_a_transaction() {
         allow_scripted: false,
         anthropic_base_url: None,
         retry: None,
+        graph: None,
     })
     .unwrap();
     let model = std::env::var("EXPOSITION_LIVE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_owned());

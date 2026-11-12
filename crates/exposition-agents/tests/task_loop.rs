@@ -57,6 +57,7 @@ fn harness_with(services: Arc<dyn ToolServices>) -> Harness {
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: None,
     })
     .unwrap();
     let settings = ProviderSettings { provider: ProviderKind::Scripted, ..ProviderSettings::default() };
@@ -736,6 +737,7 @@ async fn tasks_persist_and_interrupted_runs_are_marked_after_restart() {
             allow_scripted: true,
             anthropic_base_url: None,
             retry: None,
+            graph: None,
         })
         .unwrap()
     };

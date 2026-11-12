@@ -8,6 +8,7 @@
 //! checkpoints and conflict-aware revert.
 
 pub mod credentials;
+pub mod graph;
 pub mod model;
 pub mod patch;
 pub mod prompt;

@@ -37,6 +37,7 @@ async fn accept_and_revert_are_refused_while_the_task_runs() {
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: None,
     })
     .unwrap();
     service
