@@ -15,6 +15,7 @@ exposition-tex.workspace = true
 exposition-research.workspace = true
 exposition-attach.workspace = true
 exposition-lean.workspace = true
+exposition-graph.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

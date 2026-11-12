@@ -1241,6 +1241,7 @@ dependencies = [
  "exposition-attach",
  "exposition-core",
  "exposition-execution",
+ "exposition-graph",
  "exposition-lean",
  "exposition-research",
  "exposition-tex",

@@ -2,7 +2,18 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { confirmUnsaved, ConfirmHost, EditorTabList, IconButton, StatusPill, Tabs, type EditorTabItem } from ".";
+import {
+  Badge,
+  confirmUnsaved,
+  ConfirmHost,
+  DataTable,
+  EditorTabList,
+  IconButton,
+  NodeCard,
+  StatusPill,
+  Tabs,
+  type EditorTabItem,
+} from ".";
 
 afterEach(cleanup);
 
@@ -82,5 +93,74 @@ describe("IconButton and StatusPill", () => {
     );
     expect(screen.getByText("Build failed")).toBeTruthy();
     expect(screen.getByText("Stale")).toBeTruthy();
+  });
+});
+
+describe("DataTable", () => {
+  interface Item {
+    id: string;
+    name: string;
+    size: number;
+  }
+  const rows: Item[] = [
+    { id: "b", name: "beta", size: 2 },
+    { id: "a", name: "alpha", size: 10 },
+    { id: "c", name: "gamma", size: 1 },
+  ];
+  const columns = [
+    { id: "name", title: "Name", isRowHeader: true, sortValue: (r: Item) => r.name, render: (r: Item) => r.name },
+    { id: "size", title: "Size", sortValue: (r: Item) => r.size, render: (r: Item) => String(r.size) },
+  ];
+
+  it("renders a grid with a named row header, sorts, selects, and runs the row action", () => {
+    const onSelect = vi.fn();
+    const onAction = vi.fn();
+    render(
+      <DataTable
+        aria-label="Items"
+        columns={columns}
+        rows={rows}
+        rowKey={(r) => r.id}
+        defaultSort={{ column: "name", direction: "ascending" }}
+        onSelectionChange={onSelect}
+        onRowAction={onAction}
+      />,
+    );
+    const grid = screen.getByRole("grid", { name: "Items" });
+    const names = () => [...grid.querySelectorAll('[role="rowheader"]')].map((c) => c.textContent);
+    expect(names()).toEqual(["alpha", "beta", "gamma"]);
+    fireEvent.click(screen.getByRole("columnheader", { name: "Size" }));
+    expect(names()).toEqual(["gamma", "beta", "alpha"]);
+    // Keyboard: focus the row, Space selects it, Enter runs its action.
+    const beta = screen.getByRole("rowheader", { name: "beta" }).closest('[role="row"]') as HTMLElement;
+    act(() => beta.focus());
+    fireEvent.keyDown(beta, { key: " ", code: "Space" });
+    fireEvent.keyUp(beta, { key: " ", code: "Space" });
+    expect(onSelect).toHaveBeenLastCalledWith("b");
+    fireEvent.keyDown(beta, { key: "Enter", code: "Enter" });
+    fireEvent.keyUp(beta, { key: "Enter", code: "Enter" });
+    expect(onAction).toHaveBeenLastCalledWith("b");
+  });
+
+  it("says what is missing when there are no rows", () => {
+    render(<DataTable aria-label="Empty" columns={columns} rows={[]} rowKey={(r) => r.id} empty="No entities match" />);
+    expect(screen.getByText("No entities match")).toBeTruthy();
+  });
+});
+
+describe("Badge and NodeCard", () => {
+  it("shows the type label as text next to the category color", () => {
+    render(
+      <NodeCard
+        title="Main theorem"
+        typeLabel="Theorem"
+        category="math"
+        badges={<Badge tone="stale">Stale</Badge>}
+      />,
+    );
+    const card = screen.getByText("Main theorem").closest(".ui-node-card")!;
+    expect(card.getAttribute("data-category")).toBe("math");
+    expect(screen.getByText("Theorem")).toBeTruthy();
+    expect(screen.getByText("Stale").closest(".ui-badge")?.getAttribute("data-tone")).toBe("stale");
   });
 });

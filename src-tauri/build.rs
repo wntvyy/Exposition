@@ -117,6 +117,9 @@ const COMMANDS: &[&str] = &[
     "graph_reconcile",
     "graph_backup",
     "graph_backups",
+    // Agents and the project graph (src/agents.rs).
+    "agents_task_keep_investigation",
+    "agents_task_create_generation",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

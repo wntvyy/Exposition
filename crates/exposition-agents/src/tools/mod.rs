@@ -17,6 +17,8 @@ pub mod services;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::graph::propose::{AGENT_CREATABLE, GraphProposeInput, manual_relations};
+use crate::graph::query::GraphQueryInput;
 use crate::provider::ToolDefinition;
 
 pub const LIST_FILES: &str = "list_files";
@@ -28,6 +30,8 @@ pub const RUN_PYTHON: &str = "run_python";
 pub const CHECK_LEAN: &str = "check_lean";
 pub const RUN_COMMAND: &str = "run_command";
 pub const INSERT_ARTIFACT: &str = "insert_artifact";
+pub const GRAPH_QUERY: &str = "graph_query";
+pub const GRAPH_PROPOSE: &str = "graph_propose";
 
 /// The tool list, in a fixed order.
 pub fn definitions() -> Vec<ToolDefinition> {
@@ -191,7 +195,151 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
         },
+        ToolDefinition {
+            name: GRAPH_QUERY,
+            description: "Read the project graph: Exposition's structural model of this project (stable identities of \
+                files and research entities such as claims, lemmas, proofs, references, and experiments, and the \
+                typed relations among them). Results are bounded and filtered to this task's scope and content \
+                consent. query: search (by kinds and text), entity (one entity with its relations and evidence), \
+                neighborhood (entities within depth relations), inspect (the entities bound in one file), impact \
+                (what must be reviewed if an entity changes). Entity ids (ent-…) come from the graph context or \
+                earlier results.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "enum": ["search", "entity", "neighborhood", "inspect", "impact"], "description": "What to read."},
+                    "text": {"type": "string", "description": "search: case-insensitive text matched against labels and paths; \"\" for none. Without content consent only paths are matched."},
+                    "kinds": {"type": "array", "items": {"type": "string", "enum": entity_kind_names()}, "description": "search: only these entity kinds; [] for all."},
+                    "entity": {"type": "string", "description": "entity, neighborhood, impact: an entity id (ent-…); \"\" otherwise."},
+                    "path": {"type": "string", "description": "inspect: a project file relative to the project root; \"\" otherwise."},
+                    "depth": {"type": "integer", "description": "neighborhood and impact: relations to follow, 1 to 3 (use 1 otherwise)."},
+                    "limit": {"type": "integer", "description": "Maximum entities to return, 1 to 100."}
+                },
+                "required": ["query", "text", "kinds", "entity", "path", "depth", "limit"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: GRAPH_PROPOSE,
+            description: "Propose typed changes to the project graph: create meaningful entities (claims, \
+                definitions, lemmas, proofs, questions, references, experiments, findings, collections), add or \
+                withdraw typed relations (dependsOn, assumes, proofOf, references, evidenceFor, memberOf, ...), \
+                bind entities to files or regions, archive or discard entities. The application validates every \
+                operation (closed vocabulary and endpoint rules) and applies them as one graph change: after the \
+                user's approval in tasks that review each change, directly in tasks that apply changes. Relations \
+                you add are recorded as suggestions until a person accepts them. Use \"\", [] and -1 for fields an \
+                operation does not use; refer to entities created earlier in the same call by their temp_id.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "description": "One-line summary of the change for the user; \"\" for none."},
+                    "base_revision": {"type": "integer", "description": "The graph revision your view of the graph comes from (graph context or a query result)."},
+                    "operations": {"type": "array", "description": "Operations, applied together or not at all.", "items": {"anyOf": operation_schemas()}}
+                },
+                "required": ["summary", "base_revision", "operations"],
+                "additionalProperties": false
+            }),
+        },
     ]
+}
+
+fn entity_kind_names() -> Vec<&'static str> {
+    exposition_graph::EntityKind::ALL.iter().map(|k| k.as_str()).collect()
+}
+
+/// One strict object schema per operation kind.
+fn operation_schemas() -> Value {
+    let creatable: Vec<&str> = AGENT_CREATABLE.iter().map(|k| k.as_str()).collect();
+    let relations: Vec<&str> = manual_relations().iter().map(|k| k.as_str()).collect();
+    let mut evidence_kinds: Vec<&str> = vec![""];
+    evidence_kinds.extend(exposition_graph::EvidenceKind::ALL.iter().map(|k| k.as_str()));
+    let attributes = json!({
+        "type": "array",
+        "description": "Metadata entries (names: letters, digits, '.', '_', '-'); [] for none.",
+        "items": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "value": {"type": "string"}},
+            "required": ["name", "value"],
+            "additionalProperties": false
+        }
+    });
+    let object = |op: &str, description: &str, props: Value| {
+        let mut properties = props.as_object().cloned().unwrap_or_default();
+        properties.insert("op".into(), json!({"type": "string", "enum": [op], "description": description}));
+        let required: Vec<String> = properties.keys().cloned().collect();
+        json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
+    };
+    let bind = |props: &mut serde_json::Map<String, Value>, required: bool| {
+        let what = if required { "File to bind to" } else { "File to bind the new entity to; \"\" for none" };
+        props.insert(
+            "bind_path".into(),
+            json!({"type": "string", "description": format!("{what} (relative to the project root).")}),
+        );
+        props.insert(
+            "bind_start".into(),
+            json!({"type": "integer", "description": "UTF-16 start offset of a region, or -1 for the whole file."}),
+        );
+        props.insert(
+            "bind_end".into(),
+            json!({"type": "integer", "description": "UTF-16 end offset of a region, or -1 for the whole file."}),
+        );
+    };
+    let mut create = json!({
+        "temp_id": {"type": "string", "description": "Id for referring to the new entity later in this call (letters, digits, '-', '_'; at most 32)."},
+        "kind": {"type": "string", "enum": creatable},
+        "label": {"type": "string", "description": "Concise one-line title."},
+        "attributes": attributes.clone()
+    });
+    if let Some(props) = create.as_object_mut() {
+        bind(props, false);
+    }
+    let mut bind_source = json!({
+        "entity": {"type": "string", "description": "Entity id, or a temp_id from this call."}
+    });
+    if let Some(props) = bind_source.as_object_mut() {
+        bind(props, true);
+    }
+    json!([
+        object("create_entity", "Admit a meaningful entity.", create),
+        object(
+            "add_relation",
+            "Add a typed relation (recorded as a suggestion).",
+            json!({
+                "relation": {"type": "string", "enum": relations},
+                "from": {"type": "string", "description": "Entity id, or a temp_id from this call. Reads: from <relation> to."},
+                "to": {"type": "string", "description": "Entity id, or a temp_id from this call."},
+                "evidence_kind": {"type": "string", "enum": evidence_kinds, "description": "evidenceFor only: the kind of support; \"\" otherwise."},
+                "evidence": {"type": "array", "items": {"type": "string"}, "description": "Existing evidence record ids to cite; [] for none."},
+                "note": {"type": "string", "description": "Short note; \"\" for none."}
+            })
+        ),
+        object(
+            "update_entity",
+            "Change an entity's label or attributes.",
+            json!({
+                "entity": {"type": "string", "description": "Entity id."},
+                "expected_revision": {"type": "integer", "description": "The entity revision you read."},
+                "label": {"type": "string", "description": "New label; \"\" keeps it."},
+                "attributes": attributes,
+                "replace_attributes": {"type": "boolean", "description": "true replaces all attributes with the list given."}
+            })
+        ),
+        object(
+            "set_lifecycle",
+            "Archive, discard, or reactivate an entity (nothing is deleted).",
+            json!({
+                "entity": {"type": "string", "description": "Entity id."},
+                "expected_revision": {"type": "integer", "description": "The entity revision you read."},
+                "lifecycle": {"type": "string", "enum": ["active", "archived", "discarded"]}
+            })
+        ),
+        object(
+            "remove_relation",
+            "Withdraw one of your own suggested relations.",
+            json!({"relation": {"type": "string", "description": "Relation id."}})
+        ),
+        object("bind_source", "Bind an entity to a file or a region of it.", bind_source),
+    ])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -270,6 +418,8 @@ pub struct RunCommandInput {
 /// A validated tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolCall {
+    GraphQuery(GraphQueryInput),
+    GraphPropose(GraphProposeInput),
     ListFiles(ListFilesInput),
     ReadFile(ReadFileInput),
     EditDocument(EditDocumentInput),
@@ -307,6 +457,10 @@ pub enum Exposure {
     /// container) or any file the user's account can read (native processes,
     /// TeX).
     Unconfined,
+    /// Graph records filtered by the tool itself to the task's scope and
+    /// consent: paths, kinds, and counts always; content-derived labels,
+    /// notes, and reasons only with content consent.
+    ConsentFiltered,
 }
 
 /// Whether and how a call starts a process.
@@ -335,19 +489,43 @@ pub struct Effects<'a> {
     pub service: Option<services::ServiceKind>,
     /// What the call is, for messages ("Python code", "a LaTeX build").
     pub what: &'static str,
+    /// The named paths (other than folders) are project files the call acts
+    /// on: they are resolved to graph resource identities and must not be
+    /// pending reconciliation or ambiguous in the graph.
+    pub targets: bool,
 }
 
 impl ToolCall {
     /// What this call does (see [`Effects`]).
-    pub fn effects(&self) -> Effects<'_> {
+    pub fn effects<'a>(&'a self) -> Effects<'a> {
         use services::ServiceKind;
-        let effects =
-            |paths, exposes, launch, changes, service, what| Effects { paths, exposes, launch, changes, service, what };
+        let effects = |paths: Vec<(&'a str, PathUse)>, exposes, launch, changes, service, what| {
+            let targets = !paths.is_empty();
+            Effects { paths, exposes, launch, changes, service, what, targets }
+        };
         match self {
+            ToolCall::GraphQuery(input) => {
+                let paths = input.named_path().map(|p| vec![(p.trim(), PathUse::Read)]).unwrap_or_default();
+                Effects {
+                    targets: false,
+                    ..effects(paths, Exposure::ConsentFiltered, Launch::None, false, None, "A graph query")
+                }
+            }
+            ToolCall::GraphPropose(input) => {
+                let paths =
+                    crate::graph::propose::bound_paths(input).into_iter().map(|p| (p, PathUse::Write)).collect();
+                Effects {
+                    targets: false,
+                    ..effects(paths, Exposure::ConsentFiltered, Launch::None, true, None, "A graph change")
+                }
+            }
             ToolCall::ListFiles(input) => {
                 let paths =
                     if is_root(&input.path) { Vec::new() } else { vec![(input.path.as_str(), PathUse::Folder)] };
-                effects(paths, Exposure::Metadata, Launch::None, false, None, "Listing files")
+                Effects {
+                    targets: false,
+                    ..effects(paths, Exposure::Metadata, Launch::None, false, None, "Listing files")
+                }
             }
             ToolCall::ReadFile(input) => effects(
                 vec![(input.path.as_str(), PathUse::Read)],
@@ -464,6 +642,18 @@ impl ToolCall {
             RUN_PYTHON => ToolCall::RunPython(typed(input)?),
             CHECK_LEAN => ToolCall::CheckLean(typed(input)?),
             RUN_COMMAND => ToolCall::RunCommand(typed(input)?),
+            GRAPH_QUERY => {
+                let parsed: GraphQueryInput = typed(input)?;
+                parsed.validate()?;
+                ToolCall::GraphQuery(parsed)
+            }
+            GRAPH_PROPOSE => {
+                let parsed: GraphProposeInput = typed(input)?;
+                if parsed.operations.is_empty() {
+                    return Err("operations must contain at least one operation".into());
+                }
+                ToolCall::GraphPropose(parsed)
+            }
             other => return Err(format!("unknown tool {other:?}")),
         })
     }
@@ -509,6 +699,11 @@ mod tests {
         if let Some(items) = schema.get("items") {
             object_schemas_are_strict(items, &format!("{at}[]"));
         }
+        if let Some(variants) = schema.get("anyOf").and_then(Value::as_array) {
+            for (i, variant) in variants.iter().enumerate() {
+                object_schemas_are_strict(variant, &format!("{at}|{i}"));
+            }
+        }
     }
 
     #[test]
@@ -518,8 +713,9 @@ mod tests {
         for def in &defs {
             object_schemas_are_strict(&def.input_schema, def.name);
         }
+        names.sort();
         names.dedup();
-        assert_eq!(names.len(), 9);
+        assert_eq!(names.len(), 11);
     }
 
     #[test]
@@ -544,6 +740,17 @@ mod tests {
             (RUN_PYTHON, json!({"code": "print(1)"})),
             (CHECK_LEAN, json!({"path": "Main.lean"})),
             (RUN_COMMAND, json!({"program": "latexmk", "args": ["-pdf"], "working_directory": ""})),
+            (
+                GRAPH_QUERY,
+                json!({"query": "search", "text": "", "kinds": ["claim"], "entity": "", "path": "", "depth": 1, "limit": 20}),
+            ),
+            (
+                GRAPH_PROPOSE,
+                json!({"summary": "", "base_revision": 3, "operations": [
+                    {"op": "create_entity", "temp_id": "c1", "kind": "claim", "label": "Squares grow", "attributes": [], "bind_path": "main.typ", "bind_start": -1, "bind_end": -1},
+                    {"op": "add_relation", "relation": "dependsOn", "from": "c1", "to": "ent-0123456789abcdef0123456789abcdef", "evidence_kind": "", "evidence": [], "note": ""}
+                ]}),
+            ),
         ];
         for (name, input) in ok {
             assert!(ToolCall::parse(name, &input).is_ok(), "{name}");

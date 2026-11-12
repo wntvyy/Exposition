@@ -12,13 +12,13 @@ import { NotificationRegion } from "../ui/components/Notifications";
 import { ResizeHandle } from "../ui/components/ResizeHandle";
 import { installKeybindings } from "./keybindings";
 import { layout, SIZE_LIMITS, useLayout, useVisibility, type Region } from "./layout";
-import { EDITOR_PAGE, usePages } from "./pages";
+import { EDITOR_PAGE, registerPageCommands, usePages } from "./pages";
 import { registry } from "./registry";
 import { ActivityRail } from "./shell/ActivityRail";
 import { registerBuiltins } from "./shell/builtins";
 import { CommandPalette } from "./shell/CommandPalette";
 import { EditorArea } from "./shell/EditorArea";
-import { focusNextRegion, trackRegionFocus } from "./shell/regions";
+import { focusNextRegion, focusRegion, regionElements, trackRegionFocus } from "./shell/regions";
 import { StatusBar } from "./shell/StatusBar";
 import { useRegistryVersion } from "./shell/useRegistry";
 import { ViewContainer } from "./shell/ViewContainer";
@@ -51,6 +51,7 @@ export function Workbench() {
   const { refs, save } = usePanelSizePersistence();
 
   useEffect(() => registerBuiltins(), []);
+  useEffect(() => registerPageCommands(), []);
   useEffect(() => installKeybindings(), []);
   useEffect(() => {
     trackRegionFocus();
@@ -165,7 +166,28 @@ function Pages({ editor }: { editor: ReactNode }) {
   useRegistryVersion();
   const active = usePages((s) => s.active);
   const visited = usePages((s) => s.visited);
+  const focusRequest = usePages((s) => s.focusRequest);
   const registered = registry.pages().filter((page) => visited.includes(page.id));
+
+  // A page shown from a command or keybinding takes keyboard focus: its first
+  // region (the editor area on the Editor page). Waits a frame so a page
+  // mounted by this navigation has rendered.
+  useEffect(() => {
+    if (focusRequest === 0) return;
+    const frame = requestAnimationFrame(() => {
+      const container = [...document.querySelectorAll<HTMLElement>(".wb-pages > [data-page]")].find(
+        (page) => page.dataset.page === active,
+      );
+      if (!container || container.contains(document.activeElement)) return;
+      const inner = regionElements().filter((region) => container.contains(region));
+      const target =
+        (active === EDITOR_PAGE ? inner.find((region) => region.dataset.region === "editor") : undefined) ?? inner[0];
+      if (target) focusRegion(target);
+    });
+    return () => cancelAnimationFrame(frame);
+    // Runs for each request; `active` is read when the request arrives.
+  }, [focusRequest]);
+
   return (
     <div className="wb-pages">
       <div

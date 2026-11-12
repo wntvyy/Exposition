@@ -1,0 +1,28 @@
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+
+\begin{document}
+
+\begin{definition}\label{def:compact}
+A set is compact when every open cover has a finite subcover.
+\end{definition}
+
+\begin{lemma}\label{lem:closed}
+A closed subset of a compact set is compact.
+\end{lemma}
+
+\begin{theorem}\label{thm:main}
+Assume hypothesis H. Then the image of a compact set under a continuous map is compact.
+\end{theorem}
+
+\begin{proof}
+Take an open cover of the image and pull it back (see Lemma~\ref{lem:closed} and \cite{rudin}).
+\end{proof}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+\end{document}

@@ -118,9 +118,21 @@
 .wb-rail__group--pages .wb-rail__button[data-selected] {
   background: var(--color-surface-selected);
 }
-.wb-rail__button[data-focus-visible] {
+.wb-rail__button[data-focus-visible],
+.wb-rail__page:focus-visible {
   outline: var(--focus-ring-width) solid var(--color-focus-ring);
   outline-offset: calc(-1 * var(--focus-ring-width));
+}
+/* Page buttons are native buttons (aria-current), styled like the rail toggles. */
+.wb-rail__page {
+  outline: none;
+}
+.wb-rail__page:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+.wb-rail__page:active {
+  background: var(--color-surface-active);
 }
 
 /* ---------- View containers (sidebar, panel, auxiliary) ---------- */

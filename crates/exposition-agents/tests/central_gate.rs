@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use exposition_agents::credentials::MemoryStore;
+use exposition_agents::graph::GraphEnv;
 use exposition_agents::store::Store;
 use exposition_agents::tools::exec::{self, Gate, ToolEnv};
 use exposition_agents::tools::services::{
@@ -29,6 +30,7 @@ use exposition_agents::*;
 use exposition_core::artifact::{ArtifactId, ArtifactKind, ArtifactRecord};
 use exposition_core::job::ExecutionPolicy;
 use exposition_core::path::WorkspacePath;
+use exposition_graph::{GraphConfig, GraphService};
 use exposition_workspace::{DocumentService, OpenDocument};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -322,6 +324,11 @@ fn gate_matrix(kind: Kind) {
     let store = Store::open_in_memory().unwrap();
     let services = Recorder::new();
     let task_id = TaskId::new();
+    // The project graph is attached: every combination also resolves its
+    // targets through it (a healthy graph changes no decision).
+    let graph_data = tempfile::tempdir().unwrap();
+    let graph = GraphService::new(GraphConfig { data_dir: graph_data.path().to_path_buf() });
+    graph.attach(files.root());
     let (name, input) = kind.call();
     let call = ToolCall::parse(name, &input).unwrap();
     let mut failures = Vec::new();
@@ -338,6 +345,7 @@ fn gate_matrix(kind: Kind) {
                         workspace: None,
                         services: services.as_ref(),
                         store: &store,
+                        graph: Some(GraphEnv { service: &graph, project: None }),
                     };
                     let expected = expect(kind, mode, permission, scope, consent);
                     let gate = exec::gate(&call, &env);
@@ -419,6 +427,11 @@ struct Harness {
 }
 
 fn harness() -> Harness {
+    harness_with(None)
+}
+
+/// A harness whose agent service has the project graph `graph`.
+fn harness_with(graph: Option<Arc<GraphService>>) -> Harness {
     let recorder = Recorder::new();
     let documents = Arc::new(DocumentService::new());
     let service = AgentService::new(AgentConfig {
@@ -431,6 +444,7 @@ fn harness() -> Harness {
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph,
     })
     .unwrap();
     service
@@ -534,7 +548,12 @@ async fn observe(
 async fn loop_matrix(kind: Kind) {
     let dir = project();
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    let mut h = harness();
+    // Through the task loop with the project graph attached: the mandatory
+    // graph context and target resolution must not change any decision.
+    let graph_data = tempfile::tempdir().unwrap();
+    let graph = GraphService::new(GraphConfig { data_dir: graph_data.path().to_path_buf() });
+    graph.attach(&root);
+    let mut h = harness_with(Some(graph));
     let mut failures = Vec::new();
     for mode in MODES {
         for permission in PERMISSIONS {
@@ -740,6 +759,7 @@ fn every_path_tool_refuses_a_link_inside_the_scope_that_leads_outside_it() {
         workspace: None,
         services: services.as_ref(),
         store: &store,
+        graph: None,
     };
     let through_link = [
         (tools::READ_FILE, json!({"path": "public/link/secret.txt"})),
@@ -793,6 +813,9 @@ async fn a_scoped_typst_build_cannot_read_files_outside_the_scope() {
     let execution = ExecutionService::with_config(config).unwrap();
     let typesetting = Arc::new(TypesettingService::new(Arc::clone(&workspace), Fonts::embedded_only));
     let services = AppToolServices::new(execution).with_workspace(Arc::clone(&workspace)).with_typesetting(typesetting);
+    let graph =
+        exposition_graph::GraphService::new(exposition_graph::GraphConfig { data_dir: data.path().join("graph") });
+    graph.attach(&std::fs::canonicalize(dir.path()).unwrap());
     let service = AgentService::new(AgentConfig {
         database: None,
         documents: Arc::clone(&documents),
@@ -803,6 +826,7 @@ async fn a_scoped_typst_build_cannot_read_files_outside_the_scope() {
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: Some(Arc::clone(&graph)),
     })
     .unwrap();
     service
@@ -899,6 +923,8 @@ async fn approvals_answered_after_a_project_switch_do_nothing() {
     let documents = Arc::new(DocumentService::new());
     let workspace = WorkspaceService::new(Arc::clone(&documents), data.path().join("workspace"));
     let recorder = Recorder::new();
+    let graph =
+        exposition_graph::GraphService::new(exposition_graph::GraphConfig { data_dir: data.path().join("graph") });
     let service = AgentService::new(AgentConfig {
         database: None,
         documents: Arc::clone(&documents),
@@ -909,6 +935,7 @@ async fn approvals_answered_after_a_project_switch_do_nothing() {
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: Some(Arc::clone(&graph)),
     })
     .unwrap();
     service
@@ -931,6 +958,7 @@ async fn approvals_answered_after_a_project_switch_do_nothing() {
     ];
     for (permission, step) in cases {
         workspace.open_workspace(dir.path()).unwrap();
+        graph.attach(&std::fs::canonicalize(dir.path()).unwrap());
         service.load_script(json!({"turns": [{"steps": [step]}, {"steps": [{"text": "done"}]}]})).unwrap();
         let task = service
             .create_task(CreateTaskRequest {
@@ -953,6 +981,7 @@ async fn approvals_answered_after_a_project_switch_do_nothing() {
         .await
         .expect("approval requested");
         workspace.open_workspace(other.path()).unwrap();
+        graph.attach(&std::fs::canonicalize(other.path()).unwrap());
         service.resolve_approval(&task.id, &approval.id, true).unwrap();
         service.join(&task.id).await;
         let result = service
@@ -1083,6 +1112,8 @@ async fn a_call_refused_when_its_approval_is_checked_again_is_recorded_failed_wi
     let recorder = Recorder::new();
     let services =
         Arc::new(ChangingArtifact { inner: recorder.clone(), lookups: std::sync::atomic::AtomicUsize::new(0) });
+    let graph =
+        exposition_graph::GraphService::new(exposition_graph::GraphConfig { data_dir: data.path().join("graph") });
     let service = AgentService::new(AgentConfig {
         database: None,
         documents: Arc::clone(&documents),
@@ -1093,6 +1124,7 @@ async fn a_call_refused_when_its_approval_is_checked_again_is_recorded_failed_wi
         allow_scripted: true,
         anthropic_base_url: None,
         retry: None,
+        graph: Some(Arc::clone(&graph)),
     })
     .unwrap();
     service
@@ -1118,6 +1150,7 @@ async fn a_call_refused_when_its_approval_is_checked_again_is_recorded_failed_wi
     ];
     for (permission, execution, step, switch, code) in cases {
         workspace.open_workspace(dir.path()).unwrap();
+        graph.attach(&std::fs::canonicalize(dir.path()).unwrap());
         service.load_script(json!({"turns": [{"steps": [step]}, {"steps": [{"text": "done"}]}]})).unwrap();
         let task = service
             .create_task(CreateTaskRequest {
@@ -1141,6 +1174,7 @@ async fn a_call_refused_when_its_approval_is_checked_again_is_recorded_failed_wi
         .expect("approval requested");
         if switch {
             workspace.open_workspace(other.path()).unwrap();
+            graph.attach(&std::fs::canonicalize(other.path()).unwrap());
         }
         service.resolve_approval(&task.id, &approval.id, true).unwrap();
         service.join(&task.id).await;
