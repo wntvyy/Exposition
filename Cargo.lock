@@ -839,6 +839,7 @@ version = "0.1.0"
 dependencies = [
  "exposition-core",
  "exposition-execution",
+ "exposition-lean",
  "exposition-workspace",
  "serde",
  "serde_json",

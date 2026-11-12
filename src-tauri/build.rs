@@ -39,6 +39,16 @@ const COMMANDS: &[&str] = &[
     "trust_status",
     "trust_grant",
     "trust_revoke",
+    // Lean (src/lean.rs).
+    "lean_documents",
+    "lean_projects",
+    "lean_goals",
+    "lean_hover",
+    "lean_definition",
+    "lean_restart",
+    "lean_restart_file",
+    "lean_install_toolchain",
+    "lean_check",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

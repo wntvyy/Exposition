@@ -18,6 +18,7 @@ tauri-build = { version = "2.7", features = [] }
 exposition-core.workspace = true
 exposition-workspace.workspace = true
 exposition-execution.workspace = true
+exposition-lean.workspace = true
 tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2"
 serde.workspace = true

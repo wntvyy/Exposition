@@ -6,6 +6,7 @@ mod app;
 mod documents;
 mod error;
 mod execution;
+mod lean;
 mod state;
 mod workspace;
 
@@ -23,6 +24,7 @@ pub fn run() {
             documents::forward_events(app.handle().clone());
             workspace::start(app.handle().clone());
             execution::forward_events(app.handle().clone());
+            lean::forward_events(app.handle().clone());
             #[cfg(debug_assertions)]
             execution::add_dev_capability(app.handle())?;
             Ok(())
@@ -62,6 +64,15 @@ pub fn run() {
             execution::trust_status,
             execution::trust_grant,
             execution::trust_revoke,
+            lean::lean_documents,
+            lean::lean_projects,
+            lean::lean_goals,
+            lean::lean_hover,
+            lean::lean_definition,
+            lean::lean_restart,
+            lean::lean_restart_file,
+            lean::lean_install_toolchain,
+            lean::lean_check,
             #[cfg(debug_assertions)]
             execution::dev_start_probe_job,
             #[cfg(debug_assertions)]
