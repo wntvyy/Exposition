@@ -11,6 +11,7 @@ import {
   documentState,
   focusEditor,
   invoke,
+  invokeError,
   makeProject,
   openInEditor,
   openWorkspace,
@@ -72,6 +73,9 @@ export default async function workspaceRecovery({ launchApp, artifactsDir, asser
 
   // Another program changes notes.md while Exposition is not running.
   await writeFile(notesPath, "# Notes changed elsewhere\n");
+  // One journal is damaged (e.g. by a disk error): it must be surfaced, not dropped.
+  const [workspaceKey] = await readdir(join(project.dataDir, "recovery"));
+  await writeFile(join(project.dataDir, "recovery", workspaceKey, "live-ffffffffffffffff.json"), "{ damaged");
 
   // --- session 2: relaunch with the same data directory ----------------------
   app = await launchApp({ dataDir: project.dataDir });
@@ -79,9 +83,19 @@ export default async function workspaceRecovery({ launchApp, artifactsDir, asser
   const shot = (name) => page.screenshot({ path: join(artifactsDir, `${name}.png`) });
   try {
     const info = await openWorkspace(page, project.root);
-    assert.deepEqual(info.recovery.map((e) => e.path).sort(), ["README.txt", "main.typ", "notes.md"]);
+    const readable = info.recovery.filter((e) => !e.problem);
+    assert.deepEqual(readable.map((e) => e.path).sort(), ["README.txt", "main.typ", "notes.md"]);
+    const damaged = info.recovery.filter((e) => e.problem);
+    assert.equal(damaged.length, 1, "the damaged journal is reported");
+    assert.equal(damaged[0].disk, "unknown");
     const list = page.locator('[data-testid="recovery-list"]');
     await list.waitFor();
+    const damagedItem = list.locator('[data-recovery-unreadable="true"]');
+    assert.match(await damagedItem.innerText(), /Unreadable recovery data/);
+    assert.match(await damagedItem.innerText(), /damaged/);
+    const quarantined = damaged[0].location;
+    assert.ok(quarantined && (await readFile(quarantined, "utf8")) === "{ damaged", "bytes kept for inspection");
+    assert.equal((await invokeError(page, "recovery_restore", { id: damaged[0].id })).error?.code, "recovery.unreadable");
     const notesEntry = list.locator('[data-recovery-path="notes.md"]');
     assert.match(await notesEntry.innerText(), /changed on disk/);
     assert.doesNotMatch(await list.locator('[data-recovery-path="main.typ"]').innerText(), /changed on disk/);
@@ -120,7 +134,10 @@ export default async function workspaceRecovery({ launchApp, artifactsDir, asser
     await page.keyboard.press("Control+Y");
     await shot("04-restored-notes");
 
-    // Discard README.txt: entry and journal removed, file untouched.
+    // Discard the damaged record, then README.txt: entries and journals removed, files untouched.
+    await damagedItem.getByRole("button", { name: "Discard" }).click();
+    await damagedItem.waitFor({ state: "detached" });
+    assert.ok(!(await readFile(quarantined).then(() => true, () => false)), "quarantined data removed on discard");
     await list.locator('[data-recovery-path="README.txt"]').getByRole("button", { name: "Discard" }).click();
     await list.waitFor({ state: "detached" });
     assert.equal(await readFile(readmePath, "utf8"), readmeOriginal);

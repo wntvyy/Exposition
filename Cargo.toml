@@ -38,6 +38,7 @@ tokio-util = "0.7"
 futures-util = "0.3"
 similar = "2"
 notify = "8.2"
+winapi-util = "0.1"
 regex = "1"
 # Execution service OS integration (process-tree containment).
 libc = "0.2"

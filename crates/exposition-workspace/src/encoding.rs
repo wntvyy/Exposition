@@ -43,16 +43,59 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, DecodeError> {
     } else if let Some(rest) = bytes.strip_prefix(UTF16BE_BOM) {
         Decoded { text: decode_utf16(rest, TextEncoding::Utf16Be)?, encoding: TextEncoding::Utf16Be }
     } else {
-        if bytes.contains(&0) {
-            return Err(DecodeError::Binary);
-        }
-        let text = std::str::from_utf8(bytes).map_err(|_| DecodeError::Undecodable { encoding: TextEncoding::Utf8 })?;
+        let text = std::str::from_utf8(bytes).map_err(|_| {
+            if bytes.contains(&0) {
+                DecodeError::Binary
+            } else {
+                DecodeError::Undecodable { encoding: TextEncoding::Utf8 }
+            }
+        })?;
         Decoded { text: text.to_owned(), encoding: TextEncoding::Utf8 }
     };
-    if decoded.text.contains('\0') {
+    if looks_binary(&decoded.text) {
         return Err(DecodeError::Binary);
     }
     Ok(decoded)
+}
+
+/// Control characters that do not occur in ordinary text (everything in C0
+/// except tab, line feed, form feed, carriage return, and escape, plus DEL).
+fn is_binary_control(c: char) -> bool {
+    matches!(c, '\0'..='\u{8}' | '\u{b}' | '\u{e}'..='\u{1a}' | '\u{1c}'..='\u{1f}' | '\u{7f}')
+}
+
+/// Text dense with binary control characters (at least 8, and at least 1% of
+/// all characters) is treated as binary data. Isolated NULs or control
+/// characters in otherwise ordinary text do not make a file binary.
+pub fn looks_binary(text: &str) -> bool {
+    let mut controls = 0usize;
+    let mut total = 0usize;
+    for c in text.chars() {
+        total += 1;
+        if is_binary_control(c) {
+            controls += 1;
+        }
+    }
+    controls >= 8 && controls * 100 >= total
+}
+
+/// Why a document cannot be saved without becoming a file Exposition would
+/// refuse to reopen. Opening and saving apply the same rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveRefusal {
+    TooLarge { size: u64 },
+    Binary,
+}
+
+/// Check that `text`, encoded as `encoded_len` bytes, can be reopened as text.
+pub fn check_reopenable(text: &str, encoded_len: usize) -> Result<(), SaveRefusal> {
+    if encoded_len as u64 > MAX_TEXT_BYTES {
+        return Err(SaveRefusal::TooLarge { size: encoded_len as u64 });
+    }
+    if looks_binary(text) {
+        return Err(SaveRefusal::Binary);
+    }
+    Ok(())
 }
 
 fn decode_utf16(bytes: &[u8], encoding: TextEncoding) -> Result<String, DecodeError> {
@@ -145,7 +188,11 @@ mod tests {
 
     #[test]
     fn refuses_binary_and_invalid_bytes() {
-        assert_eq!(decode(b"PNG\0\x01\x02"), Err(DecodeError::Binary));
+        assert_eq!(decode(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"), Err(DecodeError::Binary));
+        assert_eq!(decode(b"\0\x01\x02\x03\x04\x05\x06\x07 dense controls"), Err(DecodeError::Binary));
+        // UTF-16 without a BOM: valid UTF-8, but every other byte is NUL.
+        let no_bom: Vec<u8> = "plain ascii text".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(decode(&no_bom), Err(DecodeError::Binary));
         assert_eq!(decode(b"caf\xe9"), Err(DecodeError::Undecodable { encoding: TextEncoding::Utf8 }));
         assert_eq!(decode(b"\xEF\xBB\xBFok\xff"), Err(DecodeError::Undecodable { encoding: TextEncoding::Utf8Bom }));
         // Odd byte count and an unpaired surrogate in UTF-16.
@@ -155,7 +202,23 @@ mod tests {
             Err(DecodeError::Undecodable { encoding: TextEncoding::Utf16Le })
         );
         assert_eq!(decode(&[0xFF, 0xFE, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00]), Err(DecodeError::Binary));
-        assert_eq!(decode(&[0xFE, 0xFF, 0x00, 0x00]), Err(DecodeError::Binary));
+        // A BOM followed by one NUL character is (odd) UTF-16 text, not binary.
+        assert_eq!(decode(&[0xFE, 0xFF, 0x00, 0x00]).unwrap().text, "\0");
+    }
+
+    #[test]
+    fn isolated_nul_characters_stay_text_and_the_save_check_matches_open() {
+        let text = "a\0b = Title\n";
+        assert_eq!(decode(text.as_bytes()).unwrap().text, text);
+        assert_eq!(check_reopenable(text, text.len()), Ok(()));
+        let dense = "\0".repeat(16);
+        assert_eq!(check_reopenable(&dense, 16), Err(SaveRefusal::Binary));
+        assert_eq!(decode(dense.as_bytes()), Err(DecodeError::Binary));
+        let limit = MAX_TEXT_BYTES as usize;
+        assert_eq!(check_reopenable("", limit), Ok(()));
+        assert_eq!(check_reopenable("", limit + 1), Err(SaveRefusal::TooLarge { size: limit as u64 + 1 }));
+        // Tabs, line breaks, form feeds, and escapes are ordinary text.
+        assert!(!looks_binary(&"\t\n\r\x0c\x1b".repeat(20)));
     }
 
     #[test]

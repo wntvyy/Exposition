@@ -16,6 +16,10 @@ ts-rs.workspace = true
 sha2.workspace = true
 notify.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# File identity (volume serial + file index) to unify hard links.
+winapi-util.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

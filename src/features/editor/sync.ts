@@ -17,7 +17,7 @@ import type { TextRange } from "../../bindings/TextRange";
 import type { TransactionOutcome } from "../../bindings/TransactionOutcome";
 import type { TransactionRequest } from "../../bindings/TransactionRequest";
 import type { UndoBehavior } from "../../bindings/UndoBehavior";
-import { samePatches, transform } from "./ot";
+import { diffPatch, samePatches, transform } from "./ot";
 
 export interface SyncTransport {
   apply(request: TransactionRequest): Promise<TransactionOutcome>;
@@ -35,6 +35,8 @@ export interface SyncView {
   setText(text: string): void;
   /** Adopt a selection restored by undo/redo. */
   setSelection?(ranges: TextRange[]): void;
+  /** The current view text (used to coalesce an IME composition into one edit). */
+  getText?(): string;
 }
 
 export interface SyncCallbacks {
@@ -73,6 +75,12 @@ export class DocumentSync {
   private held: DocumentChanged[] = [];
   private idleWaiters: (() => void)[] = [];
   private disposed = false;
+  /** While holding, service events and resyncs wait (see `hold`). */
+  private holding = false;
+  private deferred: DocumentChanged[] = [];
+  private resyncDeferred = false;
+  /** Queue length and view text when the hold began. */
+  private holdStart: { index: number; text: string | null } | null = null;
 
   constructor(
     readonly document: DocumentId,
@@ -91,6 +99,74 @@ export class DocumentSync {
 
   get isResyncing(): boolean {
     return this.resyncing !== null;
+  }
+
+  get isHolding(): boolean {
+    return this.holding;
+  }
+
+  /**
+   * Stop changing the view: service events (and any resync) are deferred until
+   * `release`, in order. Used during IME composition, which a concurrent edit
+   * to the editor model would corrupt. Local edits keep flowing to the service.
+   */
+  hold() {
+    if (this.holding) return;
+    this.holding = true;
+    this.holdStart = { index: this.queue.length, text: this.view.getText?.() ?? null };
+  }
+
+  /** Apply everything deferred by `hold`, in revision order. */
+  release() {
+    if (!this.holding) return;
+    this.holding = false;
+    this.coalesceHeldEdits();
+    const events = this.deferred;
+    this.deferred = [];
+    if (this.resyncDeferred) {
+      this.resyncDeferred = false;
+      void this.resync();
+      // Replayed (and filtered by revision) once the resync has loaded the state.
+      this.held.push(...events);
+    } else {
+      for (const event of events) this.receive(event);
+    }
+    this.callbacks.onChange?.();
+    this.pump();
+  }
+
+  /**
+   * Replace the local edits made during the hold (e.g. every intermediate IME
+   * composition update) with one edit from the text at the start of the hold to
+   * the text now, so a composition reaches the service, and its undo history,
+   * as a single change.
+   */
+  private coalesceHeldEdits() {
+    const start = this.holdStart;
+    this.holdStart = null;
+    if (!start || start.text === null || !this.view.getText) return;
+    const held = this.queue.slice(start.index);
+    if (held.length < 2 || held.some((p) => p.kind !== "edit" || p.sent)) return;
+    const edits = held as PendingEdit[];
+    const first = edits[0]!;
+    const last = edits[edits.length - 1]!;
+    const patch = diffPatch(start.text, this.view.getText());
+    const merged: PendingEdit[] = patch
+      ? [
+          {
+            kind: "edit",
+            id: first.id,
+            patches: [patch],
+            undo: first.undo,
+            selection:
+              first.selection && last.selection
+                ? { before: first.selection.before, after: last.selection.after }
+                : (last.selection ?? first.selection),
+            sent: false,
+          },
+        ]
+      : [];
+    this.queue.splice(start.index, held.length, ...merged);
   }
 
   dispose() {
@@ -129,7 +205,8 @@ export class DocumentSync {
   }
 
   private pump() {
-    if (this.disposed || this.resyncing) return;
+    // While holding, nothing new is sent (see `coalesceHeldEdits`).
+    if (this.disposed || this.resyncing || this.holding) return;
     const head = this.queue[0];
     if (!head || head.sent) {
       this.flushWaiters();
@@ -175,6 +252,10 @@ export class DocumentSync {
   /** Handle a service event for this document (events arrive in revision order). */
   receive(event: DocumentChanged) {
     if (this.disposed) return;
+    if (this.holding) {
+      this.deferred.push(event);
+      return;
+    }
     if (this.resyncing) {
       this.held.push(event);
       return;
@@ -223,6 +304,10 @@ export class DocumentSync {
 
   /** Replace the view with the service's current state, dropping unacknowledged local edits. */
   resync(): Promise<void> {
+    if (this.holding) {
+      this.resyncDeferred = true;
+      return Promise.resolve();
+    }
     if (this.resyncing) return this.resyncing;
     this.queue = [];
     this.held = [];

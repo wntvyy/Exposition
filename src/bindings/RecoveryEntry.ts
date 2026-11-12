@@ -9,7 +9,11 @@ export type RecoveryEntry = {
 /**
  * Opaque identifier used to restore or discard the entry.
  */
-id: string, path: WorkspacePath, 
+id: string, 
+/**
+ * The file the unsaved changes belong to (`None` when unreadable data no longer names it).
+ */
+path: WorkspacePath | null, 
 /**
  * When the journal was written (Unix milliseconds).
  */
@@ -17,4 +21,13 @@ savedAt: number,
 /**
  * UTF-16 length of the journaled text.
  */
-length: number, disk: RecoveryDiskState, };
+length: number, disk: RecoveryDiskState, 
+/**
+ * Why the recovery data cannot be restored (corrupt, from a newer version).
+ * Such entries are quarantined; they can only be inspected or discarded.
+ */
+problem: string | null, 
+/**
+ * Absolute location of the quarantined data, for inspection.
+ */
+location: string | null, };
