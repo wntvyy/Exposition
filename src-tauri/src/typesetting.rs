@@ -85,11 +85,15 @@ fn target_of(entry: &WorkspacePath) -> Option<BuildTarget> {
     Some(BuildTarget { format, engine, entry: entry.clone() })
 }
 
-fn target(entry: &WorkspacePath) -> BuildTarget {
-    target_of(entry).unwrap_or(BuildTarget {
-        format: DocumentFormat::Typst,
-        engine: Engine::Typst,
-        entry: entry.clone(),
+/// The in-process build target of `entry` (`.typ` Typst, `.md` the Markdown
+/// print profile), or the error every typesetting command reports for a file
+/// no format builds. `.tex` entries go to the TeX service before this.
+fn target(entry: &WorkspacePath) -> Result<BuildTarget, CommandError> {
+    target_of(entry).ok_or_else(|| {
+        CommandError::new(
+            "typesetting.unsupported",
+            format!("{entry} cannot be typeset: only .typ, .md and .tex entries can be built"),
+        )
     })
 }
 
@@ -164,14 +168,15 @@ impl TypesettingRuntime {
                         std::mem::take(&mut queue.dirty).into_iter().collect()
                     };
                     for entry in entries {
+                        // Watched entries were checked by `typesetting_watch`.
+                        let Ok(target) = target(&entry) else { continue };
                         let _ = handle.emit(
                             STATUS_EVENT,
                             BuildStatusEvent { entry: entry.clone(), activity: BuildActivity::Building },
                         );
                         // A compiler panic must not stop future builds.
-                        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            runtime.service.build(&target(&entry))
-                        }));
+                        let built =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.service.build(&target)));
                         match built {
                             Ok(Ok(record)) => {
                                 let _ = handle.emit(BUILD_EVENT, runtime.event_for(&record));
@@ -242,9 +247,7 @@ pub async fn typesetting_watch(
     if crate::tex::is_tex(&entry) {
         return crate::tex::watch(&state, &entry);
     }
-    if target_of(&entry).is_none() {
-        return Err(CommandError::new("typesetting.unsupported", "only .typ and .md entries can be typeset"));
-    }
+    target(&entry)?;
     let runtime = runtime(&state);
     if runtime.service.workspace().current().is_none() {
         return Err(CommandError::new("typesetting.noWorkspace", "no workspace is open"));
@@ -270,9 +273,10 @@ pub async fn typesetting_build(state: State<'_, AppState>, entry: WorkspacePath)
     if crate::tex::is_tex(&entry) {
         return crate::tex::build_now(&state, &entry).await;
     }
+    let target = target(&entry)?;
     let runtime = Arc::clone(runtime(&state));
     tauri::async_runtime::spawn_blocking(move || {
-        let record = runtime.service.build(&target(&entry)).map_err(|e| command_error("typesetting.build", e))?;
+        let record = runtime.service.build(&target).map_err(|e| command_error("typesetting.build", e))?;
         Ok(runtime.event_for(&record))
     })
     .await
@@ -325,5 +329,22 @@ mod tests {
         assert_eq!(runtime.watchers(&entry), 0);
         runtime.unwatch(&entry);
         assert_eq!(runtime.watchers(&entry), 0, "extra unwatch is harmless");
+    }
+
+    /// In-process builds dispatch by extension; any other file is refused
+    /// (it used to be compiled as Typst).
+    #[test]
+    fn build_targets_dispatch_by_extension() {
+        use exposition_core::build::{DocumentFormat, Engine};
+        let target = |path: &str| super::target(&WorkspacePath::parse(path).unwrap());
+        let typst = target("chapters/Main.TYP").unwrap();
+        assert_eq!((typst.format, typst.engine), (DocumentFormat::Typst, Engine::Typst));
+        let markdown = target("README.md").unwrap();
+        assert_eq!((markdown.format, markdown.engine), (DocumentFormat::Markdown, Engine::MarkdownPrint));
+        for refused in ["notes.txt", "figure.pdf", "Makefile", "main.typ.bak", "data.json"] {
+            let error = target(refused).unwrap_err();
+            assert_eq!(error.code, "typesetting.unsupported", "{refused}");
+            assert!(error.message.contains(refused), "{}", error.message);
+        }
     }
 }

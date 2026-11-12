@@ -134,6 +134,9 @@ pub struct RenderedPage {
     pub height_px: u32,
     /// Pixels per PDF point used for this rendering.
     pub scale: f32,
+    /// The page was rendered below the requested scale to stay within
+    /// [`exposition_page::MAX_PAGE_IMAGE_PIXELS`].
+    pub capped: bool,
     pub png: Vec<u8>,
 }
 
@@ -159,9 +162,14 @@ impl PdfDocument {
         Ok((w as f64, h as f64))
     }
 
-    /// Render one page at `scale` pixels per point (e.g. 2.0 ≈ 144 dpi) onto white.
+    /// Render one page at `scale` pixels per point (e.g. 2.0 ≈ 144 dpi) onto
+    /// white; at a lower scale when the page would exceed
+    /// [`exposition_page::MAX_PAGE_IMAGE_PIXELS`] (the document chooses its
+    /// page size: a 16383 pt page at 3 px/pt would need ~9.7 GB).
     pub fn render_page(&self, index: usize, scale: f32) -> Result<RenderedPage, PdfError> {
         let page = self.pdf.pages().get(index).ok_or(PdfError::NoSuchPage(index))?;
+        let (width_pt, height_pt) = page.render_dimensions();
+        let (scale, capped) = exposition_page::capped_raster_scale(f64::from(width_pt), f64::from(height_pt), scale);
         let cache = RenderCache::new();
         let pixmap = render(
             page,
@@ -172,7 +180,7 @@ impl PdfDocument {
         );
         let (width_px, height_px) = (pixmap.width() as u32, pixmap.height() as u32);
         let png = pixmap.into_png().map_err(|e| PdfError::Render(format!("{e:?}")))?;
-        Ok(RenderedPage { width_px, height_px, scale, png })
+        Ok(RenderedPage { width_px, height_px, scale, capped, png })
     }
 
     /// Every glyph drawn on a page, in drawing order, with recovered Unicode.

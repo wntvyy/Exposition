@@ -21,14 +21,14 @@ use tauri::ipc::Response;
 use crate::error::CommandError;
 use crate::state::AppState;
 
-/// Every format's retained builds. Integration point: add the LaTeX/Markdown
-/// providers here.
+/// Every format's retained builds: Typst and Markdown (the typesetting
+/// service) and LaTeX (the TeX service).
 fn providers<'a>(state: &'a State<'_, AppState>) -> [&'a dyn PageMapProvider; 2] {
     [state.typesetting.service.as_ref(), &state.tex]
 }
 
-/// Page input rules by document path. Integration point: add `.tex`
-/// (LaTeX escaping) and `.md` rules here.
+/// Page input rules by document path: Typst, LaTeX, and the Markdown print
+/// profile.
 fn rules_for(path: Option<&WorkspacePath>) -> Option<&'static dyn PageInputRules> {
     match path?.extension()?.to_ascii_lowercase().as_str() {
         "typ" => Some(&TypstInput),

@@ -50,7 +50,6 @@ fn a4_page_renders() {
 /// R-sec F7: the raster size is bounded only by the document's page size.
 /// 64 megapixels (256 MB RGBA) is used here as a generous cap.
 #[test]
-#[ignore = "R-sec F7: TeX page rendering has no pixel cap; page size from the document sets the allocation"]
 fn page_rendering_is_bounded() {
     const CAP_PIXELS: u64 = 64 * 1024 * 1024;
     let pdf = PdfDocument::open(pdf_with_page(4000, 4000)).unwrap();
@@ -68,4 +67,17 @@ fn page_rendering_is_bounded() {
             );
         }
     }
+}
+
+/// The cap is reported: a page rendered below the requested scale says so and
+/// gives the scale used (the page view shows it at its size in points).
+#[test]
+fn a_capped_render_reports_its_scale() {
+    let pdf = PdfDocument::open(pdf_with_page(4000, 4000)).unwrap();
+    let page = pdf.render_page(0, PAGE_IMAGE_SCALE).unwrap();
+    assert!(page.capped && page.scale < PAGE_IMAGE_SCALE, "{} {}", page.capped, page.scale);
+    assert!(u64::from(page.width_px) * u64::from(page.height_px) <= exposition_page::MAX_PAGE_IMAGE_PIXELS);
+    let a4 = pdf_with_page(595, 842);
+    let a4 = PdfDocument::open(a4).unwrap().render_page(0, PAGE_IMAGE_SCALE).unwrap();
+    assert!(!a4.capped && a4.scale == PAGE_IMAGE_SCALE);
 }

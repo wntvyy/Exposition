@@ -242,6 +242,9 @@ fn parse_render_ref(render_ref: &str) -> Option<(BuildId, u32)> {
 pub struct StoredBuild {
     pub build: TexBuild,
     pub summary: TexBuildSummary,
+    /// Workspace root the build belongs to (as `Target::root`); the build is
+    /// served only while that folder is open.
+    root: PathBuf,
     session: OnceLock<Result<Arc<TexPageSession>, String>>,
     page_map: OnceLock<Option<Arc<PageMap>>>,
     pngs: Mutex<HashMap<PngKey, Arc<Vec<u8>>>>,
@@ -371,9 +374,12 @@ impl TexService {
         })
     }
 
-    /// A finished build kept for page access.
+    /// A finished build kept for page access. Builds of a folder that is no
+    /// longer open are not served (nor exported): their ids stay unknown
+    /// after switching folders.
     pub fn build(&self, id: &BuildId) -> Option<Arc<StoredBuild>> {
-        self.inner.builds.lock().unwrap_or_else(|p| p.into_inner()).builds.get(id).cloned()
+        let stored = self.inner.builds.lock().unwrap_or_else(|p| p.into_inner()).builds.get(id).cloned()?;
+        self.inner.belongs_to_open_folder(&stored).then_some(stored)
     }
 
     /// PNG of a page at `scale` pixels per point (0.25..=8).
@@ -489,10 +495,11 @@ impl TexService {
         Ok(())
     }
 
-    /// The text of `document` at `revision`, if a retained build compiled it.
+    /// The text of `document` at `revision`, if a retained build of the open
+    /// folder compiled it.
     pub fn revision_text(&self, document: &DocumentId, revision: u64) -> Option<Arc<str>> {
         let store = self.inner.builds.lock().unwrap_or_else(|p| p.into_inner());
-        store.builds.values().find_map(|stored| {
+        store.builds.values().filter(|stored| self.inner.belongs_to_open_folder(stored)).find_map(|stored| {
             stored.build.snapshot.as_ref()?.files.values().find_map(|file| {
                 (file.document.as_ref() == Some(document) && file.revision == Some(revision))
                     .then(|| file.text.clone())
@@ -690,6 +697,11 @@ impl StoredBuild {
 }
 
 impl Inner {
+    /// Whether `stored` was built from the folder that is open now.
+    fn belongs_to_open_folder(&self, stored: &StoredBuild) -> bool {
+        self.workspace.open_root().is_some_and(|open| crate::compile::plain_path(&open) == stored.root)
+    }
+
     /// Worker loop of one target.
     fn work(self: Arc<Self>, target: Arc<Target>, build_target: BuildTarget) {
         loop {
@@ -753,6 +765,7 @@ impl Inner {
             let stored = Arc::new(StoredBuild {
                 build,
                 summary: summary.clone(),
+                root: target.root.clone(),
                 session: OnceLock::new(),
                 page_map: OnceLock::new(),
                 pngs: Mutex::new(HashMap::new()),

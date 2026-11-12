@@ -6,6 +6,7 @@ import { useCallback, useSyncExternalStore } from "react";
 import { editors, useActiveEditor, useEditors } from "../../app/editors";
 import { registry, type EditorProps } from "../../app/registry";
 import { commands } from "../../lib/ipc";
+import { setEditorLinkHandler } from "../../lib/monaco";
 import { confirm, confirmUnsaved, type UnsavedChoice } from "../../ui/components";
 import {
   activeHandle,
@@ -16,7 +17,11 @@ import {
   saveDocument,
   type DocumentHandle,
 } from "./documentClient";
+import { offerEditorLink } from "./links";
 import { SourceEditor } from "./SourceEditor";
+
+// Links in editor hovers are copied, never opened (no navigation, no opener).
+setEditorLinkHandler((uri) => void offerEditorLink(uri));
 
 function SourceEditorTab({ resource, active }: EditorProps) {
   // Inactive tabs stay mounted; only the selected tab of the active group takes focus.

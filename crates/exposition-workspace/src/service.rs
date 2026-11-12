@@ -297,6 +297,13 @@ impl WorkspaceService {
         lock(&self.state).open.as_ref().map(|o| o.root.clone()).ok_or_else(WorkspaceError::no_workspace)
     }
 
+    /// Canonical root of the open folder (the path `WorkspaceSnapshot::root`
+    /// reports), without taking a snapshot. Services that keep results per
+    /// folder use it to refuse results of a folder that is no longer open.
+    pub fn open_root(&self) -> Option<PathBuf> {
+        lock(&self.state).open.as_ref().map(|o| o.root.path().to_path_buf())
+    }
+
     fn recovery_store(&self) -> WorkspaceResult<RecoveryStore> {
         lock(&self.state).open.as_ref().map(|o| o.recovery.clone()).ok_or_else(WorkspaceError::no_workspace)
     }

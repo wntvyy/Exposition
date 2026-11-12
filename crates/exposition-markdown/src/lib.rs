@@ -14,7 +14,8 @@
 //!   dash, `...` → ellipsis, straight quotes → curly quotes. Every other
 //!   character prints literally (Typst syntax is escaped).
 //! - **Front matter** keys: `title`, `author` (one value or a list),
-//!   `date` (title block and PDF metadata); `papersize` (a3, a4, a5, b5,
+//!   `date` (title block; also the PDF metadata when it is a calendar date,
+//!   `YYYY-MM-DD`); `papersize` (a3, a4, a5, b5,
 //!   letter, legal), `fontsize` (6–24pt), `margin` (cm/mm/in/pt length),
 //!   `lang`. Other keys are reported and ignored.
 //! - **Blocks**: headings (unnumbered), paragraphs, block quotes, ordered and
