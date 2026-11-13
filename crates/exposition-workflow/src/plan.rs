@@ -25,7 +25,7 @@ use crate::adapters::Adapters;
 use crate::model::{
     MAX_PARALLEL, PLAN_TTL_MS, WorkflowConcurrencyLimits, WorkflowPlanBinding, WorkflowPlanBlocker,
     WorkflowPlanExecution, WorkflowPlanInput, WorkflowPlanStep, WorkflowRunBudgets, WorkflowRunOutcome,
-    WorkflowRunPlan,
+    WorkflowRunPlan, WorkflowRunnerImage,
 };
 
 /// A run never takes longer than this in total.
@@ -275,6 +275,8 @@ struct ApprovedExecution<'a> {
     trusted_folder: Option<bool>,
     native_steps: &'a [String],
     model_steps: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runner_images: &'a Option<Vec<WorkflowRunnerImage>>,
 }
 
 /// SHA-256 over a canonical serialization of everything the user approves.
@@ -321,6 +323,7 @@ pub fn approval_hash(plan: &WorkflowRunPlan, root: &Path) -> String {
             trusted_folder: (!plan.execution.native_steps.is_empty()).then_some(plan.execution.trusted_folder),
             native_steps: &plan.execution.native_steps,
             model_steps: &plan.execution.model_steps,
+            runner_images: &plan.execution.runner_images,
         },
     };
     crate::adapters::sha256_hex(&serde_json::to_vec(&approved).unwrap_or_default())
@@ -552,15 +555,33 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
         max_model_requests: steps.iter().map(|s| s.max_model_requests * n(s)).sum(),
     };
     let max_parallel = max_parallel_of(def);
-    // The restricted backend and image bind the plan only when a step uses them.
+    // The restricted backend and image bind the plan only when a step uses
+    // them. A runner with its own image (R, Julia) binds that image and its
+    // identity instead of the default one.
     let restricted = !restricted_steps.is_empty();
+    let mut runner_images: Vec<WorkflowRunnerImage> = Vec::new();
+    let mut default_image_steps: Vec<&str> = Vec::new();
+    for s in steps.iter().filter(|s| s.containment == Containment::RestrictedContainer) {
+        match facts.adapters.get(&s.runner).and_then(|a| a.restricted_image()) {
+            None => default_image_steps.push(s.label.as_str()),
+            Some(Ok((image, image_id))) => {
+                if !runner_images.iter().any(|b| b.runner == s.runner) {
+                    runner_images.push(WorkflowRunnerImage { runner: s.runner.clone(), image, image_id });
+                }
+            }
+            // The step is unavailable; its availability blocker says why.
+            Some(Err(_)) => {}
+        }
+    }
+    let default_restricted = !default_image_steps.is_empty();
     let execution = WorkflowPlanExecution {
         restricted_backend: facts.restricted_backend.clone().filter(|_| restricted),
-        restricted_image: facts.restricted_image.clone().filter(|_| restricted),
-        restricted_image_id: if restricted { (facts.restricted_image_id)() } else { None },
+        restricted_image: facts.restricted_image.clone().filter(|_| default_restricted),
+        restricted_image_id: if default_restricted { (facts.restricted_image_id)() } else { None },
         trusted_folder: facts.trusted,
         native_steps: native_steps.clone(),
         model_steps: model_steps.clone(),
+        runner_images: (!runner_images.is_empty()).then(|| runner_images.clone()),
     };
 
     // ----- notices -----
@@ -574,17 +595,24 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
             l.max_in_flight_steps, l.restricted, l.native, l.agent, l.lean
         )
     }];
-    if !restricted_steps.is_empty() {
-        notices.push(format!(
+    let restricted_notice = |labels: &[&str], image: Option<&str>| {
+        format!(
             "{} run{} in the restricted container ({}): only the declared inputs and code are staged read-only, with no network and no credentials; outputs are validated before anything uses them.",
-            restricted_steps.iter().map(|l| format!("“{l}”")).collect::<Vec<_>>().join(", "),
-            if restricted_steps.len() == 1 { "s" } else { "" },
-            match (&facts.restricted_backend, &facts.restricted_image) {
+            labels.iter().map(|l| format!("“{l}”")).collect::<Vec<_>>().join(", "),
+            if labels.len() == 1 { "s" } else { "" },
+            match (&facts.restricted_backend, image) {
                 (Some(b), Some(i)) => format!("{b}, image {i}"),
                 (Some(b), None) => format!("{b}, no image configured"),
                 _ => "not configured".to_owned(),
             }
-        ));
+        )
+    };
+    if default_restricted {
+        notices.push(restricted_notice(&default_image_steps, facts.restricted_image.as_deref()));
+    }
+    for bound in &runner_images {
+        let labels: Vec<&str> = steps.iter().filter(|s| s.runner == bound.runner).map(|s| s.label.as_str()).collect();
+        notices.push(restricted_notice(&labels, Some(&bound.image)));
     }
     if !native_steps.is_empty() {
         notices.push(format!(
@@ -643,13 +671,26 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
         );
     }
     // A restricted plan binds the image's identity, not just its name.
-    if restricted && execution.restricted_image_id.is_none() && steps.iter().all(|s| s.available) {
+    if default_restricted && execution.restricted_image_id.is_none() && steps.iter().all(|s| s.available) {
         blockers.push(blocker(
             "workflow.restrictedUnavailable",
             "The restricted image's identity could not be determined (Docker did not report it); restricted steps run only in an identified image. Nothing runs natively instead.",
             None,
             None,
         ));
+    }
+    for bound in runner_images.iter().filter(|b| b.image_id.is_none()) {
+        if steps.iter().all(|s| s.available) {
+            blockers.push(blocker(
+                "workflow.restrictedUnavailable",
+                format!(
+                    "The identity of the restricted image {} could not be determined (Docker did not report it); restricted steps run only in an identified image. Nothing runs natively instead.",
+                    bound.image
+                ),
+                None,
+                None,
+            ));
+        }
     }
     if let Some(message) = &facts.active_run {
         blockers.push(blocker("workflow.activeRun", message.clone(), None, None));
@@ -756,6 +797,22 @@ pub fn describe_changes(approved: &WorkflowRunPlan, now: &WorkflowRunPlan) -> St
             approved.execution.restricted_image.as_deref().unwrap_or("none"),
             now.execution.restricted_image.as_deref().unwrap_or("none")
         ));
+    }
+    let images = |p: &WorkflowRunPlan| p.execution.runner_images.clone().unwrap_or_default();
+    for bound in images(approved) {
+        match images(now).iter().find(|n| n.runner == bound.runner) {
+            None => changes.push(format!("the restricted image {} is no longer used", bound.image)),
+            Some(n) if n.image != bound.image => {
+                changes.push(format!("the restricted image changed ({} → {})", bound.image, n.image))
+            }
+            Some(n) if n.image_id != bound.image_id => changes.push(format!(
+                "the restricted image {} is now a different image ({} → {})",
+                n.image,
+                short_id(bound.image_id.as_deref()),
+                short_id(n.image_id.as_deref())
+            )),
+            Some(_) => {}
+        }
     }
     for step in &approved.steps {
         if let Some(current) = now.steps.iter().find(|s| s.step == step.step)

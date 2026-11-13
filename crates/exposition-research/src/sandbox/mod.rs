@@ -1,4 +1,5 @@
-//! The research sandbox: workflow-owned Python batches ([`BatchRunner`]).
+//! The research sandbox: workflow-owned Python, R, and Julia batches
+//! ([`BatchRunner`]; what differs by language is in `language.rs`).
 //!
 //! Wiring: [`batch_runner`] takes the research service (current project,
 //! runtime discovery, data directory) and the shared execution service
@@ -6,10 +7,11 @@
 //!
 //! One batch:
 //! 1. The project must be research's open workspace; the requested mode must
-//!    be available now (restricted: configured image present locally and the
-//!    engine reachable, checked without pulling; trusted native: the folder is
-//!    trusted and a Python interpreter is discovered). Otherwise the batch is
-//!    refused before anything is staged: never a fallback to another mode.
+//!    be available now (restricted: the language's configured image present
+//!    locally and the engine reachable, checked without pulling; trusted
+//!    native: the folder is trusted and the language's interpreter is
+//!    discovered). Otherwise the batch is refused before anything is staged:
+//!    never a fallback to another mode, image, or language.
 //! 2. Staging ([`stage`]): a service-owned working copy under
 //!    `<data>/research/batches/<run>/work` receives only the declared inputs
 //!    and the code, verified against their SHA-256 while copying.
@@ -18,7 +20,7 @@
 //!    through the execution service, and `on_dispatched` called.
 //!    - Restricted: the working copy is the registered root the Docker
 //!      backend mounts read-only at `/workspace` (the project itself is never
-//!      mounted); `python3 <entry>` runs there with `EXPOSITION_OUTPUT_DIR=/out`,
+//!      mounted); `python3 <entry>` (R: `Rscript`, Julia: `julia`) runs there with `EXPOSITION_OUTPUT_DIR=/out`,
 //!      the backend's writable output area; no network, non-root, read-only
 //!      root file system, limits, constructed environment.
 //!    - Trusted native: the discovered interpreter runs `<entry>` in the
@@ -33,6 +35,7 @@
 
 mod fsx;
 pub mod image_env;
+mod language;
 pub mod outputs;
 pub mod stage;
 
@@ -46,14 +49,15 @@ use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobId, JobOutcome, 
 use exposition_execution::{ExecutionService, RefusalCode, RestrictedTarget};
 
 use crate::batch::{
-    BatchControl, BatchMode, BatchRequest, BatchResult, BatchRunner, SEED_VAR, environment_keys as keys,
+    BatchControl, BatchLanguage, BatchMode, BatchRequest, BatchResult, BatchRunner, ITERATION_VAR, MAX_PARAMETER_BYTES,
+    SEED_VAR, environment_keys as keys, parameter_variable,
 };
 use crate::error::ResearchError;
 use crate::service::{ResearchService, display_path};
 use crate::store::{MANIFEST_FORMAT, new_run_id, write_manifest, write_transcript};
 use crate::types::{
     Availability, InterpreterProvenance, KernelDescriptor, OutputEntry, OutputItem, OutputSummary, RunErrorInfo,
-    RunExecution, RunManifest, RuntimeEnvironment, RuntimeLanguage, SessionOwner, SessionProvenance, StreamName,
+    RunExecution, RunManifest, RuntimeEnvironment, SessionOwner, SessionProvenance, StreamName,
 };
 
 pub(crate) use outputs::is_batch_artifact_name;
@@ -62,8 +66,6 @@ pub(crate) use outputs::is_batch_artifact_name;
 pub const OUTPUT_DIR_VAR: &str = "EXPOSITION_OUTPUT_DIR";
 /// Where the restricted backend mounts the output area.
 const CONTAINER_OUT: &str = "/out";
-/// Interpreter inside the container image.
-const CONTAINER_PYTHON: &str = "python3";
 /// Retained job output per stream.
 const JOB_LOG_LIMIT: u64 = 1024 * 1024;
 /// Characters of each stream kept in the batch log.
@@ -151,21 +153,6 @@ fn tail(text: &str, max: usize) -> &str {
     &text[start..]
 }
 
-/// `Name: message` of the last Python exception line in `stderr`, if any.
-fn python_error(stderr: &str) -> Option<RunErrorInfo> {
-    let line = stderr.lines().rev().map(str::trim).find(|l| !l.is_empty())?;
-    let (name, message) = line.split_once(": ").map_or((line, ""), |(n, m)| (n, m));
-    let valid = !name.is_empty()
-        && name.len() <= 100
-        && name.split('.').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && (name.ends_with("Error")
-            || name.ends_with("Exception")
-            || name.ends_with("Interrupt")
-            || name == "SystemExit");
-    valid.then(|| RunErrorInfo { ename: name.to_owned(), evalue: message.to_owned() })
-}
-
 /// A port name: realized by `<port>.<ext>`, so it must be a safe file stem.
 fn valid_port(port: &str) -> bool {
     !port.is_empty()
@@ -193,15 +180,18 @@ impl ScopedBatchRunner {
         }
     }
 
-    fn restricted_target(&self) -> Result<RestrictedTarget, ResearchError> {
-        self.execution.restricted_preflight().map_err(|reason| ResearchError::EnvironmentUnavailable {
+    fn restricted_target(&self, language: BatchLanguage) -> Result<RestrictedTarget, ResearchError> {
+        let image = language::restricted_language(language);
+        self.execution.restricted_preflight_for(image).map_err(|reason| ResearchError::EnvironmentUnavailable {
             reason: format!("Restricted execution is unavailable: {reason}"),
-            guidance: "Nothing was run, and nothing runs natively instead. Configure a local image under Settings → Execution and start Docker."
-                .into(),
+            guidance: format!(
+                "Nothing was run, and nothing runs natively instead. Configure {} (a local image) under Settings → Execution and start Docker.",
+                language::image_setting(language)
+            ),
         })
     }
 
-    fn native_target(&self, root: &Path) -> Result<RuntimeEnvironment, ResearchError> {
+    fn native_target(&self, root: &Path, language: BatchLanguage) -> Result<RuntimeEnvironment, ResearchError> {
         let trusted = self.execution.trust_status(&root.display().to_string()).map(|s| s.trusted).unwrap_or(false);
         if !trusted {
             return Err(ResearchError::EnvironmentUnavailable {
@@ -211,26 +201,23 @@ impl ScopedBatchRunner {
             });
         }
         let report = self.research.environments_blocking()?;
-        let pythons = report
-            .runtimes
-            .into_iter()
-            .filter(|r| r.language == RuntimeLanguage::Python && r.executable.is_some())
-            .collect::<Vec<_>>();
-        pythons
-            .iter()
-            .find(|r| r.availability == Availability::Available)
-            .or_else(|| pythons.first())
-            .cloned()
-            .ok_or_else(|| ResearchError::EnvironmentUnavailable {
-                reason: "No Python interpreter was found for trusted native batches.".into(),
-                guidance: "Install Python 3 (or create a project .venv) and refresh research environments.".into(),
-            })
+        // A batch needs only the interpreter (R and Julia batches do not use
+        // the Jupyter kernel whose readiness `availability` describes).
+        let runtime = language::runtime_language(language);
+        let found =
+            report.runtimes.into_iter().filter(|r| r.language == runtime && r.executable.is_some()).collect::<Vec<_>>();
+        found.iter().find(|r| r.availability == Availability::Available).or_else(|| found.first()).cloned().ok_or_else(
+            || {
+                let (reason, guidance) = language::native_missing(language);
+                ResearchError::EnvironmentUnavailable { reason, guidance }
+            },
+        )
     }
 
-    fn target(&self, root: &Path, mode: BatchMode) -> Result<Target, ResearchError> {
+    fn target(&self, root: &Path, mode: BatchMode, language: BatchLanguage) -> Result<Target, ResearchError> {
         match mode {
-            BatchMode::Restricted => self.restricted_target().map(Target::Restricted),
-            BatchMode::TrustedNative => self.native_target(root).map(Target::Native),
+            BatchMode::Restricted => self.restricted_target(language).map(Target::Restricted),
+            BatchMode::TrustedNative => self.native_target(root, language).map(Target::Native),
         }
     }
 
@@ -262,6 +249,7 @@ impl ScopedBatchRunner {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn job_spec(
         &self,
         request: &BatchRequest,
@@ -270,24 +258,23 @@ impl ScopedBatchRunner {
         entry: &str,
         out_host: Option<&Path>,
         run_id: &str,
+        language: BatchLanguage,
+        variables: &BTreeMap<String, String>,
     ) -> JobSpec {
         let timeout_ms = u64::try_from(request.time_limit.as_millis()).unwrap_or(u64::MAX).max(1);
+        let what = match language {
+            BatchLanguage::Python => String::new(),
+            other => format!("{} ", other.title()),
+        };
         match target {
             Target::Restricted(t) => {
-                let mut set = BTreeMap::new();
+                let mut set = language::container_environment(language);
                 set.insert(OUTPUT_DIR_VAR.to_owned(), CONTAINER_OUT.to_owned());
-                set.insert("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned());
-                set.insert("PYTHONUNBUFFERED".to_owned(), "1".to_owned());
-                set.insert("PYTHONIOENCODING".to_owned(), "utf-8".to_owned());
-                set.insert("MPLBACKEND".to_owned(), "Agg".to_owned());
-                set.insert("MPLCONFIGDIR".to_owned(), "/tmp/matplotlib".to_owned());
-                if let Some(seed) = request.seed {
-                    set.insert(SEED_VAR.to_owned(), seed.to_string());
-                }
+                set.extend(variables.clone());
                 JobSpec {
-                    label: format!("Workflow batch {run_id} (restricted container)"),
-                    program: CONTAINER_PYTHON.into(),
-                    args: vec![entry.to_owned()],
+                    label: format!("Workflow {what}batch {run_id} (restricted container)"),
+                    program: language::container_program(language).into(),
+                    args: language::arguments(language, entry.to_owned()),
                     environment: EnvironmentSpec { inherit: Vec::new(), set },
                     working_directory: work.display().to_string(),
                     // Pinned to the identity checked above (or seen by the
@@ -302,19 +289,28 @@ impl ScopedBatchRunner {
                 }
             }
             Target::Native(env) => {
-                let mut extra = BTreeMap::new();
+                // The runtime's own library locations (R user library, Julia
+                // depots) as discovery found them, like its kernels get.
+                let mut extra: BTreeMap<String, String> = match language {
+                    BatchLanguage::Python => BTreeMap::new(),
+                    _ => env.kernel_environment.clone(),
+                };
+                extra.extend(language::native_environment(language));
+                // R cannot open a Windows verbatim (`\\?\`) path once code
+                // appends `/name` to it: R and Julia get plain paths.
+                let host_path = |p: &Path| match language {
+                    BatchLanguage::Python => p.display().to_string(),
+                    _ => display_path(p),
+                };
                 if let Some(out) = out_host {
-                    extra.insert(OUTPUT_DIR_VAR.to_owned(), out.display().to_string());
+                    extra.insert(OUTPUT_DIR_VAR.to_owned(), host_path(out));
                 }
-                extra.insert("MPLBACKEND".to_owned(), "Agg".to_owned());
-                if let Some(seed) = request.seed {
-                    extra.insert(SEED_VAR.to_owned(), seed.to_string());
-                }
+                extra.extend(variables.clone());
                 let script = entry.split('/').fold(work.to_path_buf(), |p, c| p.join(c));
                 JobSpec {
-                    label: format!("Workflow batch {run_id} (trusted native)"),
+                    label: format!("Workflow {what}batch {run_id} (trusted native)"),
                     program: env.executable.clone().unwrap_or_default(),
-                    args: vec![script.display().to_string()],
+                    args: language::arguments(language, host_path(&script)),
                     environment: crate::launcher::research_environment(extra),
                     working_directory: work.display().to_string(),
                     policy: ExecutionPolicy::TrustedNative,
@@ -381,6 +377,7 @@ impl ScopedBatchRunner {
     fn environment_pairs(
         target: &Target,
         request: &BatchRequest,
+        language: BatchLanguage,
         image: Option<&Result<image_env::ImageEnvironment, String>>,
     ) -> Vec<(String, String)> {
         let limit = format!("{} s", request.time_limit.as_secs_f64());
@@ -395,7 +392,8 @@ impl ScopedBatchRunner {
                     pairs.push(("imageId".into(), id.clone()));
                 }
                 pairs.extend([
-                    ("interpreter".to_owned(), CONTAINER_PYTHON.to_owned()),
+                    ("interpreter".to_owned(), language::container_program(language).to_owned()),
+                    (keys::INTERPRETER_NAME.to_owned(), language::interpreter_name(language).to_owned()),
                     ("network".to_owned(), "none".to_owned()),
                     ("user".to_owned(), t.docker.user.clone()),
                     ("memory".to_owned(), t.docker.memory.clone()),
@@ -405,15 +403,22 @@ impl ScopedBatchRunner {
                     ("inputs".to_owned(), "declared files only, read-only at /workspace".to_owned()),
                     ("outputArea".to_owned(), CONTAINER_OUT.to_owned()),
                 ]);
-                match image {
-                    Some(Ok(found)) => pairs.extend(image_pairs(found)),
-                    Some(Err(reason)) => pairs.push((
+                match (language, image) {
+                    (BatchLanguage::Python, Some(Ok(found))) => pairs.extend(image_pairs(found)),
+                    (BatchLanguage::Python, Some(Err(reason))) => pairs.push((
                         keys::NOTE.to_owned(),
                         format!("The image's package list could not be captured: {reason}"),
                     )),
-                    None => pairs.push((
+                    (BatchLanguage::Python, None) => pairs.push((
                         keys::NOTE.to_owned(),
                         "The image's identity is unknown, so its package list was not captured.".to_owned(),
+                    )),
+                    (other, _) => pairs.push((
+                        keys::NOTE.to_owned(),
+                        format!(
+                            "The {} image's interpreter version and installed packages are not listed (only Python images are probed); its identity names its exact content.",
+                            other.title()
+                        ),
                     )),
                 }
                 pairs
@@ -425,9 +430,9 @@ impl ScopedBatchRunner {
                         "interpreter".to_owned(),
                         env.executable.as_deref().map(|p| display_path(Path::new(p))).unwrap_or_default(),
                     ),
-                    ("pythonVersion".to_owned(), env.version.clone().unwrap_or_default()),
-                    ("timeLimit".to_owned(), limit),
                 ];
+                pairs.extend(interpreter_pairs(language, env));
+                pairs.push(("timeLimit".to_owned(), limit));
                 pairs.extend(native_pairs(env));
                 pairs
             }
@@ -435,18 +440,59 @@ impl ScopedBatchRunner {
         if let Some(seed) = request.seed {
             pairs.push((keys::SEED.to_owned(), seed.to_string()));
         }
+        if let Some(index) = request.iteration {
+            pairs.push(("iteration".to_owned(), index.to_string()));
+        }
         pairs
+    }
+
+    /// The variables every batch gets besides the output area: its seed,
+    /// its instance index, and its declared parameters. Refused (before
+    /// anything runs) when a name is not an identifier, looks like a
+    /// credential, or a value is not one bounded line or holds a secret.
+    fn batch_variables(&self, request: &BatchRequest) -> Result<BTreeMap<String, String>, ResearchError> {
+        let mut set = BTreeMap::new();
+        if let Some(seed) = request.seed {
+            set.insert(SEED_VAR.to_owned(), seed.to_string());
+        }
+        if let Some(index) = request.iteration {
+            set.insert(ITERATION_VAR.to_owned(), index.to_string());
+        }
+        for (name, value) in &request.parameters {
+            let refuse = |why: &str| {
+                ResearchError::InvalidRequest(format!("parameter `{}` cannot be given to the batch: {why}", name))
+            };
+            let variable = parameter_variable(name).ok_or_else(|| refuse("its name is not an identifier"))?;
+            if crate::launcher::looks_secret(&variable) {
+                return Err(refuse("its name looks like a credential"));
+            }
+            if value.len() > MAX_PARAMETER_BYTES {
+                return Err(refuse(&format!("the value is longer than {MAX_PARAMETER_BYTES} bytes")));
+            }
+            if value.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
+                return Err(refuse("the value must be one line of text"));
+            }
+            if self.execution.redact(value) != *value {
+                return Err(refuse("the value contains a secret"));
+            }
+            if set.insert(variable.clone(), value.clone()).is_some() {
+                return Err(refuse(&format!("another parameter is also given as {variable}")));
+            }
+        }
+        Ok(set)
     }
 
     fn run_batch(
         &self,
         root: &Path,
         request: &BatchRequest,
+        language: BatchLanguage,
         control: &BatchControl<'_>,
     ) -> Result<BatchResult, ResearchError> {
         let root = self.current_project(root)?;
         Self::validate_request(request)?;
-        let target = self.target(&root, request.mode)?;
+        let variables = self.batch_variables(request)?;
+        let target = self.target(&root, request.mode, language)?;
         if let (Target::Restricted(t), Some(expected)) = (&target, &request.restricted_image_id)
             && t.image_id.as_ref() != Some(expected)
         {
@@ -464,13 +510,15 @@ impl ScopedBatchRunner {
         }
         // What the image contains, captured inside exactly that image (see
         // `image_env`); a failure is recorded, never a reason to fail the batch.
-        let image =
-            match &target {
-                Target::Restricted(t) => request.restricted_image_id.clone().or_else(|| t.image_id.clone()).map(|id| {
+        // (A Python probe: R and Julia images are not listed.)
+        let image = match &target {
+            Target::Restricted(t) if language == BatchLanguage::Python => {
+                request.restricted_image_id.clone().or_else(|| t.image_id.clone()).map(|id| {
                     image_env::capture(&self.execution, self.research.data_dir(), &id, &root, control.canceled)
-                }),
-                Target::Native(_) => None,
-            };
+                })
+            }
+            _ => None,
+        };
         if (control.canceled)() {
             return Err(canceled_before_start());
         }
@@ -483,7 +531,7 @@ impl ScopedBatchRunner {
             dir: batch_dir.clone(),
             registered: None,
         };
-        let staged = stage::stage(&root, &batch_dir.join("work"), control.canceled, request)?;
+        let staged = stage::stage_language(&root, &batch_dir.join("work"), control.canceled, request, language)?;
         if (control.canceled)() {
             return Err(canceled_before_start());
         }
@@ -520,19 +568,20 @@ impl ScopedBatchRunner {
                     InterpreterProvenance {
                         implementation: String::new(),
                         version: String::new(),
-                        location: format!("{CONTAINER_PYTHON} in container image {}", t.image),
+                        location: format!("{} in container image {}", language::container_program(language), t.image),
                     },
                 )
             }
             Target::Native(env) => {
                 let location = env.executable.as_deref().map(|p| display_path(Path::new(p))).unwrap_or_default();
                 if let Some(version) = &env.version {
-                    record_env.push(ToolVersion { name: "python".into(), version: version.clone() });
+                    record_env
+                        .push(ToolVersion { name: language::tool_name(language).into(), version: version.clone() });
                 }
                 (
                     env.id.clone(),
                     InterpreterProvenance {
-                        implementation: "python".into(),
+                        implementation: language::tool_name(language).into(),
                         version: env.version.clone().unwrap_or_default(),
                         location,
                     },
@@ -544,7 +593,16 @@ impl ScopedBatchRunner {
         }
         let owner = SessionOwner::Workflow { run: request.owner.run.clone(), step: request.owner.step.clone() };
         let started = now_ms();
-        let spec = self.job_spec(request, &target, &registered, &staged.entry, out_host.as_deref(), &run_id);
+        let spec = self.job_spec(
+            request,
+            &target,
+            &registered,
+            &staged.entry,
+            out_host.as_deref(),
+            &run_id,
+            language,
+            &variables,
+        );
         let mut manifest = RunManifest {
             format: MANIFEST_FORMAT.into(),
             record: RunRecord {
@@ -578,7 +636,7 @@ impl ScopedBatchRunner {
         // since the availability check refuse the batch (retry).
         if let Target::Restricted(t) = &target {
             let now = self.execution.settings().docker;
-            if now.image.as_deref() != Some(t.image.as_str()) || now != t.docker {
+            if now.image_for(language::restricted_language(language)) != Some(t.image.as_str()) || now != t.docker {
                 return Err(ResearchError::EnvironmentUnavailable {
                     reason: "Restricted execution settings changed while the batch was being prepared.".into(),
                     guidance: "Nothing was run. Start the step again.".into(),
@@ -591,7 +649,11 @@ impl ScopedBatchRunner {
         self.research.set_batch_live(&run_id, true);
         write_manifest(&root, &manifest)?;
 
-        let job = self.execution.launch(spec);
+        // A language's restricted batch runs only in that language's image.
+        let job = match (&target, language::restricted_language(language)) {
+            (Target::Restricted(_), Some(image)) => self.execution.launch_restricted_language(spec, image),
+            _ => self.execution.launch(spec),
+        };
         manifest.record.producer = Producer::Job { job_id: job.0.clone() };
         manifest.session.session_id = job.0.clone();
         // Best effort: the running manifest names its job (it is rewritten at the end).
@@ -645,7 +707,9 @@ impl ScopedBatchRunner {
             ),
             JobOutcome::Exited { code: 0 } => (RunStatus::Succeeded, Some(0)),
             JobOutcome::Exited { code } => {
-                let detail = python_error(&stderr).map(|e| format!(": {}: {}", e.ename, e.evalue)).unwrap_or_default();
+                let detail = language::error_info(language, &stderr)
+                    .map(|e| format!(": {}: {}", e.ename, e.evalue))
+                    .unwrap_or_default();
                 (RunStatus::Failed { message: format!("the batch exited with code {code}{detail}") }, Some(*code))
             }
             JobOutcome::TimedOut => (
@@ -679,7 +743,7 @@ impl ScopedBatchRunner {
         manifest.record.outputs = registered_outputs.clone();
         manifest.error = match (&result.outcome, &status) {
             (_, RunStatus::Succeeded) => None,
-            (JobOutcome::Exited { code }, _) => python_error(&stderr)
+            (JobOutcome::Exited { code }, _) => language::error_info(language, &stderr)
                 .or_else(|| Some(RunErrorInfo { ename: "ExitCode".into(), evalue: code.to_string() })),
             (JobOutcome::TimedOut, _) => Some(RunErrorInfo { ename: "TimeLimit".into(), evalue: String::new() }),
             _ => None,
@@ -750,7 +814,7 @@ impl ScopedBatchRunner {
             extra,
             rejected,
             log,
-            environment: Self::environment_pairs(&target, request, image.as_ref()),
+            environment: Self::environment_pairs(&target, request, language, image.as_ref()),
         })
     }
 }
@@ -794,41 +858,70 @@ fn native_pairs(env: &RuntimeEnvironment) -> Vec<(String, String)> {
     pairs
 }
 
+/// The interpreter of a native batch: `python`/`R`/`julia` and its version
+/// (Python also as `pythonVersion`).
+fn interpreter_pairs(language: BatchLanguage, env: &RuntimeEnvironment) -> Vec<(String, String)> {
+    let version = env.version.clone().unwrap_or_default();
+    let mut pairs = Vec::new();
+    if language == BatchLanguage::Python {
+        pairs.push((keys::PYTHON_VERSION.to_owned(), version.clone()));
+    }
+    pairs.push((keys::INTERPRETER_NAME.to_owned(), language::interpreter_name(language).to_owned()));
+    if !version.is_empty() {
+        pairs.push((keys::INTERPRETER_VERSION.to_owned(), version));
+    }
+    pairs
+}
+
 impl BatchRunner for ScopedBatchRunner {
     fn availability(&self, root: &Path, mode: BatchMode) -> Result<(), String> {
-        let root = self.current_project(root).map_err(|e| e.to_string())?;
-        self.target(&root, mode).map(|_| ()).map_err(|e| e.to_string())
+        self.language_availability(root, BatchLanguage::Python, mode)
     }
 
-    fn current_environment(&self, _root: &Path, mode: BatchMode) -> Vec<(String, String)> {
+    fn current_environment(&self, root: &Path, mode: BatchMode) -> Vec<(String, String)> {
+        self.current_language_environment(root, BatchLanguage::Python, mode)
+    }
+
+    fn current_language_environment(
+        &self,
+        _root: &Path,
+        language: BatchLanguage,
+        mode: BatchMode,
+    ) -> Vec<(String, String)> {
         match mode {
             // The same engine check plans make; the image's packages only
             // from the cache (a new identity is listed when a batch runs).
             BatchMode::Restricted => {
-                let Ok(target) = self.execution.restricted_preflight() else { return Vec::new() };
+                let Ok(target) = self.execution.restricted_preflight_for(language::restricted_language(language))
+                else {
+                    return Vec::new();
+                };
                 let mut pairs = vec![(keys::IMAGE.to_owned(), target.image.clone())];
                 if let Some(id) = &target.image_id {
                     pairs.push((keys::IMAGE_ID.to_owned(), id.clone()));
-                    if let Some(found) = image_env::cached(self.research.data_dir(), id) {
+                    if language == BatchLanguage::Python
+                        && let Some(found) = image_env::cached(self.research.data_dir(), id)
+                    {
                         pairs.extend(image_pairs(&found));
                     }
+                }
+                if language != BatchLanguage::Python {
+                    pairs.push((keys::INTERPRETER_NAME.to_owned(), language::interpreter_name(language).to_owned()));
                 }
                 pairs
             }
             // The cached discovery report only: never probes.
             BatchMode::TrustedNative => {
                 let Some(report) = self.research.cached_environments() else { return Vec::new() };
-                let pythons: Vec<RuntimeEnvironment> = report
-                    .runtimes
-                    .into_iter()
-                    .filter(|r| r.language == RuntimeLanguage::Python && r.executable.is_some())
-                    .collect();
+                let runtime = language::runtime_language(language);
+                let found: Vec<RuntimeEnvironment> =
+                    report.runtimes.into_iter().filter(|r| r.language == runtime && r.executable.is_some()).collect();
                 let Some(env) =
-                    pythons.iter().find(|r| r.availability == Availability::Available).or_else(|| pythons.first())
+                    found.iter().find(|r| r.availability == Availability::Available).or_else(|| found.first())
                 else {
                     return Vec::new();
                 };
-                let mut pairs = vec![(keys::PYTHON_VERSION.to_owned(), env.version.clone().unwrap_or_default())];
+                let mut pairs = interpreter_pairs(language, env);
                 pairs.extend(native_pairs(env));
                 pairs
             }
@@ -841,7 +934,26 @@ impl BatchRunner for ScopedBatchRunner {
         request: &BatchRequest,
         control: &BatchControl<'_>,
     ) -> Result<BatchResult, ResearchError> {
-        self.run_batch(root, request, control)
+        self.run_batch(root, request, BatchLanguage::Python, control)
+    }
+
+    fn language_availability(&self, root: &Path, language: BatchLanguage, mode: BatchMode) -> Result<(), String> {
+        let root = self.current_project(root).map_err(|e| e.to_string())?;
+        self.target(&root, mode, language).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    fn run_language(
+        &self,
+        root: &Path,
+        language: BatchLanguage,
+        request: &BatchRequest,
+        control: &BatchControl<'_>,
+    ) -> Result<BatchResult, ResearchError> {
+        self.run_batch(root, request, language, control)
+    }
+
+    fn restricted_image(&self, language: BatchLanguage) -> Result<(String, Option<String>), String> {
+        self.restricted_target(language).map(|t| (t.image, t.image_id)).map_err(|e| e.to_string())
     }
 }
 
@@ -850,13 +962,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn python_errors_are_recognised() {
-        let stderr = "Traceback (most recent call last):\n  File \"x\", line 1\nModuleNotFoundError: No module named 'helpers'\n";
-        let e = python_error(stderr).unwrap();
-        assert_eq!(e.ename, "ModuleNotFoundError");
-        assert_eq!(e.evalue, "No module named 'helpers'");
-        assert!(python_error("plain output\n").is_none());
-        assert!(python_error("").is_none());
+    fn log_tails_keep_character_boundaries() {
         assert_eq!(tail("abcdef", 3), "def");
         assert_eq!(tail("ééé", 3), "é");
     }

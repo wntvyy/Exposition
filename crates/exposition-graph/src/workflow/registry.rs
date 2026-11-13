@@ -18,7 +18,8 @@ use ts_rs::TS;
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub enum PortType {
-    /// Research code (a Python file).
+    /// Research code (a Python, R, or Julia file; a step accepts only its
+    /// own language's extension, see [`script_extensions`]).
     CodeSource,
     /// A data file (CSV, JSON, Parquet, ...).
     Dataset,
@@ -105,7 +106,7 @@ impl PortType {
     /// File extensions an external input of this type may have.
     pub fn extensions(self) -> &'static [&'static str] {
         match self {
-            PortType::CodeSource => &["py"],
+            PortType::CodeSource => &["py", "r", "jl"],
             PortType::Dataset => &[
                 "csv", "tsv", "json", "jsonl", "parquet", "feather", "xlsx", "xls", "h5", "hdf5", "nc", "npz", "npy",
                 "mat", "rds", "rdata", "arrow", "txt",
@@ -256,6 +257,8 @@ pub struct ParameterSpec {
 #[serde(rename_all = "camelCase")]
 pub enum CodeLanguage {
     Python,
+    R,
+    Julia,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -362,6 +365,17 @@ fn timeout_parameter() -> ParameterSpec {
     }
 }
 
+/// The free value a batch's code receives (`EXPOSITION_PARAM_VALUE`); a
+/// forEach over it runs the code once per value.
+fn value_parameter() -> ParameterSpec {
+    ParameterSpec {
+        name: "value".into(),
+        label: "Value (passed to the code as EXPOSITION_PARAM_VALUE; forEach sweeps it)".into(),
+        kind: ParameterKind::Text { max_len: 1000 },
+        required: false,
+    }
+}
+
 /// Every registered contract.
 pub fn operations() -> Vec<OperationContract> {
     use WorkflowEffect as E;
@@ -375,7 +389,7 @@ pub fn operations() -> Vec<OperationContract> {
                 .into(),
             inputs: py_in.clone(),
             outputs: py_out.clone(),
-            parameters: vec![timeout_parameter()],
+            parameters: vec![timeout_parameter(), value_parameter()],
             payload: Some(PayloadSpec::Code { language: CodeLanguage::Python, unless_input: Some("script".into()) }),
             effects: vec![E::ReadDeclaredInputs, E::ExecuteRestricted, E::WriteRunOutputs],
             runner: runner(
@@ -395,7 +409,7 @@ pub fn operations() -> Vec<OperationContract> {
                 .into(),
             inputs: py_in,
             outputs: py_out,
-            parameters: vec![timeout_parameter()],
+            parameters: vec![timeout_parameter(), value_parameter()],
             payload: Some(PayloadSpec::Code { language: CodeLanguage::Python, unless_input: Some("script".into()) }),
             effects: vec![E::ReadDeclaredInputs, E::ExecuteNative, E::WriteRunOutputs],
             runner: runner(
@@ -555,6 +569,7 @@ pub fn operations() -> Vec<OperationContract> {
             failure: FailureBehavior::StopWorkflow,
         },
     ];
+    ops.extend(r_julia_operations());
     ops.extend(composite_operations());
     ops
 }
@@ -686,6 +701,255 @@ mod tests {
             let len = names.len();
             names.dedup();
             assert_eq!(names.len(), len, "{} port names unique", a.id);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R and Julia batch operations (M9, lane F; the M8 follow-up "generalized
+// workflow adapters"). The same ports, parameters, effects, limits, and
+// containment as the Python batches. A restricted R/Julia batch runs only in
+// its language's own configured local image (never pulled, never another
+// image, never natively); a native one runs the discovered `Rscript`/`julia`
+// with the user's account privileges after folder trust and plan approval.
+
+pub const RESEARCH_R_BATCH: &str = "research.rBatch";
+pub const RESEARCH_NATIVE_R: &str = "research.nativeR";
+pub const RESEARCH_JULIA_BATCH: &str = "research.juliaBatch";
+pub const RESEARCH_NATIVE_JULIA: &str = "research.nativeJulia";
+
+/// Script file extensions of `language` (lowercase; a file's extension is
+/// compared without regard to case, so `.R` and `.r` are both R).
+pub fn script_extensions(language: CodeLanguage) -> &'static [&'static str] {
+    match language {
+        CodeLanguage::Python => &["py"],
+        CodeLanguage::R => &["r"],
+        CodeLanguage::Julia => &["jl"],
+    }
+}
+
+/// The language of the code an operation runs (its code payload's language).
+pub fn code_language(contract: &OperationContract) -> Option<CodeLanguage> {
+    match &contract.payload {
+        Some(PayloadSpec::Code { language, .. }) => Some(*language),
+        _ => None,
+    }
+}
+
+/// Whether the project file `path`, bound to a `CodeSource` input of
+/// `contract`, is a script of the operation's language (an R step never runs
+/// a `.py` file, a Python step never an `.R` file). `Err` names the mismatch.
+pub fn check_script_language(contract: &OperationContract, path: &str) -> Result<(), String> {
+    let Some(language) = code_language(contract) else { return Ok(()) };
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let ext = name.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()).map(|(_, e)| e.to_ascii_lowercase());
+    if ext.as_deref().is_some_and(|e| script_extensions(language).contains(&e)) {
+        return Ok(());
+    }
+    let expected = match language {
+        CodeLanguage::Python => "a Python script (.py)",
+        CodeLanguage::R => "an R script (.R)",
+        CodeLanguage::Julia => "a Julia script (.jl)",
+    };
+    Err(format!("{path} is not {expected}, which {} runs", contract.title))
+}
+
+fn script_operation(
+    id: &str,
+    title: &str,
+    purpose: &str,
+    language: CodeLanguage,
+    runner_spec: RunnerSpec,
+) -> OperationContract {
+    let (inputs, outputs) = python_ports();
+    let effects = runner_spec.allows.clone();
+    OperationContract {
+        id: id.into(),
+        version: 1,
+        title: title.into(),
+        purpose: purpose.into(),
+        inputs,
+        outputs,
+        parameters: vec![timeout_parameter(), value_parameter()],
+        payload: Some(PayloadSpec::Code { language, unless_input: Some("script".into()) }),
+        effects,
+        runner: runner_spec,
+        limits: OperationLimits { max_seconds: 3600, max_output_bytes: 256 * 1024 * 1024 },
+        failure: FailureBehavior::StopWorkflow,
+    }
+}
+
+/// The R and Julia batch contracts (part of [`operations`]).
+fn r_julia_operations() -> Vec<OperationContract> {
+    use WorkflowEffect as E;
+    let restricted = [E::ReadDeclaredInputs, E::ExecuteRestricted, E::WriteRunOutputs];
+    let native = [E::ReadDeclaredInputs, E::ExecuteNative, E::WriteRunOutputs];
+    vec![
+        script_operation(
+            RESEARCH_R_BATCH,
+            "Research R batch (restricted)",
+            "Run R code over declared inputs inside the restricted container (the configured R image) and return its declared outputs.",
+            CodeLanguage::R,
+            runner(
+                "restrictedR",
+                "Scoped restricted R adapter (configured R image)",
+                Containment::RestrictedContainer,
+                &restricted,
+            ),
+        ),
+        script_operation(
+            RESEARCH_NATIVE_R,
+            "Trusted native R",
+            "Run R code natively (Rscript) with your account's privileges (a trusted folder and approval are required; this is not a sandbox).",
+            CodeLanguage::R,
+            runner(
+                "nativeR",
+                "Trusted native R process (your account's privileges)",
+                Containment::NativeAccount,
+                &native,
+            ),
+        ),
+        script_operation(
+            RESEARCH_JULIA_BATCH,
+            "Research Julia batch (restricted)",
+            "Run Julia code over declared inputs inside the restricted container (the configured Julia image) and return its declared outputs.",
+            CodeLanguage::Julia,
+            runner(
+                "restrictedJulia",
+                "Scoped restricted Julia adapter (configured Julia image)",
+                Containment::RestrictedContainer,
+                &restricted,
+            ),
+        ),
+        script_operation(
+            RESEARCH_NATIVE_JULIA,
+            "Trusted native Julia",
+            "Run Julia code natively with your account's privileges (a trusted folder and approval are required; this is not a sandbox).",
+            CodeLanguage::Julia,
+            runner(
+                "nativeJulia",
+                "Trusted native Julia process (your account's privileges)",
+                Containment::NativeAccount,
+                &native,
+            ),
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod r_julia_tests {
+    use super::*;
+
+    fn op(id: &str) -> OperationContract {
+        operation(id, 1).unwrap_or_else(|| panic!("{id} is registered"))
+    }
+
+    /// R and Julia batches are the Python batches in another language: the
+    /// same ports, parameters, effects, containment, and limits.
+    #[test]
+    fn r_and_julia_contracts_mirror_the_python_batches() {
+        for (python, others, restricted) in [
+            (RESEARCH_PYTHON_BATCH, [RESEARCH_R_BATCH, RESEARCH_JULIA_BATCH], true),
+            (RESEARCH_NATIVE_PYTHON, [RESEARCH_NATIVE_R, RESEARCH_NATIVE_JULIA], false),
+        ] {
+            let py = op(python);
+            for id in others {
+                let o = op(id);
+                assert_eq!((&o.inputs, &o.outputs, &o.parameters), (&py.inputs, &py.outputs, &py.parameters), "{id}");
+                assert_eq!((&o.effects, &o.limits, o.failure), (&py.effects, &py.limits, py.failure), "{id}");
+                assert_eq!(
+                    (o.runner.containment, &o.runner.allows),
+                    (py.runner.containment, &py.runner.allows),
+                    "{id}"
+                );
+                assert_eq!(o.runner.containment == Containment::RestrictedContainer, restricted, "{id}");
+                let forbidden =
+                    if restricted { WorkflowEffect::ExecuteNative } else { WorkflowEffect::ExecuteRestricted };
+                assert!(!o.effects.contains(&forbidden), "{id}");
+                assert_ne!(o.runner.id, py.runner.id, "{id} has its own runner");
+                assert!(!o.runner.available, "the bare registry never claims availability");
+            }
+        }
+        assert_eq!(code_language(&op(RESEARCH_R_BATCH)), Some(CodeLanguage::R));
+        assert_eq!(code_language(&op(RESEARCH_NATIVE_JULIA)), Some(CodeLanguage::Julia));
+        assert_eq!(code_language(&op(RESEARCH_PYTHON_BATCH)), Some(CodeLanguage::Python));
+        assert_eq!(code_language(&op(LEAN_AUDIT)), None);
+        for id in [RESEARCH_NATIVE_R, RESEARCH_NATIVE_JULIA] {
+            let purpose = op(id).purpose;
+            assert!(purpose.contains("your account's privileges") && purpose.contains("not a sandbox"), "{purpose}");
+        }
+    }
+
+    #[test]
+    fn every_runner_belongs_to_one_language_and_containment() {
+        let mut seen = std::collections::BTreeMap::new();
+        for o in operations() {
+            let key = (code_language(&o), o.runner.containment);
+            if let Some(previous) = seen.insert(o.runner.id.clone(), key) {
+                assert_eq!(previous, key, "runner {} is shared across languages or containments", o.runner.id);
+            }
+        }
+        for id in ["restrictedR", "nativeR", "restrictedJulia", "nativeJulia"] {
+            assert!(seen.contains_key(id), "{id}");
+        }
+    }
+
+    /// A step runs only scripts of its own language; the external-input
+    /// extension list is exactly the union of the languages' extensions.
+    #[test]
+    fn scripts_are_checked_against_the_steps_language() {
+        assert!(check_script_language(&op(RESEARCH_R_BATCH), "analysis/fit.R").is_ok());
+        assert!(check_script_language(&op(RESEARCH_NATIVE_R), "fit.r").is_ok());
+        assert!(check_script_language(&op(RESEARCH_JULIA_BATCH), "src/Model.JL").is_ok());
+        assert!(check_script_language(&op(RESEARCH_PYTHON_BATCH), "a.py").is_ok());
+        for (id, path) in [
+            (RESEARCH_R_BATCH, "fit.py"),
+            (RESEARCH_R_BATCH, "fit.jl"),
+            (RESEARCH_NATIVE_JULIA, "model.R"),
+            (RESEARCH_PYTHON_BATCH, "analysis.R"),
+            (RESEARCH_NATIVE_PYTHON, "x.jl"),
+            (RESEARCH_R_BATCH, ".R"),
+            (RESEARCH_R_BATCH, "fit"),
+        ] {
+            let err = check_script_language(&op(id), path).unwrap_err();
+            assert!(err.contains(path), "{err}");
+        }
+        assert!(check_script_language(&op(LEAN_AUDIT), "x.py").is_ok(), "no code payload: nothing to check");
+        let mut union: Vec<&str> = [CodeLanguage::Python, CodeLanguage::R, CodeLanguage::Julia]
+            .iter()
+            .flat_map(|l| script_extensions(*l).iter().copied())
+            .collect();
+        union.sort();
+        let mut code: Vec<&str> = PortType::CodeSource.extensions().to_vec();
+        code.sort();
+        assert_eq!(code, union);
+    }
+
+    /// Every batch takes an optional free `value` its code receives as
+    /// `EXPOSITION_PARAM_VALUE` (what a forEach sweeps).
+    #[test]
+    fn every_batch_operation_takes_a_value_its_code_receives() {
+        for id in [
+            RESEARCH_PYTHON_BATCH,
+            RESEARCH_NATIVE_PYTHON,
+            RESEARCH_R_BATCH,
+            RESEARCH_NATIVE_R,
+            RESEARCH_JULIA_BATCH,
+            RESEARCH_NATIVE_JULIA,
+        ] {
+            let value = op(id).parameter("value").cloned().unwrap_or_else(|| panic!("{id}"));
+            assert_eq!(value.kind, ParameterKind::Text { max_len: 1000 }, "{id}");
+            assert!(!value.required && value.label.contains("EXPOSITION_PARAM_VALUE"), "{id}");
+            assert!(op(id).parameter("timeoutSeconds").is_some(), "{id}");
+        }
+    }
+
+    #[test]
+    fn code_languages_serialize_as_lowercase_names() {
+        for (language, name) in
+            [(CodeLanguage::Python, "python"), (CodeLanguage::R, "r"), (CodeLanguage::Julia, "julia")]
+        {
+            assert_eq!(serde_json::to_value(language).unwrap(), serde_json::json!(name));
         }
     }
 }

@@ -99,6 +99,8 @@ fn request(mode: BatchMode, code: &str, inputs: Vec<BatchInput>, outputs: Vec<Ba
         max_output_bytes: 8 * 1024 * 1024,
         restricted_image_id: None,
         seed: None,
+        iteration: None,
+        parameters: Default::default(),
     }
 }
 

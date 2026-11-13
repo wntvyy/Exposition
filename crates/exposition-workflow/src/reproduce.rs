@@ -52,6 +52,7 @@ pub type CurrentEnvironment<'a> = dyn Fn(&WorkflowRunPlan, &WorkflowPlanStep) ->
 /// settings. (Lean steps are described from files; see [`current_environment`].)
 pub fn environment_sources(batch: Option<Arc<dyn BatchRunner>>, reviewer: Option<Arc<dyn AgentReviewer>>) -> Adapters {
     let mut adapters = Adapters::new();
+    crate::adapters::rj::install(&mut adapters, batch.clone());
     adapters.insert(
         runner_ids::RESTRICTED_PYTHON.into(),
         Arc::new(BatchAdapter::new(batch.clone(), BatchMode::Restricted)),
