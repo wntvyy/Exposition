@@ -441,7 +441,7 @@ describe("run monitor", () => {
     const proposal = {
       port: "proposal",
       portType: "associationProposal" as const,
-      value: { kind: "associationProposal" as const, proposal: "p-1", declarations: ["Main.thm", "Main.uses_choice", "Main.native"], status: "pending" as const },
+      value: { kind: "associationProposal" as const, proposal: "p-1", declarations: ["Main.thm", "Main.uses_choice", "Main.native"], status: "pending" as const, accepted: [] as string[], evidence: [] as string[] },
       provenance: { run: "run-1", step: "associate", attempt: 1, operation: { kind: "review", id: "rv-1" } },
     };
     const auditRun = run({
@@ -475,7 +475,7 @@ describe("run monitor", () => {
     const promo = {
       port: "promotion",
       portType: "promotionProposal" as const,
-      value: { kind: "promotionProposal" as const, promotion: "prom-1", document: "paper/main.typ", status: "pending" as const },
+      value: { kind: "promotionProposal" as const, promotion: "prom-1", document: "paper/main.typ", status: "pending" as const, attachmentKey: null, expiresAtMs: null },
       provenance: { run: "run-1", step: "run", attempt: 1, operation: { kind: "review", id: "x" } },
     };
     render(<RunMonitor run={run({ steps: [{ ...run().steps[0]!, attempts: [attempt({ outputs: [promo] })] }] })} onRun={vi.fn()} />);
@@ -486,6 +486,35 @@ describe("run monitor", () => {
     expect(runIpc.promotionPreview).toHaveBeenCalledWith("prom-1");
     fireEvent.click(screen.getByTestId("workflow-promotion-approve"));
     await waitFor(() => expect(research.approvePromotion).toHaveBeenCalledWith("prom-1"));
+  });
+
+  it("shows decided proposals as recorded: which declarations were associated, the inserted attachment, the review deadline", () => {
+    const provenance = { run: "run-1", step: "associate", attempt: 1, operation: { kind: "review", id: "rv-1" } };
+    const association = {
+      port: "proposal",
+      portType: "associationProposal" as const,
+      value: { kind: "associationProposal" as const, proposal: "p-1", declarations: ["Main.thm", "Main.other"], status: "accepted" as const, accepted: ["Main.thm"], evidence: ["ev-1"] },
+      provenance,
+    };
+    const inserted = {
+      port: "promotion",
+      portType: "promotionProposal" as const,
+      value: { kind: "promotionProposal" as const, promotion: "prom-1", document: "paper/main.typ", status: "accepted" as const, attachmentKey: "fig-1", expiresAtMs: null },
+      provenance,
+    };
+    const waiting = {
+      ...inserted,
+      value: { ...inserted.value, promotion: "prom-2", status: "pending" as const, attachmentKey: null, expiresAtMs: Date.UTC(2026, 10, 13, 12) },
+    };
+    render(<RunMonitor run={run({ steps: [{ ...run().steps[0]!, attempts: [attempt({ outputs: [association, inserted, waiting] })] }] })} onRun={vi.fn()} />);
+    const list = screen.getByTestId("workflow-association-checklist");
+    expect(list.querySelector('[data-declaration="Main.thm"]')!.getAttribute("data-associated")).toBe("true");
+    expect(list.querySelector('[data-declaration="Main.thm"]')!.textContent).toContain("Associated");
+    expect(list.querySelector('[data-declaration="Main.other"]')!.getAttribute("data-associated")).toBe("false");
+    expect(list.querySelector('[data-declaration="Main.other"]')!.textContent).toContain("Not associated");
+    expect(screen.queryByTestId("workflow-association-accept")).toBeNull();
+    expect(screen.getByTestId("workflow-promotion-attachment").textContent).toContain("fig-1");
+    expect(screen.getByTestId("workflow-promotion-expiry").textContent).toContain("can be reviewed until");
   });
 
   it("keeps the run view current through workflow-run events for that run only", async () => {

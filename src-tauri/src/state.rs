@@ -245,6 +245,62 @@ impl SourceReader for WorkspaceSources {
     }
 }
 
+/// A cached availability answer per project root and batch mode.
+type AvailabilityKey = (PathBuf, exposition_research::batch::BatchMode);
+type AvailabilityAnswer = (std::time::Instant, Result<(), String>);
+
+/// The research batch runner as the workflow runner uses it: the research
+/// service is pointed at the run's project before each call (the same rule
+/// as the research commands), and availability answers (which may ask Docker
+/// whether the image is present) are reused for a few seconds, because drafts
+/// are re-validated as they are edited.
+struct SyncedBatchRunner {
+    inner: Arc<dyn exposition_research::batch::BatchRunner>,
+    research: Arc<ResearchService>,
+    availability: Mutex<HashMap<AvailabilityKey, AvailabilityAnswer>>,
+}
+
+const BATCH_AVAILABILITY_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl SyncedBatchRunner {
+    fn sync(&self, root: &std::path::Path) -> Result<(), exposition_research::ResearchError> {
+        let canonical = std::fs::canonicalize(root).ok();
+        let current = self.research.workspace_root();
+        if canonical.is_none() || current != canonical {
+            self.research.set_workspace(root, false)?;
+        }
+        Ok(())
+    }
+}
+
+impl exposition_research::batch::BatchRunner for SyncedBatchRunner {
+    fn availability(&self, root: &std::path::Path, mode: exposition_research::batch::BatchMode) -> Result<(), String> {
+        let key = (root.to_path_buf(), mode);
+        if let Some((at, answer)) = self.availability.lock().unwrap_or_else(|p| p.into_inner()).get(&key)
+            && at.elapsed() < BATCH_AVAILABILITY_TTL
+        {
+            return answer.clone();
+        }
+        let answer = self.sync(root).map_err(|e| e.to_string()).and_then(|()| self.inner.availability(root, mode));
+        let mut cache = self.availability.lock().unwrap_or_else(|p| p.into_inner());
+        cache.retain(|_, (at, _)| at.elapsed() < BATCH_AVAILABILITY_TTL);
+        cache.insert(key, (std::time::Instant::now(), answer.clone()));
+        answer
+    }
+
+    fn run(
+        &self,
+        root: &std::path::Path,
+        request: &exposition_research::batch::BatchRequest,
+        control: &exposition_research::batch::BatchControl<'_>,
+    ) -> Result<exposition_research::batch::BatchResult, exposition_research::ResearchError> {
+        self.sync(root)?;
+        // A run re-checks everything itself; never answer it from the cache.
+        self.availability.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        self.inner.run(root, request, control)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,58 +344,5 @@ mod tests {
             Some(DEVELOPMENT_NAMESPACE),
             "an invalid namespace never falls back to the real entry"
         );
-    }
-}
-
-/// The research batch runner as the workflow runner uses it: the research
-/// service is pointed at the run's project before each call (the same rule
-/// as the research commands), and availability answers (which may ask Docker
-/// whether the image is present) are reused for a few seconds, because drafts
-/// are re-validated as they are edited.
-struct SyncedBatchRunner {
-    inner: Arc<dyn exposition_research::batch::BatchRunner>,
-    research: Arc<ResearchService>,
-    availability:
-        Mutex<HashMap<(PathBuf, exposition_research::batch::BatchMode), (std::time::Instant, Result<(), String>)>>,
-}
-
-const BATCH_AVAILABILITY_TTL: std::time::Duration = std::time::Duration::from_secs(5);
-
-impl SyncedBatchRunner {
-    fn sync(&self, root: &std::path::Path) -> Result<(), exposition_research::ResearchError> {
-        let canonical = std::fs::canonicalize(root).ok();
-        let current = self.research.workspace_root();
-        if canonical.is_none() || current != canonical {
-            self.research.set_workspace(root, false)?;
-        }
-        Ok(())
-    }
-}
-
-impl exposition_research::batch::BatchRunner for SyncedBatchRunner {
-    fn availability(&self, root: &std::path::Path, mode: exposition_research::batch::BatchMode) -> Result<(), String> {
-        let key = (root.to_path_buf(), mode);
-        if let Some((at, answer)) = self.availability.lock().unwrap_or_else(|p| p.into_inner()).get(&key)
-            && at.elapsed() < BATCH_AVAILABILITY_TTL
-        {
-            return answer.clone();
-        }
-        let answer = self.sync(root).map_err(|e| e.to_string()).and_then(|()| self.inner.availability(root, mode));
-        let mut cache = self.availability.lock().unwrap_or_else(|p| p.into_inner());
-        cache.retain(|_, (at, _)| at.elapsed() < BATCH_AVAILABILITY_TTL);
-        cache.insert(key, (std::time::Instant::now(), answer.clone()));
-        answer
-    }
-
-    fn run(
-        &self,
-        root: &std::path::Path,
-        request: &exposition_research::batch::BatchRequest,
-        control: &exposition_research::batch::BatchControl<'_>,
-    ) -> Result<exposition_research::batch::BatchResult, exposition_research::ResearchError> {
-        self.sync(root)?;
-        // A run re-checks everything itself; never answer it from the cache.
-        self.availability.lock().unwrap_or_else(|p| p.into_inner()).clear();
-        self.inner.run(root, request, control)
     }
 }

@@ -206,6 +206,16 @@ function PromotionReview({
           </Button>
         )}
       </div>
+      {pending && value.expiresAtMs !== null && (
+        <p className="xp-wf__muted" data-testid="workflow-promotion-expiry">
+          The prepared change can be reviewed until {formatTime(value.expiresAtMs)}.
+        </p>
+      )}
+      {value.status === "accepted" && value.attachmentKey !== null && (
+        <p className="xp-wf__muted" data-testid="workflow-promotion-attachment">
+          Inserted as attachment <code>{value.attachmentKey}</code>; undo it in the document.
+        </p>
+      )}
       {open && (
         <div className="xp-wf-proposal__review">
           {error && (
@@ -275,7 +285,7 @@ function AssociationReview({
         {value.declarations.map((name) => {
           const facts = audited.get(name);
           return (
-            <li key={name} data-declaration={name} data-verdict={facts?.verdict ?? "unknown"}>
+            <li key={name} data-declaration={name} data-verdict={facts?.verdict ?? "unknown"} data-associated={!pending ? String(value.accepted.includes(name)) : undefined}>
               {pending ? (
                 <Checkbox isSelected={selected.includes(name)} onChange={(on) => setSelected(on ? [...selected, name] : selected.filter((n) => n !== name))}>
                   <code>{name}</code>
@@ -283,6 +293,16 @@ function AssociationReview({
               ) : (
                 <code>{name}</code>
               )}
+              {!pending &&
+                (value.accepted.includes(name) ? (
+                  <Badge tone="success">
+                    Associated
+                  </Badge>
+                ) : (
+                  <Badge tone="neutral" dashed>
+                    Not associated
+                  </Badge>
+                ))}
               {facts ? (
                 <Badge tone={verdictTone(facts.verdict)}>{facts.verdict}</Badge>
               ) : (

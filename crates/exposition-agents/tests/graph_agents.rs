@@ -796,7 +796,9 @@ async fn workflow_drafts_are_saved_with_diagnostics_and_never_runnable() {
     let (id, approvals) =
         run(&mut h, req, vec![tool("w", tools::WORKFLOW_PROPOSE, incomplete_workflow("Declined draft"))], false).await;
     assert_eq!(approvals.len(), 1);
-    assert!(approvals[0].detail.contains("Definition (complete):") && approvals[0].detail.contains("not runnable"));
+    assert!(
+        approvals[0].detail.contains("Definition (complete):") && approvals[0].detail.contains("Saving runs nothing")
+    );
     assert_eq!(call(&h, &id, "w").0, ToolCallStatus::Declined);
     assert_eq!(f.graph.workflows().unwrap().len(), before);
 }
