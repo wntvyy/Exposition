@@ -348,9 +348,11 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
         max_output_bytes: steps.iter().map(|s| s.max_output_bytes).sum::<u64>().min(MAX_RUN_OUTPUT_BYTES),
         max_model_requests: model_steps.len() as u32 * MODEL_REQUESTS_PER_STEP,
     };
+    // The restricted backend and image bind the plan only when a step uses them.
+    let restricted = !restricted_steps.is_empty();
     let execution = WorkflowPlanExecution {
-        restricted_backend: facts.restricted_backend.clone(),
-        restricted_image: facts.restricted_image.clone(),
+        restricted_backend: facts.restricted_backend.clone().filter(|_| restricted),
+        restricted_image: facts.restricted_image.clone().filter(|_| restricted),
         trusted_folder: facts.trusted,
         native_steps: native_steps.clone(),
         model_steps: model_steps.clone(),

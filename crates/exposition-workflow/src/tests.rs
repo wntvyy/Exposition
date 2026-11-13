@@ -1184,6 +1184,9 @@ fn formal_audit_then_association_only_for_audited_declarations() {
     assert_eq!(declarations.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["main_theorem", "helper"]);
     assert_eq!(declarations[0].axioms, vec!["propext".to_owned()]);
     assert_eq!(file_sha256.len(), 64);
+    assert_eq!(run.plan.execution.restricted_image, None, "no restricted step, no image binding");
+    assert_eq!(run.plan.execution.native_steps, vec!["audit".to_owned()]);
+    assert!(run.plan.notices.iter().any(|n| n.contains("not a sandbox")));
     let proposal = &last_attempt(&run, "associate").outputs[0];
     assert!(matches!(
         &proposal.value,
