@@ -1215,6 +1215,26 @@ fn hostile_store_rows_are_skipped() {
 }
 
 #[test]
+fn an_unreadable_history_is_set_aside_and_the_service_starts() {
+    let f = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("workflow-runs.sqlite3");
+    std::fs::write(&db, b"this is not a database at all, just garbage bytes that fill the header").unwrap();
+    let service = new_service(&db, &f.host, &f.batch, &f.lean, &f.research);
+    assert!(service.runs(None).unwrap().is_empty());
+    let aside = std::fs::read_dir(db.parent().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.file_name().to_string_lossy().contains(".bad-"));
+    assert!(aside, "the unreadable file is kept aside");
+    let id = f.save(numerical(false));
+    let plan = service.plan(&id, None).unwrap();
+    let run = service.start(&StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash }).unwrap();
+    assert!(service.wait_idle(Duration::from_secs(10)));
+    assert_eq!(service.get(&run.id).unwrap().state, WorkflowRunState::Succeeded);
+}
+
+#[test]
 fn the_plan_hash_covers_payloads() {
     let f = fixture();
     let id = f.save(numerical(false));

@@ -113,8 +113,31 @@ impl WorkflowRunService {
     /// Open the run store and reconcile runs an earlier session left active
     /// (they become interrupted; nothing is resumed or repeated).
     pub fn new(config: WorkflowRunConfig) -> Result<Self, WorkflowRunError> {
-        let store = RunStore::open(config.database.as_deref())?;
-        let interrupted = store.reconcile(crate::now_ms())?;
+        let open = |path: Option<&Path>| -> Result<(RunStore, u32), WorkflowRunError> {
+            let store = RunStore::open(path)?;
+            let interrupted = store.reconcile(crate::now_ms())?;
+            Ok((store, interrupted))
+        };
+        let (store, interrupted) = match open(config.database.as_deref()) {
+            Ok(opened) => opened,
+            Err(e) => match config.database.as_deref() {
+                // An unusable history never keeps the application from
+                // starting: it is set aside (kept for inspection) and a new
+                // one is started.
+                Some(path) => {
+                    tracing::warn!("the workflow run history could not be opened ({e}); starting a new one");
+                    let aside = path.with_extension(format!("sqlite3.bad-{}", crate::now_ms()));
+                    for suffix in ["", "-wal", "-shm"] {
+                        let from = PathBuf::from(format!("{}{suffix}", path.display()));
+                        if from.exists() {
+                            let _ = std::fs::rename(&from, PathBuf::from(format!("{}{suffix}", aside.display())));
+                        }
+                    }
+                    open(Some(path)).or_else(|_| open(None))?
+                }
+                None => return Err(e),
+            },
+        };
         if interrupted > 0 {
             tracing::info!("{interrupted} workflow run(s) were interrupted by the last shutdown");
         }
