@@ -150,6 +150,9 @@ fn rule2_orphan_steps_and_disconnected_components_are_rejected() {
         operation: StepOperation { id: "agent.review".into(), version: 1 },
         parameters: BTreeMap::new(),
         payload: Some(StepPayload::Prompt { text: "Summarize the data.".into() }),
+        composite: None,
+        condition: None,
+        repeat: None,
     });
     def.connections.push(WorkflowConnection::Data {
         from: PortSource::Input { input: "data".into() },
@@ -271,6 +274,9 @@ fn rule4_effects_must_fit_the_ceiling() {
         operation: StepOperation { id: "agent.review".into(), version: 1 },
         parameters: BTreeMap::new(),
         payload: Some(StepPayload::Prompt { text: "Review the figure".into() }),
+        composite: None,
+        condition: None,
+        repeat: None,
     });
     assert!(has(&validate(&def), "workflow.effectNotAllowed", Some(4)));
 }
@@ -292,6 +298,9 @@ fn rule6_forged_formal_evidence_is_refused() {
         operation: StepOperation { id: "research.nativePython".into(), version: 1 },
         parameters: BTreeMap::new(),
         payload: None,
+        composite: None,
+        condition: None,
+        repeat: None,
     });
     def.connections.retain(|c| !matches!(c, WorkflowConnection::Data { to, .. } if to.step == "associate"));
     def.connections.push(WorkflowConnection::Data {
@@ -370,7 +379,7 @@ fn loops_conditionals_nesting_and_hooks_are_not_expressible() {
 #[test]
 fn schema_version_operations_and_sizes() {
     let mut def = audit();
-    def.schema = "exposition.workflow/2".into();
+    def.schema = "exposition.workflow/3".into();
     assert!(has(&validate(&def), "workflow.schema", None));
     let mut def = audit();
     def.steps[0].operation.version = 9;
@@ -386,6 +395,9 @@ fn schema_version_operations_and_sizes() {
             operation: StepOperation { id: "lean.audit".into(), version: 1 },
             parameters: BTreeMap::new(),
             payload: None,
+            composite: None,
+            condition: None,
+            repeat: None,
         });
     }
     assert!(has(&validate(&def), "workflow.tooLarge", None));

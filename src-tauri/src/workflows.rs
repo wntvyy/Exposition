@@ -82,7 +82,7 @@ pub async fn workflow_validate(
 ) -> Result<WorkflowValidation, CommandError> {
     blocking(&state, move |_, root, runs| {
         let exists = |p: &WorkspacePath| exists_in(&root, p);
-        let ctx = ValidationContext { ceiling: None, file_exists: Some(&exists) };
+        let ctx = ValidationContext { ceiling: None, file_exists: Some(&exists), ..Default::default() };
         let mut validation = exposition_graph::validate_workflow(&definition, &ctx);
         runs.apply_runnability(&mut validation, &definition);
         Ok(validation)
@@ -99,7 +99,7 @@ pub async fn workflow_save(
 ) -> Result<SavedWorkflow, CommandError> {
     blocking(&state, move |graph, root, runs| {
         let exists = |p: &WorkspacePath| exists_in(&root, p);
-        let ctx = ValidationContext { ceiling: None, file_exists: Some(&exists) };
+        let ctx = ValidationContext { ceiling: None, file_exists: Some(&exists), ..Default::default() };
         let saved = graph.save_workflow(&Origin::User, &request, &ctx).map_err(CommandError::from)?;
         Ok(with_runnability(runs, saved))
     })
@@ -111,7 +111,7 @@ pub async fn workflow_save(
 pub async fn workflow_import(state: State<'_, AppState>, text: String) -> Result<SavedWorkflow, CommandError> {
     blocking(&state, move |graph, root, runs| {
         let exists = |p: &WorkspacePath| exists_in(&root, p);
-        let ctx = ValidationContext { ceiling: None, file_exists: Some(&exists) };
+        let ctx = ValidationContext { ceiling: None, file_exists: Some(&exists), ..Default::default() };
         let saved = graph.import_workflow(&Origin::User, &text, &ctx).map_err(CommandError::from)?;
         Ok(with_runnability(runs, saved))
     })
