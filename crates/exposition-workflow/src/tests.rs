@@ -501,6 +501,9 @@ fn python_step(id: &str, native: bool) -> WorkflowStep {
         },
         parameters: BTreeMap::new(),
         payload: Some(StepPayload::Code { language: CodeLanguage::Python, source: format!("# {id}\n") }),
+        composite: None,
+        condition: None,
+        repeat: None,
     }
 }
 
@@ -1073,6 +1076,9 @@ fn review_run(fail_after: Option<u32>) {
         operation: StepOperation { id: "agent.review".into(), version: 1 },
         parameters: BTreeMap::new(),
         payload: Some(StepPayload::Prompt { text: "Summarize the observations.".into() }),
+        composite: None,
+        condition: None,
+        repeat: None,
     }];
     def.connections = vec![WorkflowConnection::Data {
         from: PortSource::Input { input: "data".into() },
