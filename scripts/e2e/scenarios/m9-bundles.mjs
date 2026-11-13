@@ -8,7 +8,9 @@
 // 2. Export the parent as a workflow bundle to a .json file the user chose:
 //    root + child with their ids/revisions, definitions only (no trust,
 //    approvals, triggers, validation, or origin). Locations inside the
-//    project's .exposition records or a non-.json name are refused.
+//    project's .exposition records or a non-.json name are refused; an
+//    existing file is replaced only when it is an earlier bundle (an
+//    unrelated .json such as an editor's settings.json is never touched).
 // 3. Hostile bundles are refused and save nothing: a trust/approval/trigger
 //    claim anywhere, a key smuggled into a tagged unit variant, a child that
 //    runs the root (recursion), an extra unused child, an oversized file.
@@ -139,7 +141,16 @@ export default async function m9Bundles({ launchApp, assert }) {
     const refused = await invokeError(page, "workflow_bundle_export", { id: p.id, revision: null, path: bad });
     assert.equal(refused.error?.code, "workflow.file", `${bad}: ${JSON.stringify(refused)}`);
   }
-  log("export locations are checked");
+  const settings = join(out, "settings.json");
+  const settingsText = '{"editor.fontSize": 12}';
+  await writeFile(settings, settingsText);
+  const clobber = await invokeError(page, "workflow_bundle_export", { id: p.id, revision: null, path: settings });
+  assert.equal(clobber.error?.code, "workflow.invalidDestination", JSON.stringify(clobber));
+  assert.equal(await readFile(settings, "utf8"), settingsText, "an unrelated .json was changed");
+  const again = await call("workflow_bundle_export", { id: p.id, revision: 1, path: target });
+  assert.equal(again.bytes, exported.bytes, "an earlier bundle is replaced");
+  assert.equal(await readFile(target, "utf8"), text);
+  log("export locations are checked; only an earlier bundle is replaced");
 
   // ---- 3. hostile bundles --------------------------------------------------
   const listA = (await call("workflow_list")).length;

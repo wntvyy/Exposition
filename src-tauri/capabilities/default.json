@@ -8,7 +8,6 @@
     "core:window:allow-set-title",
     "core:window:allow-destroy",
     "dialog:allow-open",
-    "dialog:allow-save",
     "allow-app-info",
     "allow-document-list",
     "allow-document-state",
