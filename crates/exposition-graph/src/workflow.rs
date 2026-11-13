@@ -30,6 +30,7 @@
 //! every step's runner is available in the open project (decided by the
 //! workflow runner service). Running still needs a reviewed run plan.
 
+pub mod interchange;
 pub mod persist;
 pub mod presets;
 pub mod registry;
@@ -44,6 +45,10 @@ use ts_rs::TS;
 use crate::ids::WorkflowId;
 use crate::ops::DiagnosticSeverity;
 use crate::vocabulary::RelationKind;
+pub use interchange::{
+    BUNDLE_SCHEMA, BundledWorkflow, ImportedChild, MAX_BUNDLE_BYTES, WorkflowBundle, WorkflowBundleExport,
+    WorkflowBundleImport, bundle_text,
+};
 pub use persist::{SaveWorkflowRequest, SavedWorkflow, WorkflowRevisionInfo, WorkflowSummary};
 pub use registry::{
     CodeLanguage, OperationContract, ParameterKind, PayloadSpec, PortSpec, PortType, WorkflowEffect, operation,
@@ -1583,5 +1588,7 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_interchange;
 #[cfg(test)]
 mod tests_v2;

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workflow-bundle-export"
+description = "Enables the workflow_bundle_export command without any pre-configured scope."
+commands.allow = ["workflow_bundle_export"]
+
+[[permission]]
+identifier = "deny-workflow-bundle-export"
+description = "Denies the workflow_bundle_export command without any pre-configured scope."
+commands.deny = ["workflow_bundle_export"]
