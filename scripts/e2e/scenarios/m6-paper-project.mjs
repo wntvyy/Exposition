@@ -581,6 +581,15 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       await shot("01-untrusted-tex-lean-research-light");
 
       // Nothing ran: no started non-probe job, no tool or kernel process, no project file changed.
+      // The Research panel discovers system interpreters (Python, R, Julia) in the
+      // app's probe folder; let those probes finish first so their processes are
+      // not mistaken for tools the project started (they are checked as jobs below).
+      const isDiscovery = (j) => /^research discovery: /.test(j.info.label);
+      await waitFor(async () => (await invoke(page, "job_list")).filter(isDiscovery).every((j) => j.info.result !== null || j.info.startedAtMs === null), {
+        timeout: 60_000,
+        interval: 250,
+        message: "interpreter discovery finished",
+      });
       const jobs = await invoke(page, "job_list");
       // Only discovery of system interpreters (outside the project, in the app's
       // probe folder) may run; nothing from or in the project.
