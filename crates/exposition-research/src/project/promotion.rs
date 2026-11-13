@@ -44,6 +44,8 @@ use crate::types::RunManifest;
 
 /// How long a prepared review stays approvable.
 const REVIEW_TTL_MS: u64 = 30 * 60 * 1000;
+/// Discarded review ids remembered per session.
+const MAX_DISCARDED: usize = 256;
 const MAX_PENDING: usize = 32;
 const MAX_TRACKED: usize = 200;
 /// Characters of replaced text shown in a preview.
@@ -71,6 +73,9 @@ struct Tracked {
 #[derive(Default)]
 pub(crate) struct Promotions {
     pending: Mutex<HashMap<String, Pending>>,
+    /// Ids of prepared reviews the user discarded (newest last, bounded), so
+    /// a workflow run can show a discarded proposal as rejected.
+    discarded: Mutex<std::collections::VecDeque<String>>,
     tracked: Mutex<Tracked>,
     /// Test hook (debug builds): fail the next graph step of a promotion.
     fail_next_graph_write: AtomicBool,
@@ -269,7 +274,20 @@ impl ResearchProject {
 
     /// Drop a prepared review without applying it.
     pub fn cancel_promotion(&self, promotion: &str) -> bool {
-        self.promotions.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(promotion).is_some()
+        let removed = self.promotions.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(promotion).is_some();
+        if removed {
+            let mut discarded = self.promotions.discarded.lock().unwrap_or_else(|p| p.into_inner());
+            discarded.push_back(promotion.to_owned());
+            while discarded.len() > MAX_DISCARDED {
+                discarded.pop_front();
+            }
+        }
+        removed
+    }
+
+    /// The user discarded this prepared review in this session.
+    pub fn promotion_discarded(&self, promotion: &str) -> bool {
+        self.promotions.discarded.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|d| d == promotion)
     }
 
     /// Step 2 and 3: apply the reviewed insertion and record it in the graph.

@@ -18,6 +18,9 @@ use exposition_lean::{LeanService, evidence};
 use exposition_workspace::{DocumentService, WorkspaceService};
 
 use super::{StepAdapter, StepControl, StepFailure, StepRequest, StepResult, bare_hash};
+
+/// The Lean service bounds one check at this many milliseconds.
+const MAX_AUDIT_MS: u64 = 600_000;
 use crate::model::{WorkflowAuditedDeclaration, WorkflowOutputValue, WorkflowRunError};
 
 /// Lean audits and evidence recording (a seam for tests).
@@ -202,7 +205,7 @@ impl LeanAuditor for LeanServiceAuditor {
         canceled: &(dyn Fn() -> bool + Sync),
     ) -> Result<LeanAuditRecord, StepFailure> {
         let document = self.document(path)?;
-        let timeout_ms = timeout.as_millis().min(600_000) as u64;
+        let timeout_ms = (timeout.as_millis().min(MAX_AUDIT_MS as u128)) as u64;
         let check = self.lean.check(LeanCheckRequest {
             target: LeanCheckTarget::Document { document: document.clone() },
             goals_at: Vec::new(),
@@ -282,5 +285,23 @@ impl LeanAuditor for LeanServiceAuditor {
             ));
         }
         Ok(report.recorded.into_iter().map(|r| r.evidence).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use exposition_graph::workflow::registry::{LEAN_AUDIT, operations};
+
+    use super::MAX_AUDIT_MS;
+
+    #[test]
+    fn the_registered_audit_limit_is_one_the_lean_service_honours() {
+        let audit = operations().into_iter().find(|o| o.id == LEAN_AUDIT).unwrap();
+        assert!(
+            u64::from(audit.limits.max_seconds) * 1000 <= MAX_AUDIT_MS,
+            "the plan shows {} s but an audit is stopped after {} s",
+            audit.limits.max_seconds,
+            MAX_AUDIT_MS / 1000
+        );
     }
 }

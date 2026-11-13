@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 
 use crate::adapters::Adapters;
 use crate::adapters::lean::LeanAuditor;
-use crate::adapters::research::ResearchActions;
+use crate::adapters::research::{PromotionReview, ResearchActions};
 use crate::model::{
     MAX_ACTIVE_RUNS, StartWorkflowRunRequest, WorkflowAssociationDecision, WorkflowOutputValue, WorkflowProposalStatus,
     WorkflowRun, WorkflowRunError, WorkflowRunEvent, WorkflowRunPlan, WorkflowRunState, WorkflowRunStep,
@@ -408,17 +408,22 @@ impl WorkflowRunService {
             for attempt in &mut step.attempts {
                 for output in &mut attempt.outputs {
                     if let WorkflowOutputValue::PromotionProposal {
+                        promotion,
                         document,
                         status,
                         attachment_key: Some(key),
                         expires_at_ms,
-                        ..
                     } = &mut output.value
                         && *status == WorkflowProposalStatus::Pending
                     {
-                        if self.inner.research.as_ref().is_some_and(|r| r.promotion_applied(&root, document, key)) {
+                        let research = self.inner.research.as_ref();
+                        let review = research.map(|r| r.promotion_review(promotion));
+                        if research.is_some_and(|r| r.promotion_applied(&root, document, key)) {
                             *status = WorkflowProposalStatus::Accepted;
-                        } else if expires_at_ms.is_some_and(|t| t <= now) {
+                        } else if review == Some(PromotionReview::Discarded) {
+                            *status = WorkflowProposalStatus::Rejected;
+                        } else if review == Some(PromotionReview::Gone) || expires_at_ms.is_some_and(|t| t <= now) {
+                            // A review that is no longer held cannot be approved.
                             *status = WorkflowProposalStatus::Expired;
                         } else {
                             continue;

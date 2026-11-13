@@ -37,6 +37,17 @@ pub struct PreparedPromotion {
     pub expires_at_ms: u64,
 }
 
+/// What the research service knows of a prepared promotion review.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromotionReview {
+    /// Still waiting for the user's decision.
+    Pending,
+    /// The user discarded it.
+    Discarded,
+    /// No longer held (applied, expired, or lost when the app restarted).
+    Gone,
+}
+
 /// The research operations workflow steps use (a seam for tests).
 pub trait ResearchActions: Send + Sync {
     fn available(&self, root: &Path) -> Result<(), String>;
@@ -51,6 +62,8 @@ pub trait ResearchActions: Send + Sync {
     ) -> Result<PreparedPromotion, StepFailure>;
     /// The promotion's insertion (attachment `key`) is in `document` now.
     fn promotion_applied(&self, root: &Path, document: &WorkspacePath, key: &str) -> bool;
+    /// Whether the prepared review `promotion` is still pending, was discarded, or is gone.
+    fn promotion_review(&self, promotion: &str) -> PromotionReview;
 }
 
 /// The attachment markers of `key` (any supported format) enclose a block in `text`.
@@ -152,6 +165,16 @@ impl ResearchActions for ProjectResearch {
             .ok()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .is_some_and(|text| markers_present(&text, key))
+    }
+
+    fn promotion_review(&self, promotion: &str) -> PromotionReview {
+        if self.project.promotion_preview(promotion).is_some() {
+            PromotionReview::Pending
+        } else if self.project.promotion_discarded(promotion) {
+            PromotionReview::Discarded
+        } else {
+            PromotionReview::Gone
+        }
     }
 }
 

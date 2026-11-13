@@ -228,5 +228,5 @@ export function usageRows(run: Pick<WorkflowRun, "usage" | "budgets">): RunTotal
   ];
 }
 
-/** `workflow.planStale` and friends: the reviewed plan no longer matches; review a new one. */
-export const STALE_PLAN_CODES = ["workflow.planStale", "workflow.planExpired", "workflow.planUnknown"];
+/** `workflow.planStale`: the reviewed plan no longer matches (changed, expired, used, or unknown); review a new one. */
+export const STALE_PLAN_CODES = ["workflow.planStale"];

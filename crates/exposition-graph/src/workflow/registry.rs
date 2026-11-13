@@ -400,7 +400,7 @@ pub fn operations() -> Vec<OperationContract> {
             effects: vec![E::ReadDeclaredInputs, E::ExecuteNative, E::WriteRunOutputs],
             runner: runner(
                 "nativePython",
-                "Native Python kernel (your account's privileges)",
+                "Trusted native Python process (your account's privileges)",
                 Containment::NativeAccount,
                 &[E::ReadDeclaredInputs, E::ExecuteNative, E::WriteRunOutputs],
             ),
@@ -424,7 +424,8 @@ pub fn operations() -> Vec<OperationContract> {
                 Containment::NativeAccount,
                 &[E::ReadDeclaredInputs, E::ExecuteNative, E::RegisterFormalEvidence],
             ),
-            limits: OperationLimits { max_seconds: 1800, max_output_bytes: 16 * 1024 * 1024 },
+            // The Lean service bounds one check at 600 s; the plan must not promise more.
+            limits: OperationLimits { max_seconds: 600, max_output_bytes: 16 * 1024 * 1024 },
             failure: FailureBehavior::StopWorkflow,
         },
         OperationContract {

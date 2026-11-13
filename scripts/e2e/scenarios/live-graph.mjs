@@ -7,7 +7,7 @@
 //   G1. A whole-project task receives the scoped graph context, reads the graph
 //       with graph_query, proposes a mathematical dependency with graph_propose
 //       (approval card; stored as a *suggestion* attributed to the task), and
-//       saves a workflow draft with workflow_propose (never runnable). No file
+//       saves a workflow draft with workflow_propose (saving runs nothing). No file
 //       changes.
 //   G2. Under metadata-only consent the provider never receives a
 //       content-derived label (theorem/lemma labels, file text): checked on the
@@ -120,7 +120,11 @@ export default async function liveGraph({ launchApp, artifactsDir, assert, fixtu
     const drafts = await invoke(page, "workflow_list");
     const draft = drafts.find((d) => d.origin.kind === "agent" && d.origin.taskId === g1.summary.id);
     check("model: G1 saved a workflow draft through workflow_propose", !!draft, drafts.map((d) => `${d.title}:${d.origin.kind}`));
-    if (draft) check("the agent's workflow draft is never runnable", draft.runnable === false, { state: draft.state, errors: draft.errors, warnings: draft.warnings });
+    if (draft) {
+      // Saving a draft never runs it: only the user starts a run, from a reviewed plan.
+      const runs = await invoke(page, "workflow_runs", { workflow: draft.id });
+      check("saving the agent's workflow draft ran nothing (no run exists)", runs.length === 0, { state: draft.state, runnable: draft.runnable, runs: runs.map((r) => r.id) });
+    }
     const review = await invoke(page, "agents_review", { task: g1.summary.id });
     check("G1 changed no files", (review.files ?? []).length === 0 && (await readFile(join(root, "paper.tex"), "utf8")) === before, (review.files ?? []).map((f) => f.path));
     const declined = evidence.approvals.filter((a) => a.task === g1.summary.id && !a.approved);

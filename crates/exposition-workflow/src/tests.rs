@@ -30,7 +30,8 @@ use crate::adapters::associate::AssociateAdapter;
 use crate::adapters::batch::BatchAdapter;
 use crate::adapters::lean::{LeanAuditAdapter, LeanAuditor};
 use crate::adapters::research::{
-    PreparedPromotion, PromotionAdapter, ResearchActions, RetainAdapter, RetainedRecord, markers_present,
+    PreparedPromotion, PromotionAdapter, PromotionReview, ResearchActions, RetainAdapter, RetainedRecord,
+    markers_present,
 };
 use crate::adapters::{
     AGENT_REVIEW_UNAVAILABLE, Adapters, StepAdapter, StepControl, StepFailure, StepRequest, StepResult, Unavailable,
@@ -254,6 +255,8 @@ impl LeanAuditor for FakeLean {
 struct FakeResearch {
     root: PathBuf,
     calls: Arc<Calls>,
+    /// The research service's view of prepared reviews (default: still pending).
+    reviews: Mutex<BTreeMap<String, PromotionReview>>,
 }
 
 impl ResearchActions for FakeResearch {
@@ -290,6 +293,9 @@ impl ResearchActions for FakeResearch {
     }
     fn promotion_applied(&self, root: &Path, document: &WorkspacePath, key: &str) -> bool {
         std::fs::read_to_string(root.join(document.as_str())).is_ok_and(|t| markers_present(&t, key))
+    }
+    fn promotion_review(&self, promotion: &str) -> PromotionReview {
+        self.reviews.lock().unwrap().get(promotion).copied().unwrap_or(PromotionReview::Pending)
     }
 }
 
@@ -373,7 +379,7 @@ fn fixture() -> Fixture {
         counter: AtomicUsize::new(1),
     });
     let lean = Arc::new(FakeLean { root: root.clone(), calls: calls.clone(), recorded: Mutex::new(Vec::new()) });
-    let research = Arc::new(FakeResearch { root: root.clone(), calls: calls.clone() });
+    let research = Arc::new(FakeResearch { root: root.clone(), calls: calls.clone(), reviews: Mutex::default() });
     let host = Arc::new(Host {
         root: Mutex::new(Some(root.clone())),
         trusted: AtomicBool::new(true),
@@ -621,6 +627,45 @@ fn numerical_preset_runs_end_to_end_one_step_at_a_time() {
     let again =
         f.service.start(&StartWorkflowRunRequest { plan: plan.plan, approval_hash: run.plan.approval_hash.clone() });
     assert_eq!(again.unwrap_err().code, "workflow.planStale");
+}
+
+#[test]
+fn a_discarded_or_lost_promotion_review_is_not_shown_as_awaiting_review() {
+    let f = fixture();
+    let id = f.save(numerical(true));
+    let run = f.run_to_end(&id);
+    assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?}", run.message);
+    let status = |run: &WorkflowRun| match &last_attempt(run, "promote").outputs[0].value {
+        WorkflowOutputValue::PromotionProposal { status, .. } => *status,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(status(&f.service.get(&run.id).unwrap()), WorkflowProposalStatus::Pending);
+    // The user discarded the prepared review: it reads as rejected, not pending.
+    f.research.reviews.lock().unwrap().insert("promo-1".into(), PromotionReview::Discarded);
+    let reread = f.service.get(&run.id).unwrap();
+    assert_eq!(status(&reread), WorkflowProposalStatus::Rejected);
+    let outcome = reread.outcomes.iter().find(|o| o.step == "promote").and_then(|o| o.value.clone());
+    assert!(
+        matches!(
+            outcome,
+            Some(WorkflowOutputValue::PromotionProposal { status: WorkflowProposalStatus::Rejected, .. })
+        ),
+        "the outcome reflects it too: {outcome:?}"
+    );
+    // The prepared review is gone (e.g. the app restarted): it can no longer be approved.
+    f.research.reviews.lock().unwrap().insert("promo-1".into(), PromotionReview::Gone);
+    assert_eq!(status(&f.service.get(&run.id).unwrap()), WorkflowProposalStatus::Expired);
+    // An applied insertion wins over either.
+    std::fs::write(
+        f.root.join("main.typ"),
+        "= Paper
+// exposition:begin fig-run
+#figure(image(\"x.svg\"))
+// exposition:end fig-run
+",
+    )
+    .unwrap();
+    assert_eq!(status(&f.service.get(&run.id).unwrap()), WorkflowProposalStatus::Accepted);
 }
 
 #[test]

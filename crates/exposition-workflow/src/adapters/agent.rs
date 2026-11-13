@@ -61,7 +61,8 @@ fn bounded(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
     }
-    let mut out: String = text.chars().take(max).collect();
+    // The ellipsis counts toward the limit (the runner refuses longer reports).
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
 }
@@ -268,5 +269,20 @@ impl AgentReviewer for AgentServiceReviewer {
             })
             .ok_or_else(|| failure("agent.noAnswer", "The review finished without an answer.".into()))?;
         Ok(ReviewOutcome { text, task: task.0, requests: summary.usage.turns })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bounded_report_fits_the_runner_limit() {
+        let long = "x".repeat(MAX_REPORT_CHARS + 10);
+        let out = bounded(&long, MAX_REPORT_CHARS);
+        assert_eq!(out.chars().count(), MAX_REPORT_CHARS, "truncated text plus the ellipsis fit the limit");
+        assert!(out.ends_with('…'));
+        let exact = "y".repeat(MAX_REPORT_CHARS);
+        assert_eq!(bounded(&exact, MAX_REPORT_CHARS), exact, "text at the limit is kept whole");
     }
 }
