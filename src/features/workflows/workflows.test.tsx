@@ -1,6 +1,7 @@
 // Workflow drafts: compatible-only binding choices and structural edits, and
-// the draft editor (live Rust validation mocked at the feature's IPC
-// boundary): never runnable, diagnostics shown, saving creates a revision.
+// the editor (live Rust validation mocked at the feature's IPC boundary):
+// diagnostics shown, saving creates a revision, "Review and run…" only for a
+// saved, well-formed, runnable revision, and nothing ever starts by itself.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -28,7 +29,19 @@ const editorsMock = vi.hoisted(() => ({
 }));
 const notifications = vi.hoisted(() => ({ notify: vi.fn(), dismiss: vi.fn() }));
 
-vi.mock("./ipc", () => ({ workflowCommands: wfIpc }));
+const runIpc = vi.hoisted(() => ({
+  plan: vi.fn(),
+  start: vi.fn(),
+  cancel: vi.fn(),
+  get: vi.fn(),
+  list: vi.fn(async () => []),
+  acknowledge: vi.fn(),
+  decideAssociation: vi.fn(),
+  promotionPreview: vi.fn(),
+}));
+vi.mock("./ipc", () => ({ workflowCommands: wfIpc, workflowRunCommands: runIpc, workflowEvents: { run: vi.fn(async () => () => {}) } }));
+vi.mock("../research/ipc", () => ({ researchCommands: {} }));
+vi.mock("../research/Promotion", () => ({ PreviewView: () => null }));
 vi.mock("./CodePayloadEditor", () => ({
   CodePayloadEditor: ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
     <textarea data-testid="workflow-code" value={value} onChange={(e) => onChange(e.target.value)} />
@@ -43,6 +56,8 @@ vi.mock("../workspace/store", async () => {
 });
 vi.mock("../../lib/ipc", () => ({
   errorMessage: (e: unknown) => (typeof e === "object" && e && "message" in e ? String(e.message) : String(e)),
+  isCommandError: (e: unknown) => typeof e === "object" && e !== null && "code" in e && "message" in e,
+  commands: {},
 }));
 
 const model = await import("./model");
@@ -197,7 +212,7 @@ describe("draft actions", () => {
     expect(wfIpc.fromPreset).toHaveBeenCalledWith(expect.objectContaining({ preset: "formalAudit", leanFile: "Proofs/Main.lean" }));
     expect(wfIpc.save).toHaveBeenCalledWith({ id: null, expectedRevision: null, definition: audit });
     expect(editorsMock.open).toHaveBeenCalledWith({ key: "workflow:wf-1", title: "Formal audit" });
-    expect(notifications.notify.mock.calls[0]![0].body).toMatch(/Incomplete .*Not runnable in this version/);
+    expect(notifications.notify.mock.calls[0]![0].body).toMatch(/Incomplete .*Nothing runs until you review its plan and start it/);
   });
 
   it("reports a refused import without opening anything", async () => {
@@ -208,13 +223,13 @@ describe("draft actions", () => {
 });
 
 describe("WorkflowEditor", () => {
-  it("is labelled not runnable, shows live diagnostics, and saves a new revision", async () => {
+  it("shows why it cannot run, shows live diagnostics, and saves a new revision", async () => {
     wfIpc.validate.mockResolvedValue(validation(1));
     wfIpc.save.mockImplementation(async (req: { definition: WorkflowDefinition }) => saved(2, req.definition, 1));
     render(<WorkflowEditor resource={{ key: "workflow:wf-1", title: "Formal audit" }} mode="source" active />);
     const status = await screen.findByTestId("workflow-status");
     expect(status.getAttribute("data-runnable")).toBe("false");
-    expect(screen.getByText("Draft — not runnable in this version")).toBeTruthy();
+    expect((screen.getByTestId("workflow-review-run") as HTMLButtonElement).disabled).toBe(true);
     // Edit the title: dirty, validated in Rust, then saved with the expected revision.
     fireEvent.change(screen.getByTestId("workflow-title").querySelector("input")!, { target: { value: "Audit Main.lean" } });
     await waitFor(() => expect(wfIpc.validate).toHaveBeenCalledWith(expect.objectContaining({ title: "Audit Main.lean" })));

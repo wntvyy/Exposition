@@ -422,7 +422,8 @@ function PromotionForm({ run, artifact, onDone }: { run: RunSummary; artifact: A
   );
 }
 
-function PreviewView({ preview }: { preview: PromotionPreview }) {
+/** The exact markup a promotion makes (reused by the workflow run monitor). */
+export function PreviewView({ preview }: { preview: PromotionPreview }) {
   const a = preview.artifact;
   const digest = a.contentHash.replace(/^sha256:/, "");
   return (

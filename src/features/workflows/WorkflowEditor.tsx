@@ -1,10 +1,12 @@
-// Form-based workflow draft editor (editor tab `workflow:<id>`). Steps come
-// from the registered operations; port bindings offer only compatible
-// sources; outcomes, parameters, code and prompt payloads are edited here.
-// Every change is validated in Rust (live diagnostics) and saving creates a
-// new immutable revision. Drafts are never runnable in this version.
-// Full visual workflow programming is later work.
-import { Plus, Save, X } from "lucide-react";
+// Workflow editor (editor tab `workflow:<id>`): a typed canvas and a form
+// over the same draft. Steps come from the registered operations; port
+// bindings offer only compatible sources; outcomes, parameters, code and
+// prompt payloads are edited in the form (the canvas's inspector). Every
+// change is validated in Rust (live diagnostics) and saving creates a new
+// immutable revision. Saving never runs anything: a saved, well-formed
+// revision runs only after "Review and run…" shows its full plan and the
+// user presses "Start run".
+import { LayoutGrid, ListTree, Play, Plus, Save, X } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { editors } from "../../app/editors";
@@ -32,6 +34,7 @@ import {
   ErrorState,
   IconButton,
   LoadingState,
+  SegmentedControl,
   Select,
   StatusPill,
   TextField,
@@ -40,6 +43,9 @@ import {
 import { useWorkspace } from "../workspace/store";
 import { CodePayloadEditor } from "./CodePayloadEditor";
 import { workflowCommands } from "./ipc";
+import { PlanReviewDialog } from "./PlanReview";
+import { openRun, RunHistory } from "./RunView";
+import { WorkflowCanvas, type CanvasSelectionItem } from "./WorkflowCanvas";
 import {
   addInput,
   addOutcome,
@@ -372,6 +378,28 @@ function InputRow({
   );
 }
 
+type EditorView = "form" | "canvas";
+const VIEW_KEY = "exposition.workflows.view";
+
+function readView(): EditorView {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "canvas" ? "canvas" : "form";
+  } catch {
+    return "form";
+  }
+}
+
+function originNote(saved: SavedWorkflow): string | null {
+  switch (saved.origin.kind) {
+    case "agent":
+      return `Proposed by agent task ${saved.origin.taskId}.`;
+    case "preset":
+      return null;
+    default:
+      return null;
+  }
+}
+
 export function WorkflowEditor({ resource }: EditorProps) {
   const id = resource.key.slice(WORKFLOW_KEY_PREFIX.length);
   const [saved, setSaved] = useState<SavedWorkflow | null>(null);
@@ -384,9 +412,22 @@ export function WorkflowEditor({ resource }: EditorProps) {
   const [newStep, setNewStep] = useState<string | null>(null);
   const [newInput, setNewInput] = useState<PortType>("dataset");
   const [newOutcome, setNewOutcome] = useState<OutcomeKind>("retainedFigure");
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [view, setViewState] = useState<EditorView>(readView);
+  const [selection, setSelection] = useState<CanvasSelectionItem | null>(null);
+  const reasonId = useId();
   // A draft belongs to the project it was opened in.
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const currentRoot = useWorkspace((s) => s.info?.root ?? null);
+
+  const setView = (next: EditorView) => {
+    setViewState(next);
+    try {
+      localStorage.setItem(VIEW_KEY, next);
+    } catch {
+      // Presentation preference only.
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -434,7 +475,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
       notify({
         tone: result.unchanged ? "info" : "success",
         title: result.unchanged ? "No changes to save" : `Saved revision ${result.revision}`,
-        body: `${result.definition.title}: ${result.validation.state === "wellFormed" ? "well-formed draft" : `incomplete draft (${result.validation.errors} problem${result.validation.errors === 1 ? "" : "s"})`}. Not runnable in this version.`,
+        body: `${result.definition.title}: ${result.validation.state === "wellFormed" ? "well-formed" : `incomplete (${result.validation.errors} problem${result.validation.errors === 1 ? "" : "s"})`}. ${result.validation.runnable ? "Use Review and run… to review its plan; saving runs nothing." : result.validation.runnableReason}`,
       });
       return true;
     } catch (error) {
@@ -485,9 +526,131 @@ export function WorkflowEditor({ resource }: EditorProps) {
   }
 
   const errors = diagnostics.filter((d) => d.severity === "error").length;
+  const runnable = validation?.runnable ?? false;
+  // Why "Review and run…" is unavailable (null: it is available for the saved revision).
+  const runBlock = dirty
+    ? "Save the draft first: a run uses a saved revision, never unsaved edits."
+    : validation?.state !== "wellFormed"
+      ? `This revision is incomplete (${errors} problem${errors === 1 ? "" : "s"}): fix ${errors === 1 ? "it" : "them"} and save.`
+      : !runnable
+        ? (validation?.runnableReason ?? "This revision cannot run.")
+        : null;
+  const origin = originNote(saved);
+
+  const inputsSection = (
+    <section className="xp-wf__group" aria-label="Inputs">
+      <h3 className="xp-wf__group-title">Inputs</h3>
+      <p className="xp-wf__muted">Explicit project files the workflow reads, versioned when a run is reviewed or pinned to exact content.</p>
+      <ul className="xp-wf__cards">
+        {draft.inputs.map((input) => (
+          <InputRow key={input.id} draft={draft} input={input} diagnostics={diagnosticsFor(diagnostics, { input: input.id })} onChange={setDraft} />
+        ))}
+      </ul>
+      <div className="xp-wf__row">
+        <Select<PortType> label="New input type" value={newInput} onChange={setNewInput} options={FILE_INPUT_TYPES.map((t) => ({ id: t, label: PORT_TYPE_LABELS[t] }))} />
+        <Button icon={Plus} onPress={() => setDraft(addInput(draft, newInput))}>
+          Add Input
+        </Button>
+      </div>
+    </section>
+  );
+
+  const addStepRow = (
+    <div className="xp-wf__row">
+      <Select
+        label="New step"
+        placeholder="Choose an operation…"
+        value={newStep}
+        onChange={(k) => setNewStep(String(k))}
+        options={contracts.map((c) => ({ id: `${c.id}@${c.version}`, label: c.title, description: c.purpose }))}
+      />
+      <Button
+        icon={Plus}
+        isDisabled={!newStep}
+        onPress={() => {
+          const contract = contracts.find((c) => `${c.id}@${c.version}` === newStep);
+          if (contract) {
+            const next = addStep(draft, contract);
+            setDraft(next);
+            const added = next.steps[next.steps.length - 1];
+            if (added) setSelection({ kind: "step", id: added.id });
+          }
+        }}
+        data-testid="workflow-add-step"
+      >
+        Add Step
+      </Button>
+    </div>
+  );
+
+  const outcomesSection = (
+    <section className="xp-wf__group" aria-label="Outcomes">
+      <h3 className="xp-wf__group-title">Outcomes</h3>
+      <p className="xp-wf__muted">What the workflow produces. Every step must lead to one; a manuscript promotion is an optional destination.</p>
+      <ul className="xp-wf__cards">
+        {draft.outcomes.map((o) => {
+          const options = outcomeCandidates(draft, contracts, o.kind);
+          return (
+            <li key={o.id} className="xp-wf__card" data-testid={`workflow-outcome-${o.id}`}>
+              <div className="xp-wf__card-header">
+                <TextField
+                  className="xp-wf__grow"
+                  label={OUTCOME_LABELS[o.kind]}
+                  value={o.label}
+                  onChange={(label) => setDraft({ ...draft, outcomes: draft.outcomes.map((x) => (x.id === o.id ? { ...x, label } : x)) })}
+                />
+                <IconButton
+                  icon={X}
+                  aria-label={`Remove outcome ${o.label}`}
+                  onPress={() => setDraft({ ...draft, outcomes: draft.outcomes.filter((x) => x.id !== o.id) })}
+                />
+              </div>
+              <div className="xp-wf__form">
+                <Select
+                  label="Produced by"
+                  value={`${o.from.step}.${o.from.port}`}
+                  onChange={(key) => {
+                    const c = options.find((x) => x.key === key);
+                    if (c) setDraft({ ...draft, outcomes: draft.outcomes.map((x) => (x.id === o.id ? { ...x, from: { step: c.step, port: c.port } } : x)) });
+                  }}
+                  options={
+                    options.some((c) => c.key === `${o.from.step}.${o.from.port}`)
+                      ? options.map((c) => ({ id: c.key, label: c.label }))
+                      : [{ id: `${o.from.step}.${o.from.port}`, label: `${o.from.step} → ${o.from.port} (incompatible)` }, ...options.map((c) => ({ id: c.key, label: c.label }))]
+                  }
+                />
+                <Checkbox
+                  isSelected={o.optional}
+                  onChange={(optional) => setDraft({ ...draft, outcomes: draft.outcomes.map((x) => (x.id === o.id ? { ...x, optional } : x)) })}
+                >
+                  Optional destination
+                </Checkbox>
+              </div>
+              <Diagnostics items={diagnosticsFor(diagnostics, { outcome: o.id })} />
+            </li>
+          );
+        })}
+      </ul>
+      <div className="xp-wf__row">
+        <Select<OutcomeKind>
+          label="New outcome"
+          value={newOutcome}
+          onChange={setNewOutcome}
+          options={(Object.keys(OUTCOME_LABELS) as OutcomeKind[]).map((k) => ({ id: k, label: OUTCOME_LABELS[k] }))}
+        />
+        <Button icon={Plus} isDisabled={candidates.length === 0} onPress={() => candidates[0] && setDraft(addOutcome(draft, newOutcome, { step: candidates[0].step, port: candidates[0].port }))}>
+          Add Outcome
+        </Button>
+      </div>
+    </section>
+  );
+
+  const selectedStep = selection?.kind === "step" ? draft.steps.find((s) => s.id === selection.id) : undefined;
+  const selectedInput = selection?.kind === "input" ? draft.inputs.find((i) => i.id === selection.id) : undefined;
+
   return (
-    <div className="xp-wf" data-testid="workflow-editor" data-workflow={saved.id} data-revision={saved.revision}>
-      <div className="xp-wf__page">
+    <div className="xp-wf" data-testid="workflow-editor" data-workflow={saved.id} data-revision={saved.revision} data-view={view}>
+      <div className={`xp-wf__page${view === "canvas" ? " xp-wf__page--wide" : ""}`}>
         <header className="xp-wf__header">
           <div className="xp-wf__grow">
             <h2 className="xp-wf__title">{draft.title || "Untitled workflow"}</h2>
@@ -503,15 +666,50 @@ export function WorkflowEditor({ resource }: EditorProps) {
             label={validation?.state === "wellFormed" ? "Well-formed draft" : "Incomplete draft"}
             detail={errors ? `${errors} problem${errors === 1 ? "" : "s"}` : undefined}
           />
-          <Button variant="primary" icon={Save} isPending={saving} isDisabled={saving} onPress={() => void save()} data-testid="workflow-save">
+          <SegmentedControl<EditorView>
+            aria-label="Editor view"
+            value={view}
+            onChange={setView}
+            options={[
+              { id: "form", label: "Form", icon: ListTree },
+              { id: "canvas", label: "Canvas", icon: LayoutGrid },
+            ]}
+          />
+          <Button variant={dirty ? "primary" : "secondary"} icon={Save} isPending={saving} isDisabled={saving} onPress={() => void save()} data-testid="workflow-save">
             Save Revision
           </Button>
+          <Button
+            variant={dirty ? "secondary" : "primary"}
+            icon={Play}
+            isDisabled={runBlock !== null}
+            aria-describedby={runBlock ? reasonId : undefined}
+            onPress={() => setReviewOpen(true)}
+            data-testid="workflow-review-run"
+          >
+            Review and run…
+          </Button>
         </header>
-        <Banner tone="info" title="Draft — not runnable in this version">
-          <span data-testid="workflow-status" data-runnable={String(validation?.runnable ?? false)} data-state={validation?.state ?? "incomplete"}>
-            {validation?.runnableReason ?? "Workflow execution arrives in a later version."} Saving keeps every revision; drafts may be incomplete and are saved with their problems listed.
-          </span>
-        </Banner>
+        <div data-testid="workflow-status" data-runnable={String(runnable)} data-state={validation?.state ?? "incomplete"} data-can-review={String(runBlock === null)}>
+          {runBlock ? (
+            <Banner tone={dirty ? "info" : "warning"} title={dirty ? "Unsaved changes" : "Cannot run this revision"}>
+              <span id={reasonId} data-testid="workflow-run-reason">
+                {runBlock}
+              </span>{" "}
+              Saving keeps every revision; drafts may be incomplete and are saved with their problems listed.
+            </Banner>
+          ) : (
+            <Banner tone="info" title={`Revision ${saved.revision} can run`}>
+              Review and run… shows everything the run will read, execute, and send. Nothing runs until you press Start run.
+            </Banner>
+          )}
+        </div>
+        {origin && (
+          <div data-testid="workflow-origin" data-origin={saved.origin.kind}>
+            <Banner tone="info" title="Agent proposal">
+              {origin} It is a draft like any other: review and edit it, save it, and it runs only from a plan you review and start.
+            </Banner>
+          </div>
+        )}
         {saveError && (
           <Banner tone="danger" title="Not saved" live>
             {saveError}
@@ -519,151 +717,103 @@ export function WorkflowEditor({ resource }: EditorProps) {
         )}
         <Diagnostics items={generalDiagnostics(diagnostics)} testId="workflow-diagnostics" />
 
-        <section className="xp-wf__group" aria-label="General">
-          <h3 className="xp-wf__group-title">General</h3>
-          <div className="xp-wf__form">
-            <TextField label="Title" value={draft.title} onChange={(title) => setDraft({ ...draft, title })} data-testid="workflow-title" />
-            <Select<ExecutionCeiling>
-              label="Most this workflow may run"
-              value={draft.ceiling.execution}
-              onChange={(execution) => setDraft({ ...draft, ceiling: { ...draft.ceiling, execution } })}
-              options={(Object.keys(EXECUTION_LABELS) as ExecutionCeiling[]).map((k) => ({ id: k, label: EXECUTION_LABELS[k] }))}
-            />
-            <div className="xp-wf__wide">
-              <TextArea label="Description" value={draft.description} onChange={(description) => setDraft({ ...draft, description })} />
-            </div>
-            <div className="xp-wf__inline xp-wf__wide">
-              <Checkbox isSelected={draft.ceiling.modelRequests} onChange={(v) => setDraft({ ...draft, ceiling: { ...draft.ceiling, modelRequests: v } })}>
-                May send declared inputs to the model provider
-              </Checkbox>
-              <Checkbox isSelected={draft.ceiling.retainResults} onChange={(v) => setDraft({ ...draft, ceiling: { ...draft.ceiling, retainResults: v } })}>
-                May retain results and record evidence
-              </Checkbox>
-              <Checkbox isSelected={draft.ceiling.proposeChanges} onChange={(v) => setDraft({ ...draft, ceiling: { ...draft.ceiling, proposeChanges: v } })}>
-                May propose reviewable changes
-              </Checkbox>
-            </div>
-          </div>
-        </section>
+        {view === "canvas" ? (
+          <>
+            <section className="xp-wf__group" aria-label="Workflow canvas">
+              <WorkflowCanvas
+                workflowId={saved.id}
+                draft={draft}
+                contracts={contracts}
+                diagnostics={diagnostics}
+                selection={selection}
+                onSelectionChange={setSelection}
+                onChange={setDraft}
+              />
+            </section>
+            {addStepRow}
+            <section className="xp-wf__group" aria-label="Inspector" data-testid="workflow-inspector">
+              <h3 className="xp-wf__group-title">Inspector</h3>
+              {selectedStep ? (
+                <ul className="xp-wf__cards">
+                  <StepCard draft={draft} contracts={contracts} step={selectedStep} diagnostics={diagnosticsFor(diagnostics, { step: selectedStep.id })} onChange={setDraft} />
+                </ul>
+              ) : selectedInput ? (
+                <ul className="xp-wf__cards">
+                  <InputRow draft={draft} input={selectedInput} diagnostics={diagnosticsFor(diagnostics, { input: selectedInput.id })} onChange={setDraft} />
+                </ul>
+              ) : (
+                <p className="xp-wf__muted">Select a step or an input on the canvas to edit it here. The Form view shows every part of the workflow.</p>
+              )}
+            </section>
+          </>
+        ) : (
+          <>
+            <section className="xp-wf__group" aria-label="General">
+              <h3 className="xp-wf__group-title">General</h3>
+              <div className="xp-wf__form">
+                <TextField label="Title" value={draft.title} onChange={(title) => setDraft({ ...draft, title })} data-testid="workflow-title" />
+                <Select<ExecutionCeiling>
+                  label="Most this workflow may run"
+                  value={draft.ceiling.execution}
+                  onChange={(execution) => setDraft({ ...draft, ceiling: { ...draft.ceiling, execution } })}
+                  options={(Object.keys(EXECUTION_LABELS) as ExecutionCeiling[]).map((k) => ({ id: k, label: EXECUTION_LABELS[k] }))}
+                />
+                <div className="xp-wf__wide">
+                  <TextArea label="Description" value={draft.description} onChange={(description) => setDraft({ ...draft, description })} />
+                </div>
+                <div className="xp-wf__inline xp-wf__wide">
+                  <Checkbox isSelected={draft.ceiling.modelRequests} onChange={(v) => setDraft({ ...draft, ceiling: { ...draft.ceiling, modelRequests: v } })}>
+                    May send declared inputs to the model provider
+                  </Checkbox>
+                  <Checkbox isSelected={draft.ceiling.retainResults} onChange={(v) => setDraft({ ...draft, ceiling: { ...draft.ceiling, retainResults: v } })}>
+                    May retain results and record evidence
+                  </Checkbox>
+                  <Checkbox isSelected={draft.ceiling.proposeChanges} onChange={(v) => setDraft({ ...draft, ceiling: { ...draft.ceiling, proposeChanges: v } })}>
+                    May propose reviewable changes
+                  </Checkbox>
+                </div>
+              </div>
+            </section>
 
-        <section className="xp-wf__group" aria-label="Inputs">
-          <h3 className="xp-wf__group-title">Inputs</h3>
-          <p className="xp-wf__muted">Explicit project files the workflow reads, versioned when a run starts or pinned to exact content.</p>
-          <ul className="xp-wf__cards">
-            {draft.inputs.map((input) => (
-              <InputRow key={input.id} draft={draft} input={input} diagnostics={diagnosticsFor(diagnostics, { input: input.id })} onChange={setDraft} />
-            ))}
-          </ul>
-          <div className="xp-wf__row">
-            <Select<PortType> label="New input type" value={newInput} onChange={setNewInput} options={FILE_INPUT_TYPES.map((t) => ({ id: t, label: PORT_TYPE_LABELS[t] }))} />
-            <Button icon={Plus} onPress={() => setDraft(addInput(draft, newInput))}>
-              Add Input
-            </Button>
-          </div>
-        </section>
+            {inputsSection}
 
-        <section className="xp-wf__group" aria-label="Steps">
-          <h3 className="xp-wf__group-title">Steps</h3>
-          <p className="xp-wf__muted">Each step is a registered operation. Data reaches a step only through a compatible binding; there are no loops, conditions, or nested workflows.</p>
-          <ul className="xp-wf__cards">
-            {draft.steps.map((step) => (
-              <StepCard key={step.id} draft={draft} contracts={contracts} step={step} diagnostics={diagnosticsFor(diagnostics, { step: step.id })} onChange={setDraft} />
-            ))}
-          </ul>
-          <div className="xp-wf__row">
-            <Select
-              label="New step"
-              placeholder="Choose an operation…"
-              value={newStep}
-              onChange={(k) => setNewStep(String(k))}
-              options={contracts.map((c) => ({ id: `${c.id}@${c.version}`, label: c.title, description: c.purpose }))}
-            />
-            <Button
-              icon={Plus}
-              isDisabled={!newStep}
-              onPress={() => {
-                const contract = contracts.find((c) => `${c.id}@${c.version}` === newStep);
-                if (contract) setDraft(addStep(draft, contract));
-              }}
-            >
-              Add Step
-            </Button>
-          </div>
-        </section>
+            <section className="xp-wf__group" aria-label="Steps">
+              <h3 className="xp-wf__group-title">Steps</h3>
+              <p className="xp-wf__muted">Each step is a registered operation. Data reaches a step only through a compatible binding; there are no loops, conditions, or nested workflows.</p>
+              <ul className="xp-wf__cards">
+                {draft.steps.map((step) => (
+                  <StepCard key={step.id} draft={draft} contracts={contracts} step={step} diagnostics={diagnosticsFor(diagnostics, { step: step.id })} onChange={setDraft} />
+                ))}
+              </ul>
+              {addStepRow}
+            </section>
 
-        <section className="xp-wf__group" aria-label="Outcomes">
-          <h3 className="xp-wf__group-title">Outcomes</h3>
-          <p className="xp-wf__muted">What the workflow produces. Every step must lead to one; a manuscript promotion is an optional destination.</p>
-          <ul className="xp-wf__cards">
-            {draft.outcomes.map((o) => {
-              const options = outcomeCandidates(draft, contracts, o.kind);
-              return (
-                <li key={o.id} className="xp-wf__card" data-testid={`workflow-outcome-${o.id}`}>
-                  <div className="xp-wf__card-header">
-                    <TextField
-                      className="xp-wf__grow"
-                      label={OUTCOME_LABELS[o.kind]}
-                      value={o.label}
-                      onChange={(label) => setDraft({ ...draft, outcomes: draft.outcomes.map((x) => (x.id === o.id ? { ...x, label } : x)) })}
-                    />
-                    <IconButton
-                      icon={X}
-                      aria-label={`Remove outcome ${o.label}`}
-                      onPress={() => setDraft({ ...draft, outcomes: draft.outcomes.filter((x) => x.id !== o.id) })}
-                    />
-                  </div>
-                  <div className="xp-wf__form">
-                    <Select
-                      label="Produced by"
-                      value={`${o.from.step}.${o.from.port}`}
-                      onChange={(key) => {
-                        const c = options.find((x) => x.key === key);
-                        if (c) setDraft({ ...draft, outcomes: draft.outcomes.map((x) => (x.id === o.id ? { ...x, from: { step: c.step, port: c.port } } : x)) });
-                      }}
-                      options={
-                        options.some((c) => c.key === `${o.from.step}.${o.from.port}`)
-                          ? options.map((c) => ({ id: c.key, label: c.label }))
-                          : [{ id: `${o.from.step}.${o.from.port}`, label: `${o.from.step} → ${o.from.port} (incompatible)` }, ...options.map((c) => ({ id: c.key, label: c.label }))]
-                      }
-                    />
-                    <Checkbox
-                      isSelected={o.optional}
-                      onChange={(optional) => setDraft({ ...draft, outcomes: draft.outcomes.map((x) => (x.id === o.id ? { ...x, optional } : x)) })}
-                    >
-                      Optional destination
-                    </Checkbox>
-                  </div>
-                  <Diagnostics items={diagnosticsFor(diagnostics, { outcome: o.id })} />
-                </li>
-              );
-            })}
-          </ul>
-          <div className="xp-wf__row">
-            <Select<OutcomeKind>
-              label="New outcome"
-              value={newOutcome}
-              onChange={setNewOutcome}
-              options={(Object.keys(OUTCOME_LABELS) as OutcomeKind[]).map((k) => ({ id: k, label: OUTCOME_LABELS[k] }))}
-            />
-            <Button icon={Plus} isDisabled={candidates.length === 0} onPress={() => candidates[0] && setDraft(addOutcome(draft, newOutcome, { step: candidates[0].step, port: candidates[0].port }))}>
-              Add Outcome
-            </Button>
-          </div>
-        </section>
+            {outcomesSection}
 
-        {validation && validation.plan.length > 0 && (
-          <section className="xp-wf__group" aria-label="Plan">
-            <h3 className="xp-wf__group-title">Plan (for review)</h3>
-            <ol className="xp-wf__plan" data-testid="workflow-plan">
-              {validation.plan.map((p) => (
-                <li key={p.step}>
-                  <strong>{p.label}</strong> — {p.operation} via {p.runner}. Effects: {p.effects.join(", ")}.
-                </li>
-              ))}
-            </ol>
-          </section>
+            {validation && validation.plan.length > 0 && (
+              <section className="xp-wf__group" aria-label="Order">
+                <h3 className="xp-wf__group-title">Order of steps</h3>
+                <ol className="xp-wf__plan" data-testid="workflow-plan">
+                  {validation.plan.map((p) => (
+                    <li key={p.step}>
+                      <strong>{p.label}</strong> — {p.operation} via {p.runner}. Effects: {p.effects.join(", ")}.
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            )}
+          </>
         )}
+
+        <RunHistory workflow={saved.id} />
       </div>
+      <PlanReviewDialog
+        workflow={saved.id}
+        revision={saved.revision}
+        isOpen={reviewOpen}
+        onOpenChange={setReviewOpen}
+        onStarted={(run) => openRun(run)}
+      />
     </div>
   );
 }

@@ -197,3 +197,479 @@
   font-size: var(--font-size-sm);
   line-height: var(--line-height-normal);
 }
+
+/* ---------- Plan review, run monitor (M8) ---------- */
+
+.xp-wf__page--wide {
+  max-width: none;
+}
+
+.xp-wf-plan-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+  overflow-y: auto;
+  user-select: text;
+}
+
+.xp-wf-plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.xp-wf-plan__heading {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+}
+
+.xp-wf-plan__reason {
+  flex: 1;
+  margin: 0;
+  align-self: center;
+}
+
+.xp-wf-plan__blockers ul,
+.xp-wf-plan__effects {
+  margin: 0;
+  padding-left: var(--space-5);
+}
+
+.xp-wf-plan__notices {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.xp-wf-plan__steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.xp-wf-plan__step,
+.xp-wf-runstep {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
+}
+
+.xp-wf-plan__step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.xp-wf-plan__index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: var(--border-width) solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.xp-wf-plan__containment {
+  margin: 0;
+}
+
+.xp-wf-plan__payload {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.xp-wf-plan__label {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.xp-wf-plan__param {
+  display: inline-block;
+  margin-right: var(--space-3);
+}
+
+.xp-wf-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.xp-wf-facts dt {
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-medium);
+}
+
+.xp-wf-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.xp-wf-hash {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-0-5);
+  vertical-align: middle;
+}
+
+.xp-wf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.xp-wf-table th,
+.xp-wf-table td {
+  padding: var(--space-1) var(--space-2);
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.xp-wf-table thead th {
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* Full code with line numbers; the numbers are generated content (never copied). */
+.xp-wf-code {
+  max-height: 360px;
+  margin: 0;
+  overflow: auto;
+  padding: var(--space-2) 0;
+  border: var(--border-width) solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--line-height-code);
+  white-space: pre;
+}
+
+.xp-wf-code:focus-visible,
+.xp-wf-log:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: 0;
+}
+
+.xp-wf-code__line {
+  display: block;
+  padding-right: var(--space-3);
+}
+
+.xp-wf-code__line::before {
+  content: attr(data-line);
+  display: inline-block;
+  width: 4ch;
+  margin-right: var(--space-3);
+  padding-right: var(--space-1);
+  color: var(--color-text-subtle);
+  text-align: right;
+  user-select: none;
+}
+
+.xp-wf-log {
+  max-height: 280px;
+  margin: 0;
+  overflow: auto;
+  padding: var(--space-2);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.xp-wf-usage {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--space-3);
+}
+
+.xp-wf-attempt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--color-border);
+}
+
+.xp-wf-attempt .xp-wf__row {
+  align-items: center;
+  margin-top: 0;
+}
+
+.xp-wf-outputs,
+.xp-wf-rejected,
+.xp-wf-checklist {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.xp-wf-output {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.xp-wf-output__head,
+.xp-wf-output__facts {
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.xp-wf-output__image {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+}
+
+.xp-wf-output__table {
+  max-height: 320px;
+  overflow: auto;
+}
+
+/* Refused outputs: danger tint, dashed outline, icon, and the word "Refused". */
+.xp-wf-rejected__item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-1-5) var(--space-2);
+  border: var(--border-width) dashed var(--color-danger-border);
+  border-radius: var(--radius-md);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-text);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.xp-wf-rejected__item svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.xp-wf-proposal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.xp-wf-proposal .xp-wf__row {
+  align-items: center;
+}
+
+.xp-wf-checklist li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.xp-wf-checklist__statement {
+  flex-basis: 100%;
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Workflow canvas (M8) ---------- */
+
+.xp-wfc {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.xp-wfc__canvas {
+  height: 520px;
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.xp-wfc__message:empty {
+  display: none;
+}
+
+.xp-wfc-node {
+  width: 240px;
+  height: auto;
+  user-select: none;
+}
+
+.xp-wfc-ports {
+  margin: var(--space-1) calc(-1 * var(--space-2)) 0 calc(-1 * (var(--space-2) + 3px));
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.xp-wfc-port {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 26px;
+  padding: 0 var(--space-3);
+  border-top: var(--border-width) solid var(--color-border-subtle);
+  font-size: var(--font-size-sm);
+}
+
+.xp-wfc-port[data-side="out"] {
+  justify-content: flex-end;
+  text-align: right;
+}
+
+.xp-wfc-port__type,
+.xp-wfc-port__required {
+  color: var(--color-text-muted);
+}
+
+.xp-wfc-port__required {
+  font-weight: var(--font-weight-semibold);
+}
+
+.xp-wfc-path {
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+/* Typed handles: color by port category, shape as a second cue (the type is also text). */
+.xp-graph-canvas .xp-wfc-handle.react-flow__handle {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--handle-color, var(--color-border-strong));
+  border-radius: var(--radius-full);
+  background: var(--color-surface);
+  cursor: crosshair;
+}
+.xp-graph-canvas .xp-wfc-handle[data-shape="square"].react-flow__handle {
+  border-radius: 2px;
+}
+.xp-graph-canvas .xp-wfc-handle[data-shape="diamond"].react-flow__handle {
+  border-radius: 1px;
+  rotate: 45deg;
+}
+.xp-graph-canvas .xp-wfc-handle[data-category="data"] {
+  --handle-color: var(--color-graph-data-border);
+}
+.xp-graph-canvas .xp-wfc-handle[data-category="document"] {
+  --handle-color: var(--color-graph-document-border);
+}
+.xp-graph-canvas .xp-wfc-handle[data-category="formal"] {
+  --handle-color: var(--color-graph-formal-border);
+}
+.xp-graph-canvas .xp-wfc-handle[data-category="reference"] {
+  --handle-color: var(--color-graph-reference-border);
+}
+.xp-graph-canvas .xp-wfc-handle[data-category="math"] {
+  --handle-color: var(--color-graph-math-border);
+}
+.xp-graph-canvas .xp-wfc-handle[data-category="workflow"] {
+  --handle-color: var(--color-graph-workflow-border);
+}
+.xp-graph-canvas .xp-wfc-handle.react-flow__handle:hover,
+.xp-graph-canvas .xp-wfc-handle.react-flow__handle.connectingto {
+  background: var(--handle-color, var(--color-accent));
+}
+.xp-graph-canvas .xp-wfc-handle--pre.react-flow__handle {
+  width: 24px;
+  height: 8px;
+  border-width: 1px;
+  border-style: dashed;
+  border-radius: var(--radius-sm);
+}
+
+/* Connection families: solid data, dashed prerequisite, dotted annotation. */
+.xp-graph-canvas .xp-wfc-edge .react-flow__edge-path {
+  stroke: var(--color-graph-edge);
+  stroke-width: 1.75;
+}
+.xp-graph-canvas .xp-wfc-edge--prerequisite .react-flow__edge-path {
+  stroke-dasharray: 7 4;
+}
+.xp-graph-canvas .xp-wfc-edge--annotation .react-flow__edge-path {
+  stroke-dasharray: 2 3;
+  stroke: var(--color-text-subtle);
+}
+.xp-graph-canvas .xp-wfc-edge--problem .react-flow__edge-path {
+  stroke: var(--color-danger-text);
+}
+.xp-graph-canvas .xp-wfc-edge.selected .react-flow__edge-path {
+  stroke: var(--color-accent);
+  stroke-width: 2.5;
+}
+.xp-graph-canvas .xp-wfc-edge .react-flow__edge-textbg {
+  fill: var(--color-surface-raised);
+}
+.xp-graph-canvas .xp-wfc-edge .react-flow__edge-text {
+  fill: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.xp-wfc__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.xp-wfc__legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.xp-wfc__swatch {
+  display: inline-block;
+  width: 24px;
+  border-top: 2px solid var(--color-graph-edge);
+}
+.xp-wfc__swatch[data-kind="prerequisite"] {
+  border-top-style: dashed;
+}
+.xp-wfc__swatch[data-kind="annotation"] {
+  border-top-style: dotted;
+  border-top-color: var(--color-text-subtle);
+}
