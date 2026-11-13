@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use exposition_graph::workflow::registry::{self, OperationContract};
-use exposition_graph::workflow::{WorkflowDefinition, WorkflowValidation};
+use exposition_graph::workflow::{StepRepeat, WorkflowDefinition, WorkflowValidation};
 use exposition_graph::{SavedWorkflow, WorkflowId, WorkflowPlanId, WorkflowRunId};
 use tokio::sync::broadcast;
 
@@ -15,12 +15,14 @@ use crate::adapters::Adapters;
 use crate::adapters::lean::LeanAuditor;
 use crate::adapters::research::{PromotionReview, ResearchActions};
 use crate::model::{
-    MAX_ACTIVE_RUNS, StartWorkflowRunRequest, WorkflowAssociationDecision, WorkflowOutputValue, WorkflowProposalStatus,
-    WorkflowRun, WorkflowRunCause, WorkflowRunError, WorkflowRunEvent, WorkflowRunPlan, WorkflowRunState,
-    WorkflowRunStep, WorkflowRunSummary, WorkflowRunUsage, WorkflowStepState,
+    MAX_ACTIVE_RUNS, StartWorkflowRunRequest, WorkflowAssociationDecision, WorkflowConcurrencyLimits,
+    WorkflowOutputValue, WorkflowProposalStatus, WorkflowRun, WorkflowRunCause, WorkflowRunError, WorkflowRunEvent,
+    WorkflowRunPlan, WorkflowRunState, WorkflowRunStep, WorkflowRunSummary, WorkflowRunUsage, WorkflowStepInstance,
+    WorkflowStepState,
 };
 use crate::plan::{self, BuiltPlan, PlanFacts, project_key};
 use crate::runner::{self, CancelToken};
+use crate::slots::{SlotCounts, Slots};
 use crate::store::{self, RunStore};
 
 /// At most this many unstarted plans are kept.
@@ -103,6 +105,8 @@ pub(crate) struct Inner {
     /// cancel of an orphaned record).
     edits: Mutex<()>,
     events: broadcast::Sender<WorkflowRunEvent>,
+    /// Execution slots shared by every active run (the global limits).
+    pub(crate) slots: Arc<Slots>,
 }
 
 impl Inner {
@@ -165,6 +169,14 @@ impl WorkflowRunService {
     /// Open the run store and reconcile runs an earlier session left active
     /// (they become interrupted; nothing is resumed or repeated).
     pub fn new(config: WorkflowRunConfig) -> Result<Self, WorkflowRunError> {
+        Self::new_with_limits(config, WorkflowConcurrencyLimits::default())
+    }
+
+    /// [`Self::new`] with other application-wide concurrency limits (tests).
+    pub fn new_with_limits(
+        config: WorkflowRunConfig,
+        limits: WorkflowConcurrencyLimits,
+    ) -> Result<Self, WorkflowRunError> {
         let open = |path: Option<&Path>| -> Result<(RunStore, u32), WorkflowRunError> {
             let store = RunStore::open(path)?;
             let interrupted = store.reconcile(crate::now_ms())?;
@@ -205,6 +217,7 @@ impl WorkflowRunService {
                 active: Mutex::new(HashMap::new()),
                 edits: Mutex::new(()),
                 events,
+                slots: Slots::new(limits),
             }),
         })
     }
@@ -265,8 +278,24 @@ impl WorkflowRunService {
         }
     }
 
-    fn active_run(&self) -> bool {
-        self.inner.active.lock().unwrap_or_else(|p| p.into_inner()).len() >= MAX_ACTIVE_RUNS
+    /// Why a run of `workflow` cannot start now because of other runs.
+    fn active_problem(active: &HashMap<WorkflowRunId, ActiveRun>, workflow: &WorkflowId, max: u32) -> Option<String> {
+        if active.values().any(|a| &a.workflow == workflow) {
+            return Some("A run of this workflow is active; wait for it to finish or cancel it first.".to_owned());
+        }
+        let max = (max as usize).clamp(1, MAX_ACTIVE_RUNS);
+        (active.len() >= max).then(|| {
+            format!(
+                "{} workflow run{} active (at most {max} at once); wait for one to finish or cancel it first.",
+                active.len(),
+                if active.len() == 1 { " is" } else { "s are" }
+            )
+        })
+    }
+
+    fn active_run(&self, workflow: &WorkflowId) -> Option<String> {
+        let active = self.inner.active.lock().unwrap_or_else(|p| p.into_inner());
+        Self::active_problem(&active, workflow, self.inner.slots.limits().max_active_runs)
     }
 
     fn build(&self, root: &Path, saved: &SavedWorkflow, options: &PlanOptions) -> BuiltPlan {
@@ -278,8 +307,10 @@ impl WorkflowRunService {
             restricted_image,
             restricted_image_id: &|| self.inner.host.restricted_image_id(),
             adapters: &self.inner.adapters,
-            active_run: self.active_run(),
+            active_run: self.active_run(&saved.id),
             pins: &options.pins,
+            limits: self.inner.slots.limits(),
+            resolve: &|id, revision| self.inner.host.workflow(root, id, Some(revision)).ok().map(|s| s.definition),
         };
         let mut built = plan::build_plan(saved, &facts, crate::now_ms());
         built.plan.notices.extend(options.notices.iter().cloned());
@@ -314,6 +345,19 @@ impl WorkflowRunService {
         }
         plans.insert(plan.plan.clone(), CachedPlan { built, root, requested_revision: revision, options });
         Ok(plan)
+    }
+
+    /// The plan [`Self::plan_with`] would make now, without keeping it: it
+    /// cannot be started (a trigger's check of its standing plan).
+    pub fn preview_plan(
+        &self,
+        id: &WorkflowId,
+        revision: Option<u64>,
+        options: &PlanOptions,
+    ) -> Result<WorkflowRunPlan, WorkflowRunError> {
+        let root = self.root()?;
+        let saved = self.inner.host.workflow(&root, id, revision)?;
+        Ok(self.build(&root, &saved, options).plan)
     }
 
     /// Start a run of an approved plan (recomputed now; refused if anything
@@ -372,11 +416,10 @@ impl WorkflowRunService {
         let token = Arc::new(CancelToken::default());
         let run = {
             let mut active = self.inner.active.lock().unwrap_or_else(|p| p.into_inner());
-            if active.len() >= MAX_ACTIVE_RUNS {
-                return Err(WorkflowRunError::new(
-                    "workflow.activeRun",
-                    "Another workflow run is active; wait for it to finish or cancel it first.",
-                ));
+            if let Some(problem) =
+                Self::active_problem(&active, &approved.workflow, self.inner.slots.limits().max_active_runs)
+            {
+                return Err(WorkflowRunError::new("workflow.activeRun", problem));
             }
             // The run carries the plan exactly as approved.
             let approved = cached.built.plan;
@@ -405,6 +448,24 @@ impl WorkflowRunService {
                         containment: s.containment,
                         state: WorkflowStepState::Pending,
                         attempts: Vec::new(),
+                        // forEach instances are listed up front; until
+                        // iterations as they start.
+                        instances: match &s.repeat {
+                            Some(StepRepeat::ForEach { values, .. }) => values
+                                .iter()
+                                .take(plan::MAX_FOR_EACH)
+                                .enumerate()
+                                .map(|(i, v)| WorkflowStepInstance {
+                                    index: i as u32,
+                                    parameter: Some(v.clone()),
+                                    state: WorkflowStepState::Pending,
+                                    attempts: Vec::new(),
+                                    reason: None,
+                                })
+                                .collect(),
+                            _ => Vec::new(),
+                        },
+                        reason: None,
                     })
                     .collect(),
                 outcomes: cached.built.outcomes,
@@ -446,6 +507,7 @@ impl WorkflowRunService {
             failed.finished_at_ms = Some(crate::now_ms());
             for step in &mut failed.steps {
                 step.state = WorkflowStepState::Skipped;
+                step.reason = Some("The run could not start.".into());
             }
             let _ = self.inner.persist(&failure_key, &failed, None);
             return Ok(failed);
@@ -476,7 +538,9 @@ impl WorkflowRunService {
         let now = crate::now_ms();
         let mut changed: Vec<(String, String, WorkflowOutputValue)> = Vec::new();
         for step in &mut run.steps {
-            for attempt in &mut step.attempts {
+            let attempts =
+                step.attempts.iter_mut().chain(step.instances.iter_mut().flat_map(|i| i.attempts.iter_mut()));
+            for attempt in attempts {
                 for output in &mut attempt.outputs {
                     if let WorkflowOutputValue::PromotionProposal {
                         promotion,
@@ -674,6 +738,11 @@ impl WorkflowRunService {
         }
         self.inner.persist(&key, &run, Some(&decision.step))?;
         Ok(run)
+    }
+
+    /// Steps executing now across all runs, by limit (diagnostics, tests).
+    pub fn slot_counts(&self) -> SlotCounts {
+        self.inner.slots.counts()
     }
 
     /// Ids of active runs (for diagnostics and tests).

@@ -151,6 +151,8 @@
     "allow-workflow-import",
     "allow-workflow-list",
     "allow-workflow-get",
+    "allow-workflow-bundle-export",
+    "allow-workflow-bundle-import",
     "allow-workflow-run-plan",
     "allow-workflow-run-start",
     "allow-workflow-run-cancel",

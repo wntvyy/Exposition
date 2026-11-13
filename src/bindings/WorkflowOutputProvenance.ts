@@ -7,6 +7,10 @@ import type { WorkflowRunId } from "./WorkflowRunId";
  */
 export type WorkflowOutputProvenance = { run: WorkflowRunId, step: string, attempt: number, 
 /**
+ * The instance of a repeated step that produced it.
+ */
+instance: number | null, 
+/**
  * The service operation that produced it (research run, Lean audit, ...).
  */
 operation: OperationRef, };

@@ -871,6 +871,17 @@ mod tests {
     }
 
     #[test]
+    fn workflow_propose_never_offers_the_composite_operation() {
+        // Agents cannot name a saved workflow to run; their definitions stay v1.
+        let schema = workflow_schema().to_string();
+        assert!(schema.contains("research.pythonBatch"));
+        assert!(!schema.contains(exposition_graph::workflow::COMPOSITE_OPERATION), "{schema}");
+        for v2 in ["composite", "condition", "repeat", "maxParallel"] {
+            assert!(!schema.contains(&format!("\"{v2}\"")), "{v2} offered to agents");
+        }
+    }
+
+    #[test]
     fn schemas_are_strict_and_unique() {
         let defs = definitions();
         let mut names: Vec<_> = defs.iter().map(|d| d.name).collect();
