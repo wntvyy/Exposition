@@ -4,7 +4,7 @@
 //! - Saving is a deliberate admission of a `Workflow` entity, so it goes
 //!   through the central gate like a graph change: refused in read-only
 //!   tasks, approved by the user (the complete definition, its validation
-//!   diagnostics, and "draft, not runnable in this version") in review-edits
+//!   diagnostics, and that saving runs nothing) in review-edits
 //!   tasks, saved directly in auto-apply tasks. Nothing is ever executed.
 //! - The agent cannot raise the authority ceiling beyond its own task: the
 //!   task's ceiling is derived from its execution mode, permission profile,
@@ -12,8 +12,9 @@
 //! - Service-owned outputs (formal evidence, retained artifacts) cannot be
 //!   forged: a definition that wires anything else into them (contract rule
 //!   6) is refused, never saved.
-//! - Incomplete drafts are saved with their diagnostics; no draft is
-//!   runnable in this version. Workflows are project-level definitions, so
+//! - Incomplete drafts are saved with their diagnostics. Saving a proposal
+//!   never runs it: a run needs the user's review of a run plan and an
+//!   explicit start. Workflows are project-level definitions, so
 //!   the tool needs a task scoped to the whole project.
 
 use std::collections::BTreeMap;
@@ -22,9 +23,8 @@ use std::path::Path;
 use exposition_core::path::WorkspacePath;
 use exposition_graph::workflow::{
     AuthorityCeiling, CodeLanguage, ExecutionCeiling, InputSource, InputVersion, MAX_CONNECTIONS, MAX_INPUTS,
-    MAX_OUTCOMES, MAX_PARAMETERS, MAX_STEPS, NOT_RUNNABLE_REASON, OutcomeKind, ParamValue, PortSource, PortType,
-    StepOperation, StepPayload, StepPort, WORKFLOW_SCHEMA, WorkflowConnection, WorkflowInput, WorkflowOutcome,
-    WorkflowStep,
+    MAX_OUTCOMES, MAX_PARAMETERS, MAX_STEPS, OutcomeKind, ParamValue, PortSource, PortType, StepOperation, StepPayload,
+    StepPort, WORKFLOW_SCHEMA, WorkflowConnection, WorkflowInput, WorkflowOutcome, WorkflowStep,
 };
 use exposition_graph::{
     DiagnosticSeverity, Origin, RelationKind, SaveWorkflowRequest, ValidationContext, WorkflowDefinition, WorkflowId,
@@ -319,12 +319,16 @@ fn ceiling_text(c: &AuthorityCeiling) -> String {
 }
 
 /// A validated draft, as shown for approval.
+/// Why a draft saved by an agent did not run (saving never runs anything).
+pub const SAVED_NOT_RUN: &str =
+    "Saving a proposal never runs it; the user reviews a run plan and starts a run separately.";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedWorkflow {
     pub request: SaveWorkflowRequest,
     pub ceiling: AuthorityCeiling,
     pub title: String,
-    /// Complete approval text (definition, diagnostics, not runnable).
+    /// Complete approval text (definition, diagnostics, saving runs nothing).
     pub detail: String,
     pub errors: u32,
 }
@@ -421,8 +425,8 @@ pub fn prepare(
     }
     let title = format!("Save workflow draft “{}”", definition.title.trim());
     let mut detail = format!(
-        "Save the workflow draft “{}”{} in the project graph. It is a draft: it is not runnable in this version and \
-         nothing runs now or later without your separate approval.\n\nValidation: {} ({} error(s), {} warning(s)). \
+        "Save the workflow draft “{}”{} in the project graph. Saving runs nothing: the workflow runs only if you \
+         later review its run plan and start it yourself.\n\nValidation: {} ({} error(s), {} warning(s)). \
          Authority ceiling: {}.",
         shown(definition.title.trim()),
         match &id {
@@ -479,7 +483,7 @@ pub fn save(
         "warnings": saved.validation.warnings,
         "diagnostics": diagnostics_json(&saved.validation),
         "runnable": false,
-        "runnableReason": NOT_RUNNABLE_REASON,
-        "note": "Saved as a draft in the project graph. Drafts are not runnable in this version; nothing was run.",
+        "runnableReason": SAVED_NOT_RUN,
+        "note": "Saved as a draft in the project graph; nothing was run. A run needs the user's review of its run plan and an explicit start.",
     })))
 }
