@@ -126,6 +126,9 @@ pub struct WorkflowPlanInput {
     pub bytes: u64,
     /// The definition pinned this hash (otherwise: current at plan time).
     pub pinned: bool,
+    /// The complete text of a code input, exactly the content `sha256`
+    /// names (the user reviews the code a step runs, never a summary).
+    pub text: Option<String>,
 }
 
 /// A data binding of a planned step's input port.

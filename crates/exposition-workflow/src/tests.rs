@@ -1465,6 +1465,38 @@ fn an_image_retagged_during_a_run_refuses_later_restricted_steps() {
 }
 
 #[test]
+fn the_plan_shows_the_complete_code_of_a_script_input() {
+    let f = fixture();
+    let script = "import os
+# MARKER-LINE
+print('experiment')
+";
+    std::fs::write(f.root.join("experiment.py"), script).unwrap();
+    let from_script = |name: &str| {
+        draft(&WorkflowPresetRequest {
+            preset: NUMERICAL_EXPERIMENT.into(),
+            script: Some(path(name)),
+            data: Some(path("data/obs.csv")),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let plan = f.service.plan(&f.save(from_script("experiment.py")), None).unwrap();
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    let input = plan.inputs.iter().find(|i| i.port_type == PortType::CodeSource).unwrap();
+    assert_eq!(input.text.as_deref(), Some(script), "the code exactly as hashed");
+    assert_eq!(input.sha256, sha256_hex(script.as_bytes()));
+    assert!(plan.inputs.iter().filter(|i| i.port_type != PortType::CodeSource).all(|i| i.text.is_none()));
+    // Code that is not text, or too large to review in full, blocks the plan.
+    std::fs::write(f.root.join("binary.py"), [0xff_u8, 0xfe, 0x00, 0x41]).unwrap();
+    let plan = f.service.plan(&f.save(from_script("binary.py")), None).unwrap();
+    assert!(plan.blockers.iter().any(|b| b.code == "workflow.codeNotText"), "{:?}", plan.blockers);
+    std::fs::write(f.root.join("huge.py"), "#".repeat(crate::plan::MAX_REVIEW_CODE_BYTES as usize + 1)).unwrap();
+    let plan = f.service.plan(&f.save(from_script("huge.py")), None).unwrap();
+    assert!(plan.blockers.iter().any(|b| b.code == "workflow.codeTooLarge"), "{:?}", plan.blockers);
+}
+
+#[test]
 fn hostile_pins_and_trust_changes_in_plans() {
     let f = fixture();
     let mut def = numerical(false);

@@ -13,4 +13,9 @@ sha256: string, bytes: number,
 /**
  * The definition pinned this hash (otherwise: current at plan time).
  */
-pinned: boolean, };
+pinned: boolean, 
+/**
+ * The complete text of a code input, exactly the content `sha256`
+ * names (the user reviews the code a step runs, never a summary).
+ */
+text: string | null, };

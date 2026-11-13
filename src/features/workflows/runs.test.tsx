@@ -74,7 +74,7 @@ const plan = (overrides: Partial<WorkflowRunPlan> = {}): WorkflowRunPlan => ({
   definitionHash: "d".repeat(64),
   title: "Numerical experiment",
   project: "thesis",
-  inputs: [{ id: "data", label: "Measurements", portType: "dataset", path: "research/data/m.csv", sha256: HASH, bytes: 2048, pinned: true }],
+  inputs: [{ id: "data", label: "Measurements", portType: "dataset", path: "research/data/m.csv", sha256: HASH, bytes: 2048, pinned: true, text: null }],
   steps: [
     {
       step: "run",
@@ -206,6 +206,24 @@ describe("plan review", () => {
     expect(screen.getByTestId("plan-budgets").textContent).toContain("10 steps");
     expect(screen.getByTestId("plan-notices").textContent).toContain("sends the figure to the model provider");
     expect((screen.getByTestId("workflow-start-run") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("shows the complete code of a script input on the step that runs it (R-m8-F5)", async () => {
+    const script = "import os\n# MARKER-LINE\nprint(42)";
+    const base = plan();
+    runIpc.plan.mockResolvedValue(
+      plan({
+        inputs: [...base.inputs, { id: "script", label: "Python script", portType: "codeSource", path: "experiment.py", sha256: HASH, bytes: script.length, pinned: false, text: script }],
+        steps: [{ ...base.steps[0]!, payload: null, bindings: [...base.steps[0]!.bindings, { port: "script", from: { kind: "input", input: "script" } }] }, base.steps[1]!],
+      }),
+    );
+    open();
+    await screen.findByTestId("workflow-plan-details");
+    expect(screen.queryByTestId("plan-code-run")).toBeNull();
+    const code = screen.getByTestId("plan-script-run");
+    expect(code.textContent).toBe(`${script}\n`);
+    expect(code.querySelectorAll("[data-line]")).toHaveLength(3);
+    expect(screen.getByTestId("plan-step-run").textContent).toContain("Code from experiment.py");
   });
 
   it("starts only on Start run, with the plan id and its approval hash", async () => {

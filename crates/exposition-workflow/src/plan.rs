@@ -32,6 +32,8 @@ pub const MAX_RUN_SECONDS: u32 = 4 * 3600;
 pub const MAX_RUN_OUTPUT_BYTES: u64 = 1024 * 1024 * 1024;
 /// Model requests allowed per model step.
 pub const MODEL_REQUESTS_PER_STEP: u32 = 25;
+/// A code input is shown in full in the plan; larger ones cannot be reviewed.
+pub const MAX_REVIEW_CODE_BYTES: u64 = 1024 * 1024;
 
 /// What the open project and application settings say right now.
 pub struct PlanFacts<'a> {
@@ -102,6 +104,24 @@ pub fn hash_project_file(root: &Path, path: &WorkspacePath) -> Result<(String, u
         hasher.update(&buffer[..n]);
     }
     Ok((hasher.finalize().iter().map(|b| format!("{b:02x}")).collect(), bytes))
+}
+
+/// The complete text of a code input whose content hashed to `sha256`.
+fn review_text(root: &Path, path: &WorkspacePath, sha256: &str, bytes: u64) -> Result<String, (&'static str, String)> {
+    if bytes > MAX_REVIEW_CODE_BYTES {
+        return Err((
+            "workflow.codeTooLarge",
+            format!("{path} is too large to review in full ({bytes} bytes; at most {MAX_REVIEW_CODE_BYTES})"),
+        ));
+    }
+    let content = resolve(root, path)
+        .and_then(|p| std::fs::read(p).map_err(|e| format!("{path} cannot be read: {e}")))
+        .map_err(|m| ("workflow.inputMissing", m))?;
+    if crate::adapters::sha256_hex(&content) != sha256 {
+        return Err(("workflow.inputChanged", format!("{path} changed while the plan was made; review a new plan")));
+    }
+    String::from_utf8(content)
+        .map_err(|_| ("workflow.codeNotText", format!("{path} is not UTF-8 text, so its code cannot be reviewed")))
 }
 
 /// The canonical location of a project file inside `root`.
@@ -308,6 +328,17 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
                         Some(&input.id),
                     ));
                 }
+                let text = if input.port_type == registry::PortType::CodeSource {
+                    match review_text(facts.root, path, &sha256, bytes) {
+                        Ok(text) => Some(text),
+                        Err((code, message)) => {
+                            blockers.push(blocker(code, message, None, Some(&input.id)));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 inputs.push(WorkflowPlanInput {
                     id: input.id.clone(),
                     label: input.label.clone(),
@@ -316,6 +347,7 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
                     sha256,
                     bytes,
                     pinned: pinned.is_some(),
+                    text,
                 });
             }
             Err(message) => blockers.push(blocker("workflow.inputMissing", message, None, Some(&input.id))),

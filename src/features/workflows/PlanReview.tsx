@@ -168,6 +168,21 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
         </dd>
       </dl>
       {step.payload && <PayloadView step={step} payload={step.payload} />}
+      {step.bindings.map((b, i) => {
+        if (b.from.kind !== "input") return null;
+        const inputId = b.from.input;
+        const input = plan.inputs.find((x) => x.id === inputId);
+        if (!input || input.text === null) return null;
+        return (
+          <div className="xp-wf-plan__payload" key={`script-${i}`}>
+            <div className="xp-wf-plan__label">
+              Code from <code>{input.path}</code> ({input.text.split("\n").length} lines, <FullHash hash={input.sha256} label={input.path} />) — runs exactly as
+              shown
+            </div>
+            <CodeListing text={input.text} label={`Code of step ${step.label} from ${input.path}`} testId={`plan-script-${step.step}`} />
+          </div>
+        );
+      })}
     </li>
   );
 }
