@@ -763,16 +763,18 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
             </Button>
           </>
         )}
-        <Button
-          variant="ghost"
-          icon={FileDown}
-          isPending={busy === "manifest"}
-          isDisabled={busy !== null}
-          onPress={() => void exportManifest()}
-          data-testid="workflow-run-export-manifest"
-        >
-          Export manifest
-        </Button>
+        {run.state !== "running" && (
+          <Button
+            variant="ghost"
+            icon={FileDown}
+            isPending={busy === "manifest"}
+            isDisabled={busy !== null}
+            onPress={() => void exportManifest()}
+            data-testid="workflow-run-export-manifest"
+          >
+            Export manifest
+          </Button>
+        )}
       </header>
 
       {manifest && (

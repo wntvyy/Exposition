@@ -261,6 +261,8 @@ describe("plan review (M9)", () => {
 describe("run monitor (M9)", () => {
   it("shows every step and instance in flight at once", () => {
     render(<RunMonitor run={run()} onRun={vi.fn()} />);
+    // A running run has no manifest to export yet.
+    expect(screen.queryByTestId("workflow-run-export-manifest")).toBeNull();
     const now = screen.getByTestId("workflow-run-concurrent");
     expect(now.getAttribute("data-count")).toBe("2");
     expect(now.textContent).toContain("Running now (2 of at most 3 at once)");
