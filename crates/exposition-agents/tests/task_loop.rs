@@ -457,6 +457,20 @@ async fn budgets_stop_the_loop_outside_model_prose() {
     let task = run(&h, script, req).await;
     assert!(matches!(task.status, TaskStatus::BudgetExceeded { budget: BudgetKind::WallTime, .. }));
     assert!(started.elapsed() < Duration::from_secs(5));
+
+    // A process call the gate refuses (execution disabled) is answered with the
+    // refusal and the task continues; it does not trip a zero command budget
+    // (R-m8-F4: a read-only workflow review step).
+    let services = recording(None, false);
+    let h = harness_with(services.clone());
+    let mut req = request(&h, PermissionProfile::ReadOnly);
+    req.budgets = Some(Budgets { max_commands: 0, ..Budgets::default() });
+    let task = run(&h, command_script(), req).await;
+    assert_eq!(task.status, TaskStatus::Completed, "{:?}", task.status);
+    let results = tool_results(&h, &task.id);
+    assert_eq!(results[0]["isError"], json!(true), "{results:?}");
+    assert!(!results[0].to_string().contains("command budget"), "a refusal, not a budget stop: {results:?}");
+    assert!(services.calls.lock().unwrap().is_empty(), "nothing ran");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

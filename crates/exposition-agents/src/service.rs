@@ -1477,13 +1477,6 @@ impl Run<'_> {
             Ok(call) => call,
             Err(message) => return Ok(ToolOutput::error(message)),
         };
-        if call.is_process() && self.usage.commands >= budgets.max_commands {
-            *budget_hit = Some(budget_exceeded(
-                BudgetKind::Commands,
-                format!("the limit of {} process launches was reached.", budgets.max_commands),
-            ));
-            return Ok(ToolOutput::error("Not executed: the task's command budget is used up."));
-        }
         // Targets pending reconciliation get a short, bounded wait before the
         // gate pauses the call.
         self.settle_graph(&call).await;
@@ -1491,6 +1484,20 @@ impl Run<'_> {
             let env = self.env();
             exec::gate(&call, &env)
         };
+        // A call the gate refuses (e.g. a process in a task with execution
+        // disabled) gets that refusal and the task continues; only a call
+        // that could launch a process counts against the command budget.
+        let gate = match gate {
+            Gate::Refused(output) => return Ok(output),
+            other => other,
+        };
+        if call.is_process() && self.usage.commands >= budgets.max_commands {
+            *budget_hit = Some(budget_exceeded(
+                BudgetKind::Commands,
+                format!("the limit of {} process launches was reached.", budgets.max_commands),
+            ));
+            return Ok(ToolOutput::error("Not executed: the task's command budget is used up."));
+        }
         let authorization = match gate {
             Gate::Refused(output) => return Ok(output),
             Gate::Allowed(authorization) => authorization,
