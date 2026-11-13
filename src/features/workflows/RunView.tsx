@@ -7,7 +7,7 @@
 // Outputs are shown inertly: images (SVG included) only through <img> from a
 // blob URL of the research artifact bytes; CSV/TSV as plain cells; anything
 // else by path and hash. Markup is never inserted into the page.
-import { Ban, Check, CircleSlash, Eye, FileWarning, Play, RotateCcw, Square, X } from "lucide-react";
+import { Ban, Check, CircleSlash, Eye, FileWarning, RotateCcw, Square, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { editors } from "../../app/editors";
@@ -501,10 +501,16 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
         <span data-testid="workflow-run-state" data-state={run.state} aria-live="polite">
           <StatusPill status={view.status} label={view.label} />
         </span>
-        {run.state === "running" && (
+        {run.state === "running" ? (
           <Button variant="secondary" icon={Square} isPending={busy === "cancel"} isDisabled={busy !== null} onPress={() => void act("cancel")} data-testid="workflow-run-cancel">
             Cancel run
           </Button>
+        ) : (
+          run.state !== "interrupted" && (
+            <Button variant="secondary" icon={RotateCcw} onPress={() => setReviewOpen(true)} data-testid="workflow-run-again">
+              Review a new run…
+            </Button>
+          )
         )}
       </header>
 
@@ -727,7 +733,7 @@ export function RunHistory({ workflow, title = "Runs" }: { workflow: string | nu
                   </Badge>
                 )}
                 <StatusPill status={view.status} label={view.label} />
-                <Button size="sm" icon={Play} onPress={() => openRun(r)} aria-label={`Open run of ${r.title} started ${formatTime(r.startedAtMs)}`}>
+                <Button size="sm" onPress={() => openRun(r)} aria-label={`Open run of ${r.title} started ${formatTime(r.startedAtMs)}`}>
                   Open
                 </Button>
               </li>

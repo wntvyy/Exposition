@@ -8,8 +8,11 @@ import { registry } from "../../app/registry";
 import { useWorkspace } from "../workspace/store";
 import { newDraftFromPreset, WORKFLOWS_KEY } from "./actions";
 import { WORKFLOW_KEY_PREFIX } from "./model";
-import { WORKFLOW_RUN_KEY_PREFIX } from "./runModel";
-import { WorkflowRunView } from "./RunView";
+import { notify } from "../../app/notifications";
+import type { WorkflowRunState } from "../../bindings/WorkflowRunState";
+import { workflowEvents } from "./ipc";
+import { RUN_STATE_VIEW, WORKFLOW_RUN_KEY_PREFIX } from "./runModel";
+import { openRun, WorkflowRunView } from "./RunView";
 import { WorkflowEditor } from "./WorkflowEditor";
 import { WorkflowsView } from "./WorkflowsView";
 import "./workflows.css";
@@ -75,3 +78,21 @@ registry.registerCommand({
   enabled: projectOpen,
   run: () => editors.open({ key: WORKFLOWS_KEY, title: "Workflows" }),
 });
+
+// A run that ends while its tab is not in view still reports how it ended
+// (success, failure, cancellation, interruption), once per run and state.
+const announced = new Map<string, WorkflowRunState>();
+const TONES = { succeeded: "success", failed: "danger", canceled: "info", interrupted: "warning" } as const;
+void workflowEvents
+  .run((event) => {
+    if (event.state === "running" || announced.get(event.run) === event.state) return;
+    announced.set(event.run, event.state);
+    notify({
+      id: `workflow-run-${event.run}`,
+      tone: TONES[event.state],
+      title: `Workflow ${RUN_STATE_VIEW[event.state].label.toLowerCase()}`,
+      body: event.state === "interrupted" ? "The application stopped during this run; nothing was repeated automatically." : undefined,
+      actions: [{ label: "Open run", run: () => openRun({ id: event.run, title: "Workflow" }) }],
+    });
+  })
+  .catch(() => undefined);

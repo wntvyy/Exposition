@@ -5,7 +5,7 @@
 // (`workflow.planStale`), which is shown inline with "Review the new plan".
 // Nothing here starts a run by itself.
 import { Copy, Play, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 
 import type { ParamValue } from "../../bindings/ParamValue";
 import type { PortSource } from "../../bindings/PortSource";
@@ -283,6 +283,7 @@ export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onS
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [starting, setStarting] = useState(false);
   const [failure, setFailure] = useState<{ code: string; message: string } | null>(null);
+  const reasonId = useId();
 
   const fetchPlan = useCallback(async () => {
     setLoad({ kind: "loading" });
@@ -336,7 +337,7 @@ export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onS
       footer={
         <>
           {startDisabledReason && plan && (
-            <span className="xp-wf__muted xp-wf-plan__reason" id="plan-start-reason" data-testid="plan-start-reason">
+            <span className="xp-wf__muted xp-wf-plan__reason" id={reasonId} data-testid="plan-start-reason">
               {startDisabledReason}
             </span>
           )}
@@ -348,7 +349,7 @@ export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onS
             icon={Play}
             isPending={starting}
             isDisabled={starting || startDisabledReason !== null}
-            aria-describedby={startDisabledReason && plan ? "plan-start-reason" : undefined}
+            aria-describedby={startDisabledReason && plan ? reasonId : undefined}
             onPress={() => void start()}
             data-testid="workflow-start-run"
           >

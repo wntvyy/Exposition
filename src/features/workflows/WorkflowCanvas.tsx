@@ -57,7 +57,7 @@ import {
   type CanvasSelectionItem,
   type Point,
 } from "./canvasModel";
-import { contractOf, OUTCOME_LABELS, PORT_TYPE_LABELS, removeStep } from "./model";
+import { contractOf, OUTCOME_LABELS, PORT_TYPE_LABELS, removeInput, removeStep } from "./model";
 
 export type { CanvasSelectionItem } from "./canvasModel";
 
@@ -300,7 +300,18 @@ function CanvasInner({ workflowId, draft, contracts, diagnostics, selection, onS
   }, [draft, layout, saved, selectedId]);
 
   const [nodes, setNodes] = useState<WfNode[]>(desired);
-  useEffect(() => setNodes(desired), [desired]);
+  // Keep React Flow's measurements and an in-progress drag across draft edits.
+  useEffect(
+    () =>
+      setNodes((previous) => {
+        const byId = new Map(previous.map((n) => [n.id, n]));
+        return desired.map((n) => {
+          const p = byId.get(n.id);
+          return { ...n, ...(p?.measured ? { measured: p.measured } : {}), ...(p?.dragging ? { dragging: true, position: p.position } : {}) };
+        });
+      }),
+    [desired],
+  );
 
   const wfEdges = useMemo(() => edgesOf(draft, contracts, diagnostics), [draft, contracts, diagnostics]);
   const edges = useMemo<Edge[]>(
@@ -370,7 +381,18 @@ function CanvasInner({ workflowId, draft, contracts, diagnostics, selection, onS
       setMessage({ ok: true, text: `Step “${label}” removed with its connections. Save to keep the change.` });
       return true;
     }
-    return false;
+    if (selection.kind === "input") {
+      const label = draft.inputs.find((i) => i.id === selection.id)?.label ?? selection.id;
+      onChange(removeInput(draft, selection.id));
+      onSelectionChange(null);
+      setMessage({ ok: true, text: `Input “${label}” removed with its connections. Save to keep the change.` });
+      return true;
+    }
+    const label = draft.outcomes.find((o) => o.id === selection.id)?.label ?? selection.id;
+    onChange({ ...draft, outcomes: draft.outcomes.filter((o) => o.id !== selection.id) });
+    onSelectionChange(null);
+    setMessage({ ok: true, text: `Outcome “${label}” removed. Save to keep the change.` });
+    return true;
   };
 
   const arrange = () => {

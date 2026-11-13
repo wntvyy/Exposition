@@ -204,12 +204,30 @@
   max-width: none;
 }
 
+/* The plan scrolls inside a wider dialog; the footer (Cancel / Start run) stays visible. */
+.ui-modal:has(> .xp-wf-plan-dialog) {
+  width: min(960px, calc(100vw - var(--space-8)));
+  max-height: 86vh;
+}
+.xp-wf-plan-dialog.ui-dialog {
+  overflow: hidden;
+}
+.xp-wf-plan-dialog .ui-dialog__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+}
+.xp-wf-plan-dialog .ui-dialog__footer {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
 .xp-wf-plan-body {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  min-height: 0;
-  overflow-y: auto;
   user-select: text;
 }
 
