@@ -267,5 +267,6 @@ pub fn summary(run: &WorkflowRun) -> WorkflowRunSummary {
         steps_done: run.steps.iter().filter(|s| s.state == WorkflowStepState::Succeeded).count() as u32,
         steps_total: run.steps.len() as u32,
         acknowledged: run.acknowledged,
+        cause: run.cause.clone(),
     }
 }

@@ -627,6 +627,9 @@ pub struct WorkflowRunSummary {
     pub steps_done: u32,
     pub steps_total: u32,
     pub acknowledged: bool,
+    /// Why the run started (history shows trigger / reproduction badges).
+    #[serde(default)]
+    pub cause: WorkflowRunCause,
 }
 
 /// Emitted on `workflow-run` whenever a run or one of its steps changes.
