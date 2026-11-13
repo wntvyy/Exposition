@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workflow-association-decide"
+description = "Enables the workflow_association_decide command without any pre-configured scope."
+commands.allow = ["workflow_association_decide"]
+
+[[permission]]
+identifier = "deny-workflow-association-decide"
+description = "Denies the workflow_association_decide command without any pre-configured scope."
+commands.deny = ["workflow_association_decide"]

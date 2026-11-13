@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workflow-run-acknowledge"
+description = "Enables the workflow_run_acknowledge command without any pre-configured scope."
+commands.allow = ["workflow_run_acknowledge"]
+
+[[permission]]
+identifier = "deny-workflow-run-acknowledge"
+description = "Denies the workflow_run_acknowledge command without any pre-configured scope."
+commands.deny = ["workflow_run_acknowledge"]

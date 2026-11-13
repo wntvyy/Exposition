@@ -16,6 +16,7 @@ mod settings;
 mod state;
 mod tex;
 mod typesetting;
+mod workflow_runs;
 mod workflows;
 mod workspace;
 
@@ -45,6 +46,7 @@ pub fn run() {
             research::add_dev_capability(app.handle())?;
             research::forward_events(app.handle().clone());
             graph::forward_events(app.handle().clone());
+            workflow_runs::forward_events(app.handle().clone());
             app.state::<AppState>().typesetting.start(app.handle().clone());
             Ok(())
         })
@@ -199,6 +201,13 @@ pub fn run() {
             workflows::workflow_import,
             workflows::workflow_list,
             workflows::workflow_get,
+            workflow_runs::workflow_run_plan,
+            workflow_runs::workflow_run_start,
+            workflow_runs::workflow_run_cancel,
+            workflow_runs::workflow_run_get,
+            workflow_runs::workflow_runs,
+            workflow_runs::workflow_run_acknowledge,
+            workflow_runs::workflow_association_decide,
             agents::agents_task_keep_investigation,
             agents::agents_task_create_generation,
         ])
@@ -208,6 +217,9 @@ pub fn run() {
             // Kill every supervised process tree before exiting. (If the app
             // crashes instead, job-object kill-on-close does the same.)
             if let RunEvent::Exit = event {
+                // Active workflow runs stop with the app; the next start
+                // marks them interrupted (never resumed).
+                app.state::<AppState>().workflow_runs.project_closed(None);
                 app.state::<AppState>().tex.shutdown();
                 app.state::<AppState>().execution.shutdown();
                 app.state::<AppState>().reconciler.shutdown();

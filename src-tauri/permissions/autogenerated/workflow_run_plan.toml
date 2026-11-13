@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workflow-run-plan"
+description = "Enables the workflow_run_plan command without any pre-configured scope."
+commands.allow = ["workflow_run_plan"]
+
+[[permission]]
+identifier = "deny-workflow-run-plan"
+description = "Denies the workflow_run_plan command without any pre-configured scope."
+commands.deny = ["workflow_run_plan"]
