@@ -10,8 +10,9 @@ use ts_rs::TS;
 
 use super::registry::{ARTIFACT_RETAIN, FORMAL_ASSOCIATE, LEAN_AUDIT, REQUEST_PROMOTION, RESEARCH_PYTHON_BATCH};
 use super::{
-    AuthorityCeiling, ExecutionCeiling, InputSource, InputVersion, OutcomeKind, PortSource, PortType, StepOperation,
-    StepPort, WORKFLOW_SCHEMA, WorkflowConnection, WorkflowDefinition, WorkflowInput, WorkflowOutcome, WorkflowStep,
+    AuthorityCeiling, CodeLanguage, ExecutionCeiling, InputSource, InputVersion, OutcomeKind, PortSource, PortType,
+    StepOperation, StepPayload, StepPort, WORKFLOW_SCHEMA, WorkflowConnection, WorkflowDefinition, WorkflowInput,
+    WorkflowOutcome, WorkflowStep,
 };
 
 pub const NUMERICAL_EXPERIMENT: &str = "numericalExperiment";
@@ -34,7 +35,8 @@ pub struct WorkflowPresetInfo {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowPresetRequest {
     pub preset: String,
-    /// Numerical experiment: the Python script.
+    /// Numerical experiment: the Python script (none: the step starts with
+    /// an editable inline code template).
     pub script: Option<WorkspacePath>,
     /// Numerical experiment: an input dataset.
     pub data: Option<WorkspacePath>,
@@ -98,14 +100,107 @@ pub fn draft(request: &WorkflowPresetRequest) -> Option<WorkflowDefinition> {
     }
 }
 
+/// The inline code template of the numerical experiment (pure Python, no
+/// third-party packages: the default restricted image is a slim Python).
+/// Batch convention: declared inputs are readable at their project-relative
+/// paths in the working directory; output port `p` is realized by the file
+/// `p.<ext>` written into the directory named by `EXPOSITION_OUTPUT_DIR`.
+pub fn numerical_template(data: Option<&WorkspacePath>) -> String {
+    let literal = match data {
+        Some(p) => serde_json::to_string(p.as_str()).unwrap_or_else(|_| "None".into()),
+        None => "None".into(),
+    };
+    NUMERICAL_TEMPLATE.replace("__DATA__", &literal)
+}
+
+const NUMERICAL_TEMPLATE: &str = r##"# Numerical experiment (template; edit freely).
+# Reads the optional declared CSV input and writes the declared outputs into
+# EXPOSITION_OUTPUT_DIR: table.csv (summary statistics) and figure.svg (a line
+# plot drawn by hand; no plotting libraries are needed).
+import csv
+import math
+import os
+
+DATA = __DATA__  # project-relative path of the declared input data, or None
+OUT = os.environ["EXPOSITION_OUTPUT_DIR"]
+
+
+def load_series():
+    if DATA and os.path.exists(DATA):
+        values = []
+        with open(DATA, newline="", encoding="utf-8") as f:
+            for row in csv.reader(f):
+                for cell in row:
+                    try:
+                        values.append(float(cell))
+                        break
+                    except ValueError:
+                        continue
+        if values:
+            return values
+    return [math.sin(i / 5.0) for i in range(60)]
+
+
+ys = load_series()
+n = len(ys)
+mean = sum(ys) / n
+std = math.sqrt(sum((y - mean) ** 2 for y in ys) / n)
+
+with open(os.path.join(OUT, "table.csv"), "w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["statistic", "value"])
+    for name, value in [("count", n), ("mean", mean), ("std", std), ("min", min(ys)), ("max", max(ys))]:
+        writer.writerow([name, "%.6g" % value])
+
+W, H, PAD = 640, 400, 48
+lo, hi = min(ys), max(ys)
+span = (hi - lo) or 1.0
+
+
+def px(i):
+    return PAD + (W - 2 * PAD) * (i / max(n - 1, 1))
+
+
+def py(y):
+    return H - PAD - (H - 2 * PAD) * ((y - lo) / span)
+
+
+points = " ".join("%.1f,%.1f" % (px(i), py(y)) for i, y in enumerate(ys))
+svg = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">' % (W, H, W, H),
+    '<rect width="%d" height="%d" fill="white"/>' % (W, H),
+    '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="black"/>' % (PAD, H - PAD, W - PAD, H - PAD),
+    '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="black"/>' % (PAD, PAD, PAD, H - PAD),
+    '<polyline fill="none" stroke="#1f6feb" stroke-width="2" points="%s"/>' % points,
+    '<text x="%d" y="%d" text-anchor="middle" font-family="sans-serif" font-size="14">n = %d, mean = %.3g, std = %.3g</text>'
+    % (W // 2, PAD // 2, n, mean, std),
+    "</svg>",
+]
+with open(os.path.join(OUT, "figure.svg"), "w", encoding="utf-8") as f:
+    f.write("
+".join(svg) + "
+")
+"##;
+
 fn numerical_experiment(r: &WorkflowPresetRequest) -> WorkflowDefinition {
-    let mut inputs = vec![WorkflowInput {
-        id: "script".into(),
-        label: "Python script".into(),
-        port_type: PortType::CodeSource,
-        source: resource(&r.script),
-    }];
-    let mut connections = vec![data(PortSource::Input { input: "script".into() }, "run", "script")];
+    let mut inputs = Vec::new();
+    let mut connections = Vec::new();
+    let mut run = step("run", "Run the experiment", RESEARCH_PYTHON_BATCH);
+    match &r.script {
+        Some(_) => {
+            inputs.push(WorkflowInput {
+                id: "script".into(),
+                label: "Python script".into(),
+                port_type: PortType::CodeSource,
+                source: resource(&r.script),
+            });
+            connections.push(data(PortSource::Input { input: "script".into() }, "run", "script"));
+        }
+        None => {
+            run.payload =
+                Some(StepPayload::Code { language: CodeLanguage::Python, source: numerical_template(r.data.as_ref()) });
+        }
+    }
     if r.data.is_some() {
         inputs.push(WorkflowInput {
             id: "data".into(),
@@ -115,10 +210,7 @@ fn numerical_experiment(r: &WorkflowPresetRequest) -> WorkflowDefinition {
         });
         connections.push(data(PortSource::Input { input: "data".into() }, "run", "data"));
     }
-    let mut steps = vec![
-        step("run", "Run the experiment", RESEARCH_PYTHON_BATCH),
-        step("retain", "Keep the figure", ARTIFACT_RETAIN),
-    ];
+    let mut steps = vec![run, step("retain", "Keep the figure", ARTIFACT_RETAIN)];
     connections.push(data(out("run", "figure"), "retain", "artifact"));
     let mut outcomes = vec![WorkflowOutcome {
         id: "figure".into(),

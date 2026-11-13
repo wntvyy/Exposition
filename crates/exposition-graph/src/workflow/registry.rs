@@ -4,8 +4,10 @@
 //! is no generic "evaluate anything" operation, and a definition cannot add,
 //! widen, or redefine a contract. Each contract states its purpose, typed
 //! ports, parameters, payload (code or prompt), effects, runner/containment,
-//! limits, and failure behaviour. In this version no runner is available:
-//! definitions are validated and saved as drafts; execution arrives later.
+//! limits, and failure behaviour. The registry alone never claims a runner
+//! is available: availability depends on the open project (trust, restricted
+//! backend, toolchains) and is filled in by the workflow runner service
+//! ([`with_availability`]).
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -188,7 +190,8 @@ pub struct RunnerSpec {
     /// Effects this runner's containment can enforce; a contract's effects
     /// must lie within them.
     pub allows: Vec<WorkflowEffect>,
-    /// Always false in this version.
+    /// Whether the runner can execute in the open project now (filled in by
+    /// the workflow runner service; false in the bare registry).
     pub available: bool,
     pub availability: String,
 }
@@ -314,7 +317,8 @@ pub const AGENT_REVIEW: &str = "agent.review";
 pub const ARTIFACT_RETAIN: &str = "artifact.retain";
 pub const REQUEST_PROMOTION: &str = "manuscript.requestPromotion";
 
-const LATER: &str = "Workflow execution arrives in a later version of Exposition.";
+/// Availability text of the bare registry (no project context).
+pub const AVAILABILITY_NOT_CHECKED: &str = "Runner availability is checked for the open project.";
 
 fn port(name: &str, label: &str, types: &[PortType], required: bool, multiple: bool) -> PortSpec {
     PortSpec { name: name.into(), label: label.into(), types: types.to_vec(), required, multiple }
@@ -331,7 +335,7 @@ fn runner(id: &str, title: &str, containment: Containment, allows: &[WorkflowEff
         containment,
         allows: allows.to_vec(),
         available: false,
-        availability: LATER.into(),
+        availability: AVAILABILITY_NOT_CHECKED.into(),
     }
 }
 
@@ -552,6 +556,25 @@ pub fn operations() -> Vec<OperationContract> {
     ]
 }
 
+/// Every registered contract with its runner's availability filled in by
+/// `check` (runner id → `Ok` or the reason it cannot run now).
+pub fn with_availability(check: &dyn Fn(&str) -> Result<(), String>) -> Vec<OperationContract> {
+    let mut ops = operations();
+    for op in &mut ops {
+        match check(&op.runner.id) {
+            Ok(()) => {
+                op.runner.available = true;
+                op.runner.availability = "Available".into();
+            }
+            Err(reason) => {
+                op.runner.available = false;
+                op.runner.availability = reason;
+            }
+        }
+    }
+    ops
+}
+
 /// Look up a contract by id and version.
 pub fn operation(id: &str, version: u32) -> Option<OperationContract> {
     operations().into_iter().find(|o| o.id == id && o.version == version)
@@ -572,7 +595,7 @@ mod tests {
             for e in &op.effects {
                 assert!(op.runner.allows.contains(e), "{} {e:?} outside its runner", op.id);
             }
-            assert!(!op.runner.available, "nothing runs in this version");
+            assert!(!op.runner.available, "the bare registry never claims availability");
         }
     }
 

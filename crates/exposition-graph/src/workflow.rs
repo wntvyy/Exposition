@@ -19,13 +19,16 @@
 //! 4. declared effects fit the workflow's ceiling (and the context's) and the
 //!    runner's containment; connections grant nothing;
 //! 5. actual returned outputs are validated by the runner before consumers
-//!    unlock (execution arrives in a later version);
+//!    unlock (the workflow runner service, `exposition-workflow`);
 //! 6. service-owned types (formal evidence, retained artifacts) come only from
 //!    their owning operation.
 //!
 //! plus: no cycles, loops, conditionals, or nesting (the schema has none),
 //! schema versions, and size limits. Drafts may be incomplete and are saved
-//! with their diagnostics; in this version nothing is ever runnable.
+//! with their diagnostics. Validation alone never makes a draft runnable:
+//! [`apply_runnability`] marks it runnable only when it is well-formed AND
+//! every step's runner is available in the open project (decided by the
+//! workflow runner service). Running still needs a reviewed run plan.
 
 pub mod persist;
 pub mod presets;
@@ -42,14 +45,15 @@ use crate::vocabulary::RelationKind;
 pub use persist::{SaveWorkflowRequest, SavedWorkflow, WorkflowRevisionInfo, WorkflowSummary};
 pub use registry::{
     CodeLanguage, OperationContract, ParameterKind, PayloadSpec, PortSpec, PortType, WorkflowEffect, operation,
-    operations,
+    operations, with_availability,
 };
 
 /// Schema identifier of a workflow definition.
 pub const WORKFLOW_SCHEMA: &str = "exposition.workflow/1";
-/// Why no workflow runs in this version.
+/// Why a draft is not runnable before the runner checked it in a project.
+/// (Validation alone never decides runnability; see [`apply_runnability`].)
 pub const NOT_RUNNABLE_REASON: &str =
-    "Workflow execution arrives in a later version of Exposition; this draft is saved but cannot run yet.";
+    "Runner availability has not been checked for this draft in the open project; it cannot run until it is.";
 
 pub const MAX_STEPS: usize = 50;
 pub const MAX_CONNECTIONS: usize = 200;
@@ -303,14 +307,14 @@ impl AuthorityCeiling {
     }
 }
 
-/// Where a draft stands. A well-formed draft is still not runnable in this version.
+/// Where a draft stands. A well-formed draft is runnable only when its runners are available.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub enum DraftState {
     /// Has errors (unbound inputs, orphan steps, incompatible connections, ...).
     Incomplete,
-    /// Satisfies the contract; would need a runner (later version) to execute.
+    /// Satisfies the contract (runnable once every step's runner is available).
     WellFormed,
 }
 
@@ -362,7 +366,8 @@ pub struct PlannedStep {
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowValidation {
     pub state: DraftState,
-    /// Always false in this version (no runner exists yet).
+    /// Well-formed AND every step's runner available in the open project
+    /// (set by [`apply_runnability`]; false from validation alone).
     pub runnable: bool,
     pub runnable_reason: String,
     pub diagnostics: Vec<WorkflowDiagnostic>,
@@ -478,7 +483,7 @@ pub fn definition_hash(definition: &WorkflowDefinition) -> String {
 }
 
 /// Validate a definition against the strict contract. Never fails: problems
-/// are diagnostics, and `runnable` is always false in this version.
+/// are diagnostics. `runnable` is false here; [`apply_runnability`] decides it.
 pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationContext<'_>) -> WorkflowValidation {
     let mut d = Diags(Vec::new());
     let def = definition;
@@ -971,6 +976,43 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
     }
 
     finish(d, def, &contracts, order)
+}
+
+/// Decide runnability: the draft is well-formed and every step's runner is
+/// available now (`runner` maps a runner id to `Ok` or the reason it cannot
+/// run). Sets `runnable` and a precise `runnable_reason`.
+pub fn apply_runnability(
+    validation: &mut WorkflowValidation,
+    definition: &WorkflowDefinition,
+    runner: &dyn Fn(&str) -> Result<(), String>,
+) {
+    validation.runnable = false;
+    if validation.state != DraftState::WellFormed {
+        validation.runnable_reason = format!(
+            "The draft has {} error{}; fix {} before it can run.",
+            validation.errors,
+            if validation.errors == 1 { "" } else { "s" },
+            if validation.errors == 1 { "it" } else { "them" }
+        );
+        return;
+    }
+    let mut problems = Vec::new();
+    for step in &definition.steps {
+        let Some(contract) = registry::operation(&step.operation.id, step.operation.version) else {
+            problems.push(format!("step “{}” names an unknown operation", step.label));
+            continue;
+        };
+        if let Err(reason) = runner(&contract.runner.id) {
+            problems.push(format!("step “{}” ({}): {reason}", step.label, contract.runner.title));
+        }
+    }
+    if problems.is_empty() {
+        validation.runnable = true;
+        validation.runnable_reason =
+            "Ready to run: every step's runner is available. Review the run plan to start it.".to_owned();
+    } else {
+        validation.runnable_reason = format!("Not runnable now: {}", problems.join("; "));
+    }
 }
 
 fn check_parameters(d: &mut Diags, step: &WorkflowStep, contract: &OperationContract) {
