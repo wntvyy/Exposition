@@ -147,6 +147,8 @@ fn assert_clean(f: &Fixture) {
     assert_eq!(containers_of(f), "", "no container is left behind");
     let batches = f.data.join("research").join("batches");
     assert!(names_in(&batches).is_empty(), "staging folders are removed: {:?}", names_in(&batches));
+    let jobs = f.data.join("execution").join("jobs");
+    assert!(names_in(&jobs).is_empty(), "job output areas are removed: {:?}", names_in(&jobs));
 }
 
 const ANALYSIS: &str = r#"
