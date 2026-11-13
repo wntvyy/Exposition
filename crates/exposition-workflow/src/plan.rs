@@ -56,19 +56,10 @@ pub struct PlanFacts<'a> {
     pub limits: &'a WorkflowConcurrencyLimits,
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Test scaffolding until definitions carry `execution.maxParallel`.
-    pub(crate) static TEST_MAX_PARALLEL: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
-}
-
-/// The definition's `maxParallel` (1 when it declares none).
-fn max_parallel_of(_def: &exposition_graph::workflow::WorkflowDefinition) -> u32 {
-    #[cfg(test)]
-    if let Some(n) = TEST_MAX_PARALLEL.with(|c| c.get()) {
-        return n.clamp(1, MAX_PARALLEL);
-    }
-    1
+/// The definition's `maxParallel` (1 when it declares none; validation
+/// refuses values outside 1..=4, the runner never exceeds them either).
+fn max_parallel_of(def: &exposition_graph::workflow::WorkflowDefinition) -> u32 {
+    def.max_parallel().clamp(1, MAX_PARALLEL)
 }
 
 /// Why a runner cannot run (stable code, message).

@@ -1663,3 +1663,5 @@ fn the_plan_hash_covers_payloads() {
     let c = f.service.plan(&f.save(def), None).unwrap();
     assert_ne!(a.approval_hash, c.approval_hash);
 }
+
+mod sched;

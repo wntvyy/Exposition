@@ -24,6 +24,9 @@
 //! Cancellation (the user, project close, trust revocation) stops every
 //! running step through its service.
 
+// A failed attempt carries its log and refusals (see adapters); deliberate.
+#![allow(clippy::result_large_err)]
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

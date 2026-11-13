@@ -15,6 +15,11 @@ export type WorkflowPlanStep = { step: string, label: string, operation: StepOpe
  */
 payload: StepPayload | null, parameters: { [key in string]: ParamValue }, bindings: Array<WorkflowPlanBinding>, prerequisites: Array<string>, timeLimitSeconds: number, maxOutputBytes: number, 
 /**
+ * Model requests the step may make (reserved from the run's budget
+ * before it is dispatched; 0 for steps that make none).
+ */
+maxModelRequests: number, 
+/**
  * Whether the runner is usable now (backend configured, toolchain found,
  * credential present, folder trusted for native steps).
  */
