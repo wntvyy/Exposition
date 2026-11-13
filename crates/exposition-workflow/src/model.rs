@@ -5,15 +5,21 @@
 //!    runner availability, trust, and budgets into a [`WorkflowRunPlan`] the
 //!    user reviews in full (every code/prompt payload, every effect, the
 //!    containment of every runner). `blockers` non-empty: it cannot start.
+//!    Composite steps are expanded into their pinned children's steps
+//!    (`<composite>/<child>`), so the plan is flat and shows everything.
 //! 2. `workflow_run_start` takes the plan id and its `approval_hash`; the
 //!    backend recomputes the plan and refuses (`workflow.planStale`) if
 //!    anything the user approved changed (revision, definition hash, input
 //!    hashes, trust, runner settings, project).
-//! 3. The runner executes ONE step at a time in plan order. Before each
-//!    dispatch it re-checks the project is current, cancellation, budgets,
-//!    the step's input hashes, trust (native steps), and backend availability
-//!    (never downgraded). It persists the attempt's dispatch intent before
-//!    dispatching and the service operation id once known.
+//! 3. The runner starts a step once everything it depends on finished, at
+//!    most `max_parallel` steps of the run at a time (1: one at a time in plan
+//!    order) and within application-wide limits shared by all runs (at most 3
+//!    active runs, one per workflow). Before each dispatch it re-checks the
+//!    project is current, cancellation, budgets (reserving the step's output
+//!    bytes and model requests), the step's input hashes, trust (native
+//!    steps), and backend availability (never downgraded). It persists the
+//!    attempt's dispatch intent before dispatching and the service operation
+//!    id once known.
 //! 4. Every returned output is validated by the runner (declared port type,
 //!    recomputed SHA-256, producer provenance, service ownership) before a
 //!    consumer may use it. A step's own claim of validity is not trusted.
@@ -21,7 +27,11 @@
 //!    `interrupted`; the run is `interrupted` until the user acknowledges it.
 //!    Nothing is repeated automatically; a new run must be started.
 //!
-//! No loops, conditions, retries, triggers, nesting, or parallel steps.
+//! Bounded control flow only: a step condition is a fixed predicate over one
+//! validated upstream output (`conditionNotMet`, never an expression), a
+//! repeat is a bounded forEach (instances) or until (iterations). No
+//! retries; triggers start runs only through a standing plan the user
+//! approved, recorded as the run's `cause`.
 
 use std::collections::BTreeMap;
 

@@ -3,10 +3,12 @@
 //! decisions, plus the `workflow-run` event.
 //!
 //! The run service (`exposition-workflow`) enforces every rule: plans are
-//! recomputed and compared with the approved hash at start, one step runs at
-//! a time with budgets, outputs are validated before consumers see them, and
-//! runs interrupted by a shutdown are never resumed. Closing or switching the
-//! project cancels its active run (src/workspace.rs).
+//! recomputed and compared with the approved hash at start, steps run within
+//! the plan's `maxParallel` and the application-wide limits with reserved
+//! budgets, outputs are validated before consumers see them, and runs
+//! interrupted by a shutdown are never resumed. Closing or switching the
+//! project cancels its active runs (src/workspace.rs); revoking trust cancels
+//! the native ones (below).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
