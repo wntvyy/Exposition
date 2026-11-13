@@ -6,21 +6,29 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { OperationContract } from "../../bindings/OperationContract";
 import type { PromotionPreview } from "../../bindings/PromotionPreview";
-import type { SavedWorkflow } from "../../bindings/SavedWorkflow";
+import type { SavedWorkflow } from "./contract";
 import type { SaveWorkflowRequest } from "../../bindings/SaveWorkflowRequest";
 import type { StartWorkflowRunRequest } from "../../bindings/StartWorkflowRunRequest";
 import type { WorkflowAssociationDecision } from "../../bindings/WorkflowAssociationDecision";
-import type { WorkflowDefinition } from "../../bindings/WorkflowDefinition";
+import type { WorkflowDefinition } from "./contract";
 import type { WorkflowId } from "../../bindings/WorkflowId";
 import type { WorkflowPresetInfo } from "../../bindings/WorkflowPresetInfo";
 import type { WorkflowPresetRequest } from "../../bindings/WorkflowPresetRequest";
-import type { WorkflowRun } from "../../bindings/WorkflowRun";
-import type { WorkflowRunEvent } from "../../bindings/WorkflowRunEvent";
+import type { WorkflowRun } from "./contract";
+import type { WorkflowRunEvent } from "./contract";
 import type { WorkflowRunId } from "../../bindings/WorkflowRunId";
-import type { WorkflowRunPlan } from "../../bindings/WorkflowRunPlan";
-import type { WorkflowRunSummary } from "../../bindings/WorkflowRunSummary";
+import type { WorkflowRunPlan } from "./contract";
+import type { WorkflowRunSummary } from "./contract";
 import type { WorkflowSummary } from "../../bindings/WorkflowSummary";
 import type { WorkflowValidation } from "../../bindings/WorkflowValidation";
+import type {
+  EnableTriggerRequest,
+  TriggerPlanRequest,
+  WorkflowManifestExport,
+  WorkflowStandingPlan,
+  WorkflowTrigger,
+  WorkflowTriggerEvent,
+} from "./contract";
 
 export const workflowCommands = {
   /** The registered operation contracts (the only operations a step can name), with runner availability. */
@@ -57,10 +65,35 @@ export const workflowRunCommands = {
    * commands by id). `null` once it was applied, discarded, or expired.
    */
   promotionPreview: (promotion: string) => invoke<PromotionPreview | null>("research_promotion_preview", { promotion }),
+  /**
+   * A new plan reproducing a recorded run: its revision with every input
+   * pinned to the digests that run read, plus environment drift notices. It
+   * is approved and started like any plan (`start`); the run records its
+   * cause (reproduction of `run`).
+   */
+  reproduce: (run: WorkflowRunId) => invoke<WorkflowRunPlan>("workflow_run_reproduce", { run }),
+  /** Write the run manifest (JSON: revision, hashes, input/output digests, environments, usage, cause). */
+  exportManifest: (run: WorkflowRunId) => invoke<WorkflowManifestExport>("workflow_run_manifest_export", { run, destination: null }),
+};
+
+/**
+ * Explicit workflow triggers. Only the user enables one, by approving a
+ * standing plan (`plan` → review → `enable` with its standing hash); any
+ * change beyond the watched inputs' saved content suspends it. Triggers are
+ * app-local and never offered to agents.
+ */
+export const workflowTriggerCommands = {
+  list: (workflow: WorkflowId | null) => invoke<WorkflowTrigger[]>("workflow_trigger_list", { workflow }),
+  plan: (request: TriggerPlanRequest) => invoke<WorkflowStandingPlan>("workflow_trigger_plan", { request }),
+  enable: (request: EnableTriggerRequest) => invoke<WorkflowTrigger>("workflow_trigger_enable", { request }),
+  disable: (trigger: string) => invoke<WorkflowTrigger>("workflow_trigger_disable", { trigger }),
 };
 
 export const workflowEvents = {
   /** A run or one of its steps changed: re-read that run. */
   run: (handler: (event: WorkflowRunEvent) => void): Promise<UnlistenFn> =>
     listen<WorkflowRunEvent>("workflow-run", (e) => handler(e.payload)),
+  /** A trigger changed (fired, queued, suspended, enabled, disabled): re-read the triggers. */
+  trigger: (handler: (event: WorkflowTriggerEvent) => void): Promise<UnlistenFn> =>
+    listen<WorkflowTriggerEvent>("workflow-trigger", (e) => handler(e.payload)),
 };

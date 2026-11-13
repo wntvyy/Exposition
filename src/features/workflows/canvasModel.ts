@@ -7,7 +7,7 @@
 import type { OperationContract } from "../../bindings/OperationContract";
 import type { PortSource } from "../../bindings/PortSource";
 import type { PortType } from "../../bindings/PortType";
-import type { WorkflowDefinition } from "../../bindings/WorkflowDefinition";
+import type { WorkflowDefinition } from "./contract";
 import type { WorkflowDiagnostic } from "../../bindings/WorkflowDiagnostic";
 import {
   bindingsInto,
@@ -16,12 +16,14 @@ import {
   downstreamOf,
   OUTCOME_ACCEPTS,
   OUTCOME_LABELS,
+  outputLabel,
   PORT_TYPE_LABELS,
   prerequisitesOf,
   setBindings,
   setPrerequisites,
   sourceKey,
 } from "./model";
+import { describeTest, isComposite, shortTest } from "./orchestration";
 
 export type CanvasSelectionItem =
   | { kind: "step"; id: string }
@@ -46,7 +48,7 @@ export const PRE_OUT = "pre-out";
 
 export interface WfEdge {
   id: string;
-  kind: "data" | "prerequisite" | "annotation" | "outcome";
+  kind: "data" | "prerequisite" | "annotation" | "outcome" | "condition";
   source: string;
   sourceHandle: string;
   target: string;
@@ -124,6 +126,24 @@ export function edgesOf(def: WorkflowDefinition, contracts: OperationContract[],
       });
     }
   });
+  // A condition reads an earlier output (ordering only; it carries no data into the step).
+  for (const s of def.steps) {
+    const cond = s.condition;
+    if (!cond) continue;
+    const source = outputLabel(def, contracts, cond.source.step, cond.source.port);
+    edges.push({
+      id: `cond:${s.id}`,
+      kind: "condition",
+      source: nodeIdOf.step(cond.source.step),
+      sourceHandle: `out:${cond.source.port}`,
+      target: nodeIdOf.step(s.id),
+      targetHandle: PRE_IN,
+      label: `condition: ${shortTest(cond.test, cond.negate)}`,
+      description: `${s.label} runs only if ${describeTest(cond.test, source, cond.negate)} (condition, no data)`,
+      portType: null,
+      problems: diagnostics.filter((d) => d.step === s.id && d.code.startsWith("workflow.condition")).map((d) => d.message),
+    });
+  }
   for (const o of def.outcomes) {
     const step = def.steps.find((s) => s.id === o.from.step);
     const c = step && contractOf(contracts, step);
@@ -155,7 +175,8 @@ export function nodeHeight(def: WorkflowDefinition, contracts: OperationContract
   if (parsed?.kind !== "step") return 84;
   const step = def.steps.find((s) => s.id === parsed.id);
   const c = step && contractOf(contracts, step);
-  return 84 + 26 * ((c?.inputs.length ?? 0) + (c?.outputs.length ?? 0));
+  const extra = step && isComposite(step) ? 40 : 0;
+  return 84 + extra + 26 * ((c?.inputs.length ?? 0) + (c?.outputs.length ?? 0));
 }
 
 export const COLUMN_WIDTH = 380;
@@ -179,6 +200,8 @@ export function autoLayout(def: WorkflowDefinition, contracts: OperationContract
       if (c.kind === "data" && c.to.step === id && c.from.kind === "step") d = Math.max(d, depthOf(c.from.step) + 1);
       if (c.kind === "prerequisite" && c.after === id) d = Math.max(d, depthOf(c.before) + 1);
     }
+    const cond = def.steps.find((s) => s.id === id)?.condition;
+    if (cond) d = Math.max(d, depthOf(cond.source.step) + 1);
     visiting.delete(id);
     depth.set(id, d);
     return d;
@@ -281,6 +304,13 @@ export function connect(def: WorkflowDefinition, contracts: OperationContract[],
   if (portSource.kind === "step" && portSource.step === step.id) return { ok: false, message: "Refused: a step cannot feed its own input." };
   const key = sourceKey(portSource);
   const bound = bindingsInto(def, step.id, port);
+  const producer = portSource.kind === "step" ? def.steps.find((s) => s.id === portSource.step) : undefined;
+  if (producer?.repeat?.kind === "forEach" && !spec.multiple) {
+    return {
+      ok: false,
+      message: `Refused: “${producer.label}” runs once for each value, so it produces several outputs; “${spec.label}” of “${step.label}” takes one source. Connect it to an input that accepts several sources.`,
+    };
+  }
   if (bound.some((b) => sourceKey(b) === key)) return { ok: false, message: `“${spec.label}” of “${step.label}” is already connected to ${sourceLabel(def, portSource)}.` };
   const options = compatibleSources(def, contracts, step.id, port);
   if (!options.some((o) => o.key === key)) {
@@ -305,7 +335,7 @@ export function connect(def: WorkflowDefinition, contracts: OperationContract[],
   };
 }
 
-/** Remove a canvas edge from the definition (data, prerequisite, annotation); outcome links are not removable here. */
+/** Remove a canvas edge from the definition (data, prerequisite, annotation); outcome links and conditions are not removable here. */
 export function removeEdge(def: WorkflowDefinition, edgeId: string): WorkflowDefinition | null {
   const m = /^c(\d+)$/.exec(edgeId);
   if (!m) return null;

@@ -4,20 +4,25 @@
 // Rust recomputes the plan and refuses a stale approval
 // (`workflow.planStale`), which is shown inline with "Review the new plan".
 // Nothing here starts a run by itself.
-import { Copy, Play, RefreshCw } from "lucide-react";
+//
+// M9: composite steps arrive expanded (`a/b` ids, `compositePath` titles)
+// and are grouped under their composite with their complete code/prompts;
+// conditions and iteration bounds are stated in plain words; the workflow's
+// max parallel and the application's global limits are listed. A
+// reproduction plan (Reproduce in the run view) is reviewed here the same
+// way, with its environment drift notices first.
+import { Copy, Layers, Play, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useId, useState } from "react";
 
-import type { ParamValue } from "../../bindings/ParamValue";
 import type { PortSource } from "../../bindings/PortSource";
 import type { StepPayload } from "../../bindings/StepPayload";
 import type { WorkflowId } from "../../bindings/WorkflowId";
-import type { WorkflowPlanStep } from "../../bindings/WorkflowPlanStep";
-import type { WorkflowRun } from "../../bindings/WorkflowRun";
-import type { WorkflowRunPlan } from "../../bindings/WorkflowRunPlan";
+import type { WorkflowPlanStep, WorkflowRun, WorkflowRunPlan } from "./contract";
 import { errorMessage, isCommandError } from "../../lib/ipc";
 import { Badge, Banner, Button, Dialog, ErrorState, IconButton, LoadingState } from "../../ui/components";
 import { workflowRunCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
+import { DEFAULT_LIMITS, describeCondition, describeLimits, describeRepeat, paramText } from "./orchestration";
 import { CONTAINMENT_VIEW, EFFECT_LABELS, formatBytes, formatSeconds, formatTime, shortHash, STALE_PLAN_CODES } from "./runModel";
 
 const EXECUTION_CEILING: Record<string, string> = {
@@ -58,17 +63,6 @@ export function FullHash({ hash, label }: { hash: string; label: string }) {
   );
 }
 
-function paramText(value: ParamValue): string {
-  switch (value.kind) {
-    case "boolean":
-      return value.value ? "yes" : "no";
-    case "integer":
-      return String(value.value);
-    default:
-      return value.value;
-  }
-}
-
 function PayloadView({ step, payload }: { step: WorkflowPlanStep; payload: StepPayload }) {
   if (payload.kind === "code") {
     return (
@@ -88,8 +82,14 @@ function PayloadView({ step, payload }: { step: WorkflowPlanStep; payload: StepP
   );
 }
 
+/** "Label → port" of a plan step's output (plan steps carry no port labels). */
+function planPortLabel(plan: WorkflowRunPlan, step: string, port: string): string {
+  return `“${plan.steps.find((s) => s.step === step)?.label ?? step} → ${port}”`;
+}
+
 function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: WorkflowPlanStep; index: number }) {
   const containment = CONTAINMENT_VIEW[step.containment];
+  const path = step.compositePath ?? [];
   const sourceText = (from: PortSource) => {
     if (from.kind === "input") {
       const input = plan.inputs.find((i) => i.id === from.input);
@@ -100,7 +100,15 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
   };
   const params = Object.entries(step.parameters);
   return (
-    <li className="xp-wf-plan__step" data-testid={`plan-step-${step.step}`} data-containment={step.containment} data-available={String(step.available)}>
+    <li
+      className="xp-wf-plan__step"
+      data-testid={`plan-step-${step.step}`}
+      data-containment={step.containment}
+      data-available={String(step.available)}
+      data-composite-path={path.length ? path.join(" › ") : undefined}
+      data-conditional={step.condition ? "true" : undefined}
+      data-repeat={step.repeat?.kind}
+    >
       <div className="xp-wf-plan__step-head">
         <span className="xp-wf-plan__index" aria-hidden="true">
           {index + 1}
@@ -108,6 +116,7 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
         <div className="xp-wf__grow">
           <strong>{step.label}</strong>
           <div className="xp-wf__muted">
+            {path.length > 0 && <>Inside {path.map((t) => `“${t}”`).join(" › ")} · </>}
             {step.operationTitle} ({step.operation.id} v{step.operation.version}) · runner: {step.runnerTitle}
           </div>
         </div>
@@ -122,6 +131,20 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
         </Banner>
       )}
       <dl className="xp-wf-facts">
+        {step.condition && (
+          <>
+            <dt>Condition</dt>
+            <dd data-testid={`plan-condition-${step.step}`}>{describeCondition(step.condition, (s, p) => planPortLabel(plan, s, p))}</dd>
+          </>
+        )}
+        {step.repeat && (
+          <>
+            <dt>Repeats</dt>
+            <dd data-testid={`plan-repeat-${step.step}`}>
+              {describeRepeat(step.repeat, (port) => `its output “${port}”`, (name) => `“${name}”`)}
+            </dd>
+          </>
+        )}
         <dt>Effects</dt>
         <dd>
           <ul className="xp-wf-plan__effects">
@@ -187,9 +210,27 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
   );
 }
 
+type StepGroup = { path: string[]; prefix: string; items: { step: WorkflowPlanStep; index: number }[] };
+
+/** Consecutive steps with the same composite path form one group (top-level steps: an empty path). */
+export function groupByComposite(steps: WorkflowPlanStep[]): StepGroup[] {
+  const groups: StepGroup[] = [];
+  steps.forEach((step, index) => {
+    const path = step.compositePath ?? [];
+    const last = groups[groups.length - 1];
+    if (last && last.path.join("\u0000") === path.join("\u0000")) last.items.push({ step, index });
+    else groups.push({ path, prefix: step.step.includes("/") ? step.step.slice(0, step.step.lastIndexOf("/")) : "", items: [{ step, index }] });
+  });
+  return groups;
+}
+
 /** The plan in full (also shown read-only in the run monitor as "the plan exactly as approved"). */
 export function PlanDetails({ plan }: { plan: WorkflowRunPlan }) {
   const { execution, ceiling, budgets } = plan;
+  const maxParallel = plan.maxParallel ?? 1;
+  const limits = plan.limits ?? DEFAULT_LIMITS;
+  const groups = groupByComposite(plan.steps);
+  const drift = plan.drift ?? [];
   const stepNames = (ids: string[]) => ids.map((id) => `“${plan.steps.find((s) => s.step === id)?.label ?? id}”`).join(", ");
   return (
     <div className="xp-wf-plan" data-testid="workflow-plan-details" data-plan={plan.plan} data-approval={plan.approvalHash}>
@@ -223,6 +264,13 @@ export function PlanDetails({ plan }: { plan: WorkflowRunPlan }) {
           {execution.nativeSteps.length > 0 && ` · runs natively with your account's privileges: ${stepNames(execution.nativeSteps)}`}
           {execution.modelSteps.length > 0 && ` · sends material to the model provider: ${stepNames(execution.modelSteps)}`}
         </dd>
+        <dt>Concurrency</dt>
+        <dd data-testid="plan-concurrency" data-max-parallel={maxParallel}>
+          {maxParallel === 1
+            ? "One step at a time."
+            : `Up to ${maxParallel} independent steps (or repeat instances) at the same time; a step starts only after everything it reads or runs after has finished.`}{" "}
+          {describeLimits(limits)}
+        </dd>
         <dt>Budgets</dt>
         <dd data-testid="plan-budgets">
           {budgets.maxSteps} steps · {formatSeconds(budgets.maxTotalSeconds)} in total · {formatBytes(budgets.maxOutputBytes)} of output · {budgets.maxModelRequests} model request
@@ -232,7 +280,36 @@ export function PlanDetails({ plan }: { plan: WorkflowRunPlan }) {
         <dd>
           Made {formatTime(plan.createdAtMs)}; start it before {formatTime(plan.expiresAtMs)} · approval <FullHash hash={plan.approvalHash} label="the approval" />
         </dd>
+        {plan.reproduces && (
+          <>
+            <dt>Reproduces</dt>
+            <dd data-testid="plan-reproduces">
+              Run <code>{plan.reproduces}</code>: every input is pinned to the content that run read. The new run records it as its cause.
+            </dd>
+          </>
+        )}
       </dl>
+
+      {drift.length > 0 && (
+        <div data-testid="plan-drift" role="group" aria-label="Environment changes since the recorded run">
+          <Banner tone="warning" title={`The environment changed since the recorded run (${drift.length})`}>
+            <ul>
+              {drift.map((d, i) => (
+                <li key={i} data-aspect={d.aspect} data-step={d.step ?? undefined}>
+                  {d.message}
+                  {(d.recorded || d.current) && (
+                    <span className="xp-wf__muted">
+                      {" "}
+                      (recorded: <code>{d.recorded ?? "not recorded"}</code>; now: <code>{d.current ?? "unknown"}</code>)
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            Approving runs it in the current environment; the results may differ.
+          </Banner>
+        </div>
+      )}
 
       {plan.notices.length > 0 && (
         <ul className="xp-wf-plan__notices" data-testid="plan-notices">
@@ -280,11 +357,29 @@ export function PlanDetails({ plan }: { plan: WorkflowRunPlan }) {
         </table>
       )}
 
-      <h3 className="xp-wf-plan__heading">Steps, in the order they run (one at a time)</h3>
+      <h3 className="xp-wf-plan__heading">
+        {maxParallel === 1 ? "Steps, in the order they run (one at a time)" : `Steps, in dependency order (up to ${maxParallel} at a time)`}
+      </h3>
       <ol className="xp-wf-plan__steps">
-        {plan.steps.map((step, i) => (
-          <PlanStepView key={step.step} plan={plan} step={step} index={i} />
-        ))}
+        {groups.map((g) =>
+          g.path.length === 0 ? (
+            g.items.map(({ step, index }) => <PlanStepView key={step.step} plan={plan} step={step} index={index} />)
+          ) : (
+            <li key={`group-${g.items[0]!.step.step}`} className="xp-wf-plan__group" data-testid={`plan-group-${g.prefix}`} data-composite-path={g.path.join(" › ")}>
+              <div className="xp-wf-plan__group-head">
+                <Layers size={14} aria-hidden="true" />
+                <span>
+                  Inside the workflow step {g.path.map((t) => `“${t}”`).join(" › ")} — {g.items.length} step{g.items.length === 1 ? "" : "s"}, shown in full
+                </span>
+              </div>
+              <ol className="xp-wf-plan__steps">
+                {g.items.map(({ step, index }) => (
+                  <PlanStepView key={step.step} plan={plan} step={step} index={index} />
+                ))}
+              </ol>
+            </li>
+          ),
+        )}
       </ol>
     </div>
   );
@@ -298,10 +393,17 @@ export interface PlanReviewDialogProps {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
   onStarted: (run: WorkflowRun) => void;
+  /**
+   * Where the plan comes from (default: `workflow_run_plan` for the revision).
+   * Reproduce passes `workflow_run_reproduce`; the plan is approved the same way.
+   */
+  loadPlan?: () => Promise<WorkflowRunPlan>;
+  /** Dialog title prefix (default "Review and run"). */
+  heading?: string;
 }
 
 /** "Review and run": fetches the plan when opened; starting requires an explicit press of "Start run". */
-export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onStarted }: PlanReviewDialogProps) {
+export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onStarted, loadPlan, heading = "Review and run" }: PlanReviewDialogProps) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [starting, setStarting] = useState(false);
   const [failure, setFailure] = useState<{ code: string; message: string } | null>(null);
@@ -311,11 +413,11 @@ export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onS
     setLoad({ kind: "loading" });
     setFailure(null);
     try {
-      setLoad({ kind: "ready", plan: await workflowRunCommands.plan(workflow, revision) });
+      setLoad({ kind: "ready", plan: await (loadPlan ? loadPlan() : workflowRunCommands.plan(workflow, revision)) });
     } catch (e) {
       setLoad({ kind: "error", message: errorMessage(e) });
     }
-  }, [workflow, revision]);
+  }, [workflow, revision, loadPlan]);
 
   useEffect(() => {
     if (isOpen) void fetchPlan();
@@ -350,7 +452,7 @@ export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onS
 
   return (
     <Dialog
-      title={plan ? `Review and run “${plan.title}”` : "Review and run"}
+      title={plan ? `${heading} “${plan.title}”` : heading}
       size="lg"
       isOpen={isOpen}
       onOpenChange={onOpenChange}

@@ -6,8 +6,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OperationContract } from "../../bindings/OperationContract";
-import type { SavedWorkflow } from "../../bindings/SavedWorkflow";
-import type { WorkflowDefinition } from "../../bindings/WorkflowDefinition";
+import type { SavedWorkflow } from "./contract";
+import type { WorkflowDefinition } from "./contract";
 import type { WorkflowValidation } from "../../bindings/WorkflowValidation";
 
 const wfIpc = vi.hoisted(() => ({
@@ -39,7 +39,13 @@ const runIpc = vi.hoisted(() => ({
   decideAssociation: vi.fn(),
   promotionPreview: vi.fn(),
 }));
-vi.mock("./ipc", () => ({ workflowCommands: wfIpc, workflowRunCommands: runIpc, workflowEvents: { run: vi.fn(async () => () => {}) } }));
+const triggerIpc = vi.hoisted(() => ({ list: vi.fn(async () => []), plan: vi.fn(), enable: vi.fn(), disable: vi.fn() }));
+vi.mock("./ipc", () => ({
+  workflowCommands: wfIpc,
+  workflowRunCommands: runIpc,
+  workflowTriggerCommands: triggerIpc,
+  workflowEvents: { run: vi.fn(async () => () => {}), trigger: vi.fn(async () => () => {}) },
+}));
 vi.mock("../research/ipc", () => ({ researchCommands: {} }));
 vi.mock("../research/Promotion", () => ({ PreviewView: () => null }));
 vi.mock("./CodePayloadEditor", () => ({

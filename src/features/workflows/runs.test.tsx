@@ -6,10 +6,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OperationContract } from "../../bindings/OperationContract";
-import type { WorkflowDefinition } from "../../bindings/WorkflowDefinition";
-import type { WorkflowRun } from "../../bindings/WorkflowRun";
-import type { WorkflowRunPlan } from "../../bindings/WorkflowRunPlan";
-import type { WorkflowStepAttempt } from "../../bindings/WorkflowStepAttempt";
+import type { WorkflowDefinition } from "./contract";
+import type { WorkflowRun } from "./contract";
+import type { WorkflowRunPlan } from "./contract";
+import type { WorkflowStepAttempt } from "./contract";
 
 const runIpc = vi.hoisted(() => ({
   plan: vi.fn(),

@@ -15,10 +15,10 @@ import { notify } from "../../app/notifications";
 import type { EditorProps } from "../../app/registry";
 import type { PromotionPreview } from "../../bindings/PromotionPreview";
 import type { WorkflowOutputValue } from "../../bindings/WorkflowOutputValue";
-import type { WorkflowRun } from "../../bindings/WorkflowRun";
-import type { WorkflowRunStep } from "../../bindings/WorkflowRunStep";
-import type { WorkflowRunSummary } from "../../bindings/WorkflowRunSummary";
-import type { WorkflowStepAttempt } from "../../bindings/WorkflowStepAttempt";
+import type { WorkflowRun } from "./contract";
+import type { WorkflowRunStep } from "./contract";
+import type { WorkflowRunSummary } from "./contract";
+import type { WorkflowStepAttempt } from "./contract";
 import type { WorkflowStepOutput } from "../../bindings/WorkflowStepOutput";
 import { commands, errorMessage } from "../../lib/ipc";
 import {
