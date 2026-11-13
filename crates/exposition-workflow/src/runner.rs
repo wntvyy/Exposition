@@ -75,6 +75,7 @@ fn step_index(run: &WorkflowRun, step: &str) -> usize {
 }
 
 /// Execute a persisted run on the current thread until it ends.
+#[allow(clippy::result_large_err)] // the step failure type, see adapters
 pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: String, token: Arc<CancelToken>) {
     let started = Instant::now();
     let cell = Mutex::new(run);
