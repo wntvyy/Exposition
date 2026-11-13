@@ -5,15 +5,21 @@
 //!    runner availability, trust, and budgets into a [`WorkflowRunPlan`] the
 //!    user reviews in full (every code/prompt payload, every effect, the
 //!    containment of every runner). `blockers` non-empty: it cannot start.
+//!    Composite steps are expanded into their pinned children's steps
+//!    (`<composite>/<child>`), so the plan is flat and shows everything.
 //! 2. `workflow_run_start` takes the plan id and its `approval_hash`; the
 //!    backend recomputes the plan and refuses (`workflow.planStale`) if
 //!    anything the user approved changed (revision, definition hash, input
 //!    hashes, trust, runner settings, project).
-//! 3. The runner executes ONE step at a time in plan order. Before each
-//!    dispatch it re-checks the project is current, cancellation, budgets,
-//!    the step's input hashes, trust (native steps), and backend availability
-//!    (never downgraded). It persists the attempt's dispatch intent before
-//!    dispatching and the service operation id once known.
+//! 3. The runner starts a step once everything it depends on finished, at
+//!    most `max_parallel` steps of the run at a time (1: one at a time in plan
+//!    order) and within application-wide limits shared by all runs (at most 3
+//!    active runs, one per workflow). Before each dispatch it re-checks the
+//!    project is current, cancellation, budgets (reserving the step's output
+//!    bytes and model requests), the step's input hashes, trust (native
+//!    steps), and backend availability (never downgraded). It persists the
+//!    attempt's dispatch intent before dispatching and the service operation
+//!    id once known.
 //! 4. Every returned output is validated by the runner (declared port type,
 //!    recomputed SHA-256, producer provenance, service ownership) before a
 //!    consumer may use it. A step's own claim of validity is not trusted.
@@ -21,19 +27,28 @@
 //!    `interrupted`; the run is `interrupted` until the user acknowledges it.
 //!    Nothing is repeated automatically; a new run must be started.
 //!
-//! No loops, conditions, retries, triggers, nesting, or parallel steps.
+//! Bounded control flow only: a step condition is a fixed predicate over one
+//! validated upstream output (`conditionNotMet`, never an expression), a
+//! repeat is a bounded forEach (instances) or until (iterations). No
+//! retries; triggers start runs only through a standing plan the user
+//! approved, recorded as the run's `cause`.
 
 use std::collections::BTreeMap;
 
 use exposition_core::path::WorkspacePath;
 use exposition_graph::workflow::registry::{Containment, PortType, WorkflowEffect};
-use exposition_graph::workflow::{AuthorityCeiling, ParamValue, PortSource, StepOperation, StepPayload};
+use exposition_graph::workflow::{
+    AuthorityCeiling, ParamValue, PortSource, StepCondition, StepOperation, StepPayload, StepRepeat,
+};
 use exposition_graph::{EntityId, EvidenceId, OperationRef, WorkflowId, WorkflowPlanId, WorkflowRunId};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// At most this many runs are active at once (application-wide).
-pub const MAX_ACTIVE_RUNS: usize = 1;
+/// At most this many runs are active at once (application-wide; at most one
+/// run of each workflow).
+pub const MAX_ACTIVE_RUNS: usize = 3;
+/// A run never executes more than this many steps at the same time.
+pub const MAX_PARALLEL: u32 = 4;
 /// A plan must be started within this long after it was made.
 pub const PLAN_TTL_MS: u64 = 30 * 60 * 1000;
 /// Bounded text kept per attempt log (stdout/stderr tail, redacted).
@@ -71,9 +86,12 @@ pub enum WorkflowStepState {
     Succeeded,
     Failed,
     Canceled,
-    /// Not run because an earlier step failed, was canceled, or interrupted.
+    /// Not run: an earlier step failed, was canceled, or interrupted, or a
+    /// step whose output it needs did not run (`reason` says which).
     Skipped,
     Interrupted,
+    /// Not run because its own condition did not hold (`reason` says why).
+    ConditionNotMet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -160,10 +178,62 @@ pub struct WorkflowPlanStep {
     pub prerequisites: Vec<String>,
     pub time_limit_seconds: u32,
     pub max_output_bytes: u64,
+    /// Model requests the step may make (reserved from the run's budget
+    /// before it is dispatched; 0 for steps that make none).
+    #[serde(default)]
+    pub max_model_requests: u32,
+    /// Titles of the composite steps this step was expanded from, outermost
+    /// first (empty for a step of the workflow itself).
+    #[serde(default)]
+    pub composite_path: Vec<String>,
+    /// The step runs only when this holds (evaluated when it becomes ready).
+    #[serde(default)]
+    pub condition: Option<StepCondition>,
+    /// The step runs as several instances (forEach values, until iterations).
+    #[serde(default)]
+    pub repeat: Option<StepRepeat>,
     /// Whether the runner is usable now (backend configured, toolchain found,
     /// credential present, folder trusted for native steps).
     pub available: bool,
     pub availability: String,
+}
+
+/// Application-wide limits on concurrent work, shared by every active run.
+/// A step waits (it is not refused) while a limit it falls under is reached.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowConcurrencyLimits {
+    /// Active runs (at most one run of each workflow).
+    pub max_active_runs: u32,
+    /// Steps executing at the same time across all runs.
+    pub max_in_flight_steps: u32,
+    /// Steps in the restricted container.
+    pub restricted: u32,
+    /// Steps that run natively with the user's account privileges (Lean
+    /// audits included).
+    pub native: u32,
+    /// Read-only agent (model provider) steps.
+    pub agent: u32,
+    /// Lean audits.
+    pub lean: u32,
+}
+
+impl Default for WorkflowConcurrencyLimits {
+    fn default() -> Self {
+        Self {
+            max_active_runs: MAX_ACTIVE_RUNS as u32,
+            max_in_flight_steps: 4,
+            restricted: 2,
+            native: 2,
+            agent: 2,
+            lean: 1,
+        }
+    }
+}
+
+fn one() -> u32 {
+    1
 }
 
 /// Why a plan cannot start.
@@ -212,10 +282,19 @@ pub struct WorkflowRunPlan {
     /// Display name of the project folder the run is bound to.
     pub project: String,
     pub inputs: Vec<WorkflowPlanInput>,
-    /// Dependency order (the order the runner executes them, one at a time).
+    /// Dependency order. With `max_parallel` 1 the runner executes them one
+    /// at a time in this order; otherwise a step starts once everything it
+    /// depends on succeeded, ready steps start in this order.
     pub steps: Vec<WorkflowPlanStep>,
     pub ceiling: AuthorityCeiling,
     pub budgets: WorkflowRunBudgets,
+    /// Steps of this run that may execute at the same time (1–4; 1 is the
+    /// one-step-at-a-time runner).
+    #[serde(default = "one")]
+    pub max_parallel: u32,
+    /// The application-wide limits the run is subject to.
+    #[serde(default)]
+    pub limits: WorkflowConcurrencyLimits,
     pub execution: WorkflowPlanExecution,
     /// Things the user should know (native privileges, model disclosure, ...).
     pub notices: Vec<String>,
@@ -243,6 +322,9 @@ pub struct WorkflowOutputProvenance {
     pub run: WorkflowRunId,
     pub step: String,
     pub attempt: u32,
+    /// The instance of a repeated step that produced it.
+    #[serde(default)]
+    pub instance: Option<u32>,
     /// The service operation that produced it (research run, Lean audit, ...).
     pub operation: OperationRef,
 }
@@ -389,7 +471,33 @@ pub struct WorkflowRunStep {
     pub runner_title: String,
     pub containment: Containment,
     pub state: WorkflowStepState,
+    /// Attempts of a step that is not repeated.
     pub attempts: Vec<WorkflowStepAttempt>,
+    /// Instances of a repeated step (forEach: one per value, listed when the
+    /// run starts; until: one per iteration as it starts), in index order.
+    #[serde(default)]
+    pub instances: Vec<WorkflowStepInstance>,
+    /// Why the step did not run or stopped, in plain language (its condition
+    /// did not hold, a step it needs did not run, the run stopped before it,
+    /// Exposition stopped while it ran).
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// One instance of a repeated step (each counts against `maxSteps`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowStepInstance {
+    pub index: u32,
+    /// The forEach value of this instance (none for until iterations).
+    pub parameter: Option<ParamValue>,
+    pub state: WorkflowStepState,
+    pub attempts: Vec<WorkflowStepAttempt>,
+    /// Why the instance did not run, or why the run moved past it (an until
+    /// iteration whose predicate did not hold).
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// A declared outcome and what realized it.
@@ -403,6 +511,10 @@ pub struct WorkflowRunOutcome {
     pub step: String,
     pub port: String,
     pub value: Option<WorkflowOutputValue>,
+    /// Why the outcome was not produced (the step failed, was canceled or
+    /// skipped, ...); `None` while it is produced or the run is active.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// A watched input whose saved content changed (digests are SHA-256 hex;
@@ -458,6 +570,47 @@ pub struct WorkflowRun {
     pub acknowledged: bool,
     /// The plan exactly as approved.
     pub plan: WorkflowRunPlan,
+}
+
+impl WorkflowRun {
+    /// Say why each declared outcome that was not produced is missing (once
+    /// the run ended).
+    pub fn explain_outcomes(&mut self) {
+        let steps = &self.steps;
+        for outcome in &mut self.outcomes {
+            if outcome.value.is_some() || outcome.reason.is_some() {
+                continue;
+            }
+            let Some(step) = steps.iter().find(|s| s.step == outcome.step) else { continue };
+            let label = &step.label;
+            let last = step
+                .attempts
+                .iter()
+                .chain(step.instances.iter().flat_map(|i| i.attempts.iter()))
+                .rfind(|a| a.message.is_some())
+                .and_then(|a| a.message.as_deref());
+            outcome.reason = Some(match step.state {
+                WorkflowStepState::Succeeded if !step.instances.is_empty() => format!(
+                    "“{label}” ran {} instances; each instance's output is listed with the step.",
+                    step.instances.len()
+                ),
+                WorkflowStepState::Succeeded => format!("“{label}” succeeded without producing this optional output."),
+                WorkflowStepState::Failed => match last {
+                    Some(message) => format!("“{label}” failed: {message}"),
+                    None => format!("“{label}” failed."),
+                },
+                WorkflowStepState::Canceled => format!("“{label}” was canceled."),
+                WorkflowStepState::Interrupted => {
+                    format!("“{label}” was interrupted when Exposition stopped; its result is unknown.")
+                }
+                WorkflowStepState::Skipped | WorkflowStepState::ConditionNotMet => match &step.reason {
+                    Some(reason) => format!("“{label}” did not run. {reason}"),
+                    None => format!("“{label}” did not run: the run stopped before it could start."),
+                },
+                WorkflowStepState::Pending | WorkflowStepState::Running => continue,
+            });
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
