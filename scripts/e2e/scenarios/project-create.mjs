@@ -14,9 +14,11 @@
 // D. Interrupted creation: the app is killed (debug-only simulated crash)
 //    after two files; after a restart the project reports what was created
 //    and what is missing, is never complete, and Finish Setup completes it.
-// E. Workflow drafts: an incomplete draft from the palette is saved with
-//    diagnostics and is never runnable; forged formal evidence and hostile
-//    imports are refused; an imported draft is not runnable.
+// E. Workflow drafts: the palette's Numerical Experiment draft is well formed
+//    but not runnable without a restricted image (no native fallback); an
+//    unset input makes it incomplete, saved with diagnostics; forged formal
+//    evidence and hostile imports are refused; an imported draft is not
+//    runnable here.
 // F. Objective path with the scripted development provider: an empty
 //    project is created and opened and a whole-project agent task starts
 //    there (no commands), visible in the Agents view.
@@ -348,10 +350,20 @@ export default async function projectCreate({ launchApp, artifactsDir, assert })
       const editor = page.getByTestId("workflow-editor");
       await editor.waitFor({ timeout: 15_000 });
       const wfStatus = page.getByTestId("workflow-status");
+      // M8: the preset starts from an inline Python template, so the draft is
+      // well formed; it cannot run here because no restricted image is
+      // configured, and it never falls back to native execution.
+      await page.waitForSelector('[data-testid="workflow-status"][data-state="wellFormed"]');
+      assert.equal(await wfStatus.getAttribute("data-runnable"), "false");
+      await waitFor(async () => /Restricted execution is unavailable/.test(await editor.textContent()) && /never falls back to native/.test(await editor.textContent()), {
+        message: "not runnable: restricted execution unavailable, no native fallback",
+      });
+      // An added input left unset makes the draft incomplete, with a diagnostic.
+      await page.getByRole("button", { name: "Add Input" }).click();
       await page.waitForSelector('[data-testid="workflow-status"][data-state="incomplete"]');
       assert.equal(await wfStatus.getAttribute("data-runnable"), "false");
       await waitFor(async () => /choose the project file/.test(await editor.textContent()), { message: "unset input diagnostic" });
-      await page.getByTestId("input-path-script").locator("input").fill("analysis/missing.py");
+      await page.getByTestId("input-path-input1").locator("input").fill("analysis/missing.py");
       await waitFor(async () => /does not exist in the project/.test(await editor.textContent()), { message: "missing file diagnostic" });
       await page.getByTestId("workflow-save").click();
       await waitFor(async () => (await editor.getAttribute("data-revision")) === "2", { message: "revision 2 saved" });
