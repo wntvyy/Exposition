@@ -271,15 +271,17 @@ A run starts only from **Review and run…** in the workflow editor, for a
 saved, well-formed revision (never from unsaved edits). The review shows
 the complete plan: every input file with the SHA-256 of the content the run
 will read and whether that version is pinned, every step in the order it
-will run with its complete code or model instructions, parameters, runner,
-containment, effects, and limits, the run's budgets, the restricted image
-and folder trust it relies on, notices (native privileges, material sent to
+will run with its complete code (inline, or the full text of the script
+file it runs) or model instructions, parameters, runner, containment,
+effects, and limits, the run's budgets, the restricted image (by name and
+by its exact image identity) and folder trust it relies on, notices (native privileges, material sent to
 the model provider, proposals you review later), and anything that blocks
 it. **Start run** approves exactly that plan. If anything in it changed
 before the run starts (the workflow was saved again, an input file changed,
-folder trust or the restricted image changed, a runner became available or
-unavailable, or another project is open), the start is refused and you
-review the new plan. A plan must be started within 30 minutes.
+folder trust or the restricted image changed, including the same image name
+now naming a different image after a re-tag or pull, a runner became
+available or unavailable, or another project is open), the start is
+refused and you review the new plan. A plan must be started within 30 minutes.
 
 Steps run one at a time in dependency order; there are no loops,
 conditions, retries, or parallel steps, and only one workflow run is active
@@ -287,8 +289,9 @@ at a time. Before each step Exposition checks again that the project is
 still open, the run was not canceled, its budgets remain, every input file
 and earlier output the step reads still has the digest recorded for it, a
 native step's folder is still trusted, and the step's runner is still
-available with the approved image; a restricted step never falls back to
-native execution. A failed step stops the run and the remaining steps are
+available with the approved image identity, and the container is started
+from that identity; a restricted step never falls back to native
+execution. A failed step stops the run and the remaining steps are
 skipped. Every output a step returns is checked before a later step can use
 it: its declared type, its recomputed SHA-256, that it came from this
 step's own service operation, and that formal evidence and retained results
@@ -300,8 +303,8 @@ cancels a run that has native steps.
 The run's budgets come from the plan: at most as many step dispatches as the
 workflow has steps, the sum of the steps' time limits (at most 4 hours),
 the sum of their output limits (at most 1 GiB), and 25 model requests per
-agent review step. Each step's attempt is recorded before its service is
-called. If Exposition stops during a run, the next start marks the run
+agent review step; requests a review made count even when it fails or is
+canceled. Each step's attempt is recorded before its service is called. If Exposition stops during a run, the next start marks the run
 **Interrupted** (a step that was running has an unknown outcome) and never
 resumes or repeats it; you mark it as reviewed and start a new run if
 needed. Run records are kept in the application data folder on this
@@ -313,7 +316,7 @@ computer, not in the project.
 | Trusted native Python | A new Python process with your account's privileges, in a trusted folder; not a sandbox | Same as the restricted batch |
 | Lean audit | The Lean service with the project's toolchain, natively, in a trusted folder | The audit's own per-declaration verdicts, statements, and axioms for exactly the audited text |
 | Associate audited declarations | Exposition | A proposal you accept or reject per declaration; only accepted declarations get Lean evidence recorded |
-| Read-only agent review | A read-only agent task with commands off, scoped to the declared material, which it sends to the model provider | A review report (prose, never evidence) |
+| Read-only agent review | A read-only agent task with commands off, scoped to the declared material, which it sends to the model provider; a tool that would write or run is refused and the review continues | A review report (prose, never evidence) |
 | Retain artifact | Research | A kept result with computational evidence naming the mode it actually ran in |
 | Request reviewed promotion | Research | A prepared insertion at the end of the manuscript that you review and approve in the run view |
 
