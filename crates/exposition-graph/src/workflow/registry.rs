@@ -366,7 +366,7 @@ fn timeout_parameter() -> ParameterSpec {
 pub fn operations() -> Vec<OperationContract> {
     use WorkflowEffect as E;
     let (py_in, py_out) = python_ports();
-    vec![
+    let mut ops = vec![
         OperationContract {
             id: RESEARCH_PYTHON_BATCH.into(),
             version: 1,
@@ -554,14 +554,54 @@ pub fn operations() -> Vec<OperationContract> {
             limits: OperationLimits { max_seconds: 60, max_output_bytes: 0 },
             failure: FailureBehavior::StopWorkflow,
         },
-    ]
+    ];
+    ops.extend(composite_operations());
+    ops
 }
+
+// ----- M9 composite steps -----
+
+/// `workflow.composite` v1: run another saved workflow at a pinned revision.
+/// The bare contract has no ports or effects: validation derives them from
+/// the referenced child (inputs = the child's external inputs, outputs = its
+/// outcomes, effects = the union of its steps', containment = the least
+/// contained of its runners). No payload or parameters.
+fn composite_operations() -> Vec<OperationContract> {
+    vec![OperationContract {
+        id: super::COMPOSITE_OPERATION.into(),
+        version: 1,
+        title: "Run a saved workflow".into(),
+        purpose: "Run another saved workflow of this project at a pinned revision, as part of this one. Its steps run through their own runners, within this workflow's ceiling; editing it never changes the revision used here."
+            .into(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        parameters: Vec::new(),
+        payload: None,
+        effects: Vec::new(),
+        runner: runner(
+            super::v2::COMPOSITE_RUNNER,
+            "Saved workflow (each step runs through its own runner)",
+            Containment::ApplicationService,
+            &[],
+        ),
+        limits: OperationLimits { max_seconds: 0, max_output_bytes: 0 },
+        failure: FailureBehavior::StopWorkflow,
+    }]
+}
+
+/// Availability text of the composite runner (its child steps are checked one by one).
+pub const COMPOSITE_AVAILABILITY: &str = "Available: each of its steps is checked with its own runner.";
 
 /// Every registered contract with its runner's availability filled in by
 /// `check` (runner id → `Ok` or the reason it cannot run now).
 pub fn with_availability(check: &dyn Fn(&str) -> Result<(), String>) -> Vec<OperationContract> {
     let mut ops = operations();
     for op in &mut ops {
+        if op.runner.id == super::v2::COMPOSITE_RUNNER {
+            op.runner.available = true;
+            op.runner.availability = COMPOSITE_AVAILABILITY.into();
+            continue;
+        }
         match check(&op.runner.id) {
             Ok(()) => {
                 op.runner.available = true;

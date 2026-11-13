@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{
-    DraftState, ValidationContext, WorkflowDefinition, WorkflowValidation, definition_hash, parse_definition,
-    validate_workflow,
+    DraftState, ResolveWorkflow, ValidationContext, WorkflowDefinition, WorkflowValidation, definition_hash,
+    parse_definition, validate_workflow,
 };
 use crate::ids::{EntityId, WorkflowId};
 use crate::model::{Entity, GraphDelta, Lifecycle, Origin};
@@ -254,7 +254,21 @@ impl GraphService {
             return Err(GraphError::new("workflow.tooLarge", "the workflow definition is too large"));
         }
         let definition = &request.definition;
-        let validation = validate_workflow(definition, context);
+        // Composite steps resolve against this project's saved revisions
+        // (unless the caller supplies its own resolver), and a workflow may
+        // not include itself. Saving never touches the children.
+        let from_store = |id: &WorkflowId, revision: u64| self.workflow_definition(id, revision);
+        let resolve: &ResolveWorkflow<'_> = match context.resolve_workflow {
+            Some(r) => r,
+            None => &from_store,
+        };
+        let context = ValidationContext {
+            ceiling: context.ceiling,
+            file_exists: context.file_exists,
+            resolve_workflow: Some(resolve),
+            workflow_id: context.workflow_id.or(request.id.as_ref()),
+        };
+        let validation = validate_workflow(definition, &context);
         let hash = definition_hash(definition);
         let (saved, delta) = self.with_store(|store| {
             let (id, revision, previous) = match &request.id {
@@ -362,6 +376,14 @@ impl GraphService {
 
     fn was_imported(&self, conn: &Connection, id: &WorkflowId) -> bool {
         load_row(conn, id, Some(1)).ok().flatten().is_some_and(|r| r.body.imported)
+    }
+
+    /// The definition of one saved revision, or `None` when it does not exist
+    /// or cannot be read (the resolver of composite steps).
+    pub fn workflow_definition(&self, id: &WorkflowId, revision: u64) -> Option<WorkflowDefinition> {
+        self.with_store(|store| Ok(load_row(store.connection(), id, Some(revision))?.map(|r| r.body.definition)))
+            .ok()
+            .flatten()
     }
 
     /// One saved revision (the latest when `revision` is none).
