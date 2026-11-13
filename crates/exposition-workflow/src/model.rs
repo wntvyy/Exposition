@@ -370,6 +370,13 @@ pub struct WorkflowStepAttempt {
     pub rejected: Vec<WorkflowRejectedOutput>,
     /// Bounded, redacted stdout/stderr tail or service log.
     pub log: Option<String>,
+    /// What the attempt ran with (M9 environment capture): runner,
+    /// containment, platform, image, interpreter and packages, toolchain,
+    /// model, seed. `None` for attempts refused before dispatch and for runs
+    /// recorded before environment capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub environment: Option<crate::environment::WorkflowEnvironment>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

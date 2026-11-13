@@ -148,6 +148,7 @@ impl StepAdapter for BatchAdapter {
             rejected: rejected.clone(),
             log: log.clone(),
             model_requests: 0,
+            environment: None,
         };
         match &result.status {
             RunStatus::Succeeded => {}
@@ -180,7 +181,15 @@ impl StepAdapter for BatchAdapter {
             ));
         }
         let extra_output_bytes = result.extra.iter().map(|a| a.size_bytes).sum();
-        Ok(StepResult { operation: Some(operation), outputs, rejected, log, model_requests: 0, extra_output_bytes })
+        Ok(StepResult {
+            operation: Some(operation),
+            outputs,
+            rejected,
+            log,
+            model_requests: 0,
+            extra_output_bytes,
+            environment: None,
+        })
     }
 }
 
