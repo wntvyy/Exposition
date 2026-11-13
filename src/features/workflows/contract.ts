@@ -11,13 +11,14 @@
 //
 // New fields are optional here so that M8-shaped records (and older runs) are
 // still read correctly; views treat a missing field as "not recorded".
-// Landed so far: definitions (lane A), run cause (lane B), attempt environment (lane D), triggers (lane C).
+// Landed so far: definitions (lane A), run cause (lane B), environment/manifest/reproduce (lane D), triggers (lane C).
 import type { ParamValue } from "../../bindings/ParamValue";
 import type { StepCondition } from "../../bindings/StepCondition";
 import type { StepRepeat } from "../../bindings/StepRepeat";
 import type { WorkflowPlanStep as WorkflowPlanStepBase } from "../../bindings/WorkflowPlanStep";
 import type { WorkflowRun as WorkflowRunBase } from "../../bindings/WorkflowRun";
 import type { WorkflowRunEvent as WorkflowRunEventBase } from "../../bindings/WorkflowRunEvent";
+import type { WorkflowEnvironmentDrift } from "../../bindings/WorkflowEnvironmentDrift";
 import type { WorkflowRunCause } from "../../bindings/WorkflowRunCause";
 import type { WorkflowRunId } from "../../bindings/WorkflowRunId";
 import type { WorkflowRunOutcome as WorkflowRunOutcomeBase } from "../../bindings/WorkflowRunOutcome";
@@ -69,14 +70,7 @@ export type WorkflowPlanStep = WorkflowPlanStepBase & {
 };
 
 /** An environment difference between a recorded run and the plan reproducing it (lane D). */
-export type WorkflowDriftNotice = {
-  step: string | null;
-  /** What differs: image, interpreter, toolchain, packages, model, os, app. */
-  aspect: string;
-  recorded: string | null;
-  current: string | null;
-  message: string;
-};
+export type { WorkflowEnvironmentDrift as WorkflowDriftNotice } from "../../bindings/WorkflowEnvironmentDrift";
 
 export type WorkflowRunPlan = Omit<WorkflowRunPlanBase, "steps"> & {
   steps: WorkflowPlanStep[];
@@ -84,11 +78,11 @@ export type WorkflowRunPlan = Omit<WorkflowRunPlanBase, "steps"> & {
   limits?: WorkflowConcurrencyLimits;
 };
 
-/** `workflow_run_reproduce_plan`: a normal plan pinned to a recorded run's inputs, with drift (lane D). */
-export type WorkflowReproducePlan = { plan: WorkflowRunPlan; reproduces: WorkflowRunId; drift: WorkflowDriftNotice[] };
+/** `workflow_run_reproduce_plan` (lane D binding): a normal plan pinned to a recorded run's inputs, with drift. */
+export type { WorkflowReproducePlan } from "../../bindings/WorkflowReproducePlan";
 
 /** A plan as the review shows it: a reproduction carries what it reproduces and the drift. */
-export type ReviewPlan = WorkflowRunPlan & { reproduces?: WorkflowRunId | null; drift?: WorkflowDriftNotice[] };
+export type ReviewPlan = WorkflowRunPlan & { reproduces?: WorkflowRunId | null; drift?: WorkflowEnvironmentDrift[] };
 
 export type WorkflowStepState = WorkflowStepStateBase | "conditionNotMet";
 
@@ -130,8 +124,8 @@ export type WorkflowRunEvent = Omit<WorkflowRunEventBase, "stepState"> & { stepS
 
 // ----- reproducibility (lane D) --------------------------------------------------------------
 
-/** Where an exported run manifest was written (JSON). */
-export type WorkflowManifestExport = { path: string; bytes: number; sha256: string };
+/** Where an exported run manifest was written (lane D binding). */
+export type { WorkflowManifestExport } from "../../bindings/WorkflowManifestExport";
 
 // ----- triggers (lane C, main 56b8539): generated bindings ------------------------------------
 
