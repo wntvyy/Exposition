@@ -462,8 +462,14 @@ async fn missing_runtimes_report_setup_guidance() {
             Availability::Available => assert!(entry.kernel.is_some()),
             Availability::Unavailable { reason, guidance } => {
                 assert!(!reason.is_empty());
-                assert!(guidance.contains("IRkernel") || guidance.contains("IJulia"), "{guidance}");
-                assert!(guidance.contains("never installs"), "{guidance}");
+                // Whichever case this host is in: the kernel package or its
+                // registration is missing, or (the runtime is present but) no
+                // Python with jupyter_client can host the kernel.
+                assert!(
+                    ["IRkernel", "IJulia", "installkernel", "jupyter_client"].iter().any(|fix| guidance.contains(fix)),
+                    "{guidance}"
+                );
+                assert!(guidance.contains("never installs") || guidance.contains("never registers"), "{guidance}");
                 eprintln!("{language:?}: {reason} {guidance}");
             }
         }

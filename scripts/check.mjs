@@ -12,7 +12,9 @@ const TAIL_LINES = 60;
 // Failure lines kept from anywhere in a gate's output (a failed Rust test or
 // panic, a compiler or type error, a failed vitest file), beyond the tail.
 const NOTABLE = /\.\.\. FAILED$|panicked at|^error(\[\w+\])?:|error TS\d+|^\s*(FAIL|×)\s/;
-const NOTABLE_LINES = 40;
+// A Rust panic's message follows its "panicked at" line; keep up to this many.
+const PANIC_MESSAGE_LINES = 4;
+const NOTABLE_LINES = 80;
 const MAX_ANNOTATION = 12_000;
 const ANSI = new RegExp(String.raw`\u001b\[[0-9;]*[A-Za-z]`, "g");
 
@@ -44,10 +46,22 @@ function run(cmd, args) {
     let tail = [];
     const notable = [];
     const partial = new Map();
-    const take = (lines) => {
+    // Per stream: how many lines of a panic message are still to be kept.
+    const following = new Map();
+    const take = (lines, stream) => {
       for (const raw of lines) {
         const line = raw.replace(ANSI, "");
-        if (NOTABLE.test(line) && notable.length < NOTABLE_LINES && !notable.includes(line)) notable.push(line);
+        const follow = following.get(stream) ?? 0;
+        if (follow > 0 && line.trim() && !line.startsWith("note: ")) {
+          if (notable.length < NOTABLE_LINES) notable.push(`    ${line}`);
+          following.set(stream, follow - 1);
+        } else {
+          following.set(stream, 0);
+        }
+        if (NOTABLE.test(line) && notable.length < NOTABLE_LINES && !notable.includes(line)) {
+          notable.push(line);
+          if (line.includes("panicked at")) following.set(stream, PANIC_MESSAGE_LINES);
+        }
         tail.push(line);
       }
       if (tail.length > TAIL_LINES) tail = tail.slice(-TAIL_LINES);
@@ -58,14 +72,14 @@ function run(cmd, args) {
         out.write(chunk);
         const lines = ((partial.get(stream) ?? "") + chunk).split(/\r?\n/);
         partial.set(stream, lines.pop());
-        take(lines);
+        take(lines, stream);
       });
     };
     if (child.stdout) keep(child.stdout, process.stdout);
     if (child.stderr) keep(child.stderr, process.stderr);
     child.on("error", (error) => resolve({ status: null, notable, tail: [String(error)] }));
     child.on("close", (status) => {
-      take([...partial.values()].filter(Boolean));
+      for (const [stream, rest] of partial) if (rest) take([rest], stream);
       resolve({ status, notable, tail });
     });
   });

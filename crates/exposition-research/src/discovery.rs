@@ -68,7 +68,7 @@ pub const JULIA_MISSING_GUIDANCE: &str = "Install Julia from https://julialang.o
 
 pub const IJULIA_MISSING_GUIDANCE: &str = "In Julia, run: using Pkg; Pkg.add(\"IJulia\") — then refresh environments. Exposition never installs packages itself.";
 
-pub const HOST_MISSING_GUIDANCE: &str = "R and Julia kernels run through Exposition's Jupyter helper, which needs a Python interpreter with jupyter_client: python -m pip install jupyter_client — then refresh environments.";
+pub const HOST_MISSING_GUIDANCE: &str = "R and Julia kernels run through Exposition's Jupyter helper, which needs a Python interpreter with jupyter_client: python -m pip install jupyter_client — then refresh environments. Exposition never installs packages itself.";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -581,5 +581,28 @@ mod tests {
     #[test]
     fn versions_sort_numerically() {
         assert!(version_key("3.14.5") > version_key("3.9.20"));
+    }
+
+    /// Every "unavailable" guidance names what to install or register and says
+    /// that Exposition does not do it itself, whichever case the host is in.
+    #[test]
+    fn every_setup_guidance_names_the_fix_and_that_exposition_never_does_it() {
+        let cases = [
+            (PYTHON_MISSING_GUIDANCE, "ipykernel"),
+            (R_MISSING_GUIDANCE, "IRkernel"),
+            (IRKERNEL_SPEC_GUIDANCE, "IRkernel::installspec"),
+            (IRKERNEL_MISSING_GUIDANCE, "IRkernel"),
+            (JULIA_MISSING_GUIDANCE, "IJulia"),
+            (IJULIA_SPEC_GUIDANCE, "installkernel"),
+            (IJULIA_MISSING_GUIDANCE, "IJulia"),
+            (HOST_MISSING_GUIDANCE, "jupyter_client"),
+        ];
+        for (guidance, fix) in cases {
+            assert!(guidance.contains(fix), "{guidance}");
+            assert!(
+                guidance.contains("Exposition never installs") || guidance.contains("Exposition never registers"),
+                "{guidance}"
+            );
+        }
     }
 }
