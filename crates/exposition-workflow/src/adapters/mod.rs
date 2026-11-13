@@ -118,11 +118,21 @@ pub struct StepFailure {
     pub operation: Option<OperationRef>,
     pub rejected: Vec<WorkflowRejectedOutput>,
     pub log: Option<String>,
+    /// Model requests the step made before it failed (they count against
+    /// the run's budget like those of a successful step).
+    pub model_requests: u32,
 }
 
 impl StepFailure {
     pub fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.to_owned(), message: message.into(), operation: None, rejected: Vec::new(), log: None }
+        Self {
+            code: code.to_owned(),
+            message: message.into(),
+            operation: None,
+            rejected: Vec::new(),
+            log: None,
+            model_requests: 0,
+        }
     }
 
     pub fn canceled() -> Self {

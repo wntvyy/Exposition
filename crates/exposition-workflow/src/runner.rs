@@ -324,6 +324,7 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
         let now = crate::now_ms();
         match result {
             Err(failure) => {
+                run.usage.model_requests += failure.model_requests;
                 let was_canceled = token.is_canceled() || failure.code == "workflow.canceled";
                 let attempt = run.steps[i].attempts.last_mut().expect("attempt");
                 finish_attempt(attempt, &failure, reported.as_ref(), now, was_canceled);
@@ -337,6 +338,8 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
             }
             Ok(result) => {
                 let checked = validate_outputs(&root, &run, planned, &contract, attempt_no, reported.as_ref(), &result);
+                // Requests were made whether or not the outputs are accepted.
+                run.usage.model_requests += result.model_requests;
                 let attempt = run.steps[i].attempts.last_mut().expect("attempt");
                 attempt.log = result.log.clone();
                 attempt.finished_at_ms = Some(now);
@@ -349,7 +352,6 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
                         attempt.state = WorkflowAttemptState::Succeeded;
                         attempt.outputs = valid.clone();
                         run.steps[i].state = WorkflowStepState::Succeeded;
-                        run.usage.model_requests += result.model_requests;
                         run.usage.output_bytes += result.extra_output_bytes;
                         for output in valid {
                             if let WorkflowOutputValue::File { bytes, .. } = &output.value {

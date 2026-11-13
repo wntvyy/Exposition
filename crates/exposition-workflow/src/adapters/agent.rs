@@ -216,8 +216,10 @@ impl AgentReviewer for AgentServiceReviewer {
         let task = summary.id.clone();
         on_task(&task.0);
         let deadline = Instant::now() + request.time_limit + Duration::from_secs(30);
+        // A failed review still made its requests: report them.
         let failure = |code: &str, message: String| StepFailure {
             operation: Some(OperationRef { kind: "agentTask".into(), id: task.0.clone() }),
+            model_requests: self.agents.task(&task).map(|s| s.usage.turns).unwrap_or(0),
             ..StepFailure::new(code, message)
         };
         let summary = loop {

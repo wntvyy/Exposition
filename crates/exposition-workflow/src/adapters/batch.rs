@@ -147,6 +147,7 @@ impl StepAdapter for BatchAdapter {
             operation: Some(operation.clone()),
             rejected: rejected.clone(),
             log: log.clone(),
+            model_requests: 0,
         };
         match &result.status {
             RunStatus::Succeeded => {}

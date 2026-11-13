@@ -1014,6 +1014,8 @@ fn closing_the_project_cancels_the_run_and_nothing_resumes() {
 
 struct FakeReviewer {
     prompts: Mutex<Vec<(String, Vec<String>, u32)>>,
+    /// Fail after this many model requests (e.g. the budget ran out).
+    fail_after: Option<u32>,
 }
 
 impl AgentReviewer for FakeReviewer {
@@ -1032,14 +1034,30 @@ impl AgentReviewer for FakeReviewer {
             request.files.iter().map(|f| f.to_string()).collect(),
             request.max_requests,
         ));
+        if let Some(requests) = self.fail_after {
+            return Err(StepFailure {
+                model_requests: requests,
+                ..StepFailure::new("workflow.budgetExhausted", "The review ran out of budget.")
+            });
+        }
         Ok(ReviewOutcome { text: "The data look consistent.".into(), task: "task-1".into(), requests: 3 })
     }
 }
 
 #[test]
 fn a_read_only_agent_review_reports_and_counts_model_requests() {
+    review_run(None);
+}
+
+/// R-m8-F3: a review that fails still counts the requests it made.
+#[test]
+fn a_failed_review_counts_its_model_requests() {
+    review_run(Some(25));
+}
+
+fn review_run(fail_after: Option<u32>) {
     let f = fixture();
-    let reviewer = Arc::new(FakeReviewer { prompts: Mutex::new(Vec::new()) });
+    let reviewer = Arc::new(FakeReviewer { prompts: Mutex::new(Vec::new()), fail_after });
     let mut a = adapters(&f.batch, &f.lean, &f.research);
     let r: Arc<dyn AgentReviewer> = reviewer.clone();
     a.insert(runner_ids::READ_ONLY_AGENT.into(), Arc::new(AgentReviewAdapter { reviewer: Some(r) }));
@@ -1076,6 +1094,12 @@ fn a_read_only_agent_review_reports_and_counts_model_requests() {
     let run = service.start(&StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash }).unwrap();
     assert!(service.wait_idle(Duration::from_secs(10)));
     let run = service.get(&run.id).unwrap();
+    if let Some(requests) = fail_after {
+        assert_eq!(run.state, WorkflowRunState::Failed, "{:?}", run.message);
+        assert_eq!(run.code.as_deref(), Some("workflow.budgetExhausted"));
+        assert_eq!(run.usage.model_requests, requests, "the failed review's requests are counted");
+        return;
+    }
     assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?}", run.message);
     assert_eq!(run.usage.model_requests, 3);
     let out = &last_attempt(&run, "review").outputs[0];
