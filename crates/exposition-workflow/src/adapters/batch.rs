@@ -62,7 +62,12 @@ fn extensions(ty: PortType) -> Vec<String> {
         PortType::Table => &["csv", "tsv", "html", "md", "tex", "json"],
         other => other.extensions(),
     };
-    exts.iter().map(|e| (*e).to_owned()).collect()
+    // Only what the batch runner actually exports (validated, inert-rendered
+    // types); a port is never offered an extension it would refuse.
+    exts.iter()
+        .filter(|e| exposition_research::sandbox::outputs::EXPORTED_EXTENSIONS.contains(e))
+        .map(|e| (*e).to_owned())
+        .collect()
 }
 
 impl StepAdapter for BatchAdapter {
@@ -186,5 +191,27 @@ fn file_value(research_run: &str, artifact: &exposition_core::artifact::Artifact
         media_type: artifact.media_type.clone(),
         research_run: Some(research_run.to_owned()),
         artifact: Some(artifact.id.0.clone()),
+    }
+}
+
+#[cfg(test)]
+mod port_extension_tests {
+    use super::*;
+
+    /// Every output type a Python step declares is offered only extensions
+    /// the batch runner exports (it refuses a request naming any other), and
+    /// at least one.
+    #[test]
+    fn output_ports_offer_only_exported_extensions() {
+        for ty in [PortType::Dataset, PortType::Figure, PortType::Table] {
+            let exts = extensions(ty);
+            assert!(!exts.is_empty(), "{ty:?}");
+            for e in &exts {
+                assert!(
+                    exposition_research::sandbox::outputs::EXPORTED_EXTENSIONS.contains(&e.as_str()),
+                    "{ty:?} .{e}"
+                );
+            }
+        }
     }
 }

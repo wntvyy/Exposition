@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use exposition_agents::credentials::{KeyringStore, ObservedStore, PROVIDER_KEY_SECRET, SecretStore};
 use exposition_agents::tools::execution::AppToolServices;
@@ -144,7 +145,13 @@ impl AppState {
         // Workflow runs. The research batch runner (restricted Docker and
         // trusted-native Python batches) is wired here; without one, Python
         // workflow steps report themselves unavailable (never downgraded).
-        let batch_runner: Option<Arc<dyn exposition_research::batch::BatchRunner>> = None;
+        exposition_research::sandbox::remove_stale_batches(&research);
+        let batch_runner: Option<Arc<dyn exposition_research::batch::BatchRunner>> =
+            Some(Arc::new(SyncedBatchRunner {
+                inner: exposition_research::sandbox::batch_runner(Arc::clone(&research), execution.clone()),
+                research: Arc::clone(&research),
+                availability: Mutex::new(HashMap::new()),
+            }));
         let workflow_runs = crate::workflow_runs::build(
             &data_dir,
             crate::workflow_runs::RunServices {
@@ -281,5 +288,58 @@ mod tests {
             Some(DEVELOPMENT_NAMESPACE),
             "an invalid namespace never falls back to the real entry"
         );
+    }
+}
+
+/// The research batch runner as the workflow runner uses it: the research
+/// service is pointed at the run's project before each call (the same rule
+/// as the research commands), and availability answers (which may ask Docker
+/// whether the image is present) are reused for a few seconds, because drafts
+/// are re-validated as they are edited.
+struct SyncedBatchRunner {
+    inner: Arc<dyn exposition_research::batch::BatchRunner>,
+    research: Arc<ResearchService>,
+    availability:
+        Mutex<HashMap<(PathBuf, exposition_research::batch::BatchMode), (std::time::Instant, Result<(), String>)>>,
+}
+
+const BATCH_AVAILABILITY_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl SyncedBatchRunner {
+    fn sync(&self, root: &std::path::Path) -> Result<(), exposition_research::ResearchError> {
+        let canonical = std::fs::canonicalize(root).ok();
+        let current = self.research.workspace_root();
+        if canonical.is_none() || current != canonical {
+            self.research.set_workspace(root, false)?;
+        }
+        Ok(())
+    }
+}
+
+impl exposition_research::batch::BatchRunner for SyncedBatchRunner {
+    fn availability(&self, root: &std::path::Path, mode: exposition_research::batch::BatchMode) -> Result<(), String> {
+        let key = (root.to_path_buf(), mode);
+        if let Some((at, answer)) = self.availability.lock().unwrap_or_else(|p| p.into_inner()).get(&key)
+            && at.elapsed() < BATCH_AVAILABILITY_TTL
+        {
+            return answer.clone();
+        }
+        let answer = self.sync(root).map_err(|e| e.to_string()).and_then(|()| self.inner.availability(root, mode));
+        let mut cache = self.availability.lock().unwrap_or_else(|p| p.into_inner());
+        cache.retain(|_, (at, _)| at.elapsed() < BATCH_AVAILABILITY_TTL);
+        cache.insert(key, (std::time::Instant::now(), answer.clone()));
+        answer
+    }
+
+    fn run(
+        &self,
+        root: &std::path::Path,
+        request: &exposition_research::batch::BatchRequest,
+        control: &exposition_research::batch::BatchControl<'_>,
+    ) -> Result<exposition_research::batch::BatchResult, exposition_research::ResearchError> {
+        self.sync(root)?;
+        // A run re-checks everything itself; never answer it from the cache.
+        self.availability.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        self.inner.run(root, request, control)
     }
 }

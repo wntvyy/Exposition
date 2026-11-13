@@ -701,12 +701,12 @@ fn gate_matrix(kind: GraphKind) {
                         (Expect::Approval, Gate::NeedsApproval { detail, authorization, .. })
                             if kind == GraphKind::Workflow =>
                         {
-                            // The complete definition, its diagnostics, and "not runnable".
+                            // The complete definition, its diagnostics, and "saving runs nothing".
                             detail.contains("WORKFLOW-DRAFT-MARK")
                                 && detail.contains("Definition (complete):")
                                 && detail.contains("\"operation\": {")
                                 && detail.contains("Summarize the claims.")
-                                && detail.contains("not runnable in this version")
+                                && detail.contains("Saving runs nothing")
                                 && detail.contains("Diagnostics:")
                                 && authorization.policy().is_none()
                         }
@@ -768,7 +768,7 @@ async fn workflow_drafts_are_saved_with_diagnostics_and_never_runnable() {
     assert_eq!(result["saved"], json!(true));
     assert_eq!(result["state"], json!("incomplete"), "{result}");
     assert_eq!(result["runnable"], json!(false));
-    assert!(result["runnableReason"].as_str().unwrap().contains("later version"));
+    assert!(result["runnableReason"].as_str().unwrap().contains("never runs it"));
     assert!(result["errors"].as_u64().unwrap() >= 1);
     assert!(
         result["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == json!("workflow.unboundInput")),

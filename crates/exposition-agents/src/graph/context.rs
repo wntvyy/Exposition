@@ -279,10 +279,10 @@ pub fn operations(spec: &TaskSpec, services: &dyn ToolServices) -> Vec<ContextOp
                 PermissionProfile::ReadOnly => "refused: the task is read-only",
                 _ if !whole => "refused: needs a task scoped to the whole project",
                 PermissionProfile::ReviewEdits => {
-                    "saves a workflow draft after the user's approval; drafts are not runnable in this version"
+                    "saves a workflow draft after the user's approval; saving never runs it (only the user runs a workflow, from a reviewed run plan)"
                 }
                 PermissionProfile::AutoApply => {
-                    "saves a workflow draft directly; drafts are not runnable in this version"
+                    "saves a workflow draft directly; saving never runs it (only the user runs a workflow, from a reviewed run plan)"
                 }
             },
         ),

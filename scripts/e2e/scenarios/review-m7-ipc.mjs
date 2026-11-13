@@ -353,9 +353,9 @@ export default async function reviewM7Ipc({ launchApp, artifactsDir }) {
         r.expect("F an imported draft naming an unregistered operation is refused or saved with an error, never runnable", ok, short(res.error ?? v?.diagnostics?.filter((d) => d.severity === "error").map((d) => d.code)));
       }
       const imported = await call(page, "workflow_import", { text: JSON.stringify(draft) });
-      r.expect("F a valid import is saved, never runnable", !!imported.ok && imported.ok.validation.runnable === false, short(imported.error ?? imported.ok?.validation.runnableReason));
+      r.expect("F a valid import is saved and nothing runs on import (M8: runnable only reports readiness)", !!imported.ok && ((await call(page, "workflow_runs", { workflow: null })).ok ?? []).length === 0, short(imported.error ?? imported.ok?.validation.runnableReason));
       const list = (await call(page, "workflow_list")).ok ?? [];
-      r.expect("F imported drafts are listed as imported and not runnable", list.every((w) => !w.runnable), short(list.map((w) => [w.title, w.runnable, w.imported])));
+      r.expect("F imported drafts are listed as imported, and none was run", list.some((w) => w.imported) && ((await call(page, "workflow_runs", { workflow: null })).ok ?? []).length === 0, short(list.map((w) => [w.title, w.runnable, w.imported])));
       const ops = (await call(page, "workflow_operations")).ok ?? [];
       r.info("F operations", ops.map((o) => o.id ?? o.operation).join(", "));
     }

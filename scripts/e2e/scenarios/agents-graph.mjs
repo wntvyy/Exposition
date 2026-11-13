@@ -360,7 +360,7 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     await agentsPage.getByRole("tab", { name: /Run/ }).click();
     await agentsPage.getByTestId("agents-approval").waitFor({ timeout: 15_000 });
     const wfPayload = await agentsPage.getByTestId("agents-approval-payload").textContent();
-    for (const needle of [WORKFLOW_TITLE, "Definition (complete):", '"operation": {', "Summarize the claims.", "not runnable in this version", "Diagnostics:"]) {
+    for (const needle of [WORKFLOW_TITLE, "Definition (complete):", '"operation": {', "Summarize the claims.", "Saving runs nothing", "Diagnostics:"]) {
       assert.ok(wfPayload.includes(needle), `the workflow approval shows ${needle}: ${wfPayload}`);
     }
     await shot(page, "agents-graph-workflow-approval-light");

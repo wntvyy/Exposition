@@ -276,8 +276,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 connections or prerequisites, declared outcomes, and an authority ceiling (at most this task's own \
                 permissions). The application validates it against the workflow contract and saves it with its \
                 diagnostics (incomplete drafts are fine); after the user's approval in tasks that review each \
-                change, directly in tasks that apply changes. Drafts are not runnable in this version and nothing \
-                runs. Steps cannot stand in for service-owned results (formal evidence, retained artifacts). Use \
+                change, directly in tasks that apply changes. Saving never runs \
+                anything; only the user runs a workflow, from a reviewed run plan. Steps cannot stand in for service-owned results (formal evidence, retained artifacts). Use \
                 \"\", [] and -1 for unused fields.",
             input_schema: workflow_schema(),
         },

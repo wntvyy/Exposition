@@ -197,8 +197,12 @@ export default async function workflowRun({ launchApp, artifactsDir, assert }) {
     note("plan-binds-image-no-native", planA.execution.restrictedImage === IMAGE && planA.execution.nativeSteps.length === 0, planA.execution);
     const badStart = await invokeError(page, "workflow_run_start", { request: { plan: planA.plan, approvalHash: "0".repeat(64) } });
     note("start-needs-the-approved-hash", /planStale|approval/i.test(JSON.stringify(badStart)), badStart);
+    const reused = await invokeError(page, "workflow_run_start", { request: { plan: planA.plan, approvalHash: planA.approvalHash } });
+    note("a-refused-plan-cannot-be-reused", /planStale/.test(JSON.stringify(reused)), reused);
+    const planA2 = await invoke(page, "workflow_run_plan", { id: savedA.id, revision: null });
+    note("same-content-same-approval-hash", planA2.approvalHash === planA.approvalHash && planA2.plan !== planA.plan, { a: planA.approvalHash, b: planA2.approvalHash });
     const obsBefore = await fileHash("data/obs.csv");
-    let runA = await invoke(page, "workflow_run_start", { request: { plan: planA.plan, approvalHash: planA.approvalHash } });
+    let runA = await invoke(page, "workflow_run_start", { request: { plan: planA2.plan, approvalHash: planA2.approvalHash } });
     note("run-started", runA.state === "running", runA.state);
     runA = await finish(runA.id);
     note("run-succeeded", runA.state === "succeeded", { state: runA.state, code: runA.code, message: runA.message, steps: runA.steps.map((s) => [s.step, s.state, s.attempts.at(-1)?.code, s.attempts.at(-1)?.message]) });
@@ -226,9 +230,13 @@ export default async function workflowRun({ launchApp, artifactsDir, assert }) {
     const promo = lastAttempt(runA, "promote")?.outputs[0]?.value;
     note("promotion-proposed-not-applied", promo?.kind === "promotionProposal" && promo.status === "pending" && (await readFile(join(root, "paper.typ"), "utf8")) === PAPER, promo);
     if (promo?.promotion) {
+      const preview = await invoke(page, "research_promotion_preview", { promotion: promo.promotion });
+      note("promotion-review-shows-exact-markup", !!preview && preview.path === "paper.typ" && preview.edits.some((e) => e.text.includes("figure.svg")), preview?.edits);
       const applied = await invoke(page, "research_promotion_approve", { promotion: promo.promotion });
-      const paper = await readFile(join(root, "paper.typ"), "utf8");
-      note("reviewed-promotion-applied", paper.includes("figure.svg") && paper !== PAPER, { graph: applied.graph, paper: paper.slice(0, 300) });
+      const text = preview ? (await invoke(page, "document_state", { document: preview.document })).text : "";
+      note("reviewed-promotion-applied-to-the-document", applied.graph.kind === "recorded" && text.includes("figure.svg") && text !== PAPER, { graph: applied.graph, text: text.slice(0, 300) });
+      const after = await invoke(page, "workflow_run_get", { run: runA.id });
+      note("run-shows-promotion-accepted", lastAttempt(after, "promote")?.outputs[0]?.value?.status === "accepted", lastAttempt(after, "promote")?.outputs[0]?.value);
     }
 
     // UI: the run is visible in the workflow's run history (lane U test ids).
@@ -275,7 +283,7 @@ export default async function workflowRun({ launchApp, artifactsDir, assert }) {
         },
       });
       const task = await invoke(page, "agents_task_create", {
-        request: { workspaceRoot: info.root, consent: "scopeContent", prompt: "Propose an experiment workflow", scope: { kind: "workspace" }, permission: "reviewEdits", execution: "disabled", budgets: null },
+        request: { workspaceRoot: info.root, consent: "scopeContent", prompt: "Propose an experiment workflow", scope: { kind: "workspace" }, permission: "reviewEdits", execution: "restricted", budgets: null },
       });
       const answered = new Set();
       await waitFor(async () => {

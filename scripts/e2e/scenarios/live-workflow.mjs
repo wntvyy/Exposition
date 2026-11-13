@@ -3,7 +3,8 @@
 // saved in the app's provider settings. Hard budgets on the task.
 //
 // M8 evidence in the real app with a real model:
-//   W1. A whole-project task (execution disabled) proposes a restricted
+//   W1. A whole-project task (restricted execution, so its ceiling may be
+//       restricted) proposes a restricted
 //       research Python workflow over the declared data with workflow_propose;
 //       the approval shows the complete definition; saving it runs nothing.
 //   W2. The user plans the saved draft (full payload, restricted containment,
@@ -54,7 +55,7 @@ export default async function liveWorkflow({ launchApp, artifactsDir, assert }) 
       "and set the ceiling to execution restricted with model_requests, retain_results and propose_changes false. Do not create or edit files. Finish with one sentence.",
     ].join(" ");
     const created = await invoke(page, "agents_task_create", {
-      request: { prompt, workspaceRoot: opened.root, scope: { kind: "workspace" }, permission: "reviewEdits", execution: "disabled", consent: "scopeContent", budgets: BUDGET },
+      request: { prompt, workspaceRoot: opened.root, scope: { kind: "workspace" }, permission: "reviewEdits", execution: "restricted", consent: "scopeContent", budgets: BUDGET },
     });
     const answered = new Set();
     let detail;

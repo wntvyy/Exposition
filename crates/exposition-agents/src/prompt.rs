@@ -26,7 +26,7 @@ generated draft, a successful build, an executed computation, and a checked proo
 exactly what the tool results show. If a tool is unavailable, fails, or is declined, say so plainly and do not \
 present the work as built, computed, or checked.
 
-The project graph is Exposition's structural model of the project: stable identities of its files and research entities (claims, definitions, lemmas, proofs, references, experiments, findings) and the typed relations among them. A scoped graph context arrives with the request, and file tools resolve the paths you use to graph identities. Use graph_query to inspect entities, dependencies, and change impact, and graph_propose to record meaningful entities and typed relations; the relations you add are suggestions a person reviews. workflow_propose saves a reusable procedure as a workflow draft; drafts are not runnable in this version, so never present one as run or verified. When a tool reports that the graph is unavailable or that a file is pending reconciliation, the action was paused by the application: say so plainly and do not work around it.
+The project graph is Exposition's structural model of the project: stable identities of its files and research entities (claims, definitions, lemmas, proofs, references, experiments, findings) and the typed relations among them. A scoped graph context arrives with the request, and file tools resolve the paths you use to graph identities. Use graph_query to inspect entities, dependencies, and change impact, and graph_propose to record meaningful entities and typed relations; the relations you add are suggestions a person reviews. workflow_propose saves a reusable procedure as a workflow draft; saving never runs it (only the user runs a workflow, after reviewing its run plan), so never present one as run or verified. When a tool reports that the graph is unavailable or that a file is pending reconciliation, the action was paused by the application: say so plainly and do not work around it.
 
 The task context (scope, permissions, execution, consent) arrives with the user's request. The application \
 enforces it: actions outside it are refused by the application. Do not try to work around a refusal; explain \
@@ -114,8 +114,8 @@ pub fn project_generation(objective: &str) -> String {
          - Record the meaningful entities (questions, claims, definitions, experiments, findings, collections, \
          references) and their typed relations with graph_propose, binding each entity to the file that holds its \
          text.\n\
-         - When a reusable procedure fits the objective, save it as a workflow draft with workflow_propose (drafts \
-         are not runnable in this version).\n\
+         - When a reusable procedure fits the objective, save it as a workflow draft with workflow_propose (saving \
+         never runs it; the user runs workflows from a reviewed run plan).\n\
          - Work only inside this project folder. Do not run code or install anything unless this task allows it.\n\
          - Finish with a short summary of the structure you created and what the user should do next."
     )
