@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workflow-trigger-enable"
+description = "Enables the workflow_trigger_enable command without any pre-configured scope."
+commands.allow = ["workflow_trigger_enable"]
+
+[[permission]]
+identifier = "deny-workflow-trigger-enable"
+description = "Denies the workflow_trigger_enable command without any pre-configured scope."
+commands.deny = ["workflow_trigger_enable"]
