@@ -18,12 +18,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::model::ProviderKind;
 
-/// A client tool offered to the model (strict JSON schema).
+/// A client tool offered to the model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolDefinition {
     pub name: &'static str,
     pub description: &'static str,
     pub input_schema: Value,
+    /// Ask the provider to constrain generation to the schema (`strict`).
+    /// The provider compiles every strict schema of a request into one
+    /// grammar with a size limit, so large schemas are sent non-strict; every
+    /// tool's input is deserialized and validated in Rust either way.
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

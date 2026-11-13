@@ -675,6 +675,7 @@ async fn r_m5_f8_api_key_is_sent_to_a_redirect_target_on_another_host() {
             name: "read_file",
             description: "Read",
             input_schema: json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            strict: true,
         }],
         messages: vec![ProviderMessage {
             role: "user".into(),

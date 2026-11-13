@@ -399,7 +399,7 @@ natively, when no image is configured; it uses no development-only command, so
 it also runs against an installed release. The default automated
 suite uses a scripted development provider that release builds do not contain,
 and development builds use a separate development credential entry unless told
-otherwise.
+otherwise. A third, `npm run e2e -- live-graph`, has the model read the project graph, propose a mathematical dependency (kept as a suggestion until a person accepts it), and save a workflow draft (never runnable), and checks that a task with "File names only" consent never sends or receives theorem labels or file text.
 
 ## Execution and security
 

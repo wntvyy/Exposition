@@ -116,7 +116,7 @@ impl AnthropicProvider {
                     "name": tool.name,
                     "description": tool.description,
                     "input_schema": tool.input_schema,
-                    "strict": true,
+                    "strict": tool.strict,
                     "eager_input_streaming": true,
                 })
             })
@@ -340,6 +340,7 @@ mod tests {
                 name: "read_file",
                 description: "Read a file",
                 input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": false}),
+                strict: true,
             }],
             messages: vec![ProviderMessage {
                 role: "user".into(),

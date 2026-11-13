@@ -1,9 +1,12 @@
 //! Structured tools offered to the model.
 //!
-//! Every tool has a strict JSON schema (sent with `strict: true`) and a typed
-//! Rust input with `deny_unknown_fields`; with eager input streaming the API
-//! does not validate inputs, so each call is deserialized and validated here
-//! before anything runs. Invalid input becomes an error tool result.
+//! Every tool has a JSON schema and a typed Rust input with
+//! `deny_unknown_fields`; with eager input streaming the API does not validate
+//! inputs, so each call is deserialized and validated here before anything
+//! runs. Invalid input becomes an error tool result. The original file,
+//! build, research, and Lean tools are sent `strict`; the larger graph and
+//! workflow schemas are not (the provider compiles all strict schemas of a
+//! request into one grammar with a size limit — see the test below).
 //!
 //! The tool list is fixed and deterministic (prompt-cache friendly). Whether a
 //! tool may act is decided per call by the task's scope, permission profile,
@@ -40,6 +43,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: LIST_FILES,
+            strict: true,
             description: "List files and folders of the user's project (only those inside this task's scope). \
                 Call it first to discover the project's structure, and whenever you need a path you have not seen. \
                 Paths are relative to the project root and use forward slashes.",
@@ -55,6 +59,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: READ_FILE,
+            strict: true,
             description: "Read a text file of the project. Returns the current text, including unsaved changes in \
                 the user's open editor, and its revision number. Always read a file (again) before editing it: \
                 edit_document needs the revision you read, and the user may have changed the file since.",
@@ -69,6 +74,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: EDIT_DOCUMENT,
+            strict: true,
             description: "Change a text file by replacing exact snippets of the revision you read. Each old_text \
                 must occur exactly once in that revision (copy it exactly, with enough surrounding text to be unique) \
                 and edits must not overlap; to insert, include neighbouring text in old_text and new_text. All edits \
@@ -100,6 +106,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: CREATE_FILE,
+            strict: true,
             description: "Create a new text file with the given content. Fails if the file already exists (use \
                 edit_document to change existing files). Missing folders are created. The user can review and \
                 revert the creation.",
@@ -115,6 +122,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: BUILD_DOCUMENT,
+            strict: true,
             description: "Typeset a document (Typst .typ, Markdown .md or .markdown through its print profile, or \
                 LaTeX .tex) from the current editor state, unsaved changes included, and report the real status, \
                 diagnostics with locations, and page count. Use it to check that your changes build; report its \
@@ -133,6 +141,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: INSERT_ARTIFACT,
+            strict: true,
             description: "Insert a figure or table produced by a research run (an artifact listed in a run_python \
                 result) into a Typst, LaTeX, or Markdown document using the format's own figure/table markup and a \
                 stable attachment key, or update an earlier insertion by its key. The change is applied to the open \
@@ -153,6 +162,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: RUN_PYTHON,
+            strict: true,
             description: "Run Python code in a separate process for this task (never the user's own sessions) and \
                 return its real exit code and output. Use it for calculations and data analysis the user asked for. \
                 In the restricted sandbox the project is read-only at /workspace and files can be written to /out. \
@@ -168,6 +178,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: CHECK_LEAN,
+            strict: true,
             description: "Check a Lean file with the project's Lean toolchain and return the real diagnostics and \
                 proof status (incomplete proofs and `sorry` are reported as such). Lean runs natively, so this needs a \
                 task scoped to the whole project and the user's approval.",
@@ -182,6 +193,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: RUN_COMMAND,
+            strict: true,
             description: "Run one program with an argument list (no shell, no pipes or redirection) in the project \
                 folder and return its exit code and bounded output. Use only when no dedicated tool fits. In the \
                 restricted sandbox the project is read-only at /workspace and files can be written to /out. \
@@ -199,6 +211,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: GRAPH_QUERY,
+            // Non-strict: its schema is large (typed operations / a workflow
+            // definition); with it, the request's strict grammar exceeded the
+            // provider's limit and every task was rejected. Rust validates
+            // the input exactly (`deny_unknown_fields`).
+            strict: false,
             description: "Read the project graph: Exposition's structural model of this project (stable identities of \
                 files and research entities such as claims, lemmas, proofs, references, and experiments, and the \
                 typed relations among them). Results are bounded and filtered to this task's scope and content \
@@ -223,6 +240,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: GRAPH_PROPOSE,
+            // Non-strict: its schema is large (typed operations / a workflow
+            // definition); with it, the request's strict grammar exceeded the
+            // provider's limit and every task was rejected. Rust validates
+            // the input exactly (`deny_unknown_fields`).
+            strict: false,
             description: "Propose typed changes to the project graph: create meaningful entities (claims, \
                 definitions, lemmas, proofs, questions, references, experiments, findings, collections), add or \
                 withdraw typed relations (dependsOn, assumes, proofOf, references, evidenceFor, memberOf, ...), \
@@ -244,6 +266,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: WORKFLOW_PROPOSE,
+            // Non-strict: its schema is large (typed operations / a workflow
+            // definition); with it, the request's strict grammar exceeded the
+            // provider's limit and every task was rejected. Rust validates
+            // the input exactly (`deny_unknown_fields`).
+            strict: false,
             description: "Save a workflow draft in the project graph: a declarative procedure of registered \
                 operations (steps with typed input/output ports), explicit project-file inputs, typed data \
                 connections or prerequisites, declared outcomes, and an authority ceiling (at most this task's own \
@@ -893,6 +920,41 @@ mod tests {
         ];
         for (name, input) in ok {
             assert!(ToolCall::parse(name, &input).is_ok(), "{name}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod strict_tests {
+    use super::*;
+
+    /// The provider compiles every strict schema of a request into one
+    /// grammar and rejects the request ("The compiled grammar is too large")
+    /// past a limit, which failed every live agent task once the graph tools
+    /// were strict. Keep the strict set to the tools proven within the limit
+    /// in live runs, and bound its size.
+    #[test]
+    fn strict_tool_grammar_stays_within_the_provider_limit() {
+        let tools = definitions();
+        let strict: Vec<&str> = tools.iter().filter(|t| t.strict).map(|t| t.name).collect();
+        assert_eq!(
+            strict,
+            vec![
+                LIST_FILES,
+                READ_FILE,
+                EDIT_DOCUMENT,
+                CREATE_FILE,
+                BUILD_DOCUMENT,
+                INSERT_ARTIFACT,
+                RUN_PYTHON,
+                CHECK_LEAN,
+                RUN_COMMAND
+            ],
+        );
+        let strict_size: usize = tools.iter().filter(|t| t.strict).map(|t| t.input_schema.to_string().len()).sum();
+        assert!(strict_size <= 8_000, "strict schemas total {strict_size} bytes");
+        for t in tools.iter().filter(|t| !t.strict) {
+            assert_eq!(t.input_schema["additionalProperties"], false, "{} still refuses unknown fields", t.name);
         }
     }
 }

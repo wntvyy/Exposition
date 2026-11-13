@@ -16,7 +16,7 @@
 - Command palette: **63 registered commands** (62 listed; Show All Commands hides itself); 18 keybindings
 - Agent tools: **11**; 21 gate refusal codes; 44 distinct `agents.` codes; 10 task statuses; 8 tool-call states
 - Settings keys: **27 persisted** (App 2, Editor 7, Project 4, Execution 7, Provider 4, Trust 3) + API key (OS store) + 4 frontend-only
-- e2e scenarios: **40** (38 in the default run; `live-agents` and `live-restricted` opt-in)
+- e2e scenarios: **41** (38 in the default run; `live-agents`, `live-restricted`, and `live-graph` opt-in)
 - Workbench: 4 pages, 8 views, 11 editors, 6 status-bar items, 22 dialogs, 8 Settings sections
 - Project graph: 23 entity kinds, 12 relation kinds, 6 extractors, schema 2; 6 project presets; 2 workflow presets, 7 workflow operations (none runnable)
 - Formats: 4 (Typst, Markdown print profile, pdfLaTeX, LuaLaTeX); 4 page-edit operations
@@ -418,7 +418,7 @@ The final status is chosen in this order: Errors, Unverified, Partially checked,
 | `refused{category?, explanation?}` | Declined by provider · `stop_reason: refusal`; nothing from it stored or run | `failed{message}` | Task failed · provider, storage, checkpoint or folder error |
 | `stopped{stopReason, message}` | Stopped: response cut off / context window full / response paused / unexpected response · `max_tokens` (per-turn 64 000), `model_context_window_exceeded`, `pause_turn`, unknown stop; its calls `notRun` | `interrupted` | Interrupted · app closed while active; set at next start |
 
-### 6.3 Tools (12; strict schemas, every property required, unknown fields rejected)
+### 6.3 Tools (12; every property required, unknown fields rejected in Rust; the nine file/build/research/Lean tools are sent `strict`, `graph_query`, `graph_propose`, and `workflow_propose` non-strict because the provider compiles all strict schemas of a request into one size-limited grammar)
 | Tool | Parameters | Effect | Declared effects (exposure · launch · service) |
 |---|---|---|---|
 | `list_files` | `path` ("" = root), `recursive` | In-scope entries, breadth-first, ≤500 (`truncated`); skips `.git`, `node_modules`, `target`, `.venv`, `__pycache__`, `.lake`; no recursion into links; open docs get `openRevision`, `unsavedChanges` | metadata · none · — |
@@ -1090,7 +1090,7 @@ Set for children: job `TEMP`/`TMP`, constructed `PATH`, `PAR_GLOBAL_TEMP`; resea
 **e2e harness** (`npm run e2e [-- <names>]`, `scripts/e2e/run.mjs`): launches `EXPOSITION_E2E_EXECUTABLE` or `target/debug/exposition.exe` with isolated `EXPOSITION_DATA_DIR`, `WEBVIEW2_USER_DATA_FOLDER`, `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<free port>`; connects with Playwright `connectOverCDP`; raw IPC via `window.__TAURI_INTERNALS__.invoke`; strips `EXPOSITION_USE_REAL_CREDENTIAL` except for `live-*`; artifacts and last-state screenshot/console in `test-results/e2e/<name>/`. Helpers: `agent-scope-check.mjs`, `app.mjs`, `app-env.mjs`, `palette.mjs`, `processes.mjs`, `wait.mjs`, `workspace-helpers.mjs`, `repro/page-race-keystrokes.mjs`.
 
 **40 scenarios** (`scripts/e2e/scenarios/*.mjs`): agents-attention, agents-graph, agents-harness, consistency, execution-jobs, graph-canvas, graph-core, graph-lean-association, lean-check, lean-evidence, live-agents, live-restricted, m6-paper-project, page-latex, page-markdown, pages-review, page-typst, project-create, research-attach-build, research-isolation, research-output, research-python, research-workspace, review-m4-lean-ui, review-m5-agents, review-sec-acl, review-sec-exec, review-sec-ipc, review-sec-render, review-sec-secrets, settings, smoke, tex-build, trust-propagation, ui-shell, workspace-external, workspace-files, workspace-recovery, workspace-save-failure, workspace-window-close.
-- Excluded from the default run: `live-agents` and `live-restricted` (runner skips `live-*`; real key, spends API credit). `live-restricted` uses no development-only command, so it also runs against release/installed builds: an unattended task's `run_python` in the Docker sandbox, then the same request refused with no image configured.
+- Excluded from the default run: `live-agents`, `live-restricted`, and `live-graph` (runner skips `live-*`; real key, spends API credit). `live-graph`: a whole-project task gets the scoped graph context, uses `graph_query`, proposes a dependency with `graph_propose` (approval card; stored as a suggestion attributed to the task) and saves a workflow draft with `workflow_propose` (never runnable), changing no files; a metadata-only task then never sends or receives a content-derived label (checked on the stored provider transcript). `live-restricted` uses no development-only command, so it also runs against release/installed builds: an unattended task's `run_python` in the Docker sandbox, then the same request refused with no image configured.
 - Self-skip unless named: `review-m5-agents`, `review-sec-acl`, `review-sec-exec`, `review-sec-ipc`, `review-sec-render`, `review-sec-secrets`.
 - Need a debug build (scripted provider, dev commands or credential namespace): `agents-attention`, `agents-harness`, `execution-jobs`, `review-m5-agents`, `review-sec-exec`, `review-sec-render`, `review-sec-secrets`, `settings`, `trust-propagation`, `agents-graph`, `project-create` (also the simulated crash), `research-workspace` (`research_dev_fail_next_graph_write`); `lean-evidence` runs its restricted-mode agent step only in debug builds; `m6-paper-project` runs its agent step only in debug builds.
 - Report SKIPPED without Lean `leanprover/lean4:v4.35.0` via elan (fail instead with `EXPOSITION_REQUIRE_LEAN=1`): `lean-check`, `review-m4-lean-ui`, `lean-evidence`, `graph-lean-association`, the Lean step of `agents-harness`.
@@ -1122,7 +1122,7 @@ From `docs/capabilities.md` (verified where code allows) plus code findings (mar
 - A trusted Lean file's code runs with the user's privileges while compiled; deliberate tampering with the toolchain or other processes is not contained.
 - Lean audit programs target Lean 4.35 APIs; toolchains they do not compile on report Not verified; kernel re-checking large dependencies (Mathlib) is slow.
 - Lean goals are plain text; third-party infoview widgets are not executed.
-- Agents: one provider (Anthropic Messages API); live behaviour is covered only by the opt-in `live-agents` and `live-restricted` scenarios (spend credit).
+- Agents: one provider (Anthropic Messages API); live behaviour is covered only by the opt-in `live-agents`, `live-restricted`, and `live-graph` scenarios (spend credit).
 - Trusted native code (kernels, approved commands, Python, LaTeX, Lean) runs as the user and can read the stored API key.
 - Restricted execution needs Docker with a locally present image providing `/bin/sh` (`sleep` for the in-container time limit); no pull, no native fallback.
 - the startup container sweep runs only when an image is configured; a sweep failure is only printed to stderr (the first restricted job retries).
