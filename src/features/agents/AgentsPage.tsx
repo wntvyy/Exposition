@@ -9,6 +9,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { GraphSnapshot } from "../../bindings/GraphSnapshot";
 import type { TaskId } from "../../bindings/TaskId";
 import type { TaskSummary } from "../../bindings/TaskSummary";
+import { editors } from "../../app/editors";
 import { layout } from "../../app/layout";
 import { EDITOR_PAGE, pages, usePages } from "../../app/pages";
 import { notify } from "../../app/notifications";
@@ -133,12 +134,24 @@ function KeptEntities({ snapshot, error }: { snapshot: GraphSnapshot | null; err
       {entities.map((entity) => {
         const task = entity.attributes.agentTask;
         const known = task ? tasks.find((t) => t.id === task) : undefined;
+        // A workflow draft opens in the workflow editor (review, edit, save; it runs only from a plan the user starts).
+        const workflowId = entity.kind === "workflow" ? entity.attributes["workflow.id"] : undefined;
         return (
           <li key={entity.id} data-testid="agents-kept-entity" data-entity-id={entity.id} data-kind={entity.kind}>
             <Badge tone="neutral">{kindTitle(entity.kind)}</Badge> {entity.label}
             {known && (
               <Button size="sm" variant="ghost" onPress={() => agents.setPage({ selected: known.id, composing: false })}>
                 Open task
+              </Button>
+            )}
+            {workflowId && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onPress={() => editors.open({ key: `workflow:${workflowId}`, title: entity.label })}
+                data-testid="agents-kept-open-workflow"
+              >
+                Open workflow
               </Button>
             )}
           </li>

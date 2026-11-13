@@ -2,7 +2,7 @@
 // the editor (live Rust validation mocked at the feature's IPC boundary):
 // diagnostics shown, saving creates a revision, "Review and run…" only for a
 // saved, well-formed, runnable revision, and nothing ever starts by itself.
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OperationContract } from "../../bindings/OperationContract";
@@ -251,5 +251,74 @@ describe("WorkflowEditor", () => {
     const detached = await screen.findByTestId("workflow-detached");
     expect(detached.textContent).toMatch(/belongs to \/work\/lean/);
     expect(screen.queryByTestId("workflow-save")).toBeNull();
+  });
+
+  it("offers Review and run… only for a saved, runnable revision, and never starts by itself", async () => {
+    const ready = { ...validation(0), runnable: true, runnableReason: "Every runner is available." };
+    wfIpc.get.mockResolvedValue({ ...saved(1, audit), validation: ready });
+    wfIpc.validate.mockResolvedValue(ready);
+    runIpc.plan.mockReturnValue(new Promise(() => {}));
+    render(<WorkflowEditor resource={{ key: "workflow:wf-1", title: "Formal audit" }} mode="source" active />);
+    const review = (await screen.findByTestId("workflow-review-run")) as HTMLButtonElement;
+    await waitFor(() => expect(review.disabled).toBe(false));
+    expect(screen.getByTestId("workflow-status").getAttribute("data-can-review")).toBe("true");
+    fireEvent.click(review);
+    await waitFor(() => expect(runIpc.plan).toHaveBeenCalledWith("wf-1", 1));
+    expect(runIpc.start).not.toHaveBeenCalled();
+    // Unsaved edits: the action is disabled with the reason shown.
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    fireEvent.change(screen.getByTestId("workflow-title").querySelector("input")!, { target: { value: "Changed" } });
+    await waitFor(() => expect(review.disabled).toBe(true));
+    expect(screen.getByTestId("workflow-run-reason").textContent).toMatch(/Save the draft first/);
+    expect(review.getAttribute("aria-describedby")).toBeTruthy();
+  });
+
+  it("shows the backend's reason when a well-formed revision cannot run", async () => {
+    const blocked = { ...validation(0), runnable: false, runnableReason: "No Docker image is configured for restricted runs." };
+    wfIpc.get.mockResolvedValue({ ...saved(1, audit), validation: blocked });
+    wfIpc.validate.mockResolvedValue(blocked);
+    render(<WorkflowEditor resource={{ key: "workflow:wf-1", title: "Formal audit" }} mode="source" active />);
+    expect((await screen.findByTestId("workflow-run-reason")).textContent).toBe("No Docker image is configured for restricted runs.");
+    expect((screen.getByTestId("workflow-review-run") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("marks an agent's proposal as a draft the user reviews, and opens a workflow by its graph entity id", async () => {
+    wfIpc.get.mockImplementation(async (id: string) => {
+      if (id === "ent-1") throw { code: "workflow.unknown", message: "That workflow (revision) does not exist." };
+      return { ...saved(1, audit), origin: { kind: "agent", taskId: "task-7" } };
+    });
+    wfIpc.list.mockResolvedValue([{ id: "wf-1", entity: "ent-1" }]);
+    render(<WorkflowEditor resource={{ key: "workflow:ent-1", title: "Formal audit" }} mode="source" active />);
+    const origin = await screen.findByTestId("workflow-origin");
+    expect(origin.textContent).toMatch(/Proposed by agent task task-7/);
+    expect(origin.textContent).toMatch(/runs only from a plan you review and start/);
+    expect(screen.getByTestId("workflow-editor").getAttribute("data-workflow")).toBe("wf-1");
+    expect(runIpc.start).not.toHaveBeenCalled();
+  });
+
+  it("edits the same draft on the canvas: select a step to inspect it, Delete removes it", async () => {
+    globalThis.ResizeObserver ??= class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    (globalThis as { DOMMatrixReadOnly?: unknown }).DOMMatrixReadOnly ??= class {
+      m22 = 1;
+    };
+    globalThis.matchMedia ??= ((query: string) => ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} })) as unknown as typeof matchMedia;
+    render(<WorkflowEditor resource={{ key: "workflow:wf-1", title: "Formal audit" }} mode="source" active />);
+    await screen.findByTestId("workflow-status");
+    fireEvent.click(screen.getByRole("radio", { name: "Canvas" }));
+    const canvas = await screen.findByTestId("workflow-canvas");
+    expect(screen.getByTestId("workflow-editor").getAttribute("data-view")).toBe("canvas");
+    expect(within(canvas).getByTestId("wfc-step-associate")).toBeTruthy();
+    fireEvent.click(within(canvas).getByTestId("wfc-step-associate"));
+    const inspector = await screen.findByTestId("workflow-inspector");
+    await waitFor(() => expect(within(inspector).getByTestId("workflow-step-associate")).toBeTruthy());
+    fireEvent.keyDown(canvas.querySelector(".xp-wfc__canvas")!, { key: "Delete" });
+    await waitFor(() => expect(within(canvas).queryByTestId("wfc-step-associate")).toBeNull());
+    expect(screen.getByTestId("workflow-canvas-message").textContent).toMatch(/removed/);
+    await waitFor(() => expect(editorsMock.setDirty).toHaveBeenLastCalledWith("workflow:wf-1", true));
+    localStorage.removeItem("exposition.workflows.view");
   });
 });

@@ -378,6 +378,22 @@ function InputRow({
   );
 }
 
+/**
+ * Load a workflow by id. Some views (the Research inspector) open a workflow
+ * by its graph entity id; resolve that through the workflow list.
+ */
+async function resolveWorkflow(id: string): Promise<SavedWorkflow> {
+  try {
+    return await workflowCommands.get(id);
+  } catch (error) {
+    const unknown = typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "workflow.unknown";
+    if (!unknown) throw error;
+    const match = (await workflowCommands.list()).find((w) => w.entity === id);
+    if (!match) throw error;
+    return workflowCommands.get(match.id);
+  }
+}
+
 type EditorView = "form" | "canvas";
 const VIEW_KEY = "exposition.workflows.view";
 
@@ -431,7 +447,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
 
   const load = useCallback(async () => {
     try {
-      const [workflow, ops] = await Promise.all([workflowCommands.get(id), workflowCommands.operations()]);
+      const [workflow, ops] = await Promise.all([resolveWorkflow(id), workflowCommands.operations()]);
       setSaved(workflow);
       setDraft(workflow.definition);
       setValidation(workflow.validation);
