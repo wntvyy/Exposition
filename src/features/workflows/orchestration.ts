@@ -5,6 +5,7 @@
 // draft (`workflow.composite*`, `.conditionSource`, `.conditionInvalid`,
 // `.repeatInvalid`, `.iterationFanIn`, `.tooManySteps`) and those diagnostics
 // are shown inline like every other.
+import type { Containment } from "../../bindings/Containment";
 import type { OperationContract } from "../../bindings/OperationContract";
 import type { ParameterSpec } from "../../bindings/ParameterSpec";
 import type { ParamValue } from "../../bindings/ParamValue";
@@ -124,21 +125,16 @@ export const compositeKey = (ref: CompositeRef) => `${ref.workflow}@${ref.revisi
 export const compositeContractId = (ref: CompositeRef) => `${COMPOSITE_OPERATION}:${compositeKey(ref)}`;
 export const isDerivedContract = (c: OperationContract) => c.id.startsWith(`${COMPOSITE_OPERATION}:`);
 
-/** The first produced type of an outcome kind, when the producing port cannot be resolved. */
-const OUTCOME_FALLBACK_TYPE: Record<string, PortType> = {
-  transformedDataset: "dataset",
-  retainedFigure: "retainedArtifact",
-  retainedTable: "retainedArtifact",
-  investigationReport: "reviewReport",
-  auditEvidence: "formalEvidence",
-  reviewableProposal: "associationProposal",
-  manuscriptPromotion: "promotionProposal",
-};
+/** Least contained wins (lane A `v2::rank`): a composite is as contained as its least contained step. */
+const CONTAINMENT_RANK: Record<Containment, number> = { applicationService: 0, readOnlyModel: 1, restrictedContainer: 2, nativeAccount: 3 };
 
 /**
- * Derive the operation contracts of composite references (M9_PLAN: one
- * required input per child external input, named by its id with its type; one
- * output per child outcome with the type of the port that realizes it).
+ * Derive the operation contracts of composite references, as Rust does
+ * (`v2::composite_contract`): one required input per child external input,
+ * named by its id with its type; one optional output per child outcome with
+ * the type of the port that realizes it (unresolvable outcomes are left out);
+ * containment of the least contained child runner. Display only: Rust
+ * derives the same ports when it validates the draft.
  * Nested composites resolve through `children` (bounded; a cycle resolves to
  * the generic contract and Rust reports `workflow.compositeRecursive`).
  * Returns `contracts` plus one derived contract per resolvable reference.
@@ -157,16 +153,21 @@ export function withComposites(contracts: OperationContract[], children: Readonl
     const child = children.get(key);
     if (!child || visiting.has(key)) return null;
     const inner = new Set(visiting).add(key);
-    const outputs = child.outcomes.map((o) => {
+    const outputs = child.outcomes.flatMap((o) => {
       const producer = child.steps.find((s) => s.id === o.from.step);
-      const type = (producer && resolve(producer, inner)?.outputs.find((p) => p.name === o.from.port)?.types[0]) ?? OUTCOME_FALLBACK_TYPE[o.kind] ?? "dataset";
-      return { name: o.id, label: o.label, types: [type], required: !o.optional, multiple: false };
+      const type = producer && resolve(producer, inner)?.outputs.find((p) => p.name === o.from.port)?.types[0];
+      return type ? [{ name: o.id, label: o.label, types: [type], required: false, multiple: false }] : [];
     });
+    const containment = child.steps
+      .map((s) => resolve(s, inner)?.runner.containment)
+      .filter((c): c is Containment => c !== undefined)
+      .reduce<Containment>((a, b) => (CONTAINMENT_RANK[b] > CONTAINMENT_RANK[a] ? b : a), "applicationService");
     const contract: OperationContract = {
       ...generic,
       id: compositeContractId(ref),
-      title: `Workflow “${child.title || ref.workflow}”`,
+      title: `Saved workflow “${child.title || ref.workflow}” (revision ${ref.revision})`,
       purpose: `Runs revision ${ref.revision} of “${child.title || ref.workflow}” as one step.`,
+      runner: { ...generic.runner, containment },
       inputs: child.inputs.map((i) => ({ name: i.id, label: i.label, types: [i.portType], required: true, multiple: false })),
       outputs,
       parameters: [],

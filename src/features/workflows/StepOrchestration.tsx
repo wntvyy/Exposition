@@ -285,6 +285,13 @@ export function RepeatSection({
 }) {
   const contract = contractOf(contracts, step);
   const repeat = step.repeat ?? null;
+  if (isComposite(step) && !repeat) {
+    return (
+      <p className="xp-wf__muted xp-wf-orch" data-testid={`repeat-${step.id}`} data-kind="once">
+        A step that runs a saved workflow runs once; repeat steps inside that workflow instead.
+      </p>
+    );
+  }
   const params = contract?.parameters ?? [];
   const outputs = contract?.outputs ?? [];
   const kind: RepeatKind = repeat?.kind ?? "once";

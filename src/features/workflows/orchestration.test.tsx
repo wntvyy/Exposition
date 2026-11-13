@@ -117,7 +117,7 @@ export const contracts: OperationContract[] = [
     outputs: [{ name: "report", label: "Review report", types: ["reviewReport"], required: false, multiple: false }],
     payload: { kind: "prompt" },
   }),
-  op({ id: "workflow.composite", title: "Run another workflow", purpose: "Runs a saved workflow at a pinned revision", inputs: [], outputs: [] }),
+  op({ id: "workflow.composite", title: "Run a saved workflow", purpose: "Runs a saved workflow at a pinned revision", inputs: [], outputs: [], runner: { ...runner, id: "composite", containment: "applicationService" } }),
 ];
 
 /** The child a composite runs: one dataset input, one Python step, one outcome. */
@@ -237,7 +237,10 @@ describe("composites", () => {
     expect(c.id).toBe("workflow.composite:wf-child@1");
     expect(orch.isDerivedContract(c)).toBe(true);
     expect(c.inputs).toEqual([{ name: "obs", label: "Observations", types: ["dataset"], required: true, multiple: false }]);
-    expect(c.outputs).toEqual([{ name: "fitted", label: "Fitted values", types: ["dataset"], required: true, multiple: false }]);
+    // As Rust derives it (v2::composite_contract): outputs optional, least contained child runner, titled with the revision.
+    expect(c.outputs).toEqual([{ name: "fitted", label: "Fitted values", types: ["dataset"], required: false, multiple: false }]);
+    expect(c.runner.containment).toBe("restrictedContainer");
+    expect(c.title).toBe("Saved workflow “Fit model” (revision 1)");
     // Binding choices follow the derived ports like any other step.
     expect(model.compatibleSources(withComposite, effective, "comp", "obs").map((s) => s.key)).toEqual(["input:data", "step:sim.summary"]);
     // Without the child loaded the generic contract (no ports) applies.
@@ -374,7 +377,7 @@ describe("WorkflowEditor (M9)", () => {
     ]);
     openEditor(parent);
     await screen.findByTestId("workflow-step-sim");
-    await choose("workflow-new-step", /Run another workflow/);
+    await choose("workflow-new-step", /Run a saved workflow/);
     await screen.findByTestId("workflow-new-composite");
     await waitFor(() => expect(wfIpc.list).toHaveBeenCalled());
     // The workflow itself is never offered (no self-reference).

@@ -196,7 +196,7 @@ export default async function m9WorkflowUi({ launchApp, artifactsDir, assert }) 
       await choose(page.getByTestId("workflow-max-parallel"), /^2/);
 
       // Composite: a step that runs "Fit model" at its latest revision (pinned).
-      await choose(page.getByTestId("workflow-new-step"), /Run another workflow|composite/i);
+      await choose(page.getByTestId("workflow-new-step"), /Run a saved workflow/);
       await choose(page.getByTestId("workflow-new-composite"), /Fit model/);
       await page.getByTestId("workflow-add-step").click();
       const composite = page.locator('[data-testid^="workflow-step-"][data-composite="true"]').first();
@@ -345,20 +345,27 @@ export default async function m9WorkflowUi({ launchApp, artifactsDir, assert }) 
       await env.scrollIntoViewIfNeeded();
       await shot("m9-run-environment", { themes: ["light", "dark"] });
 
-      // Export manifest.
-      await visible("workflow-run-export-manifest").click();
-      const manifest = visible("workflow-run-manifest");
-      await manifest.waitFor({ timeout: 30_000 });
-      const manifestPath = await manifest.getAttribute("data-path");
-      const absolute = /^[A-Za-z]:|^\//.test(manifestPath) ? manifestPath : join(root, ...manifestPath.split("/"));
-      const text = existsSync(absolute) ? await readFile(absolute, "utf8") : "";
+      // Run manifest: read in the run view (Export manifest… opens the native save
+      // dialog, which a scenario cannot drive; the same export runs over IPC to a file).
+      await monitor.getByRole("button", { name: /Run manifest/ }).click();
+      await visible("workflow-run-manifest-show").click();
+      await waitFor(async () => (await visible("workflow-run-manifest-view").getAttribute("data-state")) === "ready", { timeout: 30_000, message: "manifest shown" });
+      const shown = await monitor.getByLabel("Run manifest (JSON)").innerText();
+      note("manifest-shown-in-the-run-view", shown.includes(run.plan.approvalHash) && shown.includes(run.definitionHash), shown.slice(0, 300));
+      await shot("m9-run-manifest");
+      const destination = join(base, "manifest.json");
+      const exported = await invoke(page, "workflow_run_manifest_export", { run: firstRunId, destination });
+      const text = existsSync(destination) ? await readFile(destination, "utf8") : "";
       let json = null;
       try {
         json = JSON.parse(text);
       } catch {
         json = null;
       }
-      note("manifest-exported", !!json && text.includes(run.plan.approvalHash) && text.includes(run.definitionHash), { manifestPath, keys: json ? Object.keys(json) : null });
+      note("manifest-exported", !!json && text.includes(run.plan.approvalHash) && text.includes(run.definitionHash) && exported.bytes === Buffer.byteLength(text), {
+        exported,
+        keys: json ? Object.keys(json) : null,
+      });
       note("manifest-carries-no-secrets", !/ANTHROPIC|sk-ant|api[_-]?key/i.test(text), "");
 
       // Reproduce: a reviewed plan pinned to the recorded inputs; the new run's cause.

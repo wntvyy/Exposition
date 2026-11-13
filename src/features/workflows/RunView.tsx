@@ -36,7 +36,7 @@ import type {
   WorkflowStepAttempt,
   WorkflowStepInstance,
 } from "./contract";
-import { commands, errorMessage } from "../../lib/ipc";
+import { commands, errorMessage, isCommandError } from "../../lib/ipc";
 import {
   Badge,
   Banner,
@@ -765,11 +765,13 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
     setBusy("manifest");
     setError(null);
     try {
+      // The backend asks where to save it (native save dialog).
       const written = await workflowRunCommands.exportManifest(run.id);
       setManifest(written);
       notify({ tone: "success", title: "Run manifest exported", body: written.path });
     } catch (e) {
-      setError(errorMessage(e));
+      // Dismissing the save dialog is not a failure.
+      if (!(isCommandError(e) && e.code === "workflow.exportCanceled")) setError(errorMessage(e));
     } finally {
       setBusy(null);
     }
@@ -826,7 +828,7 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
             onPress={() => void exportManifest()}
             data-testid="workflow-run-export-manifest"
           >
-            Export manifest
+            Export manifest…
           </Button>
         )}
       </header>

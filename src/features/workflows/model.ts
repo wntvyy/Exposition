@@ -293,7 +293,8 @@ export function conditionSources(def: WorkflowDefinition, contracts: OperationCo
   const downstream = downstreamOf(def, stepId);
   const options: ConditionSourceOption[] = [];
   for (const other of def.steps) {
-    if (other.id === stepId || downstream.has(other.id)) continue;
+    // A repeating step yields several values; a condition reads one (Rust: `workflow.conditionSource`).
+    if (other.id === stepId || downstream.has(other.id) || other.repeat) continue;
     for (const out of contractOf(contracts, other)?.outputs ?? []) {
       const type = out.types[0] ?? null;
       if (type !== "formalEvidence" && type !== "dataset" && out.required) continue;

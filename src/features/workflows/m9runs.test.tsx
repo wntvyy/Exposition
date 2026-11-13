@@ -382,6 +382,12 @@ describe("run monitor (M9)", () => {
     await waitFor(() => expect(screen.getByTestId("workflow-run-manifest-view").getAttribute("data-state")).toBe("ready"));
     expect(runIpc.manifest).toHaveBeenCalledWith("run-2");
     expect(screen.getByLabelText("Run manifest (JSON)").textContent).toContain('"approvalHash": "fff"');
+    // Dismissing the backend's save dialog is not an error.
+    runIpc.exportManifest.mockRejectedValueOnce({ code: "workflow.exportCanceled", message: "Export canceled." });
+    fireEvent.click(screen.getByTestId("workflow-run-export-manifest"));
+    await waitFor(() => expect(runIpc.exportManifest).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect((screen.getByTestId("workflow-run-export-manifest") as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByText("Not done")).toBeNull();
   });
 
   it("reproduces a run through a reviewed plan with drift notices, started with that plan's approval", async () => {
