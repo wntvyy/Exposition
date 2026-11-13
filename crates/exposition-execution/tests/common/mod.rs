@@ -30,7 +30,14 @@ pub fn host_env() -> HostEnv {
     ]))
 }
 
-pub fn fixture_with(settings: ExecutionSettings, trusted: bool) -> Fixture {
+/// Concurrent job slots of a test service unless a test asks for more. The
+/// product default is half the host's CPUs (2..=8): 2 on a 4-CPU CI runner, 8
+/// on a 16-thread workstation. Pinning the CI value keeps results independent
+/// of the host; a test that needs several jobs running at once says so.
+pub const TEST_JOB_SLOTS: u32 = 2;
+
+pub fn fixture_with(mut settings: ExecutionSettings, trusted: bool) -> Fixture {
+    settings.max_concurrent_jobs = settings.max_concurrent_jobs.or(Some(TEST_JOB_SLOTS));
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let workspace = tmp.path().join("workspace");
