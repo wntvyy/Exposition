@@ -62,6 +62,8 @@ export type WorkflowConcurrencyLimits = {
 };
 
 export type WorkflowPlanStep = WorkflowPlanStepBase & {
+  /** Model requests reserved from the run's budget before the step is dispatched (0: none). */
+  maxModelRequests?: number;
   /** Titles of the enclosing composites, outermost first (empty: a top-level step). */
   compositePath?: string[];
   condition?: StepCondition | null;

@@ -186,8 +186,12 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
               ))}
         </dd>
         <dt>Limits</dt>
-        <dd>
+        <dd data-testid={`plan-limits-${step.step}`}>
           At most {formatSeconds(step.timeLimitSeconds)} and {formatBytes(step.maxOutputBytes)} of output
+          {step.maxModelRequests
+            ? `; up to ${step.maxModelRequests} model request${step.maxModelRequests === 1 ? "" : "s"}`
+            : ""}
+          {(plan.maxParallel ?? 1) > 1 ? " — reserved from the run's budgets before the step starts, so steps running together cannot exceed them" : ""}
         </dd>
       </dl>
       {step.payload && <PayloadView step={step} payload={step.payload} />}

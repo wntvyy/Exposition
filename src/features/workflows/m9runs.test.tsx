@@ -99,6 +99,7 @@ const plan = (overrides: Partial<WorkflowRunPlan> = {}): WorkflowRunPlan => ({
       step: "review",
       label: "Review",
       containment: "readOnlyModel",
+      maxModelRequests: 2,
       condition: { source: { step: "audit", port: "evidence" }, test: { kind: "verdictIn", verdicts: ["Checked"] }, negate: false },
       payload: { kind: "prompt", text: "Summarize." },
     }),
@@ -235,6 +236,9 @@ describe("plan review (M9)", () => {
     expect(concurrency.textContent).toMatch(/Up to 3 independent steps/);
     expect(concurrency.textContent).toMatch(/at most 3 active runs \(one per workflow\) and 4 steps in flight; per kind at once: 2 restricted container, 2 native, 2 model, 1 Lean/);
     expect(screen.getByText("Steps, in dependency order (up to 3 at a time)")).toBeTruthy();
+    expect(screen.getByTestId("plan-limits-review").textContent).toBe(
+      "At most 1 min and 1.0 KiB of output; up to 2 model requests — reserved from the run's budgets before the step starts, so steps running together cannot exceed them",
+    );
   });
 
   it("keeps the M8 wording for a one-at-a-time plan without composites", async () => {
