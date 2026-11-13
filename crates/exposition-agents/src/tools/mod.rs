@@ -306,6 +306,14 @@ fn workflow_schema() -> Value {
         .collect(),
     );
     let operations: Vec<String> = exposition_graph::workflow::operations().into_iter().map(|o| o.id).collect();
+    // Every language some operation runs (Python, R, Julia).
+    let mut languages: Vec<String> = exposition_graph::workflow::operations()
+        .iter()
+        .filter_map(exposition_graph::workflow::registry::code_language)
+        .filter_map(|l| serde_json::to_value(l).ok().and_then(|v| v.as_str().map(str::to_owned)))
+        .collect();
+    languages.sort();
+    languages.dedup();
     let mut relations: Vec<&str> = vec![""];
     relations.extend(exposition_graph::RelationKind::ALL.iter().map(|k| k.as_str()));
     let strict = |props: Value| {
@@ -343,7 +351,7 @@ fn workflow_schema() -> Value {
                 }))},
                 "payload": {"anyOf": [
                     strict(json!({"kind": {"type": "string", "enum": ["none"]}})),
-                    strict(json!({"kind": {"type": "string", "enum": ["code"]}, "language": {"type": "string", "enum": ["python"]}, "source": {"type": "string"}})),
+                    strict(json!({"kind": {"type": "string", "enum": ["code"]}, "language": {"type": "string", "enum": languages}, "source": {"type": "string"}})),
                     strict(json!({"kind": {"type": "string", "enum": ["prompt"]}, "text": {"type": "string"}}))
                 ]}
             }))},
@@ -955,6 +963,17 @@ mod strict_tests {
         assert!(strict_size <= 8_000, "strict schemas total {strict_size} bytes");
         for t in tools.iter().filter(|t| !t.strict) {
             assert_eq!(t.input_schema["additionalProperties"], false, "{} still refuses unknown fields", t.name);
+        }
+    }
+
+    /// A proposed workflow can use every registered operation, so its code
+    /// payload can be in every language an operation runs (M9: R, Julia).
+    #[test]
+    fn workflow_proposals_offer_every_operations_code_language() {
+        let schema = workflow_schema().to_string();
+        assert!(schema.contains(r#""enum":["julia","python","r"]"#), "{schema}");
+        for id in ["research.rBatch", "research.nativeR", "research.juliaBatch", "research.nativeJulia"] {
+            assert!(schema.contains(&format!("\"{id}\"")), "{id}");
         }
     }
 }

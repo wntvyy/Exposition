@@ -110,6 +110,14 @@ impl LanguageBatchAdapter {
     }
 }
 
+/// `sha256:0123456789ab` (or `of unknown identity`) for messages.
+fn short_id(id: Option<&str>) -> String {
+    match id {
+        Some(id) => id.chars().take("sha256:".len() + 12).collect(),
+        None => "of unknown identity".to_owned(),
+    }
+}
+
 fn file_input(value: &WorkflowOutputValue) -> Option<BatchInput> {
     match value {
         WorkflowOutputValue::File { path, sha256, .. } => {
@@ -190,17 +198,38 @@ impl StepAdapter for LanguageBatchAdapter {
             }
         };
         let restricted_image_id = match self.mode {
-            BatchMode::Restricted => match &request.restricted_image_id {
-                Some(id) => Some(id.clone()),
-                None => {
+            BatchMode::Restricted => {
+                let Some(approved) = &request.restricted_image_id else {
                     return Err(StepFailure::new(
                         "workflow.restrictedUnavailable",
                         format!(
                             "Not started: restricted {language} steps run only in an approved image identity, and this run has none. Nothing runs natively instead."
                         ),
                     ));
+                };
+                // The plan must have approved this language's image (the
+                // research runner checks again before anything is staged).
+                match runner.restricted_image(self.language) {
+                    Err(reason) => {
+                        let native = if reason.contains("natively") { "" } else { " Nothing runs natively instead." };
+                        return Err(StepFailure::new(
+                            "workflow.restrictedUnavailable",
+                            format!("Not started: {reason}{native}"),
+                        ));
+                    }
+                    Ok((image, now)) if now.as_deref() != Some(approved.as_str()) => {
+                        return Err(StepFailure::new(
+                            "workflow.restrictedUnavailable",
+                            format!(
+                                "Not started: restricted {language} steps run in the {language} image {image} ({}), but the run's plan approved the image {}. Restricted steps run only in the image identity the plan approved; review a new plan. Nothing runs natively instead.",
+                                short_id(now.as_deref()),
+                                short_id(Some(approved))
+                            ),
+                        ));
+                    }
+                    Ok(_) => Some(approved.clone()),
                 }
-            },
+            }
             BatchMode::TrustedNative => None,
         };
         let mut inputs = Vec::new();

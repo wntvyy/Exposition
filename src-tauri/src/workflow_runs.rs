@@ -117,6 +117,8 @@ pub fn build(data_dir: &Path, services: RunServices) -> Result<WorkflowRunServic
         runner_ids::NATIVE_PYTHON.into(),
         Arc::new(BatchAdapter::new(services.batch.clone(), BatchMode::TrustedNative)),
     );
+    // R and Julia batches (M9): the same runner, each language in its own image.
+    exposition_workflow::adapters::rj::install(&mut adapters, services.batch.clone());
     adapters.insert(runner_ids::LEAN_AUDIT.into(), Arc::new(LeanAuditAdapter { auditor: Some(Arc::clone(&auditor)) }));
     adapters.insert(runner_ids::GRAPH_PROPOSAL.into(), Arc::new(AssociateAdapter));
     adapters.insert(
