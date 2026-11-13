@@ -668,7 +668,10 @@ pub fn validate_blueprint(bp: &ProjectBlueprint) -> BlueprintValidation {
             continue;
         }
         let exists = |p: &WorkspacePath| file_set.contains(p);
-        let v = validate_workflow(&w.definition, &ValidationContext { ceiling: None, file_exists: Some(&exists) });
+        let v = validate_workflow(
+            &w.definition,
+            &ValidationContext { ceiling: None, file_exists: Some(&exists), ..Default::default() },
+        );
         if v.errors > 0 {
             let first =
                 v.diagnostics.iter().find(|d| d.severity == DiagnosticSeverity::Error).map(|d| d.message.clone());

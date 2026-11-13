@@ -227,6 +227,9 @@ pub fn definition(input: &WorkflowProposeInput) -> Result<WorkflowDefinition, St
                 operation: StepOperation { id: s.operation.clone(), version: s.version },
                 parameters,
                 payload,
+                composite: None,
+                condition: None,
+                repeat: None,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -286,6 +289,7 @@ pub fn definition(input: &WorkflowProposeInput) -> Result<WorkflowDefinition, St
             retain_results: input.ceiling.retain_results,
             propose_changes: input.ceiling.propose_changes,
         },
+        execution: None,
     })
 }
 
@@ -408,8 +412,10 @@ pub fn prepare(
         ));
     }
     let exists = |p: &WorkspacePath| exists_in(root, p);
-    let validation =
-        validate_workflow(&definition, &ValidationContext { ceiling: Some(ceiling), file_exists: Some(&exists) });
+    let validation = validate_workflow(
+        &definition,
+        &ValidationContext { ceiling: Some(ceiling), file_exists: Some(&exists), ..Default::default() },
+    );
     let forged: Vec<&exposition_graph::workflow::WorkflowDiagnostic> =
         validation.diagnostics.iter().filter(|d| d.rule == Some(6)).collect();
     if !forged.is_empty() {
@@ -466,7 +472,8 @@ pub fn save(
 ) -> Result<ToolOutput, ToolOutput> {
     bound_status(graph, root)?;
     let exists = |p: &WorkspacePath| exists_in(root, p);
-    let context = ValidationContext { ceiling: Some(prepared.ceiling), file_exists: Some(&exists) };
+    let context =
+        ValidationContext { ceiling: Some(prepared.ceiling), file_exists: Some(&exists), ..Default::default() };
     let origin = Origin::Agent { task_id: task.0.clone() };
     let saved = graph
         .service
