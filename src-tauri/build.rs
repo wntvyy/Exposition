@@ -127,6 +127,7 @@ const COMMANDS: &[&str] = &[
     "research_promotion_prepare",
     "research_promotion_approve",
     "research_promotion_cancel",
+    "research_promotion_preview",
     "research_promotions",
     "research_promotion_reconcile",
     "lean_audit_record",

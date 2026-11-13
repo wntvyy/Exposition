@@ -58,6 +58,8 @@ struct Pending {
     patches: Vec<TextPatch>,
     attachment_key: String,
     created_ms: u64,
+    /// What the user reviews (returned again by [`ResearchProject::promotion_preview`]).
+    preview: PromotionPreview,
 }
 
 #[derive(Default)]
@@ -248,9 +250,21 @@ impl ResearchProject {
                 patches,
                 attachment_key: plan.attachment_key,
                 created_ms,
+                preview: preview.clone(),
             },
         );
         Ok(preview)
+    }
+
+    /// A prepared review that is still pending (e.g. one a workflow step
+    /// prepared), exactly as it was computed; `None` once applied, canceled,
+    /// or expired.
+    pub fn promotion_preview(&self, promotion: &str) -> Option<PromotionPreview> {
+        let pending = self.promotions.pending.lock().unwrap_or_else(|p| p.into_inner());
+        pending
+            .get(promotion)
+            .filter(|p| now_ms().saturating_sub(p.created_ms) < REVIEW_TTL_MS)
+            .map(|p| p.preview.clone())
     }
 
     /// Drop a prepared review without applying it.

@@ -125,6 +125,7 @@
     "allow-research-promotion-prepare",
     "allow-research-promotion-approve",
     "allow-research-promotion-cancel",
+    "allow-research-promotion-preview",
     "allow-research-promotions",
     "allow-research-promotion-reconcile",
     "allow-lean-audit-record",

@@ -54,7 +54,8 @@ pub mod workflow;
 pub use admission::{Admission, classify};
 pub use backup::BackupInfo;
 pub use ids::{
-    EntityId, EvidenceId, OperationId, ProjectId, ProposalId, RelationId, ViewId, WorkflowId, WorkflowPlanId, WorkflowRunId,
+    EntityId, EvidenceId, OperationId, ProjectId, ProposalId, RelationId, ViewId, WorkflowId, WorkflowPlanId,
+    WorkflowRunId,
 };
 pub use journal::{OperationJournal, OperationKind, OperationRecord, OperationState};
 pub use model::*;

@@ -53,9 +53,14 @@ pub struct BatchOwner {
 #[ts(export)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum BatchCode {
-    Inline { source: String },
+    Inline {
+        source: String,
+    },
     /// A declared project script, verified against this hash.
-    Script { path: WorkspacePath, sha256: String },
+    Script {
+        path: WorkspacePath,
+        sha256: String,
+    },
 }
 
 /// A declared input: staged at the same project-relative path, verified
@@ -136,6 +141,10 @@ pub trait BatchRunner: Send + Sync {
     /// Whether `mode` is usable for `root` now, and why not.
     fn availability(&self, root: &Path, mode: BatchMode) -> Result<(), String>;
     /// Run one batch to completion (or cancellation/time limit).
-    fn run(&self, root: &Path, request: &BatchRequest, control: &BatchControl<'_>)
-    -> Result<BatchResult, ResearchError>;
+    fn run(
+        &self,
+        root: &Path,
+        request: &BatchRequest,
+        control: &BatchControl<'_>,
+    ) -> Result<BatchResult, ResearchError>;
 }

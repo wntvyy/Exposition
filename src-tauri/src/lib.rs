@@ -172,6 +172,7 @@ pub fn run() {
             research::research_promotion_prepare,
             research::research_promotion_approve,
             research::research_promotion_cancel,
+            research::research_promotion_preview,
             research::research_promotions,
             research::research_promotion_reconcile,
             #[cfg(debug_assertions)]

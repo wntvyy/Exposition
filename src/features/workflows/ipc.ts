@@ -54,9 +54,9 @@ export const workflowRunCommands = {
   /**
    * The prepared manuscript change behind a run's promotion proposal, shown
    * in full before approval (approve/cancel use the research promotion
-   * commands by id). Needs `research_promotion_preview` in the backend.
+   * commands by id). `null` once it was applied, discarded, or expired.
    */
-  promotionPreview: (promotion: string) => invoke<PromotionPreview>("research_promotion_preview", { promotion }),
+  promotionPreview: (promotion: string) => invoke<PromotionPreview | null>("research_promotion_preview", { promotion }),
 };
 
 export const workflowEvents = {

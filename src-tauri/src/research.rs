@@ -362,6 +362,15 @@ pub async fn research_promotion_approve(
     project(&state, move |p| p.approve_promotion(&promotion)).await
 }
 
+/// A pending promotion review by id (e.g. one a workflow step prepared).
+#[tauri::command]
+pub async fn research_promotion_preview(
+    state: State<'_, AppState>,
+    promotion: String,
+) -> Result<Option<PromotionPreview>, CommandError> {
+    project(&state, move |p| Ok(p.promotion_preview(&promotion))).await
+}
+
 #[tauri::command]
 pub async fn research_promotion_cancel(state: State<'_, AppState>, promotion: String) -> Result<bool, CommandError> {
     project(&state, move |p| Ok(p.cancel_promotion(&promotion))).await

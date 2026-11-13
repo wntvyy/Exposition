@@ -164,7 +164,9 @@ function PromotionReview({
     setOpen(true);
     setError(null);
     try {
-      setPreview(await workflowRunCommands.promotionPreview(value.promotion));
+      const found = await workflowRunCommands.promotionPreview(value.promotion);
+      if (!found) setError("This review is no longer pending: it was applied, discarded, or expired. Review a new run to prepare it again.");
+      setPreview(found);
     } catch (e) {
       setError(errorMessage(e));
     }
