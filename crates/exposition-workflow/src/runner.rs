@@ -517,8 +517,30 @@ impl Ctx<'_> {
         };
         let execution = &self.frozen.plan.execution;
         let approved_restricted = (execution.restricted_backend.clone(), execution.restricted_image.clone());
-        let approved_image_id = execution.restricted_image_id.clone();
-        if planned.containment == Containment::RestrictedContainer {
+        let mut approved_image_id = execution.restricted_image_id.clone();
+        // A runner with its own image (R, Julia): exactly the image and the
+        // identity the plan bound for it, re-checked now.
+        let runner_image = execution.runner_images.iter().flatten().find(|b| b.runner == planned.runner).cloned();
+        if let (Some(bound), Containment::RestrictedContainer) = (&runner_image, planned.containment) {
+            let now = adapter.restricted_image();
+            if bound.image_id.is_none() || now != Some(Ok((bound.image.clone(), bound.image_id.clone()))) {
+                let now = match &now {
+                    Some(Ok((image, id))) => format!("{image} {}", id.as_deref().unwrap_or("of unknown identity")),
+                    Some(Err(reason)) => reason.clone(),
+                    None => "the default image".to_owned(),
+                };
+                return self.refuse(
+                    unit,
+                    "workflow.restrictedUnavailable",
+                    format!(
+                        "Not started: the restricted image is not the image you approved (approved {} {}, now {now}); restricted steps run only in the approved image.",
+                        bound.image,
+                        bound.image_id.as_deref().unwrap_or("of unknown identity")
+                    ),
+                );
+            }
+            approved_image_id = bound.image_id.clone();
+        } else if planned.containment == Containment::RestrictedContainer {
             if inner.host.restricted() != approved_restricted {
                 let now = inner.host.restricted().1;
                 return self.refuse(

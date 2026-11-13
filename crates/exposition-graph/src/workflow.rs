@@ -1075,6 +1075,21 @@ fn validate_in(definition: &WorkflowDefinition, context: &ValidationContext<'_>,
                     d.error(code, Some(rule), message).connection(i).step(&to.step).port(&to.port);
                     continue;
                 }
+                // A code step runs only scripts of its own language (rule 3):
+                // an R batch never runs a `.py` file, Python never an `.R` one.
+                if let PortSource::Input { input } = from
+                    && source_type == PortType::CodeSource
+                    && let Some(WorkflowInput { source: InputSource::Resource { path, .. }, .. }) =
+                        inputs.get(input.as_str()).copied()
+                    && let Err(message) = registry::check_script_language(target, path.as_str())
+                {
+                    d.error("workflow.inputTypeMismatch", Some(3), message)
+                        .connection(i)
+                        .step(&to.step)
+                        .port(&to.port)
+                        .input(input);
+                    continue;
+                }
                 if let PortSource::Step { step, .. } = from
                     && repeated.contains(step.as_str())
                     && !target_port.multiple

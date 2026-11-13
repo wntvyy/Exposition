@@ -258,15 +258,16 @@ impl SourceReader for WorkspaceSources {
     }
 }
 
-/// A cached availability answer per project root and batch mode.
-type AvailabilityKey = (PathBuf, exposition_research::batch::BatchMode);
+/// A cached availability answer per project root, batch language, and mode.
+type AvailabilityKey = (PathBuf, exposition_research::batch::BatchLanguage, exposition_research::batch::BatchMode);
 type AvailabilityAnswer = (std::time::Instant, Result<(), String>);
 
 /// The research batch runner as the workflow runner uses it: the research
 /// service is pointed at the run's project before each call (the same rule
 /// as the research commands), and availability answers (which may ask Docker
 /// whether the image is present) are reused for a few seconds, because drafts
-/// are re-validated as they are edited.
+/// are re-validated as they are edited. Python, R, and Julia batches (M9)
+/// all go through it.
 struct SyncedBatchRunner {
     inner: Arc<dyn exposition_research::batch::BatchRunner>,
     research: Arc<ResearchService>,
@@ -288,17 +289,7 @@ impl SyncedBatchRunner {
 
 impl exposition_research::batch::BatchRunner for SyncedBatchRunner {
     fn availability(&self, root: &std::path::Path, mode: exposition_research::batch::BatchMode) -> Result<(), String> {
-        let key = (root.to_path_buf(), mode);
-        if let Some((at, answer)) = self.availability.lock().unwrap_or_else(|p| p.into_inner()).get(&key)
-            && at.elapsed() < BATCH_AVAILABILITY_TTL
-        {
-            return answer.clone();
-        }
-        let answer = self.sync(root).map_err(|e| e.to_string()).and_then(|()| self.inner.availability(root, mode));
-        let mut cache = self.availability.lock().unwrap_or_else(|p| p.into_inner());
-        cache.retain(|_, (at, _)| at.elapsed() < BATCH_AVAILABILITY_TTL);
-        cache.insert(key, (std::time::Instant::now(), answer.clone()));
-        answer
+        self.language_availability(root, exposition_research::batch::BatchLanguage::Python, mode)
     }
 
     fn run(
@@ -307,10 +298,49 @@ impl exposition_research::batch::BatchRunner for SyncedBatchRunner {
         request: &exposition_research::batch::BatchRequest,
         control: &exposition_research::batch::BatchControl<'_>,
     ) -> Result<exposition_research::batch::BatchResult, exposition_research::ResearchError> {
+        self.run_language(root, exposition_research::batch::BatchLanguage::Python, request, control)
+    }
+
+    fn language_availability(
+        &self,
+        root: &std::path::Path,
+        language: exposition_research::batch::BatchLanguage,
+        mode: exposition_research::batch::BatchMode,
+    ) -> Result<(), String> {
+        let key = (root.to_path_buf(), language, mode);
+        if let Some((at, answer)) = self.availability.lock().unwrap_or_else(|p| p.into_inner()).get(&key)
+            && at.elapsed() < BATCH_AVAILABILITY_TTL
+        {
+            return answer.clone();
+        }
+        let answer = self
+            .sync(root)
+            .map_err(|e| e.to_string())
+            .and_then(|()| self.inner.language_availability(root, language, mode));
+        let mut cache = self.availability.lock().unwrap_or_else(|p| p.into_inner());
+        cache.retain(|_, (at, _)| at.elapsed() < BATCH_AVAILABILITY_TTL);
+        cache.insert(key, (std::time::Instant::now(), answer.clone()));
+        answer
+    }
+
+    fn run_language(
+        &self,
+        root: &std::path::Path,
+        language: exposition_research::batch::BatchLanguage,
+        request: &exposition_research::batch::BatchRequest,
+        control: &exposition_research::batch::BatchControl<'_>,
+    ) -> Result<exposition_research::batch::BatchResult, exposition_research::ResearchError> {
         self.sync(root)?;
         // A run re-checks everything itself; never answer it from the cache.
         self.availability.lock().unwrap_or_else(|p| p.into_inner()).clear();
-        self.inner.run(root, request, control)
+        self.inner.run_language(root, language, request, control)
+    }
+
+    fn restricted_image(
+        &self,
+        language: exposition_research::batch::BatchLanguage,
+    ) -> Result<(String, Option<String>), String> {
+        self.inner.restricted_image(language)
     }
 }
 

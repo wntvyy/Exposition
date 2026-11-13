@@ -30,6 +30,7 @@ pub mod associate;
 pub mod batch;
 pub mod lean;
 pub mod research;
+pub mod rj;
 
 /// A validated value bound to one input port of the step.
 #[derive(Clone, Debug)]
@@ -178,6 +179,13 @@ pub trait StepAdapter: Send + Sync {
     /// anything; `None` when nothing beyond the base environment is known.
     /// Shown as environment drift before a reproduction is approved.
     fn current_environment(&self, _root: &Path, _step: &WorkflowPlanStep) -> Option<WorkflowEnvironment> {
+        None
+    }
+    /// The image this runner's restricted steps run in when it is not the
+    /// default restricted image (R and Julia batches): its reference and
+    /// identity now, or why it is unavailable. `None`: the default image (or
+    /// no container at all). Plans bind it; the runner re-checks it.
+    fn restricted_image(&self) -> Option<Result<(String, Option<String>), String>> {
         None
     }
 }

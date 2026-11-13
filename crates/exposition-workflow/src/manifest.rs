@@ -59,6 +59,10 @@ pub struct WorkflowManifestExecution {
     pub restricted_image_id: Option<String>,
     pub native_steps: Vec<String>,
     pub model_steps: Vec<String>,
+    /// R/Julia runners' own images and identities (absent when none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runner_images: Option<Vec<crate::model::WorkflowRunnerImage>>,
 }
 
 /// One validated output (or an output value a step reported).
@@ -344,6 +348,7 @@ pub fn build_manifest(run: &WorkflowRun) -> WorkflowRunManifest {
             restricted_image_id: plan.execution.restricted_image_id.clone(),
             native_steps: plan.execution.native_steps.clone(),
             model_steps: plan.execution.model_steps.clone(),
+            runner_images: plan.execution.runner_images.clone(),
         },
         budgets: run.budgets.clone(),
         usage: run.usage.clone(),

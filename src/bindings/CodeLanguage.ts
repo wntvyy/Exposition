@@ -4,4 +4,4 @@
  * Language of a code payload. Code is data for an approved adapter, never a
  * way to redefine application behaviour.
  */
-export type CodeLanguage = "python";
+export type CodeLanguage = "python" | "r" | "julia";
