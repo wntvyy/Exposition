@@ -6,7 +6,8 @@ import type { WorkspacePath } from "./WorkspacePath";
  */
 export type WorkflowPresetRequest = { preset: string, 
 /**
- * Numerical experiment: the Python script.
+ * Numerical experiment: the Python script (none: the step starts with
+ * an editable inline code template).
  */
 script: WorkspacePath | null, 
 /**

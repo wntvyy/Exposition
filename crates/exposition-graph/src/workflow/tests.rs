@@ -40,12 +40,12 @@ fn has(v: &WorkflowValidation, code: &str, rule: Option<u8>) -> bool {
 }
 
 #[test]
-fn presets_are_well_formed_but_never_runnable() {
+fn presets_are_well_formed_and_not_runnable_from_validation_alone() {
     for def in [numerical(true), numerical(false), audit()] {
         let v = validate(&def);
         assert_eq!(codes(&v), vec![], "{}: {:?}", def.title, v.diagnostics);
         assert_eq!(v.state, DraftState::WellFormed);
-        assert!(!v.runnable, "nothing runs in this version");
+        assert!(!v.runnable, "validation alone never makes a draft runnable");
         assert_eq!(v.runnable_reason, NOT_RUNNABLE_REASON);
         assert!(!v.plan.is_empty());
     }
@@ -55,11 +55,59 @@ fn presets_are_well_formed_but_never_runnable() {
 
 #[test]
 fn preset_without_files_is_an_incomplete_draft() {
-    let def = draft(&WorkflowPresetRequest { preset: NUMERICAL_EXPERIMENT.into(), ..Default::default() }).unwrap();
+    let def = draft(&WorkflowPresetRequest { preset: FORMAL_AUDIT.into(), ..Default::default() }).unwrap();
     let v = validate(&def);
     assert_eq!(v.state, DraftState::Incomplete);
     assert!(has(&v, "workflow.inputUnset", Some(1)));
     assert!(!v.runnable);
+}
+
+#[test]
+fn numerical_preset_without_a_script_starts_from_an_inline_template() {
+    let def = draft(&WorkflowPresetRequest { preset: NUMERICAL_EXPERIMENT.into(), ..Default::default() }).unwrap();
+    let v = validate(&def);
+    assert_eq!(codes(&v), vec![], "{:?}", v.diagnostics);
+    let run = def.steps.iter().find(|s| s.id == "run").unwrap();
+    let Some(StepPayload::Code { source, .. }) = &run.payload else { panic!("inline code") };
+    assert!(source.contains("EXPOSITION_OUTPUT_DIR") && source.contains("figure.svg") && source.contains("table.csv"));
+    assert!(source.contains("DATA = None"));
+    assert!(!source.contains("numpy") && !source.contains("matplotlib"), "pure Python");
+    let with_data = draft(&WorkflowPresetRequest {
+        preset: NUMERICAL_EXPERIMENT.into(),
+        data: Some(path("data/obs.csv")),
+        ..Default::default()
+    })
+    .unwrap();
+    let Some(StepPayload::Code { source, .. }) = &with_data.steps[0].payload else { panic!("inline code") };
+    assert!(source.contains("DATA = \"data/obs.csv\""));
+    assert_eq!(validate(&with_data).state, DraftState::WellFormed);
+}
+
+#[test]
+fn runnable_only_when_well_formed_and_every_runner_is_available() {
+    let def = numerical(true);
+    let mut v = validate(&def);
+    assert!(!v.runnable && v.runnable_reason == NOT_RUNNABLE_REASON, "validation alone never decides");
+    apply_runnability(&mut v, &def, &|_| Ok(()));
+    assert!(v.runnable, "{}", v.runnable_reason);
+    let mut v = validate(&def);
+    apply_runnability(&mut v, &def, &|id| {
+        if id == "restrictedPython" { Err("the restricted image is not configured".into()) } else { Ok(()) }
+    });
+    assert!(!v.runnable);
+    assert!(v.runnable_reason.contains("the restricted image is not configured"), "{}", v.runnable_reason);
+    assert!(v.runnable_reason.contains("Run the experiment"), "{}", v.runnable_reason);
+    // An incomplete draft is never runnable, whatever the runners say.
+    let incomplete = draft(&WorkflowPresetRequest { preset: FORMAL_AUDIT.into(), ..Default::default() }).unwrap();
+    let mut v = validate(&incomplete);
+    apply_runnability(&mut v, &incomplete, &|_| Ok(()));
+    assert!(!v.runnable);
+    assert!(v.runnable_reason.contains("error"), "{}", v.runnable_reason);
+    // The registry reports availability per runner.
+    let ops = with_availability(&|id| if id == "leanAudit" { Err("untrusted".into()) } else { Ok(()) });
+    for op in ops {
+        assert_eq!(op.runner.available, op.runner.id != "leanAudit", "{}", op.id);
+    }
 }
 
 #[test]

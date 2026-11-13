@@ -5,8 +5,9 @@
 //! (never updating an old one) and creates or updates the workflow's graph
 //! entity, which references the definition id, revision, and hash. Editing
 //! creates a new revision; identical content creates none. Drafts are saved
-//! with their diagnostics and are never runnable in this version. Stored
-//! bodies are read back as untrusted data (bounded, strictly decoded).
+//! with their diagnostics; a stored runnability claim is never trusted (the
+//! workflow runner service decides it for the open project). Stored bodies
+//! are read back as untrusted data (bounded, strictly decoded).
 
 use std::collections::BTreeMap;
 
@@ -61,7 +62,8 @@ pub struct SavedWorkflow {
     /// The `Workflow` graph entity referencing it.
     pub entity: Option<EntityId>,
     pub definition: WorkflowDefinition,
-    /// Diagnostics as validated when saved; `runnable` is always false.
+    /// Diagnostics as validated when saved; `runnable` is false here (never
+    /// read from storage) until the runner service applies availability.
     pub validation: WorkflowValidation,
     pub origin: Origin,
     /// Imported from outside (never trusted, never auto-run).
@@ -215,8 +217,8 @@ fn label_for(definition: &WorkflowDefinition) -> String {
 impl GraphService {
     /// Validate and save a workflow draft as a new immutable revision, and
     /// admit (or update) its `Workflow` entity — one graph transaction.
-    /// Incomplete drafts are saved with their diagnostics; nothing is ever
-    /// marked runnable. Identical content to the latest revision saves nothing.
+    /// Incomplete drafts are saved with their diagnostics; nothing is marked
+    /// runnable here. Identical content to the latest revision saves nothing.
     pub fn save_workflow(
         &self,
         origin: &Origin,

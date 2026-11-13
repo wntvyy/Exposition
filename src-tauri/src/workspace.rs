@@ -50,10 +50,18 @@ where
 pub async fn workspace_open(state: State<'_, AppState>, path: String) -> Result<WorkspaceInfo, CommandError> {
     let execution = state.execution.clone();
     let graph = Arc::clone(&state.graph);
+    let runs = state.workflow_runs.clone();
     let info = blocking(&state, move |ws| {
         let previous = ws.current().map(|info| info.root);
+        let previous_root = ws.open_root();
         let info = ws.open_workspace(&PathBuf::from(path))?;
         if previous.as_deref() != Some(info.root.as_str()) {
+            // Switching projects cancels the previous project's workflow run
+            // (nothing resumes when it is reopened).
+            if let Some(root) = previous_root {
+                let root = std::fs::canonicalize(&root).unwrap_or(root);
+                runs.project_closed(Some(&root));
+            }
             if let Some(previous) = previous {
                 execution.unregister_root(Path::new(&previous));
             }
@@ -78,7 +86,13 @@ pub async fn workspace_open(state: State<'_, AppState>, path: String) -> Result<
 pub async fn workspace_close(state: State<'_, AppState>) -> Result<(), CommandError> {
     let execution = state.execution.clone();
     let graph = Arc::clone(&state.graph);
+    let runs = state.workflow_runs.clone();
     blocking(&state, move |ws| {
+        // Closing the project cancels its workflow run (nothing resumes).
+        if let Some(root) = ws.open_root() {
+            let root = std::fs::canonicalize(&root).unwrap_or(root);
+            runs.project_closed(Some(&root));
+        }
         if let Some(info) = ws.current() {
             execution.unregister_root(Path::new(&info.root));
         }

@@ -6,7 +6,8 @@ import type { WorkflowEffect } from "./WorkflowEffect";
 
 export type WorkflowValidation = { state: DraftState, 
 /**
- * Always false in this version (no runner exists yet).
+ * Well-formed AND every step's runner available in the open project
+ * (set by [`apply_runnability`]; false from validation alone).
  */
 runnable: boolean, runnableReason: string, diagnostics: Array<WorkflowDiagnostic>, errors: number, warnings: number, 
 /**

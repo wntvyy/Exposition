@@ -12,6 +12,7 @@ export type RunnerSpec = { id: string, title: string, containment: Containment,
  */
 allows: Array<WorkflowEffect>, 
 /**
- * Always false in this version.
+ * Whether the runner can execute in the open project now (filled in by
+ * the workflow runner service; false in the bare registry).
  */
 available: boolean, availability: string, };

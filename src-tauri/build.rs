@@ -154,6 +154,14 @@ const COMMANDS: &[&str] = &[
     "workflow_import",
     "workflow_list",
     "workflow_get",
+    // Workflow runs (src/workflow_runs.rs).
+    "workflow_run_plan",
+    "workflow_run_start",
+    "workflow_run_cancel",
+    "workflow_run_get",
+    "workflow_runs",
+    "workflow_run_acknowledge",
+    "workflow_association_decide",
     // Agents and the project graph (src/agents.rs).
     "agents_task_keep_investigation",
     "agents_task_create_generation",

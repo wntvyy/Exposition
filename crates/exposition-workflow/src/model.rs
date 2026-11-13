@@ -281,7 +281,15 @@ pub enum WorkflowOutputValue {
         artifact: Option<String>,
     },
     /// A retained research result (graph entity with computational evidence).
-    Retained { entity: EntityId, path: WorkspacePath, sha256: String, evidence: Option<EvidenceId> },
+    Retained {
+        entity: EntityId,
+        path: WorkspacePath,
+        sha256: String,
+        evidence: Option<EvidenceId>,
+        /// The research run and artifact it was retained from.
+        research_run: Option<String>,
+        artifact: Option<String>,
+    },
     /// A Lean audit's result. Only the Lean audit adapter constructs this.
     FormalEvidence {
         file: WorkspacePath,
@@ -295,9 +303,28 @@ pub enum WorkflowOutputValue {
     /// A read-only agent's report.
     Report { text: String, task: Option<String> },
     /// A prepared manuscript insertion awaiting review.
-    PromotionProposal { promotion: String, document: WorkspacePath, status: WorkflowProposalStatus },
+    /// `status` reflects the existing promotion review when the run is read:
+    /// accepted once the insertion is in the manuscript, expired after the
+    /// review window.
+    PromotionProposal {
+        promotion: String,
+        document: WorkspacePath,
+        status: WorkflowProposalStatus,
+        /// The attachment the insertion carries (its markers in the manuscript).
+        attachment_key: Option<String>,
+        /// When the prepared review expires.
+        expires_at_ms: Option<u64>,
+    },
     /// Evidence associations awaiting review.
-    AssociationProposal { proposal: String, declarations: Vec<String>, status: WorkflowProposalStatus },
+    AssociationProposal {
+        proposal: String,
+        declarations: Vec<String>,
+        status: WorkflowProposalStatus,
+        /// Declarations the user accepted (evidence recorded for them).
+        accepted: Vec<String>,
+        /// Evidence records the Lean evidence path registered on acceptance.
+        evidence: Vec<EvidenceId>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

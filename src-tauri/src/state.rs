@@ -13,6 +13,7 @@ use exposition_research::launcher::ExecutionLauncher;
 use exposition_research::{ResearchConfig, ResearchProject, ResearchService, ResolvedSource, SourceReader};
 use exposition_tex::{TexService, TexServiceConfig};
 use exposition_typesetting::{Fonts, TypesettingService};
+use exposition_workflow::WorkflowRunService;
 use exposition_workspace::{DocumentService, WorkspaceService};
 use tauri::{AppHandle, Manager};
 
@@ -46,6 +47,9 @@ pub struct AppState {
     /// Keeps the graph reconciled with the project's files and open buffers
     /// (its own thread, subscribed to workspace/document/graph events).
     pub reconciler: ReconcilerHandle,
+    /// Workflow runs (M8): plans, the one-step-at-a-time runner, durable run
+    /// records in `workflow-runs.sqlite3` (interrupted runs never resume).
+    pub workflow_runs: WorkflowRunService,
 }
 
 impl AppState {
@@ -137,6 +141,24 @@ impl AppState {
             // targets through the project graph.
             graph: Some(Arc::clone(&graph)),
         })?;
+        // Workflow runs. The research batch runner (restricted Docker and
+        // trusted-native Python batches) is wired here; without one, Python
+        // workflow steps report themselves unavailable (never downgraded).
+        let batch_runner: Option<Arc<dyn exposition_research::batch::BatchRunner>> = None;
+        let workflow_runs = crate::workflow_runs::build(
+            &data_dir,
+            crate::workflow_runs::RunServices {
+                workspace: Arc::clone(&workspace),
+                documents: Arc::clone(&documents),
+                graph: Arc::clone(&graph),
+                execution: execution.clone(),
+                lean: lean.clone(),
+                research_project: Arc::clone(&research_project),
+                agents: agents.clone(),
+                batch: batch_runner,
+                runtime: tauri::async_runtime::handle().inner().clone(),
+            },
+        )?;
         Ok(Self {
             documents,
             workspace,
@@ -150,6 +172,7 @@ impl AppState {
             graph,
             research_project,
             reconciler,
+            workflow_runs,
         })
     }
 }

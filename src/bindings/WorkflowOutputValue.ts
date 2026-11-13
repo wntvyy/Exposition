@@ -12,7 +12,11 @@ export type WorkflowOutputValue = { "kind": "file", path: WorkspacePath, sha256:
 /**
  * The research run and artifact that hold it, when it is a run output.
  */
-researchRun: string | null, artifact: string | null, } | { "kind": "retained", entity: EntityId, path: WorkspacePath, sha256: string, evidence: EvidenceId | null, } | { "kind": "formalEvidence", file: WorkspacePath, fileSha256: string, 
+researchRun: string | null, artifact: string | null, } | { "kind": "retained", entity: EntityId, path: WorkspacePath, sha256: string, evidence: EvidenceId | null, 
+/**
+ * The research run and artifact it was retained from.
+ */
+researchRun: string | null, artifact: string | null, } | { "kind": "formalEvidence", file: WorkspacePath, fileSha256: string, 
 /**
  * Overall audit verdict label.
  */
@@ -20,4 +24,20 @@ verdict: string, declarations: Array<WorkflowAuditedDeclaration>,
 /**
  * Evidence records the Lean service registered, if any.
  */
-evidence: Array<EvidenceId>, } | { "kind": "report", text: string, task: string | null, } | { "kind": "promotionProposal", promotion: string, document: WorkspacePath, status: WorkflowProposalStatus, } | { "kind": "associationProposal", proposal: string, declarations: Array<string>, status: WorkflowProposalStatus, };
+evidence: Array<EvidenceId>, } | { "kind": "report", text: string, task: string | null, } | { "kind": "promotionProposal", promotion: string, document: WorkspacePath, status: WorkflowProposalStatus, 
+/**
+ * The attachment the insertion carries (its markers in the manuscript).
+ */
+attachmentKey: string | null, 
+/**
+ * When the prepared review expires.
+ */
+expiresAtMs: number | null, } | { "kind": "associationProposal", proposal: string, declarations: Array<string>, status: WorkflowProposalStatus, 
+/**
+ * Declarations the user accepted (evidence recorded for them).
+ */
+accepted: Array<string>, 
+/**
+ * Evidence records the Lean evidence path registered on acceptance.
+ */
+evidence: Array<EvidenceId>, };
