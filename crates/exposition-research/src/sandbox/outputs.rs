@@ -188,19 +188,22 @@ pub(crate) fn validate(out_dir: &Path, max_total: u64) -> (Vec<Validated>, Vec<B
     (accepted, rejected)
 }
 
-/// Copy validated files into the run's artifact folder. Text artifacts are
-/// redacted like stream output first. Returns their records.
+/// Copy validated files into the run's artifact folder (each created new;
+/// nothing is renamed or linked across the boundary). Text artifacts are
+/// redacted like stream output first. Returns their records, and the files
+/// that could not be stored.
 pub(crate) fn register(
     root: &Path,
     run_id: &str,
     files: Vec<Validated>,
     redact: &dyn Fn(&str) -> String,
-) -> Result<Vec<ArtifactRecord>, ResearchError> {
+) -> Result<(Vec<ArtifactRecord>, Vec<BatchRejected>), ResearchError> {
     if files.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let dir = ensure_dir_within(root, &artifact_dir_path(run_id))?;
     let mut records = Vec::with_capacity(files.len());
+    let mut failed = Vec::new();
     for file in files {
         let media_type = media_type_for(&file.name).to_owned();
         let bytes =
@@ -212,19 +215,24 @@ pub(crate) fn register(
             } else {
                 file.bytes
             };
+        let Ok(path) = artifact_dir_path(run_id).join(&file.name) else {
+            failed.push(BatchRejected { name: file.name, reason: "the name is not a valid project path".into() });
+            continue;
+        };
         let target = dir.join(&file.name);
-        let mut out = OpenOptions::new()
+        let stored = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&target)
-            .map_err(|e| ResearchError::io(&format!("storing output {}", file.name), e))?;
-        out.write_all(&bytes)
-            .and_then(|_| out.flush())
-            .map_err(|e| ResearchError::io(&format!("storing output {}", file.name), e))?;
+            .and_then(|mut out| out.write_all(&bytes).and_then(|_| out.flush()));
+        if let Err(e) = stored {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                let _ = std::fs::remove_file(&target);
+            }
+            failed.push(BatchRejected { name: file.name, reason: format!("could not be stored in the project ({e})") });
+            continue;
+        }
         let ext = extension(&file.name).unwrap_or_default();
-        let path = artifact_dir_path(run_id)
-            .join(&file.name)
-            .map_err(|e| ResearchError::InvalidRequest(format!("output {}: {e}", file.name)))?;
         records.push(ArtifactRecord {
             id: ArtifactId(format!("{run_id}/{}", file.name)),
             kind: kind_for(&ext),
@@ -235,7 +243,7 @@ pub(crate) fn register(
             content_hash: format!("sha256:{}", sha256_hex(&bytes)),
         });
     }
-    Ok(records)
+    Ok((records, failed))
 }
 
 /// Map accepted artifacts to output ports: port `p` is realized by `p.<ext>`
@@ -417,7 +425,8 @@ mod tests {
             Validated { name: "notes.txt".into(), bytes: b"n".to_vec() },
         ];
         let redact = |t: &str| t.replace("secret-token", "[REDACTED]");
-        let records = register(&root, "run-abc", files, &redact).unwrap();
+        let (records, failed) = register(&root, "run-abc", files, &redact).unwrap();
+        assert!(failed.is_empty());
         let svg = records.iter().find(|r| r.id.0 == "run-abc/figure.svg").unwrap();
         let stored = std::fs::read(root.join(".exposition/artifacts/run-abc/figure.svg")).unwrap();
         assert_eq!(stored, b"<svg>[REDACTED]</svg>");

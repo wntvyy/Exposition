@@ -470,6 +470,8 @@ impl ScopedBatchRunner {
         let job = self.execution.launch(spec);
         manifest.record.producer = Producer::Job { job_id: job.0.clone() };
         manifest.session.session_id = job.0.clone();
+        // Best effort: the running manifest names its job (it is rewritten at the end).
+        let _ = write_manifest(&root, &manifest);
         (control.on_dispatched)(&run_id);
         let result = self.wait(&job, control);
 
@@ -479,14 +481,17 @@ impl ScopedBatchRunner {
             Some(dir) => dir.clone(),
             None => exposition_execution::docker::out_dir(&job_dir),
         };
-        let (validated, rejected) = outputs::validate(&out_dir, request.max_output_bytes);
+        let (validated, mut rejected) = outputs::validate(&out_dir, request.max_output_bytes);
         if out_host.is_none() {
             // The restricted job's folder holds only what the container wrote.
             let _ = std::fs::remove_dir_all(&job_dir);
         }
         let redact = |text: &str| self.execution.redact(text);
         let registered_outputs = match outputs::register(&root, &run_id, validated, &redact) {
-            Ok(records) => records,
+            Ok((records, failed)) => {
+                rejected.extend(failed);
+                records
+            }
             Err(e) => {
                 manifest.record.status = RunStatus::Failed { message: format!("outputs could not be stored: {e}") };
                 manifest.record.finished_at_ms = Some(now_ms());
