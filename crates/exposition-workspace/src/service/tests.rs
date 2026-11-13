@@ -606,14 +606,21 @@ fn folder_timestamp_changes_are_not_file_changes() {
     let f = fixture();
     fs::create_dir_all(f.project().join(".exposition")).unwrap();
     let mut events = f.service.subscribe();
-    let generation = lock(&f.service.state).open.as_ref().unwrap().generation;
+    // Events carry paths under the canonical root the watcher watches, as the
+    // real watcher reports them; the fixture's own path may be another name for
+    // it (a temp folder reached through an 8.3 short name, as on CI runners).
+    let (generation, root) = {
+        let state = lock(&f.service.state);
+        let open = state.open.as_ref().unwrap();
+        (open.generation, open.root.path().to_path_buf())
+    };
     let modify = |path: PathBuf| FsSignal {
         generation,
         event: Ok(notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(path)),
     };
-    f.service.process_fs(vec![modify(f.project().join(".exposition")), modify(f.project().join("chapters"))]);
+    f.service.process_fs(vec![modify(root.join(".exposition")), modify(root.join("chapters"))]);
     assert!(events.try_recv().is_err(), "no event for folder timestamp changes");
-    f.service.process_fs(vec![modify(f.file("main.typ"))]);
+    f.service.process_fs(vec![modify(root.join("main.typ"))]);
     match events.try_recv() {
         Ok(WorkspaceEvent::FilesChanged { changes, .. }) => {
             assert_eq!(changes, vec![FileChange { path: wp("main.typ"), kind: FileChangeKind::Modified }]);
