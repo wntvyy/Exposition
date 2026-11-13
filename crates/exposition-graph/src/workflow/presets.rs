@@ -80,6 +80,9 @@ fn step(id: &str, label: &str, op: &str) -> WorkflowStep {
         operation: StepOperation { id: op.into(), version: 1 },
         parameters: BTreeMap::new(),
         payload: None,
+        composite: None,
+        condition: None,
+        repeat: None,
     }
 }
 
@@ -248,6 +251,7 @@ fn numerical_experiment(r: &WorkflowPresetRequest) -> WorkflowDefinition {
             retain_results: true,
             propose_changes: true,
         },
+        execution: None,
     }
 }
 
@@ -294,5 +298,6 @@ fn formal_audit(r: &WorkflowPresetRequest) -> WorkflowDefinition {
             retain_results: true,
             propose_changes: true,
         },
+        execution: None,
     }
 }
