@@ -169,6 +169,11 @@ const COMMANDS: &[&str] = &[
     // Agents and the project graph (src/agents.rs).
     "agents_task_keep_investigation",
     "agents_task_create_generation",
+    // Workflow triggers (src/workflow_triggers.rs): user-only, never agents.
+    "workflow_trigger_plan",
+    "workflow_trigger_enable",
+    "workflow_trigger_disable",
+    "workflow_trigger_list",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

@@ -4,4 +4,18 @@ import type { WorkflowEffect } from "./WorkflowEffect";
 /**
  * One step of the reviewable plan (dependency order).
  */
-export type PlannedStep = { step: string, label: string, operation: string, runner: string, effects: Array<WorkflowEffect>, };
+export type PlannedStep = { 
+/**
+ * Step id; an expanded composite child is `<compositeStep>/<childStep>`
+ * (nested: `a/b/c`).
+ */
+step: string, label: string, operation: string, runner: string, effects: Array<WorkflowEffect>, 
+/**
+ * The runner's id (absent in records saved before schema /2 existed).
+ */
+runnerId?: string, 
+/**
+ * Labels of the enclosing composite steps, outermost first (expanded
+ * children only).
+ */
+compositePath?: Array<string>, };

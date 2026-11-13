@@ -162,6 +162,10 @@
     "allow-workflow-run-manifest-export",
     "allow-workflow-run-reproduce-plan",
     "allow-agents-task-keep-investigation",
-    "allow-agents-task-create-generation"
+    "allow-agents-task-create-generation",
+    "allow-workflow-trigger-plan",
+    "allow-workflow-trigger-enable",
+    "allow-workflow-trigger-disable",
+    "allow-workflow-trigger-list"
   ]
 }
