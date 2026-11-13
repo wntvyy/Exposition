@@ -688,3 +688,38 @@ describe("docs audit: triggers and verdicts", () => {
     expect(runModel.verdictTone("Unverified: no audit evidence")).toBe("neutral");
   });
 });
+
+describe("lane F: R and Julia runners in plans and runs", () => {
+  it("lists the image each R/Julia runner is bound to, with its identity", async () => {
+    const base = plan();
+    runIpc.plan.mockResolvedValue(
+      plan({
+        execution: {
+          ...base.execution,
+          runnerImages: [
+            { runner: "restrictedR", image: "r-base:4.6.2", imageId: `sha256:${"a".repeat(64)}` },
+            { runner: "restrictedJulia", image: "julia:1.13", imageId: null },
+          ],
+        },
+      }),
+    );
+    render(<PlanReviewDialog workflow="wf-1" revision={2} isOpen onOpenChange={() => {}} onStarted={vi.fn()} />);
+    const images = await screen.findByTestId("plan-runner-images");
+    const r = images.querySelector('[data-runner="restrictedR"]')!;
+    expect(r.textContent).toContain("r-base:4.6.2");
+    expect(r.querySelector("[data-full]")!.getAttribute("data-full")).toBe("a".repeat(64));
+    expect(images.querySelector('[data-runner="restrictedJulia"]')!.textContent).toContain("julia:1.13 (identity not recorded)");
+  });
+
+  it("omits runner images for plans without them", async () => {
+    runIpc.plan.mockResolvedValue(plan());
+    render(<PlanReviewDialog workflow="wf-1" revision={2} isOpen onOpenChange={() => {}} onStarted={vi.fn()} />);
+    await screen.findByTestId("workflow-plan-details");
+    expect(screen.queryByTestId("plan-runner-images")).toBeNull();
+  });
+
+  it("shows an R attempt's interpreter", () => {
+    const facts = runModel.environmentFacts({ ...env, runner: "restrictedR", interpreter: { name: "R", version: "4.6.2" }, packages: [], packagesDigest: null });
+    expect(facts.find((f) => f.label === "Interpreter")?.value).toBe("R 4.6.2");
+  });
+});

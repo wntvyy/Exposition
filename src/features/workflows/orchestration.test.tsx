@@ -590,3 +590,23 @@ describe("docs audit: the editor offers only what validation accepts", () => {
     expect(model.conditionSources(forEach, contracts, "review").map((o) => o.key)).not.toContain("sim.summary");
   });
 });
+
+describe("lane F: the batch operations' free value parameter", () => {
+  const valueSpec = { name: "value", label: "Value (passed to the code as EXPOSITION_PARAM_VALUE; forEach sweeps it)", kind: { kind: "text" as const, maxLen: 1000 }, required: false };
+  const withValue = contracts.map((c) => (c.id === "research.pythonBatch" ? { ...c, parameters: [...c.parameters, valueSpec] } : c));
+
+  it("is editable on the step and can be swept by forEach with text values", async () => {
+    wfIpc.operations.mockResolvedValue(withValue);
+    openEditor(parent);
+    const card = await screen.findByTestId("workflow-step-sim");
+    expect(within(card).getByText(/passed to the code as EXPOSITION_PARAM_VALUE; forEach sweeps it/)).toBeTruthy();
+    await choose("repeat-kind-sim", /Once for each value of a parameter/);
+    await choose("repeat-parameter-sim", /EXPOSITION_PARAM_VALUE/);
+    const values = await screen.findByTestId("repeat-values-sim");
+    fireEvent.change(values.querySelector("input")!, { target: { value: "alpha" } });
+    await waitFor(() =>
+      expect((wfIpc.validate.mock.lastCall?.[0] as WorkflowDefinition).steps[0]!.repeat).toEqual({ kind: "forEach", parameter: "value", values: [{ kind: "text", value: "alpha" }] }),
+    );
+    expect(within(card).getAllByText(/Varies: one instance per value/).length).toBe(1);
+  });
+});

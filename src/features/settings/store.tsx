@@ -9,6 +9,7 @@ import type { DockerImage } from "../../bindings/DockerImage";
 import type { ExecutionSettingsState } from "../../bindings/ExecutionSettingsState";
 import type { ProjectSettings } from "../../bindings/ProjectSettings";
 import type { ProjectSettingsState } from "../../bindings/ProjectSettingsState";
+import type { RestrictedLanguage } from "../../bindings/RestrictedLanguage";
 import type { TrustedRoot } from "../../bindings/TrustedRoot";
 import type { TrustList } from "../../bindings/TrustList";
 import { notify } from "../../app/notifications";
@@ -149,6 +150,25 @@ export async function setDockerImage(image: string | null): Promise<boolean> {
   } catch (e) {
     useSettings.setState({ savingImage: false });
     notify({ tone: "danger", title: "Could not change the container image", body: errorMessage(e) });
+    return false;
+  }
+}
+
+/**
+ * Set or clear the image of restricted R or Julia workflow batches (their own
+ * image; without one those batches are refused, never run natively instead).
+ */
+export async function setLanguageImage(language: RestrictedLanguage, image: string | null): Promise<boolean> {
+  useSettings.setState({ savingImage: true });
+  const name = language === "r" ? "R" : "Julia";
+  try {
+    const execution = await commands.executionSettingsUpdate({ kind: "languageImage", language, image });
+    useSettings.setState({ execution, savingImage: false });
+    notify({ tone: "success", title: image ? `${name} image set` : `${name} image cleared`, body: image ?? undefined });
+    return true;
+  } catch (e) {
+    useSettings.setState({ savingImage: false });
+    notify({ tone: "danger", title: `Could not change the ${name} image`, body: errorMessage(e) });
     return false;
   }
 }
