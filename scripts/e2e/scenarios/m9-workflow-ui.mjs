@@ -141,6 +141,24 @@ export default async function m9WorkflowUi({ launchApp, artifactsDir, assert }) 
     }, { timeout: RUN_TIMEOUT, interval: 500, message: `run ${runId} finishes` });
     return run;
   };
+  /** Replace a file's content through the document service and save it (as the editor does). */
+  const saveThroughApp = async (path, text) => {
+    const opened = await invoke(page, "document_open", { path });
+    const doc = opened.state.info.id;
+    const state = await invoke(page, "document_state", { document: doc });
+    await invoke(page, "document_apply", {
+      request: {
+        id: `m9-ui-${Date.now()}`,
+        origin: { kind: "source" },
+        edits: [{ document: doc, baseRevision: state.info.revision, patches: [{ range: { start: 0, end: state.text.length }, text }] }],
+        undo: { kind: "newGroup" },
+        conflict: "reject",
+        label: null,
+        selection: null,
+      },
+    });
+    await invoke(page, "document_save", { document: doc, overwrite: false });
+  };
   const section = async (name, body) => {
     try {
       await body();
@@ -369,9 +387,9 @@ export default async function m9WorkflowUi({ launchApp, artifactsDir, assert }) 
       await visible("workflow-trigger-add").click();
       await page.getByTestId("trigger-dialog").waitFor({ timeout: 15_000 });
       await page.getByTestId("trigger-watch-data").click();
-      await page.getByTestId("trigger-debounce").locator("input").fill("2");
       await page.getByTestId("trigger-review").click();
       await page.getByTestId("trigger-standing").waitFor({ timeout: 30_000 });
+      await page.getByTestId("trigger-debounce").locator("input").fill("2");
       const may = await page.getByTestId("trigger-may-change").innerText();
       note("standing-plan-review-says-what-may-change", /data\/obs\.csv/.test(may) && /Anything else suspends/.test(may), may.slice(0, 400));
       await shot("m9-trigger-standing-plan", { themes: ["light", "dark"] });
@@ -385,7 +403,7 @@ export default async function m9WorkflowUi({ launchApp, artifactsDir, assert }) 
       note("trigger-enabled-by-the-user", trigger?.state?.kind === "active" && trigger.kind?.kind === "inputsChanged", trigger);
 
       const runsBefore = (await invoke(page, "workflow_runs", { workflow: parent.id })).map((r) => r.id);
-      await writeFile(join(root, "data", "obs.csv"), `${OBS}3,7\n`);
+      await saveThroughApp("data/obs.csv", `${OBS}3,7\n`);
       let fired = null;
       await waitFor(async () => {
         const runs = await invoke(page, "workflow_runs", { workflow: parent.id });

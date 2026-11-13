@@ -14,9 +14,9 @@ import type {
   WorkflowPlanStep,
   WorkflowRun,
   WorkflowRunPlan,
-  WorkflowStandingPlan,
   WorkflowStepAttempt,
   WorkflowTrigger,
+  WorkflowTriggerPlan,
 } from "./contract";
 
 const runIpc = vi.hoisted(() => ({
@@ -449,43 +449,73 @@ const definition: WorkflowDefinition = {
   ceiling: { execution: "trustedNative", modelRequests: false, retainResults: true, proposeChanges: false },
 };
 
+const watchedData = { input: "data", label: "Data", path: "data/obs.csv", portType: "dataset" as const };
+const limits = { minDebounceSeconds: 2, maxDebounceSeconds: 3600, minIntervalMinutes: 15, maxIntervalMinutes: 10080, maxRunsPerHour: 12, maxRunsPerDay: 100, maxModelRequestsPerDay: 1000, maxWatchedInputs: 16 };
+
 const trigger = (overrides: Partial<WorkflowTrigger> = {}): WorkflowTrigger => ({
-  id: "trg-1",
+  id: "wtrg-1",
   workflow: "wf-1",
   revision: 2,
+  title: "Study",
+  project: "thesis",
   kind: { kind: "inputsChanged", inputs: ["data"] },
+  watched: [watchedData],
   debounceSeconds: 30,
   maxRunsPerHour: 6,
   maxRunsPerDay: 24,
   allowNative: false,
+  maxModelRequestsPerDay: 0,
+  modelRequestsPerRun: 0,
   standingHash: "5".repeat(64),
   state: { kind: "active" },
   createdAtMs: 1_700_000_000_000,
+  enabledAtMs: 1_700_000_000_000,
   lastFiredMs: 1_700_000_500_000,
   queued: false,
+  nextCheckMs: null,
+  listening: true,
+  runsLastHour: 1,
+  runsLastDay: 3,
+  modelRequestsLastDay: 0,
   history: [],
   ...overrides,
 });
 
-const standing = (overrides: Partial<WorkflowStandingPlan> = {}): WorkflowStandingPlan => ({
+const standing = (overrides: Partial<WorkflowTriggerPlan> = {}): WorkflowTriggerPlan => ({
   plan: plan({ plan: "plan-s" }),
+  kind: { kind: "inputsChanged", inputs: ["data"] },
+  watched: [watchedData],
   standingHash: "6".repeat(64),
-  settings: { kind: { kind: "inputsChanged", inputs: ["data"] }, debounceSeconds: 30, maxRunsPerHour: 6, maxRunsPerDay: 24, allowNative: true },
-  watched: [{ input: "data", label: "Data", path: "data/obs.csv" }],
+  mayChange: ["The saved content of Data (data/obs.csv)"],
+  suspendsOn: ["A new revision of the workflow", "Folder trust", "The restricted image identity", "Any code input or step code"],
+  nativeSteps: ["Audit"],
+  modelRequestsPerRun: 2,
+  defaults: { debounceSeconds: 30, maxRunsPerHour: 6, maxRunsPerDay: 24, allowNative: false, maxModelRequestsPerDay: 20 },
+  limits,
+  notices: ["Runs start unattended while the project is open."],
   blockers: [],
+  expiresAtMs: 1_700_001_800_000,
   ...overrides,
 });
 
 describe("triggers panel", () => {
-  it("lists triggers with state, suspended reason, last fired, queued, and history; turns one off", async () => {
+  it("lists triggers with state, suspended reason, last fired, counts, queued, listening and history; turns one off", async () => {
     triggerIpc.list.mockResolvedValue([
-      trigger({ queued: true, history: [{ atMs: 1_700_000_500_000, event: "fired", run: "run-9", message: null }, { atMs: 1_700_000_600_000, event: "queued", run: null, message: null }] }),
-      trigger({ id: "trg-2", state: { kind: "suspended", code: "trigger.planChanged", message: "The workflow has a new revision (3)." }, lastFiredMs: null }),
-      trigger({ id: "trg-3", kind: { kind: "interval", minutes: 60 }, state: { kind: "disabled" } }),
+      trigger({
+        queued: true,
+        history: [
+          { atMs: 1_700_000_500_000, event: { kind: "fired", run: "run-9", changed: [{ input: "data", before: "1".repeat(64), after: "2".repeat(64) }] } },
+          { atMs: 1_700_000_600_000, event: { kind: "queued" } },
+          { atMs: 1_700_000_700_000, event: { kind: "rateLimited", untilMs: 1_700_003_600_000 } },
+        ],
+      }),
+      trigger({ id: "wtrg-2", state: { kind: "suspended", code: "trigger.planChanged", message: "The workflow has a new revision (3)." }, lastFiredMs: null }),
+      trigger({ id: "wtrg-3", kind: { kind: "interval", minutes: 60, inputs: [] }, watched: [], state: { kind: "disabled" } }),
+      trigger({ id: "wtrg-4", listening: false }),
     ]);
     triggerIpc.disable.mockResolvedValue(trigger({ state: { kind: "disabled" } }));
     render(<TriggersSection workflow="wf-1" revision={3} definition={definition} reviewBlock={null} />);
-    const active = await screen.findByTestId("workflow-trigger-trg-1");
+    const active = await screen.findByTestId("workflow-trigger-wtrg-1");
     expect(triggerIpc.list).toHaveBeenCalledWith("wf-1");
     expect(active.getAttribute("data-state")).toBe("active");
     expect(active.textContent).toContain("When the saved content of Data (data/obs.csv) changes");
@@ -493,23 +523,28 @@ describe("triggers panel", () => {
     expect(active.textContent).toContain("1 run queued");
     expect(active.textContent).toContain("Revision 2 (the workflow is now at revision 3)");
     expect(active.textContent).toMatch(/Waits for 30 s without further changes · at most 6 runs an hour and 24 a day/);
-    expect(screen.getByTestId("trigger-last-fired-trg-1").textContent).toMatch(/^Last fired /);
-    fireEvent.click(within(active).getByRole("button", { name: /Recent history \(2\)/ }));
-    const history = screen.getByTestId("trigger-history-trg-1");
-    expect([...history.querySelectorAll("li")].map((li) => li.getAttribute("data-event"))).toEqual(["queued", "fired"]);
-    const suspended = screen.getByTestId("trigger-suspended-trg-2");
+    expect(screen.getByTestId("trigger-last-fired-wtrg-1").textContent).toMatch(/^Last fired .* runs this hour 1 of 6, today 3 of 24/);
+    fireEvent.click(within(active).getByRole("button", { name: /Recent history \(3\)/ }));
+    const history = screen.getByTestId("trigger-history-wtrg-1");
+    expect([...history.querySelectorAll("li")].map((li) => li.getAttribute("data-event"))).toEqual(["rateLimited", "queued", "fired"]);
+    expect(history.textContent).toContain("Started a run after 1 watched input changed");
+    expect(history.textContent).toContain("(data: 111111111111… → 222222222222…)");
+    fireEvent.click(within(history).getByRole("button", { name: "Open run" }));
+    expect(editorsMock.open).toHaveBeenCalledWith({ key: "workflow-run:run-9", title: "Run: Study" });
+    const suspended = screen.getByTestId("trigger-suspended-wtrg-2");
     expect(suspended.getAttribute("data-code")).toBe("trigger.planChanged");
     expect(suspended.textContent).toContain("The workflow has a new revision (3).");
     expect(suspended.textContent).toContain("It does not fire until you review and approve a new standing plan.");
-    expect(screen.getByTestId("trigger-last-fired-trg-2").textContent).toMatch(/^Has not fired yet/);
-    expect(screen.getByTestId("workflow-trigger-trg-3").textContent).toContain("Every 1 h");
-    expect(screen.getByTestId("workflow-trigger-trg-3").textContent).toContain("Off");
-    fireEvent.click(screen.getByTestId("trigger-disable-trg-1"));
-    await waitFor(() => expect(triggerIpc.disable).toHaveBeenCalledWith("trg-1"));
+    expect(screen.getByTestId("trigger-last-fired-wtrg-2").textContent).toMatch(/^Has not fired yet/);
+    expect(screen.getByTestId("workflow-trigger-wtrg-3").textContent).toContain("Every 1 h");
+    expect(screen.getByTestId("workflow-trigger-wtrg-3").textContent).toContain("Off");
+    expect(screen.getByTestId("workflow-trigger-wtrg-4").textContent).toContain("Not listening yet");
+    fireEvent.click(screen.getByTestId("trigger-disable-wtrg-1"));
+    await waitFor(() => expect(triggerIpc.disable).toHaveBeenCalledWith("wtrg-1"));
     await waitFor(() => expect(triggerIpc.list).toHaveBeenCalledTimes(2));
   });
 
-  it("enables a trigger only after reviewing its standing plan, sending the plan id, standing hash, and settings", async () => {
+  it("enables a trigger only after reviewing its standing plan, with explicit native permission, sending the plan id, standing hash, and settings", async () => {
     triggerIpc.list.mockResolvedValue([]);
     triggerIpc.plan.mockResolvedValue(standing());
     triggerIpc.enable.mockResolvedValue(trigger());
@@ -517,7 +552,7 @@ describe("triggers panel", () => {
     await screen.findByText("No triggers");
     fireEvent.click(screen.getByTestId("workflow-trigger-add"));
     const dialog = await screen.findByTestId("trigger-dialog");
-    expect(dialog.getAttribute("data-phase")).toBe("settings");
+    expect(dialog.getAttribute("data-phase")).toBe("choose");
     // Nothing watched yet: the review is not offered.
     expect((screen.getByTestId("trigger-review") as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByTestId("trigger-problems").textContent).toContain("Choose at least one input to watch.");
@@ -525,62 +560,57 @@ describe("triggers panel", () => {
     expect(screen.queryByTestId("trigger-watch-script")).toBeNull();
     expect(screen.getByTestId("trigger-watch").textContent).toMatch(/Code inputs cannot be watched \(Script\)/);
     fireEvent.click(within(screen.getByTestId("trigger-watch-data")).getByRole("checkbox"));
-    // Rate limits are bounded: 13 runs an hour is refused.
-    fireEvent.change(screen.getByTestId("trigger-per-hour").querySelector("input")!, { target: { value: "13" } });
-    expect(screen.getByTestId("trigger-per-hour").textContent).toContain("A whole number from 1 to 12.");
-    fireEvent.change(screen.getByTestId("trigger-per-hour").querySelector("input")!, { target: { value: "6" } });
-    fireEvent.click(within(screen.getByTestId("trigger-allow-native")).getByRole("checkbox"));
-    expect(triggerIpc.enable).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId("trigger-review"));
-    await waitFor(() =>
-      expect(triggerIpc.plan).toHaveBeenCalledWith({
-        workflow: "wf-1",
-        revision: 2,
-        kind: { kind: "inputsChanged", inputs: ["data"] },
-        debounceSeconds: 30,
-        maxRunsPerHour: 6,
-        maxRunsPerDay: 24,
-        allowNative: true,
-      }),
-    );
+    await waitFor(() => expect(triggerIpc.plan).toHaveBeenCalledWith({ workflow: "wf-1", kind: { kind: "inputsChanged", inputs: ["data"] } }));
     const review = await screen.findByTestId("trigger-standing");
     expect(review.getAttribute("data-standing-hash")).toBe("6".repeat(64));
-    const may = screen.getByTestId("trigger-may-change");
-    expect(may.querySelector('[data-input="data"]')!.textContent).toBe("The saved content of Data (data/obs.csv)");
-    expect(may.textContent).toMatch(/Anything else suspends the trigger.*a new revision of the workflow, folder trust, the container image identity, a runner becoming unavailable, any code input, or any step's code or instructions/);
-    const native = screen.getByTestId("trigger-standing-native");
-    expect(native.getAttribute("data-allowed")).toBe("true");
-    expect(native.textContent).toBe("1 step runs natively with your account's privileges on every fire, without asking.");
-    // The full plan is part of the review.
+    expect(screen.getByTestId("trigger-may-change-list").textContent).toBe("The saved content of Data (data/obs.csv)");
+    expect(screen.getByTestId("trigger-suspends-on").querySelectorAll("li")).toHaveLength(4);
+    expect(screen.getByTestId("trigger-notices").textContent).toContain("unattended");
+    // Defaults come from the plan; native steps must be allowed explicitly.
+    expect((screen.getByTestId("trigger-debounce").querySelector("input") as HTMLInputElement).value).toBe("30");
+    const native = screen.getByTestId("trigger-native");
+    expect(native.getAttribute("data-allowed")).toBe("false");
+    expect(native.textContent).toContain("Runs natively with your account's privileges on every fire: “Audit”.");
+    expect((screen.getByTestId("trigger-enable") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("trigger-enable-reason").textContent).toMatch(/allow them explicitly/);
+    // Rate limits are bounded by the plan's limits: 13 an hour is refused.
+    fireEvent.change(screen.getByTestId("trigger-per-hour").querySelector("input")!, { target: { value: "13" } });
+    expect(screen.getByTestId("trigger-per-hour").textContent).toContain("A whole number from 1 to 12.");
+    fireEvent.change(screen.getByTestId("trigger-per-hour").querySelector("input")!, { target: { value: "4" } });
+    fireEvent.change(screen.getByTestId("trigger-debounce").querySelector("input")!, { target: { value: "3" } });
+    // Model requests: at least one run's budget (2).
+    expect(screen.getByTestId("trigger-model-per-day").textContent).toContain("(2–1000)");
+    fireEvent.click(within(native).getByRole("checkbox"));
+    await waitFor(() => expect((screen.getByTestId("trigger-enable") as HTMLButtonElement).disabled).toBe(false));
     expect(within(review).getByTestId("workflow-plan-details").getAttribute("data-plan")).toBe("plan-s");
+    expect(triggerIpc.enable).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId("trigger-enable"));
     await waitFor(() =>
       expect(triggerIpc.enable).toHaveBeenCalledWith({
         plan: "plan-s",
         standingHash: "6".repeat(64),
-        kind: { kind: "inputsChanged", inputs: ["data"] },
-        debounceSeconds: 30,
-        maxRunsPerHour: 6,
-        maxRunsPerDay: 24,
-        allowNative: true,
+        settings: { debounceSeconds: 3, maxRunsPerHour: 4, maxRunsPerDay: 24, allowNative: true, maxModelRequestsPerDay: 20 },
       }),
     );
   });
 
-  it("refuses to enable a standing plan with blockers, shows a stale approval, and offers no trigger for an unrunnable revision", async () => {
-    triggerIpc.list.mockResolvedValue([]);
+  it("refuses to enable a standing plan with blockers, shows a stale approval (trigger.planStale), re-reviews a suspended trigger, and offers no trigger for an unrunnable revision", async () => {
+    triggerIpc.list.mockResolvedValue([trigger({ id: "wtrg-2", state: { kind: "suspended", code: "trigger.planChanged", message: "New revision." }, debounceSeconds: 9, allowNative: true })]);
     triggerIpc.plan
-      .mockResolvedValueOnce(standing({ blockers: [{ code: "trigger.nativeNotAllowed", message: "Audit runs natively; allow native steps to enable this trigger." }] }))
-      .mockResolvedValueOnce(standing())
-      .mockResolvedValueOnce(standing({ standingHash: "7".repeat(64) }));
-    triggerIpc.enable.mockRejectedValueOnce({ code: "workflow.planStale", message: "data/obs.csv changed after the review." });
-    const { rerender } = render(<TriggersSection workflow="wf-1" revision={2} definition={definition} reviewBlock={null} />);
-    await screen.findByText("No triggers");
-    fireEvent.click(screen.getByTestId("workflow-trigger-add"));
-    fireEvent.click(within(await screen.findByTestId("trigger-watch-data")).getByRole("checkbox"));
+      .mockResolvedValueOnce(standing({ nativeSteps: [], modelRequestsPerRun: 0, blockers: [{ code: "workflow.untrustedFolder", message: "The folder is not trusted.", step: null, input: null }] }))
+      .mockResolvedValueOnce(standing({ nativeSteps: [], modelRequestsPerRun: 0 }))
+      .mockResolvedValueOnce(standing({ nativeSteps: [], modelRequestsPerRun: 0, standingHash: "7".repeat(64) }));
+    triggerIpc.enable.mockRejectedValueOnce({ code: "trigger.planStale", message: "data/obs.csv changed after the review." });
+    const { rerender } = render(<TriggersSection workflow="wf-1" revision={3} definition={definition} reviewBlock={null} />);
+    // Review again: the trigger's kind and settings are carried into the new review.
+    fireEvent.click(await screen.findByTestId("trigger-reapprove-wtrg-2"));
+    await screen.findByTestId("trigger-dialog");
     fireEvent.click(screen.getByTestId("trigger-review"));
+    await waitFor(() => expect(triggerIpc.plan).toHaveBeenCalledWith({ workflow: "wf-1", kind: { kind: "inputsChanged", inputs: ["data"] } }));
     const blockers = await screen.findByTestId("trigger-blockers");
-    expect(blockers.textContent).toContain("allow native steps");
+    expect(blockers.textContent).toContain("The folder is not trusted.");
+    expect((screen.getByTestId("trigger-debounce").querySelector("input") as HTMLInputElement).value).toBe("9");
     expect((screen.getByTestId("trigger-enable") as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByTestId("trigger-enable-reason").textContent).toMatch(/1 blocker/);
     fireEvent.click(screen.getByTestId("trigger-back"));
@@ -589,7 +619,7 @@ describe("triggers panel", () => {
     await waitFor(() => expect((screen.getByTestId("trigger-enable") as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTestId("trigger-enable"));
     const stale = await screen.findByTestId("trigger-enable-error");
-    expect(stale.getAttribute("data-code")).toBe("workflow.planStale");
+    expect(stale.getAttribute("data-code")).toBe("trigger.planStale");
     expect(stale.textContent).toContain("Nothing was enabled.");
     expect((screen.getByTestId("trigger-enable") as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByTestId("trigger-review-new"));
@@ -597,7 +627,7 @@ describe("triggers panel", () => {
     expect(screen.queryByTestId("trigger-enable-error")).toBeNull();
     // A revision that cannot be reviewed offers no new trigger.
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
-    rerender(<TriggersSection workflow="wf-1" revision={2} definition={definition} reviewBlock="Save the draft first." />);
+    rerender(<TriggersSection workflow="wf-1" revision={3} definition={definition} reviewBlock="Save the draft first." />);
     await waitFor(() => expect((screen.getByTestId("workflow-trigger-add") as HTMLButtonElement).disabled).toBe(true));
   });
 });

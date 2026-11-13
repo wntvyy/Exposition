@@ -11,11 +11,10 @@
 //
 // New fields are optional here so that M8-shaped records (and older runs) are
 // still read correctly; views treat a missing field as "not recorded".
-// Landed so far: definitions (lane A), run cause (lane B), attempt environment (lane D).
+// Landed so far: definitions (lane A), run cause (lane B), attempt environment (lane D), triggers (lane C).
 import type { ParamValue } from "../../bindings/ParamValue";
 import type { StepCondition } from "../../bindings/StepCondition";
 import type { StepRepeat } from "../../bindings/StepRepeat";
-import type { WorkflowId } from "../../bindings/WorkflowId";
 import type { WorkflowPlanStep as WorkflowPlanStepBase } from "../../bindings/WorkflowPlanStep";
 import type { WorkflowRun as WorkflowRunBase } from "../../bindings/WorkflowRun";
 import type { WorkflowRunEvent as WorkflowRunEventBase } from "../../bindings/WorkflowRunEvent";
@@ -134,64 +133,18 @@ export type WorkflowRunEvent = Omit<WorkflowRunEventBase, "stepState"> & { stepS
 /** Where an exported run manifest was written (JSON). */
 export type WorkflowManifestExport = { path: string; bytes: number; sha256: string };
 
-// ----- triggers (lane C) ---------------------------------------------------------------------
+// ----- triggers (lane C, main 56b8539): generated bindings ------------------------------------
 
-export type TriggerKind = { kind: "inputsChanged"; inputs: string[] } | { kind: "interval"; minutes: number };
-export type TriggerState = { kind: "active" } | { kind: "suspended"; code: string; message: string } | { kind: "disabled" };
-export type TriggerHistoryEntry = {
-  atMs: number;
-  /** fired | queued | coalesced | rateLimited | suspended | enabled | disabled */
-  event: string;
-  run: WorkflowRunId | null;
-  message: string | null;
-};
-
-export type WorkflowTrigger = {
-  id: string;
-  workflow: WorkflowId;
-  revision: number;
-  kind: TriggerKind;
-  debounceSeconds: number;
-  maxRunsPerHour: number;
-  maxRunsPerDay: number;
-  allowNative: boolean;
-  standingHash: string;
-  state: TriggerState;
-  createdAtMs: number;
-  lastFiredMs: number | null;
-  queued: boolean;
-  history: TriggerHistoryEntry[];
-};
-
-export type TriggerSettings = {
-  kind: TriggerKind;
-  debounceSeconds: number;
-  maxRunsPerHour: number;
-  maxRunsPerDay: number;
-  allowNative: boolean;
-};
-
-export type TriggerPlanRequest = { workflow: WorkflowId; revision: number } & TriggerSettings;
-
-/** The standing plan a trigger is enabled with: the run plan plus what may change without asking. */
-export type WorkflowStandingPlan = {
-  plan: WorkflowRunPlan;
-  standingHash: string;
-  settings: TriggerSettings;
-  /** Inputs whose saved content may change without a new approval. */
-  watched: { input: string; label: string; path: string }[];
-  /** Why this standing plan cannot be enabled (CodeSource watched, native without allowNative, ...). */
-  blockers: { code: string; message: string }[];
-};
-
-export type EnableTriggerRequest = { plan: string; standingHash: string } & TriggerSettings;
-
-export type WorkflowTriggerEvent = { trigger: string; workflow: WorkflowId; state: TriggerState };
-
-/** Bounds from M9_PLAN acceptance 6 (Rust enforces them; the form only offers valid values). */
-export const TRIGGER_BOUNDS = {
-  debounceSeconds: { min: 2, max: 3600 },
-  intervalMinutes: { min: 15, max: 7 * 24 * 60 },
-  maxRunsPerHour: { min: 1, max: 12 },
-  maxRunsPerDay: { min: 1, max: 100 },
-};
+export type { EnableWorkflowTriggerRequest } from "../../bindings/EnableWorkflowTriggerRequest";
+export type { TriggerHistoryEntry } from "../../bindings/TriggerHistoryEntry";
+export type { TriggerHistoryEvent } from "../../bindings/TriggerHistoryEvent";
+export type { TriggerKind } from "../../bindings/TriggerKind";
+export type { TriggerState } from "../../bindings/TriggerState";
+export type { TriggerWatchedInput } from "../../bindings/TriggerWatchedInput";
+export type { WorkflowTrigger } from "../../bindings/WorkflowTrigger";
+export type { WorkflowTriggerEvent } from "../../bindings/WorkflowTriggerEvent";
+export type { WorkflowTriggerId } from "../../bindings/WorkflowTriggerId";
+export type { WorkflowTriggerLimits } from "../../bindings/WorkflowTriggerLimits";
+export type { WorkflowTriggerPlan } from "../../bindings/WorkflowTriggerPlan";
+export type { WorkflowTriggerPlanRequest } from "../../bindings/WorkflowTriggerPlanRequest";
+export type { WorkflowTriggerSettings } from "../../bindings/WorkflowTriggerSettings";

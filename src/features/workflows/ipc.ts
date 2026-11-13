@@ -22,13 +22,14 @@ import type { WorkflowRunSummary } from "./contract";
 import type { WorkflowSummary } from "../../bindings/WorkflowSummary";
 import type { WorkflowValidation } from "../../bindings/WorkflowValidation";
 import type {
-  EnableTriggerRequest,
-  TriggerPlanRequest,
+  EnableWorkflowTriggerRequest,
   WorkflowManifestExport,
   WorkflowReproducePlan,
-  WorkflowStandingPlan,
   WorkflowTrigger,
   WorkflowTriggerEvent,
+  WorkflowTriggerId,
+  WorkflowTriggerPlan,
+  WorkflowTriggerPlanRequest,
 } from "./contract";
 
 export const workflowCommands = {
@@ -87,10 +88,13 @@ export const workflowRunCommands = {
  * app-local and never offered to agents.
  */
 export const workflowTriggerCommands = {
+  /** Triggers of the open project (of one workflow when given). */
   list: (workflow: WorkflowId | null) => invoke<WorkflowTrigger[]>("workflow_trigger_list", { workflow }),
-  plan: (request: TriggerPlanRequest) => invoke<WorkflowStandingPlan>("workflow_trigger_plan", { request }),
-  enable: (request: EnableTriggerRequest) => invoke<WorkflowTrigger>("workflow_trigger_enable", { request }),
-  disable: (trigger: string) => invoke<WorkflowTrigger>("workflow_trigger_disable", { trigger }),
+  /** The standing plan for a trigger of the latest revision (what may change, what suspends it, defaults, limits). */
+  plan: (request: WorkflowTriggerPlanRequest) => invoke<WorkflowTriggerPlan>("workflow_trigger_plan", { request }),
+  /** Enable from a reviewed standing plan (`trigger.planStale` when it changed since). */
+  enable: (request: EnableWorkflowTriggerRequest) => invoke<WorkflowTrigger>("workflow_trigger_enable", { request }),
+  disable: (trigger: WorkflowTriggerId) => invoke<WorkflowTrigger>("workflow_trigger_disable", { trigger }),
 };
 
 export const workflowEvents = {
