@@ -158,7 +158,7 @@ export function nodeHeight(def: WorkflowDefinition, contracts: OperationContract
   return 84 + 26 * ((c?.inputs.length ?? 0) + (c?.outputs.length ?? 0));
 }
 
-export const COLUMN_WIDTH = 300;
+export const COLUMN_WIDTH = 380;
 const ROW_GAP = 32;
 
 /**

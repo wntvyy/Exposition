@@ -175,6 +175,7 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
 /** The plan in full (also shown read-only in the run monitor as "the plan exactly as approved"). */
 export function PlanDetails({ plan }: { plan: WorkflowRunPlan }) {
   const { execution, ceiling, budgets } = plan;
+  const stepNames = (ids: string[]) => ids.map((id) => `“${plan.steps.find((s) => s.step === id)?.label ?? id}”`).join(", ");
   return (
     <div className="xp-wf-plan" data-testid="workflow-plan-details" data-plan={plan.plan} data-approval={plan.approvalHash}>
       <dl className="xp-wf-facts">
@@ -198,8 +199,8 @@ export function PlanDetails({ plan }: { plan: WorkflowRunPlan }) {
             : "No restricted backend configured"}
           {" · "}
           {execution.trustedFolder ? "folder trusted for native execution" : "folder not trusted for native execution"}
-          {execution.nativeSteps.length > 0 && ` · natively with your account's privileges: ${execution.nativeSteps.join(", ")}`}
-          {execution.modelSteps.length > 0 && ` · sends material to the model provider: ${execution.modelSteps.join(", ")}`}
+          {execution.nativeSteps.length > 0 && ` · runs natively with your account's privileges: ${stepNames(execution.nativeSteps)}`}
+          {execution.modelSteps.length > 0 && ` · sends material to the model provider: ${stepNames(execution.modelSteps)}`}
         </dd>
         <dt>Budgets</dt>
         <dd data-testid="plan-budgets">

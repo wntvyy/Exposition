@@ -44,6 +44,7 @@ import { useWorkspace } from "../workspace/store";
 import { CodePayloadEditor } from "./CodePayloadEditor";
 import { workflowCommands } from "./ipc";
 import { PlanReviewDialog } from "./PlanReview";
+import { CONTAINMENT_VIEW, EFFECT_LABELS } from "./runModel";
 import { openRun, RunHistory } from "./RunView";
 import { WorkflowCanvas, type CanvasSelectionItem } from "./WorkflowCanvas";
 import {
@@ -233,7 +234,9 @@ function StepCard({
             <strong>{contract.title}</strong> (v{contract.version}) — {contract.purpose}
           </p>
           <p className="xp-wf__muted">
-            Runs through: {contract.runner.title} — {contract.runner.availability} Effects: {contract.effects.join(", ")}.
+            Runs through: {contract.runner.title} ({CONTAINMENT_VIEW[contract.runner.containment].label}) —{" "}
+            {contract.runner.available ? "available" : `unavailable: ${contract.runner.availability}`}. Effects:{" "}
+            {contract.effects.map((e) => EFFECT_LABELS[e].toLowerCase()).join("; ")}.
           </p>
           <div className="xp-wf__form">
             {contract.inputs.map((port) => (
