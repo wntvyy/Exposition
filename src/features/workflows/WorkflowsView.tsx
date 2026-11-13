@@ -1,7 +1,7 @@
 // Workflows of the open project (editor tab `workflows:`): saved drafts, new
 // drafts from the workflow presets, strict imports, and recent runs. Nothing
 // here starts a run: a run starts only from a reviewed plan in the editor.
-import { FileUp, Plus } from "lucide-react";
+import { Bell, BellOff, FileUp, Plus } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import { editors } from "../../app/editors";
@@ -11,7 +11,8 @@ import type { WorkflowSummary } from "../../bindings/WorkflowSummary";
 import { errorMessage } from "../../lib/ipc";
 import { Badge, Banner, Button, EmptyState, ErrorState, StatusPill } from "../../ui/components";
 import { useWorkspace } from "../workspace/store";
-import { workflowCommands } from "./ipc";
+import type { WorkflowTrigger } from "./contract";
+import { workflowCommands, workflowTriggerCommands } from "./ipc";
 import { workflowKey } from "./model";
 import { importDraft, newDraftFromPreset } from "./actions";
 import { RunHistory } from "./RunView";
@@ -19,6 +20,7 @@ import { RunHistory } from "./RunView";
 export function WorkflowsView(_props: EditorProps) {
   const [drafts, setDrafts] = useState<WorkflowSummary[] | null>(null);
   const [presets, setPresets] = useState<WorkflowPresetInfo[]>([]);
+  const [triggers, setTriggers] = useState<WorkflowTrigger[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
@@ -31,6 +33,8 @@ export function WorkflowsView(_props: EditorProps) {
       setDrafts(list);
       setPresets(p);
       setError(null);
+      // Trigger state is supplementary here (the editor's Triggers section is the place to act).
+      setTriggers(await workflowTriggerCommands.list(null).catch(() => []));
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -81,6 +85,17 @@ export function WorkflowsView(_props: EditorProps) {
                     {d.imported ? " · imported" : ""} · {d.runnable ? "can be reviewed and run" : "cannot run yet"}
                   </p>
                 </div>
+                {triggers.some((t) => t.workflow === d.id && t.state.kind === "suspended") ? (
+                  <Badge tone="warning" icon={BellOff} title="A trigger of this workflow is suspended until you review its standing plan again">
+                    Trigger suspended
+                  </Badge>
+                ) : (
+                  triggers.some((t) => t.workflow === d.id && t.state.kind === "active") && (
+                    <Badge tone="info" icon={Bell} title="Runs start by themselves under an approved standing plan">
+                      Trigger on
+                    </Badge>
+                  )
+                )}
                 {d.origin.kind === "agent" && (
                   <Badge tone="accent" dashed title={`Proposed by agent task ${d.origin.taskId}; review it before running`}>
                     Agent proposal

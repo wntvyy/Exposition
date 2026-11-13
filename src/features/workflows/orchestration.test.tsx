@@ -62,6 +62,7 @@ const model = await import("./model");
 const orch = await import("./orchestration");
 const canvasModel = await import("./canvasModel");
 const { WorkflowEditor } = await import("./WorkflowEditor");
+const { WorkflowsView } = await import("./WorkflowsView");
 
 beforeAll(() => {
   globalThis.ResizeObserver ??= class {
@@ -497,5 +498,21 @@ describe("WorkflowEditor (M9)", () => {
     expect(screen.getByTestId("wfc-port-comp-in-obs").textContent).toContain("Observations");
     expect(screen.getByTestId("wfc-port-comp-out-fitted").textContent).toContain("Fitted values");
     act(() => localStorage.removeItem("exposition.workflows.view"));
+  });
+});
+
+describe("WorkflowsView (M9)", () => {
+  it("marks workflows whose trigger is on or suspended", async () => {
+    const summary = (id: string, title: string) => ({ id, revision: 1, title, preset: null, state: "wellFormed", runnable: true, errors: 0, warnings: 0, entity: null, origin: { kind: "user" }, imported: false, savedAtMs: 0 });
+    wfIpc.list.mockResolvedValue([summary("wf-a", "A"), summary("wf-b", "B"), summary("wf-c", "C")]);
+    wfIpc.presets.mockResolvedValue([]);
+    const trigger = (workflow: string, state: object) => ({ id: `t-${workflow}`, workflow, state });
+    triggerIpc.list.mockResolvedValue([trigger("wf-a", { kind: "active" }), trigger("wf-b", { kind: "suspended", code: "x", message: "y" }), trigger("wf-c", { kind: "disabled" })] as never);
+    render(<WorkflowsView resource={{ key: "workflows:", title: "Workflows" }} mode="source" active />);
+    await waitFor(() => expect(triggerIpc.list).toHaveBeenCalledWith(null));
+    const row = async (id: string) => (await screen.findByTestId("workflow-drafts")).querySelector(`[data-workflow="${id}"]`)!;
+    await waitFor(async () => expect((await row("wf-a")).textContent).toContain("Trigger on"));
+    expect((await row("wf-b")).textContent).toContain("Trigger suspended");
+    expect((await row("wf-c")).textContent).not.toMatch(/Trigger/);
   });
 });
