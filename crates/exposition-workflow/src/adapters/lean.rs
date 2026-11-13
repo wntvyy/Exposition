@@ -121,9 +121,12 @@ impl StepAdapter for LeanAuditAdapter {
         let WorkflowOutputValue::File { path, sha256, .. } = &source.value else {
             return Err(StepFailure::new("workflow.invalidInput", "the Lean input is not a file"));
         };
-        let record = auditor.audit(path, request.time_limit, control.canceled)?;
-        let operation = audit_operation(&record);
+        // The audit of exactly the approved text (persisted before Lean runs).
+        let operation = OperationRef { kind: "leanAudit".into(), id: format!("{path}@{}", bare_hash(sha256)) };
         (control.on_dispatched)(&operation);
+        let record = auditor
+            .audit(path, request.time_limit, control.canceled)
+            .map_err(|f| StepFailure { operation: Some(operation.clone()), ..f })?;
         if bare_hash(&record.content_hash) != bare_hash(sha256) {
             return Err(StepFailure {
                 operation: Some(operation),
