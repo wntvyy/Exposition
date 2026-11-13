@@ -19,8 +19,10 @@ view, command, IPC endpoint, event, setting, external connection, and stored fil
 ## Prerequisites
 
 - Node.js 22 or newer and npm
-- Rust (stable, 1.92+) with the platform's Tauri prerequisites
-  (<https://v2.tauri.app/start/prerequisites/>)
+- Rust through rustup with the platform's Tauri prerequisites
+  (<https://v2.tauri.app/start/prerequisites/>). `rust-toolchain.toml` pins the
+  toolchain that local checks and CI run on (1.96.0); rustup installs it on
+  first use. The crates build on Rust 1.92 or newer.
 - Optional toolchains, discovered at runtime: a TeX distribution (pdfLaTeX,
   LuaLaTeX, latexmk), Python with `jupyter_client`/`ipykernel`, R/IRkernel,
   Julia/IJulia, and Lean (via elan). Missing toolchains are reported in the app.

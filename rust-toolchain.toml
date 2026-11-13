@@ -1,0 +1,8 @@
+# The Rust toolchain every check runs on, locally and in CI. rustfmt output and
+# clippy lints change between releases, so a floating `stable` makes the format
+# and lint gates disagree between machines. Upgrade deliberately: change this
+# version, run `npm run check`, and commit the reformatting and lint fixes.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
