@@ -19,6 +19,7 @@ import type { WorkflowId } from "../../bindings/WorkflowId";
 import type { WorkflowPlanStep as WorkflowPlanStepBase } from "../../bindings/WorkflowPlanStep";
 import type { WorkflowRun as WorkflowRunBase } from "../../bindings/WorkflowRun";
 import type { WorkflowRunEvent as WorkflowRunEventBase } from "../../bindings/WorkflowRunEvent";
+import type { WorkflowRunCause } from "../../bindings/WorkflowRunCause";
 import type { WorkflowRunId } from "../../bindings/WorkflowRunId";
 import type { WorkflowRunOutcome as WorkflowRunOutcomeBase } from "../../bindings/WorkflowRunOutcome";
 import type { WorkflowRunPlan as WorkflowRunPlanBase } from "../../bindings/WorkflowRunPlan";
@@ -141,17 +142,14 @@ export type WorkflowRunStep = Omit<WorkflowRunStepBase, "state" | "attempts"> & 
 
 export type WorkflowRunOutcome = WorkflowRunOutcomeBase & { reason?: string | null };
 
-export type ChangedInput = { input: string; before: string | null; after: string | null; path?: string | null };
-export type WorkflowRunCause =
-  | { kind: "manual" }
-  | { kind: "trigger"; trigger: string; changed: ChangedInput[] }
-  | { kind: "reproduce"; of: WorkflowRunId };
+// Landed from lane B (main 33d7d53): generated bindings.
+export type { ChangedInput } from "../../bindings/ChangedInput";
+export type { WorkflowRunCause } from "../../bindings/WorkflowRunCause";
 
 export type WorkflowRun = Omit<WorkflowRunBase, "steps" | "outcomes" | "plan"> & {
   steps: WorkflowRunStep[];
   outcomes: WorkflowRunOutcome[];
   plan: WorkflowRunPlan;
-  cause?: WorkflowRunCause;
 };
 
 export type WorkflowRunSummary = WorkflowRunSummaryBase & { cause?: WorkflowRunCause };

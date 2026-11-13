@@ -97,7 +97,7 @@ export function WorkflowsView(_props: EditorProps) {
         <RunHistory workflow={null} title="Recent runs" />
         <section className="xp-wf__group" aria-label="Import">
           <h3 className="xp-wf__group-title">Import a definition</h3>
-          <p className="xp-wf__muted">Paste an exposition.workflow/1 definition. It is checked strictly, saved as a new draft with a new identity, never trusted, and never run.</p>
+          <p className="xp-wf__muted">Paste an exposition.workflow/1 or /2 definition. It is checked strictly, saved as a new draft with a new identity, never trusted, and never run.</p>
           <div className="ui-field">
             <label className="ui-field__label" htmlFor={id}>
               Definition (JSON)

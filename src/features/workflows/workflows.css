@@ -695,3 +695,262 @@
   border-top-style: dotted;
   border-top-color: var(--color-text-subtle);
 }
+
+/* ---------- M9: composites, conditions, repeats, parallel runs, environment, triggers ---------- */
+
+.xp-wf-orch {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: var(--border-width) solid var(--color-border-subtle);
+}
+
+.xp-wf__fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.xp-wf-values {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--space-2) var(--space-3);
+}
+
+.xp-wf-values__item {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-1);
+}
+
+.xp-wf-values__item > .ui-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.xp-wf-children {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  font-size: var(--font-size-sm);
+}
+
+/* Plan review: expanded composite steps under their composite. */
+.xp-wf-plan__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  border: var(--border-width) dashed var(--color-graph-workflow-border);
+  border-left-width: 4px;
+  border-left-style: solid;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-sunken);
+}
+
+.xp-wf-plan__group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  color: var(--color-graph-workflow-text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* Run view */
+.xp-wf-cause {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.xp-wf-cause .xp-wf__muted {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+}
+
+.xp-wf-cause__changes {
+  flex-basis: 100%;
+  margin: 0;
+  padding-left: var(--space-5);
+  font-size: var(--font-size-sm);
+}
+
+.xp-wf-running {
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.xp-wf-running li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: var(--border-width) solid var(--color-status-running-border);
+  border-radius: var(--radius-md);
+  background: var(--color-status-running-bg);
+  color: var(--color-status-running-text);
+}
+
+.xp-wf-reason {
+  margin: 0;
+  padding: var(--space-1-5) var(--space-2);
+  border: var(--border-width) dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.xp-wf-reason--condition {
+  border-color: var(--color-info-border);
+  background: var(--color-info-bg);
+  color: var(--color-info-text);
+}
+
+.xp-wf-instances__list {
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.xp-wf-instance {
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.xp-wf-instance[data-state="running"] {
+  border-color: var(--color-status-running-border);
+}
+
+.xp-wf-instance .xp-wf__row {
+  margin-top: 0;
+  align-items: center;
+}
+
+.xp-wf-env {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.xp-wf-env__row {
+  display: contents;
+}
+
+.xp-wf-env__packages {
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--space-0-5) var(--space-3);
+  max-height: 240px;
+  overflow-y: auto;
+  font-size: var(--font-size-sm);
+}
+
+/* Triggers */
+.xp-wf-standing {
+  margin: var(--space-2) 0;
+  padding: var(--space-3);
+  border: var(--border-width) solid var(--color-warning-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-warning-bg);
+}
+
+.xp-wf-standing ul {
+  margin: var(--space-1) 0;
+  padding-left: var(--space-5);
+}
+
+.xp-wf-history {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+
+.xp-wf-history li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* Canvas: composite info, condition edges */
+.xp-wfc-composite {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: 0 var(--space-3) var(--space-1);
+}
+
+.xp-wfc-composite__line {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.xp-wfc-composite__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  align-self: flex-start;
+  height: var(--control-height-sm);
+  padding: 0 var(--space-1-5);
+  border: var(--border-width) solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.xp-wfc-composite__toggle:hover {
+  background: var(--color-surface-hover);
+}
+
+.xp-wfc-composite__toggle:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+.xp-wfc-composite__children {
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.xp-graph-canvas .xp-wfc-edge--condition .react-flow__edge-path {
+  stroke: var(--color-info-text);
+  stroke-dasharray: 8 3 2 3;
+}
+
+.xp-wfc__swatch[data-kind="condition"] {
+  height: 2px;
+  border-top: 0;
+  background: repeating-linear-gradient(90deg, var(--color-info-text) 0 8px, transparent 8px 11px, var(--color-info-text) 11px 13px, transparent 13px 16px);
+}
