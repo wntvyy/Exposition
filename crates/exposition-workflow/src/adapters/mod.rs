@@ -103,6 +103,9 @@ pub struct StepResult {
     pub log: Option<String>,
     /// Model requests the step made (counted against the run's budget).
     pub model_requests: u32,
+    /// Bytes of accepted files that realize no port (still counted against
+    /// the run's output budget).
+    pub extra_output_bytes: u64,
 }
 
 /// A failed attempt.

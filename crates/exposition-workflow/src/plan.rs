@@ -121,10 +121,18 @@ pub fn project_name(root: &Path) -> String {
     root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string())
 }
 
-/// The canonical identity of a project (case-insensitive on Windows).
+/// The canonical identity of a project (case-insensitive on Windows, with
+/// or without the verbatim `\\?\` prefix).
 pub fn project_key(root: &Path) -> String {
     let s = root.to_string_lossy().into_owned();
-    if cfg!(windows) { s.to_lowercase() } else { s }
+    if !cfg!(windows) {
+        return s;
+    }
+    let s = match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => rest.to_owned(),
+        _ => s,
+    };
+    s.to_lowercase()
 }
 
 fn time_limit(step: &exposition_graph::workflow::WorkflowStep, contract: &OperationContract) -> u32 {
@@ -165,7 +173,18 @@ struct Approved<'a> {
     steps: Vec<ApprovedStep<'a>>,
     ceiling: &'a AuthorityCeiling,
     budgets: &'a WorkflowRunBudgets,
-    execution: &'a WorkflowPlanExecution,
+    execution: ApprovedExecution<'a>,
+}
+
+/// The execution binding; folder trust binds only plans with native steps.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApprovedExecution<'a> {
+    restricted_backend: &'a Option<String>,
+    restricted_image: &'a Option<String>,
+    trusted_folder: Option<bool>,
+    native_steps: &'a [String],
+    model_steps: &'a [String],
 }
 
 /// SHA-256 over a canonical serialization of everything the user approves.
@@ -199,7 +218,13 @@ pub fn approval_hash(plan: &WorkflowRunPlan, root: &Path) -> String {
             .collect(),
         ceiling: &plan.ceiling,
         budgets: &plan.budgets,
-        execution: &plan.execution,
+        execution: ApprovedExecution {
+            restricted_backend: &plan.execution.restricted_backend,
+            restricted_image: &plan.execution.restricted_image,
+            trusted_folder: (!plan.execution.native_steps.is_empty()).then_some(plan.execution.trusted_folder),
+            native_steps: &plan.execution.native_steps,
+            model_steps: &plan.execution.model_steps,
+        },
     };
     crate::adapters::sha256_hex(&serde_json::to_vec(&approved).unwrap_or_default())
 }
@@ -263,7 +288,7 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
                         "workflow.inputChanged",
                         format!(
                             "{path} is not the version the workflow pins (pinned sha256 {}, now {})",
-                            &pin[..pin.len().min(12)],
+                            pin.chars().take(12).collect::<String>(),
                             &sha256[..12]
                         ),
                         None,

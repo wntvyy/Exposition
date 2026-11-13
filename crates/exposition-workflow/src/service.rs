@@ -76,6 +76,9 @@ pub(crate) struct Inner {
     store: Mutex<RunStore>,
     plans: Mutex<HashMap<WorkflowPlanId, CachedPlan>>,
     active: Mutex<HashMap<WorkflowRunId, ActiveRun>>,
+    /// Serializes read-modify-write of finished runs (acknowledge, decide,
+    /// cancel of an orphaned record).
+    edits: Mutex<()>,
     events: broadcast::Sender<WorkflowRunEvent>,
 }
 
@@ -96,6 +99,23 @@ impl Inner {
 
     pub(crate) fn finished(&self, run: &WorkflowRunId) {
         self.active.lock().unwrap_or_else(|p| p.into_inner()).remove(run);
+    }
+
+    /// The runner thread stopped without finishing the run: record it as
+    /// failed (in-flight attempts interrupted; nothing repeated) and release it.
+    pub(crate) fn abandoned(&self, key: &str, id: &WorkflowRunId) {
+        let found = self.store.lock().unwrap_or_else(|p| p.into_inner()).get(id);
+        if let Ok(Some((_, mut run))) = found
+            && run.state == WorkflowRunState::Running
+        {
+            store::interrupt(&mut run, crate::now_ms());
+            run.state = WorkflowRunState::Failed;
+            run.code = Some("workflow.internal".into());
+            run.message =
+                Some("The workflow runner stopped unexpectedly. Nothing was repeated; start a new run.".into());
+            let _ = self.persist(key, &run, None);
+        }
+        self.finished(id);
     }
 }
 
@@ -155,6 +175,7 @@ impl WorkflowRunService {
                 store: Mutex::new(store),
                 plans: Mutex::new(HashMap::new()),
                 active: Mutex::new(HashMap::new()),
+                edits: Mutex::new(()),
                 events,
             }),
         })
@@ -333,8 +354,17 @@ impl WorkflowRunService {
         };
         let inner = Arc::clone(&self.inner);
         let first = run.clone();
+        let failure_key = key.clone();
         let spawned = std::thread::Builder::new().name("workflow-run".into()).spawn(move || {
-            runner::execute(inner, run, root, key, token);
+            let guard = Arc::clone(&inner);
+            let guard_key = key.clone();
+            let id = run.id.clone();
+            let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                runner::execute(inner, run, root, key, token);
+            }));
+            if finished.is_err() {
+                guard.abandoned(&guard_key, &id);
+            }
         });
         if let Err(e) = spawned {
             self.inner.finished(&first.id);
@@ -346,7 +376,7 @@ impl WorkflowRunService {
             for step in &mut failed.steps {
                 step.state = WorkflowStepState::Skipped;
             }
-            let _ = self.inner.persist(&project_key(&self.root()?), &failed, None);
+            let _ = self.inner.persist(&failure_key, &failed, None);
             return Ok(failed);
         }
         Ok(first)
@@ -431,9 +461,15 @@ impl WorkflowRunService {
             }
             None if run.state == WorkflowRunState::Running => {
                 // No runner holds it (should not happen after reconciliation).
-                let mut run = run;
-                store::interrupt(&mut run, crate::now_ms());
-                self.inner.persist(&key, &run, None)?;
+                // Re-read under the edit lock: the runner may have just finished.
+                let _edit = self.inner.edits.lock().unwrap_or_else(|p| p.into_inner());
+                let (_, mut run) = self.load(id)?;
+                if run.state == WorkflowRunState::Running
+                    && !self.inner.active.lock().unwrap_or_else(|p| p.into_inner()).contains_key(id)
+                {
+                    store::interrupt(&mut run, crate::now_ms());
+                    self.inner.persist(&key, &run, None)?;
+                }
                 Ok(run)
             }
             None => Ok(run),
@@ -470,6 +506,7 @@ impl WorkflowRunService {
 
     /// Mark an interrupted run as reviewed. Nothing is resumed or repeated.
     pub fn acknowledge(&self, id: &WorkflowRunId) -> Result<WorkflowRun, WorkflowRunError> {
+        let _edit = self.inner.edits.lock().unwrap_or_else(|p| p.into_inner());
         let (key, mut run) = self.load(id)?;
         if run.state != WorkflowRunState::Interrupted {
             return Err(WorkflowRunError::new(
@@ -489,6 +526,7 @@ impl WorkflowRunService {
         if decision.accept.len() > crate::adapters::associate::MAX_PROPOSED {
             return Err(WorkflowRunError::new("workflow.tooLarge", "Too many declarations."));
         }
+        let _edit = self.inner.edits.lock().unwrap_or_else(|p| p.into_inner());
         let (key, mut run) = self.load(&decision.run)?;
         if self.inner.active.lock().unwrap_or_else(|p| p.into_inner()).contains_key(&decision.run) {
             return Err(WorkflowRunError::new("workflow.runActive", "Wait for the run to finish first."));

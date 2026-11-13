@@ -169,7 +169,8 @@ impl StepAdapter for BatchAdapter {
                 &operation,
             ));
         }
-        Ok(StepResult { operation: Some(operation), outputs, rejected, log, model_requests: 0 })
+        let extra_output_bytes = result.extra.iter().map(|a| a.size_bytes).sum();
+        Ok(StepResult { operation: Some(operation), outputs, rejected, log, model_requests: 0, extra_output_bytes })
     }
 }
 

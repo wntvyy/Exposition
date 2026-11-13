@@ -106,22 +106,24 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
             break;
         };
         let elapsed = started.elapsed().as_secs() as u32;
-        let (budget_problem, remaining) = {
+        let (budget_problem, remaining, remaining_bytes, approved_restricted) = {
             let run = cell.lock().unwrap_or_else(|p| p.into_inner());
             let b = &run.budgets;
             let u = &run.usage;
+            let remaining_bytes = b.max_output_bytes.saturating_sub(u.output_bytes);
             let problem = if u.steps >= b.max_steps {
                 Some(format!("the run may dispatch at most {} steps", b.max_steps))
             } else if elapsed >= b.max_total_seconds {
                 Some(format!("the run's time budget of {} s is used up", b.max_total_seconds))
-            } else if u.output_bytes > b.max_output_bytes {
+            } else if planned.max_output_bytes > 0 && remaining_bytes == 0 {
                 Some(format!("the run's output budget of {} bytes is used up", b.max_output_bytes))
             } else if planned.containment == Containment::ReadOnlyModel && u.model_requests >= b.max_model_requests {
                 Some(format!("the run's budget of {} model requests is used up", b.max_model_requests))
             } else {
                 None
             };
-            (problem, b.max_total_seconds.saturating_sub(elapsed))
+            let approved = (run.plan.execution.restricted_backend.clone(), run.plan.execution.restricted_image.clone());
+            (problem, b.max_total_seconds.saturating_sub(elapsed), remaining_bytes, approved)
         };
         if let Some(problem) = budget_problem {
             stop = Some(refuse(
@@ -181,6 +183,22 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
             ));
             break;
         };
+        if planned.containment == Containment::RestrictedContainer && inner.host.restricted() != approved_restricted {
+            let now = inner.host.restricted().1;
+            stop = Some(refuse(
+                &cell,
+                planned,
+                "workflow.restrictedUnavailable",
+                format!(
+                    "Not started: the restricted image changed since you approved the plan ({} → {}); restricted steps run only in the approved image.",
+                    approved_restricted.1.as_deref().unwrap_or("none"),
+                    now.as_deref().unwrap_or("none")
+                ),
+                &inner,
+                &key,
+            ));
+            break;
+        }
         if let Err(reason) = adapter.availability(&root) {
             let code = if planned.containment == Containment::RestrictedContainer {
                 "workflow.restrictedUnavailable"
@@ -261,10 +279,17 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
             attempt: attempt_no,
             inputs: &inputs,
             time_limit: Duration::from_secs(u64::from(planned.time_limit_seconds.min(remaining).max(1))),
-            max_output_bytes: planned.max_output_bytes,
+            max_output_bytes: planned.max_output_bytes.min(remaining_bytes),
             model_requests_remaining,
         };
-        let result = adapter.run(&request, &control);
+        // A panicking service must not leave the run active forever.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| adapter.run(&request, &control)))
+            .unwrap_or_else(|_| {
+                Err(StepFailure::new(
+                    "workflow.internal",
+                    "The step's service stopped unexpectedly; nothing was repeated.",
+                ))
+            });
         let reported = reported.lock().unwrap_or_else(|p| p.into_inner()).clone();
 
         // ----- outcome -----
@@ -299,6 +324,7 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
                         attempt.outputs = valid.clone();
                         run.steps[i].state = WorkflowStepState::Succeeded;
                         run.usage.model_requests += result.model_requests;
+                        run.usage.output_bytes += result.extra_output_bytes;
                         for output in valid {
                             if let WorkflowOutputValue::File { bytes, .. } = &output.value {
                                 run.usage.output_bytes += bytes;
@@ -513,7 +539,17 @@ fn validate_outputs(
     let mut valid: Vec<WorkflowStepOutput> = Vec::new();
     let mut rejected = Vec::new();
     let mut first: Option<(&'static str, String)> = None;
-    let operation = result.operation.as_ref().or(reported);
+    // Provenance is checked against the operation persisted at dispatch.
+    if let (Some(dispatched), Some(claimed)) = (reported, result.operation.as_ref())
+        && dispatched != claimed
+    {
+        let reason = format!(
+            "the service reported {} {} at dispatch but returned {} {}",
+            dispatched.kind, dispatched.id, claimed.kind, claimed.id
+        );
+        return Err(("workflow.invalidOutput", reason, Vec::new()));
+    }
+    let operation = reported.or(result.operation.as_ref());
     for output in &result.outputs {
         let problem = check_output(root, run, planned, contract, attempt, operation, output);
         match problem {

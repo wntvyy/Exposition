@@ -1267,6 +1267,127 @@ fn an_unreadable_history_is_set_aside_and_the_service_starts() {
     assert_eq!(service.get(&run.id).unwrap().state, WorkflowRunState::Succeeded);
 }
 
+struct Panicking;
+
+impl StepAdapter for Panicking {
+    fn availability(&self, _root: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn run(&self, _request: &StepRequest<'_>, control: &StepControl<'_>) -> Result<StepResult, StepFailure> {
+        (control.on_dispatched)(&OperationRef { kind: "researchRun".into(), id: "run-panic".into() });
+        panic!("service bug");
+    }
+}
+
+/// Reports one research run at dispatch and claims another in its result.
+struct Switching;
+
+impl StepAdapter for Switching {
+    fn availability(&self, _root: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn run(&self, request: &StepRequest<'_>, control: &StepControl<'_>) -> Result<StepResult, StepFailure> {
+        (control.on_dispatched)(&OperationRef { kind: "researchRun".into(), id: "run-a".into() });
+        let b = OperationRef { kind: "researchRun".into(), id: "run-b".into() };
+        let port = artifact(request.root, "run-b", "figure", "figure.svg", b"<svg/>", ArtifactKind::Figure);
+        let value = WorkflowOutputValue::File {
+            path: port.artifact.path.clone().unwrap(),
+            sha256: sha256_hex(b"<svg/>"),
+            bytes: 6,
+            media_type: "image/svg+xml".into(),
+            research_run: Some("run-b".into()),
+            artifact: Some("a-figure".into()),
+        };
+        Ok(StepResult {
+            operation: Some(b.clone()),
+            outputs: vec![request.output("figure", PortType::Figure, value, &b)],
+            ..Default::default()
+        })
+    }
+}
+
+fn service_with(f: &Fixture, runner: &str, adapter: Arc<dyn StepAdapter>) -> WorkflowRunService {
+    let mut a = adapters(&f.batch, &f.lean, &f.research);
+    a.insert(runner.into(), adapter);
+    let h: Arc<dyn WorkflowHost> = f.host.clone();
+    WorkflowRunService::new(WorkflowRunConfig { database: None, host: h, adapters: a, lean: None, research: None })
+        .unwrap()
+}
+
+#[test]
+fn a_panicking_step_fails_the_run_and_releases_the_slot() {
+    let f = fixture();
+    let service = service_with(&f, runner_ids::RESTRICTED_PYTHON, Arc::new(Panicking));
+    let id = f.save(numerical(false));
+    let plan = service.plan(&id, None).unwrap();
+    let run = service.start(&StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash }).unwrap();
+    assert!(service.wait_idle(Duration::from_secs(10)), "the slot is released");
+    let run = service.get(&run.id).unwrap();
+    assert_eq!(run.state, WorkflowRunState::Failed);
+    assert_eq!(run.code.as_deref(), Some("workflow.internal"), "{:?}", run.message);
+    assert_eq!(last_attempt(&run, "run").operation.as_ref().unwrap().id, "run-panic");
+    assert!(service.plan(&id, None).unwrap().blockers.is_empty(), "no lingering active run");
+}
+
+#[test]
+fn provenance_is_checked_against_the_dispatched_operation() {
+    let f = fixture();
+    let service = service_with(&f, runner_ids::RESTRICTED_PYTHON, Arc::new(Switching));
+    let id = f.save(numerical(false));
+    let plan = service.plan(&id, None).unwrap();
+    let run = service.start(&StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash }).unwrap();
+    assert!(service.wait_idle(Duration::from_secs(10)));
+    let run = service.get(&run.id).unwrap();
+    assert_eq!(run.code.as_deref(), Some("workflow.invalidOutput"), "{:?}", run.message);
+    assert_eq!(last_attempt(&run, "run").operation.as_ref().unwrap().id, "run-a");
+    assert!(last_attempt(&run, "run").outputs.is_empty());
+}
+
+#[test]
+fn a_changed_restricted_image_refuses_later_restricted_steps() {
+    let f = fixture();
+    let id = f.save(chain());
+    let host = f.host.clone();
+    f.set_behavior(Arc::new(move |r, req, _c, run| {
+        if req.owner.step == "a" {
+            *host.image.lock().unwrap() = Some("someone/else:latest".into());
+        }
+        Ok(succeeded(run, vec![artifact(r, run, "dataset", "dataset.csv", b"x\n", ArtifactKind::Data)]))
+    }));
+    let run = f.run_to_end(&id);
+    assert_eq!(run.code.as_deref(), Some("workflow.restrictedUnavailable"), "{:?}", run.message);
+    assert!(run.message.as_deref().unwrap().contains("someone/else:latest"));
+    assert_eq!(f.calls.log(), vec!["batch:a".to_owned()]);
+}
+
+#[test]
+fn hostile_pins_and_trust_changes_in_plans() {
+    let f = fixture();
+    let mut def = numerical(false);
+    def.inputs[0].source = InputSource::Resource {
+        path: path("data/obs.csv"),
+        version: InputVersion::Pinned { content_hash: "é".repeat(20) },
+    };
+    let plan = f.service.plan(&f.save(def), None).unwrap();
+    assert!(plan.blockers.iter().any(|b| b.code == "workflow.notWellFormed"));
+    assert!(plan.blockers.iter().any(|b| b.code == "workflow.inputChanged"));
+    // Folder trust binds only plans with native steps.
+    let id = f.save(numerical(false));
+    let plan = f.service.plan(&id, None).unwrap();
+    f.host.trusted.store(false, Ordering::SeqCst);
+    let run = f.service.start(&StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash });
+    assert!(run.is_ok(), "{run:?}");
+    assert!(f.service.wait_idle(Duration::from_secs(10)));
+}
+
+#[cfg(windows)]
+#[test]
+fn project_keys_ignore_case_and_the_verbatim_prefix() {
+    use crate::plan::project_key;
+    assert_eq!(project_key(Path::new(r"\\?\C:\Users\X\Proj")), project_key(Path::new(r"c:\users\x\proj")));
+    assert_ne!(project_key(Path::new(r"\\?\UNC\server\share")), project_key(Path::new(r"\server\share")));
+}
+
 #[test]
 fn the_plan_hash_covers_payloads() {
     let f = fixture();

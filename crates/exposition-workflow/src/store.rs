@@ -55,6 +55,7 @@ impl RunStore {
             }
             None => Connection::open_in_memory().map_err(store_error)?,
         };
+        conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(store_error)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = FULL;
@@ -71,7 +72,6 @@ impl RunStore {
              CREATE INDEX IF NOT EXISTS runs_by_project ON runs(project, started_at DESC);",
         )
         .map_err(store_error)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(store_error)?;
         Ok(Self { conn })
     }
 
@@ -125,18 +125,20 @@ impl RunStore {
         let mut stmt = self
             .conn
             .prepare_cached(
-                "SELECT id, state, body FROM runs WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2)
+                "SELECT CAST(id AS TEXT), CAST(state AS TEXT), CAST(body AS TEXT) FROM runs
+                 WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2)
                  ORDER BY started_at DESC, id LIMIT ?3",
             )
             .map_err(store_error)?;
         let rows = stmt
             .query_map(params![project, workflow.map(|w| w.as_str()), limit.min(MAX_LIST) as i64], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
             })
             .map_err(store_error)?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, state, body) = row.map_err(store_error)?;
+            // A malformed row is skipped, never fatal.
+            let Ok((Some(id), Some(state), Some(body))) = row else { continue };
             if let Ok(run) = decode(&id, &state, &body) {
                 out.push(summary(&run));
             }
@@ -148,21 +150,29 @@ impl RunStore {
     /// in-flight attempts interrupted, and its pending steps skipped. Nothing
     /// is re-dispatched. Returns the number of runs interrupted.
     pub fn reconcile(&self, now_ms: u64) -> Result<u32, WorkflowRunError> {
-        let rows: Vec<(String, String, String, String)> = {
+        type Row = (String, Option<String>, String, Option<String>);
+        let rows: Vec<Row> = {
             let mut stmt = self
                 .conn
-                .prepare("SELECT id, project, state, body FROM runs WHERE state = 'running' LIMIT 10000")
+                .prepare(
+                    "SELECT CAST(id AS TEXT), CAST(project AS TEXT), 'running', CAST(body AS TEXT) FROM runs
+                     WHERE state = 'running' AND id IS NOT NULL LIMIT 10000",
+                )
                 .map_err(store_error)?;
             let mapped =
                 stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(store_error)?;
-            mapped.collect::<Result<_, _>>().map_err(store_error)?
+            mapped.filter_map(Result::ok).collect()
         };
         let mut count = 0;
         for (id, project, state, body) in rows {
-            match decode(&id, &state, &body) {
+            let decoded = match (&project, &body) {
+                (Some(_), Some(body)) => decode(&id, &state, body),
+                _ => Err("malformed run row".to_owned()),
+            };
+            match decoded {
                 Ok(mut run) => {
                     interrupt(&mut run, now_ms);
-                    self.put(&project, &run)?;
+                    self.put(project.as_deref().unwrap_or_default(), &run)?;
                 }
                 Err(_) => {
                     // Unreadable: never resumed; the row stays out of listings.
