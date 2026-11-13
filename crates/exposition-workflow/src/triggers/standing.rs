@@ -222,6 +222,14 @@ pub fn suspends_on(plan: &WorkflowRunPlan, watched: &[String]) -> Vec<String> {
             plan.execution.restricted_image_id.as_deref().map(short).unwrap_or_else(|| "unknown".into())
         ));
     }
+    // R and Julia steps run in their own images, bound the same way.
+    for bound in plan.execution.runner_images.iter().flatten() {
+        list.push(format!(
+            "The restricted image {} becoming a different image (approved: {}).",
+            bound.image,
+            bound.image_id.as_deref().map(short).unwrap_or_else(|| "unknown".into())
+        ));
+    }
     if !plan.execution.native_steps.is_empty() {
         list.push(
             "The project folder's trust (native steps need a trusted folder); revoking trust suspends the trigger."

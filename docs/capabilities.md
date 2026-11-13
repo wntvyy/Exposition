@@ -249,10 +249,12 @@ files and applies the rest) or Keep as Is. An interrupted creation is never
 replayed automatically or reported complete.
 
 Workflow drafts describe a computation as typed steps: inputs, steps from
-seven registered operations (Python batch run, native Python, Lean audit,
+eight registered operations (Python batch run, native Python, Lean audit,
 evidence association, agent review, keeping a result, requesting a
-promotion), connections, outcomes, and a ceiling on what the workflow may
-run. Two presets exist, Numerical experiment (Python; without a script it
+promotion, running another saved workflow), connections, outcomes, and a
+ceiling on what the workflow may run.
+**TODO(lane F):** add the R and Julia batch operations (restricted and
+trusted native) to this list and its count. Two presets exist, Numerical experiment (Python; without a script it
 starts with an editable inline code template) and Formal audit (Lean).
 Drafts are edited in a form or on a canvas, validated by the application
 against a strict contract (typed connections, no cycles, every step
@@ -265,50 +267,137 @@ a trusted folder, a restricted step a configured container image that is
 present locally, an agent review step a configured model provider); a
 stored or imported claim of runnability is ignored.
 
+### Parallel steps, composite workflows, conditions, and repeats
+
+These belong to workflow schema `exposition.workflow/2`; the editor
+switches a draft to it when one of them is used. A draft that uses none of
+them stays `exposition.workflow/1`, byte for byte, so its content hash does
+not change, and a `/1` definition that names one is refused.
+
+- **Parallel steps.** "Steps that may run at the same time" is 1 to 4
+  (default 1: one step at a time, as before). Only steps with no data,
+  prerequisite, or condition path between them run together, and
+  application-wide limits apply on top (see Workflow runs).
+- **Composite steps** ("Run a saved workflow"). A step can run another
+  saved workflow of the project at a pinned revision. Its inputs are the
+  child's inputs and its outputs the child's outcomes; its containment is
+  the least contained of the child's steps and its effects are theirs.
+  Editing the child makes a new revision and never moves the pin: the
+  parent offers **Use latest revision (N)**, an ordinary edit of the parent
+  that you review and save. Validation refuses a workflow that includes
+  itself (directly or through another composite), nesting deeper than 3
+  levels, more than 100 steps once composites are expanded, a child
+  revision that does not exist or is not well formed, and a child whose
+  ceiling allows more than the parent's. A composite step cannot carry a
+  condition, a repeat, parameters, or code. The plan review shows every
+  step of the child in full (code and prompts) under the composite's name,
+  and each child step runs through its own runner.
+- **Conditions.** A step can run only when a fixed predicate on an earlier
+  step's validated output holds; there is no expression language. The
+  predicates: the Lean audit's verdict is one of a chosen set (Checked,
+  Checked with nonstandard axioms, Incomplete, Relies on compiled code,
+  Partially checked, Unverified, Errors; an overall verdict such as
+  "Errors (2)" counts as its class); a value at a JSON pointer (RFC 6901)
+  in a JSON dataset of at most 1 MiB compared with a number (=, ≠, <, ≤, >,
+  ≥) or with text or true/false (equal or not equal); or an optional output
+  was produced. Each can be negated. The step waits for the step whose
+  output its condition reads. When the predicate does not hold the step
+  reads **Condition not met** with what was observed, and the steps that
+  need its outputs are **Skipped**, each with its reason; the run can still
+  succeed, and the outcomes they would have produced read Not produced with
+  the reason. A source that cannot be read (not JSON, larger than 1 MiB, no
+  value at the pointer, a value of another type, a file changed after it
+  was validated) fails the step: it is never taken as "false". A condition
+  cannot read a step that runs once per value.
+- **Repeats.** *For each*: the step runs once for each of 1 to 20 values of
+  one of its operation's declared parameters (instances may run at the
+  same time when the workflow allows parallel steps); its outputs are
+  collected in value order and can feed only an input that accepts several
+  sources, never an outcome directly. *Until*: the step runs again, one
+  iteration after another, at most 1 to 10 times, until a predicate (as
+  above) on one of its own outputs holds; if it never does, the step fails
+  or uses the last iteration's outputs, as the definition says. Every
+  instance is recorded and counts as one step against the run's step
+  budget. A composite step runs once.
+  **TODO(lane F):** the Python batch's only parameter is its time limit and
+  every instance of a batch gets the same `EXPOSITION_SEED`, so batch code
+  cannot yet tell its instances apart; document `EXPOSITION_ITERATION`,
+  `EXPOSITION_PARAM_*`, the batch parameter, and per-instance seeds once
+  lane F merges.
+
+Agents' workflow proposals stay `exposition.workflow/1`: an agent cannot
+propose parallel steps, composites, conditions, or repeats, and a new
+revision an agent proposes for a `/2` workflow is a `/1` definition without
+them (its approval shows the complete definition).
+
 ### Workflow runs
 
-A run starts only from **Review and run…** in the workflow editor, for a
-saved, well-formed revision (never from unsaved edits). The review shows
+A run starts only from **Review and run…** in the workflow editor (or
+**Reproduce…** in a run, reviewed the same way), for a saved, well-formed
+revision (never from unsaved edits), or from a trigger under a standing
+plan you approved (see Triggers). The review shows
 the complete plan: every input file with the SHA-256 of the content the run
 will read and whether that version is pinned, every step in the order it
 will run with its complete code (inline, or the full text of the script
 file it runs) or model instructions, parameters, runner, containment,
 effects, and limits, the run's budgets, the restricted image (by name and
-by its exact image identity) and folder trust it relies on, notices (native privileges, material sent to
-the model provider, proposals you review later), and anything that blocks
-it. **Start run** approves exactly that plan. If anything in it changed
-before the run starts (the workflow was saved again, an input file changed,
-folder trust or the restricted image changed, including the same image name
-now naming a different image after a re-tag or pull, a runner became
-available or unavailable, or another project is open), the start is
-refused and you review the new plan. A plan must be started within 30 minutes.
+by its exact image identity) and folder trust it relies on, how many steps
+may run at the same time and the application-wide limits, each composite's
+steps grouped under it, each condition and repeat in plain words, notices
+(native privileges, material sent to the model provider, proposals you
+review later), and anything that blocks it. **Start run** approves exactly
+that plan. If anything in it changed before the run starts (the workflow
+was saved again, an input file changed, folder trust or the restricted
+image changed, including the same image name now naming a different image
+after a re-tag or pull, a runner became available or unavailable, or
+another project is open), the start is refused and you review the new
+plan. A plan must be started within 30 minutes.
 
-Steps run one at a time in dependency order; there are no loops,
-conditions, retries, or parallel steps, and only one workflow run is active
-at a time. Before each step Exposition checks again that the project is
-still open, the run was not canceled, its budgets remain, every input file
-and earlier output the step reads still has the digest recorded for it, a
-native step's folder is still trusted, and the step's runner is still
-available with the approved image identity, and the container is started
-from that identity; a restricted step never falls back to native
-execution. A failed step stops the run and the remaining steps are
-skipped. Every output a step returns is checked before a later step can use
-it: its declared type, its recomputed SHA-256, that it came from this
-step's own service operation, and that formal evidence and retained results
-come only from the Lean audit and the retention service (a file that merely
-looks like evidence stays a file). **Cancel run** stops the current step;
-closing or switching the project cancels its run, and revoking trust
-cancels a run that has native steps.
+Steps run in dependency order. With the default of one step at a time,
+each step waits for the previous one. A workflow that allows more (up to
+4) starts a step as soon as every step it reads from, runs after, or whose output its
+condition reads has finished, within application-wide limits shared by
+every run: at most 3 active runs (one per workflow), 4 steps in flight, of
+which at most 2 in the restricted container, 2 native (a Lean audit counts
+here too), 2 agent reviews, and 1 Lean audit; steps that only use
+Exposition's own services fall under the 4 alone. A step that finds a
+limit reached waits; it is never refused for it. There are no retries.
+Before each step Exposition checks again that the project is still open,
+the run was not canceled, its budgets remain, every input file and earlier
+output the step reads still has the digest recorded for it, a native
+step's folder is still trusted, and the step's runner is still available
+with the approved image identity, and the container is started from that
+identity; a restricted step never falls back to native execution. A
+failed step stops the run: nothing new starts, steps already running finish
+and are recorded, and the remaining steps are skipped. Every output a step
+returns is checked before a later step can use it: its declared type, its
+recomputed SHA-256, that it came from this step's own service operation,
+and that formal evidence and retained results come only from the Lean
+audit and the retention service (a file that merely looks like evidence
+stays a file). **Cancel run** stops every running step through its service
+(a batch's container is removed, a review's task canceled) and skips the
+rest; closing or switching the project cancels its active runs, and
+revoking trust cancels every active run of that folder that has a native
+step, including its restricted steps.
 
 The run's budgets come from the plan: at most as many step dispatches as the
-workflow has steps, the sum of the steps' time limits (at most 4 hours),
-the sum of their output limits (at most 1 GiB), and 25 model requests per
-agent review step; requests a review made count even when it fails or is
-canceled. Each step's attempt is recorded before its service is called. If Exposition stops during a run, the next start marks the run
-**Interrupted** (a step that was running has an unknown outcome) and never
-resumes or repeats it; you mark it as reviewed and start a new run if
-needed. Run records are kept in the application data folder on this
-computer, not in the project.
+workflow has steps after composites are expanded (each for-each value and
+each until iteration counts as one), the sum of the steps' time limits (at
+most 4 hours), the sum of their output limits (at most 1 GiB), and 25 model
+requests per agent review step; requests a review made count even when it
+fails or is canceled. Before a step starts, its output limit and, for a
+review, its 25 model requests are reserved from what the run has left, so
+steps running together cannot jointly exceed the budgets; a step whose
+reservation does not fit waits until running steps release theirs. The
+time budget is wall-clock time since the run started (waiting included),
+and each step's time limit is capped by what remains. Each attempt is
+recorded before its service is called. If Exposition stops during a run,
+the next start marks the run **Interrupted** (every step or instance that
+was running has an unknown outcome) and never resumes or repeats anything;
+you mark it as reviewed and start a new run if needed. Run records are kept
+in the application data folder on this computer, not in the project. Each
+run records why it started: by you from a reviewed plan, by a trigger
+(with the inputs that changed), or as a reproduction of an earlier run.
 
 | Step | Where it runs | What it produces |
 |---|---|---|
@@ -316,9 +405,14 @@ computer, not in the project.
 | Trusted native Python | A new Python process with your account's privileges, in a trusted folder; not a sandbox | Same as the restricted batch |
 | Lean audit | The Lean service with the project's toolchain, natively, in a trusted folder | The audit's own per-declaration verdicts, statements, and axioms for exactly the audited text |
 | Associate audited declarations | Exposition | A proposal you accept or reject per declaration; only accepted declarations get Lean evidence recorded |
-| Read-only agent review | A read-only agent task with commands off, scoped to the declared material, which it sends to the model provider; a tool that would write or run is refused and the review continues | A review report (prose, never evidence) |
+| Read-only agent review | A read-only agent task with commands off, scoped to the declared material, which it sends to the model provider; a tool that would write or run is refused and the review continues; up to 2 reviews run at once, each its own task, sharing the run's model-request budget | A review report (prose, never evidence); a later step can take several reports |
 | Retain artifact | Research | A kept result with computational evidence naming the mode it actually ran in |
 | Request reviewed promotion | Research | A prepared insertion at the end of the manuscript that you review and approve in the run view |
+| Run a saved workflow (composite) | Each of the child's steps through its own runner, as listed here | The child's outcomes, as this step's outputs |
+
+**TODO(lane F):** rows for the R and Julia batch steps (restricted in a
+configured per-language local image, refused when absent and never run
+natively instead; trusted native through the discovered `Rscript`/`julia`).
 
 **Restricted Python batches.** Only the declared input files and the code
 are copied, each verified against its SHA-256, into a working copy that the
@@ -337,10 +431,15 @@ each; links, folders, hard links, and other entries are refused and nothing
 they point to is copied. A batch that writes far more than its output
 budget is stopped. Kept files become artifacts of a research run that
 records the container image, user, and limits it ran with. SVG and HTML
-are stored as text and never rendered as active content.
+are stored as text and never rendered as active content. Python batches
+(restricted and native) also receive `EXPOSITION_SEED` (see
+Reproducibility).
 
 **Limitations.** Workflow code steps are Python only; there are no R or
-Julia steps. The container image must provide `python3` and every package
+Julia steps.
+**TODO(lane F):** replace with the R/Julia facts (per-language restricted
+image binding; restricted R/Julia packages are only what the image has).
+The container image must provide `python3` and every package
 the code needs: Exposition never pulls images and the container has no
 network. The trusted native Python step and the Lean audit run with your
 account's privileges and are not contained. The Lean audit step has a
@@ -349,7 +448,151 @@ Lean file is open with unsaved changes that differ from the reviewed file,
 the step fails rather than audit other text. A promotion is always
 prepared at the end of the manuscript; a discarded one reads Rejected, and
 one that can no longer be approved (its 30-minute window passed, or
-Exposition restarted) reads Expired.
+Exposition restarted) reads Expired. A step that waits for a free slot or
+for its budget reservation also holds back the steps after it in the same
+run, and the wait counts against the run's time budget. JSON conditions
+compare numbers as floating-point values, so very large integers or very
+long decimals compare approximately.
+
+### Triggers
+
+A trigger starts runs of one workflow by itself, under a *standing plan*
+you approve. Triggers are off by default, and only you can turn one on,
+from the **Triggers** section of the workflow editor: agents have no tool
+for them (naming a trigger command is refused as an unknown tool), and
+imported workflows, bundles, project files, and generated drafts never
+carry one. A workflow has at most one trigger; enabling a new one replaces
+the old one's kind and settings (its history is kept).
+
+- **When watched inputs change:** the saved content of chosen input files
+  (at most 16). Code inputs cannot be watched (changed code always needs a
+  new review), nor inputs the workflow pins to one version. Changes by any
+  program count, not only saves in the editor.
+- **On a fixed interval:** every 15 minutes to one week while the project
+  is open, whether or not anything changed, optionally with inputs whose
+  saved content may differ between runs (by default none may).
+
+**The standing plan** is the complete run plan of the latest saved
+revision, reviewed like any plan (every step, its code, runner,
+containment, effects, and limits, the budgets, the restricted image's
+identity, folder trust when native steps are present), plus exactly what
+may change without asking (the watched inputs' saved content) and what
+suspends the trigger. You choose a quiet period (2 seconds to 1 hour; a
+trigger on watched inputs fires only after no further change for that
+long, and each change starts it again), at most 1–12
+runs an hour and 1–100 a day, and, when the plan has agent review steps,
+model requests per day (at least one run's budget, at most 1000; each run
+counts its full budget). A plan with native steps can be enabled only if
+you explicitly allow them to run without asking; they then run with your
+account's privileges on every fire. The suggested settings are 10 seconds,
+4 an hour, 24 a day, native steps not allowed, and four runs' model
+requests.
+
+**Firing.** A trigger listens only while its project is open and after the
+project has finished opening and indexing: it never fires because a project
+was opened, and changes made while the project was closed are never caught
+up (the content found at open becomes the new starting point). When the
+quiet period ends, Exposition plans the run again. If the plan matches the
+standing plan in everything except the watched content, the run starts
+through the normal start check and records its cause: the trigger and each
+changed input with its SHA-256 before and after. If a run of the workflow
+is active (or three runs are), one follow-up is queued and starts after it
+with whatever content is saved then. When the hourly, daily, or
+model-request limit is reached, the run waits until the limit allows it.
+
+**Suspension.** Any other difference suspends the trigger until you review
+and enable it again: a new revision, a change to a code input or to an
+unwatched input, folder trust (for a plan with native steps), the
+restricted image name now naming a
+different image, a runner becoming unavailable or available (for example
+Docker not running when it fires), or any step, budget, or limit. The card
+and a notification ("Workflow trigger suspended") give the reason.
+Revoking trust for the folder suspends all of its triggers. Closing or
+switching the project stops listening and drops pending and queued fires;
+the trigger stays on and listens again the next time the project is open
+and indexed. Triggers are stored in the application data folder, never in
+the project, a workflow definition, or a bundle; they stay on across
+restarts, and a restarted Exposition does not catch up on missed intervals
+or changes.
+
+### Reproducibility
+
+Every step attempt records the environment it ran in, shown under
+**Environment** in the run view: the runner and its containment, the
+operating system and architecture, the Exposition version, and, where they
+apply, the restricted image's name and exact identity, the interpreter and
+its version, the package list with a SHA-256 digest of it, the Lean
+toolchain with the digest of `lake-manifest.json` and the Lake dependencies
+it pins, the model provider and the model the provider reported serving,
+and the seed given to the step. Nothing extra runs natively to find this
+out:
+
+- A restricted batch lists the Python distributions installed in its image
+  the first time a batch uses that image identity: a separate container
+  started from the same identity, with the same restrictions (no network,
+  no project files, no credentials) and a 30-second limit, as part of the
+  approved batch. The list is cached per image identity in the application
+  data folder; if it cannot be made, the attempt notes why and the batch
+  runs anyway.
+- A native Python step records what research environment discovery
+  already reports: the interpreter's version and the nine packages
+  discovery checks (jupyter_client, ipykernel, pyzmq, NumPy, pandas,
+  Matplotlib, SciPy, SymPy, Polars), not every installed package.
+- The Lean audit records the exact toolchain it used and reads
+  `lean-toolchain` and `lake-manifest.json`.
+- An agent review records the model the provider reported serving (the
+  configured model when none was reported).
+- Each Python batch receives `EXPOSITION_SEED`, a number derived from the
+  run and the step, and records it; a reproduction receives the original
+  run's seeds. Lean, review, and other steps get no seed.
+
+**Run manifest.** **Export manifest…** in the run view writes the run's
+manifest (`exposition.workflowRunManifest/1`, JSON) to a file you choose in
+the save dialog: the revision, definition and approval hashes, every input
+and output with its SHA-256, the budgets and usage, the cause, and each
+step's attempts with their environment. It contains no logs, no code or
+review text (only their digests), and no local paths: the project, the
+application data folder, and your home folder read `<project>`,
+`<app data>`, and `~`, other absolute paths `<path>`, and secrets are
+redacted. Keys are sorted, so the same run always gives the same bytes. An
+existing file is replaced only if it is an earlier run manifest.
+Limitation: the attempts of repeated steps' instances (for each, until) are
+not in the manifest yet.
+
+**Reproduce.** **Reproduce…** on a run that has ended builds a new plan of
+the same revision with every input pinned to the SHA-256 that run read. A
+changed or missing input blocks it until you restore that version, and a
+revision whose content no longer matches cannot be reproduced. Before you
+approve it, the review shows the differences from the recorded
+environment that can be seen without running anything (image identity,
+platform, interpreter and toolchain versions, Lake manifest, package
+lists, model, Exposition version) and the seeds the batches will receive;
+differences do not block the run. It starts like any plan, and the new
+run records which run it reproduces and links to it.
+
+### Workflow bundles
+
+**Export revision N…** in the workflow editor writes the saved revision,
+together with every saved workflow its composite steps run (at their
+pinned revisions, recursively), as one `exposition.workflow-bundle/1` file
+you choose in the save dialog (at most 8 MiB and 32 child workflows). A
+bundle holds definitions only: no trust, approvals, triggers, run records,
+or results. The destination must be a `.json` file outside the project's
+`.exposition` folder and the application data folder, and an existing file
+is replaced only if it is an earlier workflow bundle.
+
+**Import Bundle…** on the Workflows tab reads a bundle (or a single
+workflow definition) as untrusted data. It is parsed strictly: an unknown
+field anywhere, including any claim of trust, approval, or a trigger,
+refuses the whole file; every carried workflow must be one the root runs;
+nothing may include itself or nest deeper than 3 levels. Then the children
+are saved first as new imported drafts with fresh ids, and the root last,
+with its references rewritten to them. Nothing runs, nothing is trusted or
+approved, and no trigger is created. Limitation: every check happens
+before anything is saved, but if saving fails part-way (for example a
+storage error), the workflows already saved stay as drafts. A single
+definition imported this way keeps its composite references as written;
+they resolve against this project's own workflows.
 
 ## Research
 
@@ -368,7 +611,8 @@ separate sessions. Exposition never installs runtimes or packages.
 Interactive research sessions run natively with your account's privileges
 ("Trusted native"); the research space and per-owner sessions organize work
 but do not contain it. Restricted research execution exists only as the
-workflow's Python batch step (see Workflow runs), and the Research page
+workflow's Python batch step (see Workflow runs; **TODO(lane F):** and the
+R/Julia batch steps), and the Research page
 shows whether it is available for the project; nothing moves between the
 two modes silently. Computational evidence names the mode a run actually ran
 in. Enabling Research creates one research space (`.exposition/research/<id>/`
@@ -524,6 +768,11 @@ otherwise. A third, `npm run e2e -- live-graph`, has the model read the project 
   folder, and likewise never fall back to native execution. Workflow native
   Python and Lean audit steps run with your account's privileges and need a
   trusted folder.
+- Workflow triggers start runs without asking only under a standing plan
+  you approved, and only you can enable one; agents, imports, and project
+  files cannot. Trigger records live in the application data folder, never
+  in the project. A native step runs from a trigger only if you allowed it
+  explicitly for that trigger.
 - TeX can read any file your account can read, which is why LaTeX builds
   require trust. R and Julia kernels talk to Exposition over local loopback
   TCP with signed but unencrypted messages; Python kernels use CurveZMQ when

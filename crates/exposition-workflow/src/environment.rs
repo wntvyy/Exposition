@@ -242,6 +242,9 @@ pub fn apply_batch_pairs(env: &mut WorkflowEnvironment, pairs: &[(String, String
         if let Some(implementation) = get(keys::IMPLEMENTATION).filter(|i| i != "cpython") {
             env.note(format!("Python implementation: {implementation}"));
         }
+    } else if let Some(name) = get(keys::INTERPRETER_NAME) {
+        // Any batch language (R, Julia): its name, and its version when known.
+        env.interpreter = Some(WorkflowEnvironmentInterpreter { name, version: get(keys::INTERPRETER_VERSION) });
     }
     let packages: Vec<(String, String)> = pairs
         .iter()
@@ -605,6 +608,33 @@ mod tests {
         assert!(env.notes.iter().any(|n| n == "hello"));
         let json = serde_json::to_string(&env).unwrap();
         assert!(!json.contains("Users"), "no interpreter path is recorded: {json}");
+    }
+
+    /// R and Julia batches report their interpreter generically; Python's
+    /// `pythonVersion` keeps working (and wins when both are present).
+    #[test]
+    fn r_and_julia_batches_record_their_interpreter() {
+        let pairs = |p: &[(&str, &str)]| -> Vec<(String, String)> {
+            p.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+        };
+        let mut env = WorkflowEnvironment::base("nativeR", Containment::NativeAccount);
+        apply_batch_pairs(&mut env, &pairs(&[("interpreterName", "R"), ("interpreterVersion", "4.6.2")]));
+        assert_eq!(
+            env.interpreter,
+            Some(WorkflowEnvironmentInterpreter { name: "R".into(), version: Some("4.6.2".into()) })
+        );
+        let mut env = WorkflowEnvironment::base("restrictedJulia", Containment::RestrictedContainer);
+        apply_batch_pairs(&mut env, &pairs(&[("image", "julia:1.13"), ("interpreterName", "julia")]));
+        assert_eq!(env.interpreter, Some(WorkflowEnvironmentInterpreter { name: "julia".into(), version: None }));
+        let mut env = WorkflowEnvironment::base("nativePython", Containment::NativeAccount);
+        apply_batch_pairs(
+            &mut env,
+            &pairs(&[("pythonVersion", "3.14.0"), ("interpreterName", "python"), ("interpreterVersion", "3.14.0")]),
+        );
+        assert_eq!(
+            env.interpreter,
+            Some(WorkflowEnvironmentInterpreter { name: "python".into(), version: Some("3.14.0".into()) })
+        );
     }
 
     #[test]

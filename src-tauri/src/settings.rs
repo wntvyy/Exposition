@@ -34,7 +34,7 @@ fn settings_error(error: SettingsError) -> CommandError {
 fn validate_change(change: &ExecutionSettingsChange) -> Result<(), CommandError> {
     let bad = |m: &str| Err(CommandError::new("settings.invalidRequest", m));
     match change {
-        ExecutionSettingsChange::DockerImage { image } => {
+        ExecutionSettingsChange::DockerImage { image } | ExecutionSettingsChange::LanguageImage { image, .. } => {
             if image.as_ref().is_some_and(|i| i.len() > 512 || i.contains('\0')) {
                 return bad("invalid image reference");
             }
@@ -56,7 +56,7 @@ pub async fn execution_settings_get(state: State<'_, AppState>) -> Result<Execut
     Ok(state.execution.settings_state())
 }
 
-/// Apply one validated change (Docker image or tool location).
+/// Apply one validated change (a restricted image or a tool location).
 #[tauri::command]
 pub async fn execution_settings_update(
     state: State<'_, AppState>,
@@ -99,5 +99,12 @@ mod tests {
         let image = |i: &str| ExecutionSettingsChange::DockerImage { image: Some(i.into()) };
         assert!(validate_change(&image("python:3.13-slim")).is_ok());
         assert!(validate_change(&image(&"a".repeat(600))).is_err());
+        let language = |i: &str| ExecutionSettingsChange::LanguageImage {
+            language: exposition_execution::RestrictedLanguage::R,
+            image: Some(i.into()),
+        };
+        assert!(validate_change(&language("r-base:4.6.2")).is_ok());
+        assert!(validate_change(&language(&"a".repeat(600))).is_err());
+        assert!(validate_change(&language("a\0b")).is_err());
     }
 }

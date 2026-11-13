@@ -9,4 +9,15 @@ image: string | null, memory: string, cpus: string, pidsLimit: number,
 /**
  * Non-root `uid:gid` the container process runs as.
  */
-user: string, };
+user: string, 
+/**
+ * Image for restricted R workflow batches (`Rscript` on the image's
+ * standard `PATH`). Present locally, never pulled; unset: restricted R
+ * batches are refused (never run natively instead).
+ */
+rImage?: string, 
+/**
+ * Image for restricted Julia workflow batches (`julia` on the standard
+ * `PATH` or in `/usr/local/julia/bin`, the official image's layout).
+ */
+juliaImage?: string, };
