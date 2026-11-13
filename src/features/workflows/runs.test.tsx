@@ -146,6 +146,7 @@ const run = (overrides: Partial<WorkflowRun> = {}): WorkflowRun => ({
   definitionHash: "d".repeat(64),
   title: "Numerical experiment",
   state: "succeeded",
+  cause: { kind: "manual" },
   code: null,
   message: null,
   startedAtMs: 1_700_000_000_000,
