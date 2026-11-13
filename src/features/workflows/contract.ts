@@ -11,10 +11,10 @@
 //
 // New fields are optional here so that M8-shaped records (and older runs) are
 // still read correctly; views treat a missing field as "not recorded".
+// Landed so far: definitions (lane A), run cause (lane B).
 import type { ParamValue } from "../../bindings/ParamValue";
-import type { StepPort } from "../../bindings/StepPort";
-import type { SavedWorkflow as SavedWorkflowBase } from "../../bindings/SavedWorkflow";
-import type { WorkflowDefinition as WorkflowDefinitionBase } from "../../bindings/WorkflowDefinition";
+import type { StepCondition } from "../../bindings/StepCondition";
+import type { StepRepeat } from "../../bindings/StepRepeat";
 import type { WorkflowId } from "../../bindings/WorkflowId";
 import type { WorkflowPlanStep as WorkflowPlanStepBase } from "../../bindings/WorkflowPlanStep";
 import type { WorkflowRun as WorkflowRunBase } from "../../bindings/WorkflowRun";
@@ -25,7 +25,6 @@ import type { WorkflowRunOutcome as WorkflowRunOutcomeBase } from "../../binding
 import type { WorkflowRunPlan as WorkflowRunPlanBase } from "../../bindings/WorkflowRunPlan";
 import type { WorkflowRunStep as WorkflowRunStepBase } from "../../bindings/WorkflowRunStep";
 import type { WorkflowRunSummary as WorkflowRunSummaryBase } from "../../bindings/WorkflowRunSummary";
-import type { WorkflowStep as WorkflowStepBase } from "../../bindings/WorkflowStep";
 import type { WorkflowStepAttempt as WorkflowStepAttemptBase } from "../../bindings/WorkflowStepAttempt";
 import type { WorkflowStepState as WorkflowStepStateBase } from "../../bindings/WorkflowStepState";
 import type { Containment } from "../../bindings/Containment";
@@ -37,34 +36,19 @@ export const WORKFLOW_SCHEMA_V2 = "exposition.workflow/2";
 /** The registered operation of a composite step (runs another saved workflow at a pinned revision). */
 export const COMPOSITE_OPERATION = "workflow.composite";
 
-export type CompareOp = "eq" | "ne" | "lt" | "le" | "gt" | "ge";
-/** A comparison value; numbers are decimal strings (exact, never floats). */
-export type ConditionValue = { kind: "number"; value: string } | { kind: "text"; value: string } | { kind: "boolean"; value: boolean };
-export type ConditionTest =
-  | { kind: "verdictIn"; verdicts: string[] }
-  | { kind: "jsonCompare"; pointer: string; op: CompareOp; value: ConditionValue }
-  | { kind: "outputPresent" };
-export type StepCondition = { source: StepPort; test: ConditionTest; negate: boolean };
-export type Exhausted = "fail" | "useLast";
-export type StepRepeat =
-  | { kind: "forEach"; parameter: string; values: ParamValue[] }
-  | { kind: "until"; port: string; test: ConditionTest; negate: boolean; maxIterations: number; onExhausted: Exhausted };
-export type CompositeRef = { workflow: WorkflowId; revision: number };
-export type WorkflowExecutionOptions = { maxParallel: number };
-
-export type WorkflowStep = WorkflowStepBase & {
-  composite?: CompositeRef | null;
-  condition?: StepCondition | null;
-  repeat?: StepRepeat | null;
-};
-
-export type WorkflowDefinition = Omit<WorkflowDefinitionBase, "steps"> & {
-  steps: WorkflowStep[];
-  /** Absent: one step at a time (maxParallel 1, the M8 behavior). */
-  execution?: WorkflowExecutionOptions | null;
-};
-
-export type SavedWorkflow = Omit<SavedWorkflowBase, "definition"> & { definition: WorkflowDefinition };
+// Landed from lane A (main ea61564): generated bindings. A v2 field is absent
+// (never null) when unused, so a v1 definition stays byte-identical.
+export type { CompareOp } from "../../bindings/CompareOp";
+export type { CompositeRef } from "../../bindings/CompositeRef";
+export type { ConditionTest } from "../../bindings/ConditionTest";
+export type { ConditionValue } from "../../bindings/ConditionValue";
+export type { Exhausted } from "../../bindings/Exhausted";
+export type { SavedWorkflow } from "../../bindings/SavedWorkflow";
+export type { StepCondition } from "../../bindings/StepCondition";
+export type { StepRepeat } from "../../bindings/StepRepeat";
+export type { WorkflowDefinition } from "../../bindings/WorkflowDefinition";
+export type { WorkflowExecutionOptions } from "../../bindings/WorkflowExecutionOptions";
+export type { WorkflowStep } from "../../bindings/WorkflowStep";
 
 // ----- runtime (lane B) ----------------------------------------------------------------------
 
