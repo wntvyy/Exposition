@@ -12,6 +12,12 @@
 //    The exported manifest is checked for absolute user paths (held).
 // C. Re-approving a trigger opens the standing-plan dialog with "allow native
 //    steps" already ticked from the earlier approval (R-m9 F4).
+// D. The plan binds the saved Lean file while the Lean service checks the
+//    document buffer. Held at 8fd980b: a manual or triggered run over an
+//    unsaved buffer is refused (workflow.inputChanged) and does not execute
+//    the buffer's code again (DEFECT if it does). Control (pre-existing, not
+//    M9): the live Lean server elaborates an unsaved buffer edit by itself,
+//    so buffer code runs natively before any workflow is involved.
 //
 // Product defects are reported as `DEFECT` lines (the scenario still passes);
 // held checks fail the scenario. Requires Lean through elan with
@@ -199,9 +205,10 @@ export default async function reviewM9({ launchApp, artifactsDir, assert, fixtur
 
     // ---- D. the approval binds the saved file, Lean elaborates the open buffer --------
     // The plan (and a trigger's standing plan) binds the SHA-256 of the saved
-    // Lean file; the Lean audit checks the document service's buffer. An
-    // unsaved buffer edit (the user's own, or an AutoApply agent's, which
-    // stays unsaved) therefore runs natively before the step is refused.
+    // Lean file; the Lean audit checks the document service's buffer. A run
+    // over an unsaved buffer must be refused without executing the buffer's
+    // code on the plan's behalf (the live server's own elaboration is the
+    // control, removed before each run).
     const BUFFERED = "LeanBasic/Buffered.lean";
     await writeFile(join(root, ...BUFFERED.split("/")), CLEAN.replace(/Watched/g, "Buffered"));
     await mkdir(join(root, "data"), { recursive: true });
