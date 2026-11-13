@@ -12,12 +12,14 @@ use exposition_graph::Admission;
 use sha2::{Digest, Sha256};
 
 use super::fsx::{is_name_link, open_no_follow, same_file_as};
-use crate::batch::{BatchCode, BatchRequest};
+use crate::batch::{BatchCode, BatchLanguage, BatchRequest};
 use crate::error::ResearchError;
 use crate::helper::sha256_hex;
 use crate::types::{CodeOrigin, CodeProvenance};
 
-/// File the inline code is written to (at the working-copy root).
+/// File the inline Python code is written to (at the working-copy root; R
+/// and Julia use the same stem with their extension, see
+/// [`super::language::inline_entry`]).
 pub const INLINE_ENTRY: &str = "__exposition_main__.py";
 /// Declared inputs per batch.
 pub const MAX_INPUTS: usize = 32;
@@ -185,12 +187,26 @@ fn under(base: &Path, path: &WorkspacePath) -> PathBuf {
 /// Stage `request` from the project `root` into the new folder `work`.
 /// `canceled` is checked between files (a cancel during staging returns
 /// `research.batchCanceled`).
+#[cfg(test)]
 pub(crate) fn stage(
     root: &Path,
     work: &Path,
     canceled: &dyn Fn() -> bool,
     request: &BatchRequest,
 ) -> Result<Staged, ResearchError> {
+    stage_language(root, work, canceled, request, BatchLanguage::Python)
+}
+
+/// [`stage`] for a `language` batch: the inline code is written under the
+/// language's entry name, and a script must have the language's extension.
+pub(crate) fn stage_language(
+    root: &Path,
+    work: &Path,
+    canceled: &dyn Fn() -> bool,
+    request: &BatchRequest,
+    language: BatchLanguage,
+) -> Result<Staged, ResearchError> {
+    let inline_entry = super::language::inline_entry(language);
     if request.inputs.len() > MAX_INPUTS {
         return Err(ResearchError::InvalidRequest(format!("a batch declares at most {MAX_INPUTS} inputs")));
     }
@@ -207,7 +223,7 @@ pub(crate) fn stage(
             }
             return Ok(());
         }
-        if key == INLINE_ENTRY.to_ascii_lowercase() {
+        if key == inline_entry.to_ascii_lowercase() {
             return Err(refused(path, "the name is reserved for the batch's inline code"));
         }
         declared.push((path.clone(), expected));
@@ -230,11 +246,11 @@ pub(crate) fn stage(
                 bytes: source.len() as u64,
                 text: (source.len() <= MANIFEST_CODE_LIMIT).then(|| source.clone()),
             };
-            (INLINE_ENTRY.to_owned(), code)
+            (inline_entry.to_owned(), code)
         }
         BatchCode::Script { path, sha256 } => {
-            if !path.file_name().to_ascii_lowercase().ends_with(".py") {
-                return Err(ResearchError::InvalidRequest(format!("{path} is not a Python script (.py)")));
+            if !language.is_script(path.file_name()) {
+                return Err(ResearchError::InvalidRequest(format!("{path} is not {}", language.script_description())));
             }
             add(path, sha256)?;
             let digest = normalize_sha256(sha256).unwrap_or_default();
@@ -269,7 +285,7 @@ pub(crate) fn stage(
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(work.join(INLINE_ENTRY))
+                .open(work.join(inline_entry))
                 .map_err(|e| ResearchError::io("staging the batch code", e))?;
             file.write_all(source.as_bytes()).map_err(|e| ResearchError::io("staging the batch code", e))?;
         }
@@ -482,6 +498,62 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), "research.invalidRequest");
         assert_eq!(normalize_sha256(&"A".repeat(64)), Some("a".repeat(64)));
+    }
+
+    #[test]
+    fn r_and_julia_code_is_staged_under_its_own_entry_and_extension() {
+        for (language, entry, script, foreign) in [
+            (BatchLanguage::R, "__exposition_main__.R", "src/fit.R", "src/fit.py"),
+            (BatchLanguage::Julia, "__exposition_main__.jl", "src/model.jl", "src/model.R"),
+        ] {
+            let (_tmp, root, work) = dirs();
+            let data = input(&root, "data/obs.csv", b"x\n1\n");
+            let staged = stage_language(
+                &root,
+                &work,
+                NO_CANCEL,
+                &request(BatchCode::Inline { source: "1".into() }, vec![data.clone()]),
+                language,
+            )
+            .unwrap();
+            assert_eq!(staged.entry, entry);
+            assert_eq!(files_under(&staged.work), [entry, "data/obs.csv"]);
+            // A script of the language is staged at its path.
+            let ok = input(&root, script, b"1\n");
+            let code = BatchCode::Script { path: ok.path.clone(), sha256: ok.sha256.clone() };
+            let other = tempfile::tempdir().unwrap();
+            let staged =
+                stage_language(&root, &other.path().join("w"), NO_CANCEL, &request(code, Vec::new()), language)
+                    .unwrap();
+            assert_eq!(staged.entry, script);
+            // A script of another language is refused before anything is copied.
+            let bad = input(&root, foreign, b"1\n");
+            let code = BatchCode::Script { path: bad.path.clone(), sha256: bad.sha256.clone() };
+            let target = tempfile::tempdir().unwrap();
+            let err = stage_language(&root, &target.path().join("w"), NO_CANCEL, &request(code, Vec::new()), language)
+                .unwrap_err();
+            assert_eq!(err.code(), "research.invalidRequest", "{err}");
+            assert!(err.to_string().contains(language.title()), "{err}");
+            assert!(!target.path().join("w").exists(), "nothing was staged");
+            // The language's inline entry name is reserved.
+            let clash = input(&root, entry, b"x");
+            let err = stage_language(
+                &root,
+                &tempfile::tempdir().unwrap().path().join("w"),
+                NO_CANCEL,
+                &request(BatchCode::Inline { source: String::new() }, vec![clash]),
+                language,
+            )
+            .unwrap_err();
+            assert_eq!(err.code(), "research.inputRefused", "{err}");
+        }
+        // Python keeps refusing other languages' scripts.
+        let (_tmp, root, work) = dirs();
+        let r = input(&root, "fit.R", b"1\n");
+        let err =
+            stage(&root, &work, NO_CANCEL, &request(BatchCode::Script { path: r.path, sha256: r.sha256 }, vec![]))
+                .unwrap_err();
+        assert!(err.to_string().contains("Python script (.py)"), "{err}");
     }
 
     #[cfg(windows)]

@@ -29,6 +29,7 @@ pub mod associate;
 pub mod batch;
 pub mod lean;
 pub mod research;
+pub mod rj;
 
 /// A validated value bound to one input port of the step.
 #[derive(Clone, Debug)]

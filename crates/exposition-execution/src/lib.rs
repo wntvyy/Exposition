@@ -49,6 +49,9 @@ pub use service::{
     ExecutionConfig, ExecutionService, InputClosed, InteractiveInput, InteractiveJob, InteractiveOptions,
     InteractiveOutput, JobKind, JobRefusal, JobState, JobSummary, ProtocolLog, RefusalCode, RestrictedTarget,
 };
-pub use settings::{DockerSettings, ExecutionSettings, ExecutionSettingsChange, ExecutionSettingsState, SettingsError};
+pub use settings::{
+    DockerSettings, ExecutionSettings, ExecutionSettingsChange, ExecutionSettingsState, RestrictedLanguage,
+    SettingsError,
+};
 pub use toolchains::{Located, ToolSource, ToolStatus, ToolchainInfo};
 pub use trust::{TrustChanged, TrustError, TrustRuleLocation, TrustRules, TrustStatus, TrustedRoot};

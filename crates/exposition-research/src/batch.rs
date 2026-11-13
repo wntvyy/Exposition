@@ -1,4 +1,5 @@
-//! Workflow-owned Python batch runs (M8 contract; implemented by the research lane).
+//! Workflow-owned Python batch runs (M8 contract; implemented by the research lane),
+//! and R and Julia batches through the same runner (M9, [`BatchLanguage`]).
 //!
 //! Two accurately labelled modes share one request shape:
 //! - [`BatchMode::Restricted`]: the scoped research adapter. Only the declared
@@ -141,7 +142,9 @@ pub struct BatchControl<'a> {
     pub on_dispatched: &'a (dyn Fn(&str) + Sync),
 }
 
-/// Runs workflow-owned Python batches (see the module docs).
+/// Runs workflow-owned Python batches (see the module docs), and R and Julia
+/// batches through the `*_language` methods (M9). A runner that does not
+/// implement a language refuses it: never another language or mode.
 pub trait BatchRunner: Send + Sync {
     /// Whether `mode` is usable for `root` now, and why not.
     fn availability(&self, root: &Path, mode: BatchMode) -> Result<(), String>;
@@ -152,4 +155,85 @@ pub trait BatchRunner: Send + Sync {
         request: &BatchRequest,
         control: &BatchControl<'_>,
     ) -> Result<BatchResult, ResearchError>;
+
+    /// [`Self::availability`] of a `language` batch.
+    fn language_availability(&self, root: &Path, language: BatchLanguage, mode: BatchMode) -> Result<(), String> {
+        match language {
+            BatchLanguage::Python => self.availability(root, mode),
+            other => Err(format!("{} batches are not supported by this batch runner.", other.title())),
+        }
+    }
+
+    /// [`Self::run`] for a `language` batch: the code is `language` code
+    /// (inline, or a declared script with the language's extension).
+    fn run_language(
+        &self,
+        root: &Path,
+        language: BatchLanguage,
+        request: &BatchRequest,
+        control: &BatchControl<'_>,
+    ) -> Result<BatchResult, ResearchError> {
+        match language {
+            BatchLanguage::Python => self.run(root, request, control),
+            other => Err(ResearchError::coded(
+                "research.languageUnsupported",
+                format!("{} batches are not supported by this batch runner; nothing was run.", other.title()),
+            )),
+        }
+    }
+
+    /// The image restricted `language` batches run in now: its reference
+    /// and identity (`sha256:…`, when the engine reports it). `Err`: why
+    /// restricted batches of the language are unavailable. Never pulls.
+    fn restricted_image(&self, language: BatchLanguage) -> Result<(String, Option<String>), String> {
+        Err(format!("restricted {} batches are not supported by this batch runner.", language.title()))
+    }
+}
+
+/// The language of a batch's code (M9: R and Julia join Python).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum BatchLanguage {
+    Python,
+    R,
+    Julia,
+}
+
+impl BatchLanguage {
+    pub const ALL: [BatchLanguage; 3] = [BatchLanguage::Python, BatchLanguage::R, BatchLanguage::Julia];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            BatchLanguage::Python => "Python",
+            BatchLanguage::R => "R",
+            BatchLanguage::Julia => "Julia",
+        }
+    }
+
+    /// Script extensions of the language (lowercase, compared without
+    /// regard to case: `.R` and `.r` are both R).
+    pub fn extensions(self) -> &'static [&'static str] {
+        match self {
+            BatchLanguage::Python => &["py"],
+            BatchLanguage::R => &["r"],
+            BatchLanguage::Julia => &["jl"],
+        }
+    }
+
+    /// `a Python script (.py)`, `an R script (.R)`, `a Julia script (.jl)`.
+    pub fn script_description(self) -> &'static str {
+        match self {
+            BatchLanguage::Python => "a Python script (.py)",
+            BatchLanguage::R => "an R script (.R)",
+            BatchLanguage::Julia => "a Julia script (.jl)",
+        }
+    }
+
+    /// Whether `file_name` is a script of this language.
+    pub fn is_script(self, file_name: &str) -> bool {
+        file_name.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty() && self.extensions().contains(&ext.to_ascii_lowercase().as_str())
+        })
+    }
 }
