@@ -47,7 +47,7 @@ pub use docker::{DockerImage, DockerListError};
 pub use log::{OutputChunk, OutputPage};
 pub use service::{
     ExecutionConfig, ExecutionService, InputClosed, InteractiveInput, InteractiveJob, InteractiveOptions,
-    InteractiveOutput, JobKind, JobRefusal, JobState, JobSummary, ProtocolLog, RefusalCode,
+    InteractiveOutput, JobKind, JobRefusal, JobState, JobSummary, ProtocolLog, RefusalCode, RestrictedTarget,
 };
 pub use settings::{DockerSettings, ExecutionSettings, ExecutionSettingsChange, ExecutionSettingsState, SettingsError};
 pub use toolchains::{Located, ToolSource, ToolStatus, ToolchainInfo};

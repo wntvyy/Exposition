@@ -230,14 +230,19 @@ pub fn media_type_for(name: &str) -> &'static str {
         "html" => "text/html",
         "csv" => "text/csv",
         "json" => "application/json",
+        "pdf" => "application/pdf",
+        "tsv" => "text/tab-separated-values",
+        "txt" => "text/plain",
         _ => "application/octet-stream",
     }
 }
 
-/// Validate an artifact path claimed by a caller against the run that produced it.
+/// Validate an artifact path claimed by a caller against the run that produced it
+/// (kernel outputs `output-N.<ext>`, or a batch output with a safe exported name).
 pub fn artifact_belongs_to_run(path: &WorkspacePath, run_id: &str) -> bool {
     let prefix = artifact_dir_path(run_id);
-    path.parent().as_ref() == Some(&prefix) && valid_output_name(path.file_name())
+    path.parent().as_ref() == Some(&prefix)
+        && (valid_output_name(path.file_name()) || crate::sandbox::is_batch_artifact_name(path.file_name()))
 }
 
 #[cfg(test)]

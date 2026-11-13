@@ -13,7 +13,7 @@ use exposition_graph::{
 use super::types::{RetainOutcome, RetainRequest, RetainState, SetResultStateRequest};
 use super::{ResearchProject, bare_hash, now_ms, origin};
 use crate::error::ResearchError;
-use crate::types::RunManifest;
+use crate::types::{RunManifest, TRUSTED_NATIVE_LABEL};
 
 /// Evidence of `run` for an artifact (inputs exactly as the run pinned them).
 pub(crate) fn computational_evidence(
@@ -35,7 +35,10 @@ pub(crate) fn computational_evidence(
     if !interpreter.implementation.is_empty() {
         environment.push((format!("interpreter:{}", interpreter.implementation), interpreter.version.clone()));
     }
-    environment.push(("execution".into(), "trusted native (user account privileges)".into()));
+    // The mode the run actually executed in; manifests without one (M4–M7
+    // interactive kernel runs) ran trusted native.
+    let execution = manifest.execution.as_ref().map(|e| e.label()).unwrap_or_else(|| TRUSTED_NATIVE_LABEL.to_owned());
+    environment.push(("execution".into(), execution));
     environment.push(("code sha256".into(), manifest.code.sha256.clone()));
     Evidence {
         id: EvidenceId::mint(),

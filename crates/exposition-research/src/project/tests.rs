@@ -136,6 +136,7 @@ fn record_run(root: &Path, run: &str, inputs: Vec<RunInput>, unsaved: Vec<Worksp
         error: None,
         output: OutputSummary::default(),
         unsaved_inputs: unsaved,
+        execution: None,
     };
     write_manifest(root, &manifest).unwrap();
     manifest
@@ -649,4 +650,70 @@ fn an_attachment_inserted_elsewhere_is_recorded_and_followed() {
     // A key that is not in the document records nothing.
     let missing = AttachmentNotice { attachment_key: "fig-absent".into(), ..notice };
     assert_eq!(f.project.record_external_attachment(&missing).unwrap_err().code(), "promotion.notAttached");
+}
+
+/// A workflow batch run (restricted container, batch-named artifacts) is
+/// retained through the same path, and its evidence names the mode it
+/// actually ran in; manifests without a recorded mode stay trusted native.
+#[test]
+fn retained_batch_output_evidence_names_the_actual_execution_mode() {
+    let f = fixture();
+    f.project.enable().unwrap();
+    let mut manifest = record_run(&f.root, "run-b1", vec![script_input()], Vec::new());
+    let dir = f.root.join(".exposition/artifacts/run-b1");
+    std::fs::write(dir.join("table.csv"), CSV).unwrap();
+    manifest.record.outputs = vec![ArtifactRecord {
+        id: ArtifactId("run-b1/table.csv".into()),
+        kind: ArtifactKind::Table,
+        path: Some(path(".exposition/artifacts/run-b1/table.csv")),
+        scratch_path: None,
+        media_type: "text/csv".into(),
+        size_bytes: CSV.len() as u64,
+        content_hash: format!("sha256:{}", sha256_hex(CSV.as_bytes())),
+    }];
+    manifest.session.owner = SessionOwner::Workflow { run: "wf".into(), step: "s".into() };
+    manifest.execution = Some(crate::types::RunExecution::RestrictedContainer {
+        backend: "docker".into(),
+        image: "python:3.13-slim".into(),
+        image_id: Some("sha256:abc".into()),
+        network: "none".into(),
+        user: "65534:65534".into(),
+        memory: "2g".into(),
+        cpus: "2".into(),
+        pids_limit: 256,
+        time_limit_ms: 60_000,
+    });
+    write_manifest(&f.root, &manifest).unwrap();
+    let out = f
+        .project
+        .retain(&RetainRequest {
+            run_id: "run-b1".into(),
+            artifact_id: "run-b1/table.csv".into(),
+            state: RetainState::Active,
+            experiment: None,
+        })
+        .unwrap();
+    let detail = f.graph.entity_detail(&out.result.entity).unwrap();
+    let execution = detail.evidence[0].environment.iter().find(|(k, _)| k == "execution").unwrap().1.clone();
+    assert!(execution.starts_with("restricted container (docker, image python:3.13-slim, network none"), "{execution}");
+    assert!(!execution.contains("trusted native"), "{execution}");
+
+    record_run(&f.root, "run-b2", vec![script_input()], Vec::new());
+    let old = f
+        .project
+        .retain(&RetainRequest {
+            run_id: "run-b2".into(),
+            artifact_id: "run-b2/output-2.csv".into(),
+            state: RetainState::Active,
+            experiment: None,
+        })
+        .unwrap();
+    let detail = f.graph.entity_detail(&old.result.entity).unwrap();
+    let label = detail
+        .evidence
+        .iter()
+        .find(|e| e.operation.id == "run-b2")
+        .and_then(|e| e.environment.iter().find(|(k, _)| k == "execution"))
+        .map(|(_, v)| v.clone());
+    assert_eq!(label.as_deref(), Some("trusted native (user account privileges)"));
 }

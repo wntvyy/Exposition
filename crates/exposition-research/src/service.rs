@@ -1,6 +1,6 @@
 //! The research supervisor: workspace trust, sessions, runs, and events.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -146,6 +146,9 @@ struct Shared {
     environments: Mutex<Option<(Option<DiscoveredFor>, EnvironmentReport)>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     runs: Mutex<HashMap<String, RunState>>,
+    /// Workflow batch runs executing now (their manifests read "running"
+    /// legitimately and are not settled as orphans).
+    batches: Mutex<HashSet<String>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -175,6 +178,7 @@ impl ResearchService {
                 environments: Mutex::new(None),
                 sessions: Mutex::new(HashMap::new()),
                 runs: Mutex::new(HashMap::new()),
+                batches: Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -284,6 +288,38 @@ impl ResearchService {
         Ok(report)
     }
 
+    /// [`Self::environments`] for blocking callers (workflow batches run on
+    /// worker threads): the same cache, discovery, and trust rules.
+    pub(crate) fn environments_blocking(&self) -> Result<EnvironmentReport, ResearchError> {
+        let workspace = lock(&self.shared.workspace).clone();
+        let project = workspace.map(|w| ProjectScope {
+            trusted: self.shared.config.launcher.workspace_trusted(&w.root).unwrap_or(w.trusted),
+            root: w.root,
+        });
+        let key = project.as_ref().map(|p| (p.root.clone(), p.trusted));
+        if let Some((cached, report)) = lock(&self.shared.environments).clone()
+            && cached == key
+        {
+            return Ok(report);
+        }
+        let probe_dir = match self.shared.config.launcher.probe_dir() {
+            Some(dir) => dir,
+            None => self.shared.research_dir("probe")?,
+        };
+        let report = discover(&DiscoveryOptions {
+            launcher: self.shared.config.launcher.as_ref(),
+            probe_dir: &probe_dir,
+            project,
+        });
+        *lock(&self.shared.environments) = Some((key, report.clone()));
+        Ok(report)
+    }
+
+    /// The application data directory research uses.
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.shared.config.data_dir
+    }
+
     fn environment(&self, id: &str) -> Result<RuntimeEnvironment, ResearchError> {
         let guard = lock(&self.shared.environments);
         let (_, report) = guard.as_ref().ok_or_else(|| ResearchError::UnknownEnvironment(id.to_owned()))?;
@@ -306,6 +342,7 @@ impl ResearchService {
         let (kind, limit) = match request.owner {
             SessionOwner::User => ("user", self.shared.config.max_user_sessions),
             SessionOwner::Agent { .. } => ("agent", self.shared.config.max_agent_sessions),
+            SessionOwner::Workflow { .. } => ("workflow", self.shared.config.max_agent_sessions),
         };
         let live = lock(&self.shared.sessions)
             .values()
@@ -571,7 +608,7 @@ impl ResearchService {
         for manifest in store::list_manifests(&workspace.root) {
             if !live.contains_key(&manifest.record.id.0) {
                 let owner = manifest.session.owner.clone();
-                out.push(crate::runs::summary_of(&settle_orphan(manifest), owner, false));
+                out.push(crate::runs::summary_of(&self.settle(manifest), owner, false));
             }
         }
         out.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms).then_with(|| b.id.0.cmp(&a.id.0)));
@@ -586,7 +623,23 @@ impl ResearchService {
             return Ok(run.manifest.clone());
         }
         let workspace = self.current_workspace()?;
-        read_manifest(&workspace.root, run_id).map(settle_orphan)
+        read_manifest(&workspace.root, run_id).map(|m| self.settle(m))
+    }
+
+    /// A stored manifest as it stands: "running" without live state means
+    /// Exposition stopped before it finished, unless a batch runs it now.
+    fn settle(&self, manifest: RunManifest) -> RunManifest {
+        if lock(&self.shared.batches).contains(&manifest.record.id.0) { manifest } else { settle_orphan(manifest) }
+    }
+
+    /// Mark a workflow batch run as executing (or no longer executing).
+    pub(crate) fn set_batch_live(&self, run_id: &str, live: bool) {
+        let mut batches = lock(&self.shared.batches);
+        if live {
+            batches.insert(run_id.to_owned());
+        } else {
+            batches.remove(run_id);
+        }
     }
 
     /// Page through retained output (live runs) or the stored transcript.
@@ -1409,6 +1462,7 @@ impl Session {
             error: None,
             output: OutputSummary::default(),
             unsaved_inputs,
+            execution: None,
         };
         let run = RunState {
             manifest,

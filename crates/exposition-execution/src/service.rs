@@ -145,6 +145,19 @@ pub struct InteractiveOptions {
     pub stdout_log: ProtocolLog,
 }
 
+/// What restricted execution would run with now ([`ExecutionService::restricted_preflight`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestrictedTarget {
+    /// `docker`.
+    pub backend: String,
+    /// The configured image reference (present locally).
+    pub image: String,
+    /// `sha256:...` image id as reported by the engine, when available.
+    pub image_id: Option<String>,
+    /// Container limits and user every restricted job gets.
+    pub docker: crate::settings::DockerSettings,
+}
+
 /// Configuration for [`ExecutionService::with_config`].
 pub struct ExecutionConfig {
     /// Application data directory; the service uses `<data_dir>/execution`.
@@ -665,6 +678,71 @@ impl ExecutionService {
         let removed = docker::remove_stale(&docker, &self.inner.instance, &env, &self.inner.probe_dir)?;
         *cleaned = true;
         Ok(removed)
+    }
+
+    /// Whether restricted (Docker) execution can run now, and with what: the
+    /// configured image must be valid and present locally and the engine
+    /// reachable. Runs `docker image inspect` (never pulls). Used by owners
+    /// that must refuse early and record the actual container image.
+    pub fn restricted_preflight(&self) -> Result<RestrictedTarget, String> {
+        let settings = self.inner.settings.get();
+        let Some(image) = settings.docker.image.clone() else {
+            return Err(
+                "no container image is configured. Set execution.docker.image to an image present locally (`docker image ls`)."
+                    .into(),
+            );
+        };
+        docker::validate_image_reference(&image)
+            .map_err(|reason| format!("the configured image is not valid: {reason}."))?;
+        let refuse = |path: &Path| self.inner.override_problem(path);
+        let docker = match (Locator { host: &self.inner.host, settings: &settings, refuse_override: Some(&refuse) })
+            .locate("docker")
+        {
+            Located::Found { path, .. } => path,
+            Located::BadOverride { path } => return Err(format!("the configured Docker path {path} does not exist.")),
+            Located::RefusedOverride { reason, .. } => return Err(reason),
+            Located::NotFound => {
+                return Err(
+                    "Docker was not found. Install Docker Desktop (https://docs.docker.com/desktop/) and configure a local image."
+                        .into(),
+                );
+            }
+        };
+        let client_spec = EnvironmentSpec {
+            inherit: DOCKER_CLIENT_ENV.iter().map(|s| s.to_string()).collect(),
+            set: Default::default(),
+        };
+        let temp = PathBuf::new();
+        let mut env = build_environment(
+            &client_spec,
+            &EnvContext {
+                host: &self.inner.host,
+                redactor: &self.inner.redactor,
+                temp_dir: &temp,
+                path_dirs: &[docker.parent().map(Path::to_path_buf).unwrap_or_default()],
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let temp_text = self.inner.probe_dir.display().to_string();
+        if cfg!(windows) {
+            env.insert("TEMP", temp_text.clone());
+            env.insert("TMP", temp_text);
+        } else {
+            env.insert("TMPDIR", temp_text);
+        }
+        docker::preflight(&docker, &image, &env, &self.inner.probe_dir)?;
+        let image_id = docker::helper(
+            &docker,
+            &["image", "inspect", "--format", "{{.Id}}", &image],
+            &env,
+            &self.inner.probe_dir,
+            Duration::from_secs(20),
+        )
+        .ok()
+        .filter(|o| o.code == Some(0))
+        .map(|o| o.stdout.trim().to_owned())
+        .filter(|id| !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == ':'));
+        Ok(RestrictedTarget { backend: docker::BACKEND.into(), image, image_id, docker: settings.docker.clone() })
     }
 
     /// Images present locally, for choosing the restricted-execution image.
