@@ -59,19 +59,7 @@ pub(crate) fn normalize_sha256(hash: &str) -> Option<String> {
 /// agent instructions), and no link or junction anywhere on the way.
 /// Returns the host path of the regular file.
 pub(crate) fn check_project_file(root: &Path, path: &WorkspacePath) -> Result<PathBuf, ResearchError> {
-    if exposition_graph::is_graph_storage(path) {
-        return Err(refused(path, "it is the project graph's own storage"));
-    }
-    // The graph's inclusion policy names what is never project content.
-    // Unrecognised or generated file types are still data a batch may read
-    // (any other exclusion fails closed, even if its wording changes).
-    if let Admission::Exclude(reason) = exposition_graph::classify(path)
-        && reason != "not a recognised project resource type"
-        && reason != "not a recognised research source type"
-        && reason != "a generated build or cache file"
-    {
-        return Err(refused(path, reason));
-    }
+    excluded(path, path)?;
     let mut current = root.to_path_buf();
     let parts: Vec<&str> = path.components().collect();
     for (i, part) in parts.iter().enumerate() {
@@ -90,7 +78,35 @@ pub(crate) fn check_project_file(root: &Path, path: &WorkspacePath) -> Result<Pa
             return Err(refused(path, "it is not a regular file"));
         }
     }
+    // The name the file system resolves (Windows short names such as
+    // `GRAPH~1.SQL` or other aliases) must pass the same policy.
+    let canonical = std::fs::canonicalize(&current).map_err(|e| ResearchError::io("resolving a declared input", e))?;
+    let relative = canonical
+        .strip_prefix(root)
+        .ok()
+        .map(|r| r.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/"))
+        .and_then(|r| WorkspacePath::parse(&r).ok())
+        .ok_or_else(|| refused(path, "it resolves outside the project"))?;
+    excluded(path, &relative)?;
     Ok(current)
+}
+
+/// Refuse `resolved` (the declared `path`, or what it resolves to) when the
+/// graph's inclusion policy says it is never project content. Unrecognised
+/// or generated file types are still data a batch may read (any other
+/// exclusion fails closed, even if its wording changes).
+fn excluded(path: &WorkspacePath, resolved: &WorkspacePath) -> Result<(), ResearchError> {
+    if exposition_graph::is_graph_storage(resolved) {
+        return Err(refused(path, "it is the project graph's own storage"));
+    }
+    if let Admission::Exclude(reason) = exposition_graph::classify(resolved)
+        && reason != "not a recognised project resource type"
+        && reason != "not a recognised research source type"
+        && reason != "a generated build or cache file"
+    {
+        return Err(refused(path, reason));
+    }
+    Ok(())
 }
 
 /// Copy `source` to `dest` (created new, never replacing anything), hashing
@@ -349,6 +365,31 @@ mod tests {
             let err =
                 stage(&root, &work, &request(BatchCode::Inline { source: String::new() }, vec![declared])).unwrap_err();
             assert_eq!(err.code(), "research.inputRefused", "{rel}: {err}");
+        }
+        // A Windows short name (here of the `.exposition` folder) resolves to
+        // the excluded long name.
+        #[cfg(windows)]
+        {
+            let declared = input(&root, ".exposition/graph.sqlite3", b"graph");
+            let out = std::process::Command::new("cmd").args(["/C", "dir", "/X", "/A"]).arg(&root).output().unwrap();
+            let listing = String::from_utf8_lossy(&out.stdout).to_string();
+            let short = listing
+                .lines()
+                .find(|l| l.trim_end().ends_with(" .exposition"))
+                .and_then(|l| l.split_whitespace().rev().nth(1).filter(|s| s.contains('~')).map(str::to_owned));
+            match short {
+                Some(short) => {
+                    let alias = BatchInput {
+                        path: WorkspacePath::parse(&format!("{short}/graph.sqlite3")).unwrap(),
+                        sha256: declared.sha256.clone(),
+                    };
+                    let err = stage(&root, &work, &request(BatchCode::Inline { source: String::new() }, vec![alias]))
+                        .unwrap_err();
+                    assert_eq!(err.code(), "research.inputRefused", "{short}: {err}");
+                    assert!(err.to_string().contains("graph"), "{err}");
+                }
+                None => eprintln!("SKIPPED short-name case: 8.3 names are disabled on this volume"),
+            }
         }
         // Earlier batch outputs (artifacts) may be inputs of later steps.
         let artifact = input(&root, ".exposition/artifacts/run-abc/table.csv", b"1\n");
