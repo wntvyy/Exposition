@@ -412,9 +412,17 @@ pub fn prepare(
         ));
     }
     let exists = |p: &WorkspacePath| exists_in(root, p);
+    // The same validation the save performs (composites resolve against the
+    // project's saved revisions).
+    let resolve = |wf: &WorkflowId, revision: u64| graph.service.workflow_definition(wf, revision);
     let validation = validate_workflow(
         &definition,
-        &ValidationContext { ceiling: Some(ceiling), file_exists: Some(&exists), ..Default::default() },
+        &ValidationContext {
+            ceiling: Some(ceiling),
+            file_exists: Some(&exists),
+            resolve_workflow: Some(&resolve),
+            workflow_id: id.as_ref(),
+        },
     );
     let forged: Vec<&exposition_graph::workflow::WorkflowDiagnostic> =
         validation.diagnostics.iter().filter(|d| d.rule == Some(6)).collect();
