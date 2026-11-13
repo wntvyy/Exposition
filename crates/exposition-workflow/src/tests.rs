@@ -48,6 +48,8 @@ struct Host {
     root: Mutex<Option<PathBuf>>,
     trusted: AtomicBool,
     image: Mutex<Option<String>>,
+    /// The configured image's identity as the engine reports it.
+    image_id: Mutex<Option<String>>,
     graph: Arc<GraphService>,
     /// Called whenever the runner asks for the open project.
     on_root: Mutex<Option<RootHook>>,
@@ -65,6 +67,9 @@ impl WorkflowHost for Host {
     }
     fn restricted(&self) -> (Option<String>, Option<String>) {
         (Some("docker".into()), self.image.lock().unwrap().clone())
+    }
+    fn restricted_image_id(&self) -> Option<String> {
+        self.image_id.lock().unwrap().clone()
     }
     fn workflow(
         &self,
@@ -106,6 +111,8 @@ struct FakeBatch {
     available: Mutex<Result<(), String>>,
     behavior: Mutex<Arc<BatchBehavior>>,
     requests: Mutex<Vec<BatchCall>>,
+    /// The image identity each batch was pinned to.
+    pinned: Mutex<Vec<Option<String>>>,
     calls: Arc<Calls>,
     counter: AtomicUsize,
 }
@@ -121,6 +128,7 @@ impl BatchRunner for FakeBatch {
         control: &BatchControl<'_>,
     ) -> Result<BatchResult, ResearchError> {
         self.calls.enter(format!("batch:{}", request.owner.step));
+        self.pinned.lock().unwrap().push(request.restricted_image_id.clone());
         self.requests.lock().unwrap().push((
             request.mode,
             request.code.clone(),
@@ -375,6 +383,7 @@ fn fixture() -> Fixture {
         available: Mutex::new(Ok(())),
         behavior: Mutex::new(default_behavior()),
         requests: Mutex::new(Vec::new()),
+        pinned: Mutex::new(Vec::new()),
         calls: calls.clone(),
         counter: AtomicUsize::new(1),
     });
@@ -384,6 +393,7 @@ fn fixture() -> Fixture {
         root: Mutex::new(Some(root.clone())),
         trusted: AtomicBool::new(true),
         image: Mutex::new(Some("python:3.13-slim".into())),
+        image_id: Mutex::new(Some(IMAGE_A.into())),
         graph: graph.clone(),
         on_root: Mutex::new(None),
     });
@@ -546,6 +556,8 @@ fn wait_for(flag: &AtomicBool) {
     }
     panic!("timed out");
 }
+
+const IMAGE_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 // ---------------------------------------------------------------- tests ----
 
@@ -757,6 +769,7 @@ fn a_crash_interrupts_the_run_and_nothing_is_replayed() {
         available: Mutex::new(Ok(())),
         behavior: Mutex::new(default_behavior()),
         requests: Mutex::new(Vec::new()),
+        pinned: Mutex::new(Vec::new()),
         calls: f.calls.clone(),
         counter: AtomicUsize::new(100),
     });
@@ -1402,6 +1415,52 @@ fn a_changed_restricted_image_refuses_later_restricted_steps() {
     let run = f.run_to_end(&id);
     assert_eq!(run.code.as_deref(), Some("workflow.restrictedUnavailable"), "{:?}", run.message);
     assert!(run.message.as_deref().unwrap().contains("someone/else:latest"));
+    assert_eq!(f.calls.log(), vec!["batch:a".to_owned()]);
+}
+
+#[test]
+fn the_plan_binds_the_restricted_image_identity_not_just_its_name() {
+    let f = fixture();
+    let id = f.save(numerical(false));
+    let plan = f.service.plan(&id, None).unwrap();
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    assert_eq!(plan.execution.restricted_image_id.as_deref(), Some(IMAGE_A));
+    // The same name now names another image (re-tagged or pulled): stale.
+    *f.host.image_id.lock().unwrap() = Some(format!("sha256:{}", "b".repeat(64)));
+    let err = f
+        .service
+        .start(&StartWorkflowRunRequest { plan: plan.plan.clone(), approval_hash: plan.approval_hash.clone() })
+        .unwrap_err();
+    assert_eq!(err.code, "workflow.planStale");
+    assert!(err.message.contains("is now a different image"), "{}", err.message);
+    assert!(f.calls.log().is_empty(), "nothing ran");
+    // A new plan binds the new identity, and the batch is pinned to it.
+    let plan = f.service.plan(&id, None).unwrap();
+    let run = f.service.start(&StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash }).unwrap();
+    assert!(f.service.wait_idle(Duration::from_secs(20)));
+    assert_eq!(f.service.get(&run.id).unwrap().state, WorkflowRunState::Succeeded);
+    let pinned = f.batch.pinned.lock().unwrap().clone();
+    assert_eq!(pinned, vec![Some(format!("sha256:{}", "b".repeat(64)))]);
+    // An identity Docker cannot report blocks a restricted plan (never native).
+    *f.host.image_id.lock().unwrap() = None;
+    let plan = f.service.plan(&id, None).unwrap();
+    assert!(plan.blockers.iter().any(|b| b.code == "workflow.restrictedUnavailable"), "{:?}", plan.blockers);
+}
+
+#[test]
+fn an_image_retagged_during_a_run_refuses_later_restricted_steps() {
+    let f = fixture();
+    let id = f.save(chain());
+    let host = f.host.clone();
+    f.set_behavior(Arc::new(move |r, req, _c, run| {
+        if req.owner.step == "a" {
+            *host.image_id.lock().unwrap() = Some(format!("sha256:{}", "c".repeat(64)));
+        }
+        Ok(succeeded(run, vec![artifact(r, run, "dataset", "dataset.csv", b"x\n", ArtifactKind::Data)]))
+    }));
+    let run = f.run_to_end(&id);
+    assert_eq!(run.code.as_deref(), Some("workflow.restrictedUnavailable"), "{:?}", run.message);
+    assert!(run.message.as_deref().unwrap().contains("not the image you approved"), "{:?}", run.message);
     assert_eq!(f.calls.log(), vec!["batch:a".to_owned()]);
 }
 

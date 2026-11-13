@@ -304,6 +304,7 @@ mod tests {
             outputs: Vec::new(),
             time_limit: Duration::from_secs(10),
             max_output_bytes: 1 << 20,
+            restricted_image_id: None,
         }
     }
 

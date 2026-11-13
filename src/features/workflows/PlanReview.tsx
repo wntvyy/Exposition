@@ -197,6 +197,12 @@ export function PlanDetails({ plan }: { plan: WorkflowRunPlan }) {
           {execution.restrictedBackend
             ? `Restricted backend ${execution.restrictedBackend}${execution.restrictedImage ? ` with image ${execution.restrictedImage}` : " (no image configured)"}`
             : "No restricted backend configured"}
+          {execution.restrictedImageId && (
+            <span data-testid="plan-image-id">
+              {" "}
+              (exactly the image <FullHash hash={execution.restrictedImageId} label="the approved image" />; a re-tagged or updated image is refused)
+            </span>
+          )}
           {" · "}
           {execution.trustedFolder ? "folder trusted for native execution" : "folder not trusted for native execution"}
           {execution.nativeSteps.length > 0 && ` · runs natively with your account's privileges: ${stepNames(execution.nativeSteps)}`}

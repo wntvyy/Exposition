@@ -122,6 +122,10 @@ impl StepAdapter for BatchAdapter {
             outputs,
             time_limit: request.time_limit,
             max_output_bytes: request.max_output_bytes,
+            restricted_image_id: match self.mode {
+                BatchMode::Restricted => request.restricted_image_id.clone(),
+                BatchMode::TrustedNative => None,
+            },
         };
         let dispatched =
             |id: &str| (control.on_dispatched)(&OperationRef { kind: "researchRun".into(), id: id.into() });

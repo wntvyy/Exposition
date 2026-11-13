@@ -375,7 +375,7 @@ mod tests {
         spec.working_directory = std::env::temp_dir().display().to_string();
         assert!(matches!(runner.run(&spec).outcome, JobOutcome::FailedToStart { .. }));
         spec.working_directory = dir.path().display().to_string();
-        spec.policy = ExecutionPolicy::Restricted { backend: "container".into() };
+        spec.policy = ExecutionPolicy::Restricted { backend: "container".into(), image_id: None };
         assert!(matches!(runner.run(&spec).outcome, JobOutcome::FailedToStart { .. }));
     }
 }

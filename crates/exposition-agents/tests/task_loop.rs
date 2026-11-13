@@ -561,7 +561,7 @@ async fn execution_requires_approval_or_restricted_backend_and_never_downgrades(
     req.execution = ExecutionMode::Restricted;
     run(&h, command_script(), req).await;
     let calls = services.calls.lock().unwrap().clone();
-    assert_eq!(calls[0].policy, ExecutionPolicy::Restricted { backend: "docker".into() });
+    assert_eq!(calls[0].policy, ExecutionPolicy::Restricted { backend: "docker".into(), image_id: None });
     assert_eq!(calls[0].args, vec!["-pdf", "main.tex"]);
 
     // Trusted native requires approval per launch; a decline never runs it.

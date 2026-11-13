@@ -484,7 +484,7 @@ impl AppToolServices {
 fn policy_label(policy: &ExecutionPolicy) -> String {
     match policy {
         ExecutionPolicy::TrustedNative => "trustedNative".to_owned(),
-        ExecutionPolicy::Restricted { backend } => format!("restricted:{backend}"),
+        ExecutionPolicy::Restricted { backend, .. } => format!("restricted:{backend}"),
     }
 }
 

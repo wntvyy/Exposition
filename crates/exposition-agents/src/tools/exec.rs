@@ -395,7 +395,7 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         (Launch::None, _) => None,
         (_, ExecutionMode::Disabled) => return Err(execution_disabled()),
         (_, ExecutionMode::Restricted) => match env.services.restricted_backend() {
-            Some(backend) => Some(ExecutionPolicy::Restricted { backend }),
+            Some(backend) => Some(ExecutionPolicy::Restricted { backend, image_id: None }),
             None => {
                 return Err(refusal(
                     codes::RESTRICTED_UNAVAILABLE,

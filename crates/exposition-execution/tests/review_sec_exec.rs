@@ -41,7 +41,7 @@ fn python_in_container(f: &Fixture, script: &str) -> JobSpec {
     let mut spec = f.spec(&[]);
     spec.program = "python3".into();
     spec.args = vec!["-c".into(), script.into()];
-    spec.policy = ExecutionPolicy::Restricted { backend: "docker".into() };
+    spec.policy = ExecutionPolicy::Restricted { backend: "docker".into(), image_id: None };
     spec.timeout_ms = Some(120_000);
     spec
 }
@@ -193,7 +193,7 @@ async fn review_sec_docker_missing_client_is_refused() {
     let mut spec = f.spec(&[]);
     spec.program = "python".into();
     spec.args = vec!["-c".into(), format!("open(r'{}', 'w').write('x')", marker.display())];
-    spec.policy = ExecutionPolicy::Restricted { backend: "docker".into() };
+    spec.policy = ExecutionPolicy::Restricted { backend: "docker".into(), image_id: None };
     let id = f.service.launch(spec);
     let result = f.service.wait(&id).await.unwrap();
     assert!(matches!(result.outcome, JobOutcome::FailedToStart { .. }), "{result:?}");

@@ -40,6 +40,9 @@ pub struct PlanFacts<'a> {
     pub trusted: bool,
     pub restricted_backend: Option<String>,
     pub restricted_image: Option<String>,
+    /// Resolves the configured image's identity (asked only when a step
+    /// runs in the restricted container).
+    pub restricted_image_id: &'a dyn Fn() -> Option<String>,
     pub adapters: &'a Adapters,
     pub active_run: bool,
 }
@@ -182,6 +185,7 @@ struct Approved<'a> {
 struct ApprovedExecution<'a> {
     restricted_backend: &'a Option<String>,
     restricted_image: &'a Option<String>,
+    restricted_image_id: &'a Option<String>,
     trusted_folder: Option<bool>,
     native_steps: &'a [String],
     model_steps: &'a [String],
@@ -221,6 +225,7 @@ pub fn approval_hash(plan: &WorkflowRunPlan, root: &Path) -> String {
         execution: ApprovedExecution {
             restricted_backend: &plan.execution.restricted_backend,
             restricted_image: &plan.execution.restricted_image,
+            restricted_image_id: &plan.execution.restricted_image_id,
             trusted_folder: (!plan.execution.native_steps.is_empty()).then_some(plan.execution.trusted_folder),
             native_steps: &plan.execution.native_steps,
             model_steps: &plan.execution.model_steps,
@@ -233,6 +238,14 @@ pub fn approval_hash(plan: &WorkflowRunPlan, root: &Path) -> String {
 pub struct BuiltPlan {
     pub plan: WorkflowRunPlan,
     pub outcomes: Vec<WorkflowRunOutcome>,
+}
+
+/// `sha256:0123456789ab` (or `unknown`) for messages.
+fn short_id(id: Option<&str>) -> String {
+    match id {
+        Some(id) => id.chars().take("sha256:".len() + 12).collect(),
+        None => "unknown".to_owned(),
+    }
 }
 
 fn blocker(code: &str, message: impl Into<String>, step: Option<&str>, input: Option<&str>) -> WorkflowPlanBlocker {
@@ -378,6 +391,7 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
     let execution = WorkflowPlanExecution {
         restricted_backend: facts.restricted_backend.clone().filter(|_| restricted),
         restricted_image: facts.restricted_image.clone().filter(|_| restricted),
+        restricted_image_id: if restricted { (facts.restricted_image_id)() } else { None },
         trusted_folder: facts.trusted,
         native_steps: native_steps.clone(),
         model_steps: model_steps.clone(),
@@ -422,6 +436,15 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
             "Evidence associations are only proposed; you accept or reject them after the run. They never assert that a formal declaration is equivalent to an informal statement."
                 .to_owned(),
         );
+    }
+    // A restricted plan binds the image's identity, not just its name.
+    if restricted && execution.restricted_image_id.is_none() && steps.iter().all(|s| s.available) {
+        blockers.push(blocker(
+            "workflow.restrictedUnavailable",
+            "The restricted image's identity could not be determined (Docker did not report it); restricted steps run only in an identified image. Nothing runs natively instead.",
+            None,
+            None,
+        ));
     }
     if facts.active_run {
         blockers.push(blocker(
@@ -501,6 +524,17 @@ pub fn describe_changes(approved: &WorkflowRunPlan, now: &WorkflowRunPlan) -> St
         } else {
             "the project folder is no longer trusted".to_owned()
         });
+    }
+    if approved.execution.restricted_image == now.execution.restricted_image
+        && approved.execution.restricted_backend == now.execution.restricted_backend
+        && approved.execution.restricted_image_id != now.execution.restricted_image_id
+    {
+        changes.push(format!(
+            "the restricted image {} is now a different image ({} → {})",
+            now.execution.restricted_image.as_deref().unwrap_or("none"),
+            short_id(approved.execution.restricted_image_id.as_deref()),
+            short_id(now.execution.restricted_image_id.as_deref())
+        ));
     }
     if approved.execution.restricted_image != now.execution.restricted_image
         || approved.execution.restricted_backend != now.execution.restricted_backend

@@ -38,6 +38,9 @@ pub trait WorkflowHost: Send + Sync {
     fn trusted(&self, root: &Path) -> bool;
     /// Configured restricted backend (`docker`) and image.
     fn restricted(&self) -> (Option<String>, Option<String>);
+    /// The configured image's identity (`sha256:…`) as the engine reports it
+    /// now; `None` when it cannot be determined.
+    fn restricted_image_id(&self) -> Option<String>;
     /// A saved revision (latest when `revision` is none) of a workflow of the
     /// project at `root`.
     fn workflow(&self, root: &Path, id: &WorkflowId, revision: Option<u64>) -> Result<SavedWorkflow, WorkflowRunError>;
@@ -248,6 +251,7 @@ impl WorkflowRunService {
             trusted: self.inner.host.trusted(root),
             restricted_backend,
             restricted_image,
+            restricted_image_id: &|| self.inner.host.restricted_image_id(),
             adapters: &self.inner.adapters,
             active_run: self.active_run(),
         };

@@ -101,6 +101,7 @@ fn request(mode: BatchMode, code: &str, inputs: Vec<BatchInput>, outputs: Vec<Ba
         outputs,
         time_limit: Duration::from_secs(120),
         max_output_bytes: 8 * 1024 * 1024,
+        restricted_image_id: None,
     }
 }
 

@@ -123,7 +123,10 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
             } else {
                 None
             };
-            let approved = (run.plan.execution.restricted_backend.clone(), run.plan.execution.restricted_image.clone());
+            let approved = (
+                (run.plan.execution.restricted_backend.clone(), run.plan.execution.restricted_image.clone()),
+                run.plan.execution.restricted_image_id.clone(),
+            );
             (problem, b.max_total_seconds.saturating_sub(elapsed), remaining_bytes, approved)
         };
         if let Some(problem) = budget_problem {
@@ -184,6 +187,7 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
             ));
             break;
         };
+        let (approved_restricted, approved_image_id) = approved_restricted;
         if planned.containment == Containment::RestrictedContainer && inner.host.restricted() != approved_restricted {
             let now = inner.host.restricted().1;
             stop = Some(refuse(
@@ -199,6 +203,26 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
                 &key,
             ));
             break;
+        }
+        // Same name, different image (re-tagged or pulled since approval).
+        if planned.containment == Containment::RestrictedContainer {
+            let now = inner.host.restricted_image_id();
+            if approved_image_id.is_none() || now != approved_image_id {
+                stop = Some(refuse(
+                    &cell,
+                    planned,
+                    "workflow.restrictedUnavailable",
+                    format!(
+                        "Not started: the restricted image {} is not the image you approved (approved {}, now {}); restricted steps run only in the approved image.",
+                        approved_restricted.1.as_deref().unwrap_or("none"),
+                        approved_image_id.as_deref().unwrap_or("unknown"),
+                        now.as_deref().unwrap_or("unknown")
+                    ),
+                    &inner,
+                    &key,
+                ));
+                break;
+            }
         }
         if let Err(reason) = adapter.availability(&root) {
             let code = if planned.containment == Containment::RestrictedContainer {
@@ -282,6 +306,7 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
             time_limit: Duration::from_secs(u64::from(planned.time_limit_seconds.min(remaining).max(1))),
             max_output_bytes: planned.max_output_bytes.min(remaining_bytes),
             model_requests_remaining,
+            restricted_image_id: approved_image_id.clone(),
         };
         // A panicking service must not leave the run active forever.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| adapter.run(&request, &control)))

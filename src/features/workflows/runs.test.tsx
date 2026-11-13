@@ -115,7 +115,7 @@ const plan = (overrides: Partial<WorkflowRunPlan> = {}): WorkflowRunPlan => ({
   ],
   ceiling: { execution: "restricted", modelRequests: true, retainResults: true, proposeChanges: false },
   budgets: { maxSteps: 10, maxTotalSeconds: 900, maxOutputBytes: 50 * 1024 * 1024, maxModelRequests: 4 },
-  execution: { restrictedBackend: "docker", restrictedImage: "python:3.13-slim", trustedFolder: false, nativeSteps: [], modelSteps: ["review"] },
+  execution: { restrictedBackend: "docker", restrictedImage: "python:3.13-slim", restrictedImageId: `sha256:${"e".repeat(64)}`, trustedFolder: false, nativeSteps: [], modelSteps: ["review"] },
   notices: ["Step Summarize sends the figure to the model provider."],
   blockers: [],
   approvalHash: "f".repeat(64),
@@ -179,6 +179,8 @@ describe("plan review", () => {
     const details = await screen.findByTestId("workflow-plan-details");
     expect(runIpc.plan).toHaveBeenCalledWith("wf-1", 3);
     expect(screen.getByTestId("plan-project").textContent).toBe("thesis");
+    // The restricted image is bound by identity, shown in full on hover.
+    expect(screen.getByTestId("plan-image-id").querySelector("[data-full]")!.getAttribute("data-full")).toBe("e".repeat(64));
     // Input: path, short hash with the full hash on hover, size, pinned.
     const input = screen.getByTestId("plan-input-data");
     expect(input.textContent).toContain("research/data/m.csv");

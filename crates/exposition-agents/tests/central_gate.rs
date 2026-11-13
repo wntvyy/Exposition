@@ -272,7 +272,7 @@ fn expect(
         }
         return match mode {
             ExecutionMode::Restricted => {
-                Expect::Allowed(Some(ExecutionPolicy::Restricted { backend: "docker".into() }))
+                Expect::Allowed(Some(ExecutionPolicy::Restricted { backend: "docker".into(), image_id: None }))
             }
             _ => Expect::Approval(Some(ExecutionPolicy::TrustedNative)),
         };

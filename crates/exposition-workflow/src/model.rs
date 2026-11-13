@@ -185,6 +185,9 @@ pub struct WorkflowPlanExecution {
     /// Restricted backend (`docker`) and its configured image, if any.
     pub restricted_backend: Option<String>,
     pub restricted_image: Option<String>,
+    /// The configured image's identity (`sha256:…`) when the plan was made;
+    /// restricted steps run only in exactly this image.
+    pub restricted_image_id: Option<String>,
     /// The project folder is trusted for native execution.
     pub trusted_folder: bool,
     /// Steps that run natively with the user's account privileges.

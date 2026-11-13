@@ -199,6 +199,8 @@ enum StdinMode {
 /// `Prepared.env`) is the docker client and its clean environment.
 struct DockerLaunch {
     image: String,
+    /// The image identity the job is pinned to (see [`ExecutionPolicy::Restricted`]).
+    pinned_id: Option<String>,
     container_env: Environment,
     /// Program and arguments inside the container.
     program: String,
@@ -1398,7 +1400,7 @@ impl Inner {
                 .map_err(|e| JobRefusal::new(RefusalCode::EnvironmentRefused, e.to_string()))?;
                 Ok(Prepared { program, args: spec.args.clone(), env, cwd, timeout, stdin, docker: None, trust_scope })
             }
-            ExecutionPolicy::Restricted { backend } => {
+            ExecutionPolicy::Restricted { backend, image_id } => {
                 if backend != docker::BACKEND {
                     return Err(JobRefusal::new(
                         RefusalCode::UnsupportedBackend,
@@ -1421,6 +1423,14 @@ impl Inner {
                 };
                 if let Err(reason) = docker::validate_image_reference(&image) {
                     return Err(unavailable(format!("the configured image is not valid: {reason}.")));
+                }
+                if let Some(id) = image_id
+                    && !docker::valid_image_id(id)
+                {
+                    return Err(JobRefusal::new(
+                        RefusalCode::RestrictedBackendUnavailable,
+                        "the job is pinned to an image identity that is not a `sha256:` image id; it was not run natively.",
+                    ));
                 }
                 let refuse = |path: &Path| self.override_problem(path);
                 let docker_path = match (Locator {
@@ -1477,6 +1487,7 @@ impl Inner {
                     stdin,
                     docker: Some(DockerLaunch {
                         image,
+                        pinned_id: image_id.clone(),
                         container_env,
                         program: spec.program.clone(),
                         args: spec.args.clone(),
@@ -1725,6 +1736,23 @@ impl Inner {
                     format!("restricted execution is unavailable: {message} The job was not run natively."),
                 );
             }
+            // A pinned job runs only while the configured image still has the
+            // pinned identity, and the container starts from that identity.
+            if let Some(pinned) = &launch.pinned_id {
+                let current = docker::image_id(&docker_path, &launch.image, &client_env, &self.probe_dir);
+                if current.as_deref() != Some(pinned.as_str()) {
+                    return fail(
+                        self,
+                        &mut session,
+                        RefusalCode::RestrictedBackendUnavailable,
+                        format!(
+                            "restricted execution is unavailable: the configured image `{}` is now {} but this job may run only in {pinned}. The job was not run natively.",
+                            launch.image,
+                            current.as_deref().unwrap_or("of unknown identity")
+                        ),
+                    );
+                }
+            }
             let out_dir = docker::out_dir(&job_dir);
             let env_file = job_dir.join("container.env");
             // A batch job's input is a read-only file in the container: its
@@ -1757,7 +1785,7 @@ impl Inner {
             prepared.args = docker::run_args(&docker::RunPlan {
                 job_id: &job.id.0,
                 instance: &self.instance,
-                image: &launch.image,
+                image: launch.pinned_id.as_deref().unwrap_or(&launch.image),
                 settings: &self.settings.get().docker,
                 mount_root: &launch.mount_root,
                 workdir_components: launch.workdir_components,

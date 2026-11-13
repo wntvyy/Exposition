@@ -484,7 +484,7 @@ async fn restricted_backend_unavailable_is_refused_without_native_fallback() {
         // If this ever ran natively, testproc would print; a container would
         // resolve the program inside the image instead.
         spec.program = testproc();
-        spec.policy = ExecutionPolicy::Restricted { backend: "docker".into() };
+        spec.policy = ExecutionPolicy::Restricted { backend: "docker".into(), image_id: None };
         spec
     };
     let id = f.service.launch(restricted(&f));
@@ -496,7 +496,7 @@ async fn restricted_backend_unavailable_is_refused_without_native_fallback() {
 
     // (b) Unknown backend.
     let mut spec = restricted(&f);
-    spec.policy = ExecutionPolicy::Restricted { backend: "firejail".into() };
+    spec.policy = ExecutionPolicy::Restricted { backend: "firejail".into(), image_id: None };
     let id = f.service.launch(spec);
     f.service.wait(&id).await.unwrap();
     assert_eq!(refusal(&f, &id), RefusalCode::UnsupportedBackend);

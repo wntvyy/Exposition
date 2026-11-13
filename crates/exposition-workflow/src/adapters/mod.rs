@@ -51,6 +51,8 @@ pub struct StepRequest<'a> {
     pub max_output_bytes: u64,
     /// Model requests the run may still make (model steps).
     pub model_requests_remaining: u32,
+    /// The restricted image identity the run's plan was approved for.
+    pub restricted_image_id: Option<String>,
 }
 
 impl StepRequest<'_> {

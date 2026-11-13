@@ -381,6 +381,22 @@ pub fn helper(
     }
 }
 
+/// Whether `id` is an engine image identity (`sha256:` + 64 lowercase hex).
+pub fn valid_image_id(id: &str) -> bool {
+    id.strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
+/// The identity (`sha256:…`) of a locally present image, or `None` when the
+/// engine cannot say.
+pub fn image_id(docker: &Path, image: &str, env: &Environment, cwd: &Path) -> Option<String> {
+    helper(docker, &["image", "inspect", "--format", "{{.Id}}", image], env, cwd, Duration::from_secs(20))
+        .ok()
+        .filter(|o| o.code == Some(0))
+        .map(|o| o.stdout.trim().to_owned())
+        .filter(|id| valid_image_id(id))
+}
+
 /// Check that the engine is reachable and the image is present locally.
 pub fn preflight(docker: &Path, image: &str, env: &Environment, cwd: &Path) -> Result<(), String> {
     let out = helper(docker, &["image", "inspect", "--format", "{{.Id}}", image], env, cwd, Duration::from_secs(20))?;

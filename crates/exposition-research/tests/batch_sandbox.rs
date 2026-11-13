@@ -97,6 +97,7 @@ fn request(mode: BatchMode, code: &str, inputs: Vec<BatchInput>, outputs: Vec<Ba
         outputs,
         time_limit: Duration::from_secs(120),
         max_output_bytes: 8 * 1024 * 1024,
+        restricted_image_id: None,
     }
 }
 
@@ -651,4 +652,39 @@ fn trusted_native_time_limit_and_cancel_stop_the_process() {
     let (result, _) = run(&f, &req, Some(Duration::from_secs(2)));
     assert_eq!(result.unwrap().status, RunStatus::Canceled);
     assert!(started.elapsed() < Duration::from_secs(60), "{:?}", started.elapsed());
+}
+
+/// A batch approved for one image identity runs only in that image (R-m8-F1).
+#[test]
+#[ignore = "needs Docker Desktop and the local image python:3.13-slim; run with EXPOSITION_DOCKER_TESTS=1 -- --ignored"]
+fn restricted_batch_runs_only_in_the_approved_image_identity() {
+    if !docker_enabled() {
+        return;
+    }
+    let f = fixture_with(Some(IMAGE), false);
+    let out = std::process::Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", IMAGE])
+        .output()
+        .expect("docker image inspect");
+    let actual = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    assert!(actual.starts_with("sha256:"), "{actual}");
+    let code = "import os\nopen(os.path.join(os.environ['EXPOSITION_OUTPUT_DIR'], 'out.txt'), 'w').write('ran')\n";
+    // Approved for another image under the same name: refused, nothing runs.
+    let mut req = request(BatchMode::Restricted, code, Vec::new(), vec![port("dataset", &["txt"])]);
+    req.restricted_image_id = Some(format!("sha256:{}", "0".repeat(64)));
+    let (result, dispatched) = run(&f, &req, None);
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), "research.imageChanged", "{err}");
+    assert!(dispatched.is_none(), "nothing was dispatched");
+    // Approved for the image the name has now: runs, recorded with that identity.
+    req.restricted_image_id = Some(actual.clone());
+    let (result, _) = run(&f, &req, None);
+    let result = result.unwrap();
+    assert_eq!(result.status, RunStatus::Succeeded, "{}", result.log);
+    let manifest = f.research.run_manifest(&result.research_run).unwrap();
+    match manifest.execution.as_ref().unwrap() {
+        RunExecution::RestrictedContainer { image_id, .. } => assert_eq!(image_id.as_deref(), Some(actual.as_str())),
+        other => panic!("{other:?}"),
+    }
+    assert_clean(&f);
 }

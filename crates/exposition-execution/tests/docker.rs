@@ -52,7 +52,7 @@ fn node(f: &Fixture, script: &str) -> JobSpec {
     let mut spec = f.spec(&[]);
     spec.program = "node".into();
     spec.args = vec!["-e".into(), script.into()];
-    spec.policy = ExecutionPolicy::Restricted { backend: "docker".into() };
+    spec.policy = ExecutionPolicy::Restricted { backend: "docker".into(), image_id: None };
     spec.timeout_ms = Some(120_000);
     spec
 }
@@ -365,4 +365,44 @@ async fn docker_job_input_is_removed_on_every_outcome() {
     let id = f.service.launch(with_input("setInterval(() => console.log('tick'), 200)", 6_000));
     assert_eq!(f.service.wait(&id).await.unwrap().outcome, JobOutcome::TimedOut);
     assert!(!input_of(&id).exists(), "timed out: input removed");
+}
+
+/// A job pinned to an image identity runs only while the configured image has
+/// that identity, and then starts from it (R-m8-F1).
+#[tokio::test(flavor = "multi_thread")]
+async fn docker_pinned_image_identity_is_enforced() {
+    let Some(image) = image() else { return };
+    let f = docker_fixture(&image);
+    let out = std::process::Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", &image])
+        .output()
+        .expect("docker image inspect");
+    let actual = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    assert!(actual.starts_with("sha256:"), "{actual}");
+
+    // The configured image's identity: runs.
+    let mut spec = node(&f, "console.log('pinned ok')");
+    spec.policy = ExecutionPolicy::Restricted { backend: "docker".into(), image_id: Some(actual.clone()) };
+    let id = f.service.launch(spec);
+    let result = f.service.wait(&id).await.unwrap();
+    assert_eq!(result.outcome, JobOutcome::Exited { code: 0 }, "{}", f.stdout(&id));
+    assert!(f.stdout(&id).contains("pinned ok"));
+
+    // Another identity: refused before any container starts, never native.
+    let other = format!("sha256:{}", "0".repeat(64));
+    let mut spec = node(&f, "console.log('must not run')");
+    spec.policy = ExecutionPolicy::Restricted { backend: "docker".into(), image_id: Some(other) };
+    let id = f.service.launch(spec);
+    let result = f.service.wait(&id).await.unwrap();
+    assert!(matches!(result.outcome, JobOutcome::FailedToStart { .. }), "{:?}", result.outcome);
+    assert_eq!(f.service.summary(&id).unwrap().refusal.unwrap().code, RefusalCode::RestrictedBackendUnavailable);
+    assert!(!f.stdout(&id).contains("must not run"));
+    assert!(!container_listed(&id.0));
+
+    // Not an image identity at all: refused.
+    let mut spec = node(&f, "console.log('must not run')");
+    spec.policy = ExecutionPolicy::Restricted { backend: "docker".into(), image_id: Some(image.clone()) };
+    let id = f.service.launch(spec);
+    let result = f.service.wait(&id).await.unwrap();
+    assert!(matches!(result.outcome, JobOutcome::FailedToStart { .. }), "{:?}", result.outcome);
 }

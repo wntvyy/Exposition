@@ -63,6 +63,11 @@ impl WorkflowHost for AppWorkflowHost {
         (Some("docker".to_owned()), self.execution.settings().docker.image)
     }
 
+    fn restricted_image_id(&self) -> Option<String> {
+        // The engine's identity of the configured image (never pulls).
+        self.execution.restricted_preflight().ok().and_then(|t| t.image_id)
+    }
+
     fn workflow(&self, root: &Path, id: &WorkflowId, revision: Option<u64>) -> Result<SavedWorkflow, WorkflowRunError> {
         if self.graph.root().as_deref() != Some(root) {
             return Err(WorkflowRunError::new(

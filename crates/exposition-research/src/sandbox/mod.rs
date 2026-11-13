@@ -270,7 +270,7 @@ impl ScopedBatchRunner {
     ) -> JobSpec {
         let timeout_ms = u64::try_from(request.time_limit.as_millis()).unwrap_or(u64::MAX).max(1);
         match target {
-            Target::Restricted(_) => {
+            Target::Restricted(t) => {
                 let mut set = BTreeMap::new();
                 set.insert(OUTPUT_DIR_VAR.to_owned(), CONTAINER_OUT.to_owned());
                 set.insert("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned());
@@ -284,7 +284,12 @@ impl ScopedBatchRunner {
                     args: vec![entry.to_owned()],
                     environment: EnvironmentSpec { inherit: Vec::new(), set },
                     working_directory: work.display().to_string(),
-                    policy: ExecutionPolicy::Restricted { backend: exposition_execution::docker::BACKEND.into() },
+                    // Pinned to the identity checked above (or seen by the
+                    // preflight), so the container is the one recorded.
+                    policy: ExecutionPolicy::Restricted {
+                        backend: exposition_execution::docker::BACKEND.into(),
+                        image_id: request.restricted_image_id.clone().or_else(|| t.image_id.clone()),
+                    },
                     timeout_ms: Some(timeout_ms),
                     log_limit_bytes: Some(JOB_LOG_LIMIT),
                     stdin: None,
@@ -410,6 +415,18 @@ impl ScopedBatchRunner {
         let root = self.current_project(root)?;
         Self::validate_request(request)?;
         let target = self.target(&root, request.mode)?;
+        if let (Target::Restricted(t), Some(expected)) = (&target, &request.restricted_image_id)
+            && t.image_id.as_ref() != Some(expected)
+        {
+            return Err(ResearchError::coded(
+                "research.imageChanged",
+                format!(
+                    "The restricted image changed: `{}` is now {}, but this batch was approved for {expected}. Nothing was run, and nothing runs natively instead.",
+                    t.image,
+                    t.image_id.as_deref().unwrap_or("of unknown identity")
+                ),
+            ));
+        }
         if (control.canceled)() {
             return Err(canceled_before_start());
         }

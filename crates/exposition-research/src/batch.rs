@@ -91,6 +91,11 @@ pub struct BatchRequest {
     pub outputs: Vec<BatchPort>,
     pub time_limit: Duration,
     pub max_output_bytes: u64,
+    /// Restricted mode: the image identity (`sha256:…`) the batch was approved
+    /// for. The batch is refused unless the configured image still has it, and
+    /// the container starts from it. `None` runs whatever the configured image
+    /// is when the batch starts (its identity is recorded either way).
+    pub restricted_image_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

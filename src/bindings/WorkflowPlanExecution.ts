@@ -9,6 +9,11 @@ export type WorkflowPlanExecution = {
  */
 restrictedBackend: string | null, restrictedImage: string | null, 
 /**
+ * The configured image's identity (`sha256:…`) when the plan was made;
+ * restricted steps run only in exactly this image.
+ */
+restrictedImageId: string | null, 
+/**
  * The project folder is trusted for native execution.
  */
 trustedFolder: boolean, 

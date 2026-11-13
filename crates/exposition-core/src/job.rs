@@ -25,7 +25,15 @@ pub enum ExecutionPolicy {
     TrustedNative,
     /// Runs inside a tested OS/container isolation backend. If the backend is
     /// unavailable the job is refused; it is never downgraded to native.
-    Restricted { backend: String },
+    Restricted {
+        backend: String,
+        /// Pin the job to this exact image identity (`sha256:…`). The job is
+        /// refused unless the configured image currently has this identity,
+        /// and the container is started from the identity, not the tag.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        image_id: Option<String>,
+    },
 }
 
 /// The environment a child receives. Nothing is inherited implicitly: only the

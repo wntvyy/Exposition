@@ -3,4 +3,10 @@
 /**
  * Where and how a process may run.
  */
-export type ExecutionPolicy = { "kind": "trustedNative" } | { "kind": "restricted", backend: string, };
+export type ExecutionPolicy = { "kind": "trustedNative" } | { "kind": "restricted", backend: string, 
+/**
+ * Pin the job to this exact image identity (`sha256:…`). The job is
+ * refused unless the configured image currently has this identity,
+ * and the container is started from the identity, not the tag.
+ */
+imageId?: string, };
