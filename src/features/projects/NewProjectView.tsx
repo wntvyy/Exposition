@@ -189,7 +189,7 @@ function Preview() {
               ))}
               {s.workflows.map((w) => (
                 <li key={w.title}>
-                  Workflow draft “{w.title}” — {w.wellFormed ? "well formed" : `incomplete (${w.errors})`}, not runnable in this version
+                  Workflow draft “{w.title}” — {w.wellFormed ? "well formed" : `incomplete (${w.errors})`}; nothing runs until you review its plan and start it
                 </li>
               ))}
               {!s.research && s.entities.length === 0 && s.workflows.length === 0 && (
@@ -286,7 +286,7 @@ function PresetForm() {
         )}
         {preset.workflow && (
           <Checkbox isSelected={includeWorkflow} onChange={(v) => setOptions({ includeWorkflow: v })}>
-            Include a {preset.workflow === "formalAudit" ? "Formal audit" : "Numerical experiment"} workflow draft (saved, not runnable in this version)
+            Include a {preset.workflow === "formalAudit" ? "Formal audit" : "Numerical experiment"} workflow draft (saved; nothing runs until you review and start it)
           </Checkbox>
         )}
       </div>

@@ -275,7 +275,7 @@ function describeCreated(created: ProjectCreated): string {
   const entities = created.applied.entities.length;
   const drafts = created.applied.workflows.length;
   const parts = [`${files} file${files === 1 ? "" : "s"}`, `${entities} project entit${entities === 1 ? "y" : "ies"}`];
-  if (drafts) parts.push(`${drafts} workflow draft${drafts === 1 ? "" : "s"} (not runnable in this version)`);
+  if (drafts) parts.push(`${drafts} workflow draft${drafts === 1 ? "" : "s"} (nothing runs until you review and start it)`);
   const trust = created.trustedVia
     ? `It lies inside the trusted folder ${created.trustedVia}; nothing was run.`
     : "Nothing was trusted or run.";

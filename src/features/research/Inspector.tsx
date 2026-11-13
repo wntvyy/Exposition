@@ -354,7 +354,7 @@ function WorkflowInspector({ entity }: { entity: EntityId }) {
         <EmptyState
           fill={false}
           title="The workflow editor is not available"
-          description="Saved workflow definitions are listed here read-only. Running workflows is not part of this release."
+          description="Saved workflow definitions are listed here read-only."
         />
       )}
       <GraphDependencies entity={entity} revision={listing?.graphRevision} />

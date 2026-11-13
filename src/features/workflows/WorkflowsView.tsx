@@ -1,5 +1,6 @@
-// Workflow drafts of the open project (editor tab `workflows:`): saved drafts,
-// new drafts from the workflow presets, and strict imports. Nothing here runs.
+// Workflows of the open project (editor tab `workflows:`): saved drafts, new
+// drafts from the workflow presets, strict imports, and recent runs. Nothing
+// here starts a run: a run starts only from a reviewed plan in the editor.
 import { FileUp, Plus } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
@@ -8,11 +9,12 @@ import type { EditorProps } from "../../app/registry";
 import type { WorkflowPresetInfo } from "../../bindings/WorkflowPresetInfo";
 import type { WorkflowSummary } from "../../bindings/WorkflowSummary";
 import { errorMessage } from "../../lib/ipc";
-import { Banner, Button, EmptyState, ErrorState, StatusPill } from "../../ui/components";
+import { Badge, Banner, Button, EmptyState, ErrorState, StatusPill } from "../../ui/components";
 import { useWorkspace } from "../workspace/store";
 import { workflowCommands } from "./ipc";
 import { workflowKey } from "./model";
 import { importDraft, newDraftFromPreset } from "./actions";
+import { RunHistory } from "./RunView";
 
 export function WorkflowsView(_props: EditorProps) {
   const [drafts, setDrafts] = useState<WorkflowSummary[] | null>(null);
@@ -43,8 +45,11 @@ export function WorkflowsView(_props: EditorProps) {
       <div className="xp-wf__page">
         <header className="xp-wf__header">
           <div className="xp-wf__grow">
-            <h2 className="xp-wf__title">Workflow drafts</h2>
-            <p className="xp-wf__muted">Saved procedures for this project. Drafts are validated against the strict workflow contract; running them arrives in a later version.</p>
+            <h2 className="xp-wf__title">Workflows</h2>
+            <p className="xp-wf__muted">
+              Saved procedures for this project, validated against the strict workflow contract. A saved, well-formed revision runs only
+              after you review its full plan and press Start run; saving, importing, or an agent proposal never runs anything.
+            </p>
           </div>
         </header>
         <section className="xp-wf__group" aria-label="New draft">
@@ -73,15 +78,23 @@ export function WorkflowsView(_props: EditorProps) {
                   <strong>{d.title}</strong>
                   <p className="xp-wf__muted">
                     Revision {d.revision}
-                    {d.imported ? " · imported" : ""} · not runnable in this version
+                    {d.imported ? " · imported" : ""} · {d.runnable ? "can be reviewed and run" : "cannot run yet"}
                   </p>
                 </div>
+                {d.origin.kind === "agent" && (
+                  <Badge tone="accent" dashed title={`Proposed by agent task ${d.origin.taskId}; review it before running`}>
+                    Agent proposal
+                  </Badge>
+                )}
                 <StatusPill status={d.state === "wellFormed" ? "idle" : "warning"} label={d.state === "wellFormed" ? "Well-formed draft" : "Incomplete draft"} />
-                <Button onPress={() => editors.open({ key: workflowKey(d.id), title: d.title })}>Open</Button>
+                <Button onPress={() => editors.open({ key: workflowKey(d.id), title: d.title })} data-testid={`workflow-open-${d.id}`}>
+                  Open
+                </Button>
               </li>
             ))}
           </ul>
         </section>
+        <RunHistory workflow={null} title="Recent runs" />
         <section className="xp-wf__group" aria-label="Import">
           <h3 className="xp-wf__group-title">Import a definition</h3>
           <p className="xp-wf__muted">Paste an exposition.workflow/1 definition. It is checked strictly, saved as a new draft with a new identity, never trusted, and never run.</p>

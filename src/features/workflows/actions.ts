@@ -32,8 +32,10 @@ export async function newDraftFromPreset(preset: string): Promise<string | null>
       title: `${saved.definition.title} draft saved`,
       body:
         saved.validation.state === "wellFormed"
-          ? "Well formed. Not runnable in this version."
-          : `Incomplete (${saved.validation.errors} problem${saved.validation.errors === 1 ? "" : "s"}): finish it in the editor. Not runnable in this version.`,
+          ? saved.validation.runnable
+            ? "Well formed. Nothing runs until you review its plan and start it."
+            : `Well formed. ${saved.validation.runnableReason}`
+          : `Incomplete (${saved.validation.errors} problem${saved.validation.errors === 1 ? "" : "s"}): finish it in the editor. Nothing runs until you review its plan and start it.`,
     });
     return saved.id;
   } catch (error) {
