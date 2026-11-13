@@ -267,6 +267,25 @@ pub struct WorkflowPlanExecution {
     pub native_steps: Vec<String>,
     /// Steps that send material to the model provider.
     pub model_steps: Vec<String>,
+    /// Restricted runners with their own image (R and Julia batches): the
+    /// image each runs in and its identity, bound exactly like the default
+    /// image. `None` when no step uses one (such plans hash as before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runner_images: Option<Vec<WorkflowRunnerImage>>,
+}
+
+/// The image of a restricted runner that does not run in the default
+/// restricted image (R and Julia batches each have their own).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunnerImage {
+    pub runner: String,
+    pub image: String,
+    /// `sha256:…` when the plan was made; the runner's steps run only in
+    /// exactly this image.
+    pub image_id: Option<String>,
 }
 
 /// A reviewable run plan. Starting it requires its `approval_hash`.

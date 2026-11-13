@@ -23,11 +23,96 @@ pub struct DockerSettings {
     pub pids_limit: u32,
     /// Non-root `uid:gid` the container process runs as.
     pub user: String,
+    /// Image for restricted R workflow batches (`Rscript` on the image's
+    /// standard `PATH`). Present locally, never pulled; unset: restricted R
+    /// batches are refused (never run natively instead).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub r_image: Option<String>,
+    /// Image for restricted Julia workflow batches (`julia` on the standard
+    /// `PATH` or in `/usr/local/julia/bin`, the official image's layout).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub julia_image: Option<String>,
 }
 
 impl Default for DockerSettings {
     fn default() -> Self {
-        Self { image: None, memory: "2g".into(), cpus: "2".into(), pids_limit: 256, user: "65534:65534".into() }
+        Self {
+            image: None,
+            memory: "2g".into(),
+            cpus: "2".into(),
+            pids_limit: 256,
+            user: "65534:65534".into(),
+            r_image: None,
+            julia_image: None,
+        }
+    }
+}
+
+/// A language whose restricted jobs run in their own configured image
+/// (R and Julia workflow batches). Python batches and agent commands use
+/// [`DockerSettings::image`]. The same containment applies to every image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum RestrictedLanguage {
+    R,
+    Julia,
+}
+
+impl RestrictedLanguage {
+    pub fn title(self) -> &'static str {
+        match self {
+            RestrictedLanguage::R => "R",
+            RestrictedLanguage::Julia => "Julia",
+        }
+    }
+
+    /// The settings key naming this language's image.
+    pub fn setting(self) -> &'static str {
+        match self {
+            RestrictedLanguage::R => "execution.docker.rImage",
+            RestrictedLanguage::Julia => "execution.docker.juliaImage",
+        }
+    }
+
+    /// What the image must provide.
+    pub fn requirement(self) -> &'static str {
+        match self {
+            RestrictedLanguage::R => "Rscript",
+            RestrictedLanguage::Julia => "julia",
+        }
+    }
+}
+
+impl DockerSettings {
+    /// The configured image of `language`'s restricted jobs (`None`: the
+    /// default restricted image).
+    pub fn image_for(&self, language: Option<RestrictedLanguage>) -> Option<&str> {
+        match language {
+            None => self.image.as_deref(),
+            Some(RestrictedLanguage::R) => self.r_image.as_deref(),
+            Some(RestrictedLanguage::Julia) => self.julia_image.as_deref(),
+        }
+    }
+
+    /// Whether any restricted image is configured.
+    pub fn any_image(&self) -> bool {
+        self.image.is_some() || self.r_image.is_some() || self.julia_image.is_some()
+    }
+
+    /// Why no image is configured for `language`'s restricted jobs.
+    pub fn missing_image_message(language: Option<RestrictedLanguage>) -> String {
+        match language {
+            None => "no container image is configured. Set execution.docker.image to an image present locally (`docker image ls`).".into(),
+            Some(l) => format!(
+                "no restricted {} image is configured. Set {} to a local image that provides {} (`docker image ls`); Exposition never pulls images.",
+                l.title(),
+                l.setting(),
+                l.requirement()
+            ),
+        }
     }
 }
 
@@ -52,6 +137,9 @@ pub enum ExecutionSettingsChange {
     /// Set (`Some`, a Docker image reference already present locally) or clear
     /// the restricted-execution image.
     DockerImage { image: Option<String> },
+    /// Set (`Some`, a Docker image reference already present locally) or clear
+    /// the restricted image of one language's workflow batches (R, Julia).
+    LanguageImage { language: RestrictedLanguage, image: Option<String> },
     /// Set (`Some`, an absolute path to an existing executable) or clear
     /// (`None`, back to discovery) the location of a catalog tool.
     ToolPath { tool: String, path: Option<String> },
@@ -558,5 +646,43 @@ mod tests {
         assert_eq!(change, ExecutionSettingsChange::DockerImage { image: Some("python:3.13-slim".into()) });
         // Container limits and the user cannot be changed through this type.
         assert!(serde_json::from_str::<ExecutionSettingsChange>(r#"{"kind":"dockerUser","user":"0:0"}"#).is_err());
+        let change: ExecutionSettingsChange =
+            serde_json::from_str(r#"{"kind":"languageImage","language":"julia","image":"julia:1.11"}"#).unwrap();
+        assert_eq!(
+            change,
+            ExecutionSettingsChange::LanguageImage {
+                language: RestrictedLanguage::Julia,
+                image: Some("julia:1.11".into())
+            }
+        );
+        // Only R and Julia have their own image (Python uses `dockerImage`).
+        assert!(
+            serde_json::from_str::<ExecutionSettingsChange>(
+                r#"{"kind":"languageImage","language":"python","image":"python:3.13-slim"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn language_images_are_separate_settings_and_absent_when_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        store.update(|s| s.docker.image = Some("python:3.13-slim".into())).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("rImage") && !text.contains("juliaImage"),
+            "unset language images are not written: {text}"
+        );
+        store.update(|s| s.docker.r_image = Some("r-base:4.4.2".into())).unwrap();
+        let reloaded = SettingsStore::load(path).get().docker;
+        assert_eq!(reloaded.image_for(None), Some("python:3.13-slim"));
+        assert_eq!(reloaded.image_for(Some(RestrictedLanguage::R)), Some("r-base:4.4.2"));
+        assert_eq!(reloaded.image_for(Some(RestrictedLanguage::Julia)), None, "never the Python image");
+        assert!(reloaded.any_image());
+        assert!(!DockerSettings::default().any_image());
+        let missing = DockerSettings::missing_image_message(Some(RestrictedLanguage::Julia));
+        assert!(missing.contains("execution.docker.juliaImage") && missing.contains("never pulls"), "{missing}");
     }
 }

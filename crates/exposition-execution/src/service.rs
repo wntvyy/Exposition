@@ -23,8 +23,8 @@ use crate::log::{DEFAULT_LOG_LIMIT, OutputPage, RingLog, StreamCapture, page};
 use crate::paths::{PathError, RootKind, Roots, canonical_directory, canonicalize, is_within};
 use crate::process::{Containment, outcome_from_status, spawn_contained};
 use crate::settings::{
-    ExecutionSettings, ExecutionSettingsChange, ExecutionSettingsState, SettingsError, SettingsStore,
-    check_tool_override,
+    DockerSettings, ExecutionSettings, ExecutionSettingsChange, ExecutionSettingsState, RestrictedLanguage,
+    SettingsError, SettingsStore, check_tool_override,
 };
 use crate::toolchains::{
     Located, Locator, TOOLS, ToolStatus, ToolchainInfo, interpret_probe, is_executable_file, tool,
@@ -583,6 +583,20 @@ impl ExecutionService {
                 };
                 self.update_settings(|s| s.docker.image = image).map_err(io)?;
             }
+            ExecutionSettingsChange::LanguageImage { language, image } => {
+                let image = match image.as_deref().map(str::trim) {
+                    None | Some("") => None,
+                    Some(image) => {
+                        docker::validate_image_reference(image).map_err(SettingsError::InvalidImage)?;
+                        Some(image.to_owned())
+                    }
+                };
+                self.update_settings(|s| match language {
+                    RestrictedLanguage::R => s.docker.r_image = image,
+                    RestrictedLanguage::Julia => s.docker.julia_image = image,
+                })
+                .map_err(io)?;
+            }
             ExecutionSettingsChange::ToolPath { tool: id, path } => {
                 if tool(&id).is_none_or(|t| t.component_of.is_some()) {
                     return Err(SettingsError::UnknownTool(id));
@@ -638,7 +652,7 @@ impl ExecutionService {
     /// container image is configured (no restricted job can have run).
     pub fn sweep_stale_containers(&self) -> Result<usize, String> {
         let settings = self.inner.settings.get();
-        if settings.docker.image.is_none() {
+        if !settings.docker.any_image() {
             return Ok(0);
         }
         // The same tool-location rule as every other use: a configured Docker
@@ -687,12 +701,16 @@ impl ExecutionService {
     /// reachable. Runs `docker image inspect` (never pulls). Used by owners
     /// that must refuse early and record the actual container image.
     pub fn restricted_preflight(&self) -> Result<RestrictedTarget, String> {
+        self.restricted_preflight_for(None)
+    }
+
+    /// [`Self::restricted_preflight`] for the image of `language`'s
+    /// restricted jobs (`None`: the default image). A language without a
+    /// configured image is unavailable; the default image never stands in.
+    pub fn restricted_preflight_for(&self, language: Option<RestrictedLanguage>) -> Result<RestrictedTarget, String> {
         let settings = self.inner.settings.get();
-        let Some(image) = settings.docker.image.clone() else {
-            return Err(
-                "no container image is configured. Set execution.docker.image to an image present locally (`docker image ls`)."
-                    .into(),
-            );
+        let Some(image) = settings.docker.image_for(language).map(str::to_owned) else {
+            return Err(DockerSettings::missing_image_message(language));
         };
         docker::validate_image_reference(&image)
             .map_err(|reason| format!("the configured image is not valid: {reason}."))?;
@@ -825,6 +843,15 @@ impl ExecutionService {
         self.submit(spec, JobKind::Batch)
     }
 
+    /// Submit a restricted batch job that runs in the configured image of
+    /// `language` (R or Julia workflow batches), with the same containment
+    /// as every restricted job. Refused (`FailedToStart`) when that image is
+    /// not configured or not present, or when `spec` is not restricted:
+    /// never another image, never native execution.
+    pub fn launch_restricted_language(&self, spec: JobSpec, language: RestrictedLanguage) -> JobId {
+        self.submit_in(spec, JobKind::Batch, Some(language))
+    }
+
     /// Submit a fixed application command that touches no project content
     /// (version probes, diagnostics). Allowed without workspace trust, but only
     /// with a working directory in an application-owned directory that is not
@@ -903,7 +930,13 @@ impl ExecutionService {
     }
 
     fn submit(&self, spec: JobSpec, kind: JobKind) -> JobId {
-        match self.register(&spec, kind) {
+        self.submit_in(spec, kind, None)
+    }
+
+    /// Submit a job; a restricted job runs in the configured image of
+    /// `language` (`None`: the default restricted image).
+    fn submit_in(&self, spec: JobSpec, kind: JobKind, language: Option<RestrictedLanguage>) -> JobId {
+        match self.register_in(&spec, kind, language) {
             Ok((job, prepared)) => {
                 let id = job.id.clone();
                 {
@@ -920,6 +953,15 @@ impl ExecutionService {
     /// Create the job record, emit `Queued`, and validate. On refusal the job
     /// is finished with `FailedToStart` and its result returned.
     fn register(&self, spec: &JobSpec, kind: JobKind) -> Result<(Arc<Job>, Prepared), JobResult> {
+        self.register_in(spec, kind, None)
+    }
+
+    fn register_in(
+        &self,
+        spec: &JobSpec,
+        kind: JobKind,
+        language: Option<RestrictedLanguage>,
+    ) -> Result<(Arc<Job>, Prepared), JobResult> {
         let inner = &self.inner;
         let id = new_job_id();
         let redactor = &inner.redactor;
@@ -970,7 +1012,7 @@ impl ExecutionService {
             return Err(inner
                 .finish_refused(&job, JobRefusal::new(RefusalCode::ShuttingDown, "the application is shutting down")));
         }
-        match inner.prepare(spec, kind) {
+        match inner.prepare(spec, kind, language) {
             Ok(prepared) => {
                 {
                     let mut m = job.state.locked();
@@ -1320,8 +1362,21 @@ impl Inner {
         }
     }
 
-    fn prepare(&self, spec: &JobSpec, kind: JobKind) -> Result<Prepared, JobRefusal> {
+    fn prepare(
+        &self,
+        spec: &JobSpec,
+        kind: JobKind,
+        language: Option<RestrictedLanguage>,
+    ) -> Result<Prepared, JobRefusal> {
         let settings = self.settings.get();
+        if let Some(language) = language
+            && !matches!(spec.policy, ExecutionPolicy::Restricted { .. })
+        {
+            return Err(JobRefusal::new(
+                RefusalCode::InvalidArgument,
+                format!("the restricted {} image applies only to restricted jobs", language.title()),
+            ));
+        }
         let cwd = canonical_directory(&spec.working_directory)
             .map_err(|e| JobRefusal::new(RefusalCode::InvalidWorkingDirectory, e.to_string()))?;
         let root = self.roots.locked().containing(&cwd).cloned().ok_or_else(|| {
@@ -1414,12 +1469,10 @@ impl Inner {
                     )
                 };
                 // The image is checked with the same grammar settings use (a
-                // hand-edited settings file gets no looser check here).
-                let Some(image) = settings.docker.image.clone() else {
-                    return Err(unavailable(
-                        "no container image is configured. Set execution.docker.image to an image present locally (`docker image ls`)."
-                            .into(),
-                    ));
+                // hand-edited settings file gets no looser check here). A
+                // language's job runs only in that language's image.
+                let Some(image) = settings.docker.image_for(language).map(str::to_owned) else {
+                    return Err(unavailable(DockerSettings::missing_image_message(language)));
                 };
                 if let Err(reason) = docker::validate_image_reference(&image) {
                     return Err(unavailable(format!("the configured image is not valid: {reason}.")));
