@@ -19,7 +19,8 @@ hash: string,
  */
 entity: EntityId | null, definition: WorkflowDefinition, 
 /**
- * Diagnostics as validated when saved; `runnable` is always false.
+ * Diagnostics as validated when saved; `runnable` is false here (never
+ * read from storage) until the runner service applies availability.
  */
 validation: WorkflowValidation, origin: Origin, 
 /**
