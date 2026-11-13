@@ -925,6 +925,47 @@ fn closing_the_project_cancels_the_run_and_nothing_resumes() {
 }
 
 #[test]
+fn revoking_trust_cancels_a_native_run() {
+    let f = fixture();
+    let started = Arc::new(AtomicBool::new(false));
+    f.set_behavior(blocking_behavior(started.clone(), Arc::new(AtomicBool::new(false))));
+    let mut native = numerical(false);
+    native.steps[0] = python_step("run", true);
+    native.ceiling.execution = ExecutionCeiling::TrustedNative;
+    let id = f.save(native);
+    let run = f.start(&id);
+    wait_for(&started);
+    assert_eq!(f.batch.requests.lock().unwrap()[0].0, BatchMode::TrustedNative);
+    f.host.trusted.store(false, Ordering::SeqCst);
+    f.service.trust_revoked(&f.root);
+    assert!(f.service.wait_idle(Duration::from_secs(5)));
+    let run = f.service.get(&run.id).unwrap();
+    assert_eq!(run.state, WorkflowRunState::Canceled);
+    assert_eq!(run.code.as_deref(), Some("workflow.untrustedFolder"));
+    assert_eq!(states(&run)[1].1, WorkflowStepState::Skipped);
+}
+
+#[test]
+fn trust_lost_between_steps_refuses_the_next_native_step() {
+    let f = fixture();
+    let mut def = chain();
+    def.steps[1] = python_step("b", true);
+    def.ceiling.execution = ExecutionCeiling::TrustedNative;
+    let id = f.save(def);
+    let host = f.host.clone();
+    f.set_behavior(Arc::new(move |r, req, _c, run| {
+        if req.owner.step == "a" {
+            host.trusted.store(false, Ordering::SeqCst);
+        }
+        Ok(succeeded(run, vec![artifact(r, run, "dataset", "dataset.csv", b"x
+", ArtifactKind::Data)]))
+    }));
+    let run = f.run_to_end(&id);
+    assert_eq!(run.code.as_deref(), Some("workflow.untrustedFolder"), "{:?}", run.message);
+    assert_eq!(f.calls.log(), vec!["batch:a".to_owned()]);
+}
+
+#[test]
 fn blockers_untrusted_restricted_unavailable_and_invalid_drafts() {
     let f = fixture();
     // Native Python and Lean need a trusted folder.

@@ -61,6 +61,8 @@ struct CachedPlan {
 struct ActiveRun {
     root: PathBuf,
     token: Arc<CancelToken>,
+    /// The run has steps that execute natively (they need a trusted folder).
+    native: bool,
 }
 
 pub(crate) struct Inner {
@@ -279,7 +281,14 @@ impl WorkflowRunService {
                 plan: approved,
             };
             self.inner.persist(&key, &run, None)?;
-            active.insert(run.id.clone(), ActiveRun { root: root.clone(), token: Arc::clone(&token) });
+            active.insert(
+                run.id.clone(),
+                ActiveRun {
+                    root: root.clone(),
+                    token: Arc::clone(&token),
+                    native: !run.plan.execution.native_steps.is_empty(),
+                },
+            );
             run
         };
         let inner = Arc::clone(&self.inner);
@@ -356,6 +365,23 @@ impl WorkflowRunService {
         for run in active.values() {
             if root.is_none_or(|r| project_key(r) == project_key(&run.root)) {
                 run.token.cancel(PROJECT_CLOSED, PROJECT_CLOSED_MESSAGE);
+            }
+        }
+    }
+
+    /// Trust was revoked for `revoked` (and everything inside it): cancel
+    /// active runs there that execute natively. Their current native job is
+    /// stopped by the execution service itself; nothing later is dispatched.
+    pub fn trust_revoked(&self, revoked: &Path) {
+        let revoked = std::fs::canonicalize(revoked).unwrap_or_else(|_| revoked.to_path_buf());
+        let revoked = PathBuf::from(project_key(&revoked));
+        let active = self.inner.active.lock().unwrap_or_else(|p| p.into_inner());
+        for run in active.values() {
+            if run.native && PathBuf::from(project_key(&run.root)).starts_with(&revoked) {
+                run.token.cancel(
+                    "workflow.untrustedFolder",
+                    "Trust was revoked for the project folder, so the run was canceled: its native steps run with your account's privileges and need a trusted folder.",
+                );
             }
         }
     }

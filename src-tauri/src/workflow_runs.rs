@@ -202,8 +202,20 @@ pub async fn workflow_association_decide(
     blocking(&state, move |s| s.decide_association(&decision)).await
 }
 
-/// Forward run and step changes to the webview.
+/// Forward run and step changes to the webview, and cancel native runs in a
+/// folder whose trust is revoked.
 pub fn forward_events(app: AppHandle) {
+    let mut trust = app.state::<AppState>().execution.subscribe_trust();
+    let runs = app.state::<AppState>().workflow_runs.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match trust.recv().await {
+                Ok(change) if !change.granted => runs.trust_revoked(Path::new(&change.root)),
+                Ok(_) | Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
     let mut rx = app.state::<AppState>().workflow_runs.subscribe();
     tauri::async_runtime::spawn(async move {
         loop {
