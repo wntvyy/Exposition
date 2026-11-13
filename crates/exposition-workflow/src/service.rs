@@ -123,6 +123,11 @@ impl Inner {
         result
     }
 
+    /// A stored run of any project (the seed basis of a reproduction).
+    pub(crate) fn stored_run(&self, id: &WorkflowRunId) -> Option<WorkflowRun> {
+        self.store.lock().unwrap_or_else(|p| p.into_inner()).get(id).ok().flatten().map(|(_, run)| run)
+    }
+
     pub(crate) fn finished(&self, run: &WorkflowRunId) {
         self.active.lock().unwrap_or_else(|p| p.into_inner()).remove(run);
     }

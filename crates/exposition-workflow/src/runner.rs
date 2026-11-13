@@ -155,6 +155,8 @@ struct Ctx<'a> {
     /// The run as it started: id, plan, and outcomes (never changes).
     frozen: &'a WorkflowRun,
     started: Instant,
+    /// Seeds derive from this run id (the run, or the original it reproduces).
+    seed_basis: &'a str,
 }
 
 impl Ctx<'_> {
@@ -339,6 +341,7 @@ impl Ctx<'_> {
                 outputs: Vec::new(),
                 rejected: Vec::new(),
                 log: None,
+                environment: None,
             });
             run.usage.steps += 1;
             if let Err(e) = self.persist(&run, &planned.step) {
@@ -413,6 +416,7 @@ impl Ctx<'_> {
             max_output_bytes: grant.max_output_bytes,
             model_requests_remaining: grant.model_requests,
             restricted_image_id,
+            seed_basis: self.seed_basis,
         };
         // A panicking service must not leave the run active forever.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| adapter.run(&request, &control)))
@@ -446,7 +450,14 @@ impl Ctx<'_> {
             Err(failure) => {
                 run.usage.model_requests += failure.model_requests;
                 let was_canceled = self.token.is_canceled() || failure.code == "workflow.canceled";
-                finish_attempt(&mut run.steps[i].attempts[ai], &failure, reported.as_ref(), now, was_canceled);
+                let attempt = &mut run.steps[i].attempts[ai];
+                finish_attempt(attempt, &failure, reported.as_ref(), now, was_canceled);
+                attempt.environment = Some(
+                    failure
+                        .environment
+                        .clone()
+                        .unwrap_or_else(|| crate::environment::WorkflowEnvironment::of_step(planned)),
+                );
                 run.steps[i].state = if was_canceled { WorkflowStepState::Canceled } else { WorkflowStepState::Failed };
                 if stop.is_none() {
                     *stop = Some(if was_canceled {
@@ -463,6 +474,12 @@ impl Ctx<'_> {
                     Err(("workflow.internal", "the outputs were not validated".to_owned(), Vec::new()))
                 });
                 let attempt = &mut run.steps[i].attempts[ai];
+                attempt.environment = Some(
+                    result
+                        .environment
+                        .clone()
+                        .unwrap_or_else(|| crate::environment::WorkflowEnvironment::of_step(planned)),
+                );
                 attempt.log = result.log.clone();
                 attempt.finished_at_ms = Some(now);
                 if attempt.operation.is_none() {
@@ -547,7 +564,18 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
     let started = Instant::now();
     let frozen = run.clone();
     let cell = Mutex::new(run);
-    let ctx = Ctx { inner: &inner, key: &key, root: &root, token: &token, cell: &cell, frozen: &frozen, started };
+    // Seeds derive from the run, or for a reproduction from its original.
+    let seed_basis = crate::environment::seed_basis(&frozen, &|id| inner.stored_run(id));
+    let ctx = Ctx {
+        inner: &inner,
+        key: &key,
+        root: &root,
+        token: &token,
+        cell: &cell,
+        frozen: &frozen,
+        started,
+        seed_basis: &seed_basis,
+    };
     let plan_steps = &frozen.plan.steps;
     let deps = dependencies(plan_steps);
     let max_parallel = frozen.plan.max_parallel.clamp(1, MAX_PARALLEL) as usize;
@@ -648,6 +676,7 @@ fn refuse(
         outputs: Vec::new(),
         rejected: Vec::new(),
         log: None,
+        environment: None,
     });
     run.steps[i].state = WorkflowStepState::Failed;
     let _ = inner.persist(key, &run, Some(&planned.step));
