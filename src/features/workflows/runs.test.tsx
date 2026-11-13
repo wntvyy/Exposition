@@ -93,6 +93,10 @@ const plan = (overrides: Partial<WorkflowRunPlan> = {}): WorkflowRunPlan => ({
       maxOutputBytes: 10 * 1024 * 1024,
       available: true,
       availability: "Docker image python:3.13-slim is available",
+      maxModelRequests: 0,
+      compositePath: [],
+      condition: null,
+      repeat: null,
     },
     {
       step: "review",
@@ -111,10 +115,16 @@ const plan = (overrides: Partial<WorkflowRunPlan> = {}): WorkflowRunPlan => ({
       maxOutputBytes: 65536,
       available: true,
       availability: "Provider configured",
+      maxModelRequests: 0,
+      compositePath: [],
+      condition: null,
+      repeat: null,
     },
   ],
   ceiling: { execution: "restricted", modelRequests: true, retainResults: true, proposeChanges: false },
   budgets: { maxSteps: 10, maxTotalSeconds: 900, maxOutputBytes: 50 * 1024 * 1024, maxModelRequests: 4 },
+  maxParallel: 1,
+  limits: { maxActiveRuns: 3, maxInFlightSteps: 4, restricted: 2, native: 2, agent: 2, lean: 1 },
   execution: { restrictedBackend: "docker", restrictedImage: "python:3.13-slim", restrictedImageId: `sha256:${"e".repeat(64)}`, trustedFolder: false, nativeSteps: [], modelSteps: ["review"] },
   notices: ["Step Summarize sends the figure to the model provider."],
   blockers: [],
@@ -154,9 +164,9 @@ const run = (overrides: Partial<WorkflowRun> = {}): WorkflowRun => ({
   budgets: { maxSteps: 10, maxTotalSeconds: 900, maxOutputBytes: 1000, maxModelRequests: 4 },
   usage: { steps: 2, seconds: 10, outputBytes: 500, modelRequests: 1 },
   steps: [
-    { step: "run", label: "Simulate", operationTitle: "Python batch", runnerTitle: "Restricted Python batch", containment: "restrictedContainer", state: "succeeded", attempts: [attempt()] },
+    { step: "run", label: "Simulate", operationTitle: "Python batch", runnerTitle: "Restricted Python batch", containment: "restrictedContainer", state: "succeeded", attempts: [attempt()] , instances: [], reason: null },
   ],
-  outcomes: [{ id: "fig", label: "Retained figure", optional: false, step: "run", port: "figure", value: null }],
+  outcomes: [{ id: "fig", label: "Retained figure", optional: false, step: "run", port: "figure", value: null, reason: null }],
   acknowledged: false,
   plan: plan(),
   ...overrides,
@@ -284,7 +294,7 @@ describe("run monitor", () => {
   it("shows a running run with usage and cancels it", async () => {
     const onRun = vi.fn();
     runIpc.cancel.mockResolvedValue(run({ state: "canceled" }));
-    render(<RunMonitor run={run({ state: "running", finishedAtMs: null, steps: [{ ...run().steps[0]!, state: "running", attempts: [attempt({ state: "dispatched", finishedAtMs: null })] }] })} onRun={onRun} />);
+    render(<RunMonitor run={run({ state: "running", finishedAtMs: null, steps: [{ ...run().steps[0]!, state: "running", attempts: [attempt({ state: "dispatched", finishedAtMs: null })] , instances: [], reason: null }] })} onRun={onRun} />);
     expect(screen.getByTestId("workflow-run-state").getAttribute("data-state")).toBe("running");
     expect(screen.getByTestId("workflow-run-usage").textContent).toContain("2 of 10");
     expect(screen.getByTestId("workflow-run-step-run").getAttribute("data-state")).toBe("running");
@@ -304,7 +314,7 @@ describe("run monitor", () => {
           state: "failed",
           code: "research.batchFailed",
           message: "The script exited with status 1.",
-          steps: [{ ...run().steps[0]!, state: "failed", attempts: [attempt({ state: "failed", code: "research.batchFailed", message: "Traceback: ZeroDivisionError", log: "line 3\nZeroDivisionError" })] }],
+          steps: [{ ...run().steps[0]!, state: "failed", attempts: [attempt({ state: "failed", code: "research.batchFailed", message: "Traceback: ZeroDivisionError", log: "line 3\nZeroDivisionError" })] , instances: [], reason: null }],
         })}
         onRun={vi.fn()}
       />,
@@ -323,7 +333,7 @@ describe("run monitor", () => {
     runIpc.plan.mockResolvedValue(plan({ plan: "plan-9" }));
     render(
       <RunMonitor
-        run={run({ state: "interrupted", steps: [{ ...run().steps[0]!, state: "interrupted", attempts: [attempt({ state: "interrupted", finishedAtMs: null })] }] })}
+        run={run({ state: "interrupted", steps: [{ ...run().steps[0]!, state: "interrupted", attempts: [attempt({ state: "interrupted", finishedAtMs: null })] , instances: [], reason: null }] })}
         onRun={onRun}
       />,
     );
@@ -354,7 +364,7 @@ describe("run monitor", () => {
                       port: "data",
                       portType: "dataset",
                       value: { kind: "file", path: "research/runs/r1/out.bin", sha256: HASH, bytes: 10, mediaType: "application/octet-stream", researchRun: "rr-1", artifact: "a1" },
-                      provenance: { run: "run-1", step: "run", attempt: 1, operation: { kind: "researchRun", id: "rr-1" } },
+                      provenance: { run: "run-1", step: "run", attempt: 1, instance: null, operation: { kind: "researchRun", id: "rr-1" } },
                     },
                   ],
                   rejected: [{ name: "link-to-home", reason: "symbolic link escaping the output area" }],
@@ -384,7 +394,7 @@ describe("run monitor", () => {
       port: artifact,
       portType: "figure" as const,
       value: { kind: "file" as const, path, sha256: HASH, bytes: svg.length, mediaType, researchRun: "rr-1", artifact },
-      provenance: { run: "run-1", step: "run", attempt: 1, operation: { kind: "researchRun", id: "rr-1" } },
+      provenance: { run: "run-1", step: "run", attempt: 1, instance: null, operation: { kind: "researchRun", id: "rr-1" } },
     });
     const { container } = render(
       <RunMonitor
@@ -423,7 +433,7 @@ describe("run monitor", () => {
                       port: "table",
                       portType: "table",
                       value: { kind: "file", path: "research/runs/r1/t.csv", sha256: HASH, bytes: 20, mediaType: "text/csv", researchRun: "rr-1", artifact: "t" },
-                      provenance: { run: "run-1", step: "run", attempt: 1, operation: { kind: "researchRun", id: "rr-1" } },
+                      provenance: { run: "run-1", step: "run", attempt: 1, instance: null, operation: { kind: "researchRun", id: "rr-1" } },
                     },
                   ],
                 }),
@@ -457,18 +467,18 @@ describe("run monitor", () => {
         ],
         evidence: ["ev-1"],
       },
-      provenance: { run: "run-1", step: "audit", attempt: 1, operation: { kind: "leanAudit", id: "la-1" } },
+      provenance: { run: "run-1", step: "audit", attempt: 1, instance: null, operation: { kind: "leanAudit", id: "la-1" } },
     };
     const proposal = {
       port: "proposal",
       portType: "associationProposal" as const,
       value: { kind: "associationProposal" as const, proposal: "p-1", declarations: ["Main.thm", "Main.uses_choice", "Main.native"], status: "pending" as const, accepted: [] as string[], evidence: [] as string[] },
-      provenance: { run: "run-1", step: "associate", attempt: 1, operation: { kind: "review", id: "rv-1" } },
+      provenance: { run: "run-1", step: "associate", attempt: 1, instance: null, operation: { kind: "review", id: "rv-1" } },
     };
     const auditRun = run({
       steps: [
-        { step: "audit", label: "Audit", operationTitle: "Lean audit", runnerTitle: "Lean", containment: "nativeAccount", state: "succeeded", attempts: [attempt({ outputs: [formal] })] },
-        { step: "associate", label: "Associate", operationTitle: "Associate", runnerTitle: "Application", containment: "applicationService", state: "succeeded", attempts: [attempt({ outputs: [proposal] })] },
+        { step: "audit", label: "Audit", operationTitle: "Lean audit", runnerTitle: "Lean", containment: "nativeAccount", state: "succeeded", attempts: [attempt({ outputs: [formal] })] , instances: [], reason: null },
+        { step: "associate", label: "Associate", operationTitle: "Associate", runnerTitle: "Application", containment: "applicationService", state: "succeeded", attempts: [attempt({ outputs: [proposal] })] , instances: [], reason: null },
       ],
     });
     runIpc.decideAssociation.mockResolvedValue({ ...auditRun });
@@ -497,7 +507,7 @@ describe("run monitor", () => {
       port: "promotion",
       portType: "promotionProposal" as const,
       value: { kind: "promotionProposal" as const, promotion: "prom-1", document: "paper/main.typ", status: "pending" as const, attachmentKey: null, expiresAtMs: null },
-      provenance: { run: "run-1", step: "run", attempt: 1, operation: { kind: "review", id: "x" } },
+      provenance: { run: "run-1", step: "run", attempt: 1, instance: null, operation: { kind: "review", id: "x" } },
     };
     render(<RunMonitor run={run({ steps: [{ ...run().steps[0]!, attempts: [attempt({ outputs: [promo] })] }] })} onRun={vi.fn()} />);
     const approveMissing = screen.queryByTestId("workflow-promotion-approve");
@@ -510,7 +520,7 @@ describe("run monitor", () => {
   });
 
   it("shows decided proposals as recorded: which declarations were associated, the inserted attachment, the review deadline", () => {
-    const provenance = { run: "run-1", step: "associate", attempt: 1, operation: { kind: "review", id: "rv-1" } };
+    const provenance = { run: "run-1", step: "associate", attempt: 1, instance: null, operation: { kind: "review", id: "rv-1" } };
     const association = {
       port: "proposal",
       portType: "associationProposal" as const,

@@ -73,6 +73,7 @@ const planStep = (overrides: Partial<WorkflowPlanStep> & Pick<WorkflowPlanStep, 
   maxOutputBytes: 1024,
   available: true,
   availability: "Available",
+  maxModelRequests: 0,
   compositePath: [],
   condition: null,
   repeat: null,
@@ -195,6 +196,7 @@ const run = (overrides: Partial<WorkflowRun> = {}): WorkflowRun => ({
           index: 0,
           parameter: { kind: "integer", value: 1 },
           state: "succeeded",
+          reason: null,
           attempts: [
             attempt({
               outputs: [
@@ -208,8 +210,8 @@ const run = (overrides: Partial<WorkflowRun> = {}): WorkflowRun => ({
             }),
           ],
         },
-        { index: 1, parameter: { kind: "integer", value: 2 }, state: "running", attempts: [attempt({ state: "dispatched", finishedAtMs: null, environment: undefined })] },
-        { index: 2, parameter: { kind: "integer", value: 3 }, state: "pending", attempts: [] },
+        { index: 1, parameter: { kind: "integer", value: 2 }, state: "running", attempts: [attempt({ state: "dispatched", finishedAtMs: null, environment: undefined })], reason: null },
+        { index: 2, parameter: { kind: "integer", value: 3 }, state: "pending", attempts: [], reason: null },
       ],
     }),
     runStep("review", "Review", "conditionNotMet", { containment: "readOnlyModel", reason: "The verdict was “Errors”." }),
@@ -305,7 +307,7 @@ describe("run monitor (M9)", () => {
     expect(screen.getByTestId("workflow-output-sweep-summary").textContent).toContain("(attempt 1, instance 1)");
     expect(screen.getByTestId("workflow-run-repeat-sweep").textContent).toMatch(/Runs once for each of 3 values/);
     // An until iteration has no parameter: it is named by its iteration.
-    expect(runModel.instanceLabel({ index: 1, parameter: null, state: "succeeded", attempts: [] })).toBe("Iteration 2");
+    expect(runModel.instanceLabel({ index: 1, parameter: null, state: "succeeded", attempts: [], reason: null })).toBe("Iteration 2");
   });
 
   it("shows Condition not met with its reason, distinct from Skipped, and why outcomes were not produced", () => {
