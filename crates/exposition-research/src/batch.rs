@@ -1,0 +1,141 @@
+//! Workflow-owned Python batch runs (M8 contract; implemented by the research lane).
+//!
+//! Two accurately labelled modes share one request shape:
+//! - [`BatchMode::Restricted`]: the scoped research adapter. Only the declared
+//!   inputs and the code are staged (copied, hash-verified) into a
+//!   service-owned working copy that is mounted read-only; the code writes to
+//!   a dedicated output area. Docker backend with no network, no host
+//!   credentials/environment/sockets, a configured local image (never pulled),
+//!   non-root user, and the existing process/time limits. Undeclared project
+//!   files are simply absent (an undeclared import fails visibly). Never falls
+//!   back to native execution.
+//! - [`BatchMode::TrustedNative`]: a fresh workflow-owned native Python
+//!   session with the user's account privileges (never the user's own
+//!   kernel; not a sandbox).
+//!
+//! Output registration (both modes): only regular files directly produced in
+//! the output area, with safe relative names, bounded count and sizes, no
+//! links/junctions/reparse points or hard-link tricks, SHA-256 recorded; an
+//! output port `p` is realized by the file `p.<ext>` with an extension the
+//! port accepts. Accepted files become artifacts of a research run (manifest
+//! in `.exposition/runs`, files in `.exposition/artifacts/<run>`), labelled
+//! with their actual execution mode, so retention/promotion reuse the existing
+//! paths. Active formats (SVG/HTML) are stored and later rendered inertly.
+
+use std::path::Path;
+use std::time::Duration;
+
+use exposition_core::artifact::{ArtifactRecord, RunStatus};
+use exposition_core::path::WorkspacePath;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+use crate::error::ResearchError;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum BatchMode {
+    Restricted,
+    TrustedNative,
+}
+
+/// The workflow step that owns the batch (sessions and runs are attributed to it).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchOwner {
+    pub run: String,
+    pub step: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum BatchCode {
+    Inline { source: String },
+    /// A declared project script, verified against this hash.
+    Script { path: WorkspacePath, sha256: String },
+}
+
+/// A declared input: staged at the same project-relative path, verified
+/// against `sha256` (a mismatch refuses the batch: `research.inputChanged`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchInput {
+    pub path: WorkspacePath,
+    pub sha256: String,
+}
+
+/// An output port and the file extensions that may realize it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchPort {
+    pub port: String,
+    pub extensions: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BatchRequest {
+    pub mode: BatchMode,
+    pub owner: BatchOwner,
+    pub code: BatchCode,
+    pub inputs: Vec<BatchInput>,
+    pub outputs: Vec<BatchPort>,
+    pub time_limit: Duration,
+    pub max_output_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchPortOutput {
+    pub port: String,
+    pub artifact: ArtifactRecord,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchRejected {
+    pub name: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchResult {
+    /// The research run holding the manifest and accepted artifacts.
+    pub research_run: String,
+    pub status: RunStatus,
+    pub exit_code: Option<i32>,
+    /// Accepted files that realize output ports.
+    pub ports: Vec<BatchPortOutput>,
+    /// Other accepted files in the output area (kept as run artifacts).
+    pub extra: Vec<ArtifactRecord>,
+    pub rejected: Vec<BatchRejected>,
+    /// Bounded, redacted stdout/stderr tail.
+    pub log: String,
+    /// Execution environment as recorded (mode, image, interpreter, limits).
+    pub environment: Vec<(String, String)>,
+}
+
+/// Cancellation and dispatch callbacks of one batch.
+pub struct BatchControl<'a> {
+    pub canceled: &'a (dyn Fn() -> bool + Sync),
+    /// Called once with the research run id when the batch is dispatched
+    /// (the runner persists it before waiting for the outcome).
+    pub on_dispatched: &'a (dyn Fn(&str) + Sync),
+}
+
+/// Runs workflow-owned Python batches (see the module docs).
+pub trait BatchRunner: Send + Sync {
+    /// Whether `mode` is usable for `root` now, and why not.
+    fn availability(&self, root: &Path, mode: BatchMode) -> Result<(), String>;
+    /// Run one batch to completion (or cancellation/time limit).
+    fn run(&self, root: &Path, request: &BatchRequest, control: &BatchControl<'_>)
+    -> Result<BatchResult, ResearchError>;
+}

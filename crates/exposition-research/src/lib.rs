@@ -14,6 +14,7 @@
 //! Research never constructs document source text: inserting artifacts into
 //! documents is the format-owned `exposition-attach` transformation.
 
+pub mod batch;
 pub mod discovery;
 pub mod error;
 pub mod helper;

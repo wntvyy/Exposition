@@ -21,6 +21,7 @@ exposition-research = { path = "crates/exposition-research" }
 exposition-attach = { path = "crates/exposition-attach" }
 exposition-markdown = { path = "crates/exposition-markdown" }
 exposition-graph = { path = "crates/exposition-graph" }
+exposition-workflow = { path = "crates/exposition-workflow" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

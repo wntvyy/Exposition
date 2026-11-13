@@ -105,6 +105,14 @@ id_type!(
     /// A cross-service operation in the app-owned operation journal.
     OperationId, "op-", "operation"
 );
+id_type!(
+    /// One run of a workflow revision (app-local operational record).
+    WorkflowRunId, "wrun-", "workflow run"
+);
+id_type!(
+    /// A reviewable run plan awaiting the user's approval (in memory, expires).
+    WorkflowPlanId, "wplan-", "workflow plan"
+);
 
 #[cfg(test)]
 mod tests {
