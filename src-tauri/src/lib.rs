@@ -204,6 +204,8 @@ pub fn run() {
             workflows::workflow_import,
             workflows::workflow_list,
             workflows::workflow_get,
+            workflows::workflow_bundle_export,
+            workflows::workflow_bundle_import,
             workflow_runs::workflow_run_plan,
             workflow_runs::workflow_run_start,
             workflow_runs::workflow_run_cancel,

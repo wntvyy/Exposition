@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workflow-bundle-import"
+description = "Enables the workflow_bundle_import command without any pre-configured scope."
+commands.allow = ["workflow_bundle_import"]
+
+[[permission]]
+identifier = "deny-workflow-bundle-import"
+description = "Denies the workflow_bundle_import command without any pre-configured scope."
+commands.deny = ["workflow_bundle_import"]

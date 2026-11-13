@@ -154,6 +154,8 @@ const COMMANDS: &[&str] = &[
     "workflow_import",
     "workflow_list",
     "workflow_get",
+    "workflow_bundle_export",
+    "workflow_bundle_import",
     // Workflow runs (src/workflow_runs.rs).
     "workflow_run_plan",
     "workflow_run_start",
