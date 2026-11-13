@@ -14,7 +14,7 @@ import { useWorkspace } from "../workspace/store";
 import type { WorkflowTrigger } from "./contract";
 import { workflowCommands, workflowTriggerCommands } from "./ipc";
 import { workflowKey } from "./model";
-import { importDraft, newDraftFromPreset } from "./actions";
+import { importBundle, importDraft, newDraftFromPreset } from "./actions";
 import { RunHistory } from "./RunView";
 
 export function WorkflowsView(_props: EditorProps) {
@@ -112,7 +112,27 @@ export function WorkflowsView(_props: EditorProps) {
         <RunHistory workflow={null} title="Recent runs" />
         <section className="xp-wf__group" aria-label="Import">
           <h3 className="xp-wf__group-title">Import a definition</h3>
-          <p className="xp-wf__muted">Paste an exposition.workflow/1 or /2 definition. It is checked strictly, saved as a new draft with a new identity, never trusted, and never run.</p>
+          <p className="xp-wf__muted">
+            Import a workflow bundle file (a workflow with the workflows it runs), or paste an exposition.workflow/1 or /2 definition. It
+            is checked strictly, saved as new drafts with new identities, never trusted, and never run; triggers, approvals, and trust
+            are never imported.
+          </p>
+          <div className="xp-wf__row">
+            <Button
+              icon={FileUp}
+              onPress={async () => {
+                const result = await importBundle();
+                if (!result) return;
+                if (result.ok) {
+                  setImportError(null);
+                  void refresh();
+                } else setImportError(result.error);
+              }}
+              data-testid="workflow-import-bundle"
+            >
+              Import Bundle…
+            </Button>
+          </div>
           <div className="ui-field">
             <label className="ui-field__label" htmlFor={id}>
               Definition (JSON)

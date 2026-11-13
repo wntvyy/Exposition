@@ -20,6 +20,8 @@ import type { WorkflowRunId } from "../../bindings/WorkflowRunId";
 import type { WorkflowRunPlan } from "./contract";
 import type { WorkflowRunSummary } from "./contract";
 import type { WorkflowSummary } from "../../bindings/WorkflowSummary";
+import type { WorkflowBundleExport } from "../../bindings/WorkflowBundleExport";
+import type { WorkflowBundleImport } from "../../bindings/WorkflowBundleImport";
 import type { WorkflowValidation } from "../../bindings/WorkflowValidation";
 import type {
   EnableWorkflowTriggerRequest,
@@ -37,13 +39,28 @@ export const workflowCommands = {
   operations: () => invoke<OperationContract[]>("workflow_operations"),
   presets: () => invoke<WorkflowPresetInfo[]>("workflow_presets"),
   fromPreset: (request: WorkflowPresetRequest) => invoke<WorkflowDefinition>("workflow_from_preset", { request }),
-  validate: (definition: WorkflowDefinition) => invoke<WorkflowValidation>("workflow_validate", { definition }),
+  /**
+   * Validate a draft (composite steps against the project's saved revisions).
+   * `id`: the saved workflow being edited, so a composite step running this
+   * workflow itself is refused (`workflow.compositeRecursive`).
+   */
+  validate: (definition: WorkflowDefinition, id: WorkflowId | null = null) => invoke<WorkflowValidation>("workflow_validate", { definition, id }),
   /** Save a new revision (incomplete drafts are saved with diagnostics). Saving never runs anything. */
   save: (request: SaveWorkflowRequest) => invoke<SavedWorkflow>("workflow_save", { request }),
   /** Import JSON text as a new draft (strict schema, fresh id, never run). */
   import: (text: string) => invoke<SavedWorkflow>("workflow_import", { text }),
   list: () => invoke<WorkflowSummary[]>("workflow_list"),
   get: (id: WorkflowId, revision: number | null = null) => invoke<SavedWorkflow>("workflow_get", { id, revision }),
+  /**
+   * Export a saved revision with the composite children it runs as a workflow
+   * bundle (definitions only: no trust, approvals, triggers, or results).
+   * `path` null: the backend asks where (`workflow.exportCanceled` when the
+   * save dialog is dismissed; `workflow.invalidDestination` for a refused file).
+   */
+  bundleExport: (id: WorkflowId, revision: number | null, path: string | null = null) =>
+    invoke<WorkflowBundleExport>("workflow_bundle_export", { id, revision, path }),
+  /** Import a bundle (or one definition) from a chosen file: untrusted drafts with fresh ids; nothing runs. */
+  bundleImport: (path: string) => invoke<WorkflowBundleImport>("workflow_bundle_import", { path }),
 };
 
 /**

@@ -19,7 +19,11 @@ const wfIpc = vi.hoisted(() => ({
   import: vi.fn(),
   list: vi.fn(),
   get: vi.fn(),
+  bundleExport: vi.fn(),
+  bundleImport: vi.fn(),
 }));
+const dialog = vi.hoisted(() => ({ open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 const editorsMock = vi.hoisted(() => ({
   open: vi.fn(),
   setDirty: vi.fn(),
@@ -228,6 +232,49 @@ describe("draft actions", () => {
   });
 });
 
+describe("workflow bundles", () => {
+  it("exports a saved revision through the backend's save dialog; dismissing it is quiet, a refused destination is reported", async () => {
+    wfIpc.bundleExport.mockResolvedValueOnce({ path: "C:/Users/me/study.workflow.json", bytes: 900, children: 2 });
+    expect(await actions.exportBundle("wf-1", 3)).toEqual({ ok: true, path: "C:/Users/me/study.workflow.json", children: 2 });
+    expect(wfIpc.bundleExport).toHaveBeenCalledWith("wf-1", 3, null);
+    expect(notifications.notify.mock.lastCall![0]).toMatchObject({ tone: "success", title: "Workflow exported" });
+    expect(notifications.notify.mock.lastCall![0].body).toMatch(/with 2 workflows it runs.*no trust, approvals, triggers, or results/);
+    notifications.notify.mockClear();
+    wfIpc.bundleExport.mockRejectedValueOnce({ code: "workflow.exportCanceled", message: "The export was canceled." });
+    expect(await actions.exportBundle("wf-1", 3)).toBeNull();
+    expect(notifications.notify).not.toHaveBeenCalled();
+    wfIpc.bundleExport.mockRejectedValueOnce({ code: "workflow.invalidDestination", message: "That file is not a workflow bundle; it is not replaced." });
+    expect(await actions.exportBundle("wf-1", 3)).toEqual({ ok: false, code: "workflow.invalidDestination", error: "That file is not a workflow bundle; it is not replaced." });
+  });
+
+  it("imports a bundle chosen in the open dialog as drafts and opens its root; a dismissed dialog does nothing", async () => {
+    dialog.open.mockResolvedValueOnce(null);
+    expect(await actions.importBundle()).toBeNull();
+    expect(wfIpc.bundleImport).not.toHaveBeenCalled();
+    dialog.open.mockResolvedValueOnce("C:/Users/me/study.workflow.json");
+    wfIpc.bundleImport.mockResolvedValueOnce({ root: { ...saved(1, audit), id: "wf-9", imported: true }, children: [{ original: { workflow: "wf-old", revision: 2 }, saved: { workflow: "wf-8", revision: 1 }, title: "Fit", state: "wellFormed" }] });
+    expect(await actions.importBundle()).toEqual({ ok: true, id: "wf-9", children: 1 });
+    expect(wfIpc.bundleImport).toHaveBeenCalledWith("C:/Users/me/study.workflow.json");
+    expect(editorsMock.open).toHaveBeenCalledWith({ key: "workflow:wf-9", title: "Formal audit" });
+    expect(notifications.notify.mock.lastCall![0].body).toMatch(/With 1 workflow it runs, saved as drafts first.*nothing runs until you review a plan/);
+    expect(runIpc.start).not.toHaveBeenCalled();
+    dialog.open.mockResolvedValueOnce("C:/Users/me/bad.json");
+    wfIpc.bundleImport.mockRejectedValueOnce({ code: "workflow.bundleInvalid", message: "unknown field `trigger`" });
+    expect(await actions.importBundle()).toEqual({ ok: false, error: "unknown field `trigger`" });
+  });
+
+  it("offers Export revision N… in the editor and shows a refused destination", async () => {
+    wfIpc.get.mockResolvedValue(saved(2, audit));
+    wfIpc.bundleExport.mockRejectedValueOnce({ code: "workflow.invalidDestination", message: "Choose a .json file outside the project's records." });
+    render(<WorkflowEditor resource={{ key: "workflow:wf-1", title: "Formal audit" }} mode="source" active />);
+    const exportButton = await screen.findByTestId("workflow-export");
+    expect(exportButton.textContent).toContain("Export revision 2…");
+    fireEvent.click(exportButton);
+    await waitFor(() => expect(wfIpc.bundleExport).toHaveBeenCalledWith("wf-1", 2, null));
+    expect((await screen.findByTestId("workflow-export-error")).textContent).toContain("Choose a .json file outside the project's records.");
+  });
+});
+
 describe("WorkflowEditor", () => {
   it("shows why it cannot run, shows live diagnostics, and saves a new revision", async () => {
     wfIpc.validate.mockResolvedValue(validation(1));
@@ -238,7 +285,7 @@ describe("WorkflowEditor", () => {
     expect((screen.getByTestId("workflow-review-run") as HTMLButtonElement).disabled).toBe(true);
     // Edit the title: dirty, validated in Rust, then saved with the expected revision.
     fireEvent.change(screen.getByTestId("workflow-title").querySelector("input")!, { target: { value: "Audit Main.lean" } });
-    await waitFor(() => expect(wfIpc.validate).toHaveBeenCalledWith(expect.objectContaining({ title: "Audit Main.lean" })));
+    await waitFor(() => expect(wfIpc.validate.mock.calls.map((c) => c[0])).toContainEqual(expect.objectContaining({ title: "Audit Main.lean" })));
     await screen.findByText(/is not bound/);
     expect(editorsMock.setDirty).toHaveBeenLastCalledWith("workflow:wf-1", true);
     fireEvent.click(screen.getByTestId("workflow-save"));

@@ -12,7 +12,7 @@
 // (forEach / until); the workflow may allow up to 4 steps at once. Any of
 // these makes the draft schema exposition.workflow/2. Triggers are enabled
 // only from this editor's Triggers section, through a standing-plan review.
-import { LayoutGrid, ListTree, Play, Plus, Save, X } from "lucide-react";
+import { FileDown, LayoutGrid, ListTree, Play, Plus, Save, X } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { editors } from "../../app/editors";
@@ -47,6 +47,7 @@ import {
 } from "../../ui/components";
 import { useWorkspace } from "../workspace/store";
 import { CodePayloadEditor } from "./CodePayloadEditor";
+import { exportBundle } from "./actions";
 import { workflowCommands } from "./ipc";
 import { addCompositeStep, isComposite, isDerivedContract, MAX_PARALLEL, maxParallelOf, normalizeSchema, setMaxParallel, withComposites } from "./orchestration";
 import { PlanReviewDialog } from "./PlanReview";
@@ -251,6 +252,8 @@ function StepCard({
 }) {
   const contract = contractOf(contracts, step);
   const forEachParameter = step.repeat?.kind === "forEach" ? step.repeat.parameter : null;
+  // The operation declares the language of its code (python, r, julia).
+  const codeLanguage = contract?.payload?.kind === "code" ? contract.payload.language : "python";
   const downstream = downstreamOf(draft, step.id);
   const prereqs = prerequisitesOf(draft, step.id);
   return (
@@ -311,7 +314,7 @@ function StepCard({
               <Checkbox
                 isSelected={step.payload?.kind === "code"}
                 onChange={(on) =>
-                  onChange(updateStep(draft, step.id, { payload: on ? { kind: "code", language: "python", source: "" } : null }))
+                  onChange(updateStep(draft, step.id, { payload: on ? { kind: "code", language: codeLanguage, source: "" } : null }))
                 }
               >
                 Write the code here{contract.payload.unlessInput ? ` (instead of binding “${contract.payload.unlessInput}”)` : ""}
@@ -319,8 +322,9 @@ function StepCard({
               {step.payload?.kind === "code" && (
                 <CodePayloadEditor
                   label={`Code for ${step.label}`}
+                  language={step.payload.language}
                   value={step.payload.source}
-                  onChange={(source) => onChange(updateStep(draft, step.id, { payload: { kind: "code", language: "python", source } }))}
+                  onChange={(source) => onChange(updateStep(draft, step.id, { payload: { kind: "code", language: codeLanguage, source } }))}
                 />
               )}
             </div>
@@ -478,6 +482,8 @@ export function WorkflowEditor({ resource }: EditorProps) {
   const [newInput, setNewInput] = useState<PortType>("dataset");
   const [newOutcome, setNewOutcome] = useState<OutcomeKind>("retainedFigure");
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [view, setViewState] = useState<EditorView>(readView);
   const [selection, setSelection] = useState<CanvasSelectionItem | null>(null);
   const reasonId = useId();
@@ -540,10 +546,10 @@ export function WorkflowEditor({ resource }: EditorProps) {
   useEffect(() => {
     if (!draft) return;
     const timer = setTimeout(() => {
-      workflowCommands.validate(draft).then(setValidation, (e: unknown) => setSaveError(errorMessage(e)));
+      workflowCommands.validate(draft, saved?.id ?? null).then(setValidation, (e: unknown) => setSaveError(errorMessage(e)));
     }, 200);
     return () => clearTimeout(timer);
-  }, [draft]);
+  }, [draft, saved?.id]);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (!draft || !saved) return false;
@@ -782,6 +788,22 @@ export function WorkflowEditor({ resource }: EditorProps) {
               { id: "canvas", label: "Canvas", icon: LayoutGrid },
             ]}
           />
+          <Button
+            variant="ghost"
+            icon={FileDown}
+            isPending={exporting}
+            isDisabled={exporting}
+            onPress={async () => {
+              setExporting(true);
+              setExportError(null);
+              const result = await exportBundle(saved.id, saved.revision);
+              setExporting(false);
+              if (result && !result.ok) setExportError(result.error);
+            }}
+            data-testid="workflow-export"
+          >
+            Export revision {saved.revision}…
+          </Button>
           <Button variant={dirty ? "primary" : "secondary"} icon={Save} isPending={saving} isDisabled={saving} onPress={() => void save()} data-testid="workflow-save">
             Save Revision
           </Button>
@@ -821,6 +843,13 @@ export function WorkflowEditor({ resource }: EditorProps) {
           <Banner tone="danger" title="Not saved" live>
             {saveError}
           </Banner>
+        )}
+        {exportError && (
+          <div data-testid="workflow-export-error">
+            <Banner tone="danger" title="Not exported" live>
+              {exportError}
+            </Banner>
+          </div>
         )}
         <Diagnostics items={generalDiagnostics(diagnostics)} testId="workflow-diagnostics" />
 

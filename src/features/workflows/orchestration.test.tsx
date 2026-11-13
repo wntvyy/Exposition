@@ -356,6 +356,8 @@ describe("WorkflowEditor (M9)", () => {
     await waitFor(() => expect(section.textContent).toContain("“Fit model”"));
     expect(screen.getByTestId("composite-revision-comp").textContent).toBe("1");
     expect(wfIpc.get).toHaveBeenCalledWith("wf-child", 1);
+    // Validation knows which saved workflow is edited (a composite running itself is refused).
+    await waitFor(() => expect(wfIpc.validate.mock.lastCall?.[1]).toBe("wf-1"));
     // The derived ports appear as bindings of the step.
     expect(within(screen.getByTestId("workflow-step-comp")).getByText(/Observations \(Dataset\)/)).toBeTruthy();
     // Nothing changed by itself: not dirty, still pinned to 1.
@@ -366,7 +368,7 @@ describe("WorkflowEditor (M9)", () => {
     expect(steps.querySelector("input, textarea, button")).toBeNull();
     fireEvent.click(screen.getByTestId("composite-use-latest-comp"));
     await waitFor(() => expect(screen.getByTestId("composite-revision-comp").textContent).toBe("3"));
-    await waitFor(() => expect(wfIpc.validate).toHaveBeenLastCalledWith(expect.objectContaining({ steps: expect.arrayContaining([expect.objectContaining({ id: "comp", composite: { workflow: "wf-child", revision: 3 } })]) })));
+    await waitFor(() => expect(wfIpc.validate.mock.lastCall?.[0]).toEqual(expect.objectContaining({ steps: expect.arrayContaining([expect.objectContaining({ id: "comp", composite: { workflow: "wf-child", revision: 3 } })]) })));
     await waitFor(() => expect(editorsMock.setDirty).toHaveBeenLastCalledWith("workflow:wf-1", true));
   });
 
@@ -386,7 +388,7 @@ describe("WorkflowEditor (M9)", () => {
     fireEvent.click(await screen.findByRole("option", { name: /Fit model/ }));
     fireEvent.click(screen.getByTestId("workflow-add-step"));
     await waitFor(() =>
-      expect(wfIpc.validate).toHaveBeenLastCalledWith(
+      expect(wfIpc.validate.mock.lastCall?.[0]).toEqual(
         expect.objectContaining({
           schema: "exposition.workflow/2",
           steps: expect.arrayContaining([expect.objectContaining({ operation: { id: "workflow.composite", version: 1 }, composite: { workflow: "wf-child", revision: 4 } })]),
@@ -409,7 +411,7 @@ describe("WorkflowEditor (M9)", () => {
     fireEvent.click(within(screen.getByTestId("condition-review-verdicts")).getByRole("checkbox", { name: "Checked with axioms" }));
     fireEvent.click(within(section).getByRole("checkbox", { name: /Negate/ }));
     await waitFor(() =>
-      expect(wfIpc.validate).toHaveBeenLastCalledWith(
+      expect(wfIpc.validate.mock.lastCall?.[0]).toEqual(
         expect.objectContaining({
           schema: "exposition.workflow/2",
           steps: expect.arrayContaining([
@@ -440,7 +442,7 @@ describe("WorkflowEditor (M9)", () => {
     await choose("condition-review-op", /is at least/);
     fireEvent.change(screen.getByTestId("condition-review-value").querySelector("input")!, { target: { value: "1.5" } });
     await waitFor(() =>
-      expect(wfIpc.validate).toHaveBeenLastCalledWith(
+      expect(wfIpc.validate.mock.lastCall?.[0]).toEqual(
         expect.objectContaining({ steps: expect.arrayContaining([expect.objectContaining({ id: "review", condition: expect.objectContaining({ test: { kind: "jsonCompare", pointer: "slope", op: "ge", value: { kind: "number", value: "1.5" } } }) })]) }),
       ),
     );
@@ -462,7 +464,7 @@ describe("WorkflowEditor (M9)", () => {
     await waitFor(() => expect(screen.getByTestId("repeat-values-sim").querySelectorAll("li")).toHaveLength(20));
     expect(add.disabled).toBe(true);
     await waitFor(() =>
-      expect(wfIpc.validate).toHaveBeenLastCalledWith(
+      expect(wfIpc.validate.mock.lastCall?.[0]).toEqual(
         expect.objectContaining({ steps: expect.arrayContaining([expect.objectContaining({ id: "sim", parameters: {}, repeat: expect.objectContaining({ kind: "forEach", parameter: "seed" }) })]) }),
       ),
     );
@@ -483,9 +485,9 @@ describe("WorkflowEditor (M9)", () => {
     fireEvent.click(within(screen.getByTestId("workflow-max-parallel")).getByRole("button"));
     expect((await screen.findAllByRole("option")).map((o) => o.querySelector("[slot=label]")?.textContent)).toEqual(["1 — one at a time", "2", "3", "4"]);
     fireEvent.click(screen.getByRole("option", { name: /^3/ }));
-    await waitFor(() => expect(wfIpc.validate).toHaveBeenLastCalledWith(expect.objectContaining({ schema: "exposition.workflow/2", execution: { maxParallel: 3 } })));
+    await waitFor(() => expect(wfIpc.validate.mock.lastCall?.[0]).toEqual(expect.objectContaining({ schema: "exposition.workflow/2", execution: { maxParallel: 3 } })));
     await choose("workflow-max-parallel", /one at a time/);
-    await waitFor(() => expect(wfIpc.validate).toHaveBeenLastCalledWith(expect.not.objectContaining({ execution: expect.anything() })));
+    await waitFor(() => expect(wfIpc.validate.mock.lastCall?.[0]).toEqual(expect.not.objectContaining({ execution: expect.anything() })));
     expect((wfIpc.validate.mock.lastCall![0] as WorkflowDefinition).schema).toBe("exposition.workflow/1");
   });
 
