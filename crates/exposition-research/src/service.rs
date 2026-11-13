@@ -284,6 +284,38 @@ impl ResearchService {
         Ok(report)
     }
 
+    /// [`Self::environments`] for blocking callers (workflow batches run on
+    /// worker threads): the same cache, discovery, and trust rules.
+    pub(crate) fn environments_blocking(&self) -> Result<EnvironmentReport, ResearchError> {
+        let workspace = lock(&self.shared.workspace).clone();
+        let project = workspace.map(|w| ProjectScope {
+            trusted: self.shared.config.launcher.workspace_trusted(&w.root).unwrap_or(w.trusted),
+            root: w.root,
+        });
+        let key = project.as_ref().map(|p| (p.root.clone(), p.trusted));
+        if let Some((cached, report)) = lock(&self.shared.environments).clone()
+            && cached == key
+        {
+            return Ok(report);
+        }
+        let probe_dir = match self.shared.config.launcher.probe_dir() {
+            Some(dir) => dir,
+            None => self.shared.research_dir("probe")?,
+        };
+        let report = discover(&DiscoveryOptions {
+            launcher: self.shared.config.launcher.as_ref(),
+            probe_dir: &probe_dir,
+            project,
+        });
+        *lock(&self.shared.environments) = Some((key, report.clone()));
+        Ok(report)
+    }
+
+    /// The application data directory research uses.
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.shared.config.data_dir
+    }
+
     fn environment(&self, id: &str) -> Result<RuntimeEnvironment, ResearchError> {
         let guard = lock(&self.shared.environments);
         let (_, report) = guard.as_ref().ok_or_else(|| ResearchError::UnknownEnvironment(id.to_owned()))?;
@@ -306,6 +338,7 @@ impl ResearchService {
         let (kind, limit) = match request.owner {
             SessionOwner::User => ("user", self.shared.config.max_user_sessions),
             SessionOwner::Agent { .. } => ("agent", self.shared.config.max_agent_sessions),
+            SessionOwner::Workflow { .. } => ("workflow", self.shared.config.max_agent_sessions),
         };
         let live = lock(&self.shared.sessions)
             .values()
@@ -1409,6 +1442,7 @@ impl Session {
             error: None,
             output: OutputSummary::default(),
             unsaved_inputs,
+            execution: None,
         };
         let run = RunState {
             manifest,

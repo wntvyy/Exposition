@@ -20,6 +20,10 @@ tokio.workspace = true
 uuid.workspace = true
 sha2.workspace = true
 
+# Link counts of batch output files (hard-link detection).
+[target.'cfg(windows)'.dependencies]
+winapi-util.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

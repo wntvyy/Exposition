@@ -3,4 +3,4 @@
 /**
  * Who a session belongs to. Agent runs use their own sessions by default.
  */
-export type SessionOwner = { "kind": "user" } | { "kind": "agent", taskId: string, };
+export type SessionOwner = { "kind": "user" } | { "kind": "agent", taskId: string, } | { "kind": "workflow", run: string, step: string, };

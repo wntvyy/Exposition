@@ -91,7 +91,15 @@ pub struct EnvironmentReport {
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SessionOwner {
     User,
-    Agent { task_id: String },
+    Agent {
+        task_id: String,
+    },
+    /// A workflow step (service-owned; users and agents cannot use its
+    /// sessions or runs, and it cannot use theirs).
+    Workflow {
+        run: String,
+        step: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -262,7 +270,49 @@ pub struct RunManifest {
     /// digest remains.)
     #[serde(default)]
     pub unsaved_inputs: Vec<WorkspacePath>,
+    /// How the run actually executed. Absent in manifests written before M8
+    /// (interactive kernel runs): those ran trusted native.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub execution: Option<RunExecution>,
 }
+
+/// The actual execution mode of a run, as recorded by the service that ran it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum RunExecution {
+    /// Natively, with the user's account privileges (not a sandbox).
+    TrustedNative { interpreter: String },
+    /// A restricted container: only the staged inputs/code mounted read-only,
+    /// one writable output folder, no network, non-root, resource limits.
+    RestrictedContainer {
+        backend: String,
+        image: String,
+        image_id: Option<String>,
+        network: String,
+        user: String,
+        memory: String,
+        cpus: String,
+        pids_limit: u32,
+        time_limit_ms: u64,
+    },
+}
+
+impl RunExecution {
+    /// The label computational evidence shows for this mode.
+    pub fn label(&self) -> String {
+        match self {
+            RunExecution::TrustedNative { .. } => TRUSTED_NATIVE_LABEL.to_owned(),
+            RunExecution::RestrictedContainer { backend, image, network, user, .. } => format!(
+                "restricted container ({backend}, image {image}, network {network}, user {user}, declared inputs read-only)"
+            ),
+        }
+    }
+}
+
+/// Label of trusted native execution (also for manifests without a recorded mode).
+pub const TRUSTED_NATIVE_LABEL: &str = "trusted native (user account privileges)";
 
 /// Lightweight run listing entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

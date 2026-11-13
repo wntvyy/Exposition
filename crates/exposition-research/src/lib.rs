@@ -10,7 +10,12 @@
 //!   project (see [`store`] for the layout); figures and tables are artifacts
 //!   referenced by path, never copied repeatedly through IPC.
 //!
-//! Processes are launched only through [`launcher::KernelProcessLauncher`].
+//! * [`sandbox`] runs workflow-owned Python batches ([`batch::BatchRunner`]):
+//!   restricted (Docker, scoped working copy) or trusted native, with
+//!   controlled output registration.
+//!
+//! Processes are launched only through [`launcher::KernelProcessLauncher`]
+//! (kernels) or the execution service (batches).
 //! Research never constructs document source text: inserting artifacts into
 //! documents is the format-owned `exposition-attach` transformation.
 
@@ -22,6 +27,7 @@ pub mod launcher;
 pub mod project;
 pub mod protocol;
 mod runs;
+pub mod sandbox;
 mod service;
 pub mod store;
 pub mod types;

@@ -2,6 +2,7 @@
 import type { CodeProvenance } from "./CodeProvenance";
 import type { OutputSummary } from "./OutputSummary";
 import type { RunErrorInfo } from "./RunErrorInfo";
+import type { RunExecution } from "./RunExecution";
 import type { RunRecord } from "./RunRecord";
 import type { SessionProvenance } from "./SessionProvenance";
 import type { WorkspacePath } from "./WorkspacePath";
@@ -20,4 +21,9 @@ format: string, record: RunRecord, session: SessionProvenance, code: CodeProvena
  * (The code itself is kept in `code.text` when it fits; otherwise only its
  * digest remains.)
  */
-unsavedInputs: Array<WorkspacePath>, };
+unsavedInputs: Array<WorkspacePath>, 
+/**
+ * How the run actually executed. Absent in manifests written before M8
+ * (interactive kernel runs): those ran trusted native.
+ */
+execution?: RunExecution, };

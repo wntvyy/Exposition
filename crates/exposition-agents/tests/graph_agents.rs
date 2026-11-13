@@ -1614,6 +1614,7 @@ mod attachments {
             error: None,
             output: OutputSummary::default(),
             unsaved_inputs: Vec::new(),
+            execution: None,
         };
         exposition_research::store::write_manifest(root, &manifest).unwrap();
         artifact_id
