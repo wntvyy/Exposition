@@ -16,11 +16,12 @@ use exposition_graph::{GraphService, SavedWorkflow, WorkflowId, WorkflowRunId};
 use exposition_lean::LeanService;
 use exposition_research::ResearchProject;
 use exposition_research::batch::{BatchMode, BatchRunner};
+use exposition_workflow::adapters::agent::{AgentReviewAdapter, AgentReviewer, AgentServiceReviewer};
 use exposition_workflow::adapters::associate::AssociateAdapter;
 use exposition_workflow::adapters::batch::BatchAdapter;
 use exposition_workflow::adapters::lean::{LeanAuditAdapter, LeanAuditor, LeanServiceAuditor};
 use exposition_workflow::adapters::research::{ProjectResearch, PromotionAdapter, ResearchActions, RetainAdapter};
-use exposition_workflow::adapters::{AGENT_REVIEW_UNAVAILABLE, Adapters, Unavailable, runner_ids};
+use exposition_workflow::adapters::{Adapters, runner_ids};
 use exposition_workflow::{
     StartWorkflowRunRequest, WorkflowAssociationDecision, WorkflowHost, WorkflowRun, WorkflowRunConfig,
     WorkflowRunError, WorkflowRunPlan, WorkflowRunService, WorkflowRunSummary,
@@ -81,6 +82,8 @@ pub struct RunServices {
     pub execution: ExecutionService,
     pub lean: LeanService,
     pub research_project: Arc<ResearchProject>,
+    /// Read-only agent review steps run as agent tasks.
+    pub agents: exposition_agents::AgentService,
     /// The research batch runner (restricted Docker and trusted-native Python
     /// batches). `None`: Python steps report themselves unavailable.
     pub batch: Option<Arc<dyn BatchRunner>>,
@@ -116,7 +119,8 @@ pub fn build(data_dir: &Path, services: RunServices) -> Result<WorkflowRunServic
         Arc::new(RetainAdapter { research: Some(Arc::clone(&research)) }),
     );
     adapters.insert(runner_ids::REVIEWED_PROMOTION.into(), Arc::new(PromotionAdapter { research: Some(research) }));
-    adapters.insert(runner_ids::READ_ONLY_AGENT.into(), Arc::new(Unavailable(AGENT_REVIEW_UNAVAILABLE.into())));
+    let reviewer: Arc<dyn AgentReviewer> = Arc::new(AgentServiceReviewer { agents: services.agents.clone() });
+    adapters.insert(runner_ids::READ_ONLY_AGENT.into(), Arc::new(AgentReviewAdapter { reviewer: Some(reviewer) }));
     WorkflowRunService::new(WorkflowRunConfig {
         database: Some(data_dir.join("workflow-runs.sqlite3")),
         host: Arc::new(AppWorkflowHost {

@@ -250,7 +250,10 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
             }
         };
         let control = StepControl { canceled: &canceled, on_dispatched: &on_dispatched };
-        let run_id = cell.lock().unwrap_or_else(|p| p.into_inner()).id.clone();
+        let (run_id, model_requests_remaining) = {
+            let run = cell.lock().unwrap_or_else(|p| p.into_inner());
+            (run.id.clone(), run.budgets.max_model_requests.saturating_sub(run.usage.model_requests))
+        };
         let request = StepRequest {
             root: &root,
             run: &run_id,
@@ -259,6 +262,7 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
             inputs: &inputs,
             time_limit: Duration::from_secs(u64::from(planned.time_limit_seconds.min(remaining).max(1))),
             max_output_bytes: planned.max_output_bytes,
+            model_requests_remaining,
         };
         let result = adapter.run(&request, &control);
         let reported = reported.lock().unwrap_or_else(|p| p.into_inner()).clone();

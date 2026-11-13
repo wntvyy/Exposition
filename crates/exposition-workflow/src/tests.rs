@@ -25,6 +25,7 @@ use exposition_research::batch::{
     BatchCode, BatchControl, BatchMode, BatchPortOutput, BatchRequest, BatchResult, BatchRunner,
 };
 
+use crate::adapters::agent::{AgentReviewAdapter, AgentReviewer, ReviewOutcome, ReviewRequest};
 use crate::adapters::associate::AssociateAdapter;
 use crate::adapters::batch::BatchAdapter;
 use crate::adapters::lean::{LeanAuditAdapter, LeanAuditor};
@@ -922,6 +923,81 @@ fn closing_the_project_cancels_the_run_and_nothing_resumes() {
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(f.calls.log(), vec!["batch:run".to_owned()]);
     assert!(f.service.active_runs().is_empty());
+}
+
+struct FakeReviewer {
+    prompts: Mutex<Vec<(String, Vec<String>, u32)>>,
+}
+
+impl AgentReviewer for FakeReviewer {
+    fn availability(&self, _root: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn review(
+        &self,
+        request: &ReviewRequest,
+        _canceled: &(dyn Fn() -> bool + Sync),
+        on_task: &(dyn Fn(&str) + Sync),
+    ) -> Result<ReviewOutcome, StepFailure> {
+        on_task("task-1");
+        self.prompts.lock().unwrap().push((
+            request.prompt.clone(),
+            request.files.iter().map(|f| f.to_string()).collect(),
+            request.max_requests,
+        ));
+        Ok(ReviewOutcome { text: "The data look consistent.".into(), task: "task-1".into(), requests: 3 })
+    }
+}
+
+#[test]
+fn a_read_only_agent_review_reports_and_counts_model_requests() {
+    let f = fixture();
+    let reviewer = Arc::new(FakeReviewer { prompts: Mutex::new(Vec::new()) });
+    let mut a = adapters(&f.batch, &f.lean, &f.research);
+    let r: Arc<dyn AgentReviewer> = reviewer.clone();
+    a.insert(runner_ids::READ_ONLY_AGENT.into(), Arc::new(AgentReviewAdapter { reviewer: Some(r) }));
+    let h: Arc<dyn WorkflowHost> = f.host.clone();
+    let service =
+        WorkflowRunService::new(WorkflowRunConfig { database: None, host: h, adapters: a, lean: None }).unwrap();
+    let mut def = numerical(false);
+    def.ceiling.model_requests = true;
+    def.steps = vec![WorkflowStep {
+        id: "review".into(),
+        label: "Review the data".into(),
+        operation: StepOperation { id: "agent.review".into(), version: 1 },
+        parameters: BTreeMap::new(),
+        payload: Some(StepPayload::Prompt { text: "Summarize the observations.".into() }),
+    }];
+    def.connections = vec![WorkflowConnection::Data {
+        from: PortSource::Input { input: "data".into() },
+        to: StepPort { step: "review".into(), port: "material".into() },
+    }];
+    def.outcomes = vec![WorkflowOutcome {
+        id: "report".into(),
+        kind: OutcomeKind::InvestigationReport,
+        label: "Report".into(),
+        from: StepPort { step: "review".into(), port: "report".into() },
+        optional: false,
+    }];
+    let id = f.save(def);
+    let plan = service.plan(&id, None).unwrap();
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    assert_eq!(plan.execution.model_steps, vec!["review".to_owned()]);
+    assert!(plan.notices.iter().any(|n| n.contains("model provider")));
+    assert!(matches!(&plan.steps[0].payload, Some(StepPayload::Prompt { text }) if text.contains("Summarize")));
+    let run = service.start(&StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash }).unwrap();
+    assert!(service.wait_idle(Duration::from_secs(10)));
+    let run = service.get(&run.id).unwrap();
+    assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?}", run.message);
+    assert_eq!(run.usage.model_requests, 3);
+    let out = &last_attempt(&run, "review").outputs[0];
+    assert!(
+        matches!(&out.value, WorkflowOutputValue::Report { text, task: Some(t) } if text.contains("consistent") && t == "task-1")
+    );
+    let prompts = reviewer.prompts.lock().unwrap();
+    assert_eq!(prompts[0].1, vec!["data/obs.csv".to_owned()], "only the declared material is in scope");
+    assert!(prompts[0].0.contains("read-only") && prompts[0].0.contains("Summarize the observations."));
+    assert_eq!(prompts[0].2, run.budgets.max_model_requests);
 }
 
 #[test]

@@ -154,6 +154,7 @@ impl AppState {
                 execution: execution.clone(),
                 lean: lean.clone(),
                 research_project: Arc::clone(&research_project),
+                agents: agents.clone(),
                 batch: batch_runner,
                 runtime: tauri::async_runtime::handle().inner().clone(),
             },

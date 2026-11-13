@@ -24,6 +24,7 @@ use crate::model::{
     WorkflowOutputProvenance, WorkflowOutputValue, WorkflowPlanStep, WorkflowRejectedOutput, WorkflowStepOutput,
 };
 
+pub mod agent;
 pub mod associate;
 pub mod batch;
 pub mod lean;
@@ -48,6 +49,8 @@ pub struct StepRequest<'a> {
     /// The step's time limit, already capped by the run's remaining budget.
     pub time_limit: Duration,
     pub max_output_bytes: u64,
+    /// Model requests the run may still make (model steps).
+    pub model_requests_remaining: u32,
 }
 
 impl StepRequest<'_> {
