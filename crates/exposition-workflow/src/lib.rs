@@ -10,6 +10,7 @@ pub mod runner;
 pub mod service;
 mod slots;
 pub mod store;
+pub mod triggers;
 
 pub use model::*;
 pub use service::{PlanOptions, WorkflowHost, WorkflowRunConfig, WorkflowRunService};

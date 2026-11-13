@@ -305,7 +305,13 @@ fn workflow_schema() -> Value {
         .map(|k| serde_json::to_value(k).unwrap_or(Value::Null))
         .collect(),
     );
-    let operations: Vec<String> = exposition_graph::workflow::operations().into_iter().map(|o| o.id).collect();
+    // Agents cannot name a saved workflow to run (no composite reference in
+    // their schema), so the composite operation is not offered to them.
+    let operations: Vec<String> = exposition_graph::workflow::operations()
+        .into_iter()
+        .map(|o| o.id)
+        .filter(|id| id != exposition_graph::workflow::COMPOSITE_OPERATION)
+        .collect();
     let mut relations: Vec<&str> = vec![""];
     relations.extend(exposition_graph::RelationKind::ALL.iter().map(|k| k.as_str()));
     let strict = |props: Value| {
