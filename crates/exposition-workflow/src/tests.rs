@@ -1614,6 +1614,9 @@ fn a_start_with_a_cause_records_it_and_still_checks_the_approval() {
     let reread = new_service(&f.db, &f.host, &f.batch, &f.lean, &f.research).get(&run.id).unwrap();
     assert_eq!(reread.cause, cause, "persisted");
     assert_eq!(reread.state, WorkflowRunState::Succeeded, "{:?}", reread.message);
+    // The run list carries the cause too (history badges: trigger / reproduction).
+    let listed = f.service.runs(Some(&id)).unwrap();
+    assert_eq!(listed.iter().find(|s| s.id == run.id).map(|s| s.cause.clone()), Some(cause));
 }
 
 #[test]

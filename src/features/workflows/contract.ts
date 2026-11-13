@@ -5,17 +5,13 @@
 // environment capture, manifests, reproduce; triggers) is implemented in Rust
 // by lanes A–D and reaches TypeScript as generated `src/bindings`. The feature
 // imports these types from here (one switch point): everything below is a
-// re-export of its generated binding, except two view-level additions:
+// re-export of its generated binding, except one view-level addition:
 // - `ReviewPlan`: a plan as the review dialog shows it (a reproduction carries
-//   what it reproduces and its drift, from `WorkflowReproducePlan`);
-// - `WorkflowRunSummary.cause`: optional; the run list does not carry the
-//   cause yet (the history badges show it once it does).
+//   what it reproduces and its drift, from `WorkflowReproducePlan`).
 
 import type { WorkflowEnvironmentDrift } from "../../bindings/WorkflowEnvironmentDrift";
-import type { WorkflowRunCause } from "../../bindings/WorkflowRunCause";
 import type { WorkflowRunId } from "../../bindings/WorkflowRunId";
 import type { WorkflowRunPlan } from "../../bindings/WorkflowRunPlan";
-import type { WorkflowRunSummary as WorkflowRunSummaryBase } from "../../bindings/WorkflowRunSummary";
 
 // ----- definitions (lane A) ------------------------------------------------------------------
 
@@ -51,7 +47,7 @@ export type { WorkflowRunStep } from "../../bindings/WorkflowRunStep";
 export type { WorkflowStepInstance } from "../../bindings/WorkflowStepInstance";
 export type { WorkflowStepState } from "../../bindings/WorkflowStepState";
 
-export type WorkflowRunSummary = WorkflowRunSummaryBase & { cause?: WorkflowRunCause };
+export type { WorkflowRunSummary } from "../../bindings/WorkflowRunSummary";
 
 // ----- environment, manifests, reproduce (lane D) --------------------------------------------
 
