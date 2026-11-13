@@ -122,9 +122,15 @@ pub async fn workflow_import(state: State<'_, AppState>, text: String) -> Result
 pub async fn workflow_list(state: State<'_, AppState>) -> Result<Vec<WorkflowSummary>, CommandError> {
     blocking(&state, |graph, _, runs| {
         let mut list = graph.workflows().map_err(CommandError::from)?;
+        // Each runner is checked once for the whole list.
+        let availability = runs.availability();
+        let check = |id: &str| {
+            availability.get(id).cloned().unwrap_or_else(|| Err("No runner is installed for this operation.".into()))
+        };
         for summary in list.iter_mut().filter(|s| s.state == DraftState::WellFormed) {
-            if let Ok(saved) = graph.workflow(&summary.id, Some(summary.revision)) {
-                summary.runnable = with_runnability(runs, saved).validation.runnable;
+            if let Ok(mut saved) = graph.workflow(&summary.id, Some(summary.revision)) {
+                exposition_graph::workflow::apply_runnability(&mut saved.validation, &saved.definition, &check);
+                summary.runnable = saved.validation.runnable;
             }
         }
         Ok(list)

@@ -160,6 +160,18 @@ impl WorkflowRunService {
         }
     }
 
+    /// Each runner's availability in the open project now (runner id →
+    /// `Ok` or why not), computed once for many drafts.
+    pub fn availability(&self) -> std::collections::BTreeMap<String, Result<(), String>> {
+        self.operations()
+            .into_iter()
+            .map(|o| {
+                let state = if o.runner.available { Ok(()) } else { Err(o.runner.availability) };
+                (o.runner.id, state)
+            })
+            .collect()
+    }
+
     /// Runnable = well-formed AND every step's runner available now.
     pub fn apply_runnability(&self, validation: &mut WorkflowValidation, definition: &WorkflowDefinition) {
         match self.root() {

@@ -643,9 +643,17 @@ fn check_output(
                 return Err(("workflow.outputChanged", format!("{path} does not match its retained digest")));
             }
         }
-        WorkflowOutputValue::FormalEvidence { file_sha256, declarations, .. } => {
+        WorkflowOutputValue::FormalEvidence { file, file_sha256, declarations, .. } => {
             if file_sha256.len() != 64 || !file_sha256.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err(("workflow.invalidOutput", "the audit digest is not a SHA-256".into()));
+            }
+            // The audit describes exactly the file as it is now.
+            let (found, _) = hash_project_file(root, file).map_err(|r| ("workflow.invalidOutput", r))?;
+            if found != bare_hash(file_sha256) {
+                return Err((
+                    "workflow.inputChanged",
+                    format!("{file} changed while it was audited; the audit does not describe it"),
+                ));
             }
             if declarations.len() > exposition_lean::types::AUDIT_RECORD_LIMIT {
                 return Err(("workflow.invalidOutput", "too many audited declarations".into()));

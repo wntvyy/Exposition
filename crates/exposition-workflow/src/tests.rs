@@ -957,8 +957,18 @@ fn trust_lost_between_steps_refuses_the_next_native_step() {
         if req.owner.step == "a" {
             host.trusted.store(false, Ordering::SeqCst);
         }
-        Ok(succeeded(run, vec![artifact(r, run, "dataset", "dataset.csv", b"x
-", ArtifactKind::Data)]))
+        Ok(succeeded(
+            run,
+            vec![artifact(
+                r,
+                run,
+                "dataset",
+                "dataset.csv",
+                b"x
+",
+                ArtifactKind::Data,
+            )],
+        ))
     }));
     let run = f.run_to_end(&id);
     assert_eq!(run.code.as_deref(), Some("workflow.untrustedFolder"), "{:?}", run.message);

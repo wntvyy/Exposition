@@ -217,9 +217,9 @@ pub fn run() {
             // Kill every supervised process tree before exiting. (If the app
             // crashes instead, job-object kill-on-close does the same.)
             if let RunEvent::Exit = event {
-                // Active workflow runs stop with the app; the next start
-                // marks them interrupted (never resumed).
-                app.state::<AppState>().workflow_runs.project_closed(None);
+                // An active workflow run stops with the app (its jobs are
+                // killed below); the next start marks it interrupted and
+                // never resumes or repeats it.
                 app.state::<AppState>().tex.shutdown();
                 app.state::<AppState>().execution.shutdown();
                 app.state::<AppState>().reconciler.shutdown();
