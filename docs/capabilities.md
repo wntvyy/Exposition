@@ -340,12 +340,13 @@ are stored as text and never rendered as active content.
 Julia steps. The container image must provide `python3` and every package
 the code needs: Exposition never pulls images and the container has no
 network. The trusted native Python step and the Lean audit run with your
-account's privileges and are not contained. The Lean audit step waits at
-most 10 minutes for Lean, whatever its time limit; if the Lean file is open
-with unsaved changes that differ from the reviewed file, the step fails
-rather than audit other text. A promotion is always prepared at the end of
-the manuscript; a discarded promotion stays listed as awaiting review until
-its 30-minute review window ends.
+account's privileges and are not contained. The Lean audit step has a
+10-minute limit, the most the Lean service allows for one check; if the
+Lean file is open with unsaved changes that differ from the reviewed file,
+the step fails rather than audit other text. A promotion is always
+prepared at the end of the manuscript; a discarded one reads Rejected, and
+one that can no longer be approved (its 30-minute window passed, or
+Exposition restarted) reads Expired.
 
 ## Research
 
