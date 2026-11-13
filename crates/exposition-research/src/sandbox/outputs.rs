@@ -125,16 +125,22 @@ pub(crate) fn validate(out_dir: &Path, max_total: u64) -> (Vec<Validated>, Vec<B
     };
     let Ok(entries) = std::fs::read_dir(out_dir) else { return (accepted, rejected) };
     let mut names: Vec<(String, std::path::PathBuf, bool)> = Vec::new();
-    for (i, entry) in entries.flatten().enumerate() {
+    let mut entries = entries.flatten();
+    for entry in entries.by_ref().take(MAX_ENTRIES) {
         let raw = entry.file_name();
-        if i >= MAX_ENTRIES {
-            reject(&mut rejected, &raw.to_string_lossy(), format!("more than {MAX_ENTRIES} entries; not inspected"));
-            continue;
-        }
         match raw.to_str() {
             Some(name) => names.push((name.to_owned(), entry.path(), true)),
             None => names.push((raw.to_string_lossy().into_owned(), entry.path(), false)),
         }
+    }
+    // Beyond the bound, entries are counted (up to a limit), never inspected.
+    let more = entries.take(1_000_000).count();
+    if more > 0 {
+        reject(
+            &mut rejected,
+            "…",
+            format!("{more} more entries in the output folder were not inspected (at most {MAX_ENTRIES} are)"),
+        );
     }
     names.sort_by(|a, b| a.0.cmp(&b.0));
     let mut total: u64 = 0;
@@ -375,6 +381,15 @@ mod tests {
         assert_eq!(accepted.len(), MAX_FILES);
         assert_eq!(rejected.len(), 3);
         assert!(rejected.iter().all(|r| r.reason.contains("more than")));
+        // Floods are summarized, not listed one by one.
+        for i in 0..MAX_ENTRIES {
+            std::fs::write(dir.join(format!("g{i:03}.txt")), "x").unwrap();
+        }
+        let (accepted, rejected) = validate(&dir, 1 << 20);
+        assert_eq!(accepted.len(), MAX_FILES);
+        let summary = rejected.iter().find(|r| r.name == "…").unwrap();
+        assert!(summary.reason.starts_with(&format!("{} more entries", MAX_FILES + 3)), "{}", summary.reason);
+        assert!(rejected.len() < MAX_ENTRIES + 1, "{}", rejected.len());
     }
 
     #[cfg(windows)]

@@ -767,3 +767,39 @@ async fn cached_environments_follow_trust_changes() {
     fx.service.environments(false).await.unwrap();
     assert_eq!(venv_probes(), after_grant, "nothing from the project runs after the revoke");
 }
+
+/// M8: a workflow step's session is its own: users, agents, and other
+/// workflow steps cannot run code in it, and it cannot use theirs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_sessions_are_isolated_from_users_agents_and_other_steps() {
+    let mut fx = fixture(true).await;
+    let Some(env) = python(&fx, false).await else { return };
+    let owner = SessionOwner::Workflow { run: "wf-1".into(), step: "fit".into() };
+    let workflow = start(&fx, &env, owner.clone()).await;
+    let user = start(&fx, &env, SessionOwner::User).await;
+    for intruder in [
+        SessionOwner::User,
+        SessionOwner::Agent { task_id: "t1".into() },
+        SessionOwner::Workflow { run: "wf-1".into(), step: "other".into() },
+        SessionOwner::Workflow { run: "wf-2".into(), step: "fit".into() },
+    ] {
+        let refused = fx.service.execute(ExecuteRequest {
+            session_id: workflow.id.clone(),
+            source: input("1"),
+            requester: intruder.clone(),
+        });
+        assert!(matches!(refused, Err(ResearchError::OwnerMismatch { .. })), "{intruder:?}: {refused:?}");
+    }
+    let refused = fx.service.execute(ExecuteRequest {
+        session_id: user.id.clone(),
+        source: input("1"),
+        requester: owner.clone(),
+    });
+    assert!(matches!(refused, Err(ResearchError::OwnerMismatch { .. })), "{refused:?}");
+    let own = run(&fx, &workflow, input("print(6 * 7)"));
+    let done = finished(&mut fx.events, &own.id.0, Duration::from_secs(60)).await;
+    assert_eq!(done.status, RunStatus::Succeeded);
+    assert_eq!(done.owner, owner);
+    fx.service.shutdown(&workflow.id).await.unwrap();
+    fx.service.shutdown(&user.id).await.unwrap();
+}

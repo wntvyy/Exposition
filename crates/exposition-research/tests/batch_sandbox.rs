@@ -316,6 +316,7 @@ def hard():
     open(os.path.join(out, "a.csv"), "w").write("1\n")
     os.link(os.path.join(out, "a.csv"), os.path.join(out, "b.csv"))
 attempt("hardlink", hard)
+attempt("input-hardlink", lambda: os.link("/workspace/data/input.csv", os.path.join(out, "input.csv")))
 attempt("oversize", lambda: open(os.path.join(out, "big.csv"), "w").write("1" * 200000))
 attempt("mislabelled", lambda: open(os.path.join(out, "fake.png"), "w").write("<html><script>alert(1)</script>"))
 attempt("hidden", lambda: open(os.path.join(out, ".hidden.csv"), "w").write("x"))
@@ -343,7 +344,7 @@ print("listing", sorted(os.listdir(out)))
     }
     // Whatever the bind mount made of links, FIFOs, and hard links: if the
     // entry exists on the host it was rejected, and nothing it points to was copied.
-    for name in ["table.csv", "rel.csv", "etc.csv", "pipe.csv", "a.csv", "b.csv"] {
+    for name in ["table.csv", "rel.csv", "etc.csv", "pipe.csv", "a.csv", "b.csv", "input.csv"] {
         if result.log.contains(&format!("made {}", name)) || result.rejected.iter().any(|r| r.name == name) {
             assert!(rejected(name).is_some() || !names_in(&dir).contains(&name.to_owned()), "{name}");
         }
