@@ -31,7 +31,8 @@ const runIpc = vi.hoisted(() => ({
   acknowledge: vi.fn(),
   decideAssociation: vi.fn(),
   promotionPreview: vi.fn(),
-  reproduce: vi.fn(),
+  reproducePlan: vi.fn(),
+  manifest: vi.fn(),
   exportManifest: vi.fn(),
 }));
 const triggerIpc = vi.hoisted(() => ({ list: vi.fn(async () => []), plan: vi.fn(), enable: vi.fn(), disable: vi.fn() }));

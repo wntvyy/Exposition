@@ -25,6 +25,7 @@ import type {
   EnableTriggerRequest,
   TriggerPlanRequest,
   WorkflowManifestExport,
+  WorkflowReproducePlan,
   WorkflowStandingPlan,
   WorkflowTrigger,
   WorkflowTriggerEvent,
@@ -67,13 +68,16 @@ export const workflowRunCommands = {
   promotionPreview: (promotion: string) => invoke<PromotionPreview | null>("research_promotion_preview", { promotion }),
   /**
    * A new plan reproducing a recorded run: its revision with every input
-   * pinned to the digests that run read, plus environment drift notices. It
-   * is approved and started like any plan (`start`); the run records its
-   * cause (reproduction of `run`).
+   * pinned to the digests that run read, plus environment drift. It is
+   * approved and started like any plan (`start`); the run records its cause
+   * (reproduction of `run`).
    */
-  reproduce: (run: WorkflowRunId) => invoke<WorkflowRunPlan>("workflow_run_reproduce", { run }),
-  /** Write the run manifest (JSON: revision, hashes, input/output digests, environments, usage, cause). */
-  exportManifest: (run: WorkflowRunId) => invoke<WorkflowManifestExport>("workflow_run_manifest_export", { run, destination: null }),
+  reproducePlan: (run: WorkflowRunId) => invoke<WorkflowReproducePlan>("workflow_run_reproduce_plan", { run }),
+  /** The run manifest as JSON text (revision, hashes, input/output digests, environments, usage, cause). */
+  manifest: (run: WorkflowRunId) => invoke<string>("workflow_run_manifest", { run }),
+  /** Write the run manifest (`destination` null: the default place in the project). */
+  exportManifest: (run: WorkflowRunId, destination: string | null = null) =>
+    invoke<WorkflowManifestExport>("workflow_run_manifest_export", { run, destination }),
 };
 
 /**

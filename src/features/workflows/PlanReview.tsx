@@ -17,7 +17,7 @@ import { useCallback, useEffect, useId, useState } from "react";
 import type { PortSource } from "../../bindings/PortSource";
 import type { StepPayload } from "../../bindings/StepPayload";
 import type { WorkflowId } from "../../bindings/WorkflowId";
-import type { WorkflowPlanStep, WorkflowRun, WorkflowRunPlan } from "./contract";
+import type { ReviewPlan, WorkflowPlanStep, WorkflowRun, WorkflowRunPlan } from "./contract";
 import { errorMessage, isCommandError } from "../../lib/ipc";
 import { Badge, Banner, Button, Dialog, ErrorState, IconButton, LoadingState } from "../../ui/components";
 import { workflowRunCommands } from "./ipc";
@@ -229,12 +229,14 @@ export function groupByComposite(steps: WorkflowPlanStep[]): StepGroup[] {
 }
 
 /** The plan in full (also shown read-only in the run monitor as "the plan exactly as approved"). */
-export function PlanDetails({ plan }: { plan: WorkflowRunPlan }) {
+export function PlanDetails({ plan }: { plan: ReviewPlan }) {
   const { execution, ceiling, budgets } = plan;
   const maxParallel = plan.maxParallel ?? 1;
   const limits = plan.limits ?? DEFAULT_LIMITS;
   const groups = groupByComposite(plan.steps);
   const drift = plan.drift ?? [];
+  // Drift is also summarized in the plan's notices; show each fact once.
+  const notices = plan.notices.filter((n) => !drift.some((d) => d.message === n));
   const stepNames = (ids: string[]) => ids.map((id) => `“${plan.steps.find((s) => s.step === id)?.label ?? id}”`).join(", ");
   return (
     <div className="xp-wf-plan" data-testid="workflow-plan-details" data-plan={plan.plan} data-approval={plan.approvalHash}>
@@ -315,9 +317,9 @@ export function PlanDetails({ plan }: { plan: WorkflowRunPlan }) {
         </div>
       )}
 
-      {plan.notices.length > 0 && (
+      {notices.length > 0 && (
         <ul className="xp-wf-plan__notices" data-testid="plan-notices">
-          {plan.notices.map((n, i) => (
+          {notices.map((n, i) => (
             <li key={i}>
               <Banner tone="info" title="Note">
                 {n}
@@ -389,7 +391,7 @@ export function PlanDetails({ plan }: { plan: WorkflowRunPlan }) {
   );
 }
 
-type Load = { kind: "loading" } | { kind: "error"; message: string } | { kind: "ready"; plan: WorkflowRunPlan };
+type Load = { kind: "loading" } | { kind: "error"; message: string } | { kind: "ready"; plan: ReviewPlan };
 
 export interface PlanReviewDialogProps {
   workflow: WorkflowId;
@@ -401,7 +403,7 @@ export interface PlanReviewDialogProps {
    * Where the plan comes from (default: `workflow_run_plan` for the revision).
    * Reproduce passes `workflow_run_reproduce`; the plan is approved the same way.
    */
-  loadPlan?: () => Promise<WorkflowRunPlan>;
+  loadPlan?: () => Promise<ReviewPlan>;
   /** Dialog title prefix (default "Review and run"). */
   heading?: string;
 }

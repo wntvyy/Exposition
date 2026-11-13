@@ -28,7 +28,8 @@ const runIpc = vi.hoisted(() => ({
   acknowledge: vi.fn(),
   decideAssociation: vi.fn(),
   promotionPreview: vi.fn(),
-  reproduce: vi.fn(),
+  reproducePlan: vi.fn(),
+  manifest: vi.fn(),
   exportManifest: vi.fn(),
 }));
 const triggerIpc = vi.hoisted(() => ({ list: vi.fn(), plan: vi.fn(), enable: vi.fn(), disable: vi.fn() }));
@@ -190,8 +191,24 @@ const run = (overrides: Partial<WorkflowRun> = {}): WorkflowRun => ({
     runStep("comp/plot", "Plot", "skipped", { reason: "“Fit → figure” was not produced." }),
     runStep("sweep", "Sweep", "running", {
       instances: [
-        { index: 0, parameter: { kind: "integer", value: 1 }, state: "succeeded", attempts: [attempt()] },
-        { index: 1, parameter: { kind: "integer", value: 2 }, state: "running", attempts: [attempt({ state: "dispatched", finishedAtMs: null, environment: null })] },
+        {
+          index: 0,
+          parameter: { kind: "integer", value: 1 },
+          state: "succeeded",
+          attempts: [
+            attempt({
+              outputs: [
+                {
+                  port: "summary",
+                  portType: "dataset",
+                  value: { kind: "file", path: "research/runs/r9/out.bin", sha256: HASH, bytes: 12, mediaType: "application/octet-stream", researchRun: "rr-9", artifact: "a9" },
+                  provenance: { run: "run-2", step: "sweep", attempt: 1, instance: 0, operation: { kind: "researchRun", id: "rr-9" } } as never,
+                },
+              ],
+            }),
+          ],
+        },
+        { index: 1, parameter: { kind: "integer", value: 2 }, state: "running", attempts: [attempt({ state: "dispatched", finishedAtMs: null, environment: undefined })] },
         { index: 2, parameter: { kind: "integer", value: 3 }, state: "pending", attempts: [] },
       ],
     }),
@@ -284,6 +301,8 @@ describe("run monitor (M9)", () => {
     expect(second.textContent).toContain("seed = 2");
     expect(second.textContent).toContain("instance 2");
     expect(screen.getByTestId("workflow-attempt-sweep-i0-1").getAttribute("data-state")).toBe("succeeded");
+    // The output names the instance that produced it.
+    expect(screen.getByTestId("workflow-output-sweep-summary").textContent).toContain("(attempt 1, instance 1)");
     expect(screen.getByTestId("workflow-run-repeat-sweep").textContent).toMatch(/Runs once for each of 3 values/);
     // An until iteration has no parameter: it is named by its iteration.
     expect(runModel.instanceLabel({ index: 1, parameter: null, state: "succeeded", attempts: [] })).toBe("Iteration 2");
@@ -356,31 +375,41 @@ describe("run monitor (M9)", () => {
     expect(done.getAttribute("data-path")).toBe(".exposition/manifests/run-2.json");
     expect(done.textContent).toContain("4.0 KiB");
     expect(notifyMock).toHaveBeenCalledWith(expect.objectContaining({ tone: "success", title: "Run manifest exported" }));
+    // The same JSON can be read in place, on request only.
+    expect(runIpc.manifest).not.toHaveBeenCalled();
+    runIpc.manifest.mockResolvedValue('{"schema":"exposition.workflow-run-manifest/1","run":"run-2","approvalHash":"fff"}');
+    fireEvent.click(screen.getByTestId("workflow-run-manifest-show"));
+    await waitFor(() => expect(screen.getByTestId("workflow-run-manifest-view").getAttribute("data-state")).toBe("ready"));
+    expect(runIpc.manifest).toHaveBeenCalledWith("run-2");
+    expect(screen.getByLabelText("Run manifest (JSON)").textContent).toContain('"approvalHash": "fff"');
   });
 
   it("reproduces a run through a reviewed plan with drift notices, started with that plan's approval", async () => {
-    const repro = plan({
-      plan: "plan-r",
-      approvalHash: "9".repeat(64),
+    const driftNotices = [
+      { step: "comp/fit", aspect: "image", recorded: `sha256:${"e".repeat(64)}`, current: `sha256:${"7".repeat(64)}`, message: "The restricted image changed since the run." },
+      { step: "review", aspect: "model", recorded: "claude-opus-5-5", current: "claude-opus-5-6", message: "The review model differs." },
+    ];
+    // Lane D: a wrapper around a normal plan; the drift is also summarized in the plan's notices.
+    runIpc.reproducePlan.mockResolvedValue({
+      plan: plan({ plan: "plan-r", approvalHash: "9".repeat(64), inputs: [{ ...plan().inputs[0]!, pinned: true }], notices: [driftNotices[0]!.message, "Step Review sends material to the model provider."] }),
       reproduces: "run-2",
-      inputs: [{ ...plan().inputs[0]!, pinned: true }],
-      drift: [
-        { step: "comp/fit", aspect: "image", recorded: `sha256:${"e".repeat(64)}`, current: `sha256:${"7".repeat(64)}`, message: "The restricted image changed since the run." },
-        { step: "review", aspect: "model", recorded: "claude-opus-5-5", current: "claude-opus-5-6", message: "The review model differs." },
-      ],
+      drift: driftNotices,
     });
-    runIpc.reproduce.mockResolvedValue(repro);
     runIpc.start.mockResolvedValue(run({ id: "run-3", cause: { kind: "reproduce", of: "run-2" } }));
     render(<RunMonitor run={run({ state: "succeeded", finishedAtMs: 1_700_000_009_000 })} onRun={vi.fn()} />);
     fireEvent.click(screen.getByTestId("workflow-run-reproduce"));
     await screen.findByTestId("workflow-plan-details");
-    expect(runIpc.reproduce).toHaveBeenCalledWith("run-2");
+    expect(runIpc.reproducePlan).toHaveBeenCalledWith("run-2");
     expect(runIpc.plan).not.toHaveBeenCalled();
     expect(screen.getByRole("dialog").textContent).toContain("Reproduce “Study”");
     const drift = screen.getByTestId("plan-drift");
     expect(drift.querySelectorAll("li")).toHaveLength(2);
     expect(drift.querySelector('[data-aspect="image"]')!.textContent).toContain("The restricted image changed since the run.");
     expect(drift.querySelector('[data-aspect="model"]')!.textContent).toContain("claude-opus-5-6");
+    // Each fact once: the drift's summary in the notices is not repeated; other notices stay.
+    const notices = within(screen.getByRole("dialog")).getByTestId("plan-notices").textContent!;
+    expect(notices).not.toContain("The restricted image changed since the run.");
+    expect(notices).toContain("sends material to the model provider");
     expect(screen.getByTestId("plan-reproduces").textContent).toContain("run-2");
     expect(within(screen.getByRole("dialog")).getByTestId("plan-input-data").textContent).toContain("Pinned");
     expect(runIpc.start).not.toHaveBeenCalled();

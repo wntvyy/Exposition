@@ -954,3 +954,7 @@
   border-top: 0;
   background: repeating-linear-gradient(90deg, var(--color-info-text) 0 8px, transparent 8px 11px, var(--color-info-text) 11px 13px, transparent 13px 16px);
 }
+
+.xp-wf-manifest {
+  max-height: 360px;
+}

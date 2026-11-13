@@ -312,12 +312,12 @@ export function environmentFacts(env: WorkflowEnvironment): EnvironmentFact[] {
     { label: "Runner", value: `${env.runner} (${CONTAINMENT_VIEW[env.containment]?.label ?? env.containment})` },
     { label: "System", value: `${env.os} ${env.arch} · Exposition ${env.appVersion}` },
   ];
-  if (env.image) facts.push({ label: "Image", value: env.image.name, hash: env.image.id });
-  if (env.interpreter) facts.push({ label: "Interpreter", value: `${env.interpreter.name} ${env.interpreter.version}` });
+  if (env.image) facts.push({ label: "Image", value: env.image.id ? env.image.name : `${env.image.name} (identity not recorded)`, ...(env.image.id ? { hash: env.image.id } : {}) });
+  if (env.interpreter) facts.push({ label: "Interpreter", value: `${env.interpreter.name} ${env.interpreter.version ?? "(version not recorded)"}` });
   if (env.toolchain) {
     facts.push({
       label: "Toolchain",
-      value: `${env.toolchain.name} ${env.toolchain.version}`,
+      value: `${env.toolchain.name} ${env.toolchain.version ?? "(version not recorded)"}`,
       ...(env.toolchain.manifestDigest ? { hash: env.toolchain.manifestDigest } : {}),
     });
   }

@@ -11,7 +11,7 @@
 //
 // New fields are optional here so that M8-shaped records (and older runs) are
 // still read correctly; views treat a missing field as "not recorded".
-// Landed so far: definitions (lane A), run cause (lane B).
+// Landed so far: definitions (lane A), run cause (lane B), attempt environment (lane D).
 import type { ParamValue } from "../../bindings/ParamValue";
 import type { StepCondition } from "../../bindings/StepCondition";
 import type { StepRepeat } from "../../bindings/StepRepeat";
@@ -25,9 +25,8 @@ import type { WorkflowRunOutcome as WorkflowRunOutcomeBase } from "../../binding
 import type { WorkflowRunPlan as WorkflowRunPlanBase } from "../../bindings/WorkflowRunPlan";
 import type { WorkflowRunStep as WorkflowRunStepBase } from "../../bindings/WorkflowRunStep";
 import type { WorkflowRunSummary as WorkflowRunSummaryBase } from "../../bindings/WorkflowRunSummary";
-import type { WorkflowStepAttempt as WorkflowStepAttemptBase } from "../../bindings/WorkflowStepAttempt";
+import type { WorkflowStepAttempt } from "../../bindings/WorkflowStepAttempt";
 import type { WorkflowStepState as WorkflowStepStateBase } from "../../bindings/WorkflowStepState";
-import type { Containment } from "../../bindings/Containment";
 
 // ----- definitions (lane A) ------------------------------------------------------------------
 
@@ -70,7 +69,7 @@ export type WorkflowPlanStep = WorkflowPlanStepBase & {
   repeat?: StepRepeat | null;
 };
 
-/** An environment difference between a recorded run and its reproduction plan (lane D). */
+/** An environment difference between a recorded run and the plan reproducing it (lane D). */
 export type WorkflowDriftNotice = {
   step: string | null;
   /** What differs: image, interpreter, toolchain, packages, model, os, app. */
@@ -84,30 +83,18 @@ export type WorkflowRunPlan = Omit<WorkflowRunPlanBase, "steps"> & {
   steps: WorkflowPlanStep[];
   maxParallel?: number;
   limits?: WorkflowConcurrencyLimits;
-  /** A reproduction plan: the run it reproduces (inputs pinned to that run's digests). */
-  reproduces?: WorkflowRunId | null;
-  drift?: WorkflowDriftNotice[];
 };
+
+/** `workflow_run_reproduce_plan`: a normal plan pinned to a recorded run's inputs, with drift (lane D). */
+export type WorkflowReproducePlan = { plan: WorkflowRunPlan; reproduces: WorkflowRunId; drift: WorkflowDriftNotice[] };
+
+/** A plan as the review shows it: a reproduction carries what it reproduces and the drift. */
+export type ReviewPlan = WorkflowRunPlan & { reproduces?: WorkflowRunId | null; drift?: WorkflowDriftNotice[] };
 
 export type WorkflowStepState = WorkflowStepStateBase | "conditionNotMet";
 
-export type WorkflowEnvironment = {
-  runner: string;
-  containment: Containment;
-  os: string;
-  arch: string;
-  appVersion: string;
-  image: { name: string; id: string } | null;
-  interpreter: { name: string; version: string } | null;
-  packages: { name: string; version: string }[];
-  packagesDigest: string | null;
-  toolchain: { name: string; version: string; manifestDigest: string | null } | null;
-  model: { provider: string; model: string } | null;
-  seed: number | null;
-  notes: string[];
-};
-
-export type WorkflowStepAttempt = WorkflowStepAttemptBase & { environment?: WorkflowEnvironment | null };
+export type { WorkflowEnvironment } from "../../bindings/WorkflowEnvironment";
+export type { WorkflowStepAttempt };
 
 export type WorkflowStepInstance = {
   /** 0-based position (forEach: the value's position; until: the iteration). */

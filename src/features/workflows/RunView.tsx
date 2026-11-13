@@ -410,14 +410,22 @@ function OutputValueView({ run, step, value, onRun }: { run: WorkflowRun; step: 
   }
 }
 
+/** The repeat instance that produced an output (lane B adds `provenance.instance`; absent before M9). */
+function provenanceInstance(provenance: object): number | null {
+  const value = (provenance as { instance?: unknown }).instance;
+  return typeof value === "number" ? value : null;
+}
+
 function OutputItem({ run, step, output, onRun }: { run: WorkflowRun; step: string; output: WorkflowStepOutput; onRun: (run: WorkflowRun) => void }) {
+  const instance = provenanceInstance(output.provenance);
   return (
     <li className="xp-wf-output" data-testid={`workflow-output-${step}-${output.port}`} data-kind={output.value.kind} data-port={output.port}>
       <div className="xp-wf-output__head">
         <strong>{output.port}</strong> <Badge tone="neutral">{PORT_TYPE_LABELS[output.portType]}</Badge>
         <span className="xp-wf__muted">
           {" "}
-          validated · from {output.provenance.operation.kind} {output.provenance.operation.id} (attempt {output.provenance.attempt})
+          validated · from {output.provenance.operation.kind} {output.provenance.operation.id} (attempt {output.provenance.attempt}
+          {instance !== null ? `, instance ${instance + 1}` : ""})
         </span>
       </div>
       <OutputValueView run={run} step={step} value={output.value} onRun={onRun} />
@@ -660,6 +668,49 @@ function StepView({ run, step, index, onRun }: { run: WorkflowRun; step: Workflo
 
 // ----- run view ----------------------------------------------------------------------------
 
+/** The run manifest (JSON text from the service), shown on request as plain text. */
+function ManifestView({ run }: { run: WorkflowRun }) {
+  const [state, setState] = useState<{ kind: "idle" } | { kind: "loading" } | { kind: "error"; message: string } | { kind: "ready"; text: string }>({ kind: "idle" });
+  const load = async () => {
+    setState({ kind: "loading" });
+    try {
+      const raw = await workflowRunCommands.manifest(run.id);
+      let text = raw;
+      try {
+        text = JSON.stringify(JSON.parse(raw), null, 2);
+      } catch {
+        // Shown as received.
+      }
+      setState({ kind: "ready", text });
+    } catch (e) {
+      setState({ kind: "error", message: errorMessage(e) });
+    }
+  };
+  return (
+    <div data-testid="workflow-run-manifest-view" data-state={state.kind}>
+      <p className="xp-wf__muted">
+        The revision, definition and approval hashes, every input and output digest, each attempt's environment, budgets and usage,
+        and the cause. Export manifest writes the same JSON to a file.
+      </p>
+      {state.kind !== "ready" && (
+        <Button size="sm" isPending={state.kind === "loading"} onPress={() => void load()} data-testid="workflow-run-manifest-show">
+          Show the manifest
+        </Button>
+      )}
+      {state.kind === "error" && (
+        <Banner tone="danger" title="The manifest is unavailable" live>
+          {state.message}
+        </Banner>
+      )}
+      {state.kind === "ready" && (
+        <pre className="xp-wf-log xp-wf-manifest" tabIndex={0} aria-label="Run manifest (JSON)">
+          {state.text}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 function CauseView({ cause, run }: { cause: WorkflowRunCause | undefined; run: WorkflowRun }) {
   const kind = cause?.kind ?? "manual";
   return (
@@ -705,7 +756,10 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
   const view = RUN_STATE_VIEW[run.state];
   const running = runningNow(run);
   const maxParallel = run.plan.maxParallel ?? 1;
-  const reproducePlan = useCallback(() => workflowRunCommands.reproduce(run.id), [run.id]);
+  const reproducePlan = useCallback(async () => {
+    const r = await workflowRunCommands.reproducePlan(run.id);
+    return { ...r.plan, reproduces: r.reproduces, drift: r.drift };
+  }, [run.id]);
 
   const exportManifest = async () => {
     setBusy("manifest");
@@ -906,6 +960,12 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
       <Section title="The plan exactly as approved" collapsible defaultExpanded={false}>
         <PlanDetails plan={run.plan} />
       </Section>
+
+      {run.state !== "running" && (
+        <Section title="Run manifest" collapsible defaultExpanded={false}>
+          <ManifestView run={run} />
+        </Section>
+      )}
 
       <PlanReviewDialog
         workflow={run.workflow}
