@@ -630,3 +630,29 @@ fn a_preview_plan_is_not_kept_and_cannot_be_started() {
     assert_eq!(f.service.start(&request).unwrap_err().code, "workflow.planStale");
     assert!(f.calls.log().is_empty());
 }
+
+#[test]
+fn the_plan_states_conditions_and_repeats_in_plain_words() {
+    let f = fixture();
+    let mut def = fan(&["sweep"], Some("join"));
+    def.steps[0].repeat = for_each_timeouts(&[10, 20]);
+    def.steps[1].condition = when("sweep", "dataset", ConditionTest::OutputPresent, false);
+    // A condition cannot read a forEach step: validation refuses it.
+    let refused = f.service.plan(&f.save(v2(def, 2)), None).unwrap();
+    assert!(!refused.blockers.is_empty());
+    let mut def = fan(&["fit"], Some("next"));
+    def.steps[1].condition = when("fit", "dataset", json_ge("/r2", "0.9"), true);
+    def.steps[0].repeat = Some(StepRepeat::Until {
+        port: "dataset".into(),
+        test: json_ge("/r2", "0.9"),
+        negate: false,
+        max_iterations: 4,
+        on_exhausted: Exhausted::UseLast,
+    });
+    let plan = f.service.plan(&f.save(v2(def, 2)), None).unwrap();
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    let text = plan.notices.join("\n");
+    assert!(text.contains("“Python next” runs only unless the value at /r2 ≥ 0.9"), "{text}");
+    assert!(text.contains("“Python fit” runs again, at most 4 times, until the value at /r2 ≥ 0.9"), "{text}");
+    assert!(text.contains("the last iteration's outputs are used"), "{text}");
+}

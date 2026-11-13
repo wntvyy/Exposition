@@ -600,6 +600,39 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
             if model_steps.len() == 1 { "s" } else { "" }
         ));
     }
+    // Bounded control flow, in plain words.
+    let label_of =
+        |id: &str| steps.iter().find(|s| s.step == id).map(|s| s.label.clone()).unwrap_or_else(|| id.to_owned());
+    for s in &steps {
+        if let Some(c) = &s.condition {
+            notices.push(format!(
+                "“{}” runs only {} {} (output “{}” of “{}”); otherwise it is skipped, and so are the steps that need its output.",
+                s.label,
+                if c.negate { "unless" } else { "when" },
+                crate::condition::describe(&c.test),
+                c.source.port,
+                label_of(&c.source.step)
+            ));
+        }
+        match &s.repeat {
+            Some(StepRepeat::ForEach { parameter, values }) => notices.push(format!(
+                "“{}” runs once for each of {} values of {parameter} (each instance counts as a step).",
+                s.label,
+                values.len()
+            )),
+            Some(StepRepeat::Until { port, test, negate, max_iterations, on_exhausted }) => notices.push(format!(
+                "“{}” runs again, at most {max_iterations} times, until {}{} for its output “{port}”; if that never happens, {}.",
+                s.label,
+                if *negate { "it is not the case that " } else { "" },
+                crate::condition::describe(test),
+                match on_exhausted {
+                    exposition_graph::workflow::Exhausted::Fail => "the step fails",
+                    exposition_graph::workflow::Exhausted::UseLast => "the last iteration's outputs are used",
+                }
+            )),
+            None => {}
+        }
+    }
     if steps.iter().any(|s| s.effects.contains(&WorkflowEffect::ProposeDocumentChange)) {
         notices.push("Manuscript promotions are only prepared; you review and approve each one separately.".to_owned());
     }
