@@ -58,6 +58,19 @@ pub struct StepRequest<'a> {
     /// the original a reproduction reproduces
     /// ([`crate::environment::seed_basis`]).
     pub seed_basis: &'a str,
+    /// The instance of a repeated step this attempt runs (`None`: the step is
+    /// not repeated). A forEach value is already applied to
+    /// `step.parameters`; adapters may ignore this.
+    pub iteration: Option<StepIteration>,
+}
+
+/// Which instance of a repeated step an attempt runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepIteration {
+    /// 0-based instance index (forEach value index, until iteration).
+    pub index: u32,
+    /// A forEach instance's parameter name and value.
+    pub parameter: Option<(String, exposition_graph::workflow::ParamValue)>,
 }
 
 impl StepRequest<'_> {
@@ -71,6 +84,7 @@ impl StepRequest<'_> {
             run: self.run.clone(),
             step: self.step.step.clone(),
             attempt: self.attempt,
+            instance: self.iteration.as_ref().map(|i| i.index),
             operation,
         }
     }

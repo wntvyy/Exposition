@@ -1,11 +1,21 @@
 //! The bounded runner.
 //!
 //! A run's steps execute in dependency order: a step becomes ready once
-//! every step it consumes data from (and every explicit prerequisite)
-//! succeeded; ready steps start in plan order, at most the plan's
-//! `max_parallel` at a time (1: exactly one step at a time, in plan order) and
-//! only while an application-wide slot of the step's kind is free (shared by
-//! every active run, see [`crate::slots`]).
+//! every step it consumes data from, every explicit prerequisite, and the
+//! source of its condition finished; ready steps start in plan order, at most
+//! the plan's `max_parallel` at a time (1: exactly one step at a time, in plan
+//! order) and only while an application-wide slot of the step's kind is free
+//! (shared by every active run, see [`crate::slots`]).
+//!
+//! Conditions and repeats (bounded, no expression evaluator): a step whose
+//! condition does not hold is `conditionNotMet` (with its reason) and every
+//! step that needs its output is skipped (with its reason); an unreadable
+//! condition source fails the step. A forEach step runs one instance per
+//! value (in parallel within the limits; consumers receive the instances'
+//! outputs in index order); an until step runs iterations one after another
+//! until a predicate on its own output holds (on exhaustion it fails or uses
+//! the last iteration). Every instance is dispatched like a step: it counts
+//! against `maxSteps`, reserves budget, and holds a slot.
 //!
 //! Before each dispatch: the run's project is still the open one, the run was
 //! not canceled, budgets remain — the step's output bytes and model requests
@@ -27,22 +37,24 @@
 // A failed attempt carries its log and refusals (see adapters); deliberate.
 #![allow(clippy::result_large_err)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use exposition_graph::OperationRef;
-use exposition_graph::workflow::PortSource;
 use exposition_graph::workflow::registry::{self, Containment, OperationContract, PortType};
+use exposition_graph::workflow::{ConditionTest, Exhausted, PortSource, StepRepeat};
 
-use crate::adapters::{BoundInput, StepAdapter, StepControl, StepFailure, StepRequest, StepResult, bare_hash};
+use crate::adapters::{
+    BoundInput, StepAdapter, StepControl, StepFailure, StepIteration, StepRequest, StepResult, bare_hash,
+};
 use crate::model::{
     MAX_PARALLEL, WorkflowAttemptState, WorkflowOutputValue, WorkflowPlanStep, WorkflowRejectedOutput, WorkflowRun,
-    WorkflowRunState, WorkflowStepAttempt, WorkflowStepOutput, WorkflowStepState,
+    WorkflowRunState, WorkflowStepAttempt, WorkflowStepInstance, WorkflowStepOutput, WorkflowStepState,
 };
-use crate::plan::{hash_project_file, resolve};
+use crate::plan::{hash_project_file, instance_parameters, resolve, time_limit_of};
 use crate::service::Inner;
 use crate::slots::{SlotGuard, SlotKind};
 
@@ -114,6 +126,32 @@ fn step_index(run: &WorkflowRun, step: &str) -> usize {
     run.steps.iter().position(|s| s.step == step).expect("plan steps are run steps")
 }
 
+/// What is dispatched: a plan step (by index) and, for a repeated step, the
+/// instance.
+type Unit = (usize, Option<u32>);
+
+/// The attempts of a unit (an until iteration's instance is created here).
+fn attempts_mut(run: &mut WorkflowRun, (i, instance): Unit) -> &mut Vec<WorkflowStepAttempt> {
+    match instance {
+        None => &mut run.steps[i].attempts,
+        Some(k) => &mut instance_mut(run, i, k).attempts,
+    }
+}
+
+fn instance_mut(run: &mut WorkflowRun, i: usize, k: u32) -> &mut WorkflowStepInstance {
+    let step = &mut run.steps[i];
+    if !step.instances.iter().any(|x| x.index == k) {
+        step.instances.push(WorkflowStepInstance {
+            index: k,
+            parameter: None,
+            state: WorkflowStepState::Pending,
+            attempts: Vec::new(),
+            reason: None,
+        });
+    }
+    step.instances.iter_mut().find(|x| x.index == k).expect("just ensured")
+}
+
 /// A dispatched attempt: its slot and what it reserved from the budgets.
 struct Flight {
     _slot: SlotGuard,
@@ -123,7 +161,7 @@ struct Flight {
 
 /// What a finished attempt reports back to the scheduler.
 struct Completion {
-    index: usize,
+    unit: Unit,
     attempt: u32,
     reported: Option<OperationRef>,
     result: Result<StepResult, StepFailure>,
@@ -143,6 +181,63 @@ struct Grant {
     time_limit: Duration,
     max_output_bytes: u64,
     model_requests: u32,
+}
+
+/// Validated outputs by (step, port): one value, or a forEach step's values
+/// in instance order.
+type Outputs = HashMap<(String, String), Vec<WorkflowStepOutput>>;
+
+/// The scheduler's own state (only its thread touches it).
+#[derive(Default)]
+struct Sched {
+    outputs: Outputs,
+    /// forEach instance outputs: step index → instance → outputs.
+    collected: HashMap<usize, BTreeMap<u32, Vec<WorkflowStepOutput>>>,
+    /// Steps whose condition held.
+    cleared: HashSet<usize>,
+    flights: HashMap<Unit, Flight>,
+    stop: Option<Stop>,
+}
+
+/// What each plan step waits for.
+struct Deps {
+    /// Steps it needs (data producers, prerequisites).
+    needs: Vec<Vec<usize>>,
+    /// The step its condition reads.
+    condition: Vec<Option<usize>>,
+}
+
+impl Deps {
+    fn of(steps: &[WorkflowPlanStep]) -> Self {
+        let index = |id: &str| steps.iter().position(|s| s.step == id);
+        let needs = steps
+            .iter()
+            .map(|s| {
+                let mut deps: Vec<usize> = s
+                    .bindings
+                    .iter()
+                    .filter_map(|b| match &b.from {
+                        PortSource::Step { step, .. } => index(step),
+                        PortSource::Input { .. } => None,
+                    })
+                    .chain(s.prerequisites.iter().filter_map(|p| index(p)))
+                    .collect();
+                deps.sort_unstable();
+                deps.dedup();
+                deps
+            })
+            .collect();
+        let condition = steps.iter().map(|s| s.condition.as_ref().and_then(|c| index(&c.source.step))).collect();
+        Self { needs, condition }
+    }
+}
+
+fn done(state: WorkflowStepState) -> bool {
+    !matches!(state, WorkflowStepState::Pending | WorkflowStepState::Running)
+}
+
+fn did_not_run(state: WorkflowStepState) -> bool {
+    matches!(state, WorkflowStepState::Skipped | WorkflowStepState::ConditionNotMet)
 }
 
 /// Everything the scheduler and its step threads share.
@@ -168,12 +263,144 @@ impl Ctx<'_> {
         self.inner.persist(self.key, run, Some(step))
     }
 
-    fn refuse(&self, planned: &WorkflowPlanStep, code: &str, message: impl Into<String>) -> Dispatch {
-        Dispatch::Stop(refuse(self.cell, planned, code, message, self.inner, self.key))
+    fn refuse(&self, unit: Unit, code: &str, message: impl Into<String>) -> Dispatch {
+        Dispatch::Stop(refuse(self.cell, &self.frozen.plan.steps[unit.0], unit, code, message, self.inner, self.key))
+    }
+
+    /// Mark a pending step as not run (and its instances), with the reason.
+    fn not_run(&self, i: usize, state: WorkflowStepState, reason: String) {
+        let mut run = self.lock();
+        let step = &mut run.steps[i];
+        step.state = state;
+        for instance in &mut step.instances {
+            if instance.state == WorkflowStepState::Pending {
+                instance.state = WorkflowStepState::Skipped;
+                instance.reason = Some(reason.clone());
+            }
+        }
+        step.reason = Some(reason);
+        let id = step.step.clone();
+        let _ = self.persist(&run, &id);
+    }
+
+    /// The next unit to dispatch in plan order, after recording the steps
+    /// that will not run (a step they need did not run, their condition did
+    /// not hold). An unreadable condition fails its step (`sched.stop`).
+    fn advance(&self, sched: &mut Sched, deps: &Deps) -> Option<Unit> {
+        let plan = &self.frozen.plan.steps;
+        for (i, planned) in plan.iter().enumerate() {
+            let (state, ready, missing, source) = {
+                let run = self.lock();
+                let state = run.steps[i].state;
+                let waits = deps.needs[i].iter().chain(deps.condition[i].iter()).any(|&d| !done(run.steps[d].state));
+                let missing = deps.needs[i]
+                    .iter()
+                    .find(|&&d| did_not_run(run.steps[d].state))
+                    .map(|&d| run.steps[d].label.clone());
+                let source = deps.condition[i].map(|d| (run.steps[d].state, run.steps[d].label.clone()));
+                (state, !waits, missing, source)
+            };
+            match state {
+                WorkflowStepState::Pending if ready => {
+                    if deps.needs[i].iter().any(|&d| self.lock().steps[d].state != WorkflowStepState::Succeeded)
+                        && missing.is_none()
+                    {
+                        // A step it needs failed: the run is stopping.
+                        continue;
+                    }
+                    if let Some(label) = missing {
+                        let reason = format!("“{label}”, whose output it needs, did not run.");
+                        self.not_run(i, WorkflowStepState::Skipped, reason);
+                        continue;
+                    }
+                    if let Some(condition) = &planned.condition
+                        && !sched.cleared.contains(&i)
+                    {
+                        let (source_state, source_label) =
+                            source.unwrap_or((WorkflowStepState::Skipped, condition.source.step.clone()));
+                        let what = format!("output “{}” of “{source_label}”", condition.source.port);
+                        if source_state != WorkflowStepState::Succeeded
+                            && condition.test != ConditionTest::OutputPresent
+                        {
+                            if did_not_run(source_state) {
+                                let reason =
+                                    format!("“{source_label}”, whose output its condition reads, did not run.");
+                                self.not_run(i, WorkflowStepState::Skipped, reason);
+                            }
+                            continue;
+                        }
+                        let value = sched
+                            .outputs
+                            .get(&(condition.source.step.clone(), condition.source.port.clone()))
+                            .and_then(|v| v.first())
+                            .map(|o| &o.value);
+                        match crate::condition::evaluate(self.root, &condition.test, condition.negate, value, &what) {
+                            Err((code, message)) => {
+                                sched.stop = Some(refuse(
+                                    self.cell,
+                                    planned,
+                                    (i, None),
+                                    code,
+                                    format!("Not started: its condition could not be evaluated: {message}."),
+                                    self.inner,
+                                    self.key,
+                                ));
+                                return None;
+                            }
+                            Ok((false, seen)) => {
+                                let reason = format!(
+                                    "Its condition did not hold: it runs {} {}, and {seen}.",
+                                    if condition.negate { "unless" } else { "when" },
+                                    crate::condition::describe(&condition.test)
+                                );
+                                self.not_run(i, WorkflowStepState::ConditionNotMet, reason);
+                                continue;
+                            }
+                            Ok(_) => {
+                                sched.cleared.insert(i);
+                            }
+                        }
+                    }
+                    if let Some(unit) = self.next_unit(i, sched) {
+                        return Some(unit);
+                    }
+                }
+                WorkflowStepState::Running => {
+                    if let Some(unit) = self.next_unit(i, sched) {
+                        return Some(unit);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The unit of step `i` that can start now, if any.
+    fn next_unit(&self, i: usize, sched: &Sched) -> Option<Unit> {
+        let planned = &self.frozen.plan.steps[i];
+        let run = self.lock();
+        let step = &run.steps[i];
+        match &planned.repeat {
+            None => (!sched.flights.contains_key(&(i, None)) && step.state == WorkflowStepState::Pending)
+                .then_some((i, None)),
+            Some(StepRepeat::ForEach { .. }) => step
+                .instances
+                .iter()
+                .find(|x| x.state == WorkflowStepState::Pending && !sched.flights.contains_key(&(i, Some(x.index))))
+                .map(|x| (i, Some(x.index))),
+            Some(StepRepeat::Until { .. }) => {
+                // One iteration at a time; the next once the last concluded
+                // without its predicate holding (the step is still running).
+                let busy = sched.flights.keys().any(|(j, _)| *j == i);
+                let concluded = step.instances.iter().all(|x| done(x.state));
+                (!busy && concluded).then_some((i, Some(step.instances.len() as u32)))
+            }
+        }
     }
 
     /// Budget check and reservation (`None` from the inner option: wait).
-    fn reserve(&self, planned: &WorkflowPlanStep, flights: &HashMap<usize, Flight>) -> Result<Option<Grant>, String> {
+    fn reserve(&self, planned: &WorkflowPlanStep, flights: &HashMap<Unit, Flight>) -> Result<Option<Grant>, String> {
         let elapsed = self.started.elapsed().as_secs() as u32;
         let run = self.lock();
         let b = &run.budgets;
@@ -212,18 +439,16 @@ impl Ctx<'_> {
         }))
     }
 
-    /// Check, reserve, persist the intent of, and start the step at `index`.
-    #[allow(clippy::too_many_arguments)]
+    /// Check, reserve, persist the intent of, and start `unit`.
     fn dispatch<'scope, 'env>(
         &'env self,
         scope: &'scope std::thread::Scope<'scope, 'env>,
-        index: usize,
-        planned: &'env WorkflowPlanStep,
-        outputs: &HashMap<(String, String), WorkflowStepOutput>,
-        flights: &HashMap<usize, Flight>,
+        unit: Unit,
+        sched: &Sched,
         done: &mpsc::Sender<Completion>,
     ) -> Dispatch {
         let (inner, root) = (self.inner, self.root);
+        let planned = &self.frozen.plan.steps[unit.0];
         if self.token.is_canceled() {
             return Dispatch::Stop(Stop::canceled(self.token));
         }
@@ -242,11 +467,24 @@ impl Ctx<'_> {
                 format!("“{}” names an unknown operation", planned.label),
             ));
         };
-        let grant = match self.reserve(planned, flights) {
+        // The step as this instance runs it (a forEach value applied).
+        let mut step = planned.clone();
+        let iteration = unit.1.map(|k| {
+            let parameter = match &planned.repeat {
+                Some(StepRepeat::ForEach { parameter, values }) => {
+                    values.get(k as usize).map(|v| (parameter.clone(), v.clone()))
+                }
+                _ => None,
+            };
+            step.parameters = instance_parameters(planned, k);
+            step.time_limit_seconds = time_limit_of(&step.parameters, &contract);
+            StepIteration { index: k, parameter }
+        });
+        let grant = match self.reserve(&step, &sched.flights) {
             Ok(Some(grant)) => grant,
             Ok(None) => return Dispatch::Wait,
             Err(problem) => {
-                return self.refuse(planned, "workflow.budgetExhausted", format!("Not started: {problem}."));
+                return self.refuse(unit, "workflow.budgetExhausted", format!("Not started: {problem}."));
             }
         };
         // An application-wide slot of the step's kind (held until it ends).
@@ -258,24 +496,24 @@ impl Ctx<'_> {
             run.steps.iter().find(|s| &s.step == *p).is_none_or(|s| s.state != WorkflowStepState::Succeeded)
         }) {
             return self.refuse(
-                planned,
+                unit,
                 "workflow.prerequisite",
                 format!("Not started: its prerequisite “{missing}” did not succeed."),
             );
         }
-        let inputs = match bind_inputs(root, self.frozen, planned, &contract, outputs) {
+        let inputs = match bind_inputs(root, self.frozen, &step, &contract, &sched.outputs) {
             Ok(inputs) => inputs,
-            Err((code, message)) => return self.refuse(planned, code, message),
+            Err((code, message)) => return self.refuse(unit, code, message),
         };
         if planned.containment == Containment::NativeAccount && !inner.host.trusted(root) {
             return self.refuse(
-                planned,
+                unit,
                 "workflow.untrustedFolder",
                 "Not started: the project folder is no longer trusted, and this step runs natively with your account's privileges.",
             );
         }
         let Some(adapter) = inner.adapters.get(&planned.runner).cloned() else {
-            return self.refuse(planned, "workflow.runnerUnavailable", "Not started: no runner is installed.");
+            return self.refuse(unit, "workflow.runnerUnavailable", "Not started: no runner is installed.");
         };
         let execution = &self.frozen.plan.execution;
         let approved_restricted = (execution.restricted_backend.clone(), execution.restricted_image.clone());
@@ -284,7 +522,7 @@ impl Ctx<'_> {
             if inner.host.restricted() != approved_restricted {
                 let now = inner.host.restricted().1;
                 return self.refuse(
-                    planned,
+                    unit,
                     "workflow.restrictedUnavailable",
                     format!(
                         "Not started: the restricted image changed since you approved the plan ({} → {}); restricted steps run only in the approved image.",
@@ -297,7 +535,7 @@ impl Ctx<'_> {
             let now = inner.host.restricted_image_id();
             if approved_image_id.is_none() || now != approved_image_id {
                 return self.refuse(
-                    planned,
+                    unit,
                     "workflow.restrictedUnavailable",
                     format!(
                         "Not started: the restricted image {} is not the image you approved (approved {}, now {}); restricted steps run only in the approved image.",
@@ -315,7 +553,7 @@ impl Ctx<'_> {
                 "workflow.runnerUnavailable"
             };
             return self.refuse(
-                planned,
+                unit,
                 code,
                 format!(
                     "Not started: the runner is no longer available ({reason}); it is never replaced by another runner."
@@ -326,10 +564,18 @@ impl Ctx<'_> {
         // ----- dispatch intent (persisted before the service is called) -----
         let attempt = {
             let mut run = self.lock();
-            let i = step_index(&run, &planned.step);
-            let attempt = run.steps[i].attempts.len() as u32 + 1;
+            let i = unit.0;
             run.steps[i].state = WorkflowStepState::Running;
-            run.steps[i].attempts.push(WorkflowStepAttempt {
+            if let Some(k) = unit.1 {
+                let instance = instance_mut(&mut run, i, k);
+                instance.state = WorkflowStepState::Running;
+                if instance.parameter.is_none() {
+                    instance.parameter = iteration.as_ref().and_then(|it| it.parameter.as_ref().map(|p| p.1.clone()));
+                }
+            }
+            let attempts = attempts_mut(&mut run, unit);
+            let attempt = attempts.len() as u32 + 1;
+            attempts.push(WorkflowStepAttempt {
                 attempt,
                 state: WorkflowAttemptState::Intent,
                 operation: None,
@@ -346,11 +592,14 @@ impl Ctx<'_> {
             run.usage.steps += 1;
             if let Err(e) = self.persist(&run, &planned.step) {
                 // Without a durable intent nothing is dispatched.
-                let attempt = run.steps[i].attempts.last_mut().expect("just pushed");
-                attempt.state = WorkflowAttemptState::Failed;
-                attempt.code = Some(e.code.clone());
-                attempt.message = Some(e.message.clone());
+                let a = attempts_mut(&mut run, unit).last_mut().expect("just pushed");
+                a.state = WorkflowAttemptState::Failed;
+                a.code = Some(e.code.clone());
+                a.message = Some(e.message.clone());
                 run.steps[i].state = WorkflowStepState::Failed;
+                if let Some(k) = unit.1 {
+                    instance_mut(&mut run, i, k).state = WorkflowStepState::Failed;
+                }
                 return Dispatch::Stop(Stop::failed(&e.code, e.message));
             }
             attempt
@@ -359,10 +608,19 @@ impl Ctx<'_> {
         let done = done.clone();
         scope.spawn(move || {
             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.run_attempt(planned, &contract, adapter.as_ref(), attempt, &inputs, &grant, approved_image_id)
+                self.run_attempt(
+                    &step,
+                    &contract,
+                    adapter.as_ref(),
+                    (unit, attempt),
+                    &inputs,
+                    &grant,
+                    approved_image_id,
+                    iteration,
+                )
             }));
             let completion = ran.unwrap_or_else(|_| Completion {
-                index,
+                unit,
                 attempt,
                 reported: None,
                 result: Err(StepFailure::new(
@@ -371,7 +629,7 @@ impl Ctx<'_> {
                 )),
                 checked: None,
             });
-            let _ = done.send(Completion { index, ..completion });
+            let _ = done.send(completion);
         });
         Dispatch::Started(flight)
     }
@@ -380,36 +638,37 @@ impl Ctx<'_> {
     #[allow(clippy::too_many_arguments)]
     fn run_attempt(
         &self,
-        planned: &WorkflowPlanStep,
+        step: &WorkflowPlanStep,
         contract: &OperationContract,
         adapter: &dyn StepAdapter,
-        attempt: u32,
+        (unit, attempt): (Unit, u32),
         inputs: &[BoundInput],
         grant: &Grant,
         restricted_image_id: Option<String>,
+        iteration: Option<StepIteration>,
     ) -> Completion {
         let reported: Mutex<Option<OperationRef>> = Mutex::new(None);
         let canceled = || self.token.is_canceled();
         let on_dispatched = |operation: &OperationRef| {
             *reported.lock().unwrap_or_else(|p| p.into_inner()) = Some(operation.clone());
             let mut run = self.lock();
-            let i = step_index(&run, &planned.step);
-            if let Some(a) = run.steps[i].attempts.iter_mut().find(|a| a.attempt == attempt)
+            if let Some(a) = attempts_mut(&mut run, unit).iter_mut().find(|a| a.attempt == attempt)
                 && a.state == WorkflowAttemptState::Intent
             {
                 a.state = WorkflowAttemptState::Dispatched;
                 a.operation = Some(operation.clone());
                 a.dispatched_at_ms = Some(crate::now_ms());
-                if let Err(e) = self.persist(&run, &planned.step) {
+                if let Err(e) = self.persist(&run, &step.step) {
                     tracing::warn!("could not persist a workflow dispatch: {e}");
                 }
             }
         };
         let control = StepControl { canceled: &canceled, on_dispatched: &on_dispatched };
+        let instance = iteration.as_ref().map(|i| i.index);
         let request = StepRequest {
             root: self.root,
             run: &self.frozen.id,
-            step: planned,
+            step,
             attempt,
             inputs,
             time_limit: grant.time_limit,
@@ -417,6 +676,7 @@ impl Ctx<'_> {
             model_requests_remaining: grant.model_requests,
             restricted_image_id,
             seed_basis: self.seed_basis,
+            iteration,
         };
         // A panicking service must not leave the run active forever.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| adapter.run(&request, &control)))
@@ -428,29 +688,47 @@ impl Ctx<'_> {
             });
         let reported = reported.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let checked = result.as_ref().ok().map(|result| {
-            validate_outputs(self.root, self.frozen, planned, contract, attempt, reported.as_ref(), result)
+            validate_outputs(self.root, self.frozen, step, contract, (attempt, instance), reported.as_ref(), result)
         });
-        Completion { index: 0, attempt, reported, result, checked }
+        Completion { unit, attempt, reported, result, checked }
     }
 
-    /// Record a finished attempt (and release what it reserved).
-    fn complete(
-        &self,
-        planned: &WorkflowPlanStep,
-        done: Completion,
-        outputs: &mut HashMap<(String, String), WorkflowStepOutput>,
-        stop: &mut Option<Stop>,
-    ) {
+    /// Record a finished attempt (its slot and reservation are released by
+    /// the caller once this returns).
+    fn complete(&self, done: Completion, sched: &mut Sched) {
+        let (i, instance) = done.unit;
+        let planned = &self.frozen.plan.steps[i];
+        // An until iteration's predicate, on its own validated output (read
+        // before the run record is locked).
+        let until = match (&planned.repeat, &done.checked) {
+            (Some(StepRepeat::Until { port, test, negate, .. }), Some(Ok(valid))) => {
+                let value = valid.iter().find(|o| &o.port == port).map(|o| &o.value);
+                let what = format!("output “{port}” of “{}”", planned.label);
+                Some(crate::condition::evaluate(self.root, test, *negate, value, &what))
+            }
+            _ => None,
+        };
         let mut run = self.lock();
-        let i = step_index(&run, &planned.step);
         let now = crate::now_ms();
-        let Some(ai) = run.steps[i].attempts.iter().position(|a| a.attempt == done.attempt) else { return };
+        let Some(ai) = attempts_mut(&mut run, done.unit).iter().position(|a| a.attempt == done.attempt) else {
+            return;
+        };
         let reported = done.reported;
+        let stop = &mut sched.stop;
+        // The step fails (unless it already ended): first failure wins.
+        let fail_step = |run: &mut WorkflowRun, state: WorkflowStepState| {
+            if let Some(k) = instance {
+                instance_mut(run, i, k).state = state;
+            }
+            if run.steps[i].state == WorkflowStepState::Running {
+                run.steps[i].state = state;
+            }
+        };
         match done.result {
             Err(failure) => {
                 run.usage.model_requests += failure.model_requests;
                 let was_canceled = self.token.is_canceled() || failure.code == "workflow.canceled";
-                let attempt = &mut run.steps[i].attempts[ai];
+                let attempt = &mut attempts_mut(&mut run, done.unit)[ai];
                 finish_attempt(attempt, &failure, reported.as_ref(), now, was_canceled);
                 attempt.environment = Some(
                     failure
@@ -458,7 +736,7 @@ impl Ctx<'_> {
                         .clone()
                         .unwrap_or_else(|| crate::environment::WorkflowEnvironment::of_step(planned)),
                 );
-                run.steps[i].state = if was_canceled { WorkflowStepState::Canceled } else { WorkflowStepState::Failed };
+                fail_step(&mut run, if was_canceled { WorkflowStepState::Canceled } else { WorkflowStepState::Failed });
                 if stop.is_none() {
                     *stop = Some(if was_canceled {
                         Stop::canceled(self.token)
@@ -473,7 +751,7 @@ impl Ctx<'_> {
                 let checked = done.checked.unwrap_or_else(|| {
                     Err(("workflow.internal", "the outputs were not validated".to_owned(), Vec::new()))
                 });
-                let attempt = &mut run.steps[i].attempts[ai];
+                let attempt = &mut attempts_mut(&mut run, done.unit)[ai];
                 attempt.environment = Some(
                     result
                         .environment
@@ -490,26 +768,29 @@ impl Ctx<'_> {
                     Ok(valid) => {
                         attempt.state = WorkflowAttemptState::Succeeded;
                         attempt.outputs = valid.clone();
-                        run.steps[i].state = WorkflowStepState::Succeeded;
                         run.usage.output_bytes += result.extra_output_bytes;
-                        for output in valid {
+                        for output in &valid {
                             if let WorkflowOutputValue::File { bytes, .. } = &output.value {
                                 run.usage.output_bytes += bytes;
                             }
-                            for outcome in run.outcomes.iter_mut() {
-                                if outcome.step == planned.step && outcome.port == output.port {
-                                    outcome.value = Some(output.value.clone());
-                                }
-                            }
-                            outputs.insert((planned.step.clone(), output.port.clone()), output);
                         }
+                        produced(
+                            &mut run,
+                            planned,
+                            done.unit,
+                            valid,
+                            until,
+                            &mut sched.outputs,
+                            &mut sched.collected,
+                            stop,
+                        );
                     }
                     Err((code, message, mut rejected)) => {
                         attempt.state = WorkflowAttemptState::Failed;
                         attempt.code = Some(code.to_owned());
                         attempt.message = Some(message.clone());
                         attempt.rejected.append(&mut rejected);
-                        run.steps[i].state = WorkflowStepState::Failed;
+                        fail_step(&mut run, WorkflowStepState::Failed);
                         if stop.is_none() {
                             *stop = Some(Stop::failed(code, format!("“{}”: {message}", planned.label)));
                         }
@@ -528,35 +809,110 @@ impl Ctx<'_> {
     }
 }
 
-/// Plan indexes of the steps each step depends on (data and prerequisites).
-fn dependencies(steps: &[WorkflowPlanStep]) -> Vec<Vec<usize>> {
-    let index = |id: &str| steps.iter().position(|s| s.step == id);
-    steps
-        .iter()
-        .map(|s| {
-            let mut deps: Vec<usize> = s
-                .bindings
-                .iter()
-                .filter_map(|b| match &b.from {
-                    PortSource::Step { step, .. } => index(step),
-                    PortSource::Input { .. } => None,
-                })
-                .chain(s.prerequisites.iter().filter_map(|p| index(p)))
-                .collect();
-            deps.sort_unstable();
-            deps.dedup();
-            deps
-        })
-        .collect()
-}
-
-/// The first pending step in plan order whose dependencies all succeeded.
-fn next_ready(run: &WorkflowRun, deps: &[Vec<usize>], flights: &HashMap<usize, Flight>) -> Option<usize> {
-    (0..run.steps.len()).find(|&i| {
-        run.steps[i].state == WorkflowStepState::Pending
-            && !flights.contains_key(&i)
-            && deps[i].iter().all(|&d| run.steps[d].state == WorkflowStepState::Succeeded)
-    })
+/// Record the validated outputs of a succeeded attempt of `unit`: a plain
+/// step succeeds; a forEach step once every instance succeeded (its outputs
+/// in instance order); an until step once its predicate holds, or on
+/// exhaustion (fail, or use the last iteration).
+#[allow(clippy::too_many_arguments)]
+fn produced(
+    run: &mut WorkflowRun,
+    planned: &WorkflowPlanStep,
+    (i, instance): Unit,
+    valid: Vec<WorkflowStepOutput>,
+    until: Option<Result<(bool, String), crate::condition::Unreadable>>,
+    outputs: &mut Outputs,
+    collected: &mut HashMap<usize, BTreeMap<u32, Vec<WorkflowStepOutput>>>,
+    stop: &mut Option<Stop>,
+) {
+    let publish = |run: &mut WorkflowRun, outputs: &mut Outputs, valid: &[WorkflowStepOutput]| {
+        if run.steps[i].state == WorkflowStepState::Running {
+            run.steps[i].state = WorkflowStepState::Succeeded;
+        }
+        for output in valid {
+            for outcome in run.outcomes.iter_mut() {
+                if outcome.step == planned.step && outcome.port == output.port {
+                    outcome.value = Some(output.value.clone());
+                }
+            }
+            outputs.insert((planned.step.clone(), output.port.clone()), vec![output.clone()]);
+        }
+    };
+    let Some(k) = instance else {
+        publish(run, outputs, &valid);
+        return;
+    };
+    instance_mut(run, i, k).state = WorkflowStepState::Succeeded;
+    match &planned.repeat {
+        Some(StepRepeat::ForEach { .. }) => {
+            let all = collected.entry(i).or_default();
+            all.insert(k, valid);
+            let step = &mut run.steps[i];
+            if step.state == WorkflowStepState::Running
+                && step.instances.iter().all(|x| x.state == WorkflowStepState::Succeeded)
+            {
+                step.state = WorkflowStepState::Succeeded;
+                // Consumers receive every instance's output, in index order.
+                for instance_outputs in all.values() {
+                    for o in instance_outputs {
+                        outputs.entry((planned.step.clone(), o.port.clone())).or_default().push(o.clone());
+                    }
+                }
+            }
+        }
+        Some(StepRepeat::Until { max_iterations, on_exhausted, .. }) => {
+            let max = (*max_iterations).clamp(1, crate::plan::MAX_UNTIL);
+            match until {
+                Some(Err((code, message))) => {
+                    instance_mut(run, i, k).reason = Some(format!("Its predicate could not be evaluated: {message}."));
+                    if run.steps[i].state == WorkflowStepState::Running {
+                        run.steps[i].state = WorkflowStepState::Failed;
+                    }
+                    if stop.is_none() {
+                        *stop = Some(Stop::failed(
+                            code,
+                            format!("“{}”: its predicate could not be evaluated: {message}", planned.label),
+                        ));
+                    }
+                }
+                Some(Ok((true, why))) => {
+                    instance_mut(run, i, k).reason = Some(format!("Its predicate held: {why}."));
+                    publish(run, outputs, &valid);
+                }
+                Some(Ok((false, why))) => {
+                    instance_mut(run, i, k).reason = Some(format!("Its predicate did not hold: {why}."));
+                    if k + 1 >= max {
+                        match on_exhausted {
+                            Exhausted::Fail => {
+                                run.steps[i].reason =
+                                    Some(format!("Its predicate did not hold in any of its {max} iterations."));
+                                if run.steps[i].state == WorkflowStepState::Running {
+                                    run.steps[i].state = WorkflowStepState::Failed;
+                                }
+                                if stop.is_none() {
+                                    *stop = Some(Stop::failed(
+                                        "workflow.untilExhausted",
+                                        format!(
+                                            "“{}” ran {max} iterations and its predicate never held.",
+                                            planned.label
+                                        ),
+                                    ));
+                                }
+                            }
+                            Exhausted::UseLast => {
+                                run.steps[i].reason = Some(format!(
+                                    "Its predicate did not hold in any of its {max} iterations; the last iteration's outputs are used."
+                                ));
+                                publish(run, outputs, &valid);
+                            }
+                        }
+                    }
+                    // Otherwise the step keeps running: the next iteration starts.
+                }
+                None => publish(run, outputs, &valid),
+            }
+        }
+        None => publish(run, outputs, &valid),
+    }
 }
 
 /// Execute a persisted run on the current thread until it ends.
@@ -576,64 +932,78 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
         started,
         seed_basis: &seed_basis,
     };
-    let plan_steps = &frozen.plan.steps;
-    let deps = dependencies(plan_steps);
+    debug_assert!(frozen.plan.steps.iter().zip(&frozen.steps).all(|(p, s)| p.step == s.step));
+    let deps = Deps::of(&frozen.plan.steps);
     let max_parallel = frozen.plan.max_parallel.clamp(1, MAX_PARALLEL) as usize;
-    let mut outputs: HashMap<(String, String), WorkflowStepOutput> = HashMap::new();
-    let mut stop: Option<Stop> = None;
-    let mut flights: HashMap<usize, Flight> = HashMap::new();
+    let mut sched = Sched::default();
     let (done_tx, done_rx) = mpsc::channel::<Completion>();
 
     std::thread::scope(|scope| {
         let _cancel_on_panic = CancelOnPanic(&token);
         let ctx = &ctx;
-        let finish = |done: Completion,
-                      outputs: &mut HashMap<(String, String), WorkflowStepOutput>,
-                      flights: &mut HashMap<usize, Flight>,
-                      stop: &mut Option<Stop>| {
-            let index = done.index;
-            ctx.complete(&plan_steps[index], done, outputs, stop);
+        let finish = |done: Completion, sched: &mut Sched| {
+            let unit = done.unit;
+            ctx.complete(done, sched);
             // The slot and the reservation are released once the result is recorded.
-            flights.remove(&index);
+            sched.flights.remove(&unit);
         };
         loop {
             while let Ok(done) = done_rx.try_recv() {
-                finish(done, &mut outputs, &mut flights, &mut stop);
+                finish(done, &mut sched);
             }
-            if stop.is_none() && token.is_canceled() {
-                stop = Some(Stop::canceled(&token));
+            if sched.stop.is_none() && token.is_canceled() {
+                sched.stop = Some(Stop::canceled(&token));
             }
             let mut waiting = false;
-            while stop.is_none() && flights.len() < max_parallel {
-                let next = next_ready(&ctx.lock(), &deps, &flights);
-                let Some(index) = next else { break };
-                match ctx.dispatch(scope, index, &plan_steps[index], &outputs, &flights, &done_tx) {
+            while sched.stop.is_none() && sched.flights.len() < max_parallel {
+                let Some(unit) = ctx.advance(&mut sched, &deps) else { break };
+                match ctx.dispatch(scope, unit, &sched, &done_tx) {
                     Dispatch::Started(flight) => {
-                        flights.insert(index, flight);
+                        sched.flights.insert(unit, flight);
                     }
                     Dispatch::Wait => {
                         waiting = true;
                         break;
                     }
-                    Dispatch::Stop(s) => stop = Some(s),
+                    Dispatch::Stop(s) => sched.stop = Some(s),
                 }
             }
-            if flights.is_empty() && (stop.is_some() || !waiting) {
+            if sched.flights.is_empty() && (sched.stop.is_some() || !waiting) {
                 break;
             }
             if let Ok(done) = done_rx.recv_timeout(if waiting { SLOT_POLL } else { IDLE_POLL }) {
-                finish(done, &mut outputs, &mut flights, &mut stop);
+                finish(done, &mut sched);
             }
         }
     });
 
     let mut run = cell.into_inner().unwrap_or_else(|p| p.into_inner());
+    let stopped = match &sched.stop {
+        Some(s) if s.state == WorkflowRunState::Canceled => "The run was canceled before this step could start.",
+        Some(_) => "The run stopped (a step failed) before this step could start.",
+        None => "The run ended before this step could start.",
+    };
     for step in &mut run.steps {
-        if step.state == WorkflowStepState::Pending {
-            step.state = WorkflowStepState::Skipped;
+        for instance in &mut step.instances {
+            if instance.state == WorkflowStepState::Pending {
+                instance.state = WorkflowStepState::Skipped;
+                instance.reason.get_or_insert_with(|| stopped.replace("this step", "this instance"));
+            }
+        }
+        match step.state {
+            WorkflowStepState::Pending => {
+                step.state = WorkflowStepState::Skipped;
+                step.reason.get_or_insert_with(|| stopped.to_owned());
+            }
+            // A repeated step between instances when the run stopped.
+            WorkflowStepState::Running => {
+                step.state = WorkflowStepState::Canceled;
+                step.reason.get_or_insert_with(|| "The run stopped before its remaining instances could start.".into());
+            }
+            _ => {}
         }
     }
-    match stop {
+    match sched.stop {
         None => {
             run.state = WorkflowRunState::Succeeded;
         }
@@ -650,10 +1020,11 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
     inner.finished(&run.id);
 }
 
-// Refuse a step before dispatch: a failed attempt that was never dispatched.
+/// Refuse a unit before dispatch: a failed attempt that was never dispatched.
 fn refuse(
     cell: &Mutex<WorkflowRun>,
     planned: &WorkflowPlanStep,
+    unit: Unit,
     code: &str,
     message: impl Into<String>,
     inner: &Inner,
@@ -662,9 +1033,11 @@ fn refuse(
     let message = message.into();
     let mut run = cell.lock().unwrap_or_else(|p| p.into_inner());
     let i = step_index(&run, &planned.step);
-    let attempt = run.steps[i].attempts.len() as u32 + 1;
+    let unit = (i, unit.1);
     let now = crate::now_ms();
-    run.steps[i].attempts.push(WorkflowStepAttempt {
+    let attempts = attempts_mut(&mut run, unit);
+    let attempt = attempts.len() as u32 + 1;
+    attempts.push(WorkflowStepAttempt {
         attempt,
         state: WorkflowAttemptState::Failed,
         operation: None,
@@ -678,6 +1051,9 @@ fn refuse(
         log: None,
         environment: None,
     });
+    if let Some(k) = unit.1 {
+        instance_mut(&mut run, i, k).state = WorkflowStepState::Failed;
+    }
     run.steps[i].state = WorkflowStepState::Failed;
     let _ = inner.persist(key, &run, Some(&planned.step));
     Stop::failed(code, format!("“{}”: {message}", planned.label))
@@ -707,7 +1083,7 @@ fn bind_inputs(
     run: &WorkflowRun,
     planned: &WorkflowPlanStep,
     contract: &OperationContract,
-    outputs: &HashMap<(String, String), WorkflowStepOutput>,
+    outputs: &Outputs,
 ) -> Result<Vec<BoundInput>, (&'static str, String)> {
     let mut bound = Vec::new();
     for binding in &planned.bindings {
@@ -753,30 +1129,34 @@ fn bind_inputs(
                 }
             }
             PortSource::Step { step, port } => {
-                let Some(output) = outputs.get(&(step.clone(), port.clone())) else {
+                // One value, or every instance's of a forEach step, in order.
+                let produced = outputs.get(&(step.clone(), port.clone())).filter(|v| !v.is_empty());
+                let Some(produced) = produced else {
                     return Err((
                         "workflow.missingOutput",
                         format!("Not started: step “{step}” produced no validated “{port}” output."),
                     ));
                 };
-                if let Some((path, sha256)) = file_of(&output.value) {
-                    match hash_project_file(root, path) {
-                        Ok((found, _)) if found == bare_hash(sha256) => {}
-                        Ok(_) | Err(_) => {
-                            return Err((
-                                "workflow.outputChanged",
-                                format!(
-                                    "Not started: {path}, the “{port}” output of step “{step}”, was altered or removed after it was validated."
-                                ),
-                            ));
+                for output in produced {
+                    if let Some((path, sha256)) = file_of(&output.value) {
+                        match hash_project_file(root, path) {
+                            Ok((found, _)) if found == bare_hash(sha256) => {}
+                            Ok(_) | Err(_) => {
+                                return Err((
+                                    "workflow.outputChanged",
+                                    format!(
+                                        "Not started: {path}, the “{port}” output of step “{step}”, was altered or removed after it was validated."
+                                    ),
+                                ));
+                            }
                         }
                     }
+                    bound.push(BoundInput {
+                        port: binding.port.clone(),
+                        port_type: output.port_type,
+                        value: output.value.clone(),
+                    });
                 }
-                bound.push(BoundInput {
-                    port: binding.port.clone(),
-                    port_type: output.port_type,
-                    value: output.value.clone(),
-                });
             }
         }
     }
@@ -800,7 +1180,7 @@ fn validate_outputs(
     run: &WorkflowRun,
     planned: &WorkflowPlanStep,
     contract: &OperationContract,
-    attempt: u32,
+    attempt: (u32, Option<u32>),
     reported: Option<&OperationRef>,
     result: &StepResult,
 ) -> Result<Vec<WorkflowStepOutput>, Invalid> {
@@ -869,7 +1249,7 @@ fn check_output(
     run: &WorkflowRun,
     planned: &WorkflowPlanStep,
     contract: &OperationContract,
-    attempt: u32,
+    (attempt, instance): (u32, Option<u32>),
     operation: Option<&OperationRef>,
     output: &WorkflowStepOutput,
 ) -> Result<(), (&'static str, String)> {
@@ -916,7 +1296,12 @@ fn check_output(
     }
     // Provenance: this run, this step, this attempt, the operation it started.
     let p = &output.provenance;
-    if p.run != run.id || p.step != planned.step || p.attempt != attempt || Some(&p.operation) != operation {
+    if p.run != run.id
+        || p.step != planned.step
+        || p.attempt != attempt
+        || p.instance != instance
+        || Some(&p.operation) != operation
+    {
         return Err(("workflow.invalidOutput", format!("“{}” does not carry this attempt's provenance", output.port)));
     }
     match &output.value {

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use exposition_graph::workflow::registry::{self, OperationContract};
-use exposition_graph::workflow::{WorkflowDefinition, WorkflowValidation};
+use exposition_graph::workflow::{StepRepeat, WorkflowDefinition, WorkflowValidation};
 use exposition_graph::{SavedWorkflow, WorkflowId, WorkflowPlanId, WorkflowRunId};
 use tokio::sync::broadcast;
 
@@ -17,7 +17,8 @@ use crate::adapters::research::{PromotionReview, ResearchActions};
 use crate::model::{
     MAX_ACTIVE_RUNS, StartWorkflowRunRequest, WorkflowAssociationDecision, WorkflowConcurrencyLimits,
     WorkflowOutputValue, WorkflowProposalStatus, WorkflowRun, WorkflowRunCause, WorkflowRunError, WorkflowRunEvent,
-    WorkflowRunPlan, WorkflowRunState, WorkflowRunStep, WorkflowRunSummary, WorkflowRunUsage, WorkflowStepState,
+    WorkflowRunPlan, WorkflowRunState, WorkflowRunStep, WorkflowRunSummary, WorkflowRunUsage, WorkflowStepInstance,
+    WorkflowStepState,
 };
 use crate::plan::{self, BuiltPlan, PlanFacts, project_key};
 use crate::runner::{self, CancelToken};
@@ -309,6 +310,7 @@ impl WorkflowRunService {
             active_run: self.active_run(&saved.id),
             pins: &options.pins,
             limits: self.inner.slots.limits(),
+            resolve: &|id, revision| self.inner.host.workflow(root, id, Some(revision)).ok().map(|s| s.definition),
         };
         let mut built = plan::build_plan(saved, &facts, crate::now_ms());
         built.plan.notices.extend(options.notices.iter().cloned());
@@ -343,6 +345,19 @@ impl WorkflowRunService {
         }
         plans.insert(plan.plan.clone(), CachedPlan { built, root, requested_revision: revision, options });
         Ok(plan)
+    }
+
+    /// The plan [`Self::plan_with`] would make now, without keeping it: it
+    /// cannot be started (a trigger's check of its standing plan).
+    pub fn preview_plan(
+        &self,
+        id: &WorkflowId,
+        revision: Option<u64>,
+        options: &PlanOptions,
+    ) -> Result<WorkflowRunPlan, WorkflowRunError> {
+        let root = self.root()?;
+        let saved = self.inner.host.workflow(&root, id, revision)?;
+        Ok(self.build(&root, &saved, options).plan)
     }
 
     /// Start a run of an approved plan (recomputed now; refused if anything
@@ -433,6 +448,24 @@ impl WorkflowRunService {
                         containment: s.containment,
                         state: WorkflowStepState::Pending,
                         attempts: Vec::new(),
+                        // forEach instances are listed up front; until
+                        // iterations as they start.
+                        instances: match &s.repeat {
+                            Some(StepRepeat::ForEach { values, .. }) => values
+                                .iter()
+                                .take(plan::MAX_FOR_EACH)
+                                .enumerate()
+                                .map(|(i, v)| WorkflowStepInstance {
+                                    index: i as u32,
+                                    parameter: Some(v.clone()),
+                                    state: WorkflowStepState::Pending,
+                                    attempts: Vec::new(),
+                                    reason: None,
+                                })
+                                .collect(),
+                            _ => Vec::new(),
+                        },
+                        reason: None,
                     })
                     .collect(),
                 outcomes: cached.built.outcomes,
@@ -474,6 +507,7 @@ impl WorkflowRunService {
             failed.finished_at_ms = Some(crate::now_ms());
             for step in &mut failed.steps {
                 step.state = WorkflowStepState::Skipped;
+                step.reason = Some("The run could not start.".into());
             }
             let _ = self.inner.persist(&failure_key, &failed, None);
             return Ok(failed);
@@ -504,7 +538,9 @@ impl WorkflowRunService {
         let now = crate::now_ms();
         let mut changed: Vec<(String, String, WorkflowOutputValue)> = Vec::new();
         for step in &mut run.steps {
-            for attempt in &mut step.attempts {
+            let attempts =
+                step.attempts.iter_mut().chain(step.instances.iter_mut().flat_map(|i| i.attempts.iter_mut()));
+            for attempt in attempts {
                 for output in &mut attempt.outputs {
                     if let WorkflowOutputValue::PromotionProposal {
                         promotion,

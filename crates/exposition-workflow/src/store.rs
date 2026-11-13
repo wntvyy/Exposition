@@ -197,13 +197,26 @@ pub fn interrupt(run: &mut WorkflowRun, now_ms: u64) {
     );
     run.finished_at_ms = Some(now_ms);
     run.acknowledged = false;
-    for step in &mut run.steps {
-        match step.state {
-            WorkflowStepState::Running => step.state = WorkflowStepState::Interrupted,
-            WorkflowStepState::Pending => step.state = WorkflowStepState::Skipped,
-            _ => {}
+    const RUNNING: &str = "Exposition stopped while this was running; its result is unknown and it was not repeated.";
+    const PENDING: &str = "Exposition stopped before this could start; nothing resumes.";
+    let mark = |state: &mut WorkflowStepState, reason: &mut Option<String>| match *state {
+        WorkflowStepState::Running => {
+            *state = WorkflowStepState::Interrupted;
+            reason.get_or_insert_with(|| RUNNING.to_owned());
         }
-        for attempt in &mut step.attempts {
+        WorkflowStepState::Pending => {
+            *state = WorkflowStepState::Skipped;
+            reason.get_or_insert_with(|| PENDING.to_owned());
+        }
+        _ => {}
+    };
+    for step in &mut run.steps {
+        mark(&mut step.state, &mut step.reason);
+        for instance in &mut step.instances {
+            mark(&mut instance.state, &mut instance.reason);
+        }
+        let attempts = step.attempts.iter_mut().chain(step.instances.iter_mut().flat_map(|i| i.attempts.iter_mut()));
+        for attempt in attempts {
             if matches!(attempt.state, WorkflowAttemptState::Intent | WorkflowAttemptState::Dispatched) {
                 attempt.state = WorkflowAttemptState::Interrupted;
                 attempt.code = Some("workflow.interrupted".into());
@@ -225,12 +238,16 @@ fn decode(id: &str, state: &str, body: &str) -> Result<WorkflowRun, String> {
     if run.id.as_str() != id || state_name(run.state) != state {
         return Err("run record does not match its index".into());
     }
-    if run.steps.len() > exposition_graph::workflow::MAX_STEPS
+    let attempts_ok = |attempts: &[crate::model::WorkflowStepAttempt]| {
+        attempts.len() <= MAX_ATTEMPTS
+            && attempts.iter().all(|a| a.log.as_ref().is_none_or(|l| l.chars().count() <= MAX_ATTEMPT_LOG_CHARS + 1))
+    };
+    // Plans are flat after composite expansion; repeated steps have instances.
+    if run.steps.len() > exposition_graph::workflow::MAX_EXPANDED_STEPS
         || run.steps.iter().any(|s| {
-            s.attempts.len() > MAX_ATTEMPTS
-                || s.attempts
-                    .iter()
-                    .any(|a| a.log.as_ref().is_some_and(|l| l.chars().count() > MAX_ATTEMPT_LOG_CHARS + 1))
+            !attempts_ok(&s.attempts)
+                || s.instances.len() > crate::plan::MAX_FOR_EACH
+                || s.instances.iter().any(|i| !attempts_ok(&i.attempts))
         })
     {
         return Err("run record exceeds its limits".into());

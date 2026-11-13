@@ -1664,4 +1664,5 @@ fn the_plan_hash_covers_payloads() {
     assert_ne!(a.approval_hash, c.approval_hash);
 }
 
+mod flow;
 mod sched;

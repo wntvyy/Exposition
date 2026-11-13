@@ -27,7 +27,9 @@ use std::collections::BTreeMap;
 
 use exposition_core::path::WorkspacePath;
 use exposition_graph::workflow::registry::{Containment, PortType, WorkflowEffect};
-use exposition_graph::workflow::{AuthorityCeiling, ParamValue, PortSource, StepOperation, StepPayload};
+use exposition_graph::workflow::{
+    AuthorityCeiling, ParamValue, PortSource, StepCondition, StepOperation, StepPayload, StepRepeat,
+};
 use exposition_graph::{EntityId, EvidenceId, OperationRef, WorkflowId, WorkflowPlanId, WorkflowRunId};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -74,9 +76,12 @@ pub enum WorkflowStepState {
     Succeeded,
     Failed,
     Canceled,
-    /// Not run because an earlier step failed, was canceled, or interrupted.
+    /// Not run: an earlier step failed, was canceled, or interrupted, or a
+    /// step whose output it needs did not run (`reason` says which).
     Skipped,
     Interrupted,
+    /// Not run because its own condition did not hold (`reason` says why).
+    ConditionNotMet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -167,6 +172,16 @@ pub struct WorkflowPlanStep {
     /// before it is dispatched; 0 for steps that make none).
     #[serde(default)]
     pub max_model_requests: u32,
+    /// Titles of the composite steps this step was expanded from, outermost
+    /// first (empty for a step of the workflow itself).
+    #[serde(default)]
+    pub composite_path: Vec<String>,
+    /// The step runs only when this holds (evaluated when it becomes ready).
+    #[serde(default)]
+    pub condition: Option<StepCondition>,
+    /// The step runs as several instances (forEach values, until iterations).
+    #[serde(default)]
+    pub repeat: Option<StepRepeat>,
     /// Whether the runner is usable now (backend configured, toolchain found,
     /// credential present, folder trusted for native steps).
     pub available: bool,
@@ -297,6 +312,9 @@ pub struct WorkflowOutputProvenance {
     pub run: WorkflowRunId,
     pub step: String,
     pub attempt: u32,
+    /// The instance of a repeated step that produced it.
+    #[serde(default)]
+    pub instance: Option<u32>,
     /// The service operation that produced it (research run, Lean audit, ...).
     pub operation: OperationRef,
 }
@@ -443,7 +461,33 @@ pub struct WorkflowRunStep {
     pub runner_title: String,
     pub containment: Containment,
     pub state: WorkflowStepState,
+    /// Attempts of a step that is not repeated.
     pub attempts: Vec<WorkflowStepAttempt>,
+    /// Instances of a repeated step (forEach: one per value, listed when the
+    /// run starts; until: one per iteration as it starts), in index order.
+    #[serde(default)]
+    pub instances: Vec<WorkflowStepInstance>,
+    /// Why the step did not run or stopped, in plain language (its condition
+    /// did not hold, a step it needs did not run, the run stopped before it,
+    /// Exposition stopped while it ran).
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// One instance of a repeated step (each counts against `maxSteps`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowStepInstance {
+    pub index: u32,
+    /// The forEach value of this instance (none for until iterations).
+    pub parameter: Option<ParamValue>,
+    pub state: WorkflowStepState,
+    pub attempts: Vec<WorkflowStepAttempt>,
+    /// Why the instance did not run, or why the run moved past it (an until
+    /// iteration whose predicate did not hold).
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// A declared outcome and what realized it.
@@ -529,8 +573,17 @@ impl WorkflowRun {
             }
             let Some(step) = steps.iter().find(|s| s.step == outcome.step) else { continue };
             let label = &step.label;
-            let last = step.attempts.last().and_then(|a| a.message.as_deref());
+            let last = step
+                .attempts
+                .iter()
+                .chain(step.instances.iter().flat_map(|i| i.attempts.iter()))
+                .rfind(|a| a.message.is_some())
+                .and_then(|a| a.message.as_deref());
             outcome.reason = Some(match step.state {
+                WorkflowStepState::Succeeded if !step.instances.is_empty() => format!(
+                    "“{label}” ran {} instances; each instance's output is listed with the step.",
+                    step.instances.len()
+                ),
                 WorkflowStepState::Succeeded => format!("“{label}” succeeded without producing this optional output."),
                 WorkflowStepState::Failed => match last {
                     Some(message) => format!("“{label}” failed: {message}"),
@@ -540,9 +593,10 @@ impl WorkflowRun {
                 WorkflowStepState::Interrupted => {
                     format!("“{label}” was interrupted when Exposition stopped; its result is unknown.")
                 }
-                WorkflowStepState::Skipped => {
-                    format!("“{label}” did not run: the run stopped before it could start.")
-                }
+                WorkflowStepState::Skipped | WorkflowStepState::ConditionNotMet => match &step.reason {
+                    Some(reason) => format!("“{label}” did not run. {reason}"),
+                    None => format!("“{label}” did not run: the run stopped before it could start."),
+                },
                 WorkflowStepState::Pending | WorkflowStepState::Running => continue,
             });
         }

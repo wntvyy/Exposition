@@ -3,6 +3,7 @@
 //! run contract shared with the UI.
 
 pub mod adapters;
+pub mod condition;
 pub mod environment;
 pub mod model;
 pub mod plan;
