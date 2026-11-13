@@ -40,6 +40,7 @@ use exposition_core::path::WorkspacePath;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::ids::WorkflowId;
 use crate::ops::DiagnosticSeverity;
 use crate::vocabulary::RelationKind;
 pub use persist::{SaveWorkflowRequest, SavedWorkflow, WorkflowRevisionInfo, WorkflowSummary};
@@ -48,8 +49,20 @@ pub use registry::{
     operations, with_availability,
 };
 
-/// Schema identifier of a workflow definition.
+/// Schema identifier of a workflow definition (v1: M7/M8 shape). Still read
+/// and written for every definition that uses no v2 field, so its
+/// serialization and [`definition_hash`] never change.
 pub const WORKFLOW_SCHEMA: &str = "exposition.workflow/1";
+/// Schema identifier of a definition that uses any v2 field (execution
+/// options, composites, conditions, repeats). Required when one is used.
+pub const WORKFLOW_SCHEMA_V2: &str = "exposition.workflow/2";
+/// Every schema this version reads.
+pub const WORKFLOW_SCHEMAS: [&str; 2] = [WORKFLOW_SCHEMA, WORKFLOW_SCHEMA_V2];
+/// The registered operation of a composite step (runs another saved workflow
+/// at a pinned revision).
+pub const COMPOSITE_OPERATION: &str = "workflow.composite";
+/// Bounds of `execution.maxParallel`.
+pub const MAX_PARALLEL: u32 = 4;
 /// Why a draft is not runnable before the runner checked it in a project.
 /// (Validation alone never decides runnability; see [`apply_runnability`].)
 pub const NOT_RUNNABLE_REASON: &str =
@@ -86,6 +99,115 @@ pub struct WorkflowDefinition {
     pub outcomes: Vec<WorkflowOutcome>,
     /// The most this workflow may do; every step's effects must fit.
     pub ceiling: AuthorityCeiling,
+    /// Execution options (schema /2). Absent: one step at a time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub execution: Option<WorkflowExecutionOptions>,
+}
+
+impl WorkflowDefinition {
+    /// How many independent steps may run at once (1 when unset).
+    pub fn max_parallel(&self) -> u32 {
+        self.execution.map(|e| e.max_parallel).unwrap_or(1)
+    }
+
+    /// Whether the definition uses any field that needs [`WORKFLOW_SCHEMA_V2`].
+    pub fn uses_v2(&self) -> bool {
+        self.execution.is_some()
+            || self.steps.iter().any(|s| s.composite.is_some() || s.condition.is_some() || s.repeat.is_some())
+    }
+}
+
+/// Execution options of a definition (schema /2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowExecutionOptions {
+    /// Independent steps (no data or prerequisite path between them) that may
+    /// run at once, 1..=4 (1 = one step at a time). Global caps still apply.
+    pub max_parallel: u32,
+}
+
+/// A composite step's pinned reference to another saved workflow revision.
+/// Editing the child creates a new revision; the reference never follows it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompositeRef {
+    pub workflow: WorkflowId,
+    pub revision: u64,
+}
+
+/// A step's fixed run condition over a validated upstream output (no
+/// expression evaluator). False: the step is skipped (`conditionNotMet`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StepCondition {
+    /// An upstream step's output port (creates an ordering dependency).
+    pub source: StepPort,
+    pub test: ConditionTest,
+    /// Run when the test does NOT hold.
+    pub negate: bool,
+}
+
+/// A fixed predicate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum ConditionTest {
+    /// Formal evidence source: its verdict is one of these exact labels.
+    VerdictIn { verdicts: Vec<String> },
+    /// Dataset source (a JSON file ≤ 1 MiB): the value at an RFC 6901
+    /// pointer compared with a constant.
+    JsonCompare { pointer: String, op: CompareOp, value: ConditionValue },
+    /// The (optional) source output was produced.
+    OutputPresent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum CompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum ConditionValue {
+    /// A decimal number written as text (exact; no float in the definition).
+    Number(String),
+    Text(String),
+    Boolean(bool),
+}
+
+/// A bounded repetition of one step.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum StepRepeat {
+    /// One instance per value of a declared parameter (1..=20 values);
+    /// outputs are collected in order into a `multiple` consumer port.
+    ForEach { parameter: String, values: Vec<ParamValue> },
+    /// Sequential iterations (1..=10) until a predicate on the step's own
+    /// output port holds.
+    Until { port: String, test: ConditionTest, negate: bool, max_iterations: u32, on_exhausted: Exhausted },
+}
+
+/// What an `until` repetition does when every iteration ran and the
+/// predicate never held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum Exhausted {
+    Fail,
+    UseLast,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -157,6 +279,19 @@ pub struct WorkflowStep {
     pub operation: StepOperation,
     pub parameters: BTreeMap<String, ParamValue>,
     pub payload: Option<StepPayload>,
+    /// Composite step (schema /2): the operation must be
+    /// [`COMPOSITE_OPERATION`] v1; ports come from the referenced child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub composite: Option<CompositeRef>,
+    /// Run condition (schema /2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub condition: Option<StepCondition>,
+    /// Bounded repetition (schema /2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repeat: Option<StepRepeat>,
 }
 
 /// Where data on a connection comes from.
@@ -387,7 +522,17 @@ pub struct ValidationContext<'a> {
     pub ceiling: Option<AuthorityCeiling>,
     /// Whether a project file exists (None: not checked).
     pub file_exists: Option<&'a dyn Fn(&WorkspacePath) -> bool>,
+    /// Resolves a saved workflow revision for composite steps (None: not
+    /// checked — composite steps get `workflow.compositeUnchecked` and the
+    /// draft cannot be runnable).
+    pub resolve_workflow: Option<&'a ResolveWorkflow<'a>>,
+    /// The saved workflow this definition is a revision of, when known: a
+    /// composite step may not include it (at any revision).
+    pub workflow_id: Option<&'a WorkflowId>,
 }
+
+/// Looks up a saved workflow revision (composite children).
+pub type ResolveWorkflow<'a> = dyn Fn(&WorkflowId, u64) -> Option<WorkflowDefinition> + 'a;
 
 fn id_ok(id: &str) -> bool {
     !id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -466,13 +611,53 @@ impl At for WorkflowDiagnostic {
 }
 
 /// Parse a definition from untrusted JSON text (imports, agents): bounded
-/// size, strict schema (unknown fields — conditions, loops, nested
-/// workflows, extra outputs, trust or run hooks — are refused).
+/// size, strict schema (unknown fields — free-form expressions, loops,
+/// extra outputs, trust or run hooks — are refused).
 pub fn parse_definition(text: &str) -> Result<WorkflowDefinition, String> {
     if text.len() > MAX_DEFINITION_BYTES {
         return Err(format!("the workflow definition is larger than {} KiB", MAX_DEFINITION_BYTES / 1024));
     }
-    serde_json::from_str::<WorkflowDefinition>(text).map_err(|e| format!("the workflow definition is not valid: {e}"))
+    let raw: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("the workflow definition is not valid: {e}"))?;
+    definition_from_value(raw)
+}
+
+/// Strictly convert untrusted JSON into a definition: `deny_unknown_fields`
+/// plus a structural check that every key of the input is carried by the
+/// parsed definition (serde ignores extra keys on unit variants of tagged
+/// enums, e.g. `{"kind": "unset", "trust": true}`).
+pub(crate) fn definition_from_value(raw: serde_json::Value) -> Result<WorkflowDefinition, String> {
+    let definition = serde_json::from_value::<WorkflowDefinition>(raw.clone())
+        .map_err(|e| format!("the workflow definition is not valid: {e}"))?;
+    let carried =
+        serde_json::to_value(&definition).map_err(|e| format!("the workflow definition is not valid: {e}"))?;
+    if let Some(at) = dropped_key(&raw, &carried, String::new()) {
+        return Err(format!("the workflow definition is not valid: unknown field at {at}"));
+    }
+    Ok(definition)
+}
+
+/// The JSON-pointer path of the first object key in `input` that `parsed`
+/// does not carry (keys only; scalar values may be normalized by parsing).
+pub(crate) fn dropped_key(input: &serde_json::Value, parsed: &serde_json::Value, at: String) -> Option<String> {
+    use serde_json::Value;
+    match (input, parsed) {
+        (Value::Object(a), Value::Object(b)) => a.iter().find_map(|(k, v)| {
+            let here = format!("{at}/{}", k.replace('~', "~0").replace('/', "~1"));
+            match b.get(k) {
+                None => Some(here),
+                Some(w) => dropped_key(v, w, here),
+            }
+        }),
+        (Value::Array(a), Value::Array(b)) => {
+            if a.len() != b.len() {
+                return Some(at);
+            }
+            a.iter().zip(b).enumerate().find_map(|(i, (v, w))| dropped_key(v, w, format!("{at}/{i}")))
+        }
+        (Value::Object(_) | Value::Array(_), _) => Some(at),
+        _ => None,
+    }
 }
 
 /// Content hash of a definition (identifies a revision).
@@ -489,13 +674,21 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
     let def = definition;
 
     // ----- schema version and size limits -----
-    if def.schema != WORKFLOW_SCHEMA {
+    if !WORKFLOW_SCHEMAS.contains(&def.schema.as_str()) {
         d.error(
             "workflow.schema",
             None,
             format!(
-                "unsupported workflow schema {:?} (this version reads {WORKFLOW_SCHEMA})",
+                "unsupported workflow schema {:?} (this version reads {WORKFLOW_SCHEMA} and {WORKFLOW_SCHEMA_V2})",
                 truncate(&def.schema, 60)
+            ),
+        );
+    } else if def.schema == WORKFLOW_SCHEMA && def.uses_v2() {
+        d.error(
+            "workflow.schema",
+            None,
+            format!(
+                "execution options, composite steps, conditions, and repeats need schema {WORKFLOW_SCHEMA_V2} (this definition declares {WORKFLOW_SCHEMA})"
             ),
         );
     }
@@ -1186,3 +1379,5 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_v2;
