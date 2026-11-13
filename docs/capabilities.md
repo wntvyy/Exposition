@@ -252,13 +252,100 @@ Workflow drafts describe a computation as typed steps: inputs, steps from
 seven registered operations (Python batch run, native Python, Lean audit,
 evidence association, agent review, keeping a result, requesting a
 promotion), connections, outcomes, and a ceiling on what the workflow may
-run. Two presets exist, Numerical experiment (Python) and Formal audit
-(Lean). Drafts are edited in a structured editor, validated by the
-application against a strict contract (typed connections, no cycles, every
-step reaching an outcome, effects within the ceiling), and saved as
-immutable revisions in the project graph; imports are treated as untrusted
-data. **Workflows do not run in this version:** every draft is reported as
-not runnable, whatever it or an imported file claims.
+run. Two presets exist, Numerical experiment (Python; without a script it
+starts with an editable inline code template) and Formal audit (Lean).
+Drafts are edited in a form or on a canvas, validated by the application
+against a strict contract (typed connections, no cycles, every step
+reaching an outcome, effects within the ceiling), and saved as immutable
+revisions in the project graph; imports are treated as untrusted data.
+Saving, importing, or an agent's proposal never runs anything. A draft is
+reported as runnable only when it is well formed and every step's runner is
+available in the open project right now (for example, a native step needs
+a trusted folder, a restricted step a configured container image that is
+present locally, an agent review step a configured model provider); a
+stored or imported claim of runnability is ignored.
+
+### Workflow runs
+
+A run starts only from **Review and run…** in the workflow editor, for a
+saved, well-formed revision (never from unsaved edits). The review shows
+the complete plan: every input file with the SHA-256 of the content the run
+will read and whether that version is pinned, every step in the order it
+will run with its complete code or model instructions, parameters, runner,
+containment, effects, and limits, the run's budgets, the restricted image
+and folder trust it relies on, notices (native privileges, material sent to
+the model provider, proposals you review later), and anything that blocks
+it. **Start run** approves exactly that plan. If anything in it changed
+before the run starts (the workflow was saved again, an input file changed,
+folder trust or the restricted image changed, a runner became available or
+unavailable, or another project is open), the start is refused and you
+review the new plan. A plan must be started within 30 minutes.
+
+Steps run one at a time in dependency order; there are no loops,
+conditions, retries, or parallel steps, and only one workflow run is active
+at a time. Before each step Exposition checks again that the project is
+still open, the run was not canceled, its budgets remain, every input file
+and earlier output the step reads still has the digest recorded for it, a
+native step's folder is still trusted, and the step's runner is still
+available with the approved image; a restricted step never falls back to
+native execution. A failed step stops the run and the remaining steps are
+skipped. Every output a step returns is checked before a later step can use
+it: its declared type, its recomputed SHA-256, that it came from this
+step's own service operation, and that formal evidence and retained results
+come only from the Lean audit and the retention service (a file that merely
+looks like evidence stays a file). **Cancel run** stops the current step;
+closing or switching the project cancels its run, and revoking trust
+cancels a run that has native steps.
+
+The run's budgets come from the plan: at most as many step dispatches as the
+workflow has steps, the sum of the steps' time limits (at most 4 hours),
+the sum of their output limits (at most 1 GiB), and 25 model requests per
+agent review step. Each step's attempt is recorded before its service is
+called. If Exposition stops during a run, the next start marks the run
+**Interrupted** (a step that was running has an unknown outcome) and never
+resumes or repeats it; you mark it as reviewed and start a new run if
+needed. Run records are kept in the application data folder on this
+computer, not in the project.
+
+| Step | Where it runs | What it produces |
+|---|---|---|
+| Research Python batch (restricted) | A Docker container (below) | The files it writes for its declared outputs, as research run artifacts |
+| Trusted native Python | A new Python process with your account's privileges, in a trusted folder; not a sandbox | Same as the restricted batch |
+| Lean audit | The Lean service with the project's toolchain, natively, in a trusted folder | The audit's own per-declaration verdicts, statements, and axioms for exactly the audited text |
+| Associate audited declarations | Exposition | A proposal you accept or reject per declaration; only accepted declarations get Lean evidence recorded |
+| Read-only agent review | A read-only agent task with commands off, scoped to the declared material, which it sends to the model provider | A review report (prose, never evidence) |
+| Retain artifact | Research | A kept result with computational evidence naming the mode it actually ran in |
+| Request reviewed promotion | Research | A prepared insertion at the end of the manuscript that you review and approve in the run view |
+
+**Restricted Python batches.** Only the declared input files and the code
+are copied, each verified against its SHA-256, into a working copy that the
+container sees read-only; the project folder itself is never mounted, so an
+undeclared file is simply absent and an import of it fails visibly.
+Declared inputs that are links, junctions, aliases, or project metadata
+(the graph, run records, version-control or tool folders, agent
+instruction files) are refused. The container has no network, no host
+environment or credentials, a non-root user, a read-only file system, the
+configured memory, CPU, and process limits, and the step's time limit. The
+code writes into the folder named by `EXPOSITION_OUTPUT_DIR`; output `p` is
+the file `p.<ext>`. Only regular files directly in that folder with a safe
+name and an exported type (PNG, JPEG, GIF, SVG, PDF, CSV, TSV, JSON, TXT,
+HTML) whose content matches the type are kept, at most 32 files of 64 MiB
+each; links, folders, hard links, and other entries are refused and nothing
+they point to is copied. A batch that writes far more than its output
+budget is stopped. Kept files become artifacts of a research run that
+records the container image, user, and limits it ran with. SVG and HTML
+are stored as text and never rendered as active content.
+
+**Limitations.** Workflow code steps are Python only; there are no R or
+Julia steps. The container image must provide `python3` and every package
+the code needs: Exposition never pulls images and the container has no
+network. The trusted native Python step and the Lean audit run with your
+account's privileges and are not contained. The Lean audit step waits at
+most 10 minutes for Lean, whatever its time limit; if the Lean file is open
+with unsaved changes that differ from the reviewed file, the step fails
+rather than audit other text. A promotion is always prepared at the end of
+the manuscript; a discarded promotion stays listed as awaiting review until
+its 30-minute review window ends.
 
 ## Research
 
@@ -274,10 +361,13 @@ Sessions belong to one project folder and require it to be trusted; switching
 or closing the folder, or revoking trust, detaches them. Agent runs use
 separate sessions. Exposition never installs runtimes or packages.
 
-Research sessions run natively with your account's privileges ("Trusted
-native"); the research space and per-owner sessions organize work but do not
-contain it. A restricted, research-only execution mode is not available yet.
-Enabling Research creates one research space (`.exposition/research/<id>/`
+Interactive research sessions run natively with your account's privileges
+("Trusted native"); the research space and per-owner sessions organize work
+but do not contain it. Restricted research execution exists only as the
+workflow's Python batch step (see Workflow runs), and the Research page
+shows whether it is available for the project; nothing moves between the
+two modes silently. Computational evidence names the mode a run actually ran
+in. Enabling Research creates one research space (`.exposition/research/<id>/`
 with sources, data, and notes) and runs nothing; research works without any
 manuscript. Kept results become project resources with the run's evidence and
 provenance; inserting one into a Typst, LaTeX, or Markdown document is
@@ -399,7 +489,7 @@ natively, when no image is configured; it uses no development-only command, so
 it also runs against an installed release. The default automated
 suite uses a scripted development provider that release builds do not contain,
 and development builds use a separate development credential entry unless told
-otherwise. A third, `npm run e2e -- live-graph`, has the model read the project graph, propose a mathematical dependency (kept as a suggestion until a person accepts it), and save a workflow draft (never runnable), and checks that a task with "File names only" consent never sends or receives theorem labels or file text.
+otherwise. A third, `npm run e2e -- live-graph`, has the model read the project graph, propose a mathematical dependency (kept as a suggestion until a person accepts it), and save a workflow draft, and checks that a task with "File names only" consent never sends or receives theorem labels or file text. A fourth, `npm run e2e -- live-workflow`, has the model propose a restricted Python workflow (saving it runs nothing), then plans and starts it as the user and checks that it ran in the Docker sandbox and produced its validated output; agents have no tool that starts a run.
 
 ## Execution and security
 
@@ -425,6 +515,11 @@ otherwise. A third, `npm run e2e -- live-graph`, has the model read the project 
   to native execution. An agent's container stops when Exposition exits or
   crashes and when its time limit passes; leftovers are removed at the next
   start when an image is configured, or else before the next restricted run.
+- Workflow restricted Python steps use the same Docker backend and settings,
+  with a working copy of only their declared inputs instead of the project
+  folder, and likewise never fall back to native execution. Workflow native
+  Python and Lean audit steps run with your account's privileges and need a
+  trusted folder.
 - TeX can read any file your account can read, which is why LaTeX builds
   require trust. R and Julia kernels talk to Exposition over local loopback
   TCP with signed but unencrypted messages; Python kernels use CurveZMQ when
