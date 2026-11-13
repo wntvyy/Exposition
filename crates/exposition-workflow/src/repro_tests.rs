@@ -496,7 +496,8 @@ fn an_agent_review_records_the_provider_and_the_model_that_served_it() {
     assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?}", run.message);
     let env = env_of(&run, "review");
     let model = env.model.as_ref().expect("model");
-    assert_eq!((model.provider.as_str(), model.model.as_str()), ("anthropic", "claude-opus-5-5-20261101"));
+    assert_eq!((model.provider.as_str(), model.model.as_str()), ("anthropic", "claude-opus-5-5"));
+    assert_eq!(model.served_by.as_deref(), Some("claude-opus-5-5-20261101"));
     assert!(env.notes.iter().any(|n| n.contains("Configured model claude-opus-5-5;")), "{:?}", env.notes);
 }
 
@@ -682,7 +683,7 @@ fn drift_in_image_identity_packages_and_model_is_shown_before_approval() {
     f.reviewer.model.lock().unwrap().configured = "claude-opus-6".into();
     let plan = f.reproduce(&reviewed.id).unwrap().plan;
     assert!(
-        plan.notices.iter().any(|n| n.contains("model anthropic/claude-opus-5-5-20261101 → anthropic/claude-opus-6")),
+        plan.notices.iter().any(|n| n.contains("model anthropic/claude-opus-5-5 → anthropic/claude-opus-6")),
         "{:?}",
         plan.notices
     );
@@ -693,4 +694,147 @@ fn reproducing_needs_a_finished_run_of_the_open_project() {
     let f = fixture();
     let e = f.reproduce(&WorkflowRunId::mint()).unwrap_err();
     assert_eq!(e.code, "workflow.unknownRun");
+}
+
+// ------------------------------------------------- fix round (docs audit) ----
+
+/// `sweep` repeated over two timeouts, `join` consuming both datasets.
+fn sweep() -> WorkflowDefinition {
+    let mut def = python(false);
+    def.schema = exposition_graph::workflow::WORKFLOW_SCHEMA_V2.into();
+    def.execution = Some(exposition_graph::workflow::WorkflowExecutionOptions { max_parallel: 2 });
+    let code = || StepPayload::Code { language: CodeLanguage::Python, source: "print(2)\n".into() };
+    let mut repeated = step("sweep", "research.pythonBatch", code());
+    repeated.repeat = Some(exposition_graph::workflow::StepRepeat::ForEach {
+        parameter: "timeoutSeconds".into(),
+        values: vec![
+            exposition_graph::workflow::ParamValue::Integer(30),
+            exposition_graph::workflow::ParamValue::Integer(10),
+        ],
+    });
+    def.steps = vec![repeated, step("join", "research.pythonBatch", code())];
+    let data = |to: &str| WorkflowConnection::Data {
+        from: PortSource::Input { input: "data".into() },
+        to: StepPort { step: to.into(), port: "data".into() },
+    };
+    def.connections = vec![
+        data("sweep"),
+        WorkflowConnection::Data {
+            from: PortSource::Step { step: "sweep".into(), port: "dataset".into() },
+            to: StepPort { step: "join".into(), port: "data".into() },
+        },
+    ];
+    def.outcomes = vec![WorkflowOutcome {
+        id: "o-join".into(),
+        kind: OutcomeKind::TransformedDataset,
+        label: "Joined".into(),
+        from: StepPort { step: "join".into(), port: "dataset".into() },
+        optional: false,
+    }];
+    def
+}
+
+fn manifest_value(f: &Fixture, run: &WorkflowRun) -> serde_json::Value {
+    let scrub = ManifestScrub { redact: &|t: &str| t.to_owned(), folders: vec![(f.root.clone(), "<project>".into())] };
+    serde_json::from_str(&f.service.run_manifest_json(&run.id, &scrub).unwrap()).unwrap()
+}
+
+#[test]
+fn a_repeated_step_seeds_each_instance_and_its_instances_reach_the_manifest_drift_and_notices() {
+    let f = fixture();
+    let original = f.run(&f.save(sweep()));
+    assert_eq!(original.state, WorkflowRunState::Succeeded, "{:?}", original.message);
+    let step = original.steps.iter().find(|s| s.step == "sweep").unwrap();
+    assert_eq!(step.instances.len(), 2);
+    let seeds: Vec<Option<u64>> =
+        step.instances.iter().map(|i| i.attempts.last().unwrap().environment.as_ref().unwrap().seed).collect();
+    let expected: Vec<Option<u64>> =
+        (0..2).map(|k| Some(environment::step_seed(original.id.as_str(), "sweep", k))).collect();
+    assert_eq!(seeds, expected, "every instance gets its own seed");
+
+    // The manifest lists each instance with its index, value, attempts, environment, and outputs.
+    let m = manifest_value(&f, &original);
+    let sweep_step = m["steps"].as_array().unwrap().iter().find(|s| s["step"] == "sweep").unwrap();
+    let instances = sweep_step["instances"].as_array().expect("instances in the manifest");
+    assert_eq!(instances.len(), 2);
+    for (k, instance) in instances.iter().enumerate() {
+        assert_eq!(instance["index"], k);
+        assert!(instance["parameter"].is_object(), "{instance}");
+        assert_eq!(instance["attempts"][0]["environment"]["seed"], expected[k].unwrap());
+        assert_eq!(instance["attempts"][0]["outputs"][0]["port"], "dataset");
+    }
+    let instance_outputs: Vec<&serde_json::Value> =
+        m["outputs"].as_array().unwrap().iter().filter(|o| o["step"] == "sweep").collect();
+    assert_eq!(instance_outputs.len(), 2, "each instance's validated output is listed: {}", m["outputs"]);
+    assert_eq!(
+        (instance_outputs[0]["instance"].clone(), instance_outputs[1]["instance"].clone()),
+        (0.into(), 1.into())
+    );
+
+    // Drift and the seed notice cover the instances.
+    *f.host.image_id.lock().unwrap() = Some(IMAGE_B.into());
+    *f.batch.current.lock().unwrap() = image_pairs(IMAGE_B, "2.3.1");
+    let r = f.reproduce(&original.id).unwrap();
+    assert!(r.drift.iter().any(|d| d.step.as_deref() == Some("sweep") && d.aspect == "image"), "{:?}", r.drift);
+    let seeds_notice = r.plan.notices.iter().find(|n| n.contains("EXPOSITION_SEED")).expect("seed notice");
+    for seed in &expected {
+        assert!(seeds_notice.contains(&seed.unwrap().to_string()), "{seeds_notice}");
+    }
+    // The reproduction gives every instance the original instance's seed.
+    *f.host.image_id.lock().unwrap() = Some(IMAGE_A.into());
+    let copy = f.start(f.reproduce(&original.id).unwrap().plan);
+    let copy_step = copy.steps.iter().find(|s| s.step == "sweep").unwrap();
+    let copy_seeds: Vec<Option<u64>> =
+        copy_step.instances.iter().map(|i| i.attempts.last().unwrap().environment.as_ref().unwrap().seed).collect();
+    assert_eq!(copy_seeds, expected);
+}
+
+#[test]
+fn a_served_model_id_is_recorded_but_only_a_configured_model_change_is_drift() {
+    let f = fixture();
+    let reviewed = f.run(&f.save(review()));
+    let model = serde_json::to_value(env_of(&reviewed, "review").model.as_ref().unwrap()).unwrap();
+    assert_eq!(model["model"], "claude-opus-5-5", "the configured model");
+    assert_eq!(model["servedBy"], "claude-opus-5-5-20261101", "and the model that served it");
+    // Nothing changed: the served id differing from the configured one is no drift.
+    let r = f.reproduce(&reviewed.id).unwrap();
+    assert!(r.drift.iter().all(|d| d.aspect != "model"), "{:?}", r.drift);
+    // A configured model change is.
+    f.reviewer.model.lock().unwrap().configured = "claude-opus-6".into();
+    let r = f.reproduce(&reviewed.id).unwrap();
+    let drift = r.drift.iter().find(|d| d.aspect == "model").expect("model drift");
+    assert_eq!(
+        (drift.recorded.as_deref(), drift.current.as_deref()),
+        (Some("anthropic/claude-opus-5-5"), Some("anthropic/claude-opus-6"))
+    );
+}
+
+#[test]
+fn the_payload_digest_is_of_the_exact_code_or_prompt_text() {
+    let f = fixture();
+    let run = f.run(&f.save(python(false)));
+    let m = manifest_value(&f, &run);
+    assert_eq!(m["steps"][0]["payloadSha256"], sha256_hex(b"print(1)\n"));
+    let reviewed = f.run(&f.save(review()));
+    assert_eq!(manifest_value(&f, &reviewed)["steps"][0]["payloadSha256"], sha256_hex(b"Summarize."));
+}
+
+#[test]
+fn a_lean_pin_error_is_recorded_without_absolute_paths() {
+    let f = fixture();
+    std::fs::write(f.root.join("lean-toolchain"), "x".repeat(10_000)).unwrap();
+    let def = draft(&WorkflowPresetRequest {
+        preset: FORMAL_AUDIT.into(),
+        lean_file: Some(path("Proofs/Main.lean")),
+        ..Default::default()
+    })
+    .unwrap();
+    let plan = f.service.plan(&f.save(def), None).unwrap();
+    let audit = &plan.steps[0];
+    let env = crate::adapters::lean::audit_environment(audit, &f.root, &path("Proofs/Main.lean"), None);
+    let json = serde_json::to_string(&env).unwrap();
+    assert!(env.notes.iter().any(|n| n.contains("lean-toolchain")), "{:?}", env.notes);
+    let root = f.root.display().to_string();
+    let bare = root.strip_prefix(r"\\?\").unwrap_or(&root).to_lowercase();
+    assert!(!json.to_lowercase().replace("\\\\", "\\").contains(&bare), "no absolute path: {json}");
 }

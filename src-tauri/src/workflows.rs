@@ -176,7 +176,8 @@ pub async fn workflow_get(
 /// before anything is read or written: an absolute path, never inside the
 /// project's `.exposition` metadata or the app's data folder, never a link
 /// or a folder.
-fn chosen_file(raw: &str, root: &Option<PathBuf>, data_dir: &Path) -> Result<PathBuf, CommandError> {
+/// Shared with the run-manifest export (src/workflow_repro.rs).
+pub(crate) fn chosen_file(raw: &str, root: &Option<PathBuf>, data_dir: &Path) -> Result<PathBuf, CommandError> {
     let refuse = |m: String| Err(CommandError::new("workflow.file", m));
     let path = PathBuf::from(raw.trim());
     if raw.trim().is_empty() || !path.is_absolute() {

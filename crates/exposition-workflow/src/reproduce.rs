@@ -81,50 +81,66 @@ fn short(hash: &str) -> String {
 }
 
 /// Environment drift of every step of `original` that recorded an
-/// environment (`unrecorded` items for steps that ran without one, an
-/// `unknown` item when the current environment cannot be determined).
+/// environment, instances of repeated steps included (`unrecorded` items for
+/// steps that ran without one, an `unknown` item when the current
+/// environment cannot be determined). Identical items of several instances
+/// are reported once; an item that holds for only some instances names them.
 pub fn reproduction_drift(original: &WorkflowRun, current: &CurrentEnvironment<'_>) -> Vec<WorkflowEnvironmentDrift> {
     let mut out = Vec::new();
     for planned in &original.plan.steps {
         let Some(step) = original.steps.iter().find(|s| s.step == planned.step) else { continue };
-        let Some(recorded) = environment::recorded(step) else {
-            if !step.attempts.is_empty() {
-                out.push(WorkflowEnvironmentDrift {
-                    step: Some(planned.step.clone()),
-                    aspect: "unrecorded".into(),
-                    recorded: None,
-                    current: None,
-                    message: "no environment was recorded (the run predates environment capture)".into(),
-                });
+        let recorded = environment::recorded_all(step);
+        let ran = !step.attempts.is_empty() || step.instances.iter().any(|i| !i.attempts.is_empty());
+        let item = |aspect: &str, message: &str| WorkflowEnvironmentDrift {
+            step: Some(planned.step.clone()),
+            aspect: aspect.into(),
+            recorded: None,
+            current: None,
+            message: message.into(),
+        };
+        if recorded.is_empty() {
+            if ran {
+                out.push(item("unrecorded", "no environment was recorded (the run predates environment capture)"));
             }
             continue;
-        };
+        }
         let now = match current(&original.plan, planned) {
             Some(now) => now,
             // An application service step has nothing beyond its base.
             None if planned.containment == Containment::ApplicationService => WorkflowEnvironment::of_step(planned),
             None => {
-                out.push(WorkflowEnvironmentDrift {
-                    step: Some(planned.step.clone()),
-                    aspect: "unknown".into(),
-                    recorded: None,
-                    current: None,
-                    message: "the environment it would get now cannot be determined without running anything (is the runner configured and available?)".into(),
-                });
+                out.push(item(
+                    "unknown",
+                    "the environment it would get now cannot be determined without running anything (is the runner configured and available?)",
+                ));
                 continue;
             }
         };
-        out.extend(
-            environment::drift(recorded, &now)
-                .into_iter()
-                .map(|d| WorkflowEnvironmentDrift { step: Some(planned.step.clone()), ..d }),
-        );
+        // (item, instances it holds for), in first-seen order.
+        let mut groups: Vec<(WorkflowEnvironmentDrift, Vec<u32>)> = Vec::new();
+        for (instance, env) in &recorded {
+            for d in environment::drift(env, &now) {
+                let d = WorkflowEnvironmentDrift { step: Some(planned.step.clone()), ..d };
+                match groups.iter_mut().find(|(g, _)| g == &d) {
+                    Some((_, instances)) => instances.extend(*instance),
+                    None => groups.push((d, instance.iter().copied().collect())),
+                }
+            }
+        }
+        let repeated = recorded.iter().filter(|(i, _)| i.is_some()).count();
+        for (mut d, instances) in groups {
+            if repeated > 0 && instances.len() < repeated {
+                let list = instances.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+                d.message = format!("{} (instance{} {list})", d.message, if instances.len() == 1 { "" } else { "s" });
+            }
+            out.push(d);
+        }
     }
     out
 }
 
 /// The notices a reproduction of `original` shows: what it reproduces, the
-/// drift summarized per step, and the seeds.
+/// drift summarized per step, and the seeds (per instance of a repeated step).
 pub fn reproduction_notices(original: &WorkflowRun, drift: &[WorkflowEnvironmentDrift]) -> Vec<String> {
     let mut notices = vec![format!(
         "This plan reproduces run {} (revision {}): every input is pinned to the SHA-256 that run read, and a changed input blocks the plan. Environment differences are shown so you can judge them; they do not block the run.",
@@ -142,23 +158,26 @@ pub fn reproduction_notices(original: &WorkflowRun, drift: &[WorkflowEnvironment
     for (step, messages) in by_step.values() {
         notices.push(format!("Environment drift in “{step}”: {}.", messages.join("; ")));
     }
-    let recorded: Vec<(&WorkflowPlanStep, &WorkflowEnvironment)> = original
-        .plan
-        .steps
-        .iter()
-        .filter_map(|p| {
-            let step = original.steps.iter().find(|s| s.step == p.step)?;
-            environment::recorded(step).map(|e| (p, e))
-        })
-        .collect();
-    if !recorded.is_empty() && drift.is_empty() {
+    let mut any_recorded = false;
+    let mut seeds = Vec::new();
+    for planned in &original.plan.steps {
+        let Some(step) = original.steps.iter().find(|s| s.step == planned.step) else { continue };
+        for (instance, env) in environment::recorded_all(step) {
+            any_recorded = true;
+            if let Some(seed) = env.seed {
+                seeds.push(match instance {
+                    Some(k) => format!("“{}” #{k} {seed}", planned.label),
+                    None => format!("“{}” {seed}", planned.label),
+                });
+            }
+        }
+    }
+    if any_recorded && drift.is_empty() {
         notices.push(
             "No environment drift found in what can be checked without running anything (image identity, interpreter and toolchain versions, package lists, model)."
                 .to_owned(),
         );
     }
-    let seeds: Vec<String> =
-        recorded.iter().filter_map(|(p, e)| e.seed.map(|s| format!("“{}” {s}", p.label))).collect();
     if !seeds.is_empty() {
         notices.push(format!(
             "Batch steps receive the same {} values as in the original run ({}).",

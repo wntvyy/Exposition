@@ -157,8 +157,9 @@ impl StepAdapter for BatchAdapter {
             .iter()
             .map(|p| BatchPort { port: p.name.clone(), extensions: extensions(p.types[0]) })
             .collect();
-        // Instance 0 until repeated steps pass their instance index.
-        let seed = environment::step_seed(request.seed_basis, &request.step.step, 0);
+        // Each instance of a repeated step has its own seed.
+        let instance = request.iteration.as_ref().map_or(0, |i| i.index);
+        let seed = environment::step_seed(request.seed_basis, &request.step.step, instance);
         let approved_image = match self.mode {
             BatchMode::Restricted => request.restricted_image_id.clone(),
             BatchMode::TrustedNative => None,

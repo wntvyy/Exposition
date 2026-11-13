@@ -89,8 +89,13 @@ pub struct WorkflowEnvironmentToolchain {
 pub struct WorkflowEnvironmentModel {
     /// `anthropic`, `scripted`.
     pub provider: String,
-    /// The model that served the step (the configured one when unknown).
+    /// The configured model the step asked for (what drift compares).
     pub model: String,
+    /// The model id the provider reported serving, when it said (may be a
+    /// dated id or a fallback; recorded, never treated as drift).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub served_by: Option<String>,
 }
 
 /// What one attempt ran with (see the module docs).
@@ -153,8 +158,11 @@ impl WorkflowEnvironment {
         Self::base(&step.runner, step.containment)
     }
 
+    /// Add a note (absolute paths are replaced: an environment is portable
+    /// and never records user folders).
     pub fn note(&mut self, text: impl AsRef<str>) {
-        let text: String = text.as_ref().chars().filter(|c| !c.is_control()).take(MAX_TEXT).collect();
+        let text = crate::manifest::scrub_absolute_paths(text.as_ref());
+        let text: String = text.chars().filter(|c| !c.is_control()).take(MAX_TEXT).collect();
         if !text.is_empty() && self.notes.len() < MAX_NOTES && !self.notes.contains(&text) {
             self.notes.push(text);
         }
@@ -316,16 +324,29 @@ pub fn apply_lean(
     }
 }
 
-/// The environment recorded for a step: its latest attempt that has one
+/// The environment recorded by `attempts`: the latest attempt that has one
 /// (a succeeded attempt first).
-pub fn recorded(step: &WorkflowRunStep) -> Option<&WorkflowEnvironment> {
+pub fn recorded_in(attempts: &[crate::model::WorkflowStepAttempt]) -> Option<&WorkflowEnvironment> {
     use crate::model::WorkflowAttemptState;
-    step.attempts
+    attempts
         .iter()
         .rev()
         .filter(|a| a.state == WorkflowAttemptState::Succeeded)
         .find_map(|a| a.environment.as_ref())
-        .or_else(|| step.attempts.iter().rev().find_map(|a| a.environment.as_ref()))
+        .or_else(|| attempts.iter().rev().find_map(|a| a.environment.as_ref()))
+}
+
+/// The environment recorded for a (non-repeated) step.
+pub fn recorded(step: &WorkflowRunStep) -> Option<&WorkflowEnvironment> {
+    recorded_in(&step.attempts)
+}
+
+/// Every environment a step recorded: its own (instance `None`), or one per
+/// instance of a repeated step (`Some(index)`).
+pub fn recorded_all(step: &WorkflowRunStep) -> Vec<(Option<u32>, &WorkflowEnvironment)> {
+    let mut out: Vec<(Option<u32>, &WorkflowEnvironment)> = recorded(step).map(|e| (None, e)).into_iter().collect();
+    out.extend(step.instances.iter().filter_map(|i| recorded_in(&i.attempts).map(|e| (Some(i.index), e))));
+    out
 }
 
 fn short(id: &str) -> String {
@@ -518,9 +539,11 @@ pub fn drift(recorded: &WorkflowEnvironment, current: &WorkflowEnvironment) -> V
         )),
         _ => {}
     }
+    // The configured model is compared; the id a provider reports serving
+    // (a dated id, a fallback) is recorded but is not drift.
     let model = |m: &WorkflowEnvironmentModel| format!("{}/{}", m.provider, m.model);
     match (&recorded.model, &current.model) {
-        (Some(r), Some(c)) if r != c => {
+        (Some(r), Some(c)) if (&r.provider, &r.model) != (&c.provider, &c.model) => {
             out.push(item("model", Some(model(r)), Some(model(c)), format!("model {} → {}", model(r), model(c))))
         }
         (Some(r), None) => out.push(item("model", Some(model(r)), None, format!("model {} → unknown", model(r)))),
@@ -629,7 +652,8 @@ mod tests {
         before.interpreter =
             Some(WorkflowEnvironmentInterpreter { name: "python".into(), version: Some("3.13.1".into()) });
         before.set_packages(pkgs(&[("numpy", "2.1.0"), ("pip", "25.0"), ("six", "1.16")]));
-        before.model = Some(WorkflowEnvironmentModel { provider: "anthropic".into(), model: "m-1".into() });
+        before.model =
+            Some(WorkflowEnvironmentModel { provider: "anthropic".into(), model: "m-1".into(), served_by: None });
         assert!(drift(&before, &before.clone()).is_empty(), "no drift against itself");
         let messages = |a: &WorkflowEnvironment, b: &WorkflowEnvironment| {
             drift(a, b).into_iter().map(|d| d.message).collect::<Vec<_>>().join(" | ")
@@ -641,7 +665,8 @@ mod tests {
         after.interpreter =
             Some(WorkflowEnvironmentInterpreter { name: "python".into(), version: Some("3.13.2".into()) });
         after.set_packages(pkgs(&[("numpy", "2.2.0"), ("pip", "25.0"), ("scipy", "1.15")]));
-        after.model = Some(WorkflowEnvironmentModel { provider: "anthropic".into(), model: "m-2".into() });
+        after.model =
+            Some(WorkflowEnvironmentModel { provider: "anthropic".into(), model: "m-2".into(), served_by: None });
         let d = messages(&before, &after);
         let aspects: Vec<String> = drift(&before, &after).into_iter().map(|d| d.aspect).collect();
         assert_eq!(aspects, ["image", "interpreter", "packages", "model"]);
