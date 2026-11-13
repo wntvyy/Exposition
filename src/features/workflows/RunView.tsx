@@ -649,7 +649,9 @@ export function WorkflowRunView({ resource }: EditorProps) {
       .then((u) => {
         if (disposed) u();
         else unlisten = u;
-      });
+      })
+      // Outside the desktop app there are no events; the view still loads once.
+      .catch(() => undefined);
     return () => {
       disposed = true;
       unlisten?.();
@@ -699,7 +701,9 @@ export function RunHistory({ workflow, title = "Runs" }: { workflow: string | nu
       .then((u) => {
         if (disposed) u();
         else unlisten = u;
-      });
+      })
+      // Outside the desktop app there are no events; the view still loads once.
+      .catch(() => undefined);
     return () => {
       disposed = true;
       unlisten?.();
