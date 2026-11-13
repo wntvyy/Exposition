@@ -293,6 +293,7 @@ pub fn build_manifest(run: &WorkflowRun) -> WorkflowRunManifest {
                             step: o.step.clone(),
                             attempt: 0,
                             operation: OperationRef { kind: String::new(), id: String::new() },
+                            instance: None,
                         },
                     },
                 )
