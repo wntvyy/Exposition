@@ -657,6 +657,8 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
     // Data edges into (step, port); execution edges for ordering/reachability.
     let mut into: HashMap<(String, String), Vec<(usize, PortType)>> = HashMap::new();
     let mut exec_edges: BTreeSet<(String, String)> = BTreeSet::new();
+    // Step-to-step data deliveries (a prerequisite orders steps but carries nothing).
+    let mut data_edges: BTreeSet<(String, String)> = BTreeSet::new();
     let mut annotated: BTreeSet<(String, String)> = BTreeSet::new();
     let mut used_inputs: BTreeSet<String> = BTreeSet::new();
     for (i, conn) in def.connections.iter().enumerate() {
@@ -711,6 +713,7 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
                             continue;
                         };
                         exec_edges.insert((step.clone(), to.step.clone()));
+                        data_edges.insert((step.clone(), to.step.clone()));
                         out.types[0]
                     }
                     PortSource::Input { input } => {
@@ -932,23 +935,33 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
     }
 
     // ----- rule 2: every step contributes to an outcome -----
-    let mut contributing: BTreeSet<String> = outcome_steps.clone();
-    let mut queue: VecDeque<String> = outcome_steps.into_iter().collect();
-    while let Some(s) = queue.pop_front() {
-        for (from, to) in &exec_edges {
-            if to == &s && contributing.insert(from.clone()) {
-                queue.push_back(from.clone());
+    // Contribution follows data: a step whose outputs reach no outcome adds
+    // nothing to the result, even if a "runs after" link orders it first.
+    let reach = |edges: &BTreeSet<(String, String)>| {
+        let mut reached: BTreeSet<String> = outcome_steps.clone();
+        let mut queue: VecDeque<String> = outcome_steps.iter().cloned().collect();
+        while let Some(s) = queue.pop_front() {
+            for (from, to) in edges {
+                if to == &s && reached.insert(from.clone()) {
+                    queue.push_back(from.clone());
+                }
             }
         }
-    }
+        reached
+    };
+    let contributing = reach(&data_edges);
+    let ordered_only = reach(&exec_edges);
     for step in &def.steps {
         if contracts.contains_key(&step.id) && !contributing.contains(&step.id) {
-            d.error(
-                "workflow.orphanStep",
-                Some(2),
-                format!("step “{}” does not lead to any declared outcome", step.label),
-            )
-            .step(&step.id);
+            let message = if ordered_only.contains(&step.id) {
+                format!(
+                    "step “{}” does not lead to any declared outcome: its outputs are not used (a “runs after” link carries no data)",
+                    step.label
+                )
+            } else {
+                format!("step “{}” does not lead to any declared outcome", step.label)
+            };
+            d.error("workflow.orphanStep", Some(2), message).step(&step.id);
         }
     }
 
