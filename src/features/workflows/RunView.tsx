@@ -54,7 +54,7 @@ import { researchCommands } from "../research/ipc";
 import { PreviewView } from "../research/Promotion";
 import { workflowEvents, workflowRunCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
-import { describeCondition, describeRepeat } from "./orchestration";
+import { describeRepeat, describeTest } from "./orchestration";
 import { FullHash, PlanDetails, PlanReviewDialog } from "./PlanReview";
 import {
   ATTEMPT_STATE_VIEW,
@@ -563,8 +563,9 @@ function AttemptView({
 export function notRunReason(step: WorkflowRunStep, planStep: WorkflowPlanStep | undefined, plan: WorkflowRun["plan"]): string | null {
   if (step.state === "conditionNotMet") {
     const own = step.reason ? ` ${step.reason}` : "";
-    const cond = planStep?.condition
-      ? ` ${describeCondition(planStep.condition, (s, p) => `“${plan.steps.find((x) => x.step === s)?.label ?? s} → ${p}”`)}`
+    const c = planStep?.condition;
+    const cond = c
+      ? ` It runs only if ${describeTest(c.test, `“${plan.steps.find((x) => x.step === c.source.step)?.label ?? c.source.step} → ${c.source.port}”`, c.negate)}.`
       : "";
     return `Not run: its condition was not met.${own}${cond}`;
   }

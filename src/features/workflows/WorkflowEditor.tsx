@@ -268,16 +268,17 @@ function StepCard({
       </div>
       {contract ? (
         <>
-          <p className="xp-wf__muted">
-            <strong>{contract.title}</strong>
-            {isDerivedContract(contract) ? "" : ` (v${contract.version})`} — {contract.purpose}
-          </p>
-          <CompositeSection draft={draft} step={step} infos={composites} onChange={onChange} />
+          {!isDerivedContract(contract) && (
+            <p className="xp-wf__muted">
+              <strong>{contract.title}</strong> (v{contract.version}) — {contract.purpose}
+            </p>
+          )}
           <p className="xp-wf__muted">
             Runs through: {contract.runner.title} ({CONTAINMENT_VIEW[contract.runner.containment].label}) —{" "}
             {contract.runner.available ? "available" : `unavailable: ${contract.runner.availability}`}. Effects:{" "}
             {contract.effects.map((e) => EFFECT_LABELS[e].toLowerCase()).join("; ")}.
           </p>
+          <CompositeSection draft={draft} step={step} infos={composites} onChange={onChange} />
           <div className="xp-wf__form">
             {contract.inputs.map((port) => (
               <PortBinding key={port.name} draft={draft} contracts={contracts} step={step} port={port} onChange={onChange} />

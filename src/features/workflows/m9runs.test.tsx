@@ -290,7 +290,7 @@ describe("run monitor (M9)", () => {
     expect(review.textContent).toContain("Condition not met");
     const reason = screen.getByTestId("workflow-step-reason-review");
     expect(reason.getAttribute("data-state")).toBe("conditionNotMet");
-    expect(reason.textContent).toMatch(/^Not run: its condition was not met\. The verdict was “Errors”\. Runs only if the audit verdict of “Audit → evidence” is one of “Checked”/);
+    expect(reason.textContent).toBe("Not run: its condition was not met. The verdict was “Errors”. It runs only if the audit verdict of “Audit → evidence” is one of “Checked”.");
     const skipped = screen.getByTestId("workflow-step-reason-comp/plot");
     expect(skipped.getAttribute("data-state")).toBe("skipped");
     expect(skipped.textContent).toBe("Not run: an earlier step did not produce what it needs. “Fit → figure” was not produced.");
@@ -515,7 +515,7 @@ describe("triggers panel", () => {
     expect(may.textContent).toMatch(/Anything else suspends the trigger.*a new revision of the workflow, folder trust, the container image identity, a runner becoming unavailable, any code input, or any step's code or instructions/);
     const native = screen.getByTestId("trigger-standing-native");
     expect(native.getAttribute("data-allowed")).toBe("true");
-    expect(native.textContent).toBe("1 step run natively with your account's privileges on every fire, without asking.");
+    expect(native.textContent).toBe("1 step runs natively with your account's privileges on every fire, without asking.");
     // The full plan is part of the review.
     expect(within(review).getByTestId("workflow-plan-details").getAttribute("data-plan")).toBe("plan-s");
     fireEvent.click(screen.getByTestId("trigger-enable"));

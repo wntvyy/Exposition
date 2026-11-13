@@ -326,7 +326,7 @@ describe("repeats", () => {
     const cond = orch.setCondition(parent, "review", { source: { step: "audit", port: "evidence" }, test: { kind: "verdictIn", verdicts: ["Checked", "Checked with axioms"] }, negate: false });
     const edge = canvasModel.edgesOf(cond, contracts, []).find((e) => e.kind === "condition")!;
     expect(edge).toMatchObject({ id: "cond:review", source: "step:audit", sourceHandle: "out:evidence", target: "step:review", targetHandle: "pre-in" });
-    expect(edge.label).toBe("condition: verdict ∈ {Checked, Checked with axioms}");
+    expect(edge.label).toBe("condition (no data)");
     expect(edge.description).toMatch(/Review runs only if the audit verdict of Audit → Audited declarations is one of “Checked”, “Checked with axioms”/);
     expect(canvasModel.removeEdge(cond, "cond:review")).toBeNull();
     const layout = canvasModel.autoLayout(cond, contracts);

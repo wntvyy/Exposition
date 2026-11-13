@@ -15,7 +15,7 @@ import type { TriggerSettings, TriggerState, WorkflowDefinition, WorkflowStandin
 import { TRIGGER_BOUNDS } from "./contract";
 import { workflowEvents, workflowTriggerCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
-import { PlanDetails } from "./PlanReview";
+import { FullHash, PlanDetails } from "./PlanReview";
 import { openRun } from "./RunView";
 import { formatSeconds, formatTime, STALE_PLAN_CODES } from "./runModel";
 
@@ -397,18 +397,18 @@ export function TriggerDialog({ workflow, revision, definition, initial, isOpen,
                   {nativeSteps === 0
                     ? "None in this plan."
                     : standing.settings.allowNative
-                      ? `${nativeSteps} step${nativeSteps === 1 ? "" : "s"} run natively with your account's privileges on every fire, without asking.`
+                      ? `${nativeSteps} step${nativeSteps === 1 ? " runs" : "s run"} natively with your account's privileges on every fire, without asking.`
                       : `${nativeSteps} step${nativeSteps === 1 ? "" : "s"} would run natively: not allowed by these settings.`}
                 </dd>
                 <dt>Model requests</dt>
                 <dd>
                   {modelSteps === 0
                     ? "None."
-                    : `${modelSteps} step${modelSteps === 1 ? "" : "s"} send material to the model provider on every fire; requests count against a daily cap.`}
+                    : `${modelSteps} step${modelSteps === 1 ? " sends" : "s send"} material to the model provider on every fire; requests count against a daily cap.`}
                 </dd>
                 <dt>Standing hash</dt>
                 <dd>
-                  <code title={standing.standingHash}>{standing.standingHash.slice(0, 12)}…</code>
+                  <FullHash hash={standing.standingHash} label="the standing plan" />
                 </dd>
               </dl>
             </section>

@@ -23,7 +23,7 @@ import {
   setPrerequisites,
   sourceKey,
 } from "./model";
-import { describeTest, isComposite, shortTest } from "./orchestration";
+import { describeTest, isComposite } from "./orchestration";
 
 export type CanvasSelectionItem =
   | { kind: "step"; id: string }
@@ -138,7 +138,7 @@ export function edgesOf(def: WorkflowDefinition, contracts: OperationContract[],
       sourceHandle: `out:${cond.source.port}`,
       target: nodeIdOf.step(s.id),
       targetHandle: PRE_IN,
-      label: `condition: ${shortTest(cond.test, cond.negate)}`,
+      label: "condition (no data)",
       description: `${s.label} runs only if ${describeTest(cond.test, source, cond.negate)} (condition, no data)`,
       portType: null,
       problems: diagnostics.filter((d) => d.step === s.id && d.code.startsWith("workflow.condition")).map((d) => d.message),
