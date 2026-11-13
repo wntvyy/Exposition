@@ -206,6 +206,7 @@ beforeEach(() => {
   wfIpc.operations.mockResolvedValue(contracts);
   wfIpc.validate.mockResolvedValue(validation());
   wfIpc.list.mockResolvedValue([]);
+  triggerIpc.list.mockResolvedValue([]);
 });
 afterEach(() => cleanup());
 
@@ -328,11 +329,11 @@ describe("repeats", () => {
   });
 
   it("projects a condition as a dash-dot edge from the tested output that the canvas never deletes, and lays the step out after its source", () => {
-    const cond = orch.setCondition(parent, "review", { source: { step: "audit", port: "evidence" }, test: { kind: "verdictIn", verdicts: ["Checked", "Checked with axioms"] }, negate: false });
+    const cond = orch.setCondition(parent, "review", { source: { step: "audit", port: "evidence" }, test: { kind: "verdictIn", verdicts: ["Checked", "Checked with nonstandard axioms"] }, negate: false });
     const edge = canvasModel.edgesOf(cond, contracts, []).find((e) => e.kind === "condition")!;
     expect(edge).toMatchObject({ id: "cond:review", source: "step:audit", sourceHandle: "out:evidence", target: "step:review", targetHandle: "pre-in" });
     expect(edge.label).toBe("condition (no data)");
-    expect(edge.description).toMatch(/Review runs only if the audit verdict of Audit → Audited declarations is one of “Checked”, “Checked with axioms”/);
+    expect(edge.description).toMatch(/Review runs only if the audit verdict of Audit → Audited declarations is one of “Checked”, “Checked with nonstandard axioms”/);
     expect(canvasModel.removeEdge(cond, "cond:review")).toBeNull();
     const layout = canvasModel.autoLayout(cond, contracts);
     expect(layout.get("step:audit")!.x).toBeLessThan(layout.get("step:review")!.x);
@@ -408,7 +409,7 @@ describe("WorkflowEditor (M9)", () => {
     expect(offered.some((t) => t?.includes("Review"))).toBe(false);
     fireEvent.click(screen.getByRole("option", { name: /Audit → Audited declarations/ }));
     await waitFor(() => expect(screen.getByTestId("condition-review-test").getAttribute("data-kind")).toBe("verdictIn"));
-    fireEvent.click(within(screen.getByTestId("condition-review-verdicts")).getByRole("checkbox", { name: "Checked with axioms" }));
+    fireEvent.click(within(screen.getByTestId("condition-review-verdicts")).getByRole("checkbox", { name: "Checked with nonstandard axioms" }));
     fireEvent.click(within(section).getByRole("checkbox", { name: /Negate/ }));
     await waitFor(() =>
       expect(wfIpc.validate.mock.lastCall?.[0]).toEqual(
@@ -417,13 +418,13 @@ describe("WorkflowEditor (M9)", () => {
           steps: expect.arrayContaining([
             expect.objectContaining({
               id: "review",
-              condition: { source: { step: "audit", port: "evidence" }, test: { kind: "verdictIn", verdicts: ["Checked", "Checked with axioms"] }, negate: true },
+              condition: { source: { step: "audit", port: "evidence" }, test: { kind: "verdictIn", verdicts: ["Checked", "Checked with nonstandard axioms"] }, negate: true },
             }),
           ]),
         }),
       ),
     );
-    expect(screen.getByTestId("condition-summary-review").textContent).toMatch(/Runs only if the audit verdict of “Audit → Audited declarations” is not one of “Checked”, “Checked with axioms”/);
+    expect(screen.getByTestId("condition-summary-review").textContent).toMatch(/Runs only if the audit verdict of “Audit → Audited declarations” is not one of “Checked”, “Checked with nonstandard axioms”/);
   });
 
   it("edits a JSON comparison on a dataset output and shows the backend's condition diagnostics inline", async () => {
@@ -519,5 +520,73 @@ describe("WorkflowsView (M9)", () => {
     await waitFor(async () => expect((await row("wf-a")).textContent).toContain("Trigger on"));
     expect((await row("wf-b")).textContent).toContain("Trigger suspended");
     expect((await row("wf-c")).textContent).not.toMatch(/Trigger/);
+  });
+});
+
+// ----- docs audit findings (each failed before its fix) -------------------------------------
+
+describe("docs audit: the editor offers only what validation accepts", () => {
+  it("offers exactly the backend's audit verdict labels (pinned to KNOWN_VERDICTS in workflow.rs)", async () => {
+    // Vitest runs from the repository root; read the Rust source as text (the tokens test does the same).
+    const nodeFs = "node:fs";
+    const { readFileSync } = (await import(/* @vite-ignore */ nodeFs)) as { readFileSync: (path: string, encoding: "utf8") => string };
+    const rust = readFileSync("crates/exposition-graph/src/workflow.rs", "utf8");
+    const block = /pub const KNOWN_VERDICTS: \[&str; \d+\] = \[([\s\S]*?)\];/.exec(rust)?.[1] ?? "";
+    const labels = [...block.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    expect(labels.length).toBeGreaterThan(0);
+    expect([...orch.KNOWN_VERDICTS]).toEqual(labels);
+  });
+
+  it("does not offer a condition on a composite step (the backend refuses it), and lets an existing one be removed", async () => {
+    const conditioned: WorkflowDefinition = {
+      ...withComposite,
+      steps: withComposite.steps.map((s) =>
+        s.id === "comp" ? { ...s, condition: { source: { step: "audit", port: "evidence" }, test: { kind: "verdictIn", verdicts: ["Checked"] }, negate: false } } : s,
+      ),
+    };
+    openEditor(conditioned);
+    const section = await screen.findByTestId("condition-comp");
+    expect(section.getAttribute("data-enabled")).toBe("false");
+    expect(within(section).queryByRole("checkbox", { name: /Run this step only when/ })).toBeNull();
+    expect(section.textContent).toMatch(/cannot carry a condition; put conditions on the steps inside that workflow/);
+    fireEvent.click(within(section).getByRole("button", { name: "Remove the condition" }));
+    await waitFor(() => expect((wfIpc.validate.mock.lastCall?.[0] as WorkflowDefinition).steps.find((s) => s.id === "comp")!.condition).toBeUndefined());
+  });
+
+  it("compares text and true/false values only for equality", async () => {
+    expect(orch.compareOpsFor("number").map((o) => o.id)).toEqual(["eq", "ne", "lt", "le", "gt", "ge"]);
+    expect(orch.compareOpsFor("text").map((o) => o.id)).toEqual(["eq", "ne"]);
+    expect(orch.compareOpsFor("boolean").map((o) => o.id)).toEqual(["eq", "ne"]);
+    openEditor(orch.setCondition(parent, "review", { source: { step: "sim", port: "summary" }, test: { kind: "jsonCompare", pointer: "/n", op: "ge", value: { kind: "number", value: "3" } }, negate: false }));
+    await screen.findByTestId("condition-review-test");
+    // Switching the value to text resets an ordering comparison to equality.
+    fireEvent.click(within(screen.getByTestId("condition-review-test")).getByRole("button", { name: /Value type/ }));
+    fireEvent.click(await screen.findByRole("option", { name: "Text" }));
+    await waitFor(() =>
+      expect((wfIpc.validate.mock.lastCall?.[0] as WorkflowDefinition).steps.find((s) => s.id === "review")!.condition!.test).toEqual({
+        kind: "jsonCompare",
+        pointer: "/n",
+        op: "eq",
+        value: { kind: "text", value: "" },
+      }),
+    );
+    fireEvent.click(within(screen.getByTestId("condition-review-op")).getByRole("button"));
+    expect((await screen.findAllByRole("option")).map((o) => o.querySelector("[slot=label]")?.textContent)).toEqual(["=  equals", "≠  does not equal"]);
+  });
+
+  it("never offers a forEach step's output as an outcome source, and the canvas refuses that link with the reason", () => {
+    const repeated = orch.setRepeat(parent, "sim", { kind: "forEach", parameter: "seed", values: [{ kind: "integer", value: 1 }] });
+    expect(model.outcomeCandidates(parent, contracts, "transformedDataset").map((c) => c.key)).toContain("sim.summary");
+    expect(model.outcomeCandidates(repeated, contracts, "transformedDataset").map((c) => c.key)).not.toContain("sim.summary");
+    const withOutcome = { ...repeated, outcomes: [...repeated.outcomes, { id: "raw", kind: "transformedDataset" as const, label: "Raw", from: { step: "review", port: "report" }, optional: false }] };
+    const refused = canvasModel.connect(withOutcome, contracts, { source: "step:sim", sourceHandle: "out:summary", target: "outcome:raw", targetHandle: "in" });
+    expect(refused).toEqual({ ok: false, message: expect.stringMatching(/runs once for each value.*collect its outputs in a step that takes several first/) });
+  });
+
+  it("lets an until step (one value per run) be a condition source, but not a forEach step", () => {
+    const until = orch.setRepeat(parent, "sim", { kind: "until", port: "summary", test: { kind: "outputPresent" }, negate: false, maxIterations: 3, onExhausted: "fail" });
+    expect(model.conditionSources(until, contracts, "review").map((o) => o.key)).toContain("sim.summary");
+    const forEach = orch.setRepeat(parent, "sim", { kind: "forEach", parameter: "seed", values: [{ kind: "integer", value: 1 }] });
+    expect(model.conditionSources(forEach, contracts, "review").map((o) => o.key)).not.toContain("sim.summary");
   });
 });

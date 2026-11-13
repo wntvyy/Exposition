@@ -53,7 +53,7 @@ vi.mock("../research/Promotion", () => ({ PreviewView: () => null }));
 
 const { PlanReviewDialog, groupByComposite } = await import("./PlanReview");
 const { RunMonitor, RunHistory } = await import("./RunView");
-const { TriggersSection } = await import("./TriggersPanel");
+const { TriggersSection, settingsProblems, suspensionTitle } = await import("./TriggersPanel");
 const runModel = await import("./runModel");
 
 const HASH = "ab12cd34ef56".padEnd(64, "0");
@@ -542,7 +542,7 @@ describe("triggers panel", () => {
     const suspended = screen.getByTestId("trigger-suspended-wtrg-2");
     expect(suspended.getAttribute("data-code")).toBe("trigger.planChanged");
     expect(suspended.textContent).toContain("The workflow has a new revision (3).");
-    expect(suspended.textContent).toContain("It does not fire until you review and approve a new standing plan.");
+    expect(suspended.textContent).toContain("Suspended: the approved plan no longer matches");
     expect(screen.getByTestId("trigger-last-fired-wtrg-2").textContent).toMatch(/^Has not fired yet/);
     expect(screen.getByTestId("workflow-trigger-wtrg-3").textContent).toContain("Every 1 h");
     expect(screen.getByTestId("workflow-trigger-wtrg-3").textContent).toContain("Off");
@@ -637,5 +637,54 @@ describe("triggers panel", () => {
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     rerender(<TriggersSection workflow="wf-1" revision={3} definition={definition} reviewBlock="Save the draft first." />);
     await waitFor(() => expect((screen.getByTestId("workflow-trigger-add") as HTMLButtonElement).disabled).toBe(true));
+  });
+});
+
+// ----- docs audit findings (each failed before its fix) -------------------------------------
+
+describe("docs audit: triggers and verdicts", () => {
+  it("says a new trigger replaces the workflow's current one (one trigger per workflow)", async () => {
+    triggerIpc.list.mockResolvedValue([trigger({ id: "wtrg-1", state: { kind: "active" } })]);
+    triggerIpc.plan.mockResolvedValue(standing({ nativeSteps: [], modelRequestsPerRun: 0 }));
+    triggerIpc.enable.mockResolvedValue(trigger({ id: "wtrg-5" }));
+    render(<TriggersSection workflow="wf-1" revision={2} definition={definition} reviewBlock={null} />);
+    const add = await screen.findByTestId("workflow-trigger-add");
+    await waitFor(() => expect(add.textContent).toBe("Replace trigger…"));
+    fireEvent.click(add);
+    expect((await screen.findByTestId("trigger-replaces")).textContent).toMatch(/This workflow already has a trigger \(active\)\. Enabling this one replaces it/);
+    fireEvent.click(within(screen.getByTestId("trigger-watch-data")).getByRole("checkbox"));
+    fireEvent.click(screen.getByTestId("trigger-review"));
+    await screen.findByTestId("trigger-standing");
+    expect(screen.getByTestId("trigger-enable").textContent).toBe("Replace trigger");
+  });
+
+  it("checks runs per hour against runs per day", () => {
+    const base = { debounceSeconds: 30, maxRunsPerHour: 12, maxRunsPerDay: 5, allowNative: false, maxModelRequestsPerDay: 0 };
+    expect(settingsProblems(base, limits, { nativeSteps: [], modelRequestsPerRun: 0 })).toContain("Runs per hour cannot exceed runs per day (5).");
+    expect(settingsProblems({ ...base, maxRunsPerHour: 5 }, limits, { nativeSteps: [], modelRequestsPerRun: 0 })).toEqual([]);
+  });
+
+  it("shows the backend's suspension message once, under a title that fits its code", async () => {
+    triggerIpc.list.mockResolvedValue([
+      trigger({ id: "wtrg-t", state: { kind: "suspended", code: "trigger.trustRevoked", message: "Trust was revoked for the project folder, so the trigger is suspended until you review and enable it again." } }),
+      trigger({ id: "wtrg-p", state: { kind: "suspended", code: "trigger.planChanged", message: "The revision changed (2 → 3). The trigger is suspended until you review and enable it again." } }),
+    ]);
+    render(<TriggersSection workflow="wf-1" revision={3} definition={definition} reviewBlock={null} />);
+    const trust = await screen.findByTestId("trigger-suspended-wtrg-t");
+    expect(trust.textContent).toContain("Suspended: folder trust was revoked");
+    expect(trust.textContent).not.toContain("no longer matches");
+    expect(trust.textContent).not.toContain("It does not fire until");
+    expect(trust.textContent!.match(/until you review/g)).toHaveLength(1);
+    expect(screen.getByTestId("trigger-suspended-wtrg-p").textContent).toContain("Suspended: the approved plan no longer matches");
+    expect(suspensionTitle("trigger.nativeNotAllowed")).toBe("Suspended: native steps are not allowed");
+    expect(suspensionTitle("workflow.untrustedFolder")).toBe("Suspended");
+  });
+
+  it("tones the audit's exact verdict labels by their class (only Checked is success)", () => {
+    expect(runModel.verdictTone("Checked")).toBe("success");
+    expect(runModel.verdictTone("Checked with nonstandard axioms")).toBe("warning");
+    expect(runModel.verdictTone("Incomplete (1 sorry)")).toBe("warning");
+    expect(runModel.verdictTone("Errors (2)")).toBe("danger");
+    expect(runModel.verdictTone("Unverified: no audit evidence")).toBe("neutral");
   });
 });

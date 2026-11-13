@@ -18,7 +18,7 @@ import { Banner, Button, Checkbox, IconButton, Select, TextField } from "../../u
 import type { CompareOp, ConditionTest, ConditionValue, StepRepeat, WorkflowDefinition, WorkflowStep } from "./contract";
 import { conditionSources, contractOf, outputLabel, PORT_TYPE_LABELS } from "./model";
 import {
-  COMPARE_OPS,
+  compareOpsFor,
   defaultParamValue,
   defaultTest,
   describeCondition,
@@ -109,7 +109,7 @@ export function TestFields({
             label="Comparison"
             value={test.op}
             onChange={(op) => onChange({ ...test, op })}
-            options={COMPARE_OPS.map((o) => ({ id: o.id, label: `${o.symbol}  ${o.label}` }))}
+            options={compareOpsFor(test.value.kind).map((o) => ({ id: o.id, label: `${o.symbol}  ${o.label}` }))}
             data-testid={`${idPrefix}-op`}
           />
           <Select<ConditionValue["kind"]>
@@ -118,6 +118,8 @@ export function TestFields({
             onChange={(kind) =>
               onChange({
                 ...test,
+                // Text and true/false compare for equality only.
+                op: compareOpsFor(kind).some((o) => o.id === test.op) ? test.op : "eq",
                 value: kind === "boolean" ? { kind, value: true } : { kind, value: kind === "number" ? "0" : "" },
               })
             }
@@ -163,8 +165,24 @@ export function ConditionSection({
   step: WorkflowStep;
   onChange: (def: WorkflowDefinition) => void;
 }) {
-  const sources = conditionSources(draft, contracts, step.id);
   const condition = step.condition ?? null;
+  if (isComposite(step)) {
+    return (
+      <div className="xp-wf__multi xp-wf-orch" data-testid={`condition-${step.id}`} data-enabled="false">
+        <p className="xp-wf__muted">
+          A step that runs a saved workflow cannot carry a condition; put conditions on the steps inside that workflow.
+        </p>
+        {condition && (
+          <div>
+            <Button size="sm" icon={X} onPress={() => onChange(setCondition(draft, step.id, null))}>
+              Remove the condition
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  }
+  const sources = conditionSources(draft, contracts, step.id);
   const current = condition ? sources.find((o) => o.step === condition.source.step && o.port === condition.source.port) : undefined;
   const sourceKey = condition ? `${condition.source.step}.${condition.source.port}` : null;
   const enable = (on: boolean) => {

@@ -93,7 +93,10 @@ export const workflowRunCommands = {
   reproducePlan: (run: WorkflowRunId) => invoke<WorkflowReproducePlan>("workflow_run_reproduce_plan", { run }),
   /** The run manifest as JSON text (revision, hashes, input/output digests, environments, usage, cause). */
   manifest: (run: WorkflowRunId) => invoke<string>("workflow_run_manifest", { run }),
-  /** Write the run manifest (`destination` null: the default place in the project). */
+  /**
+   * Write the run manifest. `destination` null: the backend opens the save
+   * dialog (`workflow.exportCanceled` when it is dismissed).
+   */
   exportManifest: (run: WorkflowRunId, destination: string | null = null) =>
     invoke<WorkflowManifestExport>("workflow_run_manifest_export", { run, destination }),
 };

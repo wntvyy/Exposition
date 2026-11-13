@@ -92,18 +92,16 @@ export const PROPOSAL_STATUS_VIEW: Record<WorkflowProposalStatus, { tone: BadgeT
   expired: { tone: "neutral", label: "Expired", dashed: true },
 };
 
-/** Exact Lean verdict labels → tone. Only a clean result is success; unknown labels are warnings. */
+/**
+ * The audit's exact verdict labels → tone, by class (an overall label such as
+ * "Errors (2)" or "Unverified: reason" belongs to the class it starts with).
+ * Only a clean "Checked" is success; anything else checked is a warning.
+ */
 export function verdictTone(verdict: string): BadgeTone {
-  switch (verdict) {
-    case "Checked":
-      return "success";
-    case "Errors":
-      return "danger";
-    case "Not verified":
-      return "neutral";
-    default:
-      return "warning";
-  }
+  if (verdict === "Checked") return "success";
+  if (verdict.startsWith("Errors")) return "danger";
+  if (verdict.startsWith("Unverified") || verdict.startsWith("Not checked")) return "neutral";
+  return "warning";
 }
 
 export function shortHash(hash: string): string {
