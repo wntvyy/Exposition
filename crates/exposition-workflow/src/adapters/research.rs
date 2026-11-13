@@ -29,6 +29,14 @@ pub struct RetainedRecord {
     pub evidence: Option<EvidenceId>,
 }
 
+/// A prepared (not applied) promotion review.
+#[derive(Clone, Debug)]
+pub struct PreparedPromotion {
+    pub promotion: String,
+    pub attachment_key: String,
+    pub expires_at_ms: u64,
+}
+
 /// The research operations workflow steps use (a seam for tests).
 pub trait ResearchActions: Send + Sync {
     fn available(&self, root: &Path) -> Result<(), String>;
@@ -40,7 +48,24 @@ pub trait ResearchActions: Send + Sync {
         artifact: &str,
         document: &WorkspacePath,
         caption: Option<String>,
-    ) -> Result<String, StepFailure>;
+    ) -> Result<PreparedPromotion, StepFailure>;
+    /// The promotion's insertion (attachment `key`) is in `document` now.
+    fn promotion_applied(&self, root: &Path, document: &WorkspacePath, key: &str) -> bool;
+}
+
+/// The attachment markers of `key` (any supported format) enclose a block in `text`.
+pub fn markers_present(text: &str, key: &str) -> bool {
+    let begin = format!("exposition:begin {key}");
+    let end = format!("exposition:end {key}");
+    let marker = |line: &str, m: &str| {
+        let l = line.trim().trim_start_matches("//").trim_start_matches('%').trim_start_matches("<!--");
+        let l = l.trim_end_matches("-->").trim();
+        l == m
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let b = lines.iter().position(|l| marker(l, &begin));
+    let e = lines.iter().rposition(|l| marker(l, &end));
+    matches!((b, e), (Some(b), Some(e)) if b < e)
 }
 
 /// The research project service of the open project.
@@ -86,7 +111,7 @@ impl ResearchActions for ProjectResearch {
         artifact: &str,
         document: &WorkspacePath,
         caption: Option<String>,
-    ) -> Result<String, StepFailure> {
+    ) -> Result<PreparedPromotion, StepFailure> {
         let opened = self
             .workspace
             .open_document(document)
@@ -106,7 +131,27 @@ impl ResearchActions for ProjectResearch {
                 attachment_key: None,
             })
             .map_err(research_failure)?;
-        Ok(preview.promotion)
+        Ok(PreparedPromotion {
+            promotion: preview.promotion,
+            attachment_key: preview.attachment_key,
+            expires_at_ms: preview.expires_at_ms,
+        })
+    }
+
+    fn promotion_applied(&self, root: &Path, document: &WorkspacePath, key: &str) -> bool {
+        // Applied in this session (followed by the research service) ...
+        if self
+            .project
+            .promotions()
+            .is_ok_and(|p| p.tracked.iter().any(|t| &t.path == document && t.attachment_key == key))
+        {
+            return true;
+        }
+        // ... or its insertion is in the saved manuscript.
+        crate::plan::resolve(root, document)
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .is_some_and(|text| markers_present(&text, key))
     }
 }
 
@@ -189,11 +234,16 @@ impl StepAdapter for PromotionAdapter {
                 StepFailure::new("workflow.invalidParameter", "the manuscript path is missing or invalid")
             })?;
         let caption = request.text_parameter("caption").map(str::to_owned).filter(|c| !c.trim().is_empty());
-        let promotion = research.prepare_promotion(run, artifact, &document, caption)?;
-        let operation = OperationRef { kind: "promotion".into(), id: promotion.clone() };
+        let prepared = research.prepare_promotion(run, artifact, &document, caption)?;
+        let operation = OperationRef { kind: "promotion".into(), id: prepared.promotion.clone() };
         (control.on_dispatched)(&operation);
-        let value =
-            WorkflowOutputValue::PromotionProposal { promotion, document, status: WorkflowProposalStatus::Pending };
+        let value = WorkflowOutputValue::PromotionProposal {
+            promotion: prepared.promotion,
+            document,
+            status: WorkflowProposalStatus::Pending,
+            attachment_key: Some(prepared.attachment_key),
+            expires_at_ms: Some(prepared.expires_at_ms),
+        };
         Ok(StepResult {
             operation: Some(operation.clone()),
             outputs: vec![request.output("proposal", PortType::PromotionProposal, value, &operation)],

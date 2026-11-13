@@ -303,7 +303,18 @@ pub enum WorkflowOutputValue {
     /// A read-only agent's report.
     Report { text: String, task: Option<String> },
     /// A prepared manuscript insertion awaiting review.
-    PromotionProposal { promotion: String, document: WorkspacePath, status: WorkflowProposalStatus },
+    /// `status` reflects the existing promotion review when the run is read:
+    /// accepted once the insertion is in the manuscript, expired after the
+    /// review window.
+    PromotionProposal {
+        promotion: String,
+        document: WorkspacePath,
+        status: WorkflowProposalStatus,
+        /// The attachment the insertion carries (its markers in the manuscript).
+        attachment_key: Option<String>,
+        /// When the prepared review expires.
+        expires_at_ms: Option<u64>,
+    },
     /// Evidence associations awaiting review.
     AssociationProposal {
         proposal: String,

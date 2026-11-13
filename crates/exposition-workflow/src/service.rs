@@ -13,6 +13,7 @@ use tokio::sync::broadcast;
 
 use crate::adapters::Adapters;
 use crate::adapters::lean::LeanAuditor;
+use crate::adapters::research::ResearchActions;
 use crate::model::{
     MAX_ACTIVE_RUNS, StartWorkflowRunRequest, WorkflowAssociationDecision, WorkflowOutputValue, WorkflowProposalStatus,
     WorkflowRun, WorkflowRunError, WorkflowRunEvent, WorkflowRunPlan, WorkflowRunState, WorkflowRunStep,
@@ -50,6 +51,8 @@ pub struct WorkflowRunConfig {
     pub adapters: Adapters,
     /// Records evidence for accepted association proposals.
     pub lean: Option<Arc<dyn LeanAuditor>>,
+    /// Reflects promotion reviews (applied / expired) when a run is read.
+    pub research: Option<Arc<dyn ResearchActions>>,
 }
 
 struct CachedPlan {
@@ -69,6 +72,7 @@ pub(crate) struct Inner {
     pub(crate) host: Arc<dyn WorkflowHost>,
     pub(crate) adapters: Adapters,
     lean: Option<Arc<dyn LeanAuditor>>,
+    research: Option<Arc<dyn ResearchActions>>,
     store: Mutex<RunStore>,
     plans: Mutex<HashMap<WorkflowPlanId, CachedPlan>>,
     active: Mutex<HashMap<WorkflowRunId, ActiveRun>>,
@@ -147,6 +151,7 @@ impl WorkflowRunService {
                 host: config.host,
                 adapters: config.adapters,
                 lean: config.lean,
+                research: config.research,
                 store: Mutex::new(store),
                 plans: Mutex::new(HashMap::new()),
                 active: Mutex::new(HashMap::new()),
@@ -357,7 +362,49 @@ impl WorkflowRunService {
     }
 
     pub fn get(&self, id: &WorkflowRunId) -> Result<WorkflowRun, WorkflowRunError> {
-        self.load(id).map(|(_, run)| run)
+        let (_, mut run) = self.load(id)?;
+        self.reflect_promotions(&mut run);
+        Ok(run)
+    }
+
+    /// A pending promotion proposal is reported accepted once its insertion is
+    /// in the manuscript, and expired once its review window passed (the
+    /// review itself stays with the existing promotion review).
+    fn reflect_promotions(&self, run: &mut WorkflowRun) {
+        let Ok(root) = self.root() else { return };
+        let now = crate::now_ms();
+        let mut changed: Vec<(String, String, WorkflowOutputValue)> = Vec::new();
+        for step in &mut run.steps {
+            for attempt in &mut step.attempts {
+                for output in &mut attempt.outputs {
+                    if let WorkflowOutputValue::PromotionProposal {
+                        document,
+                        status,
+                        attachment_key: Some(key),
+                        expires_at_ms,
+                        ..
+                    } = &mut output.value
+                        && *status == WorkflowProposalStatus::Pending
+                    {
+                        if self.inner.research.as_ref().is_some_and(|r| r.promotion_applied(&root, document, key)) {
+                            *status = WorkflowProposalStatus::Accepted;
+                        } else if expires_at_ms.is_some_and(|t| t <= now) {
+                            *status = WorkflowProposalStatus::Expired;
+                        } else {
+                            continue;
+                        }
+                        changed.push((step.step.clone(), output.port.clone(), output.value.clone()));
+                    }
+                }
+            }
+        }
+        for (step, port, value) in changed {
+            for outcome in &mut run.outcomes {
+                if outcome.step == step && outcome.port == port {
+                    outcome.value = Some(value.clone());
+                }
+            }
+        }
     }
 
     /// Runs of the open project, newest first (bounded).

@@ -118,7 +118,10 @@ pub fn build(data_dir: &Path, services: RunServices) -> Result<WorkflowRunServic
         runner_ids::RESEARCH_RETENTION.into(),
         Arc::new(RetainAdapter { research: Some(Arc::clone(&research)) }),
     );
-    adapters.insert(runner_ids::REVIEWED_PROMOTION.into(), Arc::new(PromotionAdapter { research: Some(research) }));
+    adapters.insert(
+        runner_ids::REVIEWED_PROMOTION.into(),
+        Arc::new(PromotionAdapter { research: Some(Arc::clone(&research)) }),
+    );
     let reviewer: Arc<dyn AgentReviewer> = Arc::new(AgentServiceReviewer { agents: services.agents.clone() });
     adapters.insert(runner_ids::READ_ONLY_AGENT.into(), Arc::new(AgentReviewAdapter { reviewer: Some(reviewer) }));
     WorkflowRunService::new(WorkflowRunConfig {
@@ -130,6 +133,7 @@ pub fn build(data_dir: &Path, services: RunServices) -> Result<WorkflowRunServic
         }),
         adapters,
         lean: Some(auditor),
+        research: Some(research),
     })
 }
 

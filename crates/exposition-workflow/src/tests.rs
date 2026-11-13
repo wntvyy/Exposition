@@ -29,7 +29,9 @@ use crate::adapters::agent::{AgentReviewAdapter, AgentReviewer, ReviewOutcome, R
 use crate::adapters::associate::AssociateAdapter;
 use crate::adapters::batch::BatchAdapter;
 use crate::adapters::lean::{LeanAuditAdapter, LeanAuditor};
-use crate::adapters::research::{PromotionAdapter, ResearchActions, RetainAdapter, RetainedRecord};
+use crate::adapters::research::{
+    PreparedPromotion, PromotionAdapter, ResearchActions, RetainAdapter, RetainedRecord, markers_present,
+};
 use crate::adapters::{
     AGENT_REVIEW_UNAVAILABLE, Adapters, StepAdapter, StepControl, StepFailure, StepRequest, StepResult, Unavailable,
     runner_ids, sha256_hex,
@@ -277,10 +279,17 @@ impl ResearchActions for FakeResearch {
         _artifact: &str,
         document: &WorkspacePath,
         _caption: Option<String>,
-    ) -> Result<String, StepFailure> {
+    ) -> Result<PreparedPromotion, StepFailure> {
         self.calls.enter(format!("promote:{research_run}->{document}"));
         self.calls.leave();
-        Ok("promo-1".into())
+        Ok(PreparedPromotion {
+            promotion: "promo-1".into(),
+            attachment_key: "fig-run".into(),
+            expires_at_ms: crate::now_ms() + 60_000,
+        })
+    }
+    fn promotion_applied(&self, root: &Path, document: &WorkspacePath, key: &str) -> bool {
+        std::fs::read_to_string(root.join(document.as_str())).is_ok_and(|t| markers_present(&t, key))
     }
 }
 
@@ -404,6 +413,7 @@ fn new_service(
         host: h,
         adapters: adapters(batch, lean, research),
         lean: Some(auditor),
+        research: Some(research.clone()),
     })
     .unwrap()
 }
@@ -586,6 +596,19 @@ fn numerical_preset_runs_end_to_end_one_step_at_a_time() {
         &promotion.value,
         WorkflowOutputValue::PromotionProposal { status: WorkflowProposalStatus::Pending, .. }
     ));
+    // The promotion review is reflected when the run is read.
+    std::fs::write(
+        f.root.join("main.typ"),
+        "= Paper\n// exposition:begin fig-run\n#figure(image(\"x.svg\"))\n// exposition:end fig-run\n",
+    )
+    .unwrap();
+    let reread = f.service.get(&run.id).unwrap();
+    assert!(matches!(
+        &last_attempt(&reread, "promote").outputs[0].value,
+        WorkflowOutputValue::PromotionProposal { status: WorkflowProposalStatus::Accepted, .. }
+    ));
+    assert!(markers_present("<!-- exposition:begin k -->\nx\n<!-- exposition:end k -->", "k"));
+    assert!(!markers_present("% exposition:end k\n% exposition:begin k", "k"));
     let figure = run.outcomes.iter().find(|o| o.id == "figure").unwrap();
     assert!(figure.value.is_some());
     assert_eq!(run.usage.steps, 3);
@@ -846,8 +869,14 @@ fn forged_service_owned_outputs_are_refused() {
             }))),
         );
         let h: Arc<dyn WorkflowHost> = f.host.clone();
-        let service =
-            WorkflowRunService::new(WorkflowRunConfig { database: None, host: h, adapters: a, lean: None }).unwrap();
+        let service = WorkflowRunService::new(WorkflowRunConfig {
+            database: None,
+            host: h,
+            adapters: a,
+            lean: None,
+            research: None,
+        })
+        .unwrap();
         let id = f.save(numerical(false));
         let plan = service.plan(&id, None).unwrap();
         let run =
@@ -958,7 +987,8 @@ fn a_read_only_agent_review_reports_and_counts_model_requests() {
     a.insert(runner_ids::READ_ONLY_AGENT.into(), Arc::new(AgentReviewAdapter { reviewer: Some(r) }));
     let h: Arc<dyn WorkflowHost> = f.host.clone();
     let service =
-        WorkflowRunService::new(WorkflowRunConfig { database: None, host: h, adapters: a, lean: None }).unwrap();
+        WorkflowRunService::new(WorkflowRunConfig { database: None, host: h, adapters: a, lean: None, research: None })
+            .unwrap();
     let mut def = numerical(false);
     def.ceiling.model_requests = true;
     def.steps = vec![WorkflowStep {

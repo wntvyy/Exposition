@@ -24,7 +24,15 @@ verdict: string, declarations: Array<WorkflowAuditedDeclaration>,
 /**
  * Evidence records the Lean service registered, if any.
  */
-evidence: Array<EvidenceId>, } | { "kind": "report", text: string, task: string | null, } | { "kind": "promotionProposal", promotion: string, document: WorkspacePath, status: WorkflowProposalStatus, } | { "kind": "associationProposal", proposal: string, declarations: Array<string>, status: WorkflowProposalStatus, 
+evidence: Array<EvidenceId>, } | { "kind": "report", text: string, task: string | null, } | { "kind": "promotionProposal", promotion: string, document: WorkspacePath, status: WorkflowProposalStatus, 
+/**
+ * The attachment the insertion carries (its markers in the manuscript).
+ */
+attachmentKey: string | null, 
+/**
+ * When the prepared review expires.
+ */
+expiresAtMs: number | null, } | { "kind": "associationProposal", proposal: string, declarations: Array<string>, status: WorkflowProposalStatus, 
 /**
  * Declarations the user accepted (evidence recorded for them).
  */
