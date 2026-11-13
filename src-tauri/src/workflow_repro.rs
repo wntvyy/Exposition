@@ -86,8 +86,9 @@ fn manifest_json(state: &Ctx, run: &WorkflowRunId) -> Result<(String, String), C
     let execution = state.execution.clone();
     let redact = move |text: &str| execution.redact(text);
     let scrub = ManifestScrub { redact: &redact, folders: private_folders(state, &root) };
-    let manifest = state.runs.run_manifest(run, &scrub).map_err(CommandError::from)?;
-    Ok((manifest::manifest_json(&manifest), manifest.title))
+    let json = state.runs.run_manifest_json(run, &scrub).map_err(CommandError::from)?;
+    let title = state.runs.get(run).map(|r| r.title).unwrap_or_default();
+    Ok((json, title))
 }
 
 /// The run's manifest as canonical JSON (sorted keys; no logs, secrets, or

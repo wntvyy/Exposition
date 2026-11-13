@@ -117,7 +117,10 @@ impl BatchRunner for FakeBatch {
     ) -> Result<BatchResult, ResearchError> {
         self.seeds.lock().unwrap().push(request.seed);
         if let Some(code) = self.fail.lock().unwrap().clone() {
-            return Err(ResearchError::coded(&code, format!("refused before running ({FAKE_KEY})")));
+            return Err(ResearchError::coded(
+                &code,
+                format!("refused before running ({FAKE_KEY}) in {}", root.join("data").display()),
+            ));
         }
         let run = format!("run-{}", self.counter.fetch_add(1, Ordering::SeqCst));
         (control.on_dispatched)(&run);
@@ -520,11 +523,17 @@ fn a_manifest_is_deterministic_complete_and_free_of_secrets_and_user_paths() {
     let host = std::env::vars().chain([("EXPOSITION_REPRO_TEST_API_KEY".to_owned(), FAKE_KEY.to_owned())]);
     let redactor = Redactor::from_host_env(host);
     let scrub = scrub_with(&redactor, &f.root);
+    // Fail-before: the stored record does hold the secret and the project
+    // path (in the refusal message); only scrubbing keeps them out.
+    let raw = manifest::manifest_json(&manifest::build_manifest(&failed));
+    assert!(raw.contains(FAKE_KEY), "the planted key reaches the stored run record");
+    assert!(raw.to_lowercase().contains(&root_text.to_lowercase().replace('\\', "\\\\")), "and the project path");
     for run in [&ok, &failed, &reviewed] {
         let m1 = f.service.run_manifest(&run.id, &scrub).unwrap();
         let m2 = f.service.run_manifest(&run.id, &scrub).unwrap();
         let (a, b) = (manifest::manifest_json(&m1), manifest::manifest_json(&m2));
         assert_eq!(a, b, "the same run gives identical bytes");
+        assert_eq!(f.service.run_manifest_json(&run.id, &scrub).unwrap(), a, "the exported bytes are the same");
         assert!(!a.contains(FAKE_KEY) && !a.contains("REPRO-FAKE"), "no secret: {a}");
         assert!(!a.to_lowercase().contains(&root_text.to_lowercase()), "no project path: {a}");
         assert!(!a.contains("\\Users\\") && !a.contains("/Users/"), "no user path: {a}");
@@ -615,6 +624,10 @@ fn a_changed_input_blocks_the_reproduction_and_its_start() {
         .start(&StartWorkflowRunRequest { plan: approved.plan.clone(), approval_hash: approved.approval_hash.clone() })
         .unwrap_err();
     assert_eq!(e.code, "workflow.planStale", "{e:?}");
+    // Fail-before: an ordinary plan (input read at run start) is not blocked;
+    // the reproduction's pin is what blocks.
+    let ordinary = f.service.plan(&original.workflow, Some(original.revision)).unwrap();
+    assert!(ordinary.blockers.is_empty(), "{:?}", ordinary.blockers);
     // A new reproduction plan carries the normal blocker.
     let plan = f.reproduce(&original.id).unwrap().plan;
     let blocker = plan.blockers.iter().find(|b| b.code == "workflow.inputChanged").expect("inputChanged blocker");

@@ -463,12 +463,24 @@ fn scrub_value(value: &mut serde_json::Value, scrub: &ManifestScrub<'_>) {
     }
 }
 
-/// Every string of the manifest scrubbed (redacted, folders and absolute
-/// paths replaced). Digests, ids, and project-relative paths are unchanged.
-pub fn scrub_manifest(manifest: &WorkflowRunManifest, scrub: &ManifestScrub<'_>) -> WorkflowRunManifest {
+/// The manifest as a JSON value with every string scrubbed (redacted,
+/// folders and absolute paths replaced). Digests, ids, and project-relative
+/// paths are unchanged.
+pub fn scrubbed_value(manifest: &WorkflowRunManifest, scrub: &ManifestScrub<'_>) -> serde_json::Value {
     let mut value = serde_json::to_value(manifest).unwrap_or(serde_json::Value::Null);
     scrub_value(&mut value, scrub);
-    serde_json::from_value(value).unwrap_or_else(|_| manifest.clone())
+    value
+}
+
+/// [`scrubbed_value`] read back as a manifest. Never falls back to the
+/// unscrubbed manifest: a scrubbed value that no longer reads is an error.
+pub fn scrub_manifest(
+    manifest: &WorkflowRunManifest,
+    scrub: &ManifestScrub<'_>,
+) -> Result<WorkflowRunManifest, WorkflowRunError> {
+    serde_json::from_value(scrubbed_value(manifest, scrub)).map_err(|e| {
+        WorkflowRunError::new("workflow.manifestUnavailable", format!("The run manifest could not be prepared: {e}"))
+    })
 }
 
 fn sorted(value: serde_json::Value) -> serde_json::Value {
@@ -483,13 +495,17 @@ fn sorted(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// Canonical bytes of a manifest: keys sorted at every level, two-space
+/// Canonical bytes of a JSON value: keys sorted at every level, two-space
 /// indentation, LF line ends, a final newline.
-pub fn manifest_json(manifest: &WorkflowRunManifest) -> String {
-    let value = sorted(serde_json::to_value(manifest).unwrap_or(serde_json::Value::Null));
-    let mut text = serde_json::to_string_pretty(&value).unwrap_or_default();
+pub fn canonical_json(value: serde_json::Value) -> String {
+    let mut text = serde_json::to_string_pretty(&sorted(value)).unwrap_or_default();
     text.push('\n');
     text
+}
+
+/// Canonical bytes of a manifest (see [`canonical_json`]).
+pub fn manifest_json(manifest: &WorkflowRunManifest) -> String {
+    canonical_json(serde_json::to_value(manifest).unwrap_or(serde_json::Value::Null))
 }
 
 /// Whether `bytes` are an Exposition run manifest (an export may replace one).
@@ -547,7 +563,13 @@ impl WorkflowRunService {
         scrub: &ManifestScrub<'_>,
     ) -> Result<WorkflowRunManifest, WorkflowRunError> {
         let run = self.get(id)?;
-        Ok(scrub_manifest(&build_manifest(&run), scrub))
+        scrub_manifest(&build_manifest(&run), scrub)
+    }
+
+    /// The canonical JSON of a run's scrubbed manifest (the exported bytes).
+    pub fn run_manifest_json(&self, id: &WorkflowRunId, scrub: &ManifestScrub<'_>) -> Result<String, WorkflowRunError> {
+        let run = self.get(id)?;
+        Ok(canonical_json(scrubbed_value(&build_manifest(&run), scrub)))
     }
 
     /// Export a run's manifest to `destination` (see [`write_manifest_file`]).
@@ -557,8 +579,7 @@ impl WorkflowRunService {
         destination: &Path,
         scrub: &ManifestScrub<'_>,
     ) -> Result<WorkflowManifestExport, WorkflowRunError> {
-        let manifest = self.run_manifest(id, scrub)?;
-        write_manifest_file(destination, &manifest_json(&manifest))
+        write_manifest_file(destination, &self.run_manifest_json(id, scrub)?)
     }
 }
 
