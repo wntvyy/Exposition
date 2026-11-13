@@ -108,9 +108,12 @@ enum Target {
     Native(RuntimeEnvironment),
 }
 
-/// Removes the batch's staging folder and unregisters its root on drop.
+/// Removes the batch's staging folder, unregisters its root, and ends its
+/// live mark on drop (every return path, panics included).
 struct Staging<'a> {
     execution: &'a ExecutionService,
+    research: &'a ResearchService,
+    run_id: String,
     dir: PathBuf,
     registered: Option<PathBuf>,
 }
@@ -121,7 +124,12 @@ impl Drop for Staging<'_> {
             self.execution.unregister_root(&root);
         }
         let _ = std::fs::remove_dir_all(&self.dir);
+        self.research.set_batch_live(&self.run_id, false);
     }
+}
+
+fn canceled_before_start() -> ResearchError {
+    ResearchError::coded("research.batchCanceled", "The batch was canceled before it started.")
 }
 
 fn now_ms() -> u64 {
@@ -315,6 +323,14 @@ impl ScopedBatchRunner {
             if let Some(result) = self.execution.result(job) {
                 return (result, overflow);
             }
+            if self.execution.summary(job).is_none() {
+                // The service no longer knows the job (it cannot be waited for).
+                let lost = JobOutcome::Terminated { description: "the execution service lost track of the job".into() };
+                return (
+                    JobResult { id: job.clone(), outcome: lost, duration_ms: 0, output_truncated: false },
+                    overflow,
+                );
+            }
             if !canceled && (control.canceled)() {
                 canceled = true;
                 self.execution.cancel(job);
@@ -395,12 +411,21 @@ impl ScopedBatchRunner {
         Self::validate_request(request)?;
         let target = self.target(&root, request.mode)?;
         if (control.canceled)() {
-            return Err(ResearchError::coded("research.batchCanceled", "The batch was canceled before it started."));
+            return Err(canceled_before_start());
         }
         let run_id = new_run_id();
         let batch_dir = self.research.data_dir().join("research").join("batches").join(&run_id);
-        let mut staging = Staging { execution: &self.execution, dir: batch_dir.clone(), registered: None };
-        let staged = stage::stage(&root, &batch_dir.join("work"), request)?;
+        let mut staging = Staging {
+            execution: &self.execution,
+            research: &self.research,
+            run_id: run_id.clone(),
+            dir: batch_dir.clone(),
+            registered: None,
+        };
+        let staged = stage::stage(&root, &batch_dir.join("work"), control.canceled, request)?;
+        if (control.canceled)() {
+            return Err(canceled_before_start());
+        }
         let out_host = match target {
             Target::Native(_) => {
                 let out = batch_dir.join("out");
@@ -480,6 +505,21 @@ impl ScopedBatchRunner {
             unsaved_inputs: Vec::new(),
             execution: Some(execution),
         };
+        // The environment recorded is the one the job gets: settings changed
+        // since the availability check refuse the batch (retry).
+        if let Target::Restricted(t) = &target {
+            let now = self.execution.settings().docker;
+            if now.image.as_deref() != Some(t.image.as_str()) || now != t.docker {
+                return Err(ResearchError::EnvironmentUnavailable {
+                    reason: "Restricted execution settings changed while the batch was being prepared.".into(),
+                    guidance: "Nothing was run. Start the step again.".into(),
+                });
+            }
+        }
+        if (control.canceled)() {
+            return Err(canceled_before_start());
+        }
+        self.research.set_batch_live(&run_id, true);
         write_manifest(&root, &manifest)?;
 
         let job = self.execution.launch(spec);
@@ -496,6 +536,15 @@ impl ScopedBatchRunner {
         };
         let out_cap = request.max_output_bytes.min(outputs::TOTAL_LIMIT).saturating_add(OUTPUT_AREA_SLACK);
         let (result, overflow) = self.wait(&job, control, &out_dir, out_cap);
+        let stdout = self.execution.output_text(&job, OutputStream::Stdout).unwrap_or_default();
+        let stderr = self.execution.output_text(&job, OutputStream::Stderr).unwrap_or_default();
+        let refusal = self.execution.summary(&job).and_then(|s| s.refusal);
+        // Docker's own failures (exit 125 with a `docker:` message: daemon,
+        // mount, or image errors after the availability check) are not the
+        // batch's: they make the backend unavailable.
+        let docker_failure = matches!(target, Target::Restricted(_))
+            && result.outcome == JobOutcome::Exited { code: 125 }
+            && stderr.lines().any(|l| l.trim_start().starts_with("docker:"));
         let (validated, mut rejected) = outputs::validate(&out_dir, request.max_output_bytes);
         if out_host.is_none() {
             // The restricted job's folder holds only what the container wrote.
@@ -515,10 +564,16 @@ impl ScopedBatchRunner {
             }
         };
 
-        let stdout = self.execution.output_text(&job, OutputStream::Stdout).unwrap_or_default();
-        let stderr = self.execution.output_text(&job, OutputStream::Stderr).unwrap_or_default();
-        let refusal = self.execution.summary(&job).and_then(|s| s.refusal);
         let (status, exit_code) = match &result.outcome {
+            JobOutcome::Exited { code: 125 } if docker_failure => (
+                RunStatus::Failed {
+                    message: format!(
+                        "the container could not be started: {}",
+                        stderr.lines().find(|l| l.trim_start().starts_with("docker:")).unwrap_or("").trim()
+                    ),
+                },
+                None,
+            ),
             JobOutcome::Exited { code: 0 } => (RunStatus::Succeeded, Some(0)),
             JobOutcome::Exited { code } => {
                 let detail = python_error(&stderr).map(|e| format!(": {}: {}", e.ename, e.evalue)).unwrap_or_default();
@@ -609,6 +664,12 @@ impl ScopedBatchRunner {
                 },
                 Some(RefusalCode::UntrustedWorkspace) => ResearchError::NotTrusted,
                 _ => ResearchError::Launch(reason.clone()),
+            });
+        }
+        if docker_failure && let RunStatus::Failed { message } = &status {
+            return Err(ResearchError::EnvironmentUnavailable {
+                reason: format!("Restricted execution is unavailable: {message}"),
+                guidance: "Nothing ran natively instead. Check Docker Desktop and the configured image.".into(),
             });
         }
         let (ports, extra) = outputs::map_ports(&request.outputs, registered_outputs);

@@ -23,6 +23,13 @@ pub(crate) fn is_link_like(meta: &Metadata) -> bool {
     false
 }
 
+/// Whether `lstat` metadata describes a link that names another file: a
+/// symbolic link, junction, or WSL link (name-surrogate reparse points).
+/// Other reparse points (cloud placeholders, deduplicated files) are files.
+pub(crate) fn is_name_link(meta: &Metadata) -> bool {
+    meta.file_type().is_symlink()
+}
+
 /// Open a file for reading without following a final link (Windows opens the
 /// reparse point itself; elsewhere the caller compares identities with the
 /// `lstat` result, see [`same_file_as`]).

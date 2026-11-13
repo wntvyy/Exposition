@@ -562,6 +562,76 @@ fn trusted_native_batch_runs_in_a_fresh_process_and_registers_outputs() {
     assert!(names_in(&batches).is_empty(), "staging folders are removed");
 }
 
+/// While a batch runs its manifest reads "running" (not an orphan of a
+/// stopped application); afterwards it reads as it finished.
+#[test]
+fn a_running_batch_reads_as_running() {
+    let f = fixture_with(None, true);
+    if f.runner.availability(&f.root, BatchMode::TrustedNative).is_err() {
+        eprintln!("SKIPPED: no Python interpreter for trusted native batches");
+        return;
+    }
+    let req = request(
+        BatchMode::TrustedNative,
+        "import time
+time.sleep(120)
+",
+        Vec::new(),
+        Vec::new(),
+    );
+    let dispatched: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+    let seen: Mutex<Vec<RunStatus>> = Mutex::new(Vec::new());
+    let canceled = || {
+        let Some((id, at)) = dispatched.lock().unwrap().clone() else { return false };
+        if let Ok(manifest) = f.research.run_manifest(&id) {
+            seen.lock().unwrap().push(manifest.record.status.clone());
+        }
+        if let Some(listed) = f.research.runs().unwrap().iter().find(|r| r.id.0 == id) {
+            seen.lock().unwrap().push(listed.status.clone());
+        }
+        at.elapsed() >= Duration::from_secs(2)
+    };
+    let on_dispatched = |id: &str| *dispatched.lock().unwrap() = Some((id.to_owned(), Instant::now()));
+    let result =
+        f.runner.run(&f.root, &req, &BatchControl { canceled: &canceled, on_dispatched: &on_dispatched }).unwrap();
+    let seen = seen.into_inner().unwrap();
+    assert!(!seen.is_empty() && seen.iter().all(|s| *s == RunStatus::Running), "{seen:?}");
+    assert_eq!(result.status, RunStatus::Canceled);
+    assert_eq!(f.research.run_manifest(&result.research_run).unwrap().record.status, RunStatus::Canceled);
+}
+
+/// A cancel that arrives while inputs are staged dispatches nothing.
+#[test]
+fn a_cancel_before_dispatch_runs_nothing() {
+    let f = fixture_with(None, true);
+    let data = write(
+        &f.root,
+        "data/obs.csv",
+        b"1
+",
+    );
+    let req = request(
+        BatchMode::TrustedNative,
+        "print('ran')
+",
+        vec![data],
+        Vec::new(),
+    );
+    if f.runner.availability(&f.root, BatchMode::TrustedNative).is_err() {
+        eprintln!("SKIPPED: no Python interpreter for trusted native batches");
+        return;
+    }
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    // Not canceled at the first check, canceled from the second on (during staging).
+    let canceled = || calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1;
+    let on_dispatched = |_: &str| panic!("a canceled batch is not dispatched");
+    let err =
+        f.runner.run(&f.root, &req, &BatchControl { canceled: &canceled, on_dispatched: &on_dispatched }).unwrap_err();
+    assert_eq!(err.code(), "research.batchCanceled");
+    assert!(names_in(&f.root.join(".exposition").join("runs")).is_empty());
+    assert!(names_in(&f.data.join("research").join("batches")).is_empty());
+}
+
 #[test]
 fn trusted_native_time_limit_and_cancel_stop_the_process() {
     let f = fixture_with(None, true);

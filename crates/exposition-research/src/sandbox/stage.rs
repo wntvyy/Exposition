@@ -11,7 +11,7 @@ use exposition_core::path::WorkspacePath;
 use exposition_graph::Admission;
 use sha2::{Digest, Sha256};
 
-use super::fsx::{is_link_like, open_no_follow, same_file_as};
+use super::fsx::{is_name_link, open_no_follow, same_file_as};
 use crate::batch::{BatchCode, BatchRequest};
 use crate::error::ResearchError;
 use crate::helper::sha256_hex;
@@ -67,7 +67,10 @@ pub(crate) fn check_project_file(root: &Path, path: &WorkspacePath) -> Result<Pa
         let meta = std::fs::symlink_metadata(&current).map_err(|e| {
             ResearchError::coded("research.inputMissing", format!("{path} could not be opened for the batch: {e}"))
         })?;
-        if is_link_like(&meta) {
+        // Links (symbolic links, junctions, WSL links: name-surrogate
+        // reparse points) are refused; other reparse points (cloud-sync
+        // placeholders, deduplicated files) hold the file's own data.
+        if is_name_link(&meta) {
             return Err(refused(path, "it is or passes through a link or junction (links are never staged)"));
         }
         let last = i + 1 == parts.len();
@@ -88,6 +91,10 @@ pub(crate) fn check_project_file(root: &Path, path: &WorkspacePath) -> Result<Pa
         .and_then(|r| WorkspacePath::parse(&r).ok())
         .ok_or_else(|| refused(path, "it resolves outside the project"))?;
     excluded(path, &relative)?;
+    // Only the file's own name (letter case aside) is accepted: no alias.
+    if !relative.as_str().eq_ignore_ascii_case(path.as_str()) {
+        return Err(refused(path, &format!("it is an alias of {relative}; declare the file under its own name")));
+    }
     Ok(current)
 }
 
@@ -121,7 +128,7 @@ fn copy_verified(
     let lstat = std::fs::symlink_metadata(source).map_err(|e| ResearchError::io("reading a declared input", e))?;
     let mut file = open_no_follow(source).map_err(|e| ResearchError::io("reading a declared input", e))?;
     let meta = file.metadata().map_err(|e| ResearchError::io("reading a declared input", e))?;
-    if is_link_like(&meta) || !meta.is_file() || !same_file_as(&file, &lstat).unwrap_or(false) {
+    if is_name_link(&meta) || !meta.is_file() || !same_file_as(&file, &lstat).unwrap_or(false) {
         return Err(refused(path, "it changed into a link or special file while it was staged"));
     }
     if meta.len() > INPUT_LIMIT {
@@ -176,7 +183,14 @@ fn under(base: &Path, path: &WorkspacePath) -> PathBuf {
 }
 
 /// Stage `request` from the project `root` into the new folder `work`.
-pub(crate) fn stage(root: &Path, work: &Path, request: &BatchRequest) -> Result<Staged, ResearchError> {
+/// `canceled` is checked between files (a cancel during staging returns
+/// `research.batchCanceled`).
+pub(crate) fn stage(
+    root: &Path,
+    work: &Path,
+    canceled: &dyn Fn() -> bool,
+    request: &BatchRequest,
+) -> Result<Staged, ResearchError> {
     if request.inputs.len() > MAX_INPUTS {
         return Err(ResearchError::InvalidRequest(format!("a batch declares at most {MAX_INPUTS} inputs")));
     }
@@ -243,6 +257,9 @@ pub(crate) fn stage(root: &Path, work: &Path, request: &BatchRequest) -> Result<
     let mut budget = STAGED_TOTAL_LIMIT;
     let mut inputs = Vec::with_capacity(sources.len());
     for (path, expected, source) in sources {
+        if canceled() {
+            return Err(ResearchError::coded("research.batchCanceled", "The batch was canceled before it started."));
+        }
         copy_verified(path, &source, &under(&work, path), expected, &mut budget)?;
         inputs.push(RunInput { path: path.clone(), revision: None, content_hash: Some(format!("sha256:{expected}")) });
     }
@@ -272,6 +289,11 @@ mod tests {
     use super::*;
     use crate::batch::{BatchInput, BatchMode, BatchOwner};
     use std::time::Duration;
+
+    fn no_cancel() -> bool {
+        false
+    }
+    const NO_CANCEL: &dyn Fn() -> bool = &no_cancel;
 
     fn request(code: BatchCode, inputs: Vec<BatchInput>) -> BatchRequest {
         BatchRequest {
@@ -325,7 +347,8 @@ mod tests {
         std::fs::write(root.join("secret.txt"), "not declared").unwrap();
         std::fs::write(root.join("helpers.py"), "X = 1").unwrap();
         let staged =
-            stage(&root, &work, &request(BatchCode::Inline { source: "print(1)".into() }, vec![data])).unwrap();
+            stage(&root, &work, NO_CANCEL, &request(BatchCode::Inline { source: "print(1)".into() }, vec![data]))
+                .unwrap();
         assert_eq!(files_under(&staged.work), ["__exposition_main__.py", "data/table.csv"]);
         assert_eq!(staged.entry, INLINE_ENTRY);
         assert_eq!(std::fs::read(staged.work.join("data/table.csv")).unwrap(), b"a,b\n1,2\n");
@@ -338,7 +361,8 @@ mod tests {
         let (_tmp, root, work) = dirs();
         let mut data = input(&root, "data.csv", b"1\n");
         data.sha256 = sha256_hex(b"2\n");
-        let err = stage(&root, &work, &request(BatchCode::Inline { source: String::new() }, vec![data])).unwrap_err();
+        let err = stage(&root, &work, NO_CANCEL, &request(BatchCode::Inline { source: String::new() }, vec![data]))
+            .unwrap_err();
         assert_eq!(err.code(), "research.inputChanged", "{err}");
         assert!(!work.join("data.csv").exists(), "the mismatching copy is removed");
     }
@@ -348,12 +372,13 @@ mod tests {
         let (_tmp, root, work) = dirs();
         let script = input(&root, "src/analysis.py", b"print('hi')\n");
         let code = BatchCode::Script { path: script.path.clone(), sha256: script.sha256.clone() };
-        let staged = stage(&root, &work, &request(code, Vec::new())).unwrap();
+        let staged = stage(&root, &work, NO_CANCEL, &request(code, Vec::new())).unwrap();
         assert_eq!(staged.entry, "src/analysis.py");
         assert_eq!(files_under(&staged.work), ["src/analysis.py"]);
         assert!(matches!(staged.code.origin, CodeOrigin::File { .. }));
         let bad = BatchCode::Script { path: script.path.clone(), sha256: sha256_hex(b"other") };
-        let err = stage(&root, &tempfile::tempdir().unwrap().path().join("w"), &request(bad, Vec::new())).unwrap_err();
+        let err = stage(&root, &tempfile::tempdir().unwrap().path().join("w"), NO_CANCEL, &request(bad, Vec::new()))
+            .unwrap_err();
         assert_eq!(err.code(), "research.inputChanged");
     }
 
@@ -363,7 +388,8 @@ mod tests {
         for rel in [".exposition/graph.sqlite3", ".exposition/runs/run-a.json", ".git/config", "CLAUDE.md"] {
             let declared = input(&root, rel, b"x");
             let err =
-                stage(&root, &work, &request(BatchCode::Inline { source: String::new() }, vec![declared])).unwrap_err();
+                stage(&root, &work, NO_CANCEL, &request(BatchCode::Inline { source: String::new() }, vec![declared]))
+                    .unwrap_err();
             assert_eq!(err.code(), "research.inputRefused", "{rel}: {err}");
         }
         // A Windows short name (here of the `.exposition` folder) resolves to
@@ -383,28 +409,76 @@ mod tests {
                         path: WorkspacePath::parse(&format!("{short}/graph.sqlite3")).unwrap(),
                         sha256: declared.sha256.clone(),
                     };
-                    let err = stage(&root, &work, &request(BatchCode::Inline { source: String::new() }, vec![alias]))
-                        .unwrap_err();
+                    let err = stage(
+                        &root,
+                        &work,
+                        NO_CANCEL,
+                        &request(BatchCode::Inline { source: String::new() }, vec![alias]),
+                    )
+                    .unwrap_err();
                     assert_eq!(err.code(), "research.inputRefused", "{short}: {err}");
                     assert!(err.to_string().contains("graph"), "{err}");
                 }
                 None => eprintln!("SKIPPED short-name case: 8.3 names are disabled on this volume"),
             }
+            // Any alias is refused, not only aliases of excluded paths.
+            let long = input(
+                &root,
+                "data/long_observation_table.csv",
+                b"1
+",
+            );
+            let out =
+                std::process::Command::new("cmd").args(["/C", "dir", "/X"]).arg(root.join("data")).output().unwrap();
+            let listing = String::from_utf8_lossy(&out.stdout).to_string();
+            if let Some(short) = listing
+                .lines()
+                .find(|l| l.contains("long_observation_table.csv"))
+                .and_then(|l| l.split_whitespace().rev().nth(1).filter(|s| s.contains('~')).map(str::to_owned))
+            {
+                let alias =
+                    BatchInput { path: WorkspacePath::parse(&format!("data/{short}")).unwrap(), sha256: long.sha256 };
+                let err =
+                    stage(&root, &work, NO_CANCEL, &request(BatchCode::Inline { source: String::new() }, vec![alias]))
+                        .unwrap_err();
+                assert!(err.to_string().contains("alias"), "{short}: {err}");
+            }
+            // Letter case alone is the same file.
+            let upper = BatchInput {
+                path: WorkspacePath::parse("DATA/LONG_OBSERVATION_TABLE.CSV").unwrap(),
+                sha256: format!(
+                    "sha256:{}",
+                    sha256_hex(
+                        b"1
+"
+                    )
+                ),
+            };
+            let other = tempfile::tempdir().unwrap();
+            stage(
+                &root,
+                &other.path().join("w"),
+                NO_CANCEL,
+                &request(BatchCode::Inline { source: String::new() }, vec![upper]),
+            )
+            .unwrap();
         }
         // Earlier batch outputs (artifacts) may be inputs of later steps.
         let artifact = input(&root, ".exposition/artifacts/run-abc/table.csv", b"1\n");
-        stage(&root, &work, &request(BatchCode::Inline { source: String::new() }, vec![artifact])).unwrap();
+        stage(&root, &work, NO_CANCEL, &request(BatchCode::Inline { source: String::new() }, vec![artifact])).unwrap();
     }
 
     #[test]
     fn the_inline_entry_name_is_reserved_and_hashes_are_checked() {
         let (_tmp, root, work) = dirs();
         let clash = input(&root, "__exposition_main__.py", b"x");
-        let err = stage(&root, &work, &request(BatchCode::Inline { source: String::new() }, vec![clash])).unwrap_err();
+        let err = stage(&root, &work, NO_CANCEL, &request(BatchCode::Inline { source: String::new() }, vec![clash]))
+            .unwrap_err();
         assert_eq!(err.code(), "research.inputRefused");
         let mut bad = input(&root, "a.csv", b"x");
         bad.sha256 = "md5:abc".into();
-        let err = stage(&root, &work, &request(BatchCode::Inline { source: String::new() }, vec![bad])).unwrap_err();
+        let err = stage(&root, &work, NO_CANCEL, &request(BatchCode::Inline { source: String::new() }, vec![bad]))
+            .unwrap_err();
         assert_eq!(err.code(), "research.invalidRequest");
         assert_eq!(normalize_sha256(&"A".repeat(64)), Some("a".repeat(64)));
     }
@@ -429,8 +503,8 @@ mod tests {
         assert!(junction(&root.join("linked"), &outside), "mklink /J");
         let declared =
             BatchInput { path: WorkspacePath::parse("linked/secret.csv").unwrap(), sha256: sha256_hex(b"s") };
-        let err =
-            stage(&root, &work, &request(BatchCode::Inline { source: String::new() }, vec![declared])).unwrap_err();
+        let err = stage(&root, &work, NO_CANCEL, &request(BatchCode::Inline { source: String::new() }, vec![declared]))
+            .unwrap_err();
         assert_eq!(err.code(), "research.inputRefused", "{err}");
         assert!(!work.join("linked").exists());
     }
@@ -449,8 +523,8 @@ mod tests {
             return;
         }
         let declared = BatchInput { path: WorkspacePath::parse("link.csv").unwrap(), sha256: sha256_hex(b"s") };
-        let err =
-            stage(&root, &work, &request(BatchCode::Inline { source: String::new() }, vec![declared])).unwrap_err();
+        let err = stage(&root, &work, NO_CANCEL, &request(BatchCode::Inline { source: String::new() }, vec![declared]))
+            .unwrap_err();
         assert_eq!(err.code(), "research.inputRefused", "{err}");
     }
 }

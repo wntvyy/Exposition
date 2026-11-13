@@ -1,6 +1,6 @@
 //! The research supervisor: workspace trust, sessions, runs, and events.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -146,6 +146,9 @@ struct Shared {
     environments: Mutex<Option<(Option<DiscoveredFor>, EnvironmentReport)>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     runs: Mutex<HashMap<String, RunState>>,
+    /// Workflow batch runs executing now (their manifests read "running"
+    /// legitimately and are not settled as orphans).
+    batches: Mutex<HashSet<String>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -175,6 +178,7 @@ impl ResearchService {
                 environments: Mutex::new(None),
                 sessions: Mutex::new(HashMap::new()),
                 runs: Mutex::new(HashMap::new()),
+                batches: Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -604,7 +608,7 @@ impl ResearchService {
         for manifest in store::list_manifests(&workspace.root) {
             if !live.contains_key(&manifest.record.id.0) {
                 let owner = manifest.session.owner.clone();
-                out.push(crate::runs::summary_of(&settle_orphan(manifest), owner, false));
+                out.push(crate::runs::summary_of(&self.settle(manifest), owner, false));
             }
         }
         out.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms).then_with(|| b.id.0.cmp(&a.id.0)));
@@ -619,7 +623,23 @@ impl ResearchService {
             return Ok(run.manifest.clone());
         }
         let workspace = self.current_workspace()?;
-        read_manifest(&workspace.root, run_id).map(settle_orphan)
+        read_manifest(&workspace.root, run_id).map(|m| self.settle(m))
+    }
+
+    /// A stored manifest as it stands: "running" without live state means
+    /// Exposition stopped before it finished, unless a batch runs it now.
+    fn settle(&self, manifest: RunManifest) -> RunManifest {
+        if lock(&self.shared.batches).contains(&manifest.record.id.0) { manifest } else { settle_orphan(manifest) }
+    }
+
+    /// Mark a workflow batch run as executing (or no longer executing).
+    pub(crate) fn set_batch_live(&self, run_id: &str, live: bool) {
+        let mut batches = lock(&self.shared.batches);
+        if live {
+            batches.insert(run_id.to_owned());
+        } else {
+            batches.remove(run_id);
+        }
     }
 
     /// Page through retained output (live runs) or the stored transcript.
