@@ -67,6 +67,11 @@ const JOB_LOG_LIMIT: u64 = 1024 * 1024;
 const LOG_TAIL: usize = 8 * 1024;
 /// How often the runner looks at the job and the cancellation flag.
 const POLL: Duration = Duration::from_millis(50);
+/// The output area's size is checked every this many polls.
+const SIZE_CHECK_EVERY: u32 = 10;
+/// What a batch may write to its output area beyond its output budget
+/// (files that will be rejected, scratch) before it is stopped.
+const OUTPUT_AREA_SLACK: u64 = 64 * 1024 * 1024;
 
 /// Create the batch runner. `research` provides the open project, runtime
 /// discovery, and the data directory (`<data>/research/batches`);
@@ -300,14 +305,24 @@ impl ScopedBatchRunner {
     }
 
     /// Wait for the job, canceling it when the workflow asks.
-    fn wait(&self, job: &JobId, control: &BatchControl<'_>) -> JobResult {
+    /// Also stops the job when its output area grows beyond `out_cap` bytes
+    /// (the area is on the host disk); returns whether that happened.
+    fn wait(&self, job: &JobId, control: &BatchControl<'_>, out_dir: &Path, out_cap: u64) -> (JobResult, bool) {
         let mut canceled = false;
+        let mut overflow = false;
+        let mut polls: u32 = 0;
         loop {
             if let Some(result) = self.execution.result(job) {
-                return result;
+                return (result, overflow);
             }
             if !canceled && (control.canceled)() {
                 canceled = true;
+                self.execution.cancel(job);
+            }
+            polls = polls.wrapping_add(1);
+            if !canceled && polls.is_multiple_of(SIZE_CHECK_EVERY) && outputs::area_size(out_dir) > out_cap {
+                canceled = true;
+                overflow = true;
                 self.execution.cancel(job);
             }
             std::thread::sleep(POLL);
@@ -473,14 +488,14 @@ impl ScopedBatchRunner {
         // Best effort: the running manifest names its job (it is rewritten at the end).
         let _ = write_manifest(&root, &manifest);
         (control.on_dispatched)(&run_id);
-        let result = self.wait(&job, control);
-
         // Output area: the backend's /out folder, or the native batch folder.
         let job_dir = self.execution.job_dir(&job);
         let out_dir = match &out_host {
             Some(dir) => dir.clone(),
             None => exposition_execution::docker::out_dir(&job_dir),
         };
+        let out_cap = request.max_output_bytes.saturating_add(OUTPUT_AREA_SLACK);
+        let (result, overflow) = self.wait(&job, control, &out_dir, out_cap);
         let (validated, mut rejected) = outputs::validate(&out_dir, request.max_output_bytes);
         if out_host.is_none() {
             // The restricted job's folder holds only what the container wrote.
@@ -514,6 +529,15 @@ impl ScopedBatchRunner {
                     message: format!(
                         "the batch reached its time limit ({} s) and was stopped",
                         request.time_limit.as_secs_f64()
+                    ),
+                },
+                None,
+            ),
+            JobOutcome::Canceled if overflow => (
+                RunStatus::Failed {
+                    message: format!(
+                        "the batch wrote more than {} MiB to its output area and was stopped",
+                        out_cap / (1024 * 1024)
                     ),
                 },
                 None,

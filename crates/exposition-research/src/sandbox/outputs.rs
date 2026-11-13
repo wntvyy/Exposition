@@ -109,6 +109,31 @@ fn kind_for(ext: &str) -> ArtifactKind {
     }
 }
 
+/// Bytes in an output area (recursively, never following links; bounded
+/// walk). Used to stop a batch that floods the host disk.
+pub(crate) fn area_size(dir: &Path) -> u64 {
+    let mut total: u64 = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else { continue };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > 100_000 {
+                return u64::MAX;
+            }
+            // `DirEntry` metadata does not traverse links.
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.file_type().is_dir() && !super::fsx::is_link_like(&meta) {
+                stack.push(entry.path());
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
 /// A validated output file, read into memory (bounded).
 #[derive(Debug)]
 pub(crate) struct Validated {
@@ -369,6 +394,16 @@ mod tests {
         assert!(reason(&rejected, "nested").contains("directory"));
         assert!(reason(&rejected, "original.csv").contains("hard link"));
         assert!(reason(&rejected, "second.csv").contains("hard link"));
+    }
+
+    #[test]
+    fn the_output_area_size_counts_nested_files() {
+        let (_tmp, dir) = out();
+        std::fs::write(dir.join("a.bin"), vec![0u8; 1000]).unwrap();
+        std::fs::create_dir_all(dir.join("x/y")).unwrap();
+        std::fs::write(dir.join("x/y/b.bin"), vec![0u8; 500]).unwrap();
+        assert_eq!(area_size(&dir), 1500);
+        assert_eq!(area_size(&dir.join("missing")), 0);
     }
 
     #[test]

@@ -442,6 +442,41 @@ fn restricted_time_limit_stops_the_batch() {
 }
 
 #[test]
+#[ignore = "needs Docker Desktop and the local image python:3.13-slim; run with EXPOSITION_DOCKER_TESTS=1 -- --ignored"]
+fn restricted_output_flood_is_stopped() {
+    if !docker_enabled() {
+        return;
+    }
+    let f = fixture_with(Some(IMAGE), false);
+    let code = r#"
+import os
+out = os.environ["EXPOSITION_OUTPUT_DIR"]
+chunk = b"0" * (1 << 20)
+with open(os.path.join(out, "flood.csv"), "wb") as f:
+    for i in range(4096):
+        f.write(chunk)
+        f.flush()
+print("NOT STOPPED")
+"#;
+    let mut req = request(BatchMode::Restricted, code, Vec::new(), Vec::new());
+    req.max_output_bytes = 1024 * 1024;
+    let (result, _) = run(&f, &req, None);
+    let result = result.unwrap();
+    match &result.status {
+        RunStatus::Failed { message } => assert!(message.contains("output area"), "{message}"),
+        other => panic!(
+            "{other:?}
+{}",
+            result.log
+        ),
+    }
+    assert!(!result.log.contains("NOT STOPPED"));
+    assert!(result.rejected.iter().any(|r| r.name == "flood.csv"), "{:?}", result.rejected);
+    assert!(!artifact_dir(&f, &result.research_run).join("flood.csv").exists());
+    assert_clean(&f);
+}
+
+#[test]
 #[ignore = "needs Docker Desktop; run with EXPOSITION_DOCKER_TESTS=1 -- --ignored"]
 fn restricted_with_a_missing_image_is_refused_without_fallback() {
     if !docker_enabled() {
