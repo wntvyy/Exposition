@@ -370,6 +370,13 @@ pub struct WorkflowStepAttempt {
     pub rejected: Vec<WorkflowRejectedOutput>,
     /// Bounded, redacted stdout/stderr tail or service log.
     pub log: Option<String>,
+    /// What the attempt ran with (M9 environment capture): runner,
+    /// containment, platform, image, interpreter and packages, toolchain,
+    /// model, seed. `None` for attempts refused before dispatch and for runs
+    /// recorded before environment capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub environment: Option<crate::environment::WorkflowEnvironment>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -398,11 +405,42 @@ pub struct WorkflowRunOutcome {
     pub value: Option<WorkflowOutputValue>,
 }
 
+/// A watched input whose saved content changed (digests are SHA-256 hex;
+/// `None`: the input did not exist or its digest was not known).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedInput {
+    /// The workflow input id.
+    pub input: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// Why a run started. Only the run service sets it: the user's manual start
+/// through a reviewed plan, an enabled trigger's standing plan (lane C), or a
+/// reproduction of an earlier run (lane D). It never grants anything.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum WorkflowRunCause {
+    /// The user started the run from a reviewed plan.
+    #[default]
+    Manual,
+    /// An enabled trigger fired (its id and the watched inputs that changed).
+    Trigger { trigger: String, changed: Vec<ChangedInput> },
+    /// The user reproduced an earlier run (pinned to its recorded inputs).
+    Reproduce { of: WorkflowRunId },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowRun {
     pub id: WorkflowRunId,
+    /// Why the run started (runs recorded before M9 read as manual).
+    #[serde(default)]
+    pub cause: WorkflowRunCause,
     pub workflow: WorkflowId,
     pub revision: u64,
     pub definition_hash: String,

@@ -501,6 +501,9 @@ fn python_step(id: &str, native: bool) -> WorkflowStep {
         },
         parameters: BTreeMap::new(),
         payload: Some(StepPayload::Code { language: CodeLanguage::Python, source: format!("# {id}\n") }),
+        composite: None,
+        condition: None,
+        repeat: None,
     }
 }
 
@@ -1073,6 +1076,9 @@ fn review_run(fail_after: Option<u32>) {
         operation: StepOperation { id: "agent.review".into(), version: 1 },
         parameters: BTreeMap::new(),
         payload: Some(StepPayload::Prompt { text: "Summarize the observations.".into() }),
+        composite: None,
+        condition: None,
+        repeat: None,
     }];
     def.connections = vec![WorkflowConnection::Data {
         from: PortSource::Input { input: "data".into() },
@@ -1546,6 +1552,100 @@ fn project_keys_ignore_case_and_the_verbatim_prefix() {
     use crate::plan::project_key;
     assert_eq!(project_key(Path::new(r"\\?\C:\Users\X\Proj")), project_key(Path::new(r"c:\users\x\proj")));
     assert_ne!(project_key(Path::new(r"\\?\UNC\server\share")), project_key(Path::new(r"\server\share")));
+}
+
+// ------------------------------------------------------------ run cause ----
+
+#[test]
+fn a_manual_start_records_a_manual_cause_and_older_records_read_as_manual() {
+    let f = fixture();
+    let id = f.save(numerical(false));
+    let run = f.run_to_end(&id);
+    assert_eq!(run.cause, WorkflowRunCause::Manual);
+    let json = serde_json::to_value(&run).unwrap();
+    assert_eq!(json["cause"], serde_json::json!({ "kind": "manual" }));
+    // A run recorded before M9 has no cause: it reads as manual.
+    let mut old = json.clone();
+    old.as_object_mut().unwrap().remove("cause");
+    let decoded: WorkflowRun = serde_json::from_value(old).unwrap();
+    assert_eq!(decoded.cause, WorkflowRunCause::Manual);
+    assert_eq!(decoded.id, run.id);
+}
+
+#[test]
+fn a_start_with_a_cause_records_it_and_still_checks_the_approval() {
+    let f = fixture();
+    let id = f.save(numerical(false));
+    let cause = WorkflowRunCause::Trigger {
+        trigger: "wtrig-1".into(),
+        changed: vec![ChangedInput { input: "data".into(), before: Some("a".repeat(64)), after: Some("b".repeat(64)) }],
+    };
+    // A wrong approval is refused whatever the cause.
+    let plan = f.service.plan(&id, None).unwrap();
+    let wrong = StartWorkflowRunRequest { plan: plan.plan.clone(), approval_hash: "0".repeat(64) };
+    assert_eq!(f.service.start_with_cause(&wrong, cause.clone()).unwrap_err().code, "workflow.planStale");
+    // A stale plan too.
+    let plan = f.service.plan(&id, None).unwrap();
+    std::fs::write(f.root.join("data/obs.csv"), "x\n7\n").unwrap();
+    let request = StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash };
+    assert_eq!(f.service.start_with_cause(&request, cause.clone()).unwrap_err().code, "workflow.planStale");
+    assert!(f.calls.log().is_empty(), "nothing ran");
+    // A current plan starts and the run records the cause durably.
+    let (started, release) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (s, r) = (started.clone(), release.clone());
+    let inner = default_behavior();
+    f.set_behavior(Arc::new(move |root, req, control, run| {
+        s.store(true, Ordering::SeqCst);
+        while !r.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        inner(root, req, control, run)
+    }));
+    let plan = f.service.plan(&id, None).unwrap();
+    let request = StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash };
+    let run = f.service.start_with_cause(&request, cause.clone()).unwrap();
+    assert_eq!(run.cause, cause);
+    wait_for(&started);
+    assert!(f.service.workflow_active(&id));
+    assert!(!f.service.workflow_active(&WorkflowId::mint()));
+    release.store(true, Ordering::SeqCst);
+    assert!(f.service.wait_idle(Duration::from_secs(20)));
+    assert!(!f.service.workflow_active(&id));
+    let reread = new_service(&f.db, &f.host, &f.batch, &f.lean, &f.research).get(&run.id).unwrap();
+    assert_eq!(reread.cause, cause, "persisted");
+    assert_eq!(reread.state, WorkflowRunState::Succeeded, "{:?}", reread.message);
+}
+
+#[test]
+fn a_plan_made_for_a_cause_starts_with_it_and_pins_inputs() {
+    let f = fixture();
+    let id = f.save(numerical(false));
+    let current = sha256_hex(b"x\n1\n2\n3\n");
+    let earlier = f.run_to_end(&id);
+    let reproduce = |pin: &str| crate::PlanOptions {
+        cause: WorkflowRunCause::Reproduce { of: earlier.id.clone() },
+        pins: [("data".to_owned(), pin.to_owned())].into_iter().collect(),
+        notices: vec!["The restricted image changed since the run.".into()],
+    };
+    // A pin the file no longer matches blocks the plan.
+    let plan = f.service.plan_with(&id, None, reproduce(&"c".repeat(64))).unwrap();
+    assert!(plan.blockers.iter().any(|b| b.code == "workflow.inputChanged"), "{:?}", plan.blockers);
+    // Matching pins: the input is pinned, the notice shown, and the cause recorded.
+    let plan = f.service.plan_with(&id, None, reproduce(&current)).unwrap();
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    assert!(plan.inputs[0].pinned);
+    assert!(plan.notices.iter().any(|n| n.contains("image changed")));
+    let manual = f.service.plan(&id, None).unwrap();
+    assert!(!manual.inputs[0].pinned);
+    assert_ne!(manual.approval_hash, plan.approval_hash, "the pin is part of what is approved");
+    let run = f.service.start(&StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash }).unwrap();
+    assert_eq!(run.cause, WorkflowRunCause::Reproduce { of: earlier.id.clone() });
+    assert!(f.service.wait_idle(Duration::from_secs(20)));
+    assert_eq!(f.service.get(&run.id).unwrap().state, WorkflowRunState::Succeeded);
+    // The pins are applied again at start: a changed file makes the plan stale.
+    let plan = f.service.plan_with(&id, None, reproduce(&current)).unwrap();
+    std::fs::write(f.root.join("data/obs.csv"), "x\n5\n").unwrap();
+    assert_eq!(f.start_err(plan).code, "workflow.planStale");
 }
 
 #[test]

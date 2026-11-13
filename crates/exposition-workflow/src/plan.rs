@@ -47,6 +47,8 @@ pub struct PlanFacts<'a> {
     pub restricted_image_id: &'a dyn Fn() -> Option<String>,
     pub adapters: &'a Adapters,
     pub active_run: bool,
+    /// Input id → SHA-256 the plan pins instead of the definition's version.
+    pub pins: &'a BTreeMap<String, String>,
 }
 
 /// Why a runner cannot run (stable code, message).
@@ -308,9 +310,10 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
     let mut inputs = Vec::new();
     for input in &def.inputs {
         let InputSource::Resource { path, version } = &input.source else { continue };
-        let pinned = match version {
-            InputVersion::Pinned { content_hash } => Some(content_hash.to_ascii_lowercase()),
-            InputVersion::AtRunStart => None,
+        let pinned = match (facts.pins.get(&input.id), version) {
+            (Some(pin), _) => Some(pin.to_ascii_lowercase()),
+            (None, InputVersion::Pinned { content_hash }) => Some(content_hash.to_ascii_lowercase()),
+            (None, InputVersion::AtRunStart) => None,
         };
         match hash_project_file(facts.root, path) {
             Ok((sha256, bytes)) => {

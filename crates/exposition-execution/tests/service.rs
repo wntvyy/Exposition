@@ -428,7 +428,9 @@ async fn trust_grants_and_revokes_are_announced() {
 /// the folder's code to stop. Jobs of other trusted folders keep running.
 #[tokio::test(flavor = "multi_thread")]
 async fn revoking_trust_kills_the_folders_running_jobs_before_returning() {
-    let f = fixture();
+    // Three batch jobs must run at once (the interactive session does not take
+    // a job slot); with fewer slots the third would wait in the queue.
+    let f = fixture_with(ExecutionSettings { max_concurrent_jobs: Some(3), ..Default::default() }, true);
     // An application directory bound to the project (like the LaTeX mirror
     // or a kernel directory) follows the project's trust.
     let bound = f.tmp.path().join("bound");

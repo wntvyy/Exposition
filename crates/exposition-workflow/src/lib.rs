@@ -3,14 +3,16 @@
 //! run contract shared with the UI.
 
 pub mod adapters;
+pub mod environment;
 pub mod model;
 pub mod plan;
 pub mod runner;
 pub mod service;
 pub mod store;
+pub mod triggers;
 
 pub use model::*;
-pub use service::{WorkflowHost, WorkflowRunConfig, WorkflowRunService};
+pub use service::{PlanOptions, WorkflowHost, WorkflowRunConfig, WorkflowRunService};
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> u64 {
