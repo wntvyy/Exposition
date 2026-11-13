@@ -339,6 +339,29 @@ describe("Editor ↔ Agents navigation keeps one task and its approval", () => {
   });
 });
 
+describe("kept workflow drafts", () => {
+  it("opens an agent's workflow draft in the workflow editor without running it", async () => {
+    graphIpc.keptEntities.mockResolvedValue({
+      project: context.project,
+      revision: 7,
+      entities: [{ id: "ent-wf", kind: "workflow", label: "Audit pipeline", attributes: { "workflow.id": "wf-42" } }],
+      relations: [],
+      truncated: false,
+      total: 1,
+      coverage: context.coverage,
+      freshness: { state: "pending", pending: 0, checkpointMs: null, overlay: [] },
+    });
+    render(<AgentsPage />);
+    await act(async () => pages.show(AGENTS_PAGE_ID));
+    const open = await screen.findByTestId("agents-kept-open-workflow");
+    fireEvent.click(open);
+    const { useEditors } = await import("../../app/editors");
+    const { groups, activeGroup } = useEditors.getState();
+    expect(groups[activeGroup].editors.map((e) => e.resource.key)).toContain("workflow:wf-42");
+    expect(usePages.getState().active).toBe(EDITOR_PAGE);
+  });
+});
+
 describe("project generation helper", () => {
   it("starts an ordinary task with execution disabled by default and shows it on the Agents page", async () => {
     graphIpc.createGenerationTask.mockResolvedValue(summary({ id: "task-9", status: { kind: "queued" } }));
