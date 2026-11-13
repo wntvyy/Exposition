@@ -7,7 +7,7 @@ import { editors } from "../../app/editors";
 import { registry } from "../../app/registry";
 import { useWorkspace } from "../workspace/store";
 import { newDraftFromPreset, WORKFLOWS_KEY } from "./actions";
-import { WORKFLOW_KEY_PREFIX } from "./model";
+import { WORKFLOW_KEY_PREFIX, workflowKey } from "./model";
 import { notify } from "../../app/notifications";
 import type { WorkflowRunState } from "../../bindings/WorkflowRunState";
 import { workflowEvents } from "./ipc";
@@ -93,6 +93,28 @@ void workflowEvents
       title: `Workflow ${RUN_STATE_VIEW[event.state].label.toLowerCase()}`,
       body: event.state === "interrupted" ? "The application stopped during this run; nothing was repeated automatically." : undefined,
       actions: [{ label: "Open run", run: () => openRun({ id: event.run, title: "Workflow" }) }],
+    });
+  })
+  .catch(() => undefined);
+
+// A trigger that is suspended (its standing plan no longer matches: new
+// revision, trust, image identity, runner, code) says so once, wherever the
+// user is: it does not fire again until its standing plan is reviewed.
+const suspensions = new Map<string, string>();
+void workflowEvents
+  .trigger((event) => {
+    if (event.state.kind !== "suspended") {
+      suspensions.delete(event.trigger);
+      return;
+    }
+    if (suspensions.get(event.trigger) === event.state.code) return;
+    suspensions.set(event.trigger, event.state.code);
+    notify({
+      id: `workflow-trigger-${event.trigger}`,
+      tone: "warning",
+      title: "Workflow trigger suspended",
+      body: `${event.state.message} It does not fire until you review its standing plan again.`,
+      actions: [{ label: "Open workflow", run: () => editors.open({ key: workflowKey(event.workflow), title: "Workflow" }) }],
     });
   })
   .catch(() => undefined);
