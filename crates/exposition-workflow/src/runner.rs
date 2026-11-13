@@ -83,6 +83,11 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
     let plan_steps: Vec<WorkflowPlanStep> = cell.lock().unwrap_or_else(|p| p.into_inner()).plan.steps.clone();
     let mut outputs: HashMap<(String, String), WorkflowStepOutput> = HashMap::new();
     let mut stop: Option<Stop> = None;
+    // Seeds derive from the run, or for a reproduction from its original.
+    let seed_basis = {
+        let run = cell.lock().unwrap_or_else(|p| p.into_inner());
+        crate::environment::seed_basis(&run, &|id| inner.stored_run(id))
+    };
 
     for planned in &plan_steps {
         // ----- pre-dispatch checks -----
@@ -261,6 +266,7 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
                 outputs: Vec::new(),
                 rejected: Vec::new(),
                 log: None,
+                environment: None,
             });
             run.usage.steps += 1;
             if let Err(e) = persist(&run, &planned.step) {
@@ -307,6 +313,7 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
             max_output_bytes: planned.max_output_bytes.min(remaining_bytes),
             model_requests_remaining,
             restricted_image_id: approved_image_id.clone(),
+            seed_basis: &seed_basis,
         };
         // A panicking service must not leave the run active forever.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| adapter.run(&request, &control)))
@@ -328,6 +335,12 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
                 let was_canceled = token.is_canceled() || failure.code == "workflow.canceled";
                 let attempt = run.steps[i].attempts.last_mut().expect("attempt");
                 finish_attempt(attempt, &failure, reported.as_ref(), now, was_canceled);
+                attempt.environment = Some(
+                    failure
+                        .environment
+                        .clone()
+                        .unwrap_or_else(|| crate::environment::WorkflowEnvironment::of_step(planned)),
+                );
                 run.steps[i].state = if was_canceled { WorkflowStepState::Canceled } else { WorkflowStepState::Failed };
                 stop = Some(if was_canceled {
                     let (code, message) = token.reason();
@@ -341,6 +354,12 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
                 // Requests were made whether or not the outputs are accepted.
                 run.usage.model_requests += result.model_requests;
                 let attempt = run.steps[i].attempts.last_mut().expect("attempt");
+                attempt.environment = Some(
+                    result
+                        .environment
+                        .clone()
+                        .unwrap_or_else(|| crate::environment::WorkflowEnvironment::of_step(planned)),
+                );
                 attempt.log = result.log.clone();
                 attempt.finished_at_ms = Some(now);
                 if attempt.operation.is_none() {
@@ -437,6 +456,7 @@ fn refuse(
         outputs: Vec::new(),
         rejected: Vec::new(),
         log: None,
+        environment: None,
     });
     run.steps[i].state = WorkflowStepState::Failed;
     let _ = inner.persist(key, &run, Some(&planned.step));

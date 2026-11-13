@@ -20,6 +20,7 @@ use exposition_graph::OperationRef;
 use exposition_graph::WorkflowRunId;
 use exposition_graph::workflow::registry::PortType;
 
+use crate::environment::WorkflowEnvironment;
 use crate::model::{
     WorkflowOutputProvenance, WorkflowOutputValue, WorkflowPlanStep, WorkflowRejectedOutput, WorkflowStepOutput,
 };
@@ -53,6 +54,10 @@ pub struct StepRequest<'a> {
     pub model_requests_remaining: u32,
     /// The restricted image identity the run's plan was approved for.
     pub restricted_image_id: Option<String>,
+    /// Seeds of this run's steps derive from this run id: the run itself, or
+    /// the original a reproduction reproduces
+    /// ([`crate::environment::seed_basis`]).
+    pub seed_basis: &'a str,
 }
 
 impl StepRequest<'_> {
@@ -108,6 +113,9 @@ pub struct StepResult {
     /// Bytes of accepted files that realize no port (still counted against
     /// the run's output budget).
     pub extra_output_bytes: u64,
+    /// What the attempt ran with (the runner records the step's base
+    /// environment when an adapter reports none).
+    pub environment: Option<WorkflowEnvironment>,
 }
 
 /// A failed attempt.
@@ -121,6 +129,8 @@ pub struct StepFailure {
     /// Model requests the step made before it failed (they count against
     /// the run's budget like those of a successful step).
     pub model_requests: u32,
+    /// What the attempt ran with, as far as it got.
+    pub environment: Option<WorkflowEnvironment>,
 }
 
 impl StepFailure {
@@ -132,6 +142,7 @@ impl StepFailure {
             rejected: Vec::new(),
             log: None,
             model_requests: 0,
+            environment: None,
         }
     }
 
@@ -148,6 +159,13 @@ pub trait StepAdapter: Send + Sync {
     fn availability(&self, root: &Path) -> Result<(), String>;
     /// Run one attempt to completion, cancellation, or failure.
     fn run(&self, request: &StepRequest<'_>, control: &StepControl<'_>) -> Result<StepResult, StepFailure>;
+    /// The environment a step of this runner would get now, assembled from
+    /// what is already known (configuration, caches, files) without running
+    /// anything; `None` when nothing beyond the base environment is known.
+    /// Shown as environment drift before a reproduction is approved.
+    fn current_environment(&self, _root: &Path, _step: &WorkflowPlanStep) -> Option<WorkflowEnvironment> {
+        None
+    }
 }
 
 /// A runner that is honestly not available in this build.
