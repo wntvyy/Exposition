@@ -18,10 +18,11 @@ use exposition_lean::{LeanService, evidence};
 use exposition_workspace::{DocumentService, WorkspaceService};
 
 use super::{StepAdapter, StepControl, StepFailure, StepRequest, StepResult, bare_hash};
+use crate::environment::{self, WorkflowEnvironment};
 
 /// The Lean service bounds one check at this many milliseconds.
 const MAX_AUDIT_MS: u64 = 600_000;
-use crate::model::{WorkflowAuditedDeclaration, WorkflowOutputValue, WorkflowRunError};
+use crate::model::{WorkflowAuditedDeclaration, WorkflowOutputValue, WorkflowPlanStep, WorkflowRunError};
 
 /// Lean audits and evidence recording (a seam for tests).
 pub trait LeanAuditor: Send + Sync {
@@ -106,6 +107,57 @@ pub fn evidence_value(record: &LeanAuditRecord) -> WorkflowOutputValue {
     }
 }
 
+/// The absolute location of a project file (the project root is canonical).
+fn in_project(root: &Path, path: &WorkspacePath) -> std::path::PathBuf {
+    path.components().fold(root.to_path_buf(), |p, c| p.join(c))
+}
+
+/// The environment of an audit of `path`: the toolchain the audit record
+/// names (with `lean --version`), else the `lean-toolchain` pin, and the Lake
+/// manifest digest and dependency revisions. Reads files only.
+pub fn audit_environment(
+    step: &WorkflowPlanStep,
+    root: &Path,
+    path: &WorkspacePath,
+    record: Option<&LeanAuditRecord>,
+) -> WorkflowEnvironment {
+    let mut env = WorkflowEnvironment::of_step(step);
+    let provenance = exposition_lean::provenance::lean_provenance(root, &in_project(root, path));
+    let toolchain = record.map(|r| (r.toolchain.as_str(), r.toolchain_version.as_deref()));
+    environment::apply_lean(&mut env, toolchain, &provenance);
+    if record.is_none() && env.toolchain.is_some() {
+        env.note("The audit did not finish; the toolchain shown is the one lean-toolchain pins.");
+    }
+    env
+}
+
+/// The Lean file a planned audit step reads (its `source` input).
+fn planned_source<'a>(
+    plan_inputs: &'a [crate::model::WorkflowPlanInput],
+    step: &WorkflowPlanStep,
+) -> Option<&'a WorkspacePath> {
+    step.bindings.iter().filter(|b| b.port == "source").find_map(|b| match &b.from {
+        exposition_graph::workflow::PortSource::Input { input } => {
+            plan_inputs.iter().find(|i| &i.id == input).map(|i| &i.path)
+        }
+        _ => None,
+    })
+}
+
+/// The environment an audit step would get now (files only; the toolchain
+/// version is the pinned name's).
+pub fn current_audit_environment(
+    root: &Path,
+    plan_inputs: &[crate::model::WorkflowPlanInput],
+    step: &WorkflowPlanStep,
+) -> Option<WorkflowEnvironment> {
+    let path = planned_source(plan_inputs, step)?;
+    Some(audit_environment(step, root, path, None)).map(|mut env| {
+        env.notes.retain(|n| !n.starts_with("The audit did not finish"));
+        env
+    })
+}
+
 pub fn audit_operation(record: &LeanAuditRecord) -> OperationRef {
     OperationRef { kind: "leanAudit".into(), id: format!("{}@{}", record.path, bare_hash(&record.content_hash)) }
 }
@@ -127,12 +179,16 @@ impl StepAdapter for LeanAuditAdapter {
         // The audit of exactly the approved text (persisted before Lean runs).
         let operation = OperationRef { kind: "leanAudit".into(), id: format!("{path}@{}", bare_hash(sha256)) };
         (control.on_dispatched)(&operation);
-        let record = auditor
-            .audit(path, request.time_limit, control.canceled)
-            .map_err(|f| StepFailure { operation: Some(operation.clone()), ..f })?;
+        let record = auditor.audit(path, request.time_limit, control.canceled).map_err(|f| StepFailure {
+            operation: Some(operation.clone()),
+            environment: Some(audit_environment(request.step, request.root, path, None)),
+            ..f
+        })?;
+        let env = audit_environment(request.step, request.root, path, Some(&record));
         if bare_hash(&record.content_hash) != bare_hash(sha256) {
             return Err(StepFailure {
                 operation: Some(operation),
+                environment: Some(env),
                 ..StepFailure::new(
                     "workflow.inputChanged",
                     format!(
@@ -146,6 +202,7 @@ impl StepAdapter for LeanAuditAdapter {
         if record.declarations.is_empty() {
             return Err(StepFailure {
                 operation: Some(operation),
+                environment: Some(env),
                 ..StepFailure::new(
                     "lean.noDeclarations",
                     format!("The audit of {path} ({}) reported no declarations.", status_label(&record.status)),
@@ -163,6 +220,7 @@ impl StepAdapter for LeanAuditAdapter {
                 record.declaration_count,
                 record.toolchain
             )),
+            environment: Some(env),
             ..Default::default()
         })
     }

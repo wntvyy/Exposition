@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workflow-run-manifest-export"
+description = "Enables the workflow_run_manifest_export command without any pre-configured scope."
+commands.allow = ["workflow_run_manifest_export"]
+
+[[permission]]
+identifier = "deny-workflow-run-manifest-export"
+description = "Denies the workflow_run_manifest_export command without any pre-configured scope."
+commands.deny = ["workflow_run_manifest_export"]

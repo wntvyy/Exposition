@@ -162,6 +162,10 @@ const COMMANDS: &[&str] = &[
     "workflow_runs",
     "workflow_run_acknowledge",
     "workflow_association_decide",
+    // Workflow run manifests and reproductions (src/workflow_repro.rs).
+    "workflow_run_manifest",
+    "workflow_run_manifest_export",
+    "workflow_run_reproduce_plan",
     // Agents and the project graph (src/agents.rs).
     "agents_task_keep_investigation",
     "agents_task_create_generation",

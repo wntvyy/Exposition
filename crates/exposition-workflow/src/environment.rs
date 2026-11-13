@@ -6,20 +6,41 @@
 //! toolchain with the Lake manifest digest, the model of an agent step, and
 //! the seed a batch step was given.
 //!
-//! Adapters report what they know ([`crate::adapters::StepResult::environment`]);
-//! the runner records the base environment of the step when an adapter
-//! reports none. Capture never runs an unapproved command, never reads
-//! environment variables, and never records absolute paths.
+//! Capture never runs an unapproved command. Sources:
+//! - restricted batches: the approved image identity, and the package list
+//!   listed inside exactly that image as part of the approved batch (cached per
+//!   identity; see `exposition_research::sandbox::image_env`);
+//! - native batches: the research discovery report already collected for the
+//!   interpreter that ran (only the packages that report checks);
+//! - Lean audits: the audit record's toolchain and `lean --version`, the
+//!   `lean-toolchain` pin, and the `lake-manifest.json` digest and dependency
+//!   revisions (files read, nothing run);
+//! - agent reviews: the task's provider and the model that served it.
+//!
+//! Nothing here reads environment variables or records absolute paths, so
+//! secrets and user folders never reach an environment (or a manifest).
+
+use std::collections::BTreeMap;
 
 use exposition_graph::WorkflowRunId;
 use exposition_graph::workflow::registry::Containment;
+use exposition_research::batch::environment_keys as keys;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::model::{WorkflowPlanStep, WorkflowRun, WorkflowRunCause};
+use crate::adapters::sha256_hex;
+use crate::model::{WorkflowPlanStep, WorkflowRun, WorkflowRunCause, WorkflowRunStep};
 
 /// The application version that runs steps.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// At most this many packages are kept per environment (the digest covers
+/// every captured package).
+pub const MAX_PACKAGES: usize = 1000;
+/// At most this many notes are kept per environment.
+const MAX_NOTES: usize = 16;
+const MAX_TEXT: usize = 300;
+/// Environment variable carrying a batch step's seed.
+pub const SEED_VAR: &str = exposition_research::batch::SEED_VAR;
 
 /// A container image by name and identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -89,7 +110,7 @@ pub struct WorkflowEnvironment {
     pub image: Option<WorkflowEnvironmentImage>,
     #[serde(default)]
     pub interpreter: Option<WorkflowEnvironmentInterpreter>,
-    /// Sorted by name, at most 1000 (a note says when more were captured).
+    /// Sorted by name, at most [`MAX_PACKAGES`] (a note says when more were captured).
     #[serde(default)]
     pub packages: Vec<WorkflowEnvironmentPackage>,
     /// SHA-256 over every captured package (`name==version` lines, sorted).
@@ -99,7 +120,7 @@ pub struct WorkflowEnvironment {
     pub toolchain: Option<WorkflowEnvironmentToolchain>,
     #[serde(default)]
     pub model: Option<WorkflowEnvironmentModel>,
-    /// `EXPOSITION_SEED` as given to the step (always below 2^32).
+    /// [`SEED_VAR`] as given to the step (always below 2^32).
     #[serde(default)]
     pub seed: Option<u64>,
     /// Where parts came from, and what is unknown and why.
@@ -127,11 +148,59 @@ impl WorkflowEnvironment {
         }
     }
 
-    /// The base environment of a planned step (what the runner records when
-    /// the adapter reports nothing more).
+    /// The base environment of a planned step.
     pub fn of_step(step: &WorkflowPlanStep) -> Self {
         Self::base(&step.runner, step.containment)
     }
+
+    pub fn note(&mut self, text: impl AsRef<str>) {
+        let text: String = text.as_ref().chars().filter(|c| !c.is_control()).take(MAX_TEXT).collect();
+        if !text.is_empty() && self.notes.len() < MAX_NOTES && !self.notes.contains(&text) {
+            self.notes.push(text);
+        }
+    }
+
+    /// Record `packages` (sorted, digested, bounded).
+    pub fn set_packages(&mut self, packages: impl IntoIterator<Item = (String, String)>) {
+        let mut all: Vec<WorkflowEnvironmentPackage> = packages
+            .into_iter()
+            .map(|(name, version)| WorkflowEnvironmentPackage {
+                name: name.chars().filter(|c| !c.is_control()).take(MAX_TEXT).collect(),
+                version: version.chars().filter(|c| !c.is_control()).take(MAX_TEXT).collect(),
+            })
+            .filter(|p| !p.name.is_empty())
+            .collect();
+        all.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()).then_with(|| a.cmp(b)));
+        all.dedup();
+        if all.is_empty() {
+            self.packages.clear();
+            self.packages_digest = None;
+            return;
+        }
+        self.packages_digest = Some(packages_digest(&all));
+        if all.len() > MAX_PACKAGES {
+            self.note(format!(
+                "{} packages were captured; the first {MAX_PACKAGES} are listed (the digest covers all).",
+                all.len()
+            ));
+            all.truncate(MAX_PACKAGES);
+        }
+        self.packages = all;
+    }
+}
+
+/// SHA-256 (hex) over `name==version\n` lines in the given (sorted) order.
+pub fn packages_digest(packages: &[WorkflowEnvironmentPackage]) -> String {
+    let text: String = packages.iter().map(|p| format!("{}=={}\n", p.name, p.version)).collect();
+    sha256_hex(text.as_bytes())
+}
+
+/// The seed a batch step receives: derived from the run's seed basis, the
+/// step, and the instance index (deterministic; below 2^32 so every common
+/// random generator accepts it, e.g. `numpy.random.seed`).
+pub fn step_seed(basis: &str, step: &str, instance: u32) -> u64 {
+    let digest = sha256_hex(format!("exposition.workflowSeed/1\n{basis}\n{step}\n{instance}").as_bytes());
+    u64::from_str_radix(&digest[..8], 16).unwrap_or(0)
 }
 
 /// Bound on how far a chain of reproductions is followed.
@@ -153,6 +222,442 @@ pub fn seed_basis(run: &WorkflowRun, lookup: &dyn Fn(&WorkflowRunId) -> Option<W
         }
     }
     basis.to_string()
+}
+
+/// Apply what a batch runner reported (`exposition_research::batch::environment_keys`).
+pub fn apply_batch_pairs(env: &mut WorkflowEnvironment, pairs: &[(String, String)]) {
+    let get =
+        |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.trim().to_owned()).filter(|v| !v.is_empty());
+    if let Some(os) = get(keys::OS) {
+        env.os = os;
+    }
+    if let Some(arch) = get(keys::ARCH) {
+        env.arch = arch;
+    }
+    if let Some(name) = get(keys::IMAGE) {
+        env.image = Some(WorkflowEnvironmentImage { name, id: get(keys::IMAGE_ID) });
+    }
+    if let Some(version) = get(keys::PYTHON_VERSION) {
+        env.interpreter = Some(WorkflowEnvironmentInterpreter { name: "python".into(), version: Some(version) });
+        if let Some(implementation) = get(keys::IMPLEMENTATION).filter(|i| i != "cpython") {
+            env.note(format!("Python implementation: {implementation}"));
+        }
+    }
+    let packages: Vec<(String, String)> = pairs
+        .iter()
+        .filter(|(k, _)| k == keys::PACKAGE)
+        .filter_map(|(_, v)| v.split_once("==").map(|(n, v)| (n.trim().to_owned(), v.trim().to_owned())))
+        .collect();
+    if !packages.is_empty() {
+        env.set_packages(packages);
+        if let Some(source) = get(keys::PACKAGES_SOURCE) {
+            env.note(format!("Packages: {source}."));
+        }
+        if let Some(limit) = get(keys::PACKAGES_TRUNCATED) {
+            env.note(format!("The runner listed at most {limit} packages; more are installed."));
+        }
+    }
+    if let Some(seed) = get(keys::SEED).and_then(|s| s.parse::<u64>().ok()) {
+        env.seed = Some(seed);
+    }
+    for (_, note) in pairs.iter().filter(|(k, _)| k == keys::NOTE) {
+        env.note(note);
+    }
+}
+
+/// `4.35.0` from `Lean (version 4.35.0, x86_64-…)` or from the toolchain
+/// name `leanprover/lean4:v4.35.0`.
+pub fn lean_version(toolchain: &str, lean_version_output: Option<&str>) -> Option<String> {
+    let numeric = |s: &str| -> Option<String> {
+        let v: String = s.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-')).collect();
+        (v.chars().next().is_some_and(|c| c.is_ascii_digit())).then_some(v)
+    };
+    if let Some(out) = lean_version_output
+        && let Some(rest) = out.split("version ").nth(1)
+        && let Some(v) = numeric(rest)
+    {
+        return Some(v);
+    }
+    toolchain.rsplit_once(':').and_then(|(_, tag)| numeric(tag.trim_start_matches('v')))
+}
+
+/// Apply a Lean toolchain (`name`, `lean --version` output) and what the
+/// files around the audited file say.
+pub fn apply_lean(
+    env: &mut WorkflowEnvironment,
+    toolchain: Option<(&str, Option<&str>)>,
+    provenance: &exposition_lean::provenance::LeanProvenance,
+) {
+    let name = toolchain.map(|(n, _)| n.to_owned()).or_else(|| provenance.toolchain_pin.clone());
+    if let Some(name) = name {
+        let version = lean_version(&name, toolchain.and_then(|(_, v)| v));
+        env.toolchain =
+            Some(WorkflowEnvironmentToolchain { name, version, manifest_digest: provenance.manifest_digest.clone() });
+    } else if let Some(error) = &provenance.pin_error {
+        env.note(format!("Lean toolchain pin unreadable: {error}"));
+    }
+    if provenance.lake_project && provenance.manifest_digest.is_none() && provenance.manifest_error.is_none() {
+        env.note("The Lake project has no lake-manifest.json.");
+    }
+    if let Some(error) = &provenance.manifest_error {
+        env.note(format!("lake-manifest.json: {error}"));
+    }
+    if !provenance.packages.is_empty() {
+        env.set_packages(
+            provenance
+                .packages
+                .iter()
+                .map(|p| (p.name.clone(), p.rev.clone().unwrap_or_else(|| format!("({})", p.kind)))),
+        );
+        env.note("Packages: Lake dependencies at the revisions lake-manifest.json pins.");
+    }
+    if let Some(rev) = provenance.mathlib_rev() {
+        env.note(format!("mathlib revision {rev}"));
+    }
+}
+
+/// The environment recorded for a step: its latest attempt that has one
+/// (a succeeded attempt first).
+pub fn recorded(step: &WorkflowRunStep) -> Option<&WorkflowEnvironment> {
+    use crate::model::WorkflowAttemptState;
+    step.attempts
+        .iter()
+        .rev()
+        .filter(|a| a.state == WorkflowAttemptState::Succeeded)
+        .find_map(|a| a.environment.as_ref())
+        .or_else(|| step.attempts.iter().rev().find_map(|a| a.environment.as_ref()))
+}
+
+fn short(id: &str) -> String {
+    let bare = id.strip_prefix("sha256:").unwrap_or(id);
+    bare.chars().take(12).collect()
+}
+
+fn image_text(image: Option<&WorkflowEnvironmentImage>) -> String {
+    match image {
+        Some(WorkflowEnvironmentImage { name, id: Some(id) }) => format!("{name} ({})", short(id)),
+        Some(WorkflowEnvironmentImage { name, id: None }) => format!("{name} (identity unknown)"),
+        None => "no image".to_owned(),
+    }
+}
+
+/// At most this many package changes are named in one notice.
+const MAX_NAMED_CHANGES: usize = 6;
+
+/// What changed between two package lists (added, removed, changed).
+fn package_changes(before: &[WorkflowEnvironmentPackage], after: &[WorkflowEnvironmentPackage]) -> String {
+    let index = |list: &[WorkflowEnvironmentPackage]| -> BTreeMap<String, String> {
+        list.iter().map(|p| (p.name.to_ascii_lowercase(), p.version.clone())).collect()
+    };
+    let (b, a) = (index(before), index(after));
+    let mut changed = Vec::new();
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    for (name, version) in &a {
+        match b.get(name) {
+            None => added.push(format!("{name} {version}")),
+            Some(old) if old != version => changed.push(format!("{name} {old} → {version}")),
+            Some(_) => {}
+        }
+    }
+    for (name, version) in &b {
+        if !a.contains_key(name) {
+            removed.push(format!("{name} {version}"));
+        }
+    }
+    let mut parts = Vec::new();
+    let mut named = 0;
+    for (label, list) in [("changed", &changed), ("added", &added), ("removed", &removed)] {
+        if list.is_empty() {
+            continue;
+        }
+        let shown: Vec<&String> = list.iter().take(MAX_NAMED_CHANGES.saturating_sub(named)).collect();
+        named += shown.len();
+        let more = list.len() - shown.len();
+        let mut text = format!("{} {label}", list.len());
+        if !shown.is_empty() {
+            text.push_str(&format!(
+                " ({}{})",
+                shown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                if more > 0 { format!(", {more} more") } else { String::new() }
+            ));
+        }
+        parts.push(text);
+    }
+    if parts.is_empty() { "the lists differ".to_owned() } else { parts.join("; ") }
+}
+
+/// One difference between the environment a step recorded and the one it
+/// would get now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowEnvironmentDrift {
+    /// The plan step it concerns (`None`: the run as a whole).
+    pub step: Option<String>,
+    /// `image`, `platform`, `interpreter`, `toolchain`, `lakeManifest`,
+    /// `packages`, `model`, `appVersion`, or `unrecorded`.
+    pub aspect: String,
+    /// The recorded value (`None`: none was recorded).
+    pub recorded: Option<String>,
+    /// The value now (`None`: unknown without running anything, or absent).
+    pub current: Option<String>,
+    /// One sentence for display.
+    pub message: String,
+}
+
+fn item(aspect: &str, recorded: Option<String>, current: Option<String>, message: String) -> WorkflowEnvironmentDrift {
+    WorkflowEnvironmentDrift { step: None, aspect: aspect.to_owned(), recorded, current, message }
+}
+
+fn image_value(image: Option<&WorkflowEnvironmentImage>) -> Option<String> {
+    image.map(|i| match &i.id {
+        Some(id) => format!("{}@{id}", i.name),
+        None => i.name.clone(),
+    })
+}
+
+fn packages_value(env: &WorkflowEnvironment) -> Option<String> {
+    env.packages_digest.as_ref().map(|d| format!("{} packages, sha256 {}", env.packages.len(), short(d)))
+}
+
+/// How the environment a step would get now differs from the one recorded
+/// (empty: no drift in what can be compared). `current` is assembled without
+/// running anything, so parts of it may be unknown (no package list for an
+/// image identity never listed); those are said, not guessed.
+pub fn drift(recorded: &WorkflowEnvironment, current: &WorkflowEnvironment) -> Vec<WorkflowEnvironmentDrift> {
+    let mut out = Vec::new();
+    if recorded.image != current.image && (recorded.image.is_some() || current.image.is_some()) {
+        let same_name = recorded.image.as_ref().map(|i| &i.name) == current.image.as_ref().map(|i| &i.name);
+        out.push(item(
+            "image",
+            image_value(recorded.image.as_ref()),
+            image_value(current.image.as_ref()),
+            format!(
+                "image {} → {}{}",
+                image_text(recorded.image.as_ref()),
+                image_text(current.image.as_ref()),
+                if same_name { " (same name, different image)" } else { "" }
+            ),
+        ));
+    }
+    let known = |s: &str| s != "unknown";
+    if (recorded.os != current.os || recorded.arch != current.arch) && known(&current.os) {
+        out.push(item(
+            "platform",
+            Some(format!("{}/{}", recorded.os, recorded.arch)),
+            Some(format!("{}/{}", current.os, current.arch)),
+            format!("platform {}/{} → {}/{}", recorded.os, recorded.arch, current.os, current.arch),
+        ));
+    }
+    let interpreter =
+        |i: &WorkflowEnvironmentInterpreter| format!("{} {}", i.name, i.version.as_deref().unwrap_or("?"));
+    match (&recorded.interpreter, &current.interpreter) {
+        (Some(r), Some(c)) if r != c => out.push(item(
+            "interpreter",
+            Some(interpreter(r)),
+            Some(interpreter(c)),
+            format!("{} → {}", interpreter(r), interpreter(c)),
+        )),
+        (Some(r), None) => out.push(item(
+            "interpreter",
+            Some(interpreter(r)),
+            None,
+            format!("{}: the current interpreter is not known without running it", interpreter(r)),
+        )),
+        _ => {}
+    }
+    let toolchain = |t: &WorkflowEnvironmentToolchain| match &t.version {
+        Some(v) => format!("{} ({v})", t.name),
+        None => t.name.clone(),
+    };
+    match (&recorded.toolchain, &current.toolchain) {
+        (Some(r), Some(c)) => {
+            if r.name != c.name {
+                out.push(item(
+                    "toolchain",
+                    Some(toolchain(r)),
+                    Some(toolchain(c)),
+                    format!("toolchain {} → {}", toolchain(r), toolchain(c)),
+                ));
+            }
+            if r.manifest_digest != c.manifest_digest {
+                let text = |d: &Option<String>| d.as_deref().map(short).unwrap_or_else(|| "absent".into());
+                out.push(item(
+                    "lakeManifest",
+                    r.manifest_digest.clone(),
+                    c.manifest_digest.clone(),
+                    format!("lake-manifest.json {} → {}", text(&r.manifest_digest), text(&c.manifest_digest)),
+                ));
+            }
+        }
+        (Some(r), None) => {
+            out.push(item("toolchain", Some(toolchain(r)), None, format!("toolchain {} → none found", toolchain(r))))
+        }
+        (None, Some(c)) => {
+            out.push(item("toolchain", None, Some(toolchain(c)), format!("toolchain none recorded → {}", toolchain(c))))
+        }
+        (None, None) => {}
+    }
+    match (&recorded.packages_digest, &current.packages_digest) {
+        (Some(r), Some(c)) if r != c => out.push(item(
+            "packages",
+            packages_value(recorded),
+            packages_value(current),
+            format!("packages {}", package_changes(&recorded.packages, &current.packages)),
+        )),
+        (Some(r), None) => out.push(item(
+            "packages",
+            packages_value(recorded),
+            None,
+            format!(
+                "packages: the current list is not known until the step runs (recorded {} packages, sha256 {})",
+                recorded.packages.len(),
+                short(r)
+            ),
+        )),
+        _ => {}
+    }
+    let model = |m: &WorkflowEnvironmentModel| format!("{}/{}", m.provider, m.model);
+    match (&recorded.model, &current.model) {
+        (Some(r), Some(c)) if r != c => {
+            out.push(item("model", Some(model(r)), Some(model(c)), format!("model {} → {}", model(r), model(c))))
+        }
+        (Some(r), None) => out.push(item("model", Some(model(r)), None, format!("model {} → unknown", model(r)))),
+        _ => {}
+    }
+    if recorded.app_version != current.app_version {
+        out.push(item(
+            "appVersion",
+            Some(recorded.app_version.clone()),
+            Some(current.app_version.clone()),
+            format!("Exposition {} → {}", recorded.app_version, current.app_version),
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pkgs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter().map(|(n, v)| ((*n).to_owned(), (*v).to_owned())).collect()
+    }
+
+    #[test]
+    fn seeds_are_deterministic_bounded_and_distinct_per_step_and_instance() {
+        let a = step_seed("wrun-1", "fit", 0);
+        assert_eq!(a, step_seed("wrun-1", "fit", 0));
+        assert!(a < (1u64 << 32));
+        assert_ne!(a, step_seed("wrun-1", "fit", 1));
+        assert_ne!(a, step_seed("wrun-1", "plot", 0));
+        assert_ne!(a, step_seed("wrun-2", "fit", 0));
+    }
+
+    #[test]
+    fn packages_are_sorted_digested_and_bounded() {
+        let mut env = WorkflowEnvironment::base("restrictedPython", Containment::RestrictedContainer);
+        env.set_packages(pkgs(&[("pip", "25.0"), ("Numpy", "2.3.1"), ("attrs", "24.1")]));
+        let names: Vec<&str> = env.packages.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["attrs", "Numpy", "pip"]);
+        let digest = env.packages_digest.clone().unwrap();
+        let mut again = WorkflowEnvironment::base("x", Containment::NativeAccount);
+        again.set_packages(pkgs(&[("attrs", "24.1"), ("pip", "25.0"), ("Numpy", "2.3.1")]));
+        assert_eq!(again.packages_digest.as_deref(), Some(digest.as_str()), "order-independent");
+
+        let many: Vec<(String, String)> = (0..1500).map(|i| (format!("p{i:04}"), "1".to_owned())).collect();
+        env.set_packages(many);
+        assert_eq!(env.packages.len(), MAX_PACKAGES);
+        assert!(env.notes.iter().any(|n| n.contains("1500 packages")), "{:?}", env.notes);
+    }
+
+    #[test]
+    fn batch_pairs_become_image_interpreter_packages_and_seed() {
+        let pairs: Vec<(String, String)> = [
+            ("mode", "restricted container"),
+            ("image", "python:3.13-slim"),
+            ("imageId", "sha256:abc"),
+            ("interpreter", "C:\\Users\\someone\\python.exe"),
+            ("os", "linux"),
+            ("arch", "x86_64"),
+            ("implementation", "cpython"),
+            ("pythonVersion", "3.13.9"),
+            ("packagesSource", "every installed distribution"),
+            ("package", "pip==25.2"),
+            ("package", "numpy==2.3.1"),
+            ("seed", "42"),
+            ("note", "hello"),
+        ]
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+        let mut env = WorkflowEnvironment::base("restrictedPython", Containment::RestrictedContainer);
+        apply_batch_pairs(&mut env, &pairs);
+        assert_eq!(env.os, "linux");
+        assert_eq!(
+            env.image,
+            Some(WorkflowEnvironmentImage { name: "python:3.13-slim".into(), id: Some("sha256:abc".into()) })
+        );
+        assert_eq!(env.interpreter.as_ref().and_then(|i| i.version.as_deref()), Some("3.13.9"));
+        assert_eq!(env.packages.len(), 2);
+        assert_eq!(env.seed, Some(42));
+        assert!(env.notes.iter().any(|n| n == "hello"));
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(!json.contains("Users"), "no interpreter path is recorded: {json}");
+    }
+
+    #[test]
+    fn lean_versions_come_from_the_version_output_or_the_toolchain_name() {
+        assert_eq!(
+            lean_version(
+                "leanprover/lean4:v4.35.0",
+                Some("Lean (version 4.35.0, x86_64-w64-windows-gnu, commit abc, Release)")
+            )
+            .as_deref(),
+            Some("4.35.0")
+        );
+        assert_eq!(lean_version("leanprover/lean4:v4.20.0-rc2", None).as_deref(), Some("4.20.0-rc2"));
+        assert_eq!(lean_version("leanprover/lean4:stable", None), None);
+    }
+
+    #[test]
+    fn drift_names_image_versions_packages_and_model_changes() {
+        let mut before = WorkflowEnvironment::base("restrictedPython", Containment::RestrictedContainer);
+        before.image =
+            Some(WorkflowEnvironmentImage { name: "py".into(), id: Some(format!("sha256:{}", "a".repeat(64))) });
+        before.interpreter =
+            Some(WorkflowEnvironmentInterpreter { name: "python".into(), version: Some("3.13.1".into()) });
+        before.set_packages(pkgs(&[("numpy", "2.1.0"), ("pip", "25.0"), ("six", "1.16")]));
+        before.model = Some(WorkflowEnvironmentModel { provider: "anthropic".into(), model: "m-1".into() });
+        assert!(drift(&before, &before.clone()).is_empty(), "no drift against itself");
+        let messages = |a: &WorkflowEnvironment, b: &WorkflowEnvironment| {
+            drift(a, b).into_iter().map(|d| d.message).collect::<Vec<_>>().join(" | ")
+        };
+
+        let mut after = before.clone();
+        after.image =
+            Some(WorkflowEnvironmentImage { name: "py".into(), id: Some(format!("sha256:{}", "b".repeat(64))) });
+        after.interpreter =
+            Some(WorkflowEnvironmentInterpreter { name: "python".into(), version: Some("3.13.2".into()) });
+        after.set_packages(pkgs(&[("numpy", "2.2.0"), ("pip", "25.0"), ("scipy", "1.15")]));
+        after.model = Some(WorkflowEnvironmentModel { provider: "anthropic".into(), model: "m-2".into() });
+        let d = messages(&before, &after);
+        let aspects: Vec<String> = drift(&before, &after).into_iter().map(|d| d.aspect).collect();
+        assert_eq!(aspects, ["image", "interpreter", "packages", "model"]);
+        let image = drift(&before, &after).into_iter().next().unwrap();
+        assert_eq!(image.recorded, Some(format!("py@sha256:{}", "a".repeat(64))));
+        assert!(d.contains("same name, different image"), "{d}");
+        assert!(d.contains("python 3.13.1 → python 3.13.2"), "{d}");
+        assert!(d.contains("numpy 2.1.0 → 2.2.0") && d.contains("scipy 1.15") && d.contains("six 1.16"), "{d}");
+        assert!(d.contains("model anthropic/m-1 → anthropic/m-2"), "{d}");
+
+        let mut unknown = after.clone();
+        unknown.packages.clear();
+        unknown.packages_digest = None;
+        let d = messages(&before, &unknown);
+        assert!(d.contains("not known until the step runs"), "{d}");
+    }
 }
 
 #[cfg(test)]

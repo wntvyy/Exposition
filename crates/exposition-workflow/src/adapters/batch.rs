@@ -20,7 +20,8 @@ use exposition_research::batch::{
 };
 
 use super::{StepAdapter, StepControl, StepFailure, StepRequest, StepResult, bare_hash, bounded_tail};
-use crate::model::{MAX_ATTEMPT_LOG_CHARS, WorkflowOutputValue, WorkflowRejectedOutput};
+use crate::environment::{self, WorkflowEnvironment};
+use crate::model::{MAX_ATTEMPT_LOG_CHARS, WorkflowOutputValue, WorkflowPlanStep, WorkflowRejectedOutput};
 
 /// Why batch steps cannot run when no batch runner is installed.
 pub const NO_BATCH_RUNNER: &str =
@@ -41,6 +42,48 @@ impl BatchAdapter {
             BatchMode::Restricted => registry::RESEARCH_PYTHON_BATCH,
             BatchMode::TrustedNative => registry::RESEARCH_NATIVE_PYTHON,
         }
+    }
+
+    /// The environment of one attempt from what the batch runner reported
+    /// (`pairs`; empty when the batch failed before it ran).
+    fn environment(
+        &self,
+        step: &WorkflowPlanStep,
+        pairs: &[(String, String)],
+        approved_image: Option<&str>,
+        seed: Option<u64>,
+    ) -> WorkflowEnvironment {
+        let mut env = WorkflowEnvironment::of_step(step);
+        if self.mode == BatchMode::Restricted {
+            // The image's platform, not the host's (unknown until listed).
+            env.os = "unknown".into();
+            env.arch = "unknown".into();
+        }
+        environment::apply_batch_pairs(&mut env, pairs);
+        if self.mode == BatchMode::Restricted {
+            match (&mut env.image, approved_image) {
+                (Some(image), Some(id)) if image.id.is_none() => image.id = Some(id.to_owned()),
+                (None, Some(id)) => env.note(format!("The approved image identity was {id}.")),
+                _ => {}
+            }
+        }
+        if pairs.is_empty() {
+            env.note("The batch did not report its environment (it stopped before it ran).");
+        }
+        env.seed = seed.or(env.seed);
+        env
+    }
+
+    /// See [`StepAdapter::current_environment`].
+    pub fn current_environment(&self, root: &Path, step: &WorkflowPlanStep) -> Option<WorkflowEnvironment> {
+        let runner = self.runner.as_ref()?;
+        let pairs = runner.current_environment(root, self.mode);
+        if pairs.is_empty() {
+            return None;
+        }
+        let mut env = self.environment(step, &pairs, None, None);
+        env.notes.retain(|n| !n.starts_with("The batch did not report"));
+        Some(env)
     }
 }
 
@@ -114,6 +157,12 @@ impl StepAdapter for BatchAdapter {
             .iter()
             .map(|p| BatchPort { port: p.name.clone(), extensions: extensions(p.types[0]) })
             .collect();
+        // Instance 0 until repeated steps pass their instance index.
+        let seed = environment::step_seed(request.seed_basis, &request.step.step, 0);
+        let approved_image = match self.mode {
+            BatchMode::Restricted => request.restricted_image_id.clone(),
+            BatchMode::TrustedNative => None,
+        };
         let batch = BatchRequest {
             mode: self.mode,
             owner: BatchOwner { run: request.run.to_string(), step: request.step.step.clone() },
@@ -122,18 +171,20 @@ impl StepAdapter for BatchAdapter {
             outputs,
             time_limit: request.time_limit,
             max_output_bytes: request.max_output_bytes,
-            restricted_image_id: match self.mode {
-                BatchMode::Restricted => request.restricted_image_id.clone(),
-                BatchMode::TrustedNative => None,
-            },
+            restricted_image_id: approved_image.clone(),
+            seed: Some(seed),
         };
         let dispatched =
             |id: &str| (control.on_dispatched)(&OperationRef { kind: "researchRun".into(), id: id.into() });
         let batch_control = BatchControl { canceled: control.canceled, on_dispatched: &dispatched };
         let result = runner.run(request.root, &batch, &batch_control).map_err(|e| {
             let code = e.code();
-            StepFailure::new(if code.is_empty() { "research.batchFailed" } else { &code }, e.to_string())
+            StepFailure {
+                environment: Some(self.environment(request.step, &[], approved_image.as_deref(), Some(seed))),
+                ..StepFailure::new(if code.is_empty() { "research.batchFailed" } else { &code }, e.to_string())
+            }
         })?;
+        let env = self.environment(request.step, &result.environment, approved_image.as_deref(), Some(seed));
         let operation = OperationRef { kind: "researchRun".into(), id: result.research_run.clone() };
         let rejected: Vec<WorkflowRejectedOutput> = result
             .rejected
@@ -148,7 +199,7 @@ impl StepAdapter for BatchAdapter {
             rejected: rejected.clone(),
             log: log.clone(),
             model_requests: 0,
-            environment: None,
+            environment: Some(env.clone()),
         };
         match &result.status {
             RunStatus::Succeeded => {}
@@ -188,8 +239,12 @@ impl StepAdapter for BatchAdapter {
             log,
             model_requests: 0,
             extra_output_bytes,
-            environment: None,
+            environment: Some(env),
         })
+    }
+
+    fn current_environment(&self, root: &Path, step: &WorkflowPlanStep) -> Option<WorkflowEnvironment> {
+        BatchAdapter::current_environment(self, root, step)
     }
 }
 

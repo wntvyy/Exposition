@@ -16,6 +16,7 @@ mod settings;
 mod state;
 mod tex;
 mod typesetting;
+mod workflow_repro;
 mod workflow_runs;
 mod workflow_triggers;
 mod workflows;
@@ -211,6 +212,9 @@ pub fn run() {
             workflow_runs::workflow_runs,
             workflow_runs::workflow_run_acknowledge,
             workflow_runs::workflow_association_decide,
+            workflow_repro::workflow_run_manifest,
+            workflow_repro::workflow_run_manifest_export,
+            workflow_repro::workflow_run_reproduce_plan,
             agents::agents_task_keep_investigation,
             agents::agents_task_create_generation,
             workflow_triggers::workflow_trigger_plan,
