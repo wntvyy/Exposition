@@ -32,8 +32,11 @@ use exposition_graph::{EntityId, EvidenceId, OperationRef, WorkflowId, WorkflowP
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// At most this many runs are active at once (application-wide).
-pub const MAX_ACTIVE_RUNS: usize = 1;
+/// At most this many runs are active at once (application-wide; at most one
+/// run of each workflow).
+pub const MAX_ACTIVE_RUNS: usize = 3;
+/// A run never executes more than this many steps at the same time.
+pub const MAX_PARALLEL: u32 = 4;
 /// A plan must be started within this long after it was made.
 pub const PLAN_TTL_MS: u64 = 30 * 60 * 1000;
 /// Bounded text kept per attempt log (stdout/stderr tail, redacted).
@@ -160,10 +163,52 @@ pub struct WorkflowPlanStep {
     pub prerequisites: Vec<String>,
     pub time_limit_seconds: u32,
     pub max_output_bytes: u64,
+    /// Model requests the step may make (reserved from the run's budget
+    /// before it is dispatched; 0 for steps that make none).
+    #[serde(default)]
+    pub max_model_requests: u32,
     /// Whether the runner is usable now (backend configured, toolchain found,
     /// credential present, folder trusted for native steps).
     pub available: bool,
     pub availability: String,
+}
+
+/// Application-wide limits on concurrent work, shared by every active run.
+/// A step waits (it is not refused) while a limit it falls under is reached.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowConcurrencyLimits {
+    /// Active runs (at most one run of each workflow).
+    pub max_active_runs: u32,
+    /// Steps executing at the same time across all runs.
+    pub max_in_flight_steps: u32,
+    /// Steps in the restricted container.
+    pub restricted: u32,
+    /// Steps that run natively with the user's account privileges (Lean
+    /// audits included).
+    pub native: u32,
+    /// Read-only agent (model provider) steps.
+    pub agent: u32,
+    /// Lean audits.
+    pub lean: u32,
+}
+
+impl Default for WorkflowConcurrencyLimits {
+    fn default() -> Self {
+        Self {
+            max_active_runs: MAX_ACTIVE_RUNS as u32,
+            max_in_flight_steps: 4,
+            restricted: 2,
+            native: 2,
+            agent: 2,
+            lean: 1,
+        }
+    }
+}
+
+fn one() -> u32 {
+    1
 }
 
 /// Why a plan cannot start.
@@ -212,10 +257,19 @@ pub struct WorkflowRunPlan {
     /// Display name of the project folder the run is bound to.
     pub project: String,
     pub inputs: Vec<WorkflowPlanInput>,
-    /// Dependency order (the order the runner executes them, one at a time).
+    /// Dependency order. With `max_parallel` 1 the runner executes them one
+    /// at a time in this order; otherwise a step starts once everything it
+    /// depends on succeeded, ready steps start in this order.
     pub steps: Vec<WorkflowPlanStep>,
     pub ceiling: AuthorityCeiling,
     pub budgets: WorkflowRunBudgets,
+    /// Steps of this run that may execute at the same time (1–4; 1 is the
+    /// one-step-at-a-time runner).
+    #[serde(default = "one")]
+    pub max_parallel: u32,
+    /// The application-wide limits the run is subject to.
+    #[serde(default)]
+    pub limits: WorkflowConcurrencyLimits,
     pub execution: WorkflowPlanExecution,
     /// Things the user should know (native privileges, model disclosure, ...).
     pub notices: Vec<String>,
@@ -396,6 +450,10 @@ pub struct WorkflowRunOutcome {
     pub step: String,
     pub port: String,
     pub value: Option<WorkflowOutputValue>,
+    /// Why the outcome was not produced (the step failed, was canceled or
+    /// skipped, ...); `None` while it is produced or the run is active.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// A watched input whose saved content changed (digests are SHA-256 hex;
@@ -451,6 +509,37 @@ pub struct WorkflowRun {
     pub acknowledged: bool,
     /// The plan exactly as approved.
     pub plan: WorkflowRunPlan,
+}
+
+impl WorkflowRun {
+    /// Say why each declared outcome that was not produced is missing (once
+    /// the run ended).
+    pub fn explain_outcomes(&mut self) {
+        let steps = &self.steps;
+        for outcome in &mut self.outcomes {
+            if outcome.value.is_some() || outcome.reason.is_some() {
+                continue;
+            }
+            let Some(step) = steps.iter().find(|s| s.step == outcome.step) else { continue };
+            let label = &step.label;
+            let last = step.attempts.last().and_then(|a| a.message.as_deref());
+            outcome.reason = Some(match step.state {
+                WorkflowStepState::Succeeded => format!("“{label}” succeeded without producing this optional output."),
+                WorkflowStepState::Failed => match last {
+                    Some(message) => format!("“{label}” failed: {message}"),
+                    None => format!("“{label}” failed."),
+                },
+                WorkflowStepState::Canceled => format!("“{label}” was canceled."),
+                WorkflowStepState::Interrupted => {
+                    format!("“{label}” was interrupted when Exposition stopped; its result is unknown.")
+                }
+                WorkflowStepState::Skipped => {
+                    format!("“{label}” did not run: the run stopped before it could start.")
+                }
+                WorkflowStepState::Pending | WorkflowStepState::Running => continue,
+            });
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

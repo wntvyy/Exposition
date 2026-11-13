@@ -1,32 +1,52 @@
-//! The bounded runner: one step at a time, in plan order.
+//! The bounded runner.
+//!
+//! A run's steps execute in dependency order: a step becomes ready once
+//! every step it consumes data from (and every explicit prerequisite)
+//! succeeded; ready steps start in plan order, at most the plan's
+//! `max_parallel` at a time (1: exactly one step at a time, in plan order) and
+//! only while an application-wide slot of the step's kind is free (shared by
+//! every active run, see [`crate::slots`]).
 //!
 //! Before each dispatch: the run's project is still the open one, the run was
-//! not canceled, budgets remain, every external input and upstream output the
-//! step consumes still has the digest recorded for it, a native step's folder
-//! is still trusted, and the runner is still available (a restricted backend
-//! is never downgraded). The attempt's dispatch intent is persisted before the
-//! adapter is called and the service operation as soon as it is known. Every
-//! returned output is validated here (rule 5/6) before a consumer may use it.
-//! No retries, loops, conditions, or parallel steps; a failed step stops the
-//! workflow and the remaining steps are skipped.
+//! not canceled, budgets remain — the step's output bytes and model requests
+//! are reserved from what the run has left (a step whose reservation does not
+//! fit waits for running steps to release theirs; its time limit is capped by
+//! the run's remaining wall-clock time) —, every external input and upstream
+//! output the step consumes still has the digest recorded for it, a native
+//! step's folder is still trusted, and the runner is still available (a
+//! restricted backend is never downgraded). The attempt's dispatch intent is
+//! persisted before the adapter is called and the service operation as soon
+//! as it is known; every change of the run record is made and written through
+//! under one lock, so concurrent steps never lose each other's updates. Every
+//! returned output is validated (rule 5/6) before a consumer may use it.
+//! No retries. A failed step stops the workflow: nothing new starts, steps
+//! already running finish and are recorded, the remaining steps are skipped.
+//! Cancellation (the user, project close, trust revocation) stops every
+//! running step through its service.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use exposition_graph::OperationRef;
 use exposition_graph::workflow::PortSource;
 use exposition_graph::workflow::registry::{self, Containment, OperationContract, PortType};
 
-use crate::adapters::{BoundInput, StepControl, StepFailure, StepRequest, StepResult, bare_hash};
+use crate::adapters::{BoundInput, StepAdapter, StepControl, StepFailure, StepRequest, StepResult, bare_hash};
 use crate::model::{
-    WorkflowAttemptState, WorkflowOutputValue, WorkflowPlanStep, WorkflowRejectedOutput, WorkflowRun, WorkflowRunState,
-    WorkflowStepAttempt, WorkflowStepOutput, WorkflowStepState,
+    MAX_PARALLEL, WorkflowAttemptState, WorkflowOutputValue, WorkflowPlanStep, WorkflowRejectedOutput, WorkflowRun,
+    WorkflowRunState, WorkflowStepAttempt, WorkflowStepOutput, WorkflowStepState,
 };
 use crate::plan::{hash_project_file, resolve};
 use crate::service::Inner;
+use crate::slots::{SlotGuard, SlotKind};
+
+/// How often a run waiting for a free slot tries again.
+const SLOT_POLL: Duration = Duration::from_millis(20);
+/// How often a run with running steps re-checks cancellation.
+const IDLE_POLL: Duration = Duration::from_millis(100);
 
 /// Cancellation of one run, with the reason the run reports.
 #[derive(Default)]
@@ -57,6 +77,18 @@ impl CancelToken {
     }
 }
 
+/// Cancels the run if the scheduler itself panics, so running steps stop
+/// before the scope waits for them.
+struct CancelOnPanic<'a>(&'a CancelToken);
+
+impl Drop for CancelOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.cancel("workflow.internal", "The workflow runner stopped unexpectedly.");
+        }
+    }
+}
+
 /// How the run ended (when it did not succeed).
 struct Stop {
     state: WorkflowRunState,
@@ -68,148 +100,198 @@ impl Stop {
     fn failed(code: &str, message: impl Into<String>) -> Self {
         Self { state: WorkflowRunState::Failed, code: code.to_owned(), message: message.into() }
     }
+
+    fn canceled(token: &CancelToken) -> Self {
+        let (code, message) = token.reason();
+        Self { state: WorkflowRunState::Canceled, code, message }
+    }
 }
 
 fn step_index(run: &WorkflowRun, step: &str) -> usize {
     run.steps.iter().position(|s| s.step == step).expect("plan steps are run steps")
 }
 
-/// Execute a persisted run on the current thread until it ends.
-#[allow(clippy::result_large_err)] // the step failure type, see adapters
-pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: String, token: Arc<CancelToken>) {
-    let started = Instant::now();
-    let cell = Mutex::new(run);
-    let persist = |run: &WorkflowRun, step: &str| inner.persist(&key, run, Some(step));
-    let plan_steps: Vec<WorkflowPlanStep> = cell.lock().unwrap_or_else(|p| p.into_inner()).plan.steps.clone();
-    let mut outputs: HashMap<(String, String), WorkflowStepOutput> = HashMap::new();
-    let mut stop: Option<Stop> = None;
+/// A dispatched attempt: its slot and what it reserved from the budgets.
+struct Flight {
+    _slot: SlotGuard,
+    bytes: u64,
+    model_requests: u32,
+}
 
-    for planned in &plan_steps {
-        // ----- pre-dispatch checks -----
-        if token.is_canceled() {
-            let (code, message) = token.reason();
-            stop = Some(Stop { state: WorkflowRunState::Canceled, code, message });
-            break;
+/// What a finished attempt reports back to the scheduler.
+struct Completion {
+    index: usize,
+    attempt: u32,
+    reported: Option<OperationRef>,
+    result: Result<StepResult, StepFailure>,
+    /// The runner's validation of the outputs (when the step returned some).
+    checked: Option<Result<Vec<WorkflowStepOutput>, Invalid>>,
+}
+
+enum Dispatch {
+    Started(Flight),
+    /// A limit or reservation does not fit now; try again later.
+    Wait,
+    Stop(Stop),
+}
+
+/// What a granted dispatch may use.
+struct Grant {
+    time_limit: Duration,
+    max_output_bytes: u64,
+    model_requests: u32,
+}
+
+/// Everything the scheduler and its step threads share.
+struct Ctx<'a> {
+    inner: &'a Inner,
+    key: &'a str,
+    root: &'a Path,
+    token: &'a CancelToken,
+    cell: &'a Mutex<WorkflowRun>,
+    /// The run as it started: id, plan, and outcomes (never changes).
+    frozen: &'a WorkflowRun,
+    started: Instant,
+}
+
+impl Ctx<'_> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, WorkflowRun> {
+        self.cell.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn persist(&self, run: &WorkflowRun, step: &str) -> Result<(), crate::model::WorkflowRunError> {
+        self.inner.persist(self.key, run, Some(step))
+    }
+
+    fn refuse(&self, planned: &WorkflowPlanStep, code: &str, message: impl Into<String>) -> Dispatch {
+        Dispatch::Stop(refuse(self.cell, planned, code, message, self.inner, self.key))
+    }
+
+    /// Budget check and reservation (`None` from the inner option: wait).
+    fn reserve(&self, planned: &WorkflowPlanStep, flights: &HashMap<usize, Flight>) -> Result<Option<Grant>, String> {
+        let elapsed = self.started.elapsed().as_secs() as u32;
+        let run = self.lock();
+        let b = &run.budgets;
+        let u = &run.usage;
+        let reserved_bytes: u64 = flights.values().map(|f| f.bytes).sum();
+        let reserved_requests: u32 = flights.values().map(|f| f.model_requests).sum();
+        let bytes_left = b.max_output_bytes.saturating_sub(u.output_bytes).saturating_sub(reserved_bytes);
+        let requests_left = b.max_model_requests.saturating_sub(u.model_requests).saturating_sub(reserved_requests);
+        let model = planned.containment == Containment::ReadOnlyModel;
+        let need_requests = if model { planned.max_model_requests.max(1) } else { 0 };
+        if u.steps >= b.max_steps {
+            return Err(format!("the run may dispatch at most {} steps", b.max_steps));
         }
-        if inner.host.project_root().as_deref() != Some(root.as_path()) {
-            stop = Some(Stop {
+        if elapsed >= b.max_total_seconds {
+            return Err(format!("the run's time budget of {} s is used up", b.max_total_seconds));
+        }
+        // Running steps hold reservations: wait for them rather than start
+        // with less than the step may use.
+        if !flights.is_empty()
+            && ((planned.max_output_bytes > 0 && bytes_left < planned.max_output_bytes)
+                || requests_left < need_requests)
+        {
+            return Ok(None);
+        }
+        if planned.max_output_bytes > 0 && bytes_left == 0 {
+            return Err(format!("the run's output budget of {} bytes is used up", b.max_output_bytes));
+        }
+        if model && requests_left == 0 {
+            return Err(format!("the run's budget of {} model requests is used up", b.max_model_requests));
+        }
+        let remaining = b.max_total_seconds.saturating_sub(elapsed);
+        Ok(Some(Grant {
+            time_limit: Duration::from_secs(u64::from(planned.time_limit_seconds.min(remaining).max(1))),
+            max_output_bytes: planned.max_output_bytes.min(bytes_left),
+            model_requests: need_requests.min(requests_left),
+        }))
+    }
+
+    /// Check, reserve, persist the intent of, and start the step at `index`.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch<'scope, 'env>(
+        &'env self,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        index: usize,
+        planned: &'env WorkflowPlanStep,
+        outputs: &HashMap<(String, String), WorkflowStepOutput>,
+        flights: &HashMap<usize, Flight>,
+        done: &mpsc::Sender<Completion>,
+    ) -> Dispatch {
+        let (inner, root) = (self.inner, self.root);
+        if self.token.is_canceled() {
+            return Dispatch::Stop(Stop::canceled(self.token));
+        }
+        if inner.host.project_root().as_deref() != Some(root) {
+            return Dispatch::Stop(Stop {
                 state: WorkflowRunState::Canceled,
                 code: "workflow.projectClosed".into(),
                 message:
                     "The run's project is no longer open; the run was canceled. Nothing resumes when it is reopened."
                         .into(),
             });
-            break;
         }
         let Some(contract) = registry::operation(&planned.operation.id, planned.operation.version) else {
-            stop =
-                Some(Stop::failed("workflow.notWellFormed", format!("“{}” names an unknown operation", planned.label)));
-            break;
-        };
-        let elapsed = started.elapsed().as_secs() as u32;
-        let (budget_problem, remaining, remaining_bytes, approved_restricted) = {
-            let run = cell.lock().unwrap_or_else(|p| p.into_inner());
-            let b = &run.budgets;
-            let u = &run.usage;
-            let remaining_bytes = b.max_output_bytes.saturating_sub(u.output_bytes);
-            let problem = if u.steps >= b.max_steps {
-                Some(format!("the run may dispatch at most {} steps", b.max_steps))
-            } else if elapsed >= b.max_total_seconds {
-                Some(format!("the run's time budget of {} s is used up", b.max_total_seconds))
-            } else if planned.max_output_bytes > 0 && remaining_bytes == 0 {
-                Some(format!("the run's output budget of {} bytes is used up", b.max_output_bytes))
-            } else if planned.containment == Containment::ReadOnlyModel && u.model_requests >= b.max_model_requests {
-                Some(format!("the run's budget of {} model requests is used up", b.max_model_requests))
-            } else {
-                None
-            };
-            let approved = (
-                (run.plan.execution.restricted_backend.clone(), run.plan.execution.restricted_image.clone()),
-                run.plan.execution.restricted_image_id.clone(),
-            );
-            (problem, b.max_total_seconds.saturating_sub(elapsed), remaining_bytes, approved)
-        };
-        if let Some(problem) = budget_problem {
-            stop = Some(refuse(
-                &cell,
-                planned,
-                "workflow.budgetExhausted",
-                format!("Not started: {problem}."),
-                &inner,
-                &key,
+            return Dispatch::Stop(Stop::failed(
+                "workflow.notWellFormed",
+                format!("“{}” names an unknown operation", planned.label),
             ));
-            break;
-        }
+        };
+        let grant = match self.reserve(planned, flights) {
+            Ok(Some(grant)) => grant,
+            Ok(None) => return Dispatch::Wait,
+            Err(problem) => {
+                return self.refuse(planned, "workflow.budgetExhausted", format!("Not started: {problem}."));
+            }
+        };
+        // An application-wide slot of the step's kind (held until it ends).
+        let Some(slot) = inner.slots.try_acquire(SlotKind::of(planned)) else {
+            return Dispatch::Wait;
+        };
         if let Some(missing) = planned.prerequisites.iter().find(|p| {
-            let run = cell.lock().unwrap_or_else(|e| e.into_inner());
+            let run = self.lock();
             run.steps.iter().find(|s| &s.step == *p).is_none_or(|s| s.state != WorkflowStepState::Succeeded)
         }) {
-            stop = Some(refuse(
-                &cell,
+            return self.refuse(
                 planned,
                 "workflow.prerequisite",
                 format!("Not started: its prerequisite “{missing}” did not succeed."),
-                &inner,
-                &key,
-            ));
-            break;
+            );
         }
-        let inputs = {
-            let run = cell.lock().unwrap_or_else(|p| p.into_inner());
-            bind_inputs(&root, &run, planned, &contract, &outputs)
-        };
-        let inputs = match inputs {
+        let inputs = match bind_inputs(root, self.frozen, planned, &contract, outputs) {
             Ok(inputs) => inputs,
-            Err((code, message)) => {
-                stop = Some(refuse(&cell, planned, code, message, &inner, &key));
-                break;
-            }
+            Err((code, message)) => return self.refuse(planned, code, message),
         };
-        if planned.containment == Containment::NativeAccount && !inner.host.trusted(&root) {
-            stop = Some(refuse(
-                &cell,
+        if planned.containment == Containment::NativeAccount && !inner.host.trusted(root) {
+            return self.refuse(
                 planned,
                 "workflow.untrustedFolder",
                 "Not started: the project folder is no longer trusted, and this step runs natively with your account's privileges.",
-                &inner,
-                &key,
-            ));
-            break;
+            );
         }
         let Some(adapter) = inner.adapters.get(&planned.runner).cloned() else {
-            stop = Some(refuse(
-                &cell,
-                planned,
-                "workflow.runnerUnavailable",
-                "Not started: no runner is installed.",
-                &inner,
-                &key,
-            ));
-            break;
+            return self.refuse(planned, "workflow.runnerUnavailable", "Not started: no runner is installed.");
         };
-        let (approved_restricted, approved_image_id) = approved_restricted;
-        if planned.containment == Containment::RestrictedContainer && inner.host.restricted() != approved_restricted {
-            let now = inner.host.restricted().1;
-            stop = Some(refuse(
-                &cell,
-                planned,
-                "workflow.restrictedUnavailable",
-                format!(
-                    "Not started: the restricted image changed since you approved the plan ({} → {}); restricted steps run only in the approved image.",
-                    approved_restricted.1.as_deref().unwrap_or("none"),
-                    now.as_deref().unwrap_or("none")
-                ),
-                &inner,
-                &key,
-            ));
-            break;
-        }
-        // Same name, different image (re-tagged or pulled since approval).
+        let execution = &self.frozen.plan.execution;
+        let approved_restricted = (execution.restricted_backend.clone(), execution.restricted_image.clone());
+        let approved_image_id = execution.restricted_image_id.clone();
         if planned.containment == Containment::RestrictedContainer {
+            if inner.host.restricted() != approved_restricted {
+                let now = inner.host.restricted().1;
+                return self.refuse(
+                    planned,
+                    "workflow.restrictedUnavailable",
+                    format!(
+                        "Not started: the restricted image changed since you approved the plan ({} → {}); restricted steps run only in the approved image.",
+                        approved_restricted.1.as_deref().unwrap_or("none"),
+                        now.as_deref().unwrap_or("none")
+                    ),
+                );
+            }
+            // Same name, different image (re-tagged or pulled since approval).
             let now = inner.host.restricted_image_id();
             if approved_image_id.is_none() || now != approved_image_id {
-                stop = Some(refuse(
-                    &cell,
+                return self.refuse(
                     planned,
                     "workflow.restrictedUnavailable",
                     format!(
@@ -218,34 +300,27 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
                         approved_image_id.as_deref().unwrap_or("unknown"),
                         now.as_deref().unwrap_or("unknown")
                     ),
-                    &inner,
-                    &key,
-                ));
-                break;
+                );
             }
         }
-        if let Err(reason) = adapter.availability(&root) {
+        if let Err(reason) = adapter.availability(root) {
             let code = if planned.containment == Containment::RestrictedContainer {
                 "workflow.restrictedUnavailable"
             } else {
                 "workflow.runnerUnavailable"
             };
-            stop = Some(refuse(
-                &cell,
+            return self.refuse(
                 planned,
                 code,
                 format!(
                     "Not started: the runner is no longer available ({reason}); it is never replaced by another runner."
                 ),
-                &inner,
-                &key,
-            ));
-            break;
+            );
         }
 
         // ----- dispatch intent (persisted before the service is called) -----
-        let attempt_no = {
-            let mut run = cell.lock().unwrap_or_else(|p| p.into_inner());
+        let attempt = {
+            let mut run = self.lock();
             let i = step_index(&run, &planned.step);
             let attempt = run.steps[i].attempts.len() as u32 + 1;
             run.steps[i].state = WorkflowStepState::Running;
@@ -263,50 +338,78 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
                 log: None,
             });
             run.usage.steps += 1;
-            if let Err(e) = persist(&run, &planned.step) {
+            if let Err(e) = self.persist(&run, &planned.step) {
                 // Without a durable intent nothing is dispatched.
                 let attempt = run.steps[i].attempts.last_mut().expect("just pushed");
                 attempt.state = WorkflowAttemptState::Failed;
                 attempt.code = Some(e.code.clone());
                 attempt.message = Some(e.message.clone());
                 run.steps[i].state = WorkflowStepState::Failed;
-                stop = Some(Stop::failed(&e.code, e.message));
-                break;
+                return Dispatch::Stop(Stop::failed(&e.code, e.message));
             }
             attempt
         };
+        let flight = Flight { _slot: slot, bytes: grant.max_output_bytes, model_requests: grant.model_requests };
+        let done = done.clone();
+        scope.spawn(move || {
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.run_attempt(planned, &contract, adapter.as_ref(), attempt, &inputs, &grant, approved_image_id)
+            }));
+            let completion = ran.unwrap_or_else(|_| Completion {
+                index,
+                attempt,
+                reported: None,
+                result: Err(StepFailure::new(
+                    "workflow.internal",
+                    "The step's service stopped unexpectedly; nothing was repeated.",
+                )),
+                checked: None,
+            });
+            let _ = done.send(Completion { index, ..completion });
+        });
+        Dispatch::Started(flight)
+    }
+
+    /// Run one attempt on the current (step) thread and validate its outputs.
+    #[allow(clippy::too_many_arguments)]
+    fn run_attempt(
+        &self,
+        planned: &WorkflowPlanStep,
+        contract: &OperationContract,
+        adapter: &dyn StepAdapter,
+        attempt: u32,
+        inputs: &[BoundInput],
+        grant: &Grant,
+        restricted_image_id: Option<String>,
+    ) -> Completion {
         let reported: Mutex<Option<OperationRef>> = Mutex::new(None);
-        let canceled = || token.is_canceled();
+        let canceled = || self.token.is_canceled();
         let on_dispatched = |operation: &OperationRef| {
             *reported.lock().unwrap_or_else(|p| p.into_inner()) = Some(operation.clone());
-            let mut run = cell.lock().unwrap_or_else(|p| p.into_inner());
+            let mut run = self.lock();
             let i = step_index(&run, &planned.step);
-            if let Some(attempt) = run.steps[i].attempts.last_mut()
-                && attempt.state == WorkflowAttemptState::Intent
+            if let Some(a) = run.steps[i].attempts.iter_mut().find(|a| a.attempt == attempt)
+                && a.state == WorkflowAttemptState::Intent
             {
-                attempt.state = WorkflowAttemptState::Dispatched;
-                attempt.operation = Some(operation.clone());
-                attempt.dispatched_at_ms = Some(crate::now_ms());
-                if let Err(e) = persist(&run, &planned.step) {
+                a.state = WorkflowAttemptState::Dispatched;
+                a.operation = Some(operation.clone());
+                a.dispatched_at_ms = Some(crate::now_ms());
+                if let Err(e) = self.persist(&run, &planned.step) {
                     tracing::warn!("could not persist a workflow dispatch: {e}");
                 }
             }
         };
         let control = StepControl { canceled: &canceled, on_dispatched: &on_dispatched };
-        let (run_id, model_requests_remaining) = {
-            let run = cell.lock().unwrap_or_else(|p| p.into_inner());
-            (run.id.clone(), run.budgets.max_model_requests.saturating_sub(run.usage.model_requests))
-        };
         let request = StepRequest {
-            root: &root,
-            run: &run_id,
+            root: self.root,
+            run: &self.frozen.id,
             step: planned,
-            attempt: attempt_no,
-            inputs: &inputs,
-            time_limit: Duration::from_secs(u64::from(planned.time_limit_seconds.min(remaining).max(1))),
-            max_output_bytes: planned.max_output_bytes.min(remaining_bytes),
-            model_requests_remaining,
-            restricted_image_id: approved_image_id.clone(),
+            attempt,
+            inputs,
+            time_limit: grant.time_limit,
+            max_output_bytes: grant.max_output_bytes,
+            model_requests_remaining: grant.model_requests,
+            restricted_image_id,
         };
         // A panicking service must not leave the run active forever.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| adapter.run(&request, &control)))
@@ -317,30 +420,46 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
                 ))
             });
         let reported = reported.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let checked = result.as_ref().ok().map(|result| {
+            validate_outputs(self.root, self.frozen, planned, contract, attempt, reported.as_ref(), result)
+        });
+        Completion { index: 0, attempt, reported, result, checked }
+    }
 
-        // ----- outcome -----
-        let mut run = cell.lock().unwrap_or_else(|p| p.into_inner());
+    /// Record a finished attempt (and release what it reserved).
+    fn complete(
+        &self,
+        planned: &WorkflowPlanStep,
+        done: Completion,
+        outputs: &mut HashMap<(String, String), WorkflowStepOutput>,
+        stop: &mut Option<Stop>,
+    ) {
+        let mut run = self.lock();
         let i = step_index(&run, &planned.step);
         let now = crate::now_ms();
-        match result {
+        let Some(ai) = run.steps[i].attempts.iter().position(|a| a.attempt == done.attempt) else { return };
+        let reported = done.reported;
+        match done.result {
             Err(failure) => {
                 run.usage.model_requests += failure.model_requests;
-                let was_canceled = token.is_canceled() || failure.code == "workflow.canceled";
-                let attempt = run.steps[i].attempts.last_mut().expect("attempt");
-                finish_attempt(attempt, &failure, reported.as_ref(), now, was_canceled);
+                let was_canceled = self.token.is_canceled() || failure.code == "workflow.canceled";
+                finish_attempt(&mut run.steps[i].attempts[ai], &failure, reported.as_ref(), now, was_canceled);
                 run.steps[i].state = if was_canceled { WorkflowStepState::Canceled } else { WorkflowStepState::Failed };
-                stop = Some(if was_canceled {
-                    let (code, message) = token.reason();
-                    Stop { state: WorkflowRunState::Canceled, code, message }
-                } else {
-                    Stop::failed(&failure.code, format!("“{}” failed: {}", planned.label, failure.message))
-                });
+                if stop.is_none() {
+                    *stop = Some(if was_canceled {
+                        Stop::canceled(self.token)
+                    } else {
+                        Stop::failed(&failure.code, format!("“{}” failed: {}", planned.label, failure.message))
+                    });
+                }
             }
             Ok(result) => {
-                let checked = validate_outputs(&root, &run, planned, &contract, attempt_no, reported.as_ref(), &result);
                 // Requests were made whether or not the outputs are accepted.
                 run.usage.model_requests += result.model_requests;
-                let attempt = run.steps[i].attempts.last_mut().expect("attempt");
+                let checked = done.checked.unwrap_or_else(|| {
+                    Err(("workflow.internal", "the outputs were not validated".to_owned(), Vec::new()))
+                });
+                let attempt = &mut run.steps[i].attempts[ai];
                 attempt.log = result.log.clone();
                 attempt.finished_at_ms = Some(now);
                 if attempt.operation.is_none() {
@@ -371,23 +490,111 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
                         attempt.message = Some(message.clone());
                         attempt.rejected.append(&mut rejected);
                         run.steps[i].state = WorkflowStepState::Failed;
-                        stop = Some(Stop::failed(code, format!("“{}”: {message}", planned.label)));
+                        if stop.is_none() {
+                            *stop = Some(Stop::failed(code, format!("“{}”: {message}", planned.label)));
+                        }
                     }
                 }
             }
         }
-        run.usage.seconds = started.elapsed().as_secs() as u32;
+        run.usage.seconds = self.started.elapsed().as_secs() as u32;
         if stop.is_none() && run.usage.output_bytes > run.budgets.max_output_bytes {
-            stop = Some(Stop::failed(
+            *stop = Some(Stop::failed(
                 "workflow.budgetExhausted",
                 format!("The run's outputs exceed its budget of {} bytes.", run.budgets.max_output_bytes),
             ));
         }
-        let _ = persist(&run, &planned.step);
-        if stop.is_some() {
-            break;
-        }
+        let _ = self.persist(&run, &planned.step);
     }
+}
+
+/// Plan indexes of the steps each step depends on (data and prerequisites).
+fn dependencies(steps: &[WorkflowPlanStep]) -> Vec<Vec<usize>> {
+    let index = |id: &str| steps.iter().position(|s| s.step == id);
+    steps
+        .iter()
+        .map(|s| {
+            let mut deps: Vec<usize> = s
+                .bindings
+                .iter()
+                .filter_map(|b| match &b.from {
+                    PortSource::Step { step, .. } => index(step),
+                    PortSource::Input { .. } => None,
+                })
+                .chain(s.prerequisites.iter().filter_map(|p| index(p)))
+                .collect();
+            deps.sort_unstable();
+            deps.dedup();
+            deps
+        })
+        .collect()
+}
+
+/// The first pending step in plan order whose dependencies all succeeded.
+fn next_ready(run: &WorkflowRun, deps: &[Vec<usize>], flights: &HashMap<usize, Flight>) -> Option<usize> {
+    (0..run.steps.len()).find(|&i| {
+        run.steps[i].state == WorkflowStepState::Pending
+            && !flights.contains_key(&i)
+            && deps[i].iter().all(|&d| run.steps[d].state == WorkflowStepState::Succeeded)
+    })
+}
+
+/// Execute a persisted run on the current thread until it ends.
+pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: String, token: Arc<CancelToken>) {
+    let started = Instant::now();
+    let frozen = run.clone();
+    let cell = Mutex::new(run);
+    let ctx = Ctx { inner: &inner, key: &key, root: &root, token: &token, cell: &cell, frozen: &frozen, started };
+    let plan_steps = &frozen.plan.steps;
+    let deps = dependencies(plan_steps);
+    let max_parallel = frozen.plan.max_parallel.clamp(1, MAX_PARALLEL) as usize;
+    let mut outputs: HashMap<(String, String), WorkflowStepOutput> = HashMap::new();
+    let mut stop: Option<Stop> = None;
+    let mut flights: HashMap<usize, Flight> = HashMap::new();
+    let (done_tx, done_rx) = mpsc::channel::<Completion>();
+
+    std::thread::scope(|scope| {
+        let _cancel_on_panic = CancelOnPanic(&token);
+        let ctx = &ctx;
+        let finish = |done: Completion,
+                      outputs: &mut HashMap<(String, String), WorkflowStepOutput>,
+                      flights: &mut HashMap<usize, Flight>,
+                      stop: &mut Option<Stop>| {
+            let index = done.index;
+            ctx.complete(&plan_steps[index], done, outputs, stop);
+            // The slot and the reservation are released once the result is recorded.
+            flights.remove(&index);
+        };
+        loop {
+            while let Ok(done) = done_rx.try_recv() {
+                finish(done, &mut outputs, &mut flights, &mut stop);
+            }
+            if stop.is_none() && token.is_canceled() {
+                stop = Some(Stop::canceled(&token));
+            }
+            let mut waiting = false;
+            while stop.is_none() && flights.len() < max_parallel {
+                let next = next_ready(&ctx.lock(), &deps, &flights);
+                let Some(index) = next else { break };
+                match ctx.dispatch(scope, index, &plan_steps[index], &outputs, &flights, &done_tx) {
+                    Dispatch::Started(flight) => {
+                        flights.insert(index, flight);
+                    }
+                    Dispatch::Wait => {
+                        waiting = true;
+                        break;
+                    }
+                    Dispatch::Stop(s) => stop = Some(s),
+                }
+            }
+            if flights.is_empty() && (stop.is_some() || !waiting) {
+                break;
+            }
+            if let Ok(done) = done_rx.recv_timeout(if waiting { SLOT_POLL } else { IDLE_POLL }) {
+                finish(done, &mut outputs, &mut flights, &mut stop);
+            }
+        }
+    });
 
     let mut run = cell.into_inner().unwrap_or_else(|p| p.into_inner());
     for step in &mut run.steps {
@@ -407,11 +614,12 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
     }
     run.usage.seconds = started.elapsed().as_secs() as u32;
     run.finished_at_ms = Some(crate::now_ms());
+    run.explain_outcomes();
     let _ = inner.persist(&key, &run, None);
     inner.finished(&run.id);
 }
 
-/// Refuse a step before dispatch: a failed attempt that was never dispatched.
+// Refuse a step before dispatch: a failed attempt that was never dispatched.
 fn refuse(
     cell: &Mutex<WorkflowRun>,
     planned: &WorkflowPlanStep,

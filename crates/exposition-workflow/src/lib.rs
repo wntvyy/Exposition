@@ -7,10 +7,12 @@ pub mod model;
 pub mod plan;
 pub mod runner;
 pub mod service;
+mod slots;
 pub mod store;
 
 pub use model::*;
 pub use service::{PlanOptions, WorkflowHost, WorkflowRunConfig, WorkflowRunService};
+pub use slots::SlotCounts;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> u64 {

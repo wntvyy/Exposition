@@ -214,6 +214,7 @@ pub fn interrupt(run: &mut WorkflowRun, now_ms: u64) {
             }
         }
     }
+    run.explain_outcomes();
 }
 
 fn decode(id: &str, state: &str, body: &str) -> Result<WorkflowRun, String> {

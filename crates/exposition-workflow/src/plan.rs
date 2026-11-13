@@ -22,8 +22,9 @@ use serde::Serialize;
 
 use crate::adapters::Adapters;
 use crate::model::{
-    PLAN_TTL_MS, WorkflowPlanBinding, WorkflowPlanBlocker, WorkflowPlanExecution, WorkflowPlanInput, WorkflowPlanStep,
-    WorkflowRunBudgets, WorkflowRunOutcome, WorkflowRunPlan,
+    MAX_PARALLEL, PLAN_TTL_MS, WorkflowConcurrencyLimits, WorkflowPlanBinding, WorkflowPlanBlocker,
+    WorkflowPlanExecution, WorkflowPlanInput, WorkflowPlanStep, WorkflowRunBudgets, WorkflowRunOutcome,
+    WorkflowRunPlan,
 };
 
 /// A run never takes longer than this in total.
@@ -46,9 +47,28 @@ pub struct PlanFacts<'a> {
     /// runs in the restricted container).
     pub restricted_image_id: &'a dyn Fn() -> Option<String>,
     pub adapters: &'a Adapters,
-    pub active_run: bool,
+    /// Why another run keeps this one from starting now (a run of the same
+    /// workflow is active, or the active-run limit is reached).
+    pub active_run: Option<String>,
     /// Input id → SHA-256 the plan pins instead of the definition's version.
     pub pins: &'a BTreeMap<String, String>,
+    /// The application-wide concurrency limits.
+    pub limits: &'a WorkflowConcurrencyLimits,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test scaffolding until definitions carry `execution.maxParallel`.
+    pub(crate) static TEST_MAX_PARALLEL: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// The definition's `maxParallel` (1 when it declares none).
+fn max_parallel_of(_def: &exposition_graph::workflow::WorkflowDefinition) -> u32 {
+    #[cfg(test)]
+    if let Some(n) = TEST_MAX_PARALLEL.with(|c| c.get()) {
+        return n.clamp(1, MAX_PARALLEL);
+    }
+    1
 }
 
 /// Why a runner cannot run (stable code, message).
@@ -183,6 +203,7 @@ struct ApprovedStep<'a> {
     prerequisites: &'a [String],
     time_limit_seconds: u32,
     max_output_bytes: u64,
+    max_model_requests: u32,
     available: bool,
 }
 
@@ -198,6 +219,8 @@ struct Approved<'a> {
     steps: Vec<ApprovedStep<'a>>,
     ceiling: &'a AuthorityCeiling,
     budgets: &'a WorkflowRunBudgets,
+    max_parallel: u32,
+    limits: &'a WorkflowConcurrencyLimits,
     execution: ApprovedExecution<'a>,
 }
 
@@ -217,7 +240,7 @@ struct ApprovedExecution<'a> {
 pub fn approval_hash(plan: &WorkflowRunPlan, root: &Path) -> String {
     let key = project_key(root);
     let approved = Approved {
-        schema: "exposition.workflowRunApproval/1",
+        schema: "exposition.workflowRunApproval/2",
         project: &key,
         workflow: plan.workflow.as_str(),
         revision: plan.revision,
@@ -239,11 +262,14 @@ pub fn approval_hash(plan: &WorkflowRunPlan, root: &Path) -> String {
                 prerequisites: &s.prerequisites,
                 time_limit_seconds: s.time_limit_seconds,
                 max_output_bytes: s.max_output_bytes,
+                max_model_requests: s.max_model_requests,
                 available: s.available,
             })
             .collect(),
         ceiling: &plan.ceiling,
         budgets: &plan.budgets,
+        max_parallel: plan.max_parallel,
+        limits: &plan.limits,
         execution: ApprovedExecution {
             restricted_backend: &plan.execution.restricted_backend,
             restricted_image: &plan.execution.restricted_image,
@@ -403,6 +429,11 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
             prerequisites,
             time_limit_seconds: time_limit(step, &contract).min(MAX_RUN_SECONDS),
             max_output_bytes: contract.limits.max_output_bytes,
+            max_model_requests: if contract.runner.containment == Containment::ReadOnlyModel {
+                MODEL_REQUESTS_PER_STEP
+            } else {
+                0
+            },
             available,
             availability,
         });
@@ -419,8 +450,9 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
         max_steps: steps.len() as u32,
         max_total_seconds: steps.iter().map(|s| s.time_limit_seconds).sum::<u32>().clamp(1, MAX_RUN_SECONDS),
         max_output_bytes: steps.iter().map(|s| s.max_output_bytes).sum::<u64>().min(MAX_RUN_OUTPUT_BYTES),
-        max_model_requests: model_steps.len() as u32 * MODEL_REQUESTS_PER_STEP,
+        max_model_requests: steps.iter().map(|s| s.max_model_requests).sum(),
     };
+    let max_parallel = max_parallel_of(def);
     // The restricted backend and image bind the plan only when a step uses them.
     let restricted = !restricted_steps.is_empty();
     let execution = WorkflowPlanExecution {
@@ -433,10 +465,16 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
     };
 
     // ----- notices -----
-    let mut notices = vec![
+    let mut notices = vec![if max_parallel <= 1 {
         "Nothing runs until you start the run. Steps run one at a time in the order shown; a failed step stops the workflow, and nothing is retried or repeated."
-            .to_owned(),
-    ];
+            .to_owned()
+    } else {
+        let l = facts.limits;
+        format!(
+            "Nothing runs until you start the run. Up to {max_parallel} independent steps run at the same time (a step starts once everything it depends on succeeded; across all runs at most {} steps at once: {} restricted, {} native, {} agent, {} Lean). Budgets are reserved before each step starts. A failed step stops the workflow: nothing new starts, steps already running finish, and nothing is retried or repeated.",
+            l.max_in_flight_steps, l.restricted, l.native, l.agent, l.lean
+        )
+    }];
     if !restricted_steps.is_empty() {
         notices.push(format!(
             "{} run{} in the restricted container ({}): only the declared inputs and code are staged read-only, with no network and no credentials; outputs are validated before anything uses them.",
@@ -481,13 +519,8 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
             None,
         ));
     }
-    if facts.active_run {
-        blockers.push(blocker(
-            "workflow.activeRun",
-            "Another workflow run is active; wait for it to finish or cancel it first.",
-            None,
-            None,
-        ));
+    if let Some(message) = &facts.active_run {
+        blockers.push(blocker("workflow.activeRun", message.clone(), None, None));
     }
 
     let outcomes = def
@@ -500,6 +533,7 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
             step: o.from.step.clone(),
             port: o.from.port.clone(),
             value: None,
+            reason: None,
         })
         .collect();
     let mut plan = WorkflowRunPlan {
@@ -513,6 +547,8 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
         steps,
         ceiling: def.ceiling,
         budgets,
+        max_parallel,
+        limits: facts.limits.clone(),
         execution,
         notices,
         blockers,
@@ -590,6 +626,15 @@ pub fn describe_changes(approved: &WorkflowRunPlan, now: &WorkflowRunPlan) -> St
                 if current.available { "now" } else { "no longer" }
             ));
         }
+    }
+    if approved.max_parallel != now.max_parallel {
+        changes.push(format!(
+            "the steps that may run at the same time changed ({} → {})",
+            approved.max_parallel, now.max_parallel
+        ));
+    }
+    if approved.limits != now.limits {
+        changes.push("the application's concurrency limits changed".to_owned());
     }
     if approved.project != now.project {
         changes.push("the open project changed".to_owned());
