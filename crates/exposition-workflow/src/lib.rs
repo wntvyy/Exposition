@@ -8,6 +8,7 @@ pub mod plan;
 pub mod runner;
 pub mod service;
 pub mod store;
+pub mod triggers;
 
 pub use model::*;
 pub use service::{PlanOptions, WorkflowHost, WorkflowRunConfig, WorkflowRunService};
