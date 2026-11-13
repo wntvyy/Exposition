@@ -315,6 +315,21 @@ impl ResearchService {
         Ok(report)
     }
 
+    /// The discovery report already cached for the open project and its
+    /// trust, if any. Never probes (environment capture must not run
+    /// anything to describe what a run would get).
+    pub(crate) fn cached_environments(&self) -> Option<EnvironmentReport> {
+        let workspace = lock(&self.shared.workspace).clone();
+        let key = workspace.map(|w| {
+            let trusted = self.shared.config.launcher.workspace_trusted(&w.root).unwrap_or(w.trusted);
+            (w.root, trusted)
+        });
+        match lock(&self.shared.environments).clone() {
+            Some((cached, report)) if cached == key => Some(report),
+            _ => None,
+        }
+    }
+
     /// The application data directory research uses.
     pub(crate) fn data_dir(&self) -> &Path {
         &self.shared.config.data_dir

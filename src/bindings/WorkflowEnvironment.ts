@@ -23,7 +23,7 @@ os: string, arch: string,
  */
 appVersion: string, image: WorkflowEnvironmentImage | null, interpreter: WorkflowEnvironmentInterpreter | null, 
 /**
- * Sorted by name, at most 1000 (a note says when more were captured).
+ * Sorted by name, at most [`MAX_PACKAGES`] (a note says when more were captured).
  */
 packages: Array<WorkflowEnvironmentPackage>, 
 /**
@@ -31,7 +31,7 @@ packages: Array<WorkflowEnvironmentPackage>,
  */
 packagesDigest: string | null, toolchain: WorkflowEnvironmentToolchain | null, model: WorkflowEnvironmentModel | null, 
 /**
- * `EXPOSITION_SEED` as given to the step (always below 2^32).
+ * [`SEED_VAR`] as given to the step (always below 2^32).
  */
 seed: number | null, 
 /**

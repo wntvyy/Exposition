@@ -32,6 +32,7 @@
 //!    finalized and the staging folders removed.
 
 mod fsx;
+pub mod image_env;
 pub mod outputs;
 pub mod stage;
 
@@ -44,7 +45,9 @@ use exposition_core::artifact::{Producer, RunId, RunRecord, RunStatus, ToolVersi
 use exposition_core::job::{EnvironmentSpec, ExecutionPolicy, JobId, JobOutcome, JobResult, JobSpec, OutputStream};
 use exposition_execution::{ExecutionService, RefusalCode, RestrictedTarget};
 
-use crate::batch::{BatchControl, BatchMode, BatchRequest, BatchResult, BatchRunner};
+use crate::batch::{
+    BatchControl, BatchMode, BatchRequest, BatchResult, BatchRunner, SEED_VAR, environment_keys as keys,
+};
 use crate::error::ResearchError;
 use crate::service::{ResearchService, display_path};
 use crate::store::{MANIFEST_FORMAT, new_run_id, write_manifest, write_transcript};
@@ -278,6 +281,9 @@ impl ScopedBatchRunner {
                 set.insert("PYTHONIOENCODING".to_owned(), "utf-8".to_owned());
                 set.insert("MPLBACKEND".to_owned(), "Agg".to_owned());
                 set.insert("MPLCONFIGDIR".to_owned(), "/tmp/matplotlib".to_owned());
+                if let Some(seed) = request.seed {
+                    set.insert(SEED_VAR.to_owned(), seed.to_string());
+                }
                 JobSpec {
                     label: format!("Workflow batch {run_id} (restricted container)"),
                     program: CONTAINER_PYTHON.into(),
@@ -301,6 +307,9 @@ impl ScopedBatchRunner {
                     extra.insert(OUTPUT_DIR_VAR.to_owned(), out.display().to_string());
                 }
                 extra.insert("MPLBACKEND".to_owned(), "Agg".to_owned());
+                if let Some(seed) = request.seed {
+                    extra.insert(SEED_VAR.to_owned(), seed.to_string());
+                }
                 let script = entry.split('/').fold(work.to_path_buf(), |p, c| p.join(c));
                 JobSpec {
                     label: format!("Workflow batch {run_id} (trusted native)"),
@@ -369,9 +378,13 @@ impl ScopedBatchRunner {
         }
     }
 
-    fn environment_pairs(target: &Target, request: &BatchRequest) -> Vec<(String, String)> {
+    fn environment_pairs(
+        target: &Target,
+        request: &BatchRequest,
+        image: Option<&Result<image_env::ImageEnvironment, String>>,
+    ) -> Vec<(String, String)> {
         let limit = format!("{} s", request.time_limit.as_secs_f64());
-        match target {
+        let mut pairs = match target {
             Target::Restricted(t) => {
                 let mut pairs = vec![
                     ("mode".to_owned(), "restricted container".to_owned()),
@@ -392,18 +405,37 @@ impl ScopedBatchRunner {
                     ("inputs".to_owned(), "declared files only, read-only at /workspace".to_owned()),
                     ("outputArea".to_owned(), CONTAINER_OUT.to_owned()),
                 ]);
+                match image {
+                    Some(Ok(found)) => pairs.extend(image_pairs(found)),
+                    Some(Err(reason)) => pairs.push((
+                        keys::NOTE.to_owned(),
+                        format!("The image's package list could not be captured: {reason}"),
+                    )),
+                    None => pairs.push((
+                        keys::NOTE.to_owned(),
+                        "The image's identity is unknown, so its package list was not captured.".to_owned(),
+                    )),
+                }
                 pairs
             }
-            Target::Native(env) => vec![
-                ("mode".to_owned(), crate::types::TRUSTED_NATIVE_LABEL.to_owned()),
-                (
-                    "interpreter".to_owned(),
-                    env.executable.as_deref().map(|p| display_path(Path::new(p))).unwrap_or_default(),
-                ),
-                ("pythonVersion".to_owned(), env.version.clone().unwrap_or_default()),
-                ("timeLimit".to_owned(), limit),
-            ],
+            Target::Native(env) => {
+                let mut pairs = vec![
+                    ("mode".to_owned(), crate::types::TRUSTED_NATIVE_LABEL.to_owned()),
+                    (
+                        "interpreter".to_owned(),
+                        env.executable.as_deref().map(|p| display_path(Path::new(p))).unwrap_or_default(),
+                    ),
+                    ("pythonVersion".to_owned(), env.version.clone().unwrap_or_default()),
+                    ("timeLimit".to_owned(), limit),
+                ];
+                pairs.extend(native_pairs(env));
+                pairs
+            }
+        };
+        if let Some(seed) = request.seed {
+            pairs.push((keys::SEED.to_owned(), seed.to_string()));
         }
+        pairs
     }
 
     fn run_batch(
@@ -427,6 +459,18 @@ impl ScopedBatchRunner {
                 ),
             ));
         }
+        if (control.canceled)() {
+            return Err(canceled_before_start());
+        }
+        // What the image contains, captured inside exactly that image (see
+        // `image_env`); a failure is recorded, never a reason to fail the batch.
+        let image =
+            match &target {
+                Target::Restricted(t) => request.restricted_image_id.clone().or_else(|| t.image_id.clone()).map(|id| {
+                    image_env::capture(&self.execution, self.research.data_dir(), &id, &root, control.canceled)
+                }),
+                Target::Native(_) => None,
+            };
         if (control.canceled)() {
             return Err(canceled_before_start());
         }
@@ -466,6 +510,11 @@ impl ScopedBatchRunner {
                 if let Some(id) = &t.image_id {
                     record_env.push(ToolVersion { name: "image id".into(), version: id.clone() });
                 }
+                if let Some(Ok(found)) = &image {
+                    record_env.push(ToolVersion { name: "python".into(), version: found.python_version.clone() });
+                    record_env
+                        .push(ToolVersion { name: "image packages".into(), version: found.packages.len().to_string() });
+                }
                 (
                     format!("docker:{}", t.image),
                     InterpreterProvenance {
@@ -490,6 +539,9 @@ impl ScopedBatchRunner {
                 )
             }
         };
+        if let Some(seed) = request.seed {
+            record_env.push(ToolVersion { name: "seed".into(), version: seed.to_string() });
+        }
         let owner = SessionOwner::Workflow { run: request.owner.run.clone(), step: request.owner.step.clone() };
         let started = now_ms();
         let spec = self.job_spec(request, &target, &registered, &staged.entry, out_host.as_deref(), &run_id);
@@ -698,15 +750,89 @@ impl ScopedBatchRunner {
             extra,
             rejected,
             log,
-            environment: Self::environment_pairs(&target, request),
+            environment: Self::environment_pairs(&target, request, image.as_ref()),
         })
     }
+}
+
+/// Environment pairs of a captured image environment.
+fn image_pairs(found: &image_env::ImageEnvironment) -> Vec<(String, String)> {
+    let mut pairs = vec![
+        (keys::OS.to_owned(), found.os.clone()),
+        (keys::ARCH.to_owned(), found.arch.clone()),
+        (keys::IMPLEMENTATION.to_owned(), found.implementation.clone()),
+        (keys::PYTHON_VERSION.to_owned(), found.python_version.clone()),
+        (
+            keys::PACKAGES_SOURCE.to_owned(),
+            "every installed distribution, listed inside the image by identity (no network, no inputs)".to_owned(),
+        ),
+    ];
+    pairs.extend(found.packages.iter().map(|(n, v)| (keys::PACKAGE.to_owned(), format!("{n}=={v}"))));
+    if found.truncated {
+        pairs.push((keys::PACKAGES_TRUNCATED.to_owned(), image_env::MAX_PACKAGES.to_string()));
+    }
+    pairs
+}
+
+/// Environment pairs of a discovered native interpreter: what the discovery
+/// report already says (no command runs to list more).
+fn native_pairs(env: &RuntimeEnvironment) -> Vec<(String, String)> {
+    let mut pairs = vec![
+        (keys::OS.to_owned(), std::env::consts::OS.to_owned()),
+        (keys::ARCH.to_owned(), std::env::consts::ARCH.to_owned()),
+        (
+            keys::PACKAGES_SOURCE.to_owned(),
+            "the research environment report (the packages it checks, not every installed package)".to_owned(),
+        ),
+    ];
+    pairs.extend(
+        env.packages
+            .iter()
+            .filter(|p| !p.name.is_empty() && !p.version.is_empty())
+            .map(|p| (keys::PACKAGE.to_owned(), format!("{}=={}", p.name, p.version))),
+    );
+    pairs
 }
 
 impl BatchRunner for ScopedBatchRunner {
     fn availability(&self, root: &Path, mode: BatchMode) -> Result<(), String> {
         let root = self.current_project(root).map_err(|e| e.to_string())?;
         self.target(&root, mode).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    fn current_environment(&self, _root: &Path, mode: BatchMode) -> Vec<(String, String)> {
+        match mode {
+            // The same engine check plans make; the image's packages only
+            // from the cache (a new identity is listed when a batch runs).
+            BatchMode::Restricted => {
+                let Ok(target) = self.execution.restricted_preflight() else { return Vec::new() };
+                let mut pairs = vec![(keys::IMAGE.to_owned(), target.image.clone())];
+                if let Some(id) = &target.image_id {
+                    pairs.push((keys::IMAGE_ID.to_owned(), id.clone()));
+                    if let Some(found) = image_env::cached(self.research.data_dir(), id) {
+                        pairs.extend(image_pairs(&found));
+                    }
+                }
+                pairs
+            }
+            // The cached discovery report only: never probes.
+            BatchMode::TrustedNative => {
+                let Some(report) = self.research.cached_environments() else { return Vec::new() };
+                let pythons: Vec<RuntimeEnvironment> = report
+                    .runtimes
+                    .into_iter()
+                    .filter(|r| r.language == RuntimeLanguage::Python && r.executable.is_some())
+                    .collect();
+                let Some(env) =
+                    pythons.iter().find(|r| r.availability == Availability::Available).or_else(|| pythons.first())
+                else {
+                    return Vec::new();
+                };
+                let mut pairs = vec![(keys::PYTHON_VERSION.to_owned(), env.version.clone().unwrap_or_default())];
+                pairs.extend(native_pairs(env));
+                pairs
+            }
+        }
     }
 
     fn run(

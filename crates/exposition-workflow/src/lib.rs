@@ -4,8 +4,10 @@
 
 pub mod adapters;
 pub mod environment;
+pub mod manifest;
 pub mod model;
 pub mod plan;
+pub mod reproduce;
 pub mod runner;
 pub mod service;
 pub mod store;
@@ -18,5 +20,7 @@ pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+#[cfg(test)]
+mod repro_tests;
 #[cfg(test)]
 mod tests;
