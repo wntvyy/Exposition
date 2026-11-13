@@ -365,6 +365,17 @@ fn timeout_parameter() -> ParameterSpec {
     }
 }
 
+/// The free value a batch's code receives (`EXPOSITION_PARAM_VALUE`); a
+/// forEach over it runs the code once per value.
+fn value_parameter() -> ParameterSpec {
+    ParameterSpec {
+        name: "value".into(),
+        label: "Value (passed to the code as EXPOSITION_PARAM_VALUE; forEach sweeps it)".into(),
+        kind: ParameterKind::Text { max_len: 1000 },
+        required: false,
+    }
+}
+
 /// Every registered contract.
 pub fn operations() -> Vec<OperationContract> {
     use WorkflowEffect as E;
@@ -378,7 +389,7 @@ pub fn operations() -> Vec<OperationContract> {
                 .into(),
             inputs: py_in.clone(),
             outputs: py_out.clone(),
-            parameters: vec![timeout_parameter()],
+            parameters: vec![timeout_parameter(), value_parameter()],
             payload: Some(PayloadSpec::Code { language: CodeLanguage::Python, unless_input: Some("script".into()) }),
             effects: vec![E::ReadDeclaredInputs, E::ExecuteRestricted, E::WriteRunOutputs],
             runner: runner(
@@ -398,7 +409,7 @@ pub fn operations() -> Vec<OperationContract> {
                 .into(),
             inputs: py_in,
             outputs: py_out,
-            parameters: vec![timeout_parameter()],
+            parameters: vec![timeout_parameter(), value_parameter()],
             payload: Some(PayloadSpec::Code { language: CodeLanguage::Python, unless_input: Some("script".into()) }),
             effects: vec![E::ReadDeclaredInputs, E::ExecuteNative, E::WriteRunOutputs],
             runner: runner(
@@ -559,14 +570,53 @@ pub fn operations() -> Vec<OperationContract> {
         },
     ];
     ops.extend(r_julia_operations());
+    ops.extend(composite_operations());
     ops
 }
+
+// ----- M9 composite steps -----
+
+/// `workflow.composite` v1: run another saved workflow at a pinned revision.
+/// The bare contract has no ports or effects: validation derives them from
+/// the referenced child (inputs = the child's external inputs, outputs = its
+/// outcomes, effects = the union of its steps', containment = the least
+/// contained of its runners). No payload or parameters.
+fn composite_operations() -> Vec<OperationContract> {
+    vec![OperationContract {
+        id: super::COMPOSITE_OPERATION.into(),
+        version: 1,
+        title: "Run a saved workflow".into(),
+        purpose: "Run another saved workflow of this project at a pinned revision, as part of this one. Its steps run through their own runners, within this workflow's ceiling; editing it never changes the revision used here."
+            .into(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        parameters: Vec::new(),
+        payload: None,
+        effects: Vec::new(),
+        runner: runner(
+            super::v2::COMPOSITE_RUNNER,
+            "Saved workflow (each step runs through its own runner)",
+            Containment::ApplicationService,
+            &[],
+        ),
+        limits: OperationLimits { max_seconds: 0, max_output_bytes: 0 },
+        failure: FailureBehavior::StopWorkflow,
+    }]
+}
+
+/// Availability text of the composite runner (its child steps are checked one by one).
+pub const COMPOSITE_AVAILABILITY: &str = "Available: each of its steps is checked with its own runner.";
 
 /// Every registered contract with its runner's availability filled in by
 /// `check` (runner id → `Ok` or the reason it cannot run now).
 pub fn with_availability(check: &dyn Fn(&str) -> Result<(), String>) -> Vec<OperationContract> {
     let mut ops = operations();
     for op in &mut ops {
+        if op.runner.id == super::v2::COMPOSITE_RUNNER {
+            op.runner.available = true;
+            op.runner.availability = COMPOSITE_AVAILABILITY.into();
+            continue;
+        }
         match check(&op.runner.id) {
             Ok(()) => {
                 op.runner.available = true;
@@ -720,7 +770,7 @@ fn script_operation(
         purpose: purpose.into(),
         inputs,
         outputs,
-        parameters: vec![timeout_parameter()],
+        parameters: vec![timeout_parameter(), value_parameter()],
         payload: Some(PayloadSpec::Code { language, unless_input: Some("script".into()) }),
         effects,
         runner: runner_spec,
@@ -873,6 +923,25 @@ mod r_julia_tests {
         let mut code: Vec<&str> = PortType::CodeSource.extensions().to_vec();
         code.sort();
         assert_eq!(code, union);
+    }
+
+    /// Every batch takes an optional free `value` its code receives as
+    /// `EXPOSITION_PARAM_VALUE` (what a forEach sweeps).
+    #[test]
+    fn every_batch_operation_takes_a_value_its_code_receives() {
+        for id in [
+            RESEARCH_PYTHON_BATCH,
+            RESEARCH_NATIVE_PYTHON,
+            RESEARCH_R_BATCH,
+            RESEARCH_NATIVE_R,
+            RESEARCH_JULIA_BATCH,
+            RESEARCH_NATIVE_JULIA,
+        ] {
+            let value = op(id).parameter("value").cloned().unwrap_or_else(|| panic!("{id}"));
+            assert_eq!(value.kind, ParameterKind::Text { max_len: 1000 }, "{id}");
+            assert!(!value.required && value.label.contains("EXPOSITION_PARAM_VALUE"), "{id}");
+            assert!(op(id).parameter("timeoutSeconds").is_some(), "{id}");
+        }
     }
 
     #[test]

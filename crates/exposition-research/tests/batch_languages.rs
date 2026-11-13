@@ -159,6 +159,9 @@ fn request(mode: BatchMode, code: &str, inputs: Vec<BatchInput>, outputs: Vec<Ba
         time_limit: Duration::from_secs(180),
         max_output_bytes: 8 * 1024 * 1024,
         restricted_image_id: None,
+        seed: None,
+        iteration: None,
+        parameters: Default::default(),
     }
 }
 
@@ -445,7 +448,8 @@ fn native_r_batch_reads_declared_input_and_registers_outputs() {
     }
     assert_eq!(manifest.session.interpreter.implementation, "r");
     assert!(result.environment.iter().any(|(k, v)| k == "mode" && v.contains("trusted native")));
-    assert!(result.environment.iter().any(|(k, v)| k == "rVersion" && v.starts_with('4')), "{:?}", result.environment);
+    let has = |key: &str, value: &str| result.environment.iter().any(|(k, v)| k == key && v.starts_with(value));
+    assert!(has("interpreterName", "R") && has("interpreterVersion", "4."), "{:?}", result.environment);
     assert!(f.research.sessions().is_empty(), "never the user's kernel");
     assert_staging_removed(&f);
 }
@@ -461,7 +465,8 @@ fn native_julia_batch_reads_declared_input_and_registers_outputs() {
     }
     assert_eq!(manifest.session.interpreter.implementation, "julia");
     assert!(
-        result.environment.iter().any(|(k, v)| k == "juliaVersion" && v.starts_with('1')),
+        result.environment.iter().any(|(k, v)| k == "interpreterVersion" && v.starts_with("1."))
+            && result.environment.iter().any(|(k, v)| k == "interpreterName" && v == "julia"),
         "{:?}",
         result.environment
     );
@@ -820,5 +825,118 @@ fn restricted_with_a_missing_language_image_is_refused_without_fallback() {
             run(&f, language, &request(BatchMode::Restricted, "1\n", Vec::new(), Vec::new()), None);
         assert_eq!(result.unwrap_err().code(), "research.environmentUnavailable");
         assert_nothing_ran(&f, dispatched);
+    }
+}
+
+// ------------------------------------------------- seed, iteration, parameters ----
+
+/// Code that prints the batch variables, per language.
+fn variables_code(language: BatchLanguage) -> &'static str {
+    match language {
+        BatchLanguage::Python => {
+            "import os\nprint('vars', os.environ.get('EXPOSITION_SEED'), os.environ.get('EXPOSITION_ITERATION'), os.environ.get('EXPOSITION_PARAM_VALUE'), os.environ.get('EXPOSITION_PARAM_TIMEOUT_SECONDS'))\n"
+        }
+        BatchLanguage::R => {
+            "cat('vars', Sys.getenv('EXPOSITION_SEED'), Sys.getenv('EXPOSITION_ITERATION'), Sys.getenv('EXPOSITION_PARAM_VALUE'), Sys.getenv('EXPOSITION_PARAM_TIMEOUT_SECONDS'), '\n')\n"
+        }
+        BatchLanguage::Julia => {
+            "println(\"vars \", ENV[\"EXPOSITION_SEED\"], \" \", ENV[\"EXPOSITION_ITERATION\"], \" \", ENV[\"EXPOSITION_PARAM_VALUE\"], \" \", ENV[\"EXPOSITION_PARAM_TIMEOUT_SECONDS\"])\n"
+        }
+    }
+}
+
+fn with_variables(mut req: BatchRequest) -> BatchRequest {
+    req.seed = Some(4_242);
+    req.iteration = Some(2);
+    req.parameters = [("value", "0.25 kg"), ("timeoutSeconds", "30")]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    req
+}
+
+fn assert_variables(result: &BatchResult) {
+    assert_eq!(result.status, RunStatus::Succeeded, "{}", result.log);
+    assert!(result.log.contains("vars 4242 2 0.25 kg 30"), "{}", result.log);
+    let has = |key: &str, value: &str| result.environment.iter().any(|(k, v)| k == key && v == value);
+    assert!(has("seed", "4242") && has("iteration", "2"), "{:?}", result.environment);
+}
+
+/// The seed, the instance index, and the declared parameters reach the code
+/// of every language natively.
+#[test]
+fn native_batches_receive_their_seed_iteration_and_parameters() {
+    for language in BatchLanguage::ALL {
+        let Some(f) = native_fixture(language) else { continue };
+        let req = with_variables(request(BatchMode::TrustedNative, variables_code(language), Vec::new(), Vec::new()));
+        let (result, _) = run(&f, language, &req, None);
+        assert_variables(&result.unwrap());
+    }
+}
+
+/// … and in the restricted container.
+#[test]
+#[ignore = "needs Docker Desktop and the local r-base/julia/python images; run with EXPOSITION_DOCKER_TESTS=1 -- --ignored"]
+fn restricted_batches_receive_their_seed_iteration_and_parameters() {
+    if !docker_enabled() {
+        return;
+    }
+    for language in BatchLanguage::ALL {
+        let f = match language {
+            BatchLanguage::Python => fixture_with(Images { python: Some(PYTHON_IMAGE), r: None, julia: None }, false),
+            other => restricted_fixture(other),
+        };
+        let req = with_variables(request(BatchMode::Restricted, variables_code(language), Vec::new(), Vec::new()));
+        let (result, _) = run(&f, language, &req, None);
+        assert_variables(&result.unwrap());
+        assert_clean(&f);
+    }
+}
+
+/// Parameters never carry credentials, multi-line text, or secrets, and
+/// their names must be identifiers: refused before anything is staged.
+#[test]
+fn unsafe_parameters_are_refused_before_anything_runs() {
+    let f = fixture_with(Images { python: Some(PYTHON_IMAGE), r: None, julia: None }, true);
+    let long = "x".repeat(exposition_research::batch::MAX_PARAMETER_BYTES + 1);
+    for (name, value, why) in [
+        ("value", "two\nlines", "one line"),
+        ("value", "nul\0byte", "one line"),
+        ("value", long.as_str(), "longer than"),
+        ("value", FAKE_KEY, "secret"),
+        ("apiKey", "x", "credential"),
+        ("githubToken", "x", "credential"),
+        ("bad-name", "x", "identifier"),
+        ("", "x", "identifier"),
+        ("9lives", "x", "identifier"),
+    ] {
+        let mut req = request(BatchMode::TrustedNative, "print(1)\n", Vec::new(), Vec::new());
+        req.parameters.insert(name.to_owned(), value.to_owned());
+        for language in BatchLanguage::ALL {
+            let (result, dispatched) = run(&f, language, &req, None);
+            let err = result.unwrap_err();
+            assert_eq!(err.code(), "research.invalidRequest", "{name}: {err}");
+            assert!(err.to_string().contains(why), "{name}: {err}");
+            assert!(!err.to_string().contains(FAKE_KEY), "the secret is not echoed: {err}");
+            assert_nothing_ran(&f, dispatched);
+        }
+    }
+    // Two names given as one variable are refused too.
+    let mut req = request(BatchMode::TrustedNative, "print(1)\n", Vec::new(), Vec::new());
+    req.parameters.insert("myValue".into(), "1".into());
+    req.parameters.insert("my_value".into(), "2".into());
+    let (result, _) = run(&f, BatchLanguage::Python, &req, None);
+    assert!(result.unwrap_err().to_string().contains("also given as EXPOSITION_PARAM_MY_VALUE"));
+}
+
+#[test]
+fn parameter_names_become_upper_snake_variables() {
+    use exposition_research::batch::parameter_variable;
+    assert_eq!(parameter_variable("value").as_deref(), Some("EXPOSITION_PARAM_VALUE"));
+    assert_eq!(parameter_variable("timeoutSeconds").as_deref(), Some("EXPOSITION_PARAM_TIMEOUT_SECONDS"));
+    assert_eq!(parameter_variable("learning_rate2").as_deref(), Some("EXPOSITION_PARAM_LEARNING_RATE2"));
+    assert_eq!(parameter_variable("x2Y").as_deref(), Some("EXPOSITION_PARAM_X2_Y"));
+    for bad in ["", "1x", "a-b", "a b", "ä", &"a".repeat(65)] {
+        assert_eq!(parameter_variable(bad), None, "{bad}");
     }
 }

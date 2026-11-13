@@ -16,7 +16,9 @@ mod settings;
 mod state;
 mod tex;
 mod typesetting;
+mod workflow_repro;
 mod workflow_runs;
+mod workflow_triggers;
 mod workflows;
 mod workspace;
 
@@ -47,6 +49,7 @@ pub fn run() {
             research::forward_events(app.handle().clone());
             graph::forward_events(app.handle().clone());
             workflow_runs::forward_events(app.handle().clone());
+            workflow_triggers::start(app.handle().clone());
             app.state::<AppState>().typesetting.start(app.handle().clone());
             Ok(())
         })
@@ -202,6 +205,8 @@ pub fn run() {
             workflows::workflow_import,
             workflows::workflow_list,
             workflows::workflow_get,
+            workflows::workflow_bundle_export,
+            workflows::workflow_bundle_import,
             workflow_runs::workflow_run_plan,
             workflow_runs::workflow_run_start,
             workflow_runs::workflow_run_cancel,
@@ -209,8 +214,15 @@ pub fn run() {
             workflow_runs::workflow_runs,
             workflow_runs::workflow_run_acknowledge,
             workflow_runs::workflow_association_decide,
+            workflow_repro::workflow_run_manifest,
+            workflow_repro::workflow_run_manifest_export,
+            workflow_repro::workflow_run_reproduce_plan,
             agents::agents_task_keep_investigation,
             agents::agents_task_create_generation,
+            workflow_triggers::workflow_trigger_plan,
+            workflow_triggers::workflow_trigger_enable,
+            workflow_triggers::workflow_trigger_disable,
+            workflow_triggers::workflow_trigger_list,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

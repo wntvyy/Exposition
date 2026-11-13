@@ -6,9 +6,17 @@ import type { WorkflowAttemptState } from "../../bindings/WorkflowAttemptState";
 import type { WorkflowEffect } from "../../bindings/WorkflowEffect";
 import type { WorkflowOutputValue } from "../../bindings/WorkflowOutputValue";
 import type { WorkflowProposalStatus } from "../../bindings/WorkflowProposalStatus";
-import type { WorkflowRun } from "../../bindings/WorkflowRun";
 import type { WorkflowRunState } from "../../bindings/WorkflowRunState";
-import type { WorkflowStepState } from "../../bindings/WorkflowStepState";
+import type {
+  WorkflowEnvironment,
+  WorkflowRun,
+  WorkflowRunCause,
+  WorkflowRunStep,
+  WorkflowStepAttempt,
+  WorkflowStepInstance,
+  WorkflowStepState,
+} from "./contract";
+import { paramText } from "./orchestration";
 import type { BadgeTone, Status } from "../../ui/components";
 
 export const WORKFLOW_RUN_KEY_PREFIX = "workflow-run:";
@@ -65,6 +73,7 @@ export const STEP_STATE_VIEW: Record<WorkflowStepState, { status: Status; label:
   canceled: { status: "canceled", label: "Canceled" },
   skipped: { status: "idle", label: "Skipped" },
   interrupted: { status: "warning", label: "Interrupted" },
+  conditionNotMet: { status: "idle", label: "Condition not met" },
 };
 
 export const ATTEMPT_STATE_VIEW: Record<WorkflowAttemptState, { status: Status; label: string }> = {
@@ -201,7 +210,7 @@ export function outputValueLabel(value: WorkflowOutputValue): string {
 export function auditedDeclarations(run: WorkflowRun): Map<string, { verdict: string; axioms: string[]; statement: string | null }> {
   const map = new Map<string, { verdict: string; axioms: string[]; statement: string | null }>();
   for (const step of run.steps) {
-    for (const attempt of step.attempts) {
+    for (const attempt of attemptsOf(step)) {
       for (const output of attempt.outputs) {
         if (output.value.kind !== "formalEvidence") continue;
         for (const d of output.value.declarations) map.set(d.name, { verdict: d.verdict, axioms: d.axioms, statement: d.statement });
@@ -230,3 +239,96 @@ export function usageRows(run: Pick<WorkflowRun, "usage" | "budgets">): RunTotal
 
 /** `workflow.planStale`: the reviewed plan no longer matches (changed, expired, used, or unknown); review a new one. */
 export const STALE_PLAN_CODES = ["workflow.planStale"];
+
+// ----- M9: instances, concurrency, cause, environment ------------------------------------------
+
+/** Every attempt of a step: its own (a single step) and those of its instances (a repeated step). */
+export function attemptsOf(step: WorkflowRunStep): WorkflowStepAttempt[] {
+  return [...step.attempts, ...(step.instances ?? []).flatMap((i) => i.attempts)];
+}
+
+export interface RunningItem {
+  step: string;
+  label: string;
+  /** null: the step itself; otherwise the instance index. */
+  instance: number | null;
+  detail: string | null;
+  sinceMs: number | null;
+}
+
+const lastAttempt = (attempts: WorkflowStepAttempt[]) => attempts[attempts.length - 1];
+
+/** Steps and instances in flight now (several when the plan allows parallel steps). */
+export function runningNow(run: Pick<WorkflowRun, "steps" | "plan">): RunningItem[] {
+  const items: RunningItem[] = [];
+  for (const step of run.steps) {
+    const repeat = run.plan.steps.find((p) => p.step === step.step)?.repeat;
+    const parameter = repeat?.kind === "forEach" ? repeat.parameter : undefined;
+    const instances = step.instances ?? [];
+    const runningInstances = instances.filter((i) => i.state === "running");
+    if (runningInstances.length) {
+      for (const i of runningInstances) {
+        const a = lastAttempt(i.attempts);
+        items.push({ step: step.step, label: step.label, instance: i.index, detail: instanceLabel(i, parameter), sinceMs: a ? (a.dispatchedAtMs ?? a.intentAtMs) : null });
+      }
+    } else if (step.state === "running") {
+      const a = lastAttempt(step.attempts);
+      items.push({ step: step.step, label: step.label, instance: null, detail: null, sinceMs: a ? (a.dispatchedAtMs ?? a.intentAtMs) : null });
+    }
+  }
+  return items;
+}
+
+/** "seed = 3" for a forEach instance, "Iteration 2" for an until iteration. */
+export function instanceLabel(instance: WorkflowStepInstance, parameter?: string): string {
+  if (instance.parameter) return `${parameter ? `${parameter} = ` : ""}${paramText(instance.parameter)}`;
+  return `Iteration ${instance.index + 1}`;
+}
+
+export function instanceCounts(instances: WorkflowStepInstance[]): Partial<Record<WorkflowStepState, number>> {
+  const counts: Partial<Record<WorkflowStepState, number>> = {};
+  for (const i of instances) counts[i.state] = (counts[i.state] ?? 0) + 1;
+  return counts;
+}
+
+/** Plain-language cause of a run. */
+export function describeCause(cause: WorkflowRunCause | undefined): string {
+  if (!cause || cause.kind === "manual") return "Started by you from a reviewed plan";
+  if (cause.kind === "reproduce") return `Reproduction of run ${cause.of}, from a reviewed plan pinned to that run's recorded inputs`;
+  const n = cause.changed.length;
+  return `Started by trigger ${cause.trigger} under its approved standing plan${n ? ` after ${n} watched input${n === 1 ? "" : "s"} changed` : ""}`;
+}
+
+export interface EnvironmentFact {
+  label: string;
+  value: string;
+  /** A digest shown short with the full value available. */
+  hash?: string;
+}
+
+/** The recorded environment of an attempt as label/value rows ("not recorded" omitted). */
+export function environmentFacts(env: WorkflowEnvironment): EnvironmentFact[] {
+  const facts: EnvironmentFact[] = [
+    { label: "Runner", value: `${env.runner} (${CONTAINMENT_VIEW[env.containment]?.label ?? env.containment})` },
+    { label: "System", value: `${env.os} ${env.arch} · Exposition ${env.appVersion}` },
+  ];
+  if (env.image) facts.push({ label: "Image", value: env.image.id ? env.image.name : `${env.image.name} (identity not recorded)`, ...(env.image.id ? { hash: env.image.id } : {}) });
+  if (env.interpreter) facts.push({ label: "Interpreter", value: `${env.interpreter.name} ${env.interpreter.version ?? "(version not recorded)"}` });
+  if (env.toolchain) {
+    facts.push({
+      label: "Toolchain",
+      value: `${env.toolchain.name} ${env.toolchain.version ?? "(version not recorded)"}`,
+      ...(env.toolchain.manifestDigest ? { hash: env.toolchain.manifestDigest } : {}),
+    });
+  }
+  if (env.packages.length || env.packagesDigest) {
+    facts.push({
+      label: "Packages",
+      value: `${env.packages.length} package${env.packages.length === 1 ? "" : "s"}`,
+      ...(env.packagesDigest ? { hash: env.packagesDigest } : {}),
+    });
+  }
+  if (env.model) facts.push({ label: "Model", value: `${env.model.provider} · ${env.model.model}` });
+  if (env.seed !== null) facts.push({ label: "Seed", value: String(env.seed) });
+  return facts;
+}

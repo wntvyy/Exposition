@@ -554,7 +554,7 @@ impl Creator<'_> {
                     let saved = self.graph.save_definition(
                         &origin,
                         &SaveWorkflowRequest { id: None, expected_revision: None, definition: w.definition.clone() },
-                        &ValidationContext { ceiling: None, file_exists: Some(&exists) },
+                        &ValidationContext { ceiling: None, file_exists: Some(&exists), ..Default::default() },
                         *provenance == Provenance::Imported,
                     )?;
                     let mut refs = BTreeMap::new();

@@ -3,19 +3,28 @@
 //! run contract shared with the UI.
 
 pub mod adapters;
+pub mod condition;
+pub mod environment;
+pub mod manifest;
 pub mod model;
 pub mod plan;
+pub mod reproduce;
 pub mod runner;
 pub mod service;
+mod slots;
 pub mod store;
+pub mod triggers;
 
 pub use model::*;
-pub use service::{WorkflowHost, WorkflowRunConfig, WorkflowRunService};
+pub use service::{PlanOptions, WorkflowHost, WorkflowRunConfig, WorkflowRunService};
+pub use slots::SlotCounts;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+#[cfg(test)]
+mod repro_tests;
 #[cfg(test)]
 mod tests;

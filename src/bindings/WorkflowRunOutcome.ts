@@ -4,4 +4,9 @@ import type { WorkflowOutputValue } from "./WorkflowOutputValue";
 /**
  * A declared outcome and what realized it.
  */
-export type WorkflowRunOutcome = { id: string, label: string, optional: boolean, step: string, port: string, value: WorkflowOutputValue | null, };
+export type WorkflowRunOutcome = { id: string, label: string, optional: boolean, step: string, port: string, value: WorkflowOutputValue | null, 
+/**
+ * Why the outcome was not produced (the step failed, was canceled or
+ * skipped, ...); `None` while it is produced or the run is active.
+ */
+reason: string | null, };

@@ -1,7 +1,9 @@
 // A small Monaco editor for a step's code payload. The code is data of the
 // workflow definition (saved as part of a revision), not a project file; it
-// is never run in this version.
+// runs only as part of an approved plan, in the language its operation declares.
 import { useEffect, useRef } from "react";
+
+import type { CodeLanguage } from "../../bindings/CodeLanguage";
 
 import { editorDefaults, monaco } from "../../lib/monaco";
 import { ensureLanguage } from "../editor/languages";
@@ -10,10 +12,12 @@ export function CodePayloadEditor({
   value,
   onChange,
   label,
+  language = "python",
 }: {
   value: string;
   onChange: (value: string) => void;
   label: string;
+  language?: CodeLanguage;
 }) {
   const container = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
@@ -22,7 +26,7 @@ export function CodePayloadEditor({
 
   useEffect(() => {
     if (!container.current) return;
-    const model = monaco.editor.createModel(value, ensureLanguage("python"));
+    const model = monaco.editor.createModel(value, ensureLanguage(language));
     const editor = monaco.editor.create(container.current, {
       ...editorDefaults,
       model,
@@ -40,7 +44,7 @@ export function CodePayloadEditor({
     };
     // The editor owns its text after creation; external resets are applied below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [language]);
 
   useEffect(() => {
     const model = editorRef.current?.getModel();

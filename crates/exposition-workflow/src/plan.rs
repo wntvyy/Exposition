@@ -15,15 +15,17 @@ use std::path::{Path, PathBuf};
 use exposition_core::path::WorkspacePath;
 use exposition_graph::workflow::registry::{self, Containment, OperationContract, WorkflowEffect};
 use exposition_graph::workflow::{
-    AuthorityCeiling, DraftState, InputSource, InputVersion, ParamValue, ValidationContext, WorkflowConnection,
+    AuthorityCeiling, DraftState, InputSource, InputVersion, ParamValue, StepCondition, StepRepeat, ValidationContext,
+    WorkflowConnection, WorkflowStep,
 };
 use exposition_graph::{SavedWorkflow, WorkflowPlanId};
 use serde::Serialize;
 
 use crate::adapters::Adapters;
 use crate::model::{
-    PLAN_TTL_MS, WorkflowPlanBinding, WorkflowPlanBlocker, WorkflowPlanExecution, WorkflowPlanInput, WorkflowPlanStep,
-    WorkflowRunBudgets, WorkflowRunOutcome, WorkflowRunPlan,
+    MAX_PARALLEL, PLAN_TTL_MS, WorkflowConcurrencyLimits, WorkflowPlanBinding, WorkflowPlanBlocker,
+    WorkflowPlanExecution, WorkflowPlanInput, WorkflowPlanStep, WorkflowRunBudgets, WorkflowRunOutcome,
+    WorkflowRunPlan, WorkflowRunnerImage,
 };
 
 /// A run never takes longer than this in total.
@@ -46,7 +48,21 @@ pub struct PlanFacts<'a> {
     /// runs in the restricted container).
     pub restricted_image_id: &'a dyn Fn() -> Option<String>,
     pub adapters: &'a Adapters,
-    pub active_run: bool,
+    /// Why another run keeps this one from starting now (a run of the same
+    /// workflow is active, or the active-run limit is reached).
+    pub active_run: Option<String>,
+    /// Input id → SHA-256 the plan pins instead of the definition's version.
+    pub pins: &'a BTreeMap<String, String>,
+    /// The application-wide concurrency limits.
+    pub limits: &'a WorkflowConcurrencyLimits,
+    /// Saved workflow revisions of the project (composite children).
+    pub resolve: &'a exposition_graph::workflow::ResolveWorkflow<'a>,
+}
+
+/// The definition's `maxParallel` (1 when it declares none; validation
+/// refuses values outside 1..=4, the runner never exceeds them either).
+fn max_parallel_of(def: &exposition_graph::workflow::WorkflowDefinition) -> u32 {
+    def.max_parallel().clamp(1, MAX_PARALLEL)
 }
 
 /// Why a runner cannot run (stable code, message).
@@ -158,11 +174,55 @@ pub fn project_key(root: &Path) -> String {
     s.to_lowercase()
 }
 
-fn time_limit(step: &exposition_graph::workflow::WorkflowStep, contract: &OperationContract) -> u32 {
+/// The time limit of a step with `parameters` (its `timeoutSeconds`, at most
+/// the contract's limit).
+pub(crate) fn time_limit_of(parameters: &BTreeMap<String, ParamValue>, contract: &OperationContract) -> u32 {
     let max = contract.limits.max_seconds.max(1);
-    match step.parameters.get("timeoutSeconds") {
+    match parameters.get("timeoutSeconds") {
         Some(ParamValue::Integer(v)) => (*v).clamp(1, max as i64) as u32,
         _ => max,
+    }
+    .min(MAX_RUN_SECONDS)
+}
+
+/// At most this many forEach instances (validation allows 1..=20).
+pub const MAX_FOR_EACH: usize = exposition_graph::workflow::MAX_FOR_EACH_VALUES;
+/// At most this many until iterations (validation allows 1..=10).
+pub const MAX_UNTIL: u32 = exposition_graph::workflow::MAX_UNTIL_ITERATIONS;
+
+/// How many instances a repeated step may run (1 for other steps).
+pub fn instances_of(repeat: Option<&StepRepeat>) -> u32 {
+    match repeat {
+        None => 1,
+        Some(StepRepeat::ForEach { values, .. }) => values.len().clamp(1, MAX_FOR_EACH) as u32,
+        Some(StepRepeat::Until { max_iterations, .. }) => (*max_iterations).clamp(1, MAX_UNTIL),
+    }
+}
+
+/// The parameters of forEach instance `index` (the step's own otherwise).
+pub fn instance_parameters(step: &WorkflowPlanStep, index: u32) -> BTreeMap<String, ParamValue> {
+    let mut parameters = step.parameters.clone();
+    if let Some(StepRepeat::ForEach { parameter, values }) = &step.repeat
+        && let Some(value) = values.get(index as usize)
+    {
+        parameters.insert(parameter.clone(), value.clone());
+    }
+    parameters
+}
+
+/// The longest time limit any instance of the step gets.
+fn step_time_limit(step: &WorkflowStep, contract: &OperationContract) -> u32 {
+    match &step.repeat {
+        Some(StepRepeat::ForEach { parameter, values }) => values
+            .iter()
+            .map(|v| {
+                let mut p = step.parameters.clone();
+                p.insert(parameter.clone(), v.clone());
+                time_limit_of(&p, contract)
+            })
+            .max()
+            .unwrap_or_else(|| time_limit_of(&step.parameters, contract)),
+        _ => time_limit_of(&step.parameters, contract),
     }
 }
 
@@ -181,7 +241,11 @@ struct ApprovedStep<'a> {
     prerequisites: &'a [String],
     time_limit_seconds: u32,
     max_output_bytes: u64,
+    max_model_requests: u32,
     available: bool,
+    composite_path: &'a [String],
+    condition: &'a Option<StepCondition>,
+    repeat: &'a Option<StepRepeat>,
 }
 
 #[derive(Serialize)]
@@ -196,6 +260,8 @@ struct Approved<'a> {
     steps: Vec<ApprovedStep<'a>>,
     ceiling: &'a AuthorityCeiling,
     budgets: &'a WorkflowRunBudgets,
+    max_parallel: u32,
+    limits: &'a WorkflowConcurrencyLimits,
     execution: ApprovedExecution<'a>,
 }
 
@@ -209,13 +275,15 @@ struct ApprovedExecution<'a> {
     trusted_folder: Option<bool>,
     native_steps: &'a [String],
     model_steps: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runner_images: &'a Option<Vec<WorkflowRunnerImage>>,
 }
 
 /// SHA-256 over a canonical serialization of everything the user approves.
 pub fn approval_hash(plan: &WorkflowRunPlan, root: &Path) -> String {
     let key = project_key(root);
     let approved = Approved {
-        schema: "exposition.workflowRunApproval/1",
+        schema: "exposition.workflowRunApproval/2",
         project: &key,
         workflow: plan.workflow.as_str(),
         revision: plan.revision,
@@ -237,11 +305,17 @@ pub fn approval_hash(plan: &WorkflowRunPlan, root: &Path) -> String {
                 prerequisites: &s.prerequisites,
                 time_limit_seconds: s.time_limit_seconds,
                 max_output_bytes: s.max_output_bytes,
+                max_model_requests: s.max_model_requests,
                 available: s.available,
+                composite_path: &s.composite_path,
+                condition: &s.condition,
+                repeat: &s.repeat,
             })
             .collect(),
         ceiling: &plan.ceiling,
         budgets: &plan.budgets,
+        max_parallel: plan.max_parallel,
+        limits: &plan.limits,
         execution: ApprovedExecution {
             restricted_backend: &plan.execution.restricted_backend,
             restricted_image: &plan.execution.restricted_image,
@@ -249,6 +323,7 @@ pub fn approval_hash(plan: &WorkflowRunPlan, root: &Path) -> String {
             trusted_folder: (!plan.execution.native_steps.is_empty()).then_some(plan.execution.trusted_folder),
             native_steps: &plan.execution.native_steps,
             model_steps: &plan.execution.model_steps,
+            runner_images: &plan.execution.runner_images,
         },
     };
     crate::adapters::sha256_hex(&serde_json::to_vec(&approved).unwrap_or_default())
@@ -281,7 +356,14 @@ fn blocker(code: &str, message: impl Into<String>, step: Option<&str>, input: Op
 pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> BuiltPlan {
     let def = &saved.definition;
     // Never trust the stored validation: validate again now.
-    let validation = exposition_graph::validate_workflow(def, &ValidationContext::default());
+    let validation = exposition_graph::validate_workflow(
+        def,
+        &ValidationContext {
+            resolve_workflow: Some(facts.resolve),
+            workflow_id: Some(&saved.id),
+            ..Default::default()
+        },
+    );
     let mut blockers = Vec::new();
     if validation.state != DraftState::WellFormed {
         let errors: Vec<String> = validation
@@ -308,9 +390,10 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
     let mut inputs = Vec::new();
     for input in &def.inputs {
         let InputSource::Resource { path, version } = &input.source else { continue };
-        let pinned = match version {
-            InputVersion::Pinned { content_hash } => Some(content_hash.to_ascii_lowercase()),
-            InputVersion::AtRunStart => None,
+        let pinned = match (facts.pins.get(&input.id), version) {
+            (Some(pin), _) => Some(pin.to_ascii_lowercase()),
+            (None, InputVersion::Pinned { content_hash }) => Some(content_hash.to_ascii_lowercase()),
+            (None, InputVersion::AtRunStart) => None,
         };
         match hash_project_file(facts.root, path) {
             Ok((sha256, bytes)) => {
@@ -354,12 +437,29 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
         }
     }
 
-    // ----- steps in dependency order -----
-    let mut steps = Vec::new();
+    // ----- steps in dependency order (composites expanded) -----
+    // The plan is flat: each composite step is replaced by its pinned
+    // child's steps (`<composite>/<child>`, validation's dependency order).
+    let expanded = match exposition_graph::workflow::expand_workflow(def, facts.resolve) {
+        Ok(expanded) => Some(expanded),
+        Err(message) => {
+            if validation.state == DraftState::WellFormed {
+                blockers.push(blocker("workflow.compositeNotWellFormed", message, None, None));
+            }
+            None
+        }
+    };
+    let flat_def = expanded.as_ref().map(|e| &e.definition).unwrap_or(def);
+    let mut steps: Vec<WorkflowPlanStep> = Vec::new();
     for planned in &validation.plan {
-        let Some(step) = def.steps.iter().find(|s| s.id == planned.step) else { continue };
+        let Some(step) = flat_def.steps.iter().find(|s| s.id == planned.step) else { continue };
         let Some(contract) = registry::operation(&step.operation.id, step.operation.version) else { continue };
-        let bindings: Vec<WorkflowPlanBinding> = def
+        let composite_path = expanded
+            .as_ref()
+            .and_then(|e| e.steps.iter().find(|x| x.id == step.id))
+            .map(|x| x.composite_path.clone())
+            .unwrap_or_default();
+        let bindings: Vec<WorkflowPlanBinding> = flat_def
             .connections
             .iter()
             .filter_map(|c| match c {
@@ -369,14 +469,15 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
                 _ => None,
             })
             .collect();
-        let prerequisites: Vec<String> = def
-            .connections
-            .iter()
-            .filter_map(|c| match c {
-                WorkflowConnection::Prerequisite { before, after } if after == &step.id => Some(before.clone()),
-                _ => None,
-            })
-            .collect();
+        let mut prerequisites: Vec<String> = Vec::new();
+        for c in &flat_def.connections {
+            if let WorkflowConnection::Prerequisite { before, after } = c
+                && after == &step.id
+                && !prerequisites.contains(before)
+            {
+                prerequisites.push(before.clone());
+            }
+        }
         let (available, availability) =
             match runner_availability(&contract.runner.id, facts.root, facts.trusted, facts.adapters) {
                 Ok(()) => (true, "Available".to_owned()),
@@ -398,11 +499,36 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
             parameters: step.parameters.clone(),
             bindings,
             prerequisites,
-            time_limit_seconds: time_limit(step, &contract).min(MAX_RUN_SECONDS),
+            time_limit_seconds: step_time_limit(step, &contract),
             max_output_bytes: contract.limits.max_output_bytes,
+            max_model_requests: if contract.runner.containment == Containment::ReadOnlyModel {
+                MODEL_REQUESTS_PER_STEP
+            } else {
+                0
+            },
             available,
             availability,
+            composite_path,
+            condition: step.condition.clone(),
+            repeat: step.repeat.clone(),
         });
+    }
+    // A condition reads one validated output: not the many outputs of a
+    // forEach step.
+    for s in &steps {
+        if let Some(c) = &s.condition
+            && steps.iter().any(|p| p.step == c.source.step && matches!(p.repeat, Some(StepRepeat::ForEach { .. })))
+        {
+            blockers.push(blocker(
+                "workflow.conditionSource",
+                format!(
+                    "“{}”: its condition reads a step that runs once per value; it has no single output to test",
+                    s.label
+                ),
+                Some(&s.step),
+                None,
+            ));
+        }
     }
 
     // ----- budgets -----
@@ -412,39 +538,81 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
         steps.iter().filter(|s| s.containment == Containment::NativeAccount).map(|s| s.step.clone()).collect();
     let restricted_steps: Vec<&str> =
         steps.iter().filter(|s| s.containment == Containment::RestrictedContainer).map(|s| s.label.as_str()).collect();
+    // Every instance of a repeated step counts like a step.
+    let n = |s: &WorkflowPlanStep| instances_of(s.repeat.as_ref());
     let budgets = WorkflowRunBudgets {
-        max_steps: steps.len() as u32,
-        max_total_seconds: steps.iter().map(|s| s.time_limit_seconds).sum::<u32>().clamp(1, MAX_RUN_SECONDS),
-        max_output_bytes: steps.iter().map(|s| s.max_output_bytes).sum::<u64>().min(MAX_RUN_OUTPUT_BYTES),
-        max_model_requests: model_steps.len() as u32 * MODEL_REQUESTS_PER_STEP,
+        max_steps: steps.iter().map(n).sum(),
+        max_total_seconds: steps
+            .iter()
+            .map(|s| s.time_limit_seconds.saturating_mul(n(s)))
+            .fold(0u32, u32::saturating_add)
+            .clamp(1, MAX_RUN_SECONDS),
+        max_output_bytes: steps
+            .iter()
+            .map(|s| s.max_output_bytes.saturating_mul(u64::from(n(s))))
+            .fold(0u64, u64::saturating_add)
+            .min(MAX_RUN_OUTPUT_BYTES),
+        max_model_requests: steps.iter().map(|s| s.max_model_requests * n(s)).sum(),
     };
-    // The restricted backend and image bind the plan only when a step uses them.
+    let max_parallel = max_parallel_of(def);
+    // The restricted backend and image bind the plan only when a step uses
+    // them. A runner with its own image (R, Julia) binds that image and its
+    // identity instead of the default one.
     let restricted = !restricted_steps.is_empty();
+    let mut runner_images: Vec<WorkflowRunnerImage> = Vec::new();
+    let mut default_image_steps: Vec<&str> = Vec::new();
+    for s in steps.iter().filter(|s| s.containment == Containment::RestrictedContainer) {
+        match facts.adapters.get(&s.runner).and_then(|a| a.restricted_image()) {
+            None => default_image_steps.push(s.label.as_str()),
+            Some(Ok((image, image_id))) => {
+                if !runner_images.iter().any(|b| b.runner == s.runner) {
+                    runner_images.push(WorkflowRunnerImage { runner: s.runner.clone(), image, image_id });
+                }
+            }
+            // The step is unavailable; its availability blocker says why.
+            Some(Err(_)) => {}
+        }
+    }
+    let default_restricted = !default_image_steps.is_empty();
     let execution = WorkflowPlanExecution {
         restricted_backend: facts.restricted_backend.clone().filter(|_| restricted),
-        restricted_image: facts.restricted_image.clone().filter(|_| restricted),
-        restricted_image_id: if restricted { (facts.restricted_image_id)() } else { None },
+        restricted_image: facts.restricted_image.clone().filter(|_| default_restricted),
+        restricted_image_id: if default_restricted { (facts.restricted_image_id)() } else { None },
         trusted_folder: facts.trusted,
         native_steps: native_steps.clone(),
         model_steps: model_steps.clone(),
+        runner_images: (!runner_images.is_empty()).then(|| runner_images.clone()),
     };
 
     // ----- notices -----
-    let mut notices = vec![
+    let mut notices = vec![if max_parallel <= 1 {
         "Nothing runs until you start the run. Steps run one at a time in the order shown; a failed step stops the workflow, and nothing is retried or repeated."
-            .to_owned(),
-    ];
-    if !restricted_steps.is_empty() {
-        notices.push(format!(
+            .to_owned()
+    } else {
+        let l = facts.limits;
+        format!(
+            "Nothing runs until you start the run. Up to {max_parallel} independent steps run at the same time (a step starts once everything it depends on succeeded; across all runs at most {} steps at once: {} restricted, {} native, {} agent, {} Lean). Budgets are reserved before each step starts. A failed step stops the workflow: nothing new starts, steps already running finish, and nothing is retried or repeated.",
+            l.max_in_flight_steps, l.restricted, l.native, l.agent, l.lean
+        )
+    }];
+    let restricted_notice = |labels: &[&str], image: Option<&str>| {
+        format!(
             "{} run{} in the restricted container ({}): only the declared inputs and code are staged read-only, with no network and no credentials; outputs are validated before anything uses them.",
-            restricted_steps.iter().map(|l| format!("“{l}”")).collect::<Vec<_>>().join(", "),
-            if restricted_steps.len() == 1 { "s" } else { "" },
-            match (&facts.restricted_backend, &facts.restricted_image) {
+            labels.iter().map(|l| format!("“{l}”")).collect::<Vec<_>>().join(", "),
+            if labels.len() == 1 { "s" } else { "" },
+            match (&facts.restricted_backend, image) {
                 (Some(b), Some(i)) => format!("{b}, image {i}"),
                 (Some(b), None) => format!("{b}, no image configured"),
                 _ => "not configured".to_owned(),
             }
-        ));
+        )
+    };
+    if default_restricted {
+        notices.push(restricted_notice(&default_image_steps, facts.restricted_image.as_deref()));
+    }
+    for bound in &runner_images {
+        let labels: Vec<&str> = steps.iter().filter(|s| s.runner == bound.runner).map(|s| s.label.as_str()).collect();
+        notices.push(restricted_notice(&labels, Some(&bound.image)));
     }
     if !native_steps.is_empty() {
         notices.push(format!(
@@ -460,6 +628,39 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
             if model_steps.len() == 1 { "s" } else { "" }
         ));
     }
+    // Bounded control flow, in plain words.
+    let label_of =
+        |id: &str| steps.iter().find(|s| s.step == id).map(|s| s.label.clone()).unwrap_or_else(|| id.to_owned());
+    for s in &steps {
+        if let Some(c) = &s.condition {
+            notices.push(format!(
+                "“{}” runs only {} {} (output “{}” of “{}”); otherwise it is skipped, and so are the steps that need its output.",
+                s.label,
+                if c.negate { "unless" } else { "when" },
+                crate::condition::describe(&c.test),
+                c.source.port,
+                label_of(&c.source.step)
+            ));
+        }
+        match &s.repeat {
+            Some(StepRepeat::ForEach { parameter, values }) => notices.push(format!(
+                "“{}” runs once for each of {} values of {parameter} (each instance counts as a step).",
+                s.label,
+                values.len()
+            )),
+            Some(StepRepeat::Until { port, test, negate, max_iterations, on_exhausted }) => notices.push(format!(
+                "“{}” runs again, at most {max_iterations} times, until {}{} for its output “{port}”; if that never happens, {}.",
+                s.label,
+                if *negate { "it is not the case that " } else { "" },
+                crate::condition::describe(test),
+                match on_exhausted {
+                    exposition_graph::workflow::Exhausted::Fail => "the step fails",
+                    exposition_graph::workflow::Exhausted::UseLast => "the last iteration's outputs are used",
+                }
+            )),
+            None => {}
+        }
+    }
     if steps.iter().any(|s| s.effects.contains(&WorkflowEffect::ProposeDocumentChange)) {
         notices.push("Manuscript promotions are only prepared; you review and approve each one separately.".to_owned());
     }
@@ -470,7 +671,7 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
         );
     }
     // A restricted plan binds the image's identity, not just its name.
-    if restricted && execution.restricted_image_id.is_none() && steps.iter().all(|s| s.available) {
+    if default_restricted && execution.restricted_image_id.is_none() && steps.iter().all(|s| s.available) {
         blockers.push(blocker(
             "workflow.restrictedUnavailable",
             "The restricted image's identity could not be determined (Docker did not report it); restricted steps run only in an identified image. Nothing runs natively instead.",
@@ -478,25 +679,43 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
             None,
         ));
     }
-    if facts.active_run {
-        blockers.push(blocker(
-            "workflow.activeRun",
-            "Another workflow run is active; wait for it to finish or cancel it first.",
-            None,
-            None,
-        ));
+    for bound in runner_images.iter().filter(|b| b.image_id.is_none()) {
+        if steps.iter().all(|s| s.available) {
+            blockers.push(blocker(
+                "workflow.restrictedUnavailable",
+                format!(
+                    "The identity of the restricted image {} could not be determined (Docker did not report it); restricted steps run only in an identified image. Nothing runs natively instead.",
+                    bound.image
+                ),
+                None,
+                None,
+            ));
+        }
+    }
+    if let Some(message) = &facts.active_run {
+        blockers.push(blocker("workflow.activeRun", message.clone(), None, None));
     }
 
     let outcomes = def
         .outcomes
         .iter()
-        .map(|o| WorkflowRunOutcome {
-            id: o.id.clone(),
-            label: o.label.clone(),
-            optional: o.optional,
-            step: o.from.step.clone(),
-            port: o.from.port.clone(),
-            value: None,
+        .map(|o| {
+            // An outcome of a composite step is realized by a step inside it.
+            let from = flat_def
+                .outcomes
+                .iter()
+                .find(|x| x.id == o.id)
+                .map(|x| x.from.clone())
+                .unwrap_or_else(|| o.from.clone());
+            WorkflowRunOutcome {
+                id: o.id.clone(),
+                label: o.label.clone(),
+                optional: o.optional,
+                step: from.step,
+                port: from.port,
+                value: None,
+                reason: None,
+            }
         })
         .collect();
     let mut plan = WorkflowRunPlan {
@@ -510,6 +729,8 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
         steps,
         ceiling: def.ceiling,
         budgets,
+        max_parallel,
+        limits: facts.limits.clone(),
         execution,
         notices,
         blockers,
@@ -577,6 +798,22 @@ pub fn describe_changes(approved: &WorkflowRunPlan, now: &WorkflowRunPlan) -> St
             now.execution.restricted_image.as_deref().unwrap_or("none")
         ));
     }
+    let images = |p: &WorkflowRunPlan| p.execution.runner_images.clone().unwrap_or_default();
+    for bound in images(approved) {
+        match images(now).iter().find(|n| n.runner == bound.runner) {
+            None => changes.push(format!("the restricted image {} is no longer used", bound.image)),
+            Some(n) if n.image != bound.image => {
+                changes.push(format!("the restricted image changed ({} → {})", bound.image, n.image))
+            }
+            Some(n) if n.image_id != bound.image_id => changes.push(format!(
+                "the restricted image {} is now a different image ({} → {})",
+                n.image,
+                short_id(bound.image_id.as_deref()),
+                short_id(n.image_id.as_deref())
+            )),
+            Some(_) => {}
+        }
+    }
     for step in &approved.steps {
         if let Some(current) = now.steps.iter().find(|s| s.step == step.step)
             && current.available != step.available
@@ -587,6 +824,15 @@ pub fn describe_changes(approved: &WorkflowRunPlan, now: &WorkflowRunPlan) -> St
                 if current.available { "now" } else { "no longer" }
             ));
         }
+    }
+    if approved.max_parallel != now.max_parallel {
+        changes.push(format!(
+            "the steps that may run at the same time changed ({} → {})",
+            approved.max_parallel, now.max_parallel
+        ));
+    }
+    if approved.limits != now.limits {
+        changes.push("the application's concurrency limits changed".to_owned());
     }
     if approved.project != now.project {
         changes.push("the open project changed".to_owned());

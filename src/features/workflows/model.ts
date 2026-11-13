@@ -6,9 +6,9 @@ import type { OutcomeKind } from "../../bindings/OutcomeKind";
 import type { PortSource } from "../../bindings/PortSource";
 import type { PortType } from "../../bindings/PortType";
 import type { WorkflowConnection } from "../../bindings/WorkflowConnection";
-import type { WorkflowDefinition } from "../../bindings/WorkflowDefinition";
 import type { WorkflowDiagnostic } from "../../bindings/WorkflowDiagnostic";
-import type { WorkflowStep } from "../../bindings/WorkflowStep";
+import type { WorkflowDefinition, WorkflowStep } from "./contract";
+import { compositeContractId } from "./orchestration";
 
 export const WORKFLOW_KEY_PREFIX = "workflow:";
 
@@ -52,7 +52,17 @@ export const PORT_TYPE_LABELS: Record<PortType, string> = {
 /** Types an external input (a project file) may have. */
 export const FILE_INPUT_TYPES: PortType[] = ["codeSource", "dataset", "figure", "table", "document", "formalSource"];
 
+/**
+ * The operation contract of a step. A composite step's ports come from its
+ * pinned child (`withComposites` derives them); until the child is loaded it
+ * falls back to the registered `workflow.composite` contract (no ports).
+ */
 export function contractOf(contracts: OperationContract[], step: WorkflowStep): OperationContract | undefined {
+  if (step.composite) {
+    const id = compositeContractId(step.composite);
+    const derived = contracts.find((c) => c.id === id);
+    if (derived) return derived;
+  }
   return contracts.find((c) => c.id === step.operation.id && c.version === step.operation.version);
 }
 
@@ -65,24 +75,26 @@ export function parseSourceKey(key: string): PortSource | null {
   return input?.[1] ? { kind: "input", input: input[1] } : null;
 }
 
-/** Steps reachable from `stepId` along data and prerequisite connections. */
+/**
+ * Steps reachable from `stepId` along data and prerequisite connections and
+ * condition sources (a condition on a step's output orders it first).
+ */
 export function downstreamOf(def: WorkflowDefinition, stepId: string): Set<string> {
   const out = new Set<string>();
   const queue = [stepId];
+  const visit = (next: string) => {
+    if (!out.has(next)) {
+      out.add(next);
+      queue.push(next);
+    }
+  };
   while (queue.length) {
     const current = queue.shift() as string;
     for (const c of def.connections) {
-      const next =
-        c.kind === "data" && c.from.kind === "step" && c.from.step === current
-          ? c.to.step
-          : c.kind === "prerequisite" && c.before === current
-            ? c.after
-            : null;
-      if (next && !out.has(next)) {
-        out.add(next);
-        queue.push(next);
-      }
+      if (c.kind === "data" && c.from.kind === "step" && c.from.step === current) visit(c.to.step);
+      else if (c.kind === "prerequisite" && c.before === current) visit(c.after);
     }
+    for (const s of def.steps) if (s.condition?.source.step === current) visit(s.id);
   }
   return out;
 }
@@ -107,7 +119,8 @@ export function compatibleSources(
 ): SourceOption[] {
   const step = def.steps.find((s) => s.id === stepId);
   const contract = step && contractOf(contracts, step);
-  const accepts = contract?.inputs.find((p) => p.name === port)?.types ?? [];
+  const spec = contract?.inputs.find((p) => p.name === port);
+  const accepts = spec?.types ?? [];
   const downstream = downstreamOf(def, stepId);
   const options: SourceOption[] = [];
   for (const input of def.inputs) {
@@ -118,6 +131,8 @@ export function compatibleSources(
   }
   for (const other of def.steps) {
     if (other.id === stepId || downstream.has(other.id)) continue;
+    // A forEach step yields one output per instance: only a port that takes several sources can collect them.
+    if (other.repeat?.kind === "forEach" && !spec?.multiple) continue;
     const c = contractOf(contracts, other);
     for (const out of c?.outputs ?? []) {
       const type = out.types[0];
@@ -169,11 +184,18 @@ export function addStep(def: WorkflowDefinition, contract: OperationContract): W
   return { ...def, steps: [...def.steps, step] };
 }
 
-/** Remove a step with its connections and the outcomes it realized. */
+/** Remove a step with its connections, the outcomes it realized, and conditions on its outputs. */
 export function removeStep(def: WorkflowDefinition, stepId: string): WorkflowDefinition {
   return {
     ...def,
-    steps: def.steps.filter((s) => s.id !== stepId),
+    steps: def.steps
+      .filter((s) => s.id !== stepId)
+      .map((s) => {
+        if (s.condition?.source.step !== stepId) return s;
+        const next = { ...s };
+        delete next.condition;
+        return next;
+      }),
     connections: def.connections.filter((c) => {
       if (c.kind === "data") return c.to.step !== stepId && !(c.from.kind === "step" && c.from.step === stepId);
       if (c.kind === "prerequisite") return c.before !== stepId && c.after !== stepId;
@@ -242,4 +264,42 @@ export function generalDiagnostics(diagnostics: WorkflowDiagnostic[]): WorkflowD
 
 export function sameDefinition(a: WorkflowDefinition, b: WorkflowDefinition): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** "Step → Port" with the port's label when the contract is known. */
+export function outputLabel(def: WorkflowDefinition, contracts: OperationContract[], stepId: string, port: string): string {
+  const step = def.steps.find((s) => s.id === stepId);
+  const spec = step && contractOf(contracts, step)?.outputs.find((p) => p.name === port);
+  return `${step?.label ?? stepId} → ${spec?.label ?? port}`;
+}
+
+export interface ConditionSourceOption {
+  key: string;
+  label: string;
+  step: string;
+  port: string;
+  type: PortType | null;
+  /** The output is optional (may not be produced): "was produced" can be tested. */
+  optional: boolean;
+}
+
+/**
+ * Outputs a condition on `stepId` may test: outputs of other steps that are
+ * not downstream of it (choosing one orders that step first), whose type a
+ * fixed predicate can read — formal evidence (verdict), a dataset (JSON
+ * value), or any optional output (presence).
+ */
+export function conditionSources(def: WorkflowDefinition, contracts: OperationContract[], stepId: string): ConditionSourceOption[] {
+  const downstream = downstreamOf(def, stepId);
+  const options: ConditionSourceOption[] = [];
+  for (const other of def.steps) {
+    // A repeating step yields several values; a condition reads one (Rust: `workflow.conditionSource`).
+    if (other.id === stepId || downstream.has(other.id) || other.repeat) continue;
+    for (const out of contractOf(contracts, other)?.outputs ?? []) {
+      const type = out.types[0] ?? null;
+      if (type !== "formalEvidence" && type !== "dataset" && out.required) continue;
+      options.push({ key: `${other.id}.${out.name}`, label: `${other.label} → ${out.label}`, step: other.id, port: out.name, type, optional: !out.required });
+    }
+  }
+  return options;
 }

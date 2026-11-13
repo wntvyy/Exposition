@@ -23,6 +23,7 @@
 //! with their actual execution mode, so retention/promotion reuse the existing
 //! paths. Active formats (SVG/HTML) are stored and later rendered inertly.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -97,6 +98,79 @@ pub struct BatchRequest {
     /// the container starts from it. `None` runs whatever the configured image
     /// is when the batch starts (its identity is recorded either way).
     pub restricted_image_id: Option<String>,
+    /// Given to the batch as [`SEED_VAR`] (decimal) and recorded with its
+    /// environment. The workflow runner derives it from the run, step, and
+    /// instance; it never carries anything secret.
+    pub seed: Option<u64>,
+    /// The instance index of a repeated (forEach/until) step, given to the
+    /// batch as [`ITERATION_VAR`].
+    pub iteration: Option<u32>,
+    /// The step's declared parameters as text (a forEach value already
+    /// applied), each given to the batch as `EXPOSITION_PARAM_<NAME>` (see
+    /// [`parameter_variable`]). Names must be identifiers; values one line,
+    /// at most [`MAX_PARAMETER_BYTES`], and never a secret.
+    pub parameters: BTreeMap<String, String>,
+}
+
+/// Environment variable carrying [`BatchRequest::seed`].
+pub const SEED_VAR: &str = "EXPOSITION_SEED";
+/// Environment variable carrying [`BatchRequest::iteration`].
+pub const ITERATION_VAR: &str = "EXPOSITION_ITERATION";
+/// Prefix of the variables carrying [`BatchRequest::parameters`].
+pub const PARAMETER_PREFIX: &str = "EXPOSITION_PARAM_";
+/// Longest parameter value given to a batch.
+pub const MAX_PARAMETER_BYTES: usize = 4096;
+
+/// `EXPOSITION_PARAM_<UPPER_SNAKE_NAME>` for a parameter name (`timeoutSeconds`
+/// → `EXPOSITION_PARAM_TIMEOUT_SECONDS`, `value` → `EXPOSITION_PARAM_VALUE`),
+/// or `None` when the name is not an identifier of at most 64 characters.
+pub fn parameter_variable(name: &str) -> Option<String> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !valid {
+        return None;
+    }
+    let mut out = String::from(PARAMETER_PREFIX);
+    let mut previous_lower = false;
+    for c in name.chars() {
+        if c.is_ascii_uppercase() && previous_lower {
+            out.push('_');
+        }
+        previous_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        out.push(c.to_ascii_uppercase());
+    }
+    Some(out)
+}
+
+/// Keys of [`BatchResult::environment`] that workflow environment capture
+/// reads (other keys describe limits and containment for display).
+pub mod environment_keys {
+    /// Configured image reference and its identity (`sha256:…`).
+    pub const IMAGE: &str = "image";
+    pub const IMAGE_ID: &str = "imageId";
+    /// Operating system and CPU architecture the code ran on (the image's
+    /// platform for restricted batches).
+    pub const OS: &str = "os";
+    pub const ARCH: &str = "arch";
+    /// Interpreter implementation (`cpython`, …) and version.
+    pub const IMPLEMENTATION: &str = "implementation";
+    pub const PYTHON_VERSION: &str = "pythonVersion";
+    /// The interpreter of any batch language (`python`, `R`, `julia`) and its
+    /// version when known (R and Julia batches report only these).
+    pub const INTERPRETER_NAME: &str = "interpreterName";
+    pub const INTERPRETER_VERSION: &str = "interpreterVersion";
+    /// One entry per installed package: `name==version`.
+    pub const PACKAGE: &str = "package";
+    /// Where the package list came from (shown with it).
+    pub const PACKAGES_SOURCE: &str = "packagesSource";
+    /// The package list was cut at its bound.
+    pub const PACKAGES_TRUNCATED: &str = "packagesTruncated";
+    /// [`super::SEED_VAR`] as given to the batch.
+    pub const SEED: &str = "seed";
+    /// Anything else the capture needs to say (e.g. why packages are unknown).
+    pub const NOTE: &str = "note";
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -155,6 +229,26 @@ pub trait BatchRunner: Send + Sync {
         request: &BatchRequest,
         control: &BatchControl<'_>,
     ) -> Result<BatchResult, ResearchError>;
+    /// The environment a batch of `mode` would get now, in the
+    /// [`environment_keys`] form, from what is already known (configured
+    /// image identity, cached image package lists, the cached discovery
+    /// report). Never runs anything to find out; unknown parts are omitted.
+    fn current_environment(&self, _root: &Path, _mode: BatchMode) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// [`Self::current_environment`] of a `language` batch.
+    fn current_language_environment(
+        &self,
+        root: &Path,
+        language: BatchLanguage,
+        mode: BatchMode,
+    ) -> Vec<(String, String)> {
+        match language {
+            BatchLanguage::Python => self.current_environment(root, mode),
+            _ => Vec::new(),
+        }
+    }
 
     /// [`Self::availability`] of a `language` batch.
     fn language_availability(&self, root: &Path, language: BatchLanguage, mode: BatchMode) -> Result<(), String> {

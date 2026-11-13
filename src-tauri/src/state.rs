@@ -51,6 +51,9 @@ pub struct AppState {
     /// Workflow runs (M8): plans, the one-step-at-a-time runner, durable run
     /// records in `workflow-runs.sqlite3` (interrupted runs never resume).
     pub workflow_runs: WorkflowRunService,
+    /// Explicit, user-only workflow triggers (M9): standing plans the user
+    /// enabled, in `workflow-triggers.json` (app-local, never in a project).
+    pub workflow_triggers: exposition_workflow::triggers::TriggerService,
 }
 
 impl AppState {
@@ -166,6 +169,15 @@ impl AppState {
                 runtime: tauri::async_runtime::handle().inner().clone(),
             },
         )?;
+        let workflow_triggers = crate::workflow_triggers::build(
+            &data_dir,
+            workflow_runs.clone(),
+            Arc::new(crate::workflow_runs::AppWorkflowHost {
+                workspace: Arc::clone(&workspace),
+                graph: Arc::clone(&graph),
+                execution: execution.clone(),
+            }),
+        );
         Ok(Self {
             documents,
             workspace,
@@ -180,6 +192,7 @@ impl AppState {
             research_project,
             reconciler,
             workflow_runs,
+            workflow_triggers,
         })
     }
 }

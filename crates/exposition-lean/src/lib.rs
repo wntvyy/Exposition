@@ -1,6 +1,8 @@
 //! Lean 4 support for Exposition.
 //!
 //! - [`project`]: Lake project detection and `lean-toolchain` pins.
+//! - [`provenance`]: toolchain pin and `lake-manifest.json` digest/revisions
+//!   of a file (read only; nothing runs).
 //! - [`toolchain`]: resolving pins to installed elan toolchains (never
 //!   installing implicitly).
 //! - [`lsp`]: a small LSP client over an execution-service interactive job.
@@ -27,6 +29,7 @@ pub mod convert;
 pub mod evidence;
 pub mod lsp;
 pub mod project;
+pub mod provenance;
 mod server;
 mod service;
 pub mod toolchain;

@@ -14,6 +14,11 @@
 // - Layout is arranged by dependency order; moved positions are kept per
 //   workflow in localStorage (presentation only, never in the definition).
 // - Validation diagnostics appear as badges on the nodes and ports they name.
+// - M9: a composite step shows the workflow it runs and its pinned revision
+//   (a newer revision is a badge; adopting it is a form edit), and expands to
+//   list the child's steps read-only; conditions are dash-dotted edges from
+//   the tested output ("condition: …", no data); repeats and conditions are
+//   badges on the step.
 // The keyboard alternative is the form (the inspector below the canvas).
 import "@xyflow/react/dist/base.css";
 import "../graph/canvas/canvas.css";
@@ -34,13 +39,13 @@ import {
   type NodeChange,
   type NodeProps,
 } from "@xyflow/react";
-import { Focus, LayoutGrid, Maximize, Minus, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Focus, LayoutGrid, Maximize, Minus, Plus } from "lucide-react";
 import { createContext, memo, useCallback, useContext, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 
 import type { OperationContract } from "../../bindings/OperationContract";
 import type { PortSpec } from "../../bindings/PortSpec";
 import type { PortType } from "../../bindings/PortType";
-import type { WorkflowDefinition } from "../../bindings/WorkflowDefinition";
+import type { WorkflowDefinition } from "./contract";
 import type { WorkflowDiagnostic } from "../../bindings/WorkflowDiagnostic";
 import { Badge, Banner, IconButton, Toolbar } from "../../ui/components";
 import {
@@ -57,7 +62,9 @@ import {
   type CanvasSelectionItem,
   type Point,
 } from "./canvasModel";
-import { contractOf, OUTCOME_LABELS, PORT_TYPE_LABELS, removeInput, removeStep } from "./model";
+import { contractOf, OUTCOME_LABELS, outputLabel, PORT_TYPE_LABELS, removeInput, removeStep } from "./model";
+import { compositeKey, describeTest, isComposite, shortTest } from "./orchestration";
+import type { CompositeInfo } from "./useComposites";
 
 export type { CanvasSelectionItem } from "./canvasModel";
 
@@ -80,6 +87,7 @@ interface NodeContextValue {
   draft: WorkflowDefinition;
   contracts: OperationContract[];
   diagnostics: WorkflowDiagnostic[];
+  composites: ReadonlyMap<string, CompositeInfo>;
 }
 const NodeContext = createContext<NodeContextValue | null>(null);
 const useNodeContext = () => useContext(NodeContext) as NodeContextValue;
@@ -127,24 +135,108 @@ function PortRow({ side, spec, stepId }: { side: "in" | "out"; spec: PortSpec; s
   );
 }
 
+/** The workflow a composite step runs, its pinned revision, and its steps (read-only, on request). */
+function CompositeInfoView({ stepId, pinned }: { stepId: string; pinned: { workflow: string; revision: number } }) {
+  const { composites } = useNodeContext();
+  const [open, setOpen] = useState(false);
+  const info = composites.get(compositeKey(pinned));
+  const child = info?.saved?.definition;
+  const newer = info?.latest != null && info.latest > pinned.revision ? info.latest : null;
+  return (
+    <div className="xp-wfc-composite" data-testid={`wfc-composite-${stepId}`} data-revision={pinned.revision}>
+      <p className="xp-wfc-composite__line">
+        Runs <strong>“{child?.title ?? pinned.workflow}”</strong> · revision {pinned.revision} (pinned)
+      </p>
+      <div className="ui-node-card__badges">
+        {newer !== null && (
+          <Badge tone="accent" dashed title="Choose “Use latest revision” in the step's inspector to adopt it (an edit of this workflow).">
+            Revision {newer} available
+          </Badge>
+        )}
+        {info?.error && (
+          <Badge tone="danger" dashed title={info.error}>
+            Child not loaded
+          </Badge>
+        )}
+      </div>
+      {child && (
+        <>
+          <button
+            type="button"
+            className="xp-wfc-composite__toggle nodrag nopan"
+            aria-expanded={open}
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(!open);
+            }}
+            data-testid={`wfc-composite-toggle-${stepId}`}
+          >
+            {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+            {open ? "Hide" : "Show"} its {child.steps.length} step{child.steps.length === 1 ? "" : "s"}
+          </button>
+          {open && (
+            <ol className="xp-wfc-composite__children" aria-label={`Steps of ${child.title} (read-only)`} data-testid={`wfc-composite-children-${stepId}`}>
+              {child.steps.map((s) => (
+                <li key={s.id}>
+                  {s.label}
+                  {isComposite(s) ? " (workflow)" : ""}
+                </li>
+              ))}
+            </ol>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function StepNodeView({ data, selected }: NodeProps<WfNode>) {
   const { draft, contracts, diagnostics } = useNodeContext();
   const step = draft.steps.find((s) => s.id === data.ref);
   if (!step) return null;
   const contract = contractOf(contracts, step);
   const own = diagnostics.filter((d) => d.step === step.id && d.port === null && d.outcome === null);
+  const composite = isComposite(step);
+  const repeat = step.repeat;
   return (
-    <div className="xp-wfc-node ui-node-card" data-category="workflow" data-selected={selected || undefined} data-step={step.id} data-testid={`wfc-step-${step.id}`}>
+    <div
+      className="xp-wfc-node ui-node-card"
+      data-category="workflow"
+      data-selected={selected || undefined}
+      data-step={step.id}
+      data-composite={composite || undefined}
+      data-testid={`wfc-step-${step.id}`}
+    >
       <Handle type="target" position={Position.Top} id={PRE_IN} className="xp-wfc-handle xp-wfc-handle--pre" aria-label={`Runs after (prerequisite into ${step.label})`} title="Drop a prerequisite here: this step runs after that one (no data)" />
       <div className="ui-node-card__header">
         <span className="ui-node-card__type">
-          <span>{contract ? contract.title : "Unknown operation"}</span>
+          <span>{composite ? "Workflow step" : contract ? contract.title : "Unknown operation"}</span>
         </span>
       </div>
       <p className="ui-node-card__title" title={step.label}>
         {step.label}
       </p>
+      {composite && step.composite && <CompositeInfoView stepId={step.id} pinned={step.composite} />}
       <div className="ui-node-card__badges">
+        {step.condition && (
+          <Badge
+            tone="info"
+            dashed
+            title={`Runs only if ${describeTest(step.condition.test, outputLabel(draft, contracts, step.condition.source.step, step.condition.source.port), step.condition.negate)}`}
+          >
+            If {shortTest(step.condition.test, step.condition.negate)}
+          </Badge>
+        )}
+        {repeat?.kind === "forEach" && (
+          <Badge tone="info" title={`One instance for each of ${repeat.values.length} values of ${repeat.parameter}`}>
+            For each {repeat.parameter} ×{repeat.values.length}
+          </Badge>
+        )}
+        {repeat?.kind === "until" && (
+          <Badge tone="info" title={`Repeats until ${shortTest(repeat.test, repeat.negate)}, at most ${repeat.maxIterations} times`}>
+            Until · at most {repeat.maxIterations}
+          </Badge>
+        )}
         {!contract && (
           <Badge tone="danger" dashed>
             Not a registered operation
@@ -249,6 +341,8 @@ export interface WorkflowCanvasProps {
   workflowId: string;
   draft: WorkflowDefinition;
   contracts: OperationContract[];
+  /** Loaded composite children (title, pinned definition, latest revision). */
+  composites?: ReadonlyMap<string, CompositeInfo>;
   diagnostics: WorkflowDiagnostic[];
   selection: CanvasSelectionItem | null;
   onSelectionChange: (selection: CanvasSelectionItem | null) => void;
@@ -265,7 +359,9 @@ function selectedNodeId(selection: CanvasSelectionItem | null): string | null {
   return nodeIdOf[selection.kind](selection.id);
 }
 
-function CanvasInner({ workflowId, draft, contracts, diagnostics, selection, onSelectionChange, onChange }: WorkflowCanvasProps) {
+const NO_COMPOSITES: ReadonlyMap<string, CompositeInfo> = new Map();
+
+function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES, diagnostics, selection, onSelectionChange, onChange }: WorkflowCanvasProps) {
   const flow = useReactFlow();
   const [saved, setSaved] = useState<Record<string, Point>>(() => loadPositions(workflowId));
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
@@ -328,7 +424,7 @@ function CanvasInner({ workflowId, draft, contracts, diagnostics, selection, onS
         selected: selection?.kind === "edge" && selection.id === e.id,
         markerEnd: { type: e.kind === "data" || e.kind === "outcome" ? MarkerType.ArrowClosed : MarkerType.Arrow, color: "var(--color-graph-edge)" },
         data: { kind: e.kind },
-        deletable: e.kind !== "outcome",
+        deletable: e.kind !== "outcome" && e.kind !== "condition",
       })),
     [wfEdges, selection],
   );
@@ -366,7 +462,12 @@ function CanvasInner({ workflowId, draft, contracts, diagnostics, selection, onS
     if (selection.kind === "edge") {
       const next = removeEdge(draft, selection.id);
       if (!next) {
-        setMessage({ ok: false, text: "An outcome link is changed by connecting another output to the outcome, or in the Form view." });
+        setMessage({
+          ok: false,
+          text: selection.id.startsWith("cond:")
+            ? "A condition is changed or removed in the step's inspector (“Run this step only when a condition holds”)."
+            : "An outcome link is changed by connecting another output to the outcome, or in the Form view.",
+        });
         return true;
       }
       onChange(next);
@@ -416,7 +517,7 @@ function CanvasInner({ workflowId, draft, contracts, diagnostics, selection, onS
     event.preventDefault();
   };
 
-  const context = useMemo(() => ({ draft, contracts, diagnostics }), [draft, contracts, diagnostics]);
+  const context = useMemo(() => ({ draft, contracts, diagnostics, composites }), [draft, contracts, diagnostics, composites]);
 
   return (
     <NodeContext.Provider value={context}>
@@ -486,6 +587,9 @@ function CanvasInner({ workflowId, draft, contracts, diagnostics, selection, onS
           </li>
           <li>
             <span className="xp-wfc__swatch" data-kind="annotation" aria-hidden="true" /> annotation, no data (dotted)
+          </li>
+          <li>
+            <span className="xp-wfc__swatch" data-kind="condition" aria-hidden="true" /> condition on an output, no data (dash-dot)
           </li>
           <li>Port shapes: ● data · ■ sources · ◆ evidence, reports, proposals</li>
         </ul>

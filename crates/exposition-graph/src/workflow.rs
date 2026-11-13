@@ -30,9 +30,11 @@
 //! every step's runner is available in the open project (decided by the
 //! workflow runner service). Running still needs a reviewed run plan.
 
+pub mod interchange;
 pub mod persist;
 pub mod presets;
 pub mod registry;
+pub mod v2;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
@@ -40,16 +42,51 @@ use exposition_core::path::WorkspacePath;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::ids::WorkflowId;
 use crate::ops::DiagnosticSeverity;
 use crate::vocabulary::RelationKind;
+pub use interchange::{
+    BUNDLE_SCHEMA, BundledWorkflow, ImportedChild, MAX_BUNDLE_BYTES, WorkflowBundle, WorkflowBundleExport,
+    WorkflowBundleImport, bundle_text,
+};
 pub use persist::{SaveWorkflowRequest, SavedWorkflow, WorkflowRevisionInfo, WorkflowSummary};
 pub use registry::{
     CodeLanguage, OperationContract, ParameterKind, PayloadSpec, PortSpec, PortType, WorkflowEffect, operation,
     operations, with_availability,
 };
+pub use v2::{
+    COMPOSITE_RUNNER, ExpandedStep, ExpandedWorkflow, MAX_COMPOSITE_DEPTH, MAX_CONDITION_JSON_BYTES,
+    MAX_EXPANDED_STEPS, MAX_FOR_EACH_VALUES, MAX_UNTIL_ITERATIONS, Observed, evaluate_condition, expand_workflow,
+    verdict_class,
+};
 
-/// Schema identifier of a workflow definition.
+/// Schema identifier of a workflow definition (v1: M7/M8 shape). Still read
+/// and written for every definition that uses no v2 field, so its
+/// serialization and [`definition_hash`] never change.
 pub const WORKFLOW_SCHEMA: &str = "exposition.workflow/1";
+/// Schema identifier of a definition that uses any v2 field (execution
+/// options, composites, conditions, repeats). Required when one is used.
+pub const WORKFLOW_SCHEMA_V2: &str = "exposition.workflow/2";
+/// Every schema this version reads.
+pub const WORKFLOW_SCHEMAS: [&str; 2] = [WORKFLOW_SCHEMA, WORKFLOW_SCHEMA_V2];
+/// The registered operation of a composite step (runs another saved workflow
+/// at a pinned revision).
+pub const COMPOSITE_OPERATION: &str = "workflow.composite";
+/// Bounds of `execution.maxParallel`.
+pub const MAX_PARALLEL: u32 = 4;
+/// Audit verdict labels a `verdictIn` condition may name: the Lean audit
+/// adapter's declaration verdicts and the classes of its overall file
+/// verdict (an overall label such as "Errors (2)" or "Incomplete (1 sorry)"
+/// belongs to the class it starts with; see [`verdict_class`]).
+pub const KNOWN_VERDICTS: [&str; 7] = [
+    "Checked",
+    "Checked with nonstandard axioms",
+    "Incomplete",
+    "Relies on compiled code",
+    "Partially checked",
+    "Unverified",
+    "Errors",
+];
 /// Why a draft is not runnable before the runner checked it in a project.
 /// (Validation alone never decides runnability; see [`apply_runnability`].)
 pub const NOT_RUNNABLE_REASON: &str =
@@ -86,6 +123,115 @@ pub struct WorkflowDefinition {
     pub outcomes: Vec<WorkflowOutcome>,
     /// The most this workflow may do; every step's effects must fit.
     pub ceiling: AuthorityCeiling,
+    /// Execution options (schema /2). Absent: one step at a time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub execution: Option<WorkflowExecutionOptions>,
+}
+
+impl WorkflowDefinition {
+    /// How many independent steps may run at once (1 when unset).
+    pub fn max_parallel(&self) -> u32 {
+        self.execution.map(|e| e.max_parallel).unwrap_or(1)
+    }
+
+    /// Whether the definition uses any field that needs [`WORKFLOW_SCHEMA_V2`].
+    pub fn uses_v2(&self) -> bool {
+        self.execution.is_some()
+            || self.steps.iter().any(|s| s.composite.is_some() || s.condition.is_some() || s.repeat.is_some())
+    }
+}
+
+/// Execution options of a definition (schema /2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowExecutionOptions {
+    /// Independent steps (no data or prerequisite path between them) that may
+    /// run at once, 1..=4 (1 = one step at a time). Global caps still apply.
+    pub max_parallel: u32,
+}
+
+/// A composite step's pinned reference to another saved workflow revision.
+/// Editing the child creates a new revision; the reference never follows it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompositeRef {
+    pub workflow: WorkflowId,
+    pub revision: u64,
+}
+
+/// A step's fixed run condition over a validated upstream output (no
+/// expression evaluator). False: the step is skipped (`conditionNotMet`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StepCondition {
+    /// An upstream step's output port (creates an ordering dependency).
+    pub source: StepPort,
+    pub test: ConditionTest,
+    /// Run when the test does NOT hold.
+    pub negate: bool,
+}
+
+/// A fixed predicate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum ConditionTest {
+    /// Formal evidence source: its verdict is one of these exact labels.
+    VerdictIn { verdicts: Vec<String> },
+    /// Dataset source (a JSON file ≤ 1 MiB): the value at an RFC 6901
+    /// pointer compared with a constant.
+    JsonCompare { pointer: String, op: CompareOp, value: ConditionValue },
+    /// The (optional) source output was produced.
+    OutputPresent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum CompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum ConditionValue {
+    /// A decimal number written as text (exact; no float in the definition).
+    Number(String),
+    Text(String),
+    Boolean(bool),
+}
+
+/// A bounded repetition of one step.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum StepRepeat {
+    /// One instance per value of a declared parameter (1..=20 values);
+    /// outputs are collected in order into a `multiple` consumer port.
+    ForEach { parameter: String, values: Vec<ParamValue> },
+    /// Sequential iterations (1..=10) until a predicate on the step's own
+    /// output port holds.
+    Until { port: String, test: ConditionTest, negate: bool, max_iterations: u32, on_exhausted: Exhausted },
+}
+
+/// What an `until` repetition does when every iteration ran and the
+/// predicate never held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum Exhausted {
+    Fail,
+    UseLast,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -157,6 +303,19 @@ pub struct WorkflowStep {
     pub operation: StepOperation,
     pub parameters: BTreeMap<String, ParamValue>,
     pub payload: Option<StepPayload>,
+    /// Composite step (schema /2): the operation must be
+    /// [`COMPOSITE_OPERATION`] v1; ports come from the referenced child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub composite: Option<CompositeRef>,
+    /// Run condition (schema /2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub condition: Option<StepCondition>,
+    /// Bounded repetition (schema /2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repeat: Option<StepRepeat>,
 }
 
 /// Where data on a connection comes from.
@@ -354,11 +513,22 @@ pub struct WorkflowDiagnostic {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannedStep {
+    /// Step id; an expanded composite child is `<compositeStep>/<childStep>`
+    /// (nested: `a/b/c`).
     pub step: String,
     pub label: String,
     pub operation: String,
     pub runner: String,
     pub effects: Vec<WorkflowEffect>,
+    /// The runner's id (absent in records saved before schema /2 existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runner_id: Option<String>,
+    /// Labels of the enclosing composite steps, outermost first (expanded
+    /// children only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub composite_path: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -387,7 +557,17 @@ pub struct ValidationContext<'a> {
     pub ceiling: Option<AuthorityCeiling>,
     /// Whether a project file exists (None: not checked).
     pub file_exists: Option<&'a dyn Fn(&WorkspacePath) -> bool>,
+    /// Resolves a saved workflow revision for composite steps (None: not
+    /// checked — composite steps get `workflow.compositeUnchecked` and the
+    /// draft cannot be runnable).
+    pub resolve_workflow: Option<&'a ResolveWorkflow<'a>>,
+    /// The saved workflow this definition is a revision of, when known: a
+    /// composite step may not include it (at any revision).
+    pub workflow_id: Option<&'a WorkflowId>,
 }
+
+/// Looks up a saved workflow revision (composite children).
+pub type ResolveWorkflow<'a> = dyn Fn(&WorkflowId, u64) -> Option<WorkflowDefinition> + 'a;
 
 fn id_ok(id: &str) -> bool {
     !id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -466,13 +646,53 @@ impl At for WorkflowDiagnostic {
 }
 
 /// Parse a definition from untrusted JSON text (imports, agents): bounded
-/// size, strict schema (unknown fields — conditions, loops, nested
-/// workflows, extra outputs, trust or run hooks — are refused).
+/// size, strict schema (unknown fields — free-form expressions, loops,
+/// extra outputs, trust or run hooks — are refused).
 pub fn parse_definition(text: &str) -> Result<WorkflowDefinition, String> {
     if text.len() > MAX_DEFINITION_BYTES {
         return Err(format!("the workflow definition is larger than {} KiB", MAX_DEFINITION_BYTES / 1024));
     }
-    serde_json::from_str::<WorkflowDefinition>(text).map_err(|e| format!("the workflow definition is not valid: {e}"))
+    let raw: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("the workflow definition is not valid: {e}"))?;
+    definition_from_value(raw)
+}
+
+/// Strictly convert untrusted JSON into a definition: `deny_unknown_fields`
+/// plus a structural check that every key of the input is carried by the
+/// parsed definition (serde ignores extra keys on unit variants of tagged
+/// enums, e.g. `{"kind": "unset", "trust": true}`).
+pub(crate) fn definition_from_value(raw: serde_json::Value) -> Result<WorkflowDefinition, String> {
+    let definition = serde_json::from_value::<WorkflowDefinition>(raw.clone())
+        .map_err(|e| format!("the workflow definition is not valid: {e}"))?;
+    let carried =
+        serde_json::to_value(&definition).map_err(|e| format!("the workflow definition is not valid: {e}"))?;
+    if let Some(at) = dropped_key(&raw, &carried, String::new()) {
+        return Err(format!("the workflow definition is not valid: unknown field at {at}"));
+    }
+    Ok(definition)
+}
+
+/// The JSON-pointer path of the first object key in `input` that `parsed`
+/// does not carry (keys only; scalar values may be normalized by parsing).
+pub(crate) fn dropped_key(input: &serde_json::Value, parsed: &serde_json::Value, at: String) -> Option<String> {
+    use serde_json::Value;
+    match (input, parsed) {
+        (Value::Object(a), Value::Object(b)) => a.iter().find_map(|(k, v)| {
+            let here = format!("{at}/{}", k.replace('~', "~0").replace('/', "~1"));
+            match b.get(k) {
+                None => Some(here),
+                Some(w) => dropped_key(v, w, here),
+            }
+        }),
+        (Value::Array(a), Value::Array(b)) => {
+            if a.len() != b.len() {
+                return Some(at);
+            }
+            a.iter().zip(b).enumerate().find_map(|(i, (v, w))| dropped_key(v, w, format!("{at}/{i}")))
+        }
+        (Value::Object(_) | Value::Array(_), _) => Some(at),
+        _ => None,
+    }
 }
 
 /// Content hash of a definition (identifies a revision).
@@ -484,18 +704,42 @@ pub fn definition_hash(definition: &WorkflowDefinition) -> String {
 
 /// Validate a definition against the strict contract. Never fails: problems
 /// are diagnostics. `runnable` is false here; [`apply_runnability`] decides it.
+/// Composite steps are resolved through `context.resolve_workflow` and their
+/// children validated too; the plan lists the expanded steps.
 pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationContext<'_>) -> WorkflowValidation {
+    let mut nest = v2::Nest::new(context.workflow_id);
+    validate_in(definition, context, &mut nest).validation
+}
+
+/// A validation with what a parent composite needs from it.
+pub(crate) struct Validated {
+    pub validation: WorkflowValidation,
+    /// Contracts of the steps that have one (composites: their dynamic contract).
+    pub contracts: BTreeMap<String, OperationContract>,
+    /// Steps after expanding composites.
+    pub leaves: usize,
+}
+
+fn validate_in(definition: &WorkflowDefinition, context: &ValidationContext<'_>, nest: &mut v2::Nest) -> Validated {
     let mut d = Diags(Vec::new());
     let def = definition;
 
     // ----- schema version and size limits -----
-    if def.schema != WORKFLOW_SCHEMA {
+    if !WORKFLOW_SCHEMAS.contains(&def.schema.as_str()) {
         d.error(
             "workflow.schema",
             None,
             format!(
-                "unsupported workflow schema {:?} (this version reads {WORKFLOW_SCHEMA})",
+                "unsupported workflow schema {:?} (this version reads {WORKFLOW_SCHEMA} and {WORKFLOW_SCHEMA_V2})",
                 truncate(&def.schema, 60)
+            ),
+        );
+    } else if def.schema == WORKFLOW_SCHEMA && def.uses_v2() {
+        d.error(
+            "workflow.schema",
+            None,
+            format!(
+                "execution options, composite steps, conditions, and repeats need schema {WORKFLOW_SCHEMA_V2} (this definition declares {WORKFLOW_SCHEMA})"
             ),
         );
     }
@@ -515,6 +759,15 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
     {
         d.error("workflow.preset", None, "invalid preset name");
     }
+    if let Some(execution) = &def.execution
+        && !(1..=MAX_PARALLEL).contains(&execution.max_parallel)
+    {
+        d.error(
+            "workflow.maxParallel",
+            None,
+            format!("run 1–{MAX_PARALLEL} independent steps at once (it says {})", execution.max_parallel),
+        );
+    }
     let limits = [
         (def.steps.len(), MAX_STEPS, "steps"),
         (def.connections.len(), MAX_CONNECTIONS, "connections"),
@@ -529,7 +782,8 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
         }
     }
     if too_large {
-        return finish(d, def, &BTreeMap::new(), None);
+        let validation = finish(d, def, &BTreeMap::new(), &BTreeMap::new(), None);
+        return Validated { validation, contracts: BTreeMap::new(), leaves: def.steps.len() };
     }
 
     // ----- ceiling -----
@@ -610,6 +864,9 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
 
     // ----- steps -----
     let mut contracts: BTreeMap<String, OperationContract> = BTreeMap::new();
+    // Composite step -> its child's expanded plan.
+    let mut expanded: BTreeMap<String, Vec<PlannedStep>> = BTreeMap::new();
+    let mut leaves = 0usize;
     let mut seen_steps: BTreeSet<&str> = BTreeSet::new();
     for step in &def.steps {
         if !id_ok(&step.id) {
@@ -622,6 +879,19 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
         }
         if let Err(m) = crate::validate::check_label(&step.label) {
             d.error("workflow.label", None, format!("step {:?}: {m}", step.id)).step(&step.id);
+        }
+        let composite_operation = step.operation.id == COMPOSITE_OPERATION;
+        if composite_operation != step.composite.is_some() {
+            let message = if composite_operation {
+                format!("composite step “{}” must name the saved workflow revision it runs", step.label)
+            } else {
+                format!(
+                    "step “{}” names a saved workflow but only a {COMPOSITE_OPERATION} step can run one",
+                    step.label
+                )
+            };
+            d.error("workflow.compositeOperation", None, message).step(&step.id);
+            continue;
         }
         let Some(contract) = registry::operation(&step.operation.id, step.operation.version) else {
             if registry::is_registered(&step.operation.id) {
@@ -647,11 +917,39 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
             }
             continue;
         };
-        check_parameters(&mut d, step, &contract);
+        let repeated_parameter = match &step.repeat {
+            Some(StepRepeat::ForEach { parameter, .. }) => Some(parameter.as_str()),
+            _ => None,
+        };
+        check_parameters(&mut d, step, &contract, repeated_parameter);
         check_payload(&mut d, step, &contract);
+        if let Some(reference) = &step.composite {
+            if let Some(child) = v2::resolve_composite(&mut d, step, reference, &def.ceiling, contract, context, nest) {
+                leaves += child.leaves;
+                expanded.insert(step.id.clone(), child.plan);
+                contracts.insert(step.id.clone(), child.contract);
+            }
+            continue;
+        }
+        leaves += 1;
         contracts.insert(step.id.clone(), contract);
     }
     let step_known = |id: &str| seen_steps.contains(id);
+    // Composite steps whose child could not be checked: their connections
+    // still order and use, nothing else is known about their ports.
+    let opaque: BTreeSet<&str> = def
+        .steps
+        .iter()
+        .filter(|s| s.composite.is_some() && seen_steps.contains(s.id.as_str()) && !contracts.contains_key(&s.id))
+        .map(|s| s.id.as_str())
+        .collect();
+    // Steps that run once per value (their outputs are collected, in order).
+    let repeated: BTreeSet<&str> = def
+        .steps
+        .iter()
+        .filter(|s| matches!(s.repeat, Some(StepRepeat::ForEach { .. })))
+        .map(|s| s.id.as_str())
+        .collect();
 
     // ----- connections -----
     // Data edges into (step, port); execution edges for ordering/reachability.
@@ -672,6 +970,17 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
                             format!("connection {i} targets unknown step {:?}", to.step),
                         )
                         .connection(i);
+                    } else if opaque.contains(to.step.as_str()) {
+                        match from {
+                            PortSource::Step { step, .. } if step_known(step) && step != &to.step => {
+                                exec_edges.insert((step.clone(), to.step.clone()));
+                                data_edges.insert((step.clone(), to.step.clone()));
+                            }
+                            PortSource::Input { input } if inputs.contains_key(input.as_str()) => {
+                                used_inputs.insert(input.clone());
+                            }
+                            _ => {}
+                        }
                     }
                     continue;
                 };
@@ -699,6 +1008,12 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
                                     format!("connection {i} starts at unknown step {:?}", truncate(step, 40)),
                                 )
                                 .connection(i);
+                            } else if opaque.contains(step.as_str()) {
+                                exec_edges.insert((step.clone(), to.step.clone()));
+                                data_edges.insert((step.clone(), to.step.clone()));
+                                into.entry((to.step.clone(), to.port.clone()))
+                                    .or_default()
+                                    .push((i, target_port.types[0]));
                             }
                             continue;
                         };
@@ -760,6 +1075,39 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
                     d.error(code, Some(rule), message).connection(i).step(&to.step).port(&to.port);
                     continue;
                 }
+                // A code step runs only scripts of its own language (rule 3):
+                // an R batch never runs a `.py` file, Python never an `.R` one.
+                if let PortSource::Input { input } = from
+                    && source_type == PortType::CodeSource
+                    && let Some(WorkflowInput { source: InputSource::Resource { path, .. }, .. }) =
+                        inputs.get(input.as_str()).copied()
+                    && let Err(message) = registry::check_script_language(target, path.as_str())
+                {
+                    d.error("workflow.inputTypeMismatch", Some(3), message)
+                        .connection(i)
+                        .step(&to.step)
+                        .port(&to.port)
+                        .input(input);
+                    continue;
+                }
+                if let PortSource::Step { step, .. } = from
+                    && repeated.contains(step.as_str())
+                    && !target_port.multiple
+                {
+                    d.error(
+                        "workflow.iterationFanIn",
+                        Some(3),
+                        format!(
+                            "{}’s “{}” takes one value, but step {:?} repeats; connect it to an input that collects several",
+                            target.title,
+                            target_port.label,
+                            truncate(step, 40)
+                        ),
+                    )
+                    .connection(i)
+                    .step(&to.step)
+                    .port(&to.port);
+                }
                 into.entry((to.step.clone(), to.port.clone())).or_default().push((i, source_type));
             }
             WorkflowConnection::Prerequisite { before, after } => {
@@ -801,6 +1149,9 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
             }
         }
     }
+
+    // ----- conditions and repeats (schema /2) -----
+    v2::check_conditions_and_repeats(&mut d, def, &contracts, &seen_steps, &repeated, &mut exec_edges, &mut data_edges);
 
     // ----- rule 1: required inputs bound -----
     for step in &def.steps {
@@ -880,6 +1231,9 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
             if !step_known(&outcome.from.step) {
                 d.error("workflow.unknownStep", Some(2), format!("outcome “{}” names an unknown step", outcome.label))
                     .outcome(&outcome.id);
+            } else if opaque.contains(outcome.from.step.as_str()) {
+                outcome_steps.insert(outcome.from.step.clone());
+                required_outcome |= !outcome.optional;
             }
             continue;
         };
@@ -892,6 +1246,19 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
             .outcome(&outcome.id);
             continue;
         };
+        if repeated.contains(outcome.from.step.as_str()) {
+            d.error(
+                "workflow.iterationFanIn",
+                Some(3),
+                format!(
+                    "outcome “{}” comes from a repeating step; collect its outputs in a step that takes several first",
+                    outcome.label
+                ),
+            )
+            .outcome(&outcome.id)
+            .step(&outcome.from.step);
+            continue;
+        }
         let produced = port.types[0];
         if !outcome.kind.accepts().contains(&produced) {
             let rule = if outcome.kind == OutcomeKind::AuditEvidence { 6 } else { 3 };
@@ -988,7 +1355,18 @@ pub fn validate_workflow(definition: &WorkflowDefinition, context: &ValidationCo
         }
     }
 
-    finish(d, def, &contracts, order)
+    if leaves > MAX_EXPANDED_STEPS {
+        d.error(
+            "workflow.tooManySteps",
+            None,
+            format!(
+                "a workflow can have at most {MAX_EXPANDED_STEPS} steps after expanding composites (it has {leaves})"
+            ),
+        );
+    }
+
+    let validation = finish(d, def, &contracts, &expanded, order);
+    Validated { validation, contracts, leaves }
 }
 
 /// Decide runnability: the draft is well-formed and every step's runner is
@@ -1009,8 +1387,31 @@ pub fn apply_runnability(
         );
         return;
     }
+    if let Some(unchecked) = validation.diagnostics.iter().find(|x| x.code == "workflow.compositeUnchecked") {
+        validation.runnable_reason = format!("Not runnable: {}.", unchecked.message);
+        return;
+    }
     let mut problems = Vec::new();
     for step in &definition.steps {
+        if step.composite.is_some() {
+            // Its expanded children run through their own runners.
+            let prefix = format!("{}/", step.id);
+            let children: Vec<&PlannedStep> = validation.plan.iter().filter(|p| p.step.starts_with(&prefix)).collect();
+            if children.is_empty() {
+                problems.push(format!("composite step “{}” has no checked steps", step.label));
+            }
+            for child in children {
+                match &child.runner_id {
+                    Some(id) => {
+                        if let Err(reason) = runner(id) {
+                            problems.push(format!("step “{}” ({}): {reason}", child.label, child.runner));
+                        }
+                    }
+                    None => problems.push(format!("step “{}” was not checked", child.label)),
+                }
+            }
+            continue;
+        }
         let Some(contract) = registry::operation(&step.operation.id, step.operation.version) else {
             problems.push(format!("step “{}” names an unknown operation", step.label));
             continue;
@@ -1028,7 +1429,28 @@ pub fn apply_runnability(
     }
 }
 
-fn check_parameters(d: &mut Diags, step: &WorkflowStep, contract: &OperationContract) {
+/// What is wrong with a parameter value, if anything.
+pub(crate) fn parameter_problem(kind: &ParameterKind, value: &ParamValue) -> Option<String> {
+    match (kind, value) {
+        (ParameterKind::Text { max_len }, ParamValue::Text(t)) => text_ok(t, *max_len as usize).err(),
+        (ParameterKind::Integer { min, max }, ParamValue::Integer(v)) => {
+            (!(min..=max).contains(&v)).then(|| format!("must be between {min} and {max}"))
+        }
+        (ParameterKind::Boolean, ParamValue::Boolean(_)) => None,
+        (ParameterKind::Path { extensions }, ParamValue::Text(t)) => match WorkspacePath::parse(t) {
+            Err(e) => Some(e.to_string()),
+            Ok(p) if p.as_str() != t => Some("write the path in normalized form".into()),
+            Ok(p) => {
+                let ext = p.extension().map(|e| e.to_ascii_lowercase()).unwrap_or_default();
+                (!extensions.iter().any(|e| e == &ext)).then(|| format!("must be one of: {}", extensions.join(", ")))
+            }
+        },
+        _ => Some("has the wrong type".into()),
+    }
+}
+
+/// `repeated`: the parameter a `forEach` repeat supplies (not missing).
+fn check_parameters(d: &mut Diags, step: &WorkflowStep, contract: &OperationContract, repeated: Option<&str>) {
     if step.parameters.len() > MAX_PARAMETERS {
         d.error("workflow.tooLarge", None, format!("at most {MAX_PARAMETERS} parameters per step")).step(&step.id);
         return;
@@ -1044,29 +1466,12 @@ fn check_parameters(d: &mut Diags, step: &WorkflowStep, contract: &OperationCont
             .port(name);
             continue;
         };
-        let problem = match (&spec.kind, value) {
-            (ParameterKind::Text { max_len }, ParamValue::Text(t)) => text_ok(t, *max_len as usize).err(),
-            (ParameterKind::Integer { min, max }, ParamValue::Integer(v)) => {
-                (!(min..=max).contains(&v)).then(|| format!("must be between {min} and {max}"))
-            }
-            (ParameterKind::Boolean, ParamValue::Boolean(_)) => None,
-            (ParameterKind::Path { extensions }, ParamValue::Text(t)) => match WorkspacePath::parse(t) {
-                Err(e) => Some(e.to_string()),
-                Ok(p) if p.as_str() != t => Some("write the path in normalized form".into()),
-                Ok(p) => {
-                    let ext = p.extension().map(|e| e.to_ascii_lowercase()).unwrap_or_default();
-                    (!extensions.iter().any(|e| e == &ext))
-                        .then(|| format!("must be one of: {}", extensions.join(", ")))
-                }
-            },
-            _ => Some("has the wrong type".into()),
-        };
-        if let Some(problem) = problem {
+        if let Some(problem) = parameter_problem(&spec.kind, value) {
             d.error("workflow.invalidParameter", None, format!("“{}” {problem}", spec.label)).step(&step.id).port(name);
         }
     }
     for spec in &contract.parameters {
-        if spec.required && !step.parameters.contains_key(&spec.name) {
+        if spec.required && !step.parameters.contains_key(&spec.name) && repeated != Some(spec.name.as_str()) {
             d.error("workflow.missingParameter", Some(1), format!("step “{}” needs “{}”", step.label, spec.label))
                 .step(&step.id)
                 .port(&spec.name);
@@ -1145,6 +1550,7 @@ fn finish(
     d: Diags,
     def: &WorkflowDefinition,
     contracts: &BTreeMap<String, OperationContract>,
+    expanded: &BTreeMap<String, Vec<PlannedStep>>,
     order: Option<Vec<String>>,
 ) -> WorkflowValidation {
     let diagnostics = d.0;
@@ -1153,21 +1559,32 @@ fn finish(
     let mut effects: Vec<WorkflowEffect> = contracts.values().flat_map(|c| c.effects.iter().copied()).collect();
     effects.sort();
     effects.dedup();
-    let plan = order
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|id| {
-            let step = def.steps.iter().find(|s| s.id == id)?;
-            let c = contracts.get(&id)?;
-            Some(PlannedStep {
-                step: id,
-                label: step.label.clone(),
-                operation: format!("{} (v{})", c.title, c.version),
-                runner: c.runner.title.clone(),
-                effects: c.effects.clone(),
-            })
-        })
-        .collect();
+    let mut plan = Vec::new();
+    for id in order.unwrap_or_default() {
+        let Some(step) = def.steps.iter().find(|s| s.id == id) else { continue };
+        if let Some(children) = expanded.get(&id) {
+            // The child's own plan (already in its dependency order), in place.
+            for child in children {
+                let mut c = child.clone();
+                c.step = format!("{id}/{}", c.step);
+                let mut path = vec![step.label.clone()];
+                path.extend(c.composite_path.take().unwrap_or_default());
+                c.composite_path = Some(path);
+                plan.push(c);
+            }
+            continue;
+        }
+        let Some(c) = contracts.get(&id) else { continue };
+        plan.push(PlannedStep {
+            step: id,
+            label: step.label.clone(),
+            operation: format!("{} (v{})", c.title, c.version),
+            runner: c.runner.title.clone(),
+            effects: c.effects.clone(),
+            runner_id: Some(c.runner.id.clone()),
+            composite_path: None,
+        });
+    }
     WorkflowValidation {
         state: if errors == 0 { DraftState::WellFormed } else { DraftState::Incomplete },
         runnable: false,
@@ -1186,3 +1603,7 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_interchange;
+#[cfg(test)]
+mod tests_v2;

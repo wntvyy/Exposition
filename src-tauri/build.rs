@@ -154,6 +154,8 @@ const COMMANDS: &[&str] = &[
     "workflow_import",
     "workflow_list",
     "workflow_get",
+    "workflow_bundle_export",
+    "workflow_bundle_import",
     // Workflow runs (src/workflow_runs.rs).
     "workflow_run_plan",
     "workflow_run_start",
@@ -162,9 +164,18 @@ const COMMANDS: &[&str] = &[
     "workflow_runs",
     "workflow_run_acknowledge",
     "workflow_association_decide",
+    // Workflow run manifests and reproductions (src/workflow_repro.rs).
+    "workflow_run_manifest",
+    "workflow_run_manifest_export",
+    "workflow_run_reproduce_plan",
     // Agents and the project graph (src/agents.rs).
     "agents_task_keep_investigation",
     "agents_task_create_generation",
+    // Workflow triggers (src/workflow_triggers.rs): user-only, never agents.
+    "workflow_trigger_plan",
+    "workflow_trigger_enable",
+    "workflow_trigger_disable",
+    "workflow_trigger_list",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

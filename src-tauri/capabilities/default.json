@@ -151,6 +151,8 @@
     "allow-workflow-import",
     "allow-workflow-list",
     "allow-workflow-get",
+    "allow-workflow-bundle-export",
+    "allow-workflow-bundle-import",
     "allow-workflow-run-plan",
     "allow-workflow-run-start",
     "allow-workflow-run-cancel",
@@ -158,7 +160,14 @@
     "allow-workflow-runs",
     "allow-workflow-run-acknowledge",
     "allow-workflow-association-decide",
+    "allow-workflow-run-manifest",
+    "allow-workflow-run-manifest-export",
+    "allow-workflow-run-reproduce-plan",
     "allow-agents-task-keep-investigation",
-    "allow-agents-task-create-generation"
+    "allow-agents-task-create-generation",
+    "allow-workflow-trigger-plan",
+    "allow-workflow-trigger-enable",
+    "allow-workflow-trigger-disable",
+    "allow-workflow-trigger-list"
   ]
 }

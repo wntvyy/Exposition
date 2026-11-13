@@ -72,6 +72,15 @@ pub(crate) fn tool_name(language: BatchLanguage) -> &'static str {
     }
 }
 
+/// The interpreter's name as environments record it (`python`, `R`, `julia`).
+pub(crate) fn interpreter_name(language: BatchLanguage) -> &'static str {
+    match language {
+        BatchLanguage::Python => "python",
+        BatchLanguage::R => "R",
+        BatchLanguage::Julia => "julia",
+    }
+}
+
 /// The program inside the container image.
 pub(crate) fn container_program(language: BatchLanguage) -> &'static str {
     match language {

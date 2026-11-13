@@ -18,9 +18,10 @@ use std::time::Duration;
 use exposition_core::artifact::{ArtifactId, ArtifactKind, ArtifactRecord, RunStatus};
 use exposition_core::path::WorkspacePath;
 use exposition_execution::{DockerSettings, ExecutionConfig, ExecutionService, ExecutionSettings};
+use exposition_graph::WorkflowRunId;
 use exposition_graph::workflow::WorkflowDefinition;
 use exposition_graph::workflow::registry::{
-    RESEARCH_JULIA_BATCH, RESEARCH_NATIVE_JULIA, RESEARCH_NATIVE_R, RESEARCH_R_BATCH,
+    PortType, RESEARCH_JULIA_BATCH, RESEARCH_NATIVE_JULIA, RESEARCH_NATIVE_R, RESEARCH_R_BATCH,
 };
 use exposition_graph::{
     GraphConfig, GraphService, Origin, SaveWorkflowRequest, SavedWorkflow, ValidationContext, WorkflowId,
@@ -31,7 +32,7 @@ use exposition_research::batch::{
 use exposition_research::launcher::ExecutionLauncher;
 use exposition_research::types::RunExecution;
 use exposition_research::{ResearchConfig, ResearchError, ResearchService};
-use exposition_workflow::adapters::{Adapters, rj, sha256_hex};
+use exposition_workflow::adapters::{Adapters, BoundInput, StepControl, StepRequest, rj, sha256_hex};
 use exposition_workflow::{
     StartWorkflowRunRequest, WorkflowHost, WorkflowOutputValue, WorkflowRun, WorkflowRunConfig, WorkflowRunError,
     WorkflowRunPlan, WorkflowRunService, WorkflowRunState, WorkflowStepState,
@@ -191,12 +192,17 @@ fn only_attempt(run: &WorkflowRun) -> &exposition_workflow::WorkflowStepAttempt 
 // ----------------------------------------------------------------- fakes ----
 
 type Call = (BatchLanguage, BatchMode, BatchCode, Option<String>);
+/// A `restricted_image` answer: (reference, identity) or why it is unavailable.
+type ImageAnswer = Result<(String, Option<String>), String>;
 
 /// Records each call and writes a dataset (and figure) like a batch would.
 struct FakeRunner {
     calls: Mutex<Vec<Call>>,
     /// What `restricted_image` reports for every language.
-    image: Mutex<Result<(String, Option<String>), String>>,
+    image: Mutex<ImageAnswer>,
+    /// From this many `restricted_image` calls on, report `later` instead.
+    switch: Mutex<Option<(usize, ImageAnswer)>>,
+    image_calls: AtomicUsize,
     counter: AtomicUsize,
 }
 
@@ -205,6 +211,8 @@ impl FakeRunner {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
             image: Mutex::new(Ok(("r-or-julia:local".into(), image_id.map(str::to_owned)))),
+            switch: Mutex::new(None),
+            image_calls: AtomicUsize::new(0),
             counter: AtomicUsize::new(1),
         })
     }
@@ -266,7 +274,11 @@ impl BatchRunner for FakeRunner {
         })
     }
     fn restricted_image(&self, _language: BatchLanguage) -> Result<(String, Option<String>), String> {
-        self.image.lock().unwrap().clone()
+        let n = self.image_calls.fetch_add(1, Ordering::SeqCst);
+        match &*self.switch.lock().unwrap() {
+            Some((after, later)) if n >= *after => later.clone(),
+            _ => self.image.lock().unwrap().clone(),
+        }
     }
 }
 
@@ -301,60 +313,154 @@ fn r_and_julia_steps_hand_their_code_to_the_language_runner() {
     }
 }
 
-/// An R step never runs a Python (or Julia) script: refused before the
-/// research runner is called, without a retry.
+/// An R step never runs a Python (or Julia) script: validation refuses the
+/// binding (the plan is blocked; nothing runs), and the adapter refuses such
+/// a script again before the research runner is called (defense in depth).
 #[test]
 fn a_script_of_another_language_is_refused_before_the_runner_is_called() {
-    for (operation, script) in [(RESEARCH_NATIVE_R, "analysis/fit.py"), (RESEARCH_JULIA_BATCH, "analysis/fit.R")] {
+    for (operation, language, script, own) in [
+        (RESEARCH_NATIVE_R, "r", "analysis/fit.py", "analysis/fit.R"),
+        (RESEARCH_JULIA_BATCH, "julia", "analysis/fit.R", "analysis/fit.jl"),
+    ] {
         let p = project();
         std::fs::create_dir_all(p.root.join("analysis")).unwrap();
         std::fs::write(p.root.join(script), "print(1)\n").unwrap();
+        std::fs::write(p.root.join(own), "1\n").unwrap();
         let fake = FakeRunner::new(Some(IMAGE_A));
         let (service, _) = service(&p, None, fake.clone(), (Some("lang:local"), Some(IMAGE_A)));
-        let id = save(&p, definition(operation, "r", None, Some(script)));
-        let plan = plan(&service, &id);
-        assert!(plan.inputs.iter().any(|i| i.text.as_deref() == Some("print(1)\n")), "the script is shown for review");
-        let run = run_to_end(&service, &plan, Duration::from_secs(20));
-        assert_eq!(run.state, WorkflowRunState::Failed);
-        let attempt = only_attempt(&run);
-        assert_eq!(attempt.code.as_deref(), Some("workflow.invalidInput"), "{:?}", attempt.message);
-        assert!(attempt.message.as_deref().unwrap_or("").contains(script), "{:?}", attempt.message);
+        let id = save(&p, definition(operation, language, None, Some(script)));
+        let blocked = plan(&service, &id);
+        assert!(
+            blocked.blockers.iter().any(|b| b.code == "workflow.notWellFormed" && b.message.contains(script)),
+            "{:?}",
+            blocked.blockers
+        );
+        let start =
+            StartWorkflowRunRequest { plan: blocked.plan.clone(), approval_hash: blocked.approval_hash.clone() };
+        assert!(service.start(&start).is_err(), "a blocked plan does not start");
+
+        // The adapter itself, given a valid plan's step and a foreign script.
+        let ok = plan(&service, &save(&p, definition(operation, language, None, Some(own))));
+        assert!(ok.blockers.is_empty(), "{:?}", ok.blockers);
+        let mut adapters = Adapters::new();
+        rj::install(&mut adapters, Some(fake.clone()));
+        let adapter = adapters.get(&ok.steps[0].runner).unwrap();
+        let foreign = BoundInput {
+            port: "script".into(),
+            port_type: PortType::CodeSource,
+            value: WorkflowOutputValue::File {
+                path: WorkspacePath::parse(script).unwrap(),
+                sha256: sha256_hex(b"print(1)\n"),
+                bytes: 9,
+                media_type: "text/plain".into(),
+                research_run: None,
+                artifact: None,
+            },
+        };
+        let run = WorkflowRunId::mint();
+        let request = StepRequest {
+            root: &p.root,
+            run: &run,
+            step: &ok.steps[0],
+            attempt: 1,
+            inputs: std::slice::from_ref(&foreign),
+            time_limit: Duration::from_secs(10),
+            max_output_bytes: 1 << 20,
+            model_requests_remaining: 0,
+            restricted_image_id: Some(IMAGE_A.into()),
+            seed_basis: "basis",
+            iteration: None,
+        };
+        let canceled = || false;
+        let on_dispatched = |_: &exposition_graph::OperationRef| panic!("nothing is dispatched");
+        let err =
+            adapter.run(&request, &StepControl { canceled: &canceled, on_dispatched: &on_dispatched }).unwrap_err();
+        assert_eq!(err.code, "workflow.invalidInput", "{}", err.message);
+        assert!(err.message.contains(script), "{}", err.message);
         assert!(fake.calls.lock().unwrap().is_empty(), "the research runner was never called");
     }
 }
 
-/// A restricted R/Julia step runs only when the identity the plan approved
-/// is the language image's identity (the research runner checks again).
+/// A restricted R/Julia step binds its own language image (not the default
+/// image) into the plan and its approval: it runs pinned to that identity,
+/// a change before the start makes the plan stale, and a change after the
+/// start refuses the step at dispatch.
 #[test]
-fn restricted_steps_run_only_in_the_identity_the_plan_approved() {
-    for operation in [RESEARCH_R_BATCH, RESEARCH_JULIA_BATCH] {
+fn restricted_steps_bind_their_language_image_in_the_plan() {
+    for (operation, language) in [(RESEARCH_R_BATCH, "r"), (RESEARCH_JULIA_BATCH, "julia")] {
         let p = project();
-        // The plan approved image A; the language's image is B.
         let fake = FakeRunner::new(Some(IMAGE_B));
+        // The default (Python) image is A; the language image is B.
         let (service, _) = service(&p, None, fake.clone(), (Some("python:3.13-slim"), Some(IMAGE_A)));
-        let id = save(
-            &p,
-            definition(operation, if operation == RESEARCH_R_BATCH { "r" } else { "julia" }, Some("1\n"), None),
-        );
-        let run = run_to_end(&service, &plan(&service, &id), Duration::from_secs(20));
+        let id = save(&p, definition(operation, language, Some("1\n"), None));
+        let first = plan(&service, &id);
+        let bound = first.execution.runner_images.clone().expect("the language image is bound");
+        assert_eq!(bound.len(), 1);
+        assert_eq!((bound[0].image.as_str(), bound[0].image_id.as_deref()), ("r-or-julia:local", Some(IMAGE_B)));
+        assert_eq!(bound[0].runner, first.steps[0].runner);
+        assert_eq!(first.execution.restricted_image, None, "no step uses the default image");
+        assert_eq!(first.execution.restricted_image_id, None);
+        assert!(first.notices.iter().any(|n| n.contains("image r-or-julia:local")), "{:?}", first.notices);
+        // A standing trigger plan names it among what suspends the trigger.
+        let suspends = exposition_workflow::triggers::standing::suspends_on(&first, &[]);
+        assert!(suspends.iter().any(|r| r.contains("r-or-julia:local")), "{suspends:?}");
+        let before = fake.image_calls.load(Ordering::SeqCst);
+        let run = run_to_end(&service, &first, Duration::from_secs(20));
+        assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?} {:?}", run.code, run.message);
+        // Starting re-plans; the runner's check and the adapter's own come last.
+        let per_run = fake.image_calls.load(Ordering::SeqCst) - before;
+        assert!(per_run >= 2, "{per_run}");
+        assert_eq!(fake.calls.lock().unwrap()[0].3.as_deref(), Some(IMAGE_B), "pinned to the bound identity");
+
+        // Changed between plan and start: the plan is stale (approval hash).
+        let stale = plan(&service, &id);
+        *fake.image.lock().unwrap() = Ok(("r-or-julia:local".into(), Some(IMAGE_A.into())));
+        let err = service
+            .start(&StartWorkflowRunRequest { plan: stale.plan.clone(), approval_hash: stale.approval_hash.clone() })
+            .unwrap_err();
+        assert!(err.message.contains("is now a different image"), "{}", err.message);
+
+        // Changed after the start, before dispatch: refused, nothing runs.
+        *fake.image.lock().unwrap() = Ok(("r-or-julia:local".into(), Some(IMAGE_B.into())));
+        let next = plan(&service, &id);
+        let calls = fake.image_calls.load(Ordering::SeqCst);
+        // Everything `start` asks first answers B; the runner's check sees A.
+        *fake.switch.lock().unwrap() =
+            Some((calls + per_run - 2, Ok(("r-or-julia:local".into(), Some(IMAGE_A.into())))));
+        let before = fake.calls.lock().unwrap().len();
+        let run = run_to_end(&service, &next, Duration::from_secs(20));
         assert_eq!(run.state, WorkflowRunState::Failed);
         let attempt = only_attempt(&run);
-        assert_eq!(attempt.code.as_deref(), Some("workflow.restrictedUnavailable"), "{:?}", attempt.message);
-        let message = attempt.message.clone().unwrap_or_default();
-        assert!(message.contains("sha256:bbbbbbbbbbbb") && message.contains("sha256:aaaaaaaaaaaa"), "{message}");
-        assert!(message.contains("Nothing runs natively"), "{message}");
-        assert!(fake.calls.lock().unwrap().is_empty(), "nothing was dispatched");
-        // Restricted R/Julia unavailable: refused the same way, never native.
-        *fake.image.lock().unwrap() = Err("no restricted R image is configured.".into());
-        let run = run_to_end(&service, &plan(&service, &id), Duration::from_secs(20));
-        assert_eq!(only_attempt(&run).code.as_deref(), Some("workflow.restrictedUnavailable"));
-        assert!(fake.calls.lock().unwrap().is_empty());
-        // The approved identity: runs, pinned to it.
-        *fake.image.lock().unwrap() = Ok(("lang:local".into(), Some(IMAGE_A.into())));
-        let run = run_to_end(&service, &plan(&service, &id), Duration::from_secs(20));
-        assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?}", run.message);
-        assert_eq!(fake.calls.lock().unwrap()[0].3.as_deref(), Some(IMAGE_A));
+        assert!(attempt.operation.is_none(), "nothing was dispatched");
+        assert_eq!(attempt.code.as_deref(), Some("workflow.restrictedUnavailable"));
+        assert!(
+            attempt.message.as_deref().unwrap_or("").contains("not the image you approved"),
+            "{:?}",
+            attempt.message
+        );
+        assert_eq!(run.steps[0].state, WorkflowStepState::Failed);
+        assert_eq!(fake.calls.lock().unwrap().len(), before, "the batch was not run");
+        *fake.switch.lock().unwrap() = None;
     }
+}
+
+/// Plans without R/Julia restricted steps bind no runner image (and hash as
+/// before).
+#[test]
+fn plans_without_language_images_bind_none() {
+    let p = project();
+    let fake = FakeRunner::new(Some(IMAGE_B));
+    let (service, _) = service(&p, None, fake, (Some("python:3.13-slim"), Some(IMAGE_A)));
+    let id = save(&p, definition(RESEARCH_NATIVE_R, "r", Some("1\n"), None));
+    let plan = plan(&service, &id);
+    assert_eq!(plan.execution.runner_images, None);
+    assert_eq!(
+        (plan.execution.restricted_image.as_deref(), plan.execution.restricted_backend.as_deref()),
+        (None, None)
+    );
+    // Absent from the serialized plan (and so from the approval hash's input).
+    let json = serde_json::to_value(&plan.execution).unwrap();
+    assert!(json.get("runnerImages").is_none(), "{json}");
 }
 
 /// A batch runner without R/Julia support makes the steps unavailable in the
@@ -625,7 +731,8 @@ fn restricted_r_and_julia_workflows_run_in_the_approved_language_image() {
         };
         let wf = save(&r.project, definition);
         let plan = plan(&service, &wf);
-        assert_eq!(plan.execution.restricted_image_id.as_deref(), Some(id_now.as_str()));
+        let bound = plan.execution.runner_images.clone().expect("the language image is bound");
+        assert_eq!(bound[0].image_id.as_deref(), Some(id_now.as_str()));
         let run = run_to_end(&service, &plan, Duration::from_secs(240));
         let manifest = assert_produced(&r, &run, figure, log);
         match manifest.execution.unwrap() {
@@ -640,12 +747,12 @@ fn restricted_r_and_julia_workflows_run_in_the_approved_language_image() {
     }
 }
 
-/// Today's application binds only the default (Python) image into a plan: a
-/// restricted R/Julia step is then refused at dispatch (never run in another
-/// image, never natively) with an accurate reason.
+/// With the default image set to Python (as the application reports it), a
+/// restricted R/Julia step still runs in its own language image, pinned to
+/// the identity the plan bound for it.
 #[test]
 #[ignore = "needs Docker Desktop and the local r-base/julia/python images; run with EXPOSITION_DOCKER_TESTS=1 -- --ignored"]
-fn restricted_r_and_julia_steps_bound_to_the_python_image_are_refused() {
+fn restricted_r_and_julia_run_in_their_own_image_beside_the_python_image() {
     if !docker_enabled() {
         return;
     }
@@ -654,15 +761,28 @@ fn restricted_r_and_julia_steps_bound_to_the_python_image_are_refused() {
     let python_id = image_id(PYTHON_IMAGE);
     let (service, _) =
         service(&r.project, Some(r.execution.clone()), r.runner.clone(), (Some(PYTHON_IMAGE), Some(&python_id)));
-    for (operation, language) in [(RESEARCH_R_BATCH, "r"), (RESEARCH_JULIA_BATCH, "julia")] {
-        let wf = save(&r.project, definition(operation, language, Some("cat('ran')\n"), None));
-        let run = run_to_end(&service, &plan(&service, &wf), Duration::from_secs(60));
-        assert_eq!(run.state, WorkflowRunState::Failed);
-        let attempt = only_attempt(&run);
-        assert_eq!(attempt.code.as_deref(), Some("workflow.restrictedUnavailable"), "{:?}", attempt.message);
-        assert!(attempt.operation.is_none(), "nothing was dispatched");
-        let message = attempt.message.clone().unwrap_or_default();
-        assert!(message.contains(&python_id[..19]) && message.contains("Nothing runs natively"), "{message}");
+    for (operation, language, lang_image) in
+        [(RESEARCH_R_BATCH, BatchLanguage::R, &r_image), (RESEARCH_JULIA_BATCH, BatchLanguage::Julia, &julia_image)]
+    {
+        let (definition, figure, log) = match language {
+            BatchLanguage::R => (definition(operation, "r", Some(R_CODE), None), "figure.png", "R rows 2 total 6"),
+            _ => (definition(operation, "julia", Some(JULIA_SCRIPT), None), "figure.svg", "Julia rows 2 total 6.0"),
+        };
+        let wf = save(&r.project, definition);
+        let plan = plan(&service, &wf);
+        let bound = plan.execution.runner_images.clone().unwrap();
+        let expected = image_id(lang_image);
+        assert_eq!(
+            (bound[0].image.as_str(), bound[0].image_id.as_deref()),
+            (lang_image.as_str(), Some(expected.as_str()))
+        );
+        let run = run_to_end(&service, &plan, Duration::from_secs(240));
+        let manifest = assert_produced(&r, &run, figure, log);
+        match manifest.execution.unwrap() {
+            RunExecution::RestrictedContainer { image, image_id, .. } => {
+                assert_eq!((image.as_str(), image_id.as_deref()), (lang_image.as_str(), Some(expected.as_str())));
+            }
+            other => panic!("{other:?}"),
+        }
     }
-    assert!(!r.project.root.join(".exposition").join("runs").exists(), "no research run was started");
 }

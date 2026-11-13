@@ -6,7 +6,13 @@
 // immutable revision. Saving never runs anything: a saved, well-formed
 // revision runs only after "Review and run…" shows its full plan and the
 // user presses "Start run".
-import { LayoutGrid, ListTree, Play, Plus, Save, X } from "lucide-react";
+//
+// M9: a step may run another saved workflow at a pinned revision (composite;
+// its ports come from the child), carry a bounded condition, and repeat
+// (forEach / until); the workflow may allow up to 4 steps at once. Any of
+// these makes the draft schema exposition.workflow/2. Triggers are enabled
+// only from this editor's Triggers section, through a standing-plan review.
+import { FileDown, LayoutGrid, ListTree, Play, Plus, Save, X } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { editors } from "../../app/editors";
@@ -19,12 +25,11 @@ import type { ParameterSpec } from "../../bindings/ParameterSpec";
 import type { ParamValue } from "../../bindings/ParamValue";
 import type { PortSpec } from "../../bindings/PortSpec";
 import type { PortType } from "../../bindings/PortType";
-import type { SavedWorkflow } from "../../bindings/SavedWorkflow";
-import type { WorkflowDefinition } from "../../bindings/WorkflowDefinition";
 import type { WorkflowDiagnostic } from "../../bindings/WorkflowDiagnostic";
 import type { WorkflowInput } from "../../bindings/WorkflowInput";
-import type { WorkflowStep } from "../../bindings/WorkflowStep";
+import type { WorkflowSummary } from "../../bindings/WorkflowSummary";
 import type { WorkflowValidation } from "../../bindings/WorkflowValidation";
+import { COMPOSITE_OPERATION, type SavedWorkflow, type WorkflowDefinition, type WorkflowStep } from "./contract";
 import { errorMessage } from "../../lib/ipc";
 import {
   Banner,
@@ -42,10 +47,15 @@ import {
 } from "../../ui/components";
 import { useWorkspace } from "../workspace/store";
 import { CodePayloadEditor } from "./CodePayloadEditor";
+import { exportBundle } from "./actions";
 import { workflowCommands } from "./ipc";
+import { addCompositeStep, isComposite, isDerivedContract, MAX_PARALLEL, maxParallelOf, normalizeSchema, setMaxParallel, withComposites } from "./orchestration";
 import { PlanReviewDialog } from "./PlanReview";
 import { CONTAINMENT_VIEW, EFFECT_LABELS } from "./runModel";
 import { openRun, RunHistory } from "./RunView";
+import { CompositeSection, ConditionSection, RepeatSection } from "./StepOrchestration";
+import { TriggersSection } from "./TriggersPanel";
+import { useCompositeChildren, type CompositeInfo } from "./useComposites";
 import { WorkflowCanvas, type CanvasSelectionItem } from "./WorkflowCanvas";
 import {
   addInput,
@@ -110,8 +120,27 @@ function TextArea(props: { label: string; value: string; onChange: (v: string) =
   );
 }
 
-function ParameterField({ spec, value, onChange }: { spec: ParameterSpec; value: ParamValue | undefined; onChange: (v: ParamValue | null) => void }) {
+function ParameterField({
+  spec,
+  value,
+  repeated,
+  onChange,
+}: {
+  spec: ParameterSpec;
+  value: ParamValue | undefined;
+  /** The step repeats for each value of this parameter (set in Repeat below). */
+  repeated?: boolean;
+  onChange: (v: ParamValue | null) => void;
+}) {
   const label = spec.required ? `${spec.label} (required)` : spec.label;
+  if (repeated) {
+    return (
+      <div className="ui-field">
+        <span className="ui-field__label">{label}</span>
+        <span className="xp-wf__muted">Varies: one instance per value (see Repeat below).</span>
+      </div>
+    );
+  }
   switch (spec.kind.kind) {
     case "boolean":
       return (
@@ -211,33 +240,48 @@ function StepCard({
   contracts,
   step,
   diagnostics,
+  composites,
   onChange,
 }: {
   draft: WorkflowDefinition;
   contracts: OperationContract[];
   step: WorkflowStep;
   diagnostics: WorkflowDiagnostic[];
+  composites: ReadonlyMap<string, CompositeInfo>;
   onChange: (def: WorkflowDefinition) => void;
 }) {
   const contract = contractOf(contracts, step);
+  const forEachParameter = step.repeat?.kind === "forEach" ? step.repeat.parameter : null;
+  // The operation declares the language of its code (python, r, julia).
+  const codeLanguage = contract?.payload?.kind === "code" ? contract.payload.language : "python";
   const downstream = downstreamOf(draft, step.id);
   const prereqs = prerequisitesOf(draft, step.id);
   return (
-    <li className="xp-wf__card" data-testid={`workflow-step-${step.id}`} data-operation={step.operation.id}>
+    <li
+      className="xp-wf__card"
+      data-testid={`workflow-step-${step.id}`}
+      data-operation={step.operation.id}
+      data-composite={isComposite(step) || undefined}
+      data-conditional={step.condition ? "true" : undefined}
+      data-repeat={step.repeat?.kind}
+    >
       <div className="xp-wf__card-header">
         <TextField className="xp-wf__grow" label="Step" value={step.label} onChange={(v) => onChange(updateStep(draft, step.id, { label: v }))} />
         <IconButton icon={X} aria-label={`Remove step ${step.label}`} onPress={() => onChange(removeStep(draft, step.id))} />
       </div>
       {contract ? (
         <>
-          <p className="xp-wf__muted">
-            <strong>{contract.title}</strong> (v{contract.version}) — {contract.purpose}
-          </p>
+          {!isDerivedContract(contract) && (
+            <p className="xp-wf__muted">
+              <strong>{contract.title}</strong> (v{contract.version}) — {contract.purpose}
+            </p>
+          )}
           <p className="xp-wf__muted">
             Runs through: {contract.runner.title} ({CONTAINMENT_VIEW[contract.runner.containment].label}) —{" "}
             {contract.runner.available ? "available" : `unavailable: ${contract.runner.availability}`}. Effects:{" "}
             {contract.effects.map((e) => EFFECT_LABELS[e].toLowerCase()).join("; ")}.
           </p>
+          <CompositeSection draft={draft} step={step} infos={composites} onChange={onChange} />
           <div className="xp-wf__form">
             {contract.inputs.map((port) => (
               <PortBinding key={port.name} draft={draft} contracts={contracts} step={step} port={port} onChange={onChange} />
@@ -246,6 +290,7 @@ function StepCard({
               <ParameterField
                 key={spec.name}
                 spec={spec}
+                repeated={forEachParameter === spec.name}
                 value={step.parameters[spec.name]}
                 onChange={(v) => {
                   const parameters = { ...step.parameters };
@@ -269,7 +314,7 @@ function StepCard({
               <Checkbox
                 isSelected={step.payload?.kind === "code"}
                 onChange={(on) =>
-                  onChange(updateStep(draft, step.id, { payload: on ? { kind: "code", language: "python", source: "" } : null }))
+                  onChange(updateStep(draft, step.id, { payload: on ? { kind: "code", language: codeLanguage, source: "" } : null }))
                 }
               >
                 Write the code here{contract.payload.unlessInput ? ` (instead of binding “${contract.payload.unlessInput}”)` : ""}
@@ -277,12 +322,15 @@ function StepCard({
               {step.payload?.kind === "code" && (
                 <CodePayloadEditor
                   label={`Code for ${step.label}`}
+                  language={step.payload.language}
                   value={step.payload.source}
-                  onChange={(source) => onChange(updateStep(draft, step.id, { payload: { kind: "code", language: "python", source } }))}
+                  onChange={(source) => onChange(updateStep(draft, step.id, { payload: { kind: "code", language: codeLanguage, source } }))}
                 />
               )}
             </div>
           )}
+          <ConditionSection draft={draft} contracts={contracts} step={step} onChange={onChange} />
+          <RepeatSection draft={draft} contracts={contracts} step={step} onChange={onChange} />
           {draft.steps.length > 1 && (
             <div className="xp-wf__multi">
               <span className="ui-field__label">Runs after (explicit prerequisites; no data)</span>
@@ -422,16 +470,20 @@ function originNote(saved: SavedWorkflow): string | null {
 export function WorkflowEditor({ resource }: EditorProps) {
   const id = resource.key.slice(WORKFLOW_KEY_PREFIX.length);
   const [saved, setSaved] = useState<SavedWorkflow | null>(null);
-  const [draft, setDraft] = useState<WorkflowDefinition | null>(null);
+  const [draft, setDraftState] = useState<WorkflowDefinition | null>(null);
   const [contracts, setContracts] = useState<OperationContract[]>([]);
   const [validation, setValidation] = useState<WorkflowValidation | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [newStep, setNewStep] = useState<string | null>(null);
+  const [newChild, setNewChild] = useState<string | null>(null);
+  const [others, setOthers] = useState<WorkflowSummary[]>([]);
   const [newInput, setNewInput] = useState<PortType>("dataset");
   const [newOutcome, setNewOutcome] = useState<OutcomeKind>("retainedFigure");
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [view, setViewState] = useState<EditorView>(readView);
   const [selection, setSelection] = useState<CanvasSelectionItem | null>(null);
   const reasonId = useId();
@@ -452,7 +504,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
     try {
       const [workflow, ops] = await Promise.all([resolveWorkflow(id), workflowCommands.operations()]);
       setSaved(workflow);
-      setDraft(workflow.definition);
+      setDraftState(workflow.definition);
       setValidation(workflow.validation);
       setContracts(ops);
       setProjectRoot(useWorkspace.getState().info?.root ?? null);
@@ -467,6 +519,24 @@ export function WorkflowEditor({ resource }: EditorProps) {
     void load();
   }, [load]);
 
+  // Every edit goes through here: a draft using any v2 field declares exposition.workflow/2.
+  const savedSchema = saved?.definition.schema;
+  const setDraft = useCallback(
+    (next: WorkflowDefinition) => setDraftState(savedSchema ? normalizeSchema(next, savedSchema) : next),
+    [savedSchema],
+  );
+  const composites = useCompositeChildren(draft);
+  // Registered contracts plus the ports derived for each composite reference.
+  const effective = useMemo(() => withComposites(contracts, composites.definitions), [contracts, composites.definitions]);
+  const composingStep = newStep === `${COMPOSITE_OPERATION}@1`;
+  useEffect(() => {
+    if (!composingStep || !saved) return;
+    workflowCommands.list().then(
+      (list) => setOthers(list.filter((w) => w.id !== saved.id)),
+      () => setOthers([]),
+    );
+  }, [composingStep, saved]);
+
   const dirty = Boolean(draft && saved && !sameDefinition(draft, saved.definition));
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
@@ -476,10 +546,10 @@ export function WorkflowEditor({ resource }: EditorProps) {
   useEffect(() => {
     if (!draft) return;
     const timer = setTimeout(() => {
-      workflowCommands.validate(draft).then(setValidation, (e: unknown) => setSaveError(errorMessage(e)));
+      workflowCommands.validate(draft, saved?.id ?? null).then(setValidation, (e: unknown) => setSaveError(errorMessage(e)));
     }, 200);
     return () => clearTimeout(timer);
-  }, [draft]);
+  }, [draft, saved?.id]);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (!draft || !saved) return false;
@@ -488,7 +558,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
     try {
       const result = await workflowCommands.save({ id: saved.id, expectedRevision: saved.revision, definition: draft });
       setSaved(result);
-      setDraft(result.definition);
+      setDraftState(result.definition);
       setValidation(result.validation);
       editors.setTitle(resource.key, result.definition.title || "Workflow draft");
       notify({
@@ -520,8 +590,8 @@ export function WorkflowEditor({ resource }: EditorProps) {
 
   const diagnostics = validation?.diagnostics ?? [];
   const candidates = useMemo(
-    () => (draft ? outcomeCandidates(draft, contracts, newOutcome) : []),
-    [draft, contracts, newOutcome],
+    () => (draft ? outcomeCandidates(draft, effective, newOutcome) : []),
+    [draft, effective, newOutcome],
   );
 
   if (loadError) {
@@ -574,6 +644,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
     </section>
   );
 
+  const child = composingStep ? others.find((w) => w.id === newChild) : undefined;
   const addStepRow = (
     <div className="xp-wf__row">
       <Select
@@ -581,15 +652,32 @@ export function WorkflowEditor({ resource }: EditorProps) {
         placeholder="Choose an operation…"
         value={newStep}
         onChange={(k) => setNewStep(String(k))}
-        options={contracts.map((c) => ({ id: `${c.id}@${c.version}`, label: c.title, description: c.purpose }))}
+        options={contracts
+          .filter((c) => !isDerivedContract(c))
+          .map((c) => ({ id: `${c.id}@${c.version}`, label: c.title, description: c.purpose }))}
+        data-testid="workflow-new-step"
       />
+      {composingStep && (
+        <Select
+          label="Workflow to run"
+          placeholder={others.length ? "Choose a saved workflow…" : "No other saved workflows"}
+          value={newChild}
+          onChange={(k) => setNewChild(String(k))}
+          options={others.map((w) => ({ id: w.id, label: w.title, description: `Latest revision ${w.revision}${w.state === "wellFormed" ? "" : " · incomplete"}` }))}
+          data-testid="workflow-new-composite"
+        />
+      )}
       <Button
         icon={Plus}
-        isDisabled={!newStep}
+        isDisabled={!newStep || (composingStep && !child)}
         onPress={() => {
-          const contract = contracts.find((c) => `${c.id}@${c.version}` === newStep);
-          if (contract) {
-            const next = addStep(draft, contract);
+          let next: WorkflowDefinition | null = null;
+          if (composingStep && child) next = addCompositeStep(draft, { workflow: child.id, revision: child.revision }, child.title);
+          else {
+            const contract = contracts.find((c) => `${c.id}@${c.version}` === newStep);
+            if (contract) next = addStep(draft, contract);
+          }
+          if (next) {
             setDraft(next);
             const added = next.steps[next.steps.length - 1];
             if (added) setSelection({ kind: "step", id: added.id });
@@ -599,6 +687,12 @@ export function WorkflowEditor({ resource }: EditorProps) {
       >
         Add Step
       </Button>
+      {composingStep && (
+        <p className="xp-wf__muted xp-wf__wide">
+          The step runs the chosen workflow at its latest saved revision, pinned: later edits of that workflow never change this step
+          until you choose “Use latest revision”. Composites may nest 3 deep and expand to at most 100 steps.
+        </p>
+      )}
     </div>
   );
 
@@ -608,7 +702,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
       <p className="xp-wf__muted">What the workflow produces. Every step must lead to one; a manuscript promotion is an optional destination.</p>
       <ul className="xp-wf__cards">
         {draft.outcomes.map((o) => {
-          const options = outcomeCandidates(draft, contracts, o.kind);
+          const options = outcomeCandidates(draft, effective, o.kind);
           return (
             <li key={o.id} className="xp-wf__card" data-testid={`workflow-outcome-${o.id}`}>
               <div className="xp-wf__card-header">
@@ -694,6 +788,22 @@ export function WorkflowEditor({ resource }: EditorProps) {
               { id: "canvas", label: "Canvas", icon: LayoutGrid },
             ]}
           />
+          <Button
+            variant="ghost"
+            icon={FileDown}
+            isPending={exporting}
+            isDisabled={exporting}
+            onPress={async () => {
+              setExporting(true);
+              setExportError(null);
+              const result = await exportBundle(saved.id, saved.revision);
+              setExporting(false);
+              if (result && !result.ok) setExportError(result.error);
+            }}
+            data-testid="workflow-export"
+          >
+            Export revision {saved.revision}…
+          </Button>
           <Button variant={dirty ? "primary" : "secondary"} icon={Save} isPending={saving} isDisabled={saving} onPress={() => void save()} data-testid="workflow-save">
             Save Revision
           </Button>
@@ -734,6 +844,13 @@ export function WorkflowEditor({ resource }: EditorProps) {
             {saveError}
           </Banner>
         )}
+        {exportError && (
+          <div data-testid="workflow-export-error">
+            <Banner tone="danger" title="Not exported" live>
+              {exportError}
+            </Banner>
+          </div>
+        )}
         <Diagnostics items={generalDiagnostics(diagnostics)} testId="workflow-diagnostics" />
 
         {view === "canvas" ? (
@@ -742,7 +859,8 @@ export function WorkflowEditor({ resource }: EditorProps) {
               <WorkflowCanvas
                 workflowId={saved.id}
                 draft={draft}
-                contracts={contracts}
+                contracts={effective}
+                composites={composites.infos}
                 diagnostics={diagnostics}
                 selection={selection}
                 onSelectionChange={setSelection}
@@ -754,7 +872,14 @@ export function WorkflowEditor({ resource }: EditorProps) {
               <h3 className="xp-wf__group-title">Inspector</h3>
               {selectedStep ? (
                 <ul className="xp-wf__cards">
-                  <StepCard draft={draft} contracts={contracts} step={selectedStep} diagnostics={diagnosticsFor(diagnostics, { step: selectedStep.id })} onChange={setDraft} />
+                  <StepCard
+                    draft={draft}
+                    contracts={effective}
+                    step={selectedStep}
+                    diagnostics={diagnosticsFor(diagnostics, { step: selectedStep.id })}
+                    composites={composites.infos}
+                    onChange={setDraft}
+                  />
                 </ul>
               ) : selectedInput ? (
                 <ul className="xp-wf__cards">
@@ -777,6 +902,18 @@ export function WorkflowEditor({ resource }: EditorProps) {
                   onChange={(execution) => setDraft({ ...draft, ceiling: { ...draft.ceiling, execution } })}
                   options={(Object.keys(EXECUTION_LABELS) as ExecutionCeiling[]).map((k) => ({ id: k, label: EXECUTION_LABELS[k] }))}
                 />
+                <Select<number>
+                  label="Steps that may run at the same time"
+                  value={maxParallelOf(draft)}
+                  onChange={(n) => setDraft(setMaxParallel(draft, n))}
+                  options={Array.from({ length: MAX_PARALLEL }, (_, i) => ({
+                    id: i + 1,
+                    label: i === 0 ? "1 — one at a time" : String(i + 1),
+                    description: i === 0 ? "Each step waits for the previous one" : "Only steps that do not depend on each other; global limits still apply",
+                  }))}
+                  description="Independent steps and repeat instances run side by side up to this limit and the application's global limits (4 steps in flight, 2 containers, 2 native, 2 model, 1 Lean)."
+                  data-testid="workflow-max-parallel"
+                />
                 <div className="xp-wf__wide">
                   <TextArea label="Description" value={draft.description} onChange={(description) => setDraft({ ...draft, description })} />
                 </div>
@@ -798,10 +935,22 @@ export function WorkflowEditor({ resource }: EditorProps) {
 
             <section className="xp-wf__group" aria-label="Steps">
               <h3 className="xp-wf__group-title">Steps</h3>
-              <p className="xp-wf__muted">Each step is a registered operation. Data reaches a step only through a compatible binding; there are no loops, conditions, or nested workflows.</p>
+              <p className="xp-wf__muted">
+                Each step is a registered operation or another saved workflow (pinned revision). Data reaches a step only through a compatible
+                binding. A step may run only when a fixed condition on an earlier output holds, and may repeat a bounded number of times; there
+                is no expression language and no open-ended loop.
+              </p>
               <ul className="xp-wf__cards">
                 {draft.steps.map((step) => (
-                  <StepCard key={step.id} draft={draft} contracts={contracts} step={step} diagnostics={diagnosticsFor(diagnostics, { step: step.id })} onChange={setDraft} />
+                  <StepCard
+                    key={step.id}
+                    draft={draft}
+                    contracts={effective}
+                    step={step}
+                    diagnostics={diagnosticsFor(diagnostics, { step: step.id })}
+                    composites={composites.infos}
+                    onChange={setDraft}
+                  />
                 ))}
               </ul>
               {addStepRow}
@@ -825,6 +974,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
         )}
 
         <RunHistory workflow={saved.id} />
+        <TriggersSection workflow={saved.id} revision={saved.revision} definition={saved.definition} reviewBlock={runBlock} />
       </div>
       <PlanReviewDialog
         workflow={saved.id}

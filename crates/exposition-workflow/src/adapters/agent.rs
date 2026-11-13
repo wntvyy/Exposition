@@ -21,7 +21,8 @@ use exposition_graph::workflow::StepPayload;
 use exposition_graph::workflow::registry::PortType;
 
 use super::{StepAdapter, StepControl, StepFailure, StepRequest, StepResult};
-use crate::model::{MAX_REPORT_CHARS, WorkflowOutputValue};
+use crate::environment::{WorkflowEnvironment, WorkflowEnvironmentModel};
+use crate::model::{MAX_REPORT_CHARS, WorkflowOutputValue, WorkflowPlanStep};
 
 /// What one review asks for.
 pub struct ReviewRequest {
@@ -39,6 +40,18 @@ pub struct ReviewOutcome {
     pub requests: u32,
 }
 
+/// The model behind a review (environment capture).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewModel {
+    /// `anthropic`, `scripted`.
+    pub provider: String,
+    /// The model the task was created with (or the settings' model).
+    pub configured: String,
+    /// The model that served the latest request, when the provider said.
+    pub served_by: Option<String>,
+    pub effort: Option<String>,
+}
+
 /// Read-only agent reviews (a seam for tests).
 pub trait AgentReviewer: Send + Sync {
     fn availability(&self, root: &Path) -> Result<(), String>;
@@ -48,6 +61,30 @@ pub trait AgentReviewer: Send + Sync {
         canceled: &(dyn Fn() -> bool + Sync),
         on_task: &(dyn Fn(&str) + Sync),
     ) -> Result<ReviewOutcome, StepFailure>;
+    /// The provider and model of review task `task` (`None`: of a new task
+    /// now, from the provider settings). Reads records only.
+    fn model(&self, _task: Option<&str>) -> Option<ReviewModel> {
+        None
+    }
+}
+
+/// The environment of a review with `model`.
+pub fn review_environment(step: &WorkflowPlanStep, model: Option<ReviewModel>) -> WorkflowEnvironment {
+    let mut env = WorkflowEnvironment::of_step(step);
+    match model {
+        Some(m) => {
+            let served = m.served_by.clone().unwrap_or_else(|| m.configured.clone());
+            if served != m.configured {
+                env.note(format!("Configured model {}; the provider served {served}.", m.configured));
+            }
+            if let Some(effort) = &m.effort {
+                env.note(format!("Effort {effort}."));
+            }
+            env.model = Some(WorkflowEnvironmentModel { provider: m.provider, model: served });
+        }
+        None => env.note("The review's model was not reported."),
+    }
+    env
 }
 
 pub struct AgentReviewAdapter {
@@ -138,8 +175,18 @@ impl StepAdapter for AgentReviewAdapter {
             max_requests: request.model_requests_remaining,
             time_limit: request.time_limit,
         };
-        let on_task = |task: &str| (control.on_dispatched)(&OperationRef { kind: "agentTask".into(), id: task.into() });
-        let outcome = reviewer.review(&review, control.canceled, &on_task)?;
+        let started: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        let on_task = |task: &str| {
+            *started.lock().unwrap_or_else(|p| p.into_inner()) = Some(task.to_owned());
+            (control.on_dispatched)(&OperationRef { kind: "agentTask".into(), id: task.into() })
+        };
+        let environment = || {
+            let task = started.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            review_environment(request.step, task.as_deref().and_then(|t| reviewer.model(Some(t))))
+        };
+        let outcome = reviewer
+            .review(&review, control.canceled, &on_task)
+            .map_err(|f| StepFailure { environment: Some(environment()), ..f })?;
         let operation = OperationRef { kind: "agentTask".into(), id: outcome.task.clone() };
         let value =
             WorkflowOutputValue::Report { text: bounded(&outcome.text, MAX_REPORT_CHARS), task: Some(outcome.task) };
@@ -147,8 +194,14 @@ impl StepAdapter for AgentReviewAdapter {
             operation: Some(operation.clone()),
             outputs: vec![request.output("report", PortType::ReviewReport, value, &operation)],
             model_requests: outcome.requests,
+            environment: Some(environment()),
             ..Default::default()
         })
+    }
+
+    fn current_environment(&self, _root: &Path, step: &WorkflowPlanStep) -> Option<WorkflowEnvironment> {
+        let model = self.reviewer.as_ref()?.model(None)?;
+        Some(review_environment(step, Some(model)))
     }
 }
 
@@ -175,7 +228,35 @@ impl AgentServiceReviewer {
     }
 }
 
+/// The serde name of a provider kind or effort (`anthropic`, `medium`).
+fn wire_name<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()
+}
+
 impl AgentReviewer for AgentServiceReviewer {
+    fn model(&self, task: Option<&str>) -> Option<ReviewModel> {
+        match task {
+            Some(task) => {
+                let summary = self.agents.task(&TaskId(task.to_owned())).ok()?;
+                Some(ReviewModel {
+                    provider: wire_name(&summary.spec.provider.provider),
+                    configured: summary.spec.provider.model.clone(),
+                    served_by: summary.usage.served_by.clone(),
+                    effort: Some(wire_name(&summary.spec.provider.effort)),
+                })
+            }
+            None => {
+                let settings = self.agents.provider_status().settings;
+                Some(ReviewModel {
+                    provider: wire_name(&settings.provider),
+                    configured: settings.model.clone(),
+                    served_by: None,
+                    effort: Some(wire_name(&settings.effort)),
+                })
+            }
+        }
+    }
+
     fn availability(&self, _root: &Path) -> Result<(), String> {
         let status = self.agents.provider_status();
         match status.settings.provider {
