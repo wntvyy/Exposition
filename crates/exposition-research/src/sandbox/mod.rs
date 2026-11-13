@@ -494,7 +494,7 @@ impl ScopedBatchRunner {
             Some(dir) => dir.clone(),
             None => exposition_execution::docker::out_dir(&job_dir),
         };
-        let out_cap = request.max_output_bytes.saturating_add(OUTPUT_AREA_SLACK);
+        let out_cap = request.max_output_bytes.min(outputs::TOTAL_LIMIT).saturating_add(OUTPUT_AREA_SLACK);
         let (result, overflow) = self.wait(&job, control, &out_dir, out_cap);
         let (validated, mut rejected) = outputs::validate(&out_dir, request.max_output_bytes);
         if out_host.is_none() {

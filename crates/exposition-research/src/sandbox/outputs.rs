@@ -5,7 +5,7 @@
 //! (`[A-Za-z0-9._-]{1,100}`, no leading dot, no trailing dot, no reserved
 //! Windows device name, an exported extension), at most [`MAX_FILES`] files,
 //! each at most [`ARTIFACT_SIZE_LIMIT`] and together at most the batch's
-//! output budget, with exactly one name (no hard links), and content that
+//! output budget (and [`TOTAL_LIMIT`]), with exactly one name (no hard links), and content that
 //! matches the claimed type (magic bytes for PNG/JPEG/GIF/PDF; UTF-8 text for
 //! SVG/HTML/CSV/TSV/JSON/TXT). Links, junctions/reparse points, folders and
 //! special files are rejected without being followed. Accepted files are
@@ -28,6 +28,9 @@ use crate::store::{artifact_dir_path, ensure_dir_within};
 
 /// Files accepted per batch.
 pub const MAX_FILES: usize = 32;
+/// Total accepted per batch whatever the request's budget (validated files
+/// are held in memory until they are stored).
+pub const TOTAL_LIMIT: u64 = 512 * 1024 * 1024;
 /// Directory entries inspected at most (the rest are rejected unread).
 const MAX_ENTRIES: usize = 256;
 /// Longest accepted name.
@@ -148,6 +151,7 @@ pub(crate) fn validate(out_dir: &Path, max_total: u64) -> (Vec<Validated>, Vec<B
     let reject = |rejected: &mut Vec<BatchRejected>, name: &str, reason: String| {
         rejected.push(BatchRejected { name: name.chars().take(200).collect(), reason });
     };
+    let max_total = max_total.min(TOTAL_LIMIT);
     let Ok(entries) = std::fs::read_dir(out_dir) else { return (accepted, rejected) };
     let mut names: Vec<(String, std::path::PathBuf, bool)> = Vec::new();
     let mut entries = entries.flatten();
