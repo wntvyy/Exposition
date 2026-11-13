@@ -221,8 +221,10 @@ pub(crate) fn redact_text_artifact(
     Ok(redacted.into_bytes())
 }
 
+/// The media type of an artifact by its extension (compared case-insensitively,
+/// as output names are accepted: `FIGURE.SVG` is an SVG and is treated as one).
 pub fn media_type_for(name: &str) -> &'static str {
-    match name.rsplit('.').next().unwrap_or("") {
+    match name.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
@@ -248,6 +250,15 @@ pub fn artifact_belongs_to_run(path: &WorkspacePath, run_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_types_ignore_the_extension_case() {
+        assert_eq!(media_type_for("upper.TXT"), "text/plain");
+        assert_eq!(media_type_for("figure.SVG"), "image/svg+xml");
+        assert_eq!(media_type_for("table.Csv"), "text/csv");
+        assert_eq!(media_type_for("photo.JPEG"), "image/jpeg");
+        assert_eq!(media_type_for("noext"), "application/octet-stream");
+    }
 
     #[test]
     fn text_artifacts_are_redacted_and_binary_ones_left_alone() {
