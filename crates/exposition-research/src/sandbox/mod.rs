@@ -77,6 +77,20 @@ pub fn batch_runner(research: Arc<ResearchService>, execution: ExecutionService)
     Arc::new(ScopedBatchRunner::new(research, execution))
 }
 
+/// Remove batch staging folders an earlier session left behind (the
+/// application was killed while a batch ran; its manifest then reads as
+/// failed). Call once at application start, before any batch runs.
+/// Returns how many were removed.
+pub fn remove_stale_batches(research: &ResearchService) -> usize {
+    let dir = research.data_dir().join("research").join("batches");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+    entries
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(crate::store::valid_run_id))
+        .filter(|e| std::fs::remove_dir_all(e.path()).is_ok())
+        .count()
+}
+
 /// The [`BatchRunner`] implementation (see the module docs).
 pub struct ScopedBatchRunner {
     research: Arc<ResearchService>,

@@ -72,7 +72,12 @@ pub(crate) fn link_count(file: &File) -> io::Result<u64> {
 pub(crate) fn checked_regular_file(path: &Path) -> Result<(File, u64), String> {
     let lstat = std::fs::symlink_metadata(path).map_err(|e| format!("cannot be inspected ({e})"))?;
     if is_link_like(&lstat) {
-        return Err("a link (symbolic link, junction or other reparse point; links are never followed)".into());
+        // Docker Desktop shows links and FIFOs a container creates in a bind
+        // mount as reparse points on Windows.
+        return Err(
+            "a link or special file (symbolic link, junction, or other reparse point such as a container-made FIFO); never followed"
+                .into(),
+        );
     }
     if lstat.is_dir() {
         return Err("a directory (only files directly in the output folder are exported)".into());

@@ -406,7 +406,8 @@ fn restricted_cancel_removes_the_container() {
     let f = fixture_with(Some(IMAGE), false);
     let code = "import time\nprint('started', flush=True)\ntime.sleep(120)\nprint('NOT CANCELED')\n";
     let started = Instant::now();
-    let (result, dispatched) = run(&f, &request(BatchMode::Restricted, code, Vec::new(), Vec::new()), Some(Duration::from_secs(4)));
+    let (result, dispatched) =
+        run(&f, &request(BatchMode::Restricted, code, Vec::new(), Vec::new()), Some(Duration::from_secs(4)));
     let result = result.unwrap();
     assert!(dispatched.is_some());
     assert_eq!(result.status, RunStatus::Canceled, "{}", result.log);
@@ -446,8 +447,7 @@ fn restricted_with_a_missing_image_is_refused_without_fallback() {
     let f = fixture_with(Some("exposition-test-missing-image:0.0"), true);
     let reason = f.runner.availability(&f.root, BatchMode::Restricted).unwrap_err();
     assert!(reason.contains("not present locally"), "{reason}");
-    let (result, dispatched) =
-        run(&f, &request(BatchMode::Restricted, "print('ran')\n", Vec::new(), Vec::new()), None);
+    let (result, dispatched) = run(&f, &request(BatchMode::Restricted, "print('ran')\n", Vec::new(), Vec::new()), None);
     let err = result.unwrap_err();
     assert_eq!(err.code(), "research.environmentUnavailable", "{err}");
     assert!(dispatched.is_none(), "nothing was dispatched");
@@ -459,8 +459,7 @@ fn restricted_without_an_image_is_unavailable() {
     let f = fixture_with(None, false);
     let reason = f.runner.availability(&f.root, BatchMode::Restricted).unwrap_err();
     assert!(reason.contains("no container image is configured"), "{reason}");
-    let (result, dispatched) =
-        run(&f, &request(BatchMode::Restricted, "print('ran')\n", Vec::new(), Vec::new()), None);
+    let (result, dispatched) = run(&f, &request(BatchMode::Restricted, "print('ran')\n", Vec::new(), Vec::new()), None);
     assert_eq!(result.unwrap_err().code(), "research.environmentUnavailable");
     assert!(dispatched.is_none());
 }
@@ -506,7 +505,8 @@ fn trusted_native_batch_runs_in_a_fresh_process_and_registers_outputs() {
     let code = format!(
         "{ANALYSIS}\nimport os\nprint('cwd-has-secret', os.path.exists('helpers.py'))\nprint('out-env', bool(os.environ.get('EXPOSITION_OUTPUT_DIR')))\nprint('key-visible', 'ANTHROPIC_API_KEY' in os.environ)\n"
     );
-    let req = request(BatchMode::TrustedNative, &code, vec![data], vec![port("table", &["csv"]), port("figure", &["svg"])]);
+    let req =
+        request(BatchMode::TrustedNative, &code, vec![data], vec![port("table", &["csv"]), port("figure", &["svg"])]);
     let (result, dispatched) = run(&f, &req, None);
     let result = result.unwrap();
     assert_eq!(result.status, RunStatus::Succeeded, "{}", result.log);
