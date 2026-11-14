@@ -299,6 +299,7 @@ function FileTree({ name, rootPath, entries }: { name: string; rootPath: string;
         className="xp-tree"
         data-testid="file-tree"
         selectionMode="multiple"
+        selectionBehavior="replace"
         selectedKeys={selected}
         onSelectionChange={(keys) =>
           setSelected(keys === "all" ? new Set([...index.keys()]) : new Set([...keys].map(String).filter((k) => index.has(k))))

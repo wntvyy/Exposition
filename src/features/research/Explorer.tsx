@@ -166,6 +166,7 @@ export function ResearchExplorer() {
         className="xp-tree exp-rexplorer__tree"
         data-testid="research-tree"
         selectionMode="multiple"
+        selectionBehavior="replace"
         selectedKeys={selected}
         onSelectionChange={(keys) => {
           if (keys === "all") return;
