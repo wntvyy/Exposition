@@ -48,7 +48,8 @@ pub struct AppState {
     /// Keeps the graph reconciled with the project's files and open buffers
     /// (its own thread, subscribed to workspace/document/graph events).
     pub reconciler: ReconcilerHandle,
-    /// Workflow runs (M8): plans, the one-step-at-a-time runner, durable run
+    /// Workflow runs: reviewed plans, the bounded scheduler (a run's
+    /// `maxParallel`, application-wide limits, reserved budgets), durable run
     /// records in `workflow-runs.sqlite3` (interrupted runs never resume).
     pub workflow_runs: WorkflowRunService,
     /// Explicit, user-only workflow triggers (M9): standing plans the user

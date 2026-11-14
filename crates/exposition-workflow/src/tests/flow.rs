@@ -107,7 +107,7 @@ fn json_conditions_run_or_skip_steps_and_skips_propagate() {
     assert_eq!(state_of(&run, "good"), WorkflowStepState::Succeeded);
     assert_eq!(state_of(&run, "refit"), WorkflowStepState::ConditionNotMet);
     let reason = step_of(&run, "refit").reason.clone().unwrap();
-    assert!(reason.contains("/r2") && reason.contains("0.95") && reason.contains("unless"), "{reason}");
+    assert!(reason.contains("/r2") && reason.contains("0.95") && reason.contains("does not hold"), "{reason}");
     assert!(step_of(&run, "refit").attempts.is_empty(), "never dispatched");
     assert_eq!(state_of(&run, "after"), WorkflowStepState::Skipped);
     assert!(step_of(&run, "after").reason.as_deref().unwrap().contains("“Python refit”"));
@@ -652,7 +652,124 @@ fn the_plan_states_conditions_and_repeats_in_plain_words() {
     let plan = f.service.plan(&f.save(v2(def, 2)), None).unwrap();
     assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
     let text = plan.notices.join("\n");
-    assert!(text.contains("“Python next” runs only unless the value at /r2 ≥ 0.9"), "{text}");
+    assert!(text.contains("“Python next” runs only when the value at /r2 ≥ 0.9 does not hold"), "{text}");
     assert!(text.contains("“Python fit” runs again, at most 4 times, until the value at /r2 ≥ 0.9"), "{text}");
     assert!(text.contains("the last iteration's outputs are used"), "{text}");
+}
+
+// ---------------------------------------------------------- audit fixes ----
+
+/// M9 audit 2: an association step fed by a repeated (until) audit can be
+/// decided; the audit used is the iteration the step consumed.
+#[test]
+fn an_association_fed_by_an_until_audit_can_be_decided() {
+    let f = fixture();
+    let mut def = formal(None);
+    def.steps[0].repeat = Some(StepRepeat::Until {
+        port: "evidence".into(),
+        test: ConditionTest::VerdictIn { verdicts: vec!["Unverified".into()] },
+        negate: false,
+        max_iterations: 2,
+        on_exhausted: Exhausted::Fail,
+    });
+    def.ceiling.execution = ExecutionCeiling::TrustedNative;
+    let run = f.run_to_end(&f.save(v2(def, 1)));
+    assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?}", run.message);
+    assert_eq!(step_of(&run, "audit").instances.len(), 1);
+    let decided = f
+        .service
+        .decide_association(&WorkflowAssociationDecision {
+            run: run.id.clone(),
+            step: "associate".into(),
+            accept: vec!["main_theorem".into()],
+        })
+        .unwrap();
+    let WorkflowOutputValue::AssociationProposal { status, accepted, .. } =
+        &last_attempt(&decided, "associate").outputs[0].value
+    else {
+        panic!("proposal")
+    };
+    assert_eq!(*status, WorkflowProposalStatus::Accepted);
+    assert_eq!(accepted, &vec!["main_theorem".to_owned()]);
+    assert_eq!(*f.lean.recorded.lock().unwrap(), vec![vec!["main_theorem".to_owned()]]);
+}
+
+/// M9 audit 3: plan and run wording is accurate for repeats, conditions,
+/// prerequisites, and an until predicate that cannot be evaluated.
+#[test]
+fn plan_and_run_wording_is_accurate() {
+    let f = fixture();
+    f.set_behavior(json_behavior());
+    // A plan with a repeat does not promise that nothing is repeated.
+    let mut def = fan(&["sweep"], Some("join"));
+    def.steps[0].repeat = for_each_timeouts(&[10, 20]);
+    let plan = f.service.plan(&f.save(v2(def, 1)), None).unwrap();
+    assert!(!plan.notices[0].contains("nothing is retried or repeated"), "{}", plan.notices[0]);
+    assert!(plan.notices[0].contains("nothing is retried"), "{}", plan.notices[0]);
+    let plan = f.service.plan(&f.save(chain()), None).unwrap();
+    assert!(plan.notices[0].contains("nothing is retried or repeated"), "M8 wording kept: {}", plan.notices[0]);
+    // The condition notice names the state the step gets, and reads well negated.
+    let mut def = numerical(false);
+    def.steps = vec![code_step("fit", "# json: {\"r2\": 0.5}"), code_step("refit", ""), code_step("after", "")];
+    def.steps[1].condition = when("fit", "dataset", json_ge("/r2", "0.9"), true);
+    def.connections = vec![
+        data_edge(PortSource::Input { input: "data".into() }, "fit"),
+        data_edge(out("fit"), "refit"),
+        data_edge(PortSource::Input { input: "data".into() }, "after"),
+        WorkflowConnection::Prerequisite { before: "refit".into(), after: "after".into() },
+    ];
+    def.outcomes = vec![dataset_outcome("refit"), dataset_outcome("after")];
+    let id = f.save(v2(def, 1));
+    let plan = f.service.plan(&id, None).unwrap();
+    let notice = plan.notices.iter().find(|n| n.starts_with("“Python refit” runs only")).unwrap();
+    assert!(!notice.contains("unless"), "{notice}");
+    assert!(notice.contains("does not hold") && notice.contains("condition not met"), "{notice}");
+    assert!(!notice.contains("it is skipped"), "{notice}");
+    // A dependent that only waits for the step (a prerequisite) is not told
+    // it needed that step's output.
+    let mut def = f.graph.workflow(&id, None).unwrap().definition;
+    def.steps[0] = code_step("fit", "# json: {\"r2\": 0.95}");
+    let run = f.run_to_end(&f.save(def));
+    assert_eq!(state_of(&run, "refit"), WorkflowStepState::ConditionNotMet);
+    assert_eq!(state_of(&run, "after"), WorkflowStepState::Skipped);
+    let reason = step_of(&run, "after").reason.clone().unwrap();
+    assert!(!reason.contains("output it needs") && reason.contains("runs after"), "{reason}");
+    // An until predicate that cannot be evaluated: the iteration does not
+    // read as a success while the step fails.
+    let mut def = fan(&["search"], Some("use"));
+    def.steps[0] = code_step("search", "# json: {\"other\": 1}");
+    def.steps[0].repeat = Some(StepRepeat::Until {
+        port: "dataset".into(),
+        test: json_ge("/found", "1"),
+        negate: false,
+        max_iterations: 3,
+        on_exhausted: Exhausted::Fail,
+    });
+    let run = f.run_to_end(&f.save(v2(def, 1)));
+    assert_eq!(run.state, WorkflowRunState::Failed);
+    assert_eq!(run.code.as_deref(), Some("workflow.conditionUnreadable"), "{:?}", run.message);
+    let step = step_of(&run, "search");
+    assert_eq!(step.state, WorkflowStepState::Failed);
+    assert_eq!(step.instances.len(), 1);
+    assert_eq!(step.instances[0].state, WorkflowStepState::Failed, "the iteration that could not be judged failed");
+    assert_eq!(step.instances[0].attempts[0].state, WorkflowAttemptState::Failed);
+    assert!(step.instances[0].attempts[0].message.as_deref().unwrap().contains("predicate"));
+}
+
+/// M9 audit 4: a step skipped by its own condition finished as planned.
+#[test]
+fn run_summaries_count_condition_not_met_steps_as_done() {
+    let f = fixture();
+    f.set_behavior(json_behavior());
+    let mut def = numerical(false);
+    def.steps = vec![code_step("fit", "# json: {\"r2\": 0.5}"), code_step("publish", "")];
+    def.steps[1].condition = when("fit", "dataset", json_ge("/r2", "0.9"), false);
+    def.connections =
+        vec![data_edge(PortSource::Input { input: "data".into() }, "fit"), data_edge(out("fit"), "publish")];
+    def.outcomes = vec![dataset_outcome("fit"), dataset_outcome("publish")];
+    let id = f.save(v2(def, 1));
+    let run = f.run_to_end(&id);
+    assert_eq!(state_of(&run, "publish"), WorkflowStepState::ConditionNotMet);
+    let summary = f.service.runs(Some(&id)).unwrap().into_iter().find(|s| s.id == run.id).unwrap();
+    assert_eq!((summary.steps_done, summary.steps_total), (2, 2));
 }
