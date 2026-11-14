@@ -781,7 +781,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
 
   const selectedStep = selection?.kind === "step" ? draft.steps.find((s) => s.id === selection.id) : undefined;
   const selectedInput = selection?.kind === "input" ? draft.inputs.find((i) => i.id === selection.id) : undefined;
-  const subtitle = `Revision ${saved.revision} of ${saved.revisions.length}${saved.imported ? " · imported" : ""}${dirty ? " · unsaved changes" : ""}`;
+  const subtitle = `Revision ${saved.revision} of ${saved.revisions.length}${saved.imported ? " · imported (untrusted)" : ""}${dirty ? " · unsaved changes" : ""}`;
 
   return (
     <div className="xp-wf" data-testid="workflow-editor" data-workflow={saved.id} data-revision={saved.revision} data-view={view}>
