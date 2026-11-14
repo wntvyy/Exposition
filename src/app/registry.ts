@@ -71,6 +71,11 @@ export interface CommandContribution {
    * Mod+C or Mod+Z), and `"workbench"` otherwise. See `src/app/keybindings.ts`.
    */
   keybindingScope?: "global" | "workbench";
+  /**
+   * Ignore auto-repeated keydown events (a held key) for this binding. Set for
+   * destructive commands so holding Delete never deletes item after item.
+   */
+  ignoreRepeat?: boolean;
   /** Return false (or a promise of false) when the command is unavailable. */
   enabled?: () => boolean;
   run: () => void | Promise<void>;

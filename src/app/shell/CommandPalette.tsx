@@ -30,6 +30,11 @@ export const commandPalette = {
   close: () => usePalette.setState({ open: false }),
   toggle: () => usePalette.setState((s) => ({ open: !s.open })),
   isOpen: () => usePalette.getState().open,
+  /** Observe opening and closing (e.g. to remember which surface had focus before). */
+  subscribe: (listener: (open: boolean) => void): (() => void) =>
+    usePalette.subscribe((state, previous) => {
+      if (state.open !== previous.open) listener(state.open);
+    }),
 };
 
 export function commandLabel(command: CommandContribution): string {

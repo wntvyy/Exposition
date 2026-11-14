@@ -17,6 +17,7 @@ import { commands, errorMessage, events } from "../../lib/ipc";
 import type { KeyValueStorage } from "../../ui/storage";
 import { readStored, writeStored } from "../../ui/storage";
 import { disposeAllHandles, fileKey } from "../editor/documentClient";
+import { onProjectOp, touchedPaths } from "../operations/client";
 import { loadAppSettings, useAppSettings } from "../editor/settings";
 import { reportSettingsWarning } from "../settings/warnings";
 
@@ -295,11 +296,29 @@ function dropFileTabs() {
   }
 }
 
+/**
+ * After a project operation (delete, copy, restore — from any surface or an
+ * agent): re-list the folders it touched at once instead of waiting for the
+ * watcher's (debounced) change event.
+ */
+export function refreshAfterOperation(paths: string[]): void {
+  const { dirs, info } = useWorkspace.getState();
+  if (!info) return;
+  const stale = new Set<string>();
+  for (const path of paths) {
+    const parent = parentOf(path);
+    if (dirs[parent]) stale.add(parent);
+    for (const key of Object.keys(dirs)) if (key === path || key.startsWith(`${path}/`)) stale.add(key);
+  }
+  for (const key of stale) void loadDir(key);
+}
+
 let started = false;
 
 export function startWorkspaceEvents() {
   if (started) return;
   started = true;
+  onProjectOp((result) => refreshAfterOperation(touchedPaths(result)));
   void events.workspace((event: WorkspaceEvent) => {
     switch (event.kind) {
       case "opened":

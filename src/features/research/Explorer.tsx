@@ -17,7 +17,7 @@ import {
   Table2,
   Workflow,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 
 import type { ResearchListing } from "../../bindings/ResearchListing";
 import type { SpaceGroup } from "../../bindings/SpaceGroup";
@@ -34,7 +34,12 @@ import {
   Toolbar,
   Tree,
   TreeItem,
+  useContextMenu,
 } from "../../ui/components";
+import { OpContextMenu } from "../operations/OpMenu";
+import { useOpSurface } from "../operations/surfaces";
+import { useWorkspace } from "../workspace/store";
+import { researchActions, resolveResearchKeys } from "./researchOps";
 import { createSourceFile, importInto, itemKey, parseItemKey, selectItem, useSpace } from "./space";
 
 const GROUPS: { id: SpaceGroup; title: string }[] = [
@@ -99,10 +104,40 @@ export function ResearchExplorer() {
     () => new Set(["group:sources", "group:data", "group:notes", "group:experiments", "group:results", "group:workflows"]),
   );
   const [creating, setCreating] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const ref = useRef<HTMLDivElement>(null);
+  const menu = useContextMenu();
+  const items = resolveResearchKeys(selected, listing);
+  const actions = () =>
+    researchActions(items, {
+      root: useWorkspace.getState().info?.root ?? null,
+      afterCreate: (paths) => setSelected(new Set(paths.map((path) => itemKey({ kind: "file", path })))),
+    });
+  useOpSurface("research", ref, actions);
+  // Keys that no longer resolve (deleted files, removed experiments) leave the selection.
+  useEffect(() => {
+    if (!listing) return;
+    const valid = [...selected].filter((k) => resolveResearchKeys([k], listing).length > 0);
+    if (valid.length !== selected.size) setSelected(new Set(valid));
+  }, [listing, selected]);
   if (!listing?.space) return null;
   const onAction = (key: string) => {
     const item = parseItemKey(key);
     if (item) selectItem(item);
+  };
+  const keyAt = (target: EventTarget | null) =>
+    target instanceof Element ? (target.closest("[data-item-key]")?.getAttribute("data-item-key") ?? null) : null;
+  // A plain click opens the item (as before selection existed); modifiers extend the selection.
+  const onClickCapture = (event: MouseEvent) => {
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    if (event.target instanceof Element && event.target.closest(".ui-tree-item__chevron")) return;
+    const key = keyAt(event.target);
+    if (key && parseItemKey(key)) onAction(key);
+  };
+  const onContextMenu = (event: MouseEvent) => {
+    const key = keyAt(event.target);
+    if (key && !selected.has(key) && resolveResearchKeys([key], listing).length > 0) setSelected(new Set([key]));
+    menu.openFromEvent(event);
   };
   return (
     <div className="exp-rexplorer" data-testid="research-explorer">
@@ -125,10 +160,17 @@ export function ResearchExplorer() {
         <IconButton icon={Plus} size="sm" aria-label="New experiment" onPress={() => selectItem({ kind: "experiment", entity: null })} />
       </Toolbar>
       {creating && <NewFileDialog onClose={() => setCreating(false)} />}
+      <div ref={ref} className="xp-ops-surface" onClickCapture={onClickCapture} onContextMenu={onContextMenu} data-testid="research-surface">
       <Tree
         aria-label="Research space"
         className="xp-tree exp-rexplorer__tree"
         data-testid="research-tree"
+        selectionMode="multiple"
+        selectedKeys={selected}
+        onSelectionChange={(keys) => {
+          if (keys === "all") return;
+          setSelected(new Set([...keys].map(String).filter((k) => resolveResearchKeys([k], listing).length > 0)));
+        }}
         expandedKeys={expanded}
         onExpandedChange={(keys) => setExpanded(new Set([...keys].map(String)))}
         onAction={(key) => onAction(String(key))}
@@ -136,7 +178,7 @@ export function ResearchExplorer() {
         {GROUPS.map((g) => {
           const files = groupFiles(listing, g.id);
           return (
-            <TreeItem key={g.id} id={`group:${g.id}`} title={g.title} icon={FlaskConical} hasChildItems trailing={<span className="xp-tree-note">{files.length}</span>} data-group={g.id}>
+            <TreeItem key={g.id} id={`group:${g.id}`} title={g.title} icon={FlaskConical} hasChildItems trailing={<span className="xp-tree-note">{files.length}</span>} data-group={g.id} data-item-key={`group:${g.id}`}>
               {files.length === 0 ? (
                 <TreeItem id={`empty:${g.id}`} title={g.id === "data" ? "No data yet — import or create a file" : "Empty"} isDisabled />
               ) : (
@@ -147,6 +189,7 @@ export function ResearchExplorer() {
                     title={f.name}
                     icon={fileIcon(f.name)}
                     data-path={f.path}
+                    data-item-key={itemKey({ kind: "file", path: f.path })}
                     data-entity={f.entity ?? undefined}
                     trailing={f.origin ? <span className="xp-tree-note" title={`Imported from ${f.origin.source}`}>imported</span> : undefined}
                   />
@@ -158,7 +201,7 @@ export function ResearchExplorer() {
         {listing.references.length > 0 && (
           <TreeItem id="group:references" title="References" icon={Link2} hasChildItems trailing={<span className="xp-tree-note">{listing.references.length}</span>}>
             {listing.references.map((r) => (
-              <TreeItem key={r.entity} id={itemKey({ kind: "reference", entity: r.entity })} title={r.label} icon={Link2} trailing={<span className="xp-tree-note">read-only</span>} />
+              <TreeItem key={r.entity} id={itemKey({ kind: "reference", entity: r.entity })} data-item-key={itemKey({ kind: "reference", entity: r.entity })} title={r.label} icon={Link2} trailing={<span className="xp-tree-note">read-only</span>} />
             ))}
           </TreeItem>
         )}
@@ -167,7 +210,7 @@ export function ResearchExplorer() {
             <TreeItem id="empty:experiments" title="No experiments — use + to describe one" isDisabled />
           ) : (
             listing.experiments.map((e) => (
-              <TreeItem key={e.entity} id={itemKey({ kind: "experiment", entity: e.entity })} title={e.label} icon={Beaker} data-entity={e.entity} />
+              <TreeItem key={e.entity} id={itemKey({ kind: "experiment", entity: e.entity })} data-item-key={itemKey({ kind: "experiment", entity: e.entity })} title={e.label} icon={Beaker} data-entity={e.entity} />
             ))
           )}
         </TreeItem>
@@ -179,6 +222,8 @@ export function ResearchExplorer() {
               <TreeItem
                 key={r.entity}
                 id={itemKey({ kind: "result", entity: r.entity })}
+                data-item-key={itemKey({ kind: "result", entity: r.entity })}
+                data-path={r.path}
                 title={r.label}
                 icon={r.kind === "table" ? Table2 : Image}
                 data-entity={r.entity}
@@ -199,11 +244,13 @@ export function ResearchExplorer() {
             <TreeItem id="empty:workflows" title="No saved workflows" isDisabled />
           ) : (
             listing.workflows.map((w) => (
-              <TreeItem key={w.entity} id={itemKey({ kind: "workflow", entity: w.entity })} title={w.label} icon={Workflow} />
+              <TreeItem key={w.entity} id={itemKey({ kind: "workflow", entity: w.entity })} data-item-key={itemKey({ kind: "workflow", entity: w.entity })} title={w.label} icon={Workflow} />
             ))
           )}
         </TreeItem>
       </Tree>
+      {menu.position && <OpContextMenu controller={menu} label="Research actions" actions={actions()} testId="research-context-menu" />}
+      </div>
       {listing.truncated && <p className="exp-muted">Some files are not listed (too many).</p>}
     </div>
   );

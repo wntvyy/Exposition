@@ -217,6 +217,7 @@ export function commandForEvent(event: KeyboardEvent, platform: Platform = detec
     const bound = cachedChord(command.keybinding, platform);
     if (!bound || !chordsEqual(bound, chord)) return false;
     if (editing && scopeOf(command, bound) !== "global") return false;
+    if (event.repeat && command.ignoreRepeat) return false;
     return command.enabled ? command.enabled() : true;
   });
 }

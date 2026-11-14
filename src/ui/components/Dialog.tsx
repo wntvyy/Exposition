@@ -117,6 +117,10 @@ export interface ConfirmOptions<A extends string> {
   /** Action focused on open; defaults to the last action. Avoid defaulting to destructive actions. */
   defaultId?: A;
   tone?: "warning" | "danger";
+  /** Dialog width (default `sm`); `md` for decisions that list several consequences. */
+  size?: "sm" | "md" | "lg";
+  /** `data-testid` of the alert dialog. */
+  testId?: string;
 }
 
 interface PendingConfirm {
@@ -183,8 +187,8 @@ export function ConfirmHost() {
         if (!open) finish(options.cancelId);
       }}
     >
-      <Modal className="ui-modal" data-size="sm">
-        <AriaDialog className="ui-dialog" role="alertdialog" data-tone={options.tone}>
+      <Modal className="ui-modal" data-size={options.size ?? "sm"}>
+        <AriaDialog className="ui-dialog" role="alertdialog" data-tone={options.tone} data-testid={options.testId}>
           <div className="ui-dialog__alert-header">
             {options.tone && <Icon className="ui-dialog__tone-icon" size={20} aria-hidden />}
             <Heading slot="title" className="ui-dialog__title">

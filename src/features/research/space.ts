@@ -24,6 +24,7 @@ import { commands, errorMessage, events, isCommandError } from "../../lib/ipc";
 import { graphEvents } from "../../lib/graphIpc";
 import { confirmUnsaved } from "../../ui/components";
 import { fileKey, handleForPath, saveDocument } from "../editor/documentClient";
+import { onProjectOp } from "../operations/client";
 import { researchCommands } from "./ipc";
 import { execute } from "./store";
 
@@ -135,6 +136,8 @@ let tracking = false;
 export function startSpaceTracking(): void {
   if (tracking) return;
   tracking = true;
+  // Deletions, copies and restores (any surface, agents too) change the listing.
+  onProjectOp(() => scheduleRefresh());
   try {
     void graphEvents.graph((event) => {
       if (event.kind === "changed" || event.kind === "status") scheduleRefresh();

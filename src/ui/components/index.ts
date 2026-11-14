@@ -13,6 +13,8 @@ export { AlertDialog, confirm, confirmUnsaved, ConfirmHost, Dialog, DialogTrigge
 export type { ConfirmAction, ConfirmOptions, DialogProps, PopoverDialogProps, UnsavedChoice } from "./Dialog";
 export { Checkbox, SearchField, Select, Switch, TextField } from "./Fields";
 export type { CheckboxProps, SearchFieldProps, SelectOption, SelectProps, SwitchProps, TextFieldProps } from "./Fields";
+export { ContextMenu, useContextMenu } from "./ContextMenu";
+export type { ContextMenuController, ContextMenuProps } from "./ContextMenu";
 export { Kbd, Keybinding, keybindingLabel } from "./Kbd";
 export { Menu, MenuItem, MenuSection, MenuSeparator, MenuTrigger, Popover, SubmenuTrigger } from "./Menu";
 export type { MenuItemProps, MenuProps, PopoverProps } from "./Menu";

@@ -40,6 +40,7 @@ function NotificationItem({ notification }: { notification: Notification }) {
       className="ui-notification"
       data-tone={tone}
       data-testid="notification"
+      data-notification-id={id}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocus={() => setPaused(true)}
