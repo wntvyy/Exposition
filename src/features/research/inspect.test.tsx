@@ -116,7 +116,7 @@ describe("GraphDependencies", () => {
     render(<GraphDependencies entity="e-fig" />);
     await waitFor(() => expect(screen.getByTestId("graph-dependencies")).toBeTruthy());
 
-    expect(screen.getByRole("heading", { name: "Relations 2" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Relationships 2" })).toBeTruthy();
     const [accepted, suggested] = screen.getAllByTestId("graph-relation");
     expect(accepted!.textContent).toBe("fig.png is derived from obs.csv · accepted");
     expect(accepted!.querySelector(".ui-badge")).toBeNull();

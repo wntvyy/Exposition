@@ -11,6 +11,7 @@ import type { ExperimentDetail } from "../../bindings/ExperimentDetail";
 import type { RunManifest } from "../../bindings/RunManifest";
 import type { SourceInspection } from "../../bindings/SourceInspection";
 import { graphCommands } from "../../lib/graphIpc";
+import { coverageStateLabel } from "../graph/status";
 import { commands } from "../../lib/ipc";
 import {
   Banner,
@@ -22,7 +23,6 @@ import {
   KeyValueList,
   Section,
   Select,
-  StatusPill,
   StatusText,
   TextField,
   type KeyValueItem,
@@ -140,7 +140,7 @@ function DeclaredInFile({ path, revision }: { path: string; revision: number | n
           </ul>
         )}
         <p className="ui-meta">
-          Extraction: {inspection.coverage ? inspection.coverage.state : "not indexed yet (coverage unknown)"}
+          Extraction: {inspection.coverage ? coverageStateLabel(inspection.coverage.state) : "not indexed yet (coverage unknown)"}
         </p>
       </div>
     </Section>
@@ -206,7 +206,7 @@ function ResultInspector({ entity }: { entity: EntityId }) {
     <div className="exp-rinspector" data-testid="research-inspector" data-kind="result" data-entity={entity} data-lifecycle={result.lifecycle}>
       <InspectorHeader
         title={result.label}
-        meta={<StatusPill size="sm" status={pill.status} label={pill.label} />}
+        meta={<StatusText status={pill.status} label={pill.label} />}
         actions={
           <>
             {result.lifecycle !== "active" && (

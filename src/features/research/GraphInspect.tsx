@@ -170,9 +170,9 @@ export function GraphDependencies({ entity, revision }: { entity: EntityId; revi
   const incoming = detail.incoming.filter((r) => r.status !== "rejected");
   return (
     <div className="exp-graph" data-testid="graph-dependencies" data-entity={entity} data-graph-revision={detail.graphRevision}>
-      <Section title="Relations" count={outgoing.length + incoming.length}>
+      <Section title="Relationships" count={outgoing.length + incoming.length}>
         {outgoing.length + incoming.length === 0 ? (
-          <p className="ui-meta">No relations yet.</p>
+          <p className="ui-meta">No relationships yet.</p>
         ) : (
           <ul className="exp-graph__list">
             {outgoing.map((r) => (
