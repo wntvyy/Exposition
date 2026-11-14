@@ -62,30 +62,11 @@
   align-items: center;
   gap: var(--space-1) var(--space-2);
 }
-/* Type indicator in its category's text color (inspector headers, dependency items). */
+/* Type indicator (icon + text); its color is the shared .ui-category-text. */
 .xp-graph-type {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
-  color: var(--color-graph-structure-text);
-}
-.xp-graph-type[data-category="document"] {
-  color: var(--color-graph-document-text);
-}
-.xp-graph-type[data-category="data"] {
-  color: var(--color-graph-data-text);
-}
-.xp-graph-type[data-category="math"] {
-  color: var(--color-graph-math-text);
-}
-.xp-graph-type[data-category="formal"] {
-  color: var(--color-graph-formal-text);
-}
-.xp-graph-type[data-category="reference"] {
-  color: var(--color-graph-reference-text);
-}
-.xp-graph-type[data-category="workflow"] {
-  color: var(--color-graph-workflow-text);
 }
 .xp-graph-count {
   color: var(--color-text-subtle);
