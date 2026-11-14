@@ -14,7 +14,7 @@ import type { RetainedResult } from "../../bindings/RetainedResult";
 import type { RunSummary } from "../../bindings/RunSummary";
 import { commands, errorMessage, isCommandError } from "../../lib/ipc";
 import { graphCommands } from "../../lib/graphIpc";
-import { Banner, Button, Select, Spinner, StatusPill, TextField } from "../../ui/components";
+import { Banner, Button, KeyValueList, Select, Spinner, StatusText, TextField } from "../../ui/components";
 import { openDocument } from "../editor/documentClient";
 import { researchCommands } from "./ipc";
 import { attachmentsOfKind, defaultInsertOffset, documentFormat, formatBytes } from "./model";
@@ -27,6 +27,7 @@ import {
   setResultState,
   useSpace,
 } from "./space";
+import "./research.css";
 
 export function lifecyclePill(result: RetainedResult | undefined): {
   status: "idle" | "succeeded" | "canceled" | "stale";
@@ -64,7 +65,7 @@ export function RetainControls({ run, artifact }: { run: RunSummary; artifact: A
       data-testid="research-retain"
       data-state={result?.lifecycle ?? "none"}
     >
-      <StatusPill size="sm" status={pill.status} label={pill.label} />
+      <StatusText status={pill.status} label={pill.label} />
       {result?.lifecycle !== "active" && (
         <Button
           size="sm"
@@ -325,7 +326,7 @@ function PromotionForm({ run, artifact, onDone }: { run: RunSummary; artifact: A
         (targets === null ? (
           <Spinner size="sm" aria-label="Loading documents" />
         ) : targets.length === 0 ? (
-          <p className="exp-muted">
+          <p className="ui-meta">
             The project has no Typst, LaTeX, or Markdown manuscript to insert this {what} into. Promotion is optional: kept
             results stay in Research.
           </p>
@@ -434,32 +435,57 @@ export function PreviewView({ preview }: { preview: PromotionPreview }) {
       data-key={preview.attachmentKey}
       data-path={preview.path}
     >
-      <dl className="exp-research__facts">
-        <dt>Document</dt>
-        <dd>
-          <code data-testid="research-promotion-target">{preview.path}</code> · {preview.format} · revision{" "}
-          <span data-testid="research-promotion-revision">{preview.revision}</span>
-        </dd>
-        <dt>Artifact</dt>
-        <dd>
-          <code>{a.path}</code> · {a.mediaType} · {formatBytes(a.sizeBytes)} · run {preview.runId}
-        </dd>
-        <dt>Digest</dt>
-        <dd>
-          <code title={digest} data-testid="research-promotion-digest">
-            sha256 {digest}
-          </code>{" "}
-          · verified now and again on approval
-        </dd>
-        <dt>Attachment</dt>
-        <dd>
-          <code>{preview.attachmentKey}</code> · {preview.retained ? "already a kept result" : "approving keeps the result"}
-        </dd>
-      </dl>
-      <p className="exp-muted">The format adapter makes exactly these changes, as one undoable change:</p>
+      <KeyValueList
+        items={[
+          {
+            key: "document",
+            label: "Document",
+            value: (
+              <>
+                <code className="ui-code" data-testid="research-promotion-target">
+                  {preview.path}
+                </code>{" "}
+                · {preview.format} · revision <span data-testid="research-promotion-revision">{preview.revision}</span>
+              </>
+            ),
+          },
+          {
+            key: "artifact",
+            label: "Artifact",
+            value: (
+              <>
+                <code className="ui-code">{a.path}</code> · {a.mediaType} · {formatBytes(a.sizeBytes)} · run {preview.runId}
+              </>
+            ),
+          },
+          {
+            key: "digest",
+            label: "Digest",
+            value: (
+              <>
+                <code className="ui-code" title={digest} data-testid="research-promotion-digest">
+                  sha256 {digest}
+                </code>{" "}
+                · verified now and again on approval
+              </>
+            ),
+          },
+          {
+            key: "attachment",
+            label: "Attachment",
+            value: (
+              <>
+                <code className="ui-code">{preview.attachmentKey}</code> ·{" "}
+                {preview.retained ? "already a kept result" : "approving keeps the result"}
+              </>
+            ),
+          },
+        ]}
+      />
+      <p className="ui-meta">The format adapter makes exactly these changes, as one undoable change:</p>
       {preview.edits.map((e, i) => (
         <div key={i} className="exp-promotion__edit">
-          <div className="exp-promotion__where">{e.replaced ? `Replace from line ${e.line}` : `Insert at line ${e.line}`}</div>
+          <div className="ui-meta">{e.replaced ? `Replace from line ${e.line}` : `Insert at line ${e.line}`}</div>
           {e.replaced && (
             <pre className="exp-promotion__markup exp-promotion__markup--old" aria-label="Replaced text">
               {e.replaced}

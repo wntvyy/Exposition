@@ -7,10 +7,10 @@
 // network, read-only inputs, a dedicated output area). Its availability is
 // what the workflow runner reports for this project; nothing ever falls back
 // to native execution or moves between the two silently.
-import { ShieldAlert } from "lucide-react";
+import { Ban, ShieldAlert, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { Banner, StatusPill } from "../../ui/components";
+import { Badge, Banner, Section } from "../../ui/components";
 import { workflowCommands } from "../workflows/ipc";
 
 export const TRUSTED_NATIVE_LABEL = "Trusted native — runs with your account's privileges";
@@ -29,8 +29,9 @@ export function ExecutionLabel() {
       aria-label={full}
       role="note"
     >
-      <ShieldAlert size={14} aria-hidden />
-      Trusted native — your account&rsquo;s privileges
+      <Badge tone="warning" icon={ShieldAlert}>
+        Trusted native — your account&rsquo;s privileges
+      </Badge>
     </span>
   );
 }
@@ -56,28 +57,34 @@ function useRestrictedAvailability(): { available: boolean; reason: string } | n
   return state;
 }
 
-/** Fuller explanation for the Research page. */
+/** Fuller explanation for the Research page: one section, each policy with its label. */
 export function ExecutionModes() {
   const restricted = useRestrictedAvailability();
   const available = restricted?.available ?? false;
   return (
-    <div className="exp-research__modes" data-testid="research-execution-modes">
-      <div className="exp-research__mode-row" data-mode="trustedNative">
-        <StatusPill size="sm" status="warning" label="Trusted native" />
-        <span>
-          Python, R, and Julia kernels run with your account&rsquo;s privileges. The research space and session keep work
-          organized; they do not contain it.
-        </span>
+    <Section title="Execution" className="exp-research__modes-section">
+      <div className="exp-research__modes" data-testid="research-execution-modes">
+        <div className="exp-research__mode-row" data-mode="trustedNative">
+          <Badge tone="warning" icon={ShieldAlert}>
+            Trusted native
+          </Badge>
+          <span className="ui-meta">
+            Python, R, and Julia kernels run with your account&rsquo;s privileges. The research space and session keep work
+            organized; they do not contain it.
+          </span>
+        </div>
+        <div className="exp-research__mode-row" data-mode="restricted" data-available={String(available)}>
+          <Badge tone={available ? "success" : "neutral"} icon={available ? ShieldCheck : Ban}>
+            Restricted research
+          </Badge>
+          <span className="ui-meta">
+            Workflow Python batch steps run in a container that sees only their declared inputs, with no network.{" "}
+            {restricted === null ? "Checking…" : available ? "Available." : restricted.reason || "Not available."} Runs
+            are never moved to or from a sandbox silently.
+          </span>
+        </div>
       </div>
-      <div className="exp-research__mode-row" data-mode="restricted" data-available={String(available)}>
-        <StatusPill size="sm" status={available ? "succeeded" : "unavailable"} label="Restricted research" />
-        <span>
-          Workflow Python batch steps run in a container that sees only their declared inputs, with no network.{" "}
-          {restricted === null ? "Checking…" : available ? "Available." : restricted.reason || "Not available."} Runs
-          are never moved to or from a sandbox silently.
-        </span>
-      </div>
-    </div>
+    </Section>
   );
 }
 

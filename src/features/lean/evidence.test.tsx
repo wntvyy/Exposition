@@ -12,7 +12,7 @@ import type { LeanDocumentState } from "../../bindings/LeanDocumentState";
 vi.mock("./leanMonaco", () => ({ revealInEditor: vi.fn() }));
 vi.mock("../../lib/graphIpc", () => ({ graphCommands: { snapshot: vi.fn() }, graphEvents: {} }));
 
-const { verdictView } = await import("./evidence");
+const { verdictTone, verdictView } = await import("./evidence");
 const { DeclarationEvidenceControls } = await import("./FormalEvidence");
 
 const state = { document: "doc-1", path: "LeanBasic/Defs.lean", revision: 2 } as unknown as LeanDocumentState;
@@ -72,6 +72,15 @@ describe("Lean evidence", () => {
     expect(new Set(labels).size).toBe(7);
     expect(verdictView("checked").status).toBe("succeeded");
     expect(verdictView("checkedWithAxioms").status).not.toBe("succeeded");
+  });
+
+  it("tones verdict badges by class: only Checked is success", () => {
+    expect(verdictTone("checked")).toBe("success");
+    expect(verdictTone("errors")).toBe("danger");
+    expect(verdictTone("notVerified")).toBe("neutral");
+    for (const v of ["checkedWithAxioms", "incomplete", "reliesOnCompiledCode", "partiallyChecked"] as const) {
+      expect(verdictTone(v)).toBe("warning");
+    }
   });
 
   it("shows the association as a reviewed correspondence and historical freshness separately", () => {

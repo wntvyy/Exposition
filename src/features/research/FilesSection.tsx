@@ -3,7 +3,7 @@
 import { Beaker, FileCode2, FlaskConical, Image, Table2, Workflow } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { Button, Section, Tree, TreeItem } from "../../ui/components";
+import { Button, EmptyState, Section, Tree, TreeItem } from "../../ui/components";
 import { itemKey, parseItemKey, revealInResearch, startSpaceTracking, useSpace, type ResearchItem } from "./space";
 import "./research.css";
 
@@ -17,12 +17,16 @@ export function ResearchFilesSection() {
   if (!loaded) return null;
   if (!listing?.space) {
     return (
-      <Section key="disabled" title="Research" collapsible defaultExpanded={false}>
+      <Section key="disabled" title="Research" variant="chrome" collapsible defaultExpanded={false}>
         <div className="xp-files__research" data-testid="files-research" data-enabled="false">
-          <p className="xp-files__research-note">Research is not enabled for this project.</p>
-          <Button size="sm" variant="ghost" icon={FlaskConical} onPress={() => revealInResearch(null)}>
-            Open Research…
-          </Button>
+          <EmptyState
+            title="Research is not enabled for this project."
+            actions={
+              <Button size="sm" variant="ghost" icon={FlaskConical} onPress={() => revealInResearch(null)}>
+                Open Research…
+              </Button>
+            }
+          />
         </div>
       </Section>
     );
@@ -58,7 +62,7 @@ export function ResearchFilesSection() {
     },
   ];
   return (
-    <Section key="enabled" title="Research" collapsible defaultExpanded>
+    <Section key="enabled" title="Research" variant="chrome" collapsible defaultExpanded>
       <div className="xp-files__research" data-testid="files-research" data-enabled="true">
         <Tree
           aria-label="Research space"
