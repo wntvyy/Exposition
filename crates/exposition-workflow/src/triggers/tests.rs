@@ -22,7 +22,9 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::adapters::agent::{AgentReviewAdapter, AgentReviewer, ReviewOutcome, ReviewRequest};
+use crate::adapters::associate::AssociateAdapter;
 use crate::adapters::batch::BatchAdapter;
+use crate::adapters::lean::{LeanAuditAdapter, LeanAuditor};
 use crate::adapters::{Adapters, StepFailure, runner_ids, sha256_hex};
 use crate::model::{WorkflowRunCause, WorkflowRunError, WorkflowRunPlan, WorkflowRunState};
 use crate::service::{WorkflowHost, WorkflowRunConfig, WorkflowRunService};
@@ -121,6 +123,31 @@ impl AgentReviewer for FakeReviewer {
         _on_task: &(dyn Fn(&str) + Sync),
     ) -> Result<ReviewOutcome, StepFailure> {
         Ok(ReviewOutcome { text: "ok".into(), task: "task-1".into(), requests: 1 })
+    }
+}
+
+/// A Lean auditor that is available (plans only; these tests never audit).
+struct FakeLean;
+
+impl LeanAuditor for FakeLean {
+    fn availability(&self, _root: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn audit(
+        &self,
+        _path: &WorkspacePath,
+        _timeout: Duration,
+        _canceled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<exposition_lean::types::LeanAuditRecord, StepFailure> {
+        Err(StepFailure::new("lean.test", "the trigger tests never audit"))
+    }
+    fn record_evidence(
+        &self,
+        _path: &WorkspacePath,
+        _content_hash: &str,
+        _names: &[String],
+    ) -> Result<Vec<exposition_graph::EvidenceId>, WorkflowRunError> {
+        Ok(Vec::new())
     }
 }
 
@@ -234,6 +261,8 @@ fn fixture() -> Fx {
         runner_ids::READ_ONLY_AGENT.into(),
         Arc::new(AgentReviewAdapter { reviewer: Some(Arc::new(FakeReviewer)) }),
     );
+    adapters.insert(runner_ids::LEAN_AUDIT.into(), Arc::new(LeanAuditAdapter { auditor: Some(Arc::new(FakeLean)) }));
+    adapters.insert(runner_ids::GRAPH_PROPOSAL.into(), Arc::new(AssociateAdapter));
     let h: Arc<dyn WorkflowHost> = host.clone();
     let runs = WorkflowRunService::new(WorkflowRunConfig {
         database: Some(data.path().join("workflow-runs.sqlite3")),
@@ -1275,4 +1304,66 @@ fn unsaved_changes_are_rolled_back_or_surfaced() {
     drop(lock);
     f.triggers.disable(&t.id).unwrap();
     assert_eq!(f.trigger(&t.id).store_problem, None, "a later save clears the problem");
+}
+
+// ------------------------------------------- R-m9 F2: Lean source is code ---
+
+const LEAN: &str = "theorem main_theorem : 1 + 1 = 2 := rfl\n";
+
+fn formal_audit(f: &Fx) -> WorkflowId {
+    std::fs::create_dir_all(f.root.join("Proofs")).unwrap();
+    std::fs::write(f.root.join("Proofs/Main.lean"), LEAN).unwrap();
+    let def = exposition_graph::workflow::presets::draft(&exposition_graph::workflow::presets::WorkflowPresetRequest {
+        preset: exposition_graph::workflow::presets::FORMAL_AUDIT.into(),
+        lean_file: Some(path("Proofs/Main.lean")),
+        ..Default::default()
+    })
+    .unwrap();
+    f.save(serde_json::to_value(def).unwrap())
+}
+
+/// A Lean source is elaborated natively by Lean (`#eval` runs code), so it
+/// is code: it cannot be watched, and the review shows its complete text.
+#[test]
+fn lean_sources_are_code_never_watched_and_shown_in_full() {
+    let f = fixture();
+    let id = formal_audit(&f);
+    f.open_ready();
+    let err = plan_err(&f, &id, watch(&["leanFile"]));
+    assert_eq!(err.code, "trigger.codeInputWatched", "{}", err.message);
+    let err = plan_err(&f, &id, TriggerKind::Interval { minutes: 30, inputs: vec!["leanFile".into()] });
+    assert_eq!(err.code, "trigger.codeInputWatched");
+    let review = f.review(&id, TriggerKind::Interval { minutes: 30, inputs: vec![] });
+    assert!(review.blockers.is_empty(), "{:?}", review.blockers);
+    let lean = review.plan.inputs.iter().find(|i| i.id == "leanFile").unwrap();
+    assert_eq!(lean.text.as_deref(), Some(LEAN), "the Lean source is shown in full");
+    assert!(
+        review.suspends_on.iter().any(|s| s.contains("code in “Lean file” (Proofs/Main.lean)")),
+        "{:?}",
+        review.suspends_on
+    );
+    // Lean source that cannot be reviewed in full blocks the plan, like a script.
+    std::fs::write(f.root.join("Proofs/Main.lean"), [0xff_u8, 0xfe, 0x00, 0x41]).unwrap();
+    let plan = f.runs.plan(&id, None).unwrap();
+    assert!(plan.blockers.iter().any(|b| b.code == "workflow.codeNotText"), "{:?}", plan.blockers);
+}
+
+/// Any change to a Lean source suspends the trigger (it is never watched).
+#[test]
+fn a_lean_source_change_suspends() {
+    let f = fixture();
+    let id = formal_audit(&f);
+    f.open_ready();
+    let t = f.enable_with(
+        &id,
+        TriggerKind::Interval { minutes: 15, inputs: vec![] },
+        WorkflowTriggerSettings { allow_native: true, ..settings() },
+    );
+    f.save_file("Proofs/Main.lean", "#eval IO.FS.writeFile \"../outside.txt\" \"x\"\ntheorem t : True := trivial\n");
+    f.advance(3 * SECOND);
+    let (code, message) = f.suspended(&t.id);
+    assert_eq!(code, "trigger.planChanged");
+    assert!(message.contains("“Lean file” (Proofs/Main.lean) changed"), "{message}");
+    f.advance(HOUR_MS);
+    assert!(f.started().is_empty(), "a run started from a changed Lean source");
 }

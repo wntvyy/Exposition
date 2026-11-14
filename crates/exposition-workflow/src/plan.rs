@@ -411,17 +411,20 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
                         Some(&input.id),
                     ));
                 }
-                let text = if input.port_type == registry::PortType::CodeSource {
-                    match review_text(facts.root, path, &sha256, bytes) {
-                        Ok(text) => Some(text),
-                        Err((code, message)) => {
-                            blockers.push(blocker(code, message, None, Some(&input.id)));
-                            None
+                // Code is reviewed in full: scripts, and Lean sources (Lean
+                // elaborates them natively, and `#eval` runs code).
+                let text =
+                    if matches!(input.port_type, registry::PortType::CodeSource | registry::PortType::FormalSource) {
+                        match review_text(facts.root, path, &sha256, bytes) {
+                            Ok(text) => Some(text),
+                            Err((code, message)) => {
+                                blockers.push(blocker(code, message, None, Some(&input.id)));
+                                None
+                            }
                         }
-                    }
-                } else {
-                    None
-                };
+                    } else {
+                        None
+                    };
                 inputs.push(WorkflowPlanInput {
                     id: input.id.clone(),
                     label: input.label.clone(),
