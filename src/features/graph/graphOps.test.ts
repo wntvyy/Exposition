@@ -8,7 +8,7 @@ vi.mock("./reveal", () => ({ revealSource: vi.fn() }));
 vi.mock("../operations/ipc", () => ({ opCommands: {}, opEvents: { projectOp: vi.fn(async () => () => {}) } }));
 
 import { entity, fakeVocabulary, relation } from "./fakeApi";
-import { classifyEntity, graphActions } from "./graphOps";
+import { classifyEntity, entityTarget, graphActions } from "./graphOps";
 import { indexVocabulary } from "./model";
 
 const vocabulary = indexVocabulary(fakeVocabulary());
@@ -64,6 +64,21 @@ describe("actions", () => {
     expect(readOnly.delete?.enabled).toBe(false);
     expect(readOnly.delete?.reason).toBe("The graph is read-only right now");
     expect(readOnly.duplicate?.enabled).toBe(false);
+  });
+
+  it("targets: a file-backed item IS its source file (a path target); a missing file is a record; workflows and references follow their own rules", () => {
+    expect(entityTarget(file, classifyEntity(file, vocabulary))).toEqual({ kind: "path", path: "figures/plot.png" });
+    expect(entityTarget(claim, classifyEntity(claim, vocabulary))).toEqual({ kind: "graphEntity", entity: "cl" });
+    const gone = entity("gone", "resource", "old.png", { key: "old.png", lifecycle: "tombstoned", origin: { kind: "extracted", extractor: "files" } });
+    expect(classifyEntity(gone, vocabulary)).toBe("missingFile");
+    expect(entityTarget(gone, "missingFile")).toEqual({ kind: "graphEntity", entity: "gone" });
+    const wf = graphActions({ entities: [entity("w", "workflow", "Fit")], relations: [] }, opts).actions;
+    expect(wf.delete?.enabled).toBe(false);
+    expect(wf.delete?.reason).toMatch(/Workflows list/);
+    const ref = graphActions({ entities: [entity("r", "reference", "Rudin 1976", { key: "rudin" })], relations: [] }, opts);
+    expect(ref.actions.delete?.enabled).toBe(true);
+    expect(ref.actions.duplicate?.enabled).toBe(false);
+    expect(ref.extras.map((e) => e.id)).toContain("copyReference");
   });
 
   it("a mixed selection uses one combined label", () => {

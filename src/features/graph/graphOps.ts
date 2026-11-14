@@ -27,16 +27,37 @@ import { errorText, graphApi } from "./api";
 import { entityDisplay, relationDisplay, type VocabularyIndex } from "./model";
 import { revealSource } from "./reveal";
 
-export type EntityClass = "project" | "managed" | "fileBacked" | "folder" | "sourceAnchored" | "manual";
+export type EntityClass =
+  | "project"
+  | "managed"
+  | "workflow"
+  | "fileBacked"
+  | "folder"
+  | "missingFile"
+  | "sourceAnchored"
+  | "reference"
+  | "manual";
 
-/** How an entity may be deleted or duplicated from the graph. */
+/** How an entity may be deleted or duplicated from the graph (mirrors the backend's rules; the plan decides). */
 export function classifyEntity(entity: Entity, vocabulary: VocabularyIndex | null): EntityClass {
   if (entity.kind === "project") return "project";
   if (entity.kind === "researchSpace") return "managed";
+  if (entity.kind === "workflow") return "workflow";
   const display = entityDisplay(vocabulary, entity);
-  if (display.kind.fileBacked) return entity.kind === "folder" ? "folder" : "fileBacked";
-  if (entity.origin.kind === "extracted") return "sourceAnchored";
+  if (display.kind.fileBacked) {
+    // A file that is already gone leaves a record only: removing it is metadata cleanup.
+    if (entity.lifecycle === "tombstoned" || !entity.key) return "missingFile";
+    return entity.kind === "folder" ? "folder" : "fileBacked";
+  }
+  if (entity.lifecycle !== "tombstoned" && (entity.origin.kind === "extracted" || entity.kind === "formalDeclaration")) return "sourceAnchored";
+  if (entity.kind === "externalResource" || entity.kind === "reference") return "reference";
   return "manual";
+}
+
+/** The operation target for an entity: a file-backed resource IS its source file. */
+export function entityTarget(entity: Entity, cls: EntityClass): OpTarget {
+  if ((cls === "fileBacked" || cls === "folder") && entity.key) return { kind: "path", path: entity.key };
+  return { kind: "graphEntity", entity: entity.id };
 }
 
 /** A relationship the person (or an agent) asserted, which can be deleted; observed ones follow the source. */
@@ -44,13 +65,16 @@ export function relationDeletable(relation: Relation): boolean {
   return relation.origin.kind !== "extracted" && relation.status !== "observed";
 }
 
-const REASONS: Record<Exclude<EntityClass, "manual" | "fileBacked" | "folder">, { delete: string; duplicate: string }> = {
+const REASONS: Partial<Record<EntityClass, { delete?: string; duplicate?: string }>> = {
   project: { delete: "The project itself is not deleted from the graph", duplicate: "The project itself is not duplicated" },
   managed: { delete: "The research space is managed by Research", duplicate: "The research space is managed by Research" },
+  workflow: { delete: "Delete saved workflows from the Workflows list", duplicate: "Duplicate saved workflows from the Workflows list" },
   sourceAnchored: {
     delete: "It comes from its source; change the source to remove it",
     duplicate: "It comes from its source and has no independent copy; use Copy Text or Copy Reference",
   },
+  reference: { duplicate: "It identifies one source; a second card would duplicate its identity. Use Copy Reference" },
+  missingFile: { duplicate: "Its file is gone; there is nothing to duplicate" },
 };
 
 export interface GraphSelection {
@@ -67,7 +91,7 @@ function deleteLabel(classes: EntityClass[], relations: number): string {
   if (classes.length === 0) return plural(relations, "Delete Relationship", "Delete Relationships");
   if (relations === 0 && classes.every((c) => c === "fileBacked")) return plural(classes.length, "Delete Source File", "Delete Source Files");
   if (relations === 0 && classes.every((c) => c === "folder")) return plural(classes.length, "Delete Source Folder", "Delete Source Folders");
-  if (relations === 0 && classes.every((c) => c === "manual")) return plural(classes.length, "Delete Entity", "Delete Entities");
+  if (relations === 0 && classes.every((c) => c === "manual" || c === "reference" || c === "missingFile")) return plural(classes.length, "Delete Entity", "Delete Entities");
   return "Delete Selected Items";
 }
 
@@ -118,8 +142,9 @@ export function graphActions(selection: GraphSelection, options: GraphActionOpti
   const { entities, relations } = selection;
   const classes = entities.map((e) => classifyEntity(e, options.vocabulary));
   const count = entities.length + relations.length;
+  const entityTargets = entities.map((e, i) => entityTarget(e, classes[i]!));
   const labels = new Map<string, string>([
-    ...entities.map((e) => [targetKey({ kind: "graphEntity", entity: e.id }), e.label] as const),
+    ...entities.map((e, i) => [targetKey(entityTargets[i]!), e.label] as const),
     ...relations.map((r) => [targetKey({ kind: "graphRelation", relation: r.id }), relationDisplay(options.vocabulary, r.kind).reading] as const),
   ]);
   const readOnly = options.canWrite ? null : "The graph is read-only right now";
@@ -127,7 +152,8 @@ export function graphActions(selection: GraphSelection, options: GraphActionOpti
 
   const blockedDelete = (() => {
     for (const [i, c] of classes.entries()) {
-      if (c === "project" || c === "managed" || c === "sourceAnchored") return `${quoted(entities[i]!.label)}: ${REASONS[c].delete}`;
+      const reason = REASONS[c]?.delete;
+      if (reason) return `${quoted(entities[i]!.label)}: ${reason}`;
     }
     const observed = relations.find((r) => !relationDeletable(r));
     if (observed) return "An observed relationship follows its source; change the source to remove it";
@@ -136,21 +162,20 @@ export function graphActions(selection: GraphSelection, options: GraphActionOpti
   const blockedDuplicate = (() => {
     if (relations.length) return "Relationships are duplicated together with the items they connect";
     for (const [i, c] of classes.entries()) {
-      if (c === "project" || c === "managed" || c === "sourceAnchored") return `${quoted(entities[i]!.label)}: ${REASONS[c].duplicate}`;
+      const reason = REASONS[c]?.duplicate;
+      if (reason) return `${quoted(entities[i]!.label)}: ${reason}`;
     }
     return null;
   })();
 
-  const targets: OpTarget[] = [
-    ...entities.map((e): OpTarget => ({ kind: "graphEntity", entity: e.id })),
-    ...relations.map((r): OpTarget => ({ kind: "graphRelation", relation: r.id })),
-  ];
+  const targets: OpTarget[] = [...entityTargets, ...relations.map((r): OpTarget => ({ kind: "graphRelation", relation: r.id }))];
   const deleteEnabled = count > 0 && !blockedDelete && !readOnly;
   const files = classes.filter((c) => c === "fileBacked" || c === "folder").length;
   const deleteDescription = files ? `Source ${plural(files, "file moves", "files move")} to ${trashName()}` : undefined;
 
   const createdEntities = (outcome: Awaited<ReturnType<typeof runUserOperation>>) =>
     (outcome?.result.outcomes ?? []).flatMap((o) => (o.status === "succeeded" && o.created?.kind === "graphEntity" ? [o.created.entity] : []));
+  const pasteTargets = (clipped: { id: string }[]): OpTarget[] => clipped.map((e) => ({ kind: "graphEntity", entity: e.id }));
 
   const del = (permanent: boolean): SurfaceAction => ({
     enabled: deleteEnabled,
@@ -185,7 +210,7 @@ export function graphActions(selection: GraphSelection, options: GraphActionOpti
         const pasteLabels = new Map(current.entities.map((e) => [targetKey({ kind: "graphEntity", entity: e.id }), e.label]));
         const outcome = await runUserOperation(
           { kind: "paste", destination: { kind: "project" } },
-          current.entities.map((e) => ({ kind: "graphEntity", entity: e.id })),
+          pasteTargets(current.entities),
           { labels: pasteLabels },
         );
         const created = createdEntities(outcome);
@@ -217,7 +242,7 @@ export function graphActions(selection: GraphSelection, options: GraphActionOpti
   }
   if (entities.length === 1 && relations.length === 0) {
     const entity = entities[0]!;
-    if (classes[0] === "sourceAnchored" || entity.key) {
+    if (classes[0] === "sourceAnchored" || classes[0] === "reference" || entity.key) {
       extras.push({ id: "copyReference", label: "Copy Reference", icon: Quote, description: entity.key ?? entity.label, run: () => copyReference(entity) });
     }
     if (classes[0] === "sourceAnchored") {
