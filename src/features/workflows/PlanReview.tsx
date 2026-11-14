@@ -269,6 +269,24 @@ export function PlanDetails({ plan }: { plan: ReviewPlan }) {
           {execution.trustedFolder ? "folder trusted for native execution" : "folder not trusted for native execution"}
           {execution.nativeSteps.length > 0 && ` · runs natively with your account's privileges: ${stepNames(execution.nativeSteps)}`}
           {execution.modelSteps.length > 0 && ` · sends material to the model provider: ${stepNames(execution.modelSteps)}`}
+          {execution.runnerImages && execution.runnerImages.length > 0 && (
+            <ul className="xp-wf-plan__effects" data-testid="plan-runner-images" aria-label="Images of the R and Julia runners">
+              {execution.runnerImages.map((r) => (
+                <li key={r.runner} data-runner={r.runner}>
+                  {r.runner} runs in{" "}
+                  {r.imageId ? (
+                    <>
+                      <code>{r.image}</code>, exactly the image <FullHash hash={r.imageId} label={`the image of ${r.runner}`} />
+                    </>
+                  ) : (
+                    <>
+                      <code>{r.image}</code> (identity not recorded)
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
         </dd>
         <dt>Concurrency</dt>
         <dd data-testid="plan-concurrency" data-max-parallel={maxParallel}>

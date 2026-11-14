@@ -59,6 +59,20 @@ export function historyText(event: TriggerHistoryEvent): string {
   }
 }
 
+/** A suspension's title by its code; the backend's message (shown once, as is) says what to do. */
+export function suspensionTitle(code: string): string {
+  switch (code) {
+    case "trigger.planChanged":
+      return "Suspended: the approved plan no longer matches";
+    case "trigger.trustRevoked":
+      return "Suspended: folder trust was revoked";
+    case "trigger.nativeNotAllowed":
+      return "Suspended: native steps are not allowed";
+    default:
+      return "Suspended";
+  }
+}
+
 export function describeKind(kind: TriggerKind, watched: { label: string; path: string }[]): string {
   const names = watched.map((w) => `${w.label} (${w.path})`).join(", ");
   if (kind.kind === "interval") return `Every ${formatSeconds(kind.minutes * 60)}${names ? `; may read new saved content of ${names}` : ""}`;
@@ -81,6 +95,7 @@ export function settingsProblems(s: WorkflowTriggerSettings, limits: WorkflowTri
     problems.push(`The quiet period is ${formatSeconds(limits.minDebounceSeconds)} to ${formatSeconds(limits.maxDebounceSeconds)}.`);
   if (s.maxRunsPerHour < 1 || s.maxRunsPerHour > limits.maxRunsPerHour) problems.push(`Runs per hour: 1 to ${limits.maxRunsPerHour}.`);
   if (s.maxRunsPerDay < 1 || s.maxRunsPerDay > limits.maxRunsPerDay) problems.push(`Runs per day: 1 to ${limits.maxRunsPerDay}.`);
+  if (s.maxRunsPerHour > s.maxRunsPerDay) problems.push(`Runs per hour cannot exceed runs per day (${s.maxRunsPerDay}).`);
   if (plan.modelRequestsPerRun > 0 && (s.maxModelRequestsPerDay < plan.modelRequestsPerRun || s.maxModelRequestsPerDay > limits.maxModelRequestsPerDay))
     problems.push(`Model requests per day: ${plan.modelRequestsPerRun} (one run) to ${limits.maxModelRequestsPerDay}.`);
   if (plan.nativeSteps.length > 0 && !s.allowNative) problems.push("This plan runs steps natively: allow them explicitly to enable the trigger.");
@@ -135,6 +150,8 @@ export interface TriggerDialogProps {
   definition: WorkflowDefinition;
   /** Review again an existing trigger (suspended or off): its kind and settings. */
   initial?: { kind: TriggerKind; settings: WorkflowTriggerSettings };
+  /** The workflow's current trigger, which enabling replaces (one trigger per workflow). */
+  replaces?: WorkflowTrigger | null;
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
   onEnabled: (trigger: WorkflowTrigger) => void;
@@ -142,7 +159,7 @@ export interface TriggerDialogProps {
 
 const NEW_KIND: TriggerKind = { kind: "inputsChanged", inputs: [] };
 
-export function TriggerDialog({ workflow, revision, definition, initial, isOpen, onOpenChange, onEnabled }: TriggerDialogProps) {
+export function TriggerDialog({ workflow, revision, definition, initial, replaces = null, isOpen, onOpenChange, onEnabled }: TriggerDialogProps) {
   const [kind, setKind] = useState<TriggerKind>(initial?.kind ?? NEW_KIND);
   const [settings, setSettings] = useState<WorkflowTriggerSettings | null>(initial?.settings ?? null);
   const [phase, setPhase] = useState<Phase>({ kind: "choose" });
@@ -242,7 +259,7 @@ export function TriggerDialog({ workflow, revision, definition, initial, isOpen,
                 onPress={() => void enable()}
                 data-testid="trigger-enable"
               >
-                Enable trigger
+                {replaces ? "Replace trigger" : "Enable trigger"}
               </Button>
             </>
           ) : (
@@ -254,6 +271,14 @@ export function TriggerDialog({ workflow, revision, definition, initial, isOpen,
       }
     >
       <div className="xp-wf-plan-body" data-testid="trigger-dialog" data-phase={phase.kind}>
+        {replaces && (
+          <div data-testid="trigger-replaces">
+            <Banner tone="warning" title="This replaces the current trigger">
+              This workflow already has a trigger ({TRIGGER_STATE_VIEW[replaces.state.kind].label.toLowerCase()}). Enabling this one replaces it: a
+              workflow has one trigger.
+            </Banner>
+          </div>
+        )}
         {phase.kind === "choose" && (
           <>
             <p className="xp-wf__muted">
@@ -549,14 +574,14 @@ function TriggerCard({
         <div data-testid={`trigger-suspended-${trigger.id}`} data-code={trigger.state.code}>
           <Banner
             tone="warning"
-            title="Suspended: the approved plan no longer matches"
+            title={suspensionTitle(trigger.state.code)}
             actions={
               <Button size="sm" icon={RefreshCw} onPress={() => onReapprove(trigger)} data-testid={`trigger-reapprove-${trigger.id}`}>
                 Review again…
               </Button>
             }
           >
-            {trigger.state.message} It does not fire until you review and approve a new standing plan.
+            {trigger.state.message}
           </Banner>
         </div>
       )}
@@ -679,7 +704,7 @@ export function TriggersSection({
           onPress={() => setDialog({ open: true })}
           data-testid="workflow-trigger-add"
         >
-          New trigger…
+          {triggers && triggers.length > 0 ? "Replace trigger…" : "New trigger…"}
         </Button>
         {reviewBlock && (
           <span className="xp-wf__muted" id={reasonId}>
@@ -692,6 +717,7 @@ export function TriggersSection({
         revision={revision}
         definition={definition}
         initial={dialog.initial}
+        replaces={triggers?.[0] ?? null}
         isOpen={dialog.open}
         onOpenChange={(open) => setDialog((d) => ({ ...d, open }))}
         onEnabled={() => void refresh()}

@@ -190,6 +190,29 @@ describe("Execution", () => {
     expect(ipc.dockerImagesList).toHaveBeenCalled();
   });
 
+  it("sets and clears the R and Julia images from local images (languageImage), and says what is refused without them", async () => {
+    const withImages = (rImage?: string, juliaImage?: string): ExecutionSettingsState => {
+      const state = executionState("python:3.13-slim");
+      return { ...state, settings: { ...state.settings, docker: { ...state.settings.docker, ...(rImage ? { rImage } : {}), ...(juliaImage ? { juliaImage } : {}) } } };
+    };
+    ipc.executionSettingsGet.mockResolvedValue(withImages(undefined, "gone-julia:1"));
+    ipc.dockerImagesList.mockResolvedValue([
+      { reference: "python:3.13-slim", id: "e48f59cdba69", size: "178MB", created: "6 days ago" },
+      { reference: "r-base:4.6.2", id: "a1b2c3d4e5f6", size: "900MB", created: "2 days ago" },
+    ]);
+    ipc.executionSettingsUpdate.mockResolvedValueOnce(withImages("r-base:4.6.2", "gone-julia:1")).mockResolvedValueOnce(withImages("r-base:4.6.2"));
+    render(<ExecutionSection />);
+    const r = await screen.findByTestId("docker-r-image");
+    expect(within(r).getByTestId("docker-r-image-state").textContent).toMatch(/No R image: restricted R batches are refused; they never run natively instead/);
+    expect((await screen.findByText("gone-julia:1 is not present locally")).textContent).toBeTruthy();
+    fireEvent.click(within(r).getByRole("button", { name: /Choose a local image|R image/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /r-base:4\.6\.2/ }));
+    await waitFor(() => expect(ipc.executionSettingsUpdate).toHaveBeenCalledWith({ kind: "languageImage", language: "r", image: "r-base:4.6.2" }));
+    await waitFor(() => expect(within(screen.getByTestId("docker-r-image")).getByTestId("docker-r-image-state").textContent).toMatch(/r-base:4\.6\.2 is present locally/));
+    fireEvent.click(within(screen.getByTestId("docker-julia-image")).getByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(ipc.executionSettingsUpdate).toHaveBeenLastCalledWith({ kind: "languageImage", language: "julia", image: null }));
+  });
+
   it("warns when the configured image is not present locally", async () => {
     ipc.executionSettingsGet.mockResolvedValue(executionState("gone:1"));
     render(<ExecutionSection />);

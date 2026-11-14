@@ -281,6 +281,13 @@ export function connect(def: WorkflowDefinition, contracts: OperationContract[],
   if (to.kind === "outcome") {
     const outcome = def.outcomes.find((o) => o.id === to.id);
     if (!outcome || portSource.kind !== "step") return { ok: false, message: "Refused: an outcome is realized by a step's output, not by an external input." };
+    const repeating = def.steps.find((s) => s.id === portSource.step);
+    if (repeating?.repeat?.kind === "forEach") {
+      return {
+        ok: false,
+        message: `Refused: “${repeating.label}” runs once for each value, so it produces several outputs; collect its outputs in a step that takes several first.`,
+      };
+    }
     const accepts = OUTCOME_ACCEPTS[outcome.kind];
     if (!type || !accepts.includes(type)) {
       return {

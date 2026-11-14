@@ -84,6 +84,8 @@ pub struct WorkflowManifestOutput {
     pub media_type: Option<String>,
     /// Verdict of formal evidence, status of a proposal.
     pub status: Option<String>,
+    /// The instance of a repeated step that produced it.
+    pub instance: Option<u32>,
     pub provenance: WorkflowOutputProvenance,
 }
 
@@ -104,6 +106,19 @@ pub struct WorkflowManifestAttempt {
     pub rejected: Vec<WorkflowRejectedOutput>,
 }
 
+/// One instance of a repeated step (forEach value, until iteration).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowManifestInstance {
+    pub index: u32,
+    /// The forEach value of this instance.
+    pub parameter: Option<ParamValue>,
+    pub state: WorkflowStepState,
+    pub reason: Option<String>,
+    pub attempts: Vec<WorkflowManifestAttempt>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
@@ -114,12 +129,14 @@ pub struct WorkflowManifestStep {
     pub runner: String,
     pub containment: Containment,
     pub state: WorkflowStepState,
-    /// SHA-256 (hex) of the step's code or prompt as approved (the full
-    /// text is in the definition revision).
+    /// SHA-256 (hex) of the exact code or prompt text the step ran (the
+    /// full text is in the definition revision).
     pub payload_sha256: Option<String>,
     pub parameters: BTreeMap<String, ParamValue>,
     pub time_limit_seconds: u32,
     pub attempts: Vec<WorkflowManifestAttempt>,
+    /// A repeated step's instances (its attempts live there).
+    pub instances: Vec<WorkflowManifestInstance>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -194,6 +211,7 @@ fn output(step: &str, o: &WorkflowStepOutput) -> WorkflowManifestOutput {
         bytes: None,
         media_type: None,
         status: None,
+        instance: o.provenance.instance,
         provenance: o.provenance.clone(),
     };
     match &o.value {
@@ -234,6 +252,40 @@ fn output(step: &str, o: &WorkflowStepOutput) -> WorkflowManifestOutput {
     m
 }
 
+fn attempt(step: &str, a: &crate::model::WorkflowStepAttempt) -> WorkflowManifestAttempt {
+    WorkflowManifestAttempt {
+        attempt: a.attempt,
+        state: a.state,
+        operation: a.operation.clone(),
+        code: a.code.clone(),
+        message: a.message.clone(),
+        intent_at_ms: a.intent_at_ms,
+        dispatched_at_ms: a.dispatched_at_ms,
+        finished_at_ms: a.finished_at_ms,
+        environment: a.environment.clone(),
+        outputs: a.outputs.iter().map(|o| output(step, o)).collect(),
+        rejected: a.rejected.clone(),
+    }
+}
+
+/// The validated outputs of the last successful attempt among `attempts`.
+fn final_outputs(step: &str, attempts: &[crate::model::WorkflowStepAttempt]) -> Vec<WorkflowManifestOutput> {
+    attempts
+        .iter()
+        .rev()
+        .find(|a| a.state == WorkflowAttemptState::Succeeded)
+        .map(|a| a.outputs.iter().map(|o| output(step, o)).collect())
+        .unwrap_or_default()
+}
+
+/// SHA-256 (hex) of exactly the code or prompt text a payload runs.
+fn payload_digest(payload: &exposition_graph::workflow::StepPayload) -> String {
+    match payload {
+        exposition_graph::workflow::StepPayload::Code { source, .. } => sha256_hex(source.as_bytes()),
+        exposition_graph::workflow::StepPayload::Prompt { text } => sha256_hex(text.as_bytes()),
+    }
+}
+
 /// The manifest of `run` (unscrubbed; see [`scrub_manifest`]).
 pub fn build_manifest(run: &WorkflowRun) -> WorkflowRunManifest {
     let plan = &run.plan;
@@ -243,25 +295,9 @@ pub fn build_manifest(run: &WorkflowRun) -> WorkflowRunManifest {
         .iter()
         .map(|step| {
             let planned = plan.steps.iter().find(|p| p.step == step.step);
-            let attempts: Vec<WorkflowManifestAttempt> = step
-                .attempts
-                .iter()
-                .map(|a| WorkflowManifestAttempt {
-                    attempt: a.attempt,
-                    state: a.state,
-                    operation: a.operation.clone(),
-                    code: a.code.clone(),
-                    message: a.message.clone(),
-                    intent_at_ms: a.intent_at_ms,
-                    dispatched_at_ms: a.dispatched_at_ms,
-                    finished_at_ms: a.finished_at_ms,
-                    environment: a.environment.clone(),
-                    outputs: a.outputs.iter().map(|o| output(&step.step, o)).collect(),
-                    rejected: a.rejected.clone(),
-                })
-                .collect();
-            if let Some(last) = step.attempts.iter().rev().find(|a| a.state == WorkflowAttemptState::Succeeded) {
-                outputs.extend(last.outputs.iter().map(|o| output(&step.step, o)));
+            outputs.extend(final_outputs(&step.step, &step.attempts));
+            for instance in &step.instances {
+                outputs.extend(final_outputs(&step.step, &instance.attempts));
             }
             WorkflowManifestStep {
                 step: step.step.clone(),
@@ -272,12 +308,21 @@ pub fn build_manifest(run: &WorkflowRun) -> WorkflowRunManifest {
                 runner: planned.map(|p| p.runner.clone()).unwrap_or_default(),
                 containment: step.containment,
                 state: step.state,
-                payload_sha256: planned
-                    .and_then(|p| p.payload.as_ref())
-                    .map(|payload| sha256_hex(&serde_json::to_vec(payload).unwrap_or_default())),
+                payload_sha256: planned.and_then(|p| p.payload.as_ref()).map(payload_digest),
                 parameters: planned.map(|p| p.parameters.clone()).unwrap_or_default(),
                 time_limit_seconds: planned.map(|p| p.time_limit_seconds).unwrap_or(0),
-                attempts,
+                attempts: step.attempts.iter().map(|a| attempt(&step.step, a)).collect(),
+                instances: step
+                    .instances
+                    .iter()
+                    .map(|i| WorkflowManifestInstance {
+                        index: i.index,
+                        parameter: i.parameter.clone(),
+                        state: i.state,
+                        reason: i.reason.clone(),
+                        attempts: i.attempts.iter().map(|a| attempt(&step.step, a)).collect(),
+                    })
+                    .collect(),
             }
         })
         .collect();
@@ -526,8 +571,11 @@ fn is_manifest(bytes: &[u8]) -> bool {
 
 /// Write `json` to the user-chosen `destination`: an absolute `.json` path
 /// in an existing folder. An existing file is replaced only when it is a
-/// regular file holding an earlier run manifest (never a link, a folder, or
-/// any other file). The write is atomic.
+/// regular file holding an earlier run manifest (never a link, a folder, an
+/// oversized file, or any other file). The write is atomic. Callers that take
+/// a destination from the webview first apply the application's chosen-file
+/// rules (never inside the project's `.exposition` folder or the app data
+/// folder; see `src-tauri/src/workflow_repro.rs`).
 pub fn write_manifest_file(destination: &Path, json: &str) -> Result<WorkflowManifestExport, WorkflowRunError> {
     let invalid = |m: &str| WorkflowRunError::new("workflow.invalidDestination", m);
     if json.len() > MAX_MANIFEST_BYTES {
@@ -545,6 +593,9 @@ pub fn write_manifest_file(destination: &Path, json: &str) -> Result<WorkflowMan
     if let Ok(meta) = std::fs::symlink_metadata(&target) {
         if !meta.is_file() {
             return Err(invalid("The destination exists and is not a regular file."));
+        }
+        if meta.len() > MAX_MANIFEST_BYTES as u64 {
+            return Err(invalid("The existing destination is too large to be a run manifest; refusing to replace it."));
         }
         let existing = std::fs::read(&target).map_err(|e| invalid(&format!("The destination cannot be read: {e}")))?;
         if !is_manifest(&existing) {
@@ -634,5 +685,22 @@ mod tests {
         assert_eq!(first.sha256, sha256_hex(json.as_bytes()));
         let again = write_manifest_file(&target, json).expect("an earlier manifest may be replaced");
         assert_eq!(again.bytes, json.len() as u64);
+    }
+
+    #[test]
+    fn an_oversized_existing_destination_is_not_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = std::fs::canonicalize(tmp.path()).unwrap().join("big.json");
+        let mut big = String::from("{\"schema\": \"exposition.workflowRunManifest/1\", \"pad\": \"");
+        big.push_str(&"x".repeat(MAX_MANIFEST_BYTES + 1));
+        big.push_str("\"}");
+        std::fs::write(&target, &big).unwrap();
+        let e = write_manifest_file(
+            &target, "{}
+",
+        )
+        .unwrap_err();
+        assert!(e.message.contains("too large"), "{e:?}");
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), big.len() as u64, "untouched");
     }
 }

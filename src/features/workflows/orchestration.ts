@@ -200,14 +200,19 @@ export function compositeRefs(def: WorkflowDefinition): CompositeRef[] {
 
 // ----- conditions and predicates -------------------------------------------------------------
 
-/** Exact Lean verdict labels a VerdictIn test may name (Rust refuses others: `workflow.conditionInvalid`). */
+/**
+ * Exactly the audit verdict labels a VerdictIn test may name: Rust's
+ * `KNOWN_VERDICTS` (crates/exposition-graph/src/workflow.rs; a test pins this
+ * list to it). An overall label such as "Errors (2)" belongs to the class it
+ * starts with. Rust refuses any other label (`workflow.conditionInvalid`).
+ */
 export const KNOWN_VERDICTS = [
   "Checked",
-  "Checked with axioms",
-  "Incomplete (sorry)",
+  "Checked with nonstandard axioms",
+  "Incomplete",
   "Relies on compiled code",
   "Partially checked",
-  "Not verified",
+  "Unverified",
   "Errors",
 ] as const;
 
@@ -219,6 +224,11 @@ export const COMPARE_OPS: { id: CompareOp; label: string; symbol: string }[] = [
   { id: "gt", label: "is greater than", symbol: ">" },
   { id: "ge", label: "is at least", symbol: "≥" },
 ];
+
+/** Comparisons a value kind allows: ordering only for numbers (Rust: "text can only be compared for equality"). */
+export function compareOpsFor(kind: ConditionValue["kind"]): typeof COMPARE_OPS {
+  return kind === "number" ? COMPARE_OPS : COMPARE_OPS.filter((o) => o.id === "eq" || o.id === "ne");
+}
 
 export type TestKind = ConditionTest["kind"];
 

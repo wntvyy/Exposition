@@ -23,7 +23,9 @@
 //! 6. service-owned types (formal evidence, retained artifacts) come only from
 //!    their owning operation.
 //!
-//! plus: no cycles, loops, conditionals, or nesting (the schema has none),
+//! plus: no cycles or unbounded loops; schema /2 adds only bounded forms
+//! (fixed-predicate conditions, forEach/until repeats with fixed bounds,
+//! composites of pinned revisions at most 3 deep and 100 expanded steps);
 //! schema versions, and size limits. Drafts may be incomplete and are saved
 //! with their diagnostics. Validation alone never makes a draft runnable:
 //! [`apply_runnability`] marks it runnable only when it is well-formed AND

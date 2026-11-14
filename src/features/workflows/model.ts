@@ -232,7 +232,8 @@ export interface OutcomeCandidate {
 /** Outputs that can realize an outcome of `kind`. */
 export function outcomeCandidates(def: WorkflowDefinition, contracts: OperationContract[], kind: OutcomeKind): OutcomeCandidate[] {
   const accepts = OUTCOME_ACCEPTS[kind];
-  return def.steps.flatMap((s) => {
+  // A forEach step yields several values; an outcome is realized by one (Rust: `workflow.iterationFanIn`).
+  return def.steps.filter((s) => s.repeat?.kind !== "forEach").flatMap((s) => {
     const c = contractOf(contracts, s);
     return (c?.outputs ?? [])
       .filter((o) => o.types[0] !== undefined && accepts.includes(o.types[0]))
@@ -293,8 +294,8 @@ export function conditionSources(def: WorkflowDefinition, contracts: OperationCo
   const downstream = downstreamOf(def, stepId);
   const options: ConditionSourceOption[] = [];
   for (const other of def.steps) {
-    // A repeating step yields several values; a condition reads one (Rust: `workflow.conditionSource`).
-    if (other.id === stepId || downstream.has(other.id) || other.repeat) continue;
+    // A forEach step yields several values; a condition reads one (Rust: `workflow.conditionSource`).
+    if (other.id === stepId || downstream.has(other.id) || other.repeat?.kind === "forEach") continue;
     for (const out of contractOf(contracts, other)?.outputs ?? []) {
       const type = out.types[0] ?? null;
       if (type !== "formalEvidence" && type !== "dataset" && out.required) continue;

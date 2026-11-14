@@ -169,6 +169,9 @@ pub mod codes {
     pub const WORKFLOW_CEILING: &str = "agents.workflowCeiling";
     /// A workflow that forges a service-owned result (formal evidence, retained artifacts).
     pub const WORKFLOW_SERVICE_OWNED: &str = "agents.workflowServiceOwned";
+    /// A workflow whose current revision uses schema /2 features (parallel
+    /// steps, composites, conditions, repeats): agents edit only /1 workflows.
+    pub const WORKFLOW_UNSUPPORTED: &str = "agents.workflowUnsupported";
 }
 
 /// A refusal with its stable code.

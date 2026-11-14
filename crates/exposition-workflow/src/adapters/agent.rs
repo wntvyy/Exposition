@@ -80,7 +80,8 @@ pub fn review_environment(step: &WorkflowPlanStep, model: Option<ReviewModel>) -
             if let Some(effort) = &m.effort {
                 env.note(format!("Effort {effort}."));
             }
-            env.model = Some(WorkflowEnvironmentModel { provider: m.provider, model: served });
+            env.model =
+                Some(WorkflowEnvironmentModel { provider: m.provider, model: m.configured, served_by: m.served_by });
         }
         None => env.note("The review's model was not reported."),
     }

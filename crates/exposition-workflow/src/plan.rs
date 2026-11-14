@@ -585,13 +585,20 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
     };
 
     // ----- notices -----
+    // Repeated steps run their declared instances; nothing else repeats.
+    let repeats = if steps.iter().any(|s| s.repeat.is_some()) {
+        "nothing is retried, and repeated steps run only their declared instances"
+    } else {
+        "nothing is retried or repeated"
+    };
     let mut notices = vec![if max_parallel <= 1 {
-        "Nothing runs until you start the run. Steps run one at a time in the order shown; a failed step stops the workflow, and nothing is retried or repeated."
-            .to_owned()
+        format!(
+            "Nothing runs until you start the run. Steps run one at a time in the order shown; a failed step stops the workflow, and {repeats}."
+        )
     } else {
         let l = facts.limits;
         format!(
-            "Nothing runs until you start the run. Up to {max_parallel} independent steps run at the same time (a step starts once everything it depends on succeeded; across all runs at most {} steps at once: {} restricted, {} native, {} agent, {} Lean). Budgets are reserved before each step starts. A failed step stops the workflow: nothing new starts, steps already running finish, and nothing is retried or repeated.",
+            "Nothing runs until you start the run. Up to {max_parallel} independent steps run at the same time (a step starts once everything it depends on succeeded; across all runs at most {} steps at once: {} restricted, {} native, {} agent, {} Lean). Budgets are reserved before each step starts. A failed step stops the workflow: nothing new starts, steps already running finish, and {repeats}.",
             l.max_in_flight_steps, l.restricted, l.native, l.agent, l.lean
         )
     }];
@@ -634,10 +641,10 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
     for s in &steps {
         if let Some(c) = &s.condition {
             notices.push(format!(
-                "“{}” runs only {} {} (output “{}” of “{}”); otherwise it is skipped, and so are the steps that need its output.",
+                "“{}” runs only when {}{} (output “{}” of “{}”); otherwise it does not run (condition not met), and the steps that need it are skipped.",
                 s.label,
-                if c.negate { "unless" } else { "when" },
                 crate::condition::describe(&c.test),
+                if c.negate { " does not hold" } else { "" },
                 c.source.port,
                 label_of(&c.source.step)
             ));

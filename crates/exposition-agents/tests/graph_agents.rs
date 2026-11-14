@@ -1905,3 +1905,58 @@ fn protected_folders_reached_through_links_or_short_names_are_refused() {
     assert!(failures.is_empty(), "{} rows differ:\n{}", failures.len(), failures.join("\n"));
     assert!(!f.root.join(".exposition/runs/run-5.json").exists());
 }
+
+/// M9 audit 1: agents edit only schema /1 workflows. A new revision of a
+/// workflow whose current revision uses /2 features (parallel steps,
+/// composites, conditions, repeats) is refused; nothing is downgraded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agents_never_rewrite_a_workflow_that_uses_v2_features() {
+    let f = fixture();
+    let save_user = |schema: &str, execution: Value| {
+        let mut definition = json!({
+            "schema": schema, "title": "User workflow", "description": "", "preset": null,
+            "inputs": [{"id": "paper", "label": "Paper", "portType": "document",
+                "source": {"kind": "resource", "path": "main.typ", "version": {"kind": "atRunStart"}}}],
+            "steps": [{"id": "review", "label": "Review the paper", "operation": {"id": "agent.review", "version": 1},
+                "parameters": {}, "payload": {"kind": "prompt", "text": "Summarize."}}],
+            "connections": [{"kind": "data", "from": {"kind": "input", "input": "paper"}, "to": {"step": "review", "port": "material"}}],
+            "outcomes": [{"id": "report", "kind": "investigationReport", "label": "Report", "from": {"step": "review", "port": "report"}, "optional": false}],
+            "ceiling": {"execution": "none", "modelRequests": false, "retainResults": false, "proposeChanges": false}
+        });
+        if !execution.is_null() {
+            definition["execution"] = execution;
+        }
+        let definition = exposition_graph::workflow::parse_definition(&definition.to_string()).unwrap();
+        f.graph
+            .save_workflow(
+                &Origin::User,
+                &exposition_graph::SaveWorkflowRequest { id: None, expected_revision: None, definition },
+                &exposition_graph::ValidationContext::default(),
+            )
+            .unwrap()
+            .id
+    };
+    let v2 = save_user("exposition.workflow/2", json!({"maxParallel": 2}));
+    let v1 = save_user("exposition.workflow/1", Value::Null);
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let revise = |id: &WorkflowId| {
+        let mut input = incomplete_workflow("Agent revision");
+        input["workflow_id"] = json!(id.as_str());
+        input["expected_revision"] = json!(1);
+        input
+    };
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+    let (task, _) = run(&mut h, req, vec![tool("w", tools::WORKFLOW_PROPOSE, revise(&v2))], true).await;
+    let (_, err, text) = call(&h, &task, "w");
+    assert!(err && code_of(&text).as_deref() == Some(codes::WORKFLOW_UNSUPPORTED), "{text}");
+    assert!(text.contains("ask the user"), "{text}");
+    let current = f.graph.workflow(&v2, None).unwrap();
+    assert_eq!(current.revision, 1, "no new revision");
+    assert_eq!(current.definition.max_parallel(), 2, "nothing was downgraded");
+    // A schema /1 workflow can still be revised by an agent.
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+    let (task, _) = run(&mut h, req, vec![tool("w", tools::WORKFLOW_PROPOSE, revise(&v1))], true).await;
+    let (_, err, text) = call(&h, &task, "w");
+    assert!(!err, "{text}");
+    assert_eq!(f.graph.workflow(&v1, None).unwrap().revision, 2);
+}

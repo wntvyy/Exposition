@@ -396,8 +396,22 @@ pub fn prepare(
         })?),
     };
     if let Some(id) = &id {
-        // A new revision of an existing workflow of this project.
-        graph.service.workflow(id, None).map_err(|e| refusal(codes::WORKFLOW_INVALID, e.message))?;
+        // A new revision of an existing workflow of this project. Agents write
+        // schema /1 only: a revision of a workflow that uses /2 features would
+        // silently drop them (a safety condition could vanish), so it is
+        // refused, never downgraded.
+        let current = graph.service.workflow(id, None).map_err(|e| refusal(codes::WORKFLOW_INVALID, e.message))?;
+        if current.definition.schema != WORKFLOW_SCHEMA || current.definition.uses_v2() {
+            return Err(refusal(
+                codes::WORKFLOW_UNSUPPORTED,
+                format!(
+                    "Workflow {id} (revision {}) uses features agents cannot edit (parallel steps, composite steps, \
+                     conditions, or repeats). Saving an agent revision would remove them, so nothing was saved; ask \
+                     the user to make this change, or propose a new workflow instead.",
+                    current.revision
+                ),
+            ));
+        }
     }
     let ceiling = task_ceiling(spec);
     if !definition.ceiling.within(&ceiling) {

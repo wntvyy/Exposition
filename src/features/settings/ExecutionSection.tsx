@@ -1,14 +1,16 @@
 // Execution: the restricted (Docker) backend's availability and image (local
-// images only), what restricted runs enforce, and tool location overrides.
+// images only; R and Julia workflow batches have their own image), what
+// restricted runs enforce, and tool location overrides.
 // Every change is validated by the execution service.
 import { useEffect, useState } from "react";
 import { FolderSearch, RefreshCw, RotateCcw, X } from "lucide-react";
 
+import type { RestrictedLanguage } from "../../bindings/RestrictedLanguage";
 import { Banner, Button, Dialog, ErrorState, LoadingState, Select, StatusPill, TextField, type Status } from "../../ui/components";
 import { loadToolchains, useJobs } from "../jobs/store";
 import { dockerAvailability, imageOptions, imageState, restrictedGuarantees, SOURCE_LABELS, toolRows, type ToolRow } from "./model";
 import { SettingRow, SettingsGroup, SettingsPage } from "./parts";
-import { loadExecutionSettings, loadImages, setDockerImage, setToolPath, useSettings } from "./store";
+import { loadExecutionSettings, loadImages, setDockerImage, setLanguageImage, setToolPath, useSettings } from "./store";
 
 const TOOL_STATUS: Record<ToolRow["status"], { status: Status; label: string }> = {
   available: { status: "succeeded", label: "Available" },
@@ -116,6 +118,8 @@ function DockerGroup() {
           Restricted runs are refused until the image is available. Choose a local image, or pull it with Docker yourself.
         </Banner>
       )}
+      <LanguageImageRow language="r" />
+      <LanguageImageRow language="julia" />
       <div className="exp-settings__enforce" data-testid="restricted-guarantees">
         <h4 className="exp-settings__subhead">Every restricted run</h4>
         <ul>
@@ -125,6 +129,66 @@ function DockerGroup() {
         </ul>
       </div>
     </SettingsGroup>
+  );
+}
+
+/**
+ * The image restricted R or Julia workflow batches run in (their own image,
+ * chosen from local images like the default one). Without it those batches
+ * are refused; they never run natively instead.
+ */
+function LanguageImageRow({ language }: { language: RestrictedLanguage }) {
+  const execution = useSettings((s) => s.execution);
+  const images = useSettings((s) => s.images);
+  const imagesLoading = useSettings((s) => s.imagesLoading);
+  const saving = useSettings((s) => s.savingImage);
+  if (!execution) return null;
+  const name = language === "r" ? "R" : "Julia";
+  const configured = (language === "r" ? execution.settings.docker.rImage : execution.settings.docker.juliaImage) ?? null;
+  const image = imageState(configured, images);
+  const testId = `docker-${language}-image`;
+  return (
+    <>
+      <SettingRow
+        label={`${name} image`}
+        description={`Restricted ${name} workflow batches run in this image (${language === "r" ? "Rscript" : "julia"} on its standard PATH), under the same restrictions.`}
+        testId={testId}
+      >
+        {({ labelId, descriptionId }) => (
+          <div className="exp-settings__stack">
+            <div className="exp-settings__inline">
+              <Select
+                aria-labelledby={labelId}
+                aria-describedby={descriptionId}
+                placeholder={imagesLoading && !images ? "Listing local images…" : "Choose a local image"}
+                value={configured}
+                options={imageOptions(images, configured)}
+                isDisabled={saving || (!images && !configured)}
+                onChange={(next) => {
+                  if (next !== configured) void setLanguageImage(language, next);
+                }}
+                className="exp-settings__select"
+                data-testid={`${testId}-select`}
+              />
+              <Button size="sm" variant="ghost" icon={X} isDisabled={!configured || saving} onPress={() => void setLanguageImage(language, null)}>
+                Clear
+              </Button>
+            </div>
+            <span className="exp-settings__muted" data-testid={`${testId}-state`}>
+              {image.kind === "notConfigured" && `No ${name} image: restricted ${name} batches are refused; they never run natively instead.`}
+              {image.kind === "present" && `${image.image} is present locally (${image.local.id}, ${image.local.size}).`}
+              {image.kind === "unverified" && `Configured: ${image.image}`}
+              {image.kind === "missing" && `Configured: ${image.image}`}
+            </span>
+          </div>
+        )}
+      </SettingRow>
+      {image.kind === "missing" && (
+        <Banner tone="warning" title={`${image.image} is not present locally`}>
+          Restricted {name} batches are refused until the image is available. Choose a local image, or pull it with Docker yourself.
+        </Banner>
+      )}
+    </>
   );
 }
 

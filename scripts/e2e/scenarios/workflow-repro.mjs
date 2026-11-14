@@ -20,6 +20,7 @@
 //   D. A changed input blocks the reproduction (workflow.inputChanged); a run
 //      of another project cannot be exported or reproduced.
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -151,6 +152,14 @@ export default async function workflowRepro({ launchApp, artifactsDir }) {
     expect("B export refuses to replace a file that is not a run manifest", refused.error?.code === "workflow.invalidDestination" && (await readFile(foreign, "utf8")) === '{"name": "keep me"}', refused.error ?? "replaced");
     const relative = await invokeError(page, "workflow_run_manifest_export", { run: run.id, destination: "manifest.json" });
     expect("B export refuses a relative destination", !!relative.error, relative.error);
+    // Exposition's own records are never an export destination (as for bundles).
+    for (const [label, dest] of [
+      ["the project's .exposition folder", join(root, ".exposition", "run-manifest.json")],
+      ["the app data folder", join(dataDir, "run-manifest.json")],
+    ]) {
+      const res = await invokeError(page, "workflow_run_manifest_export", { run: run.id, destination: dest });
+      expect(`B export refuses ${label}`, !!res.error && !existsSync(dest), res.error ?? `written to ${dest}`);
+    }
 
     // ---- C. reproduce ----------------------------------------------------------
     const repro = await invoke(page, "workflow_run_reproduce_plan", { run: run.id });

@@ -264,7 +264,12 @@ pub fn summary(run: &WorkflowRun) -> WorkflowRunSummary {
         state: run.state,
         started_at_ms: run.started_at_ms,
         finished_at_ms: run.finished_at_ms,
-        steps_done: run.steps.iter().filter(|s| s.state == WorkflowStepState::Succeeded).count() as u32,
+        // Steps that finished as planned: succeeded, or skipped by their own condition.
+        steps_done: run
+            .steps
+            .iter()
+            .filter(|s| matches!(s.state, WorkflowStepState::Succeeded | WorkflowStepState::ConditionNotMet))
+            .count() as u32,
         steps_total: run.steps.len() as u32,
         acknowledged: run.acknowledged,
         cause: run.cause.clone(),

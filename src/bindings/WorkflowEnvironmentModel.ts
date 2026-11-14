@@ -6,6 +6,11 @@ export type WorkflowEnvironmentModel = {
  */
 provider: string, 
 /**
- * The model that served the step (the configured one when unknown).
+ * The configured model the step asked for (what drift compares).
  */
-model: string, };
+model: string, 
+/**
+ * The model id the provider reported serving, when it said (may be a
+ * dated id or a fallback; recorded, never treated as drift).
+ */
+servedBy?: string, };

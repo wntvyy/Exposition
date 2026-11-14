@@ -203,6 +203,8 @@ struct Sched {
 struct Deps {
     /// Steps it needs (data producers, prerequisites).
     needs: Vec<Vec<usize>>,
+    /// Of those, the steps whose outputs it consumes.
+    data: Vec<Vec<usize>>,
     /// The step its condition reads.
     condition: Vec<Option<usize>>,
 }
@@ -210,6 +212,18 @@ struct Deps {
 impl Deps {
     fn of(steps: &[WorkflowPlanStep]) -> Self {
         let index = |id: &str| steps.iter().position(|s| s.step == id);
+        let data = steps
+            .iter()
+            .map(|s| {
+                s.bindings
+                    .iter()
+                    .filter_map(|b| match &b.from {
+                        PortSource::Step { step, .. } => index(step),
+                        PortSource::Input { .. } => None,
+                    })
+                    .collect()
+            })
+            .collect();
         let needs = steps
             .iter()
             .map(|s| {
@@ -228,7 +242,7 @@ impl Deps {
             })
             .collect();
         let condition = steps.iter().map(|s| s.condition.as_ref().and_then(|c| index(&c.source.step))).collect();
-        Self { needs, condition }
+        Self { needs, data, condition }
     }
 }
 
@@ -296,7 +310,7 @@ impl Ctx<'_> {
                 let missing = deps.needs[i]
                     .iter()
                     .find(|&&d| did_not_run(run.steps[d].state))
-                    .map(|&d| run.steps[d].label.clone());
+                    .map(|&d| (run.steps[d].label.clone(), deps.data[i].contains(&d)));
                 let source = deps.condition[i].map(|d| (run.steps[d].state, run.steps[d].label.clone()));
                 (state, !waits, missing, source)
             };
@@ -308,8 +322,12 @@ impl Ctx<'_> {
                         // A step it needs failed: the run is stopping.
                         continue;
                     }
-                    if let Some(label) = missing {
-                        let reason = format!("“{label}”, whose output it needs, did not run.");
+                    if let Some((label, consumes)) = missing {
+                        let reason = if consumes {
+                            format!("“{label}”, whose output it needs, did not run.")
+                        } else {
+                            format!("“{label}”, which it runs after, did not run.")
+                        };
                         self.not_run(i, WorkflowStepState::Skipped, reason);
                         continue;
                     }
@@ -349,9 +367,9 @@ impl Ctx<'_> {
                             }
                             Ok((false, seen)) => {
                                 let reason = format!(
-                                    "Its condition did not hold: it runs {} {}, and {seen}.",
-                                    if condition.negate { "unless" } else { "when" },
-                                    crate::condition::describe(&condition.test)
+                                    "Its condition did not hold: it runs only when {}{}, and {seen}.",
+                                    crate::condition::describe(&condition.test),
+                                    if condition.negate { " does not hold" } else { "" }
                                 );
                                 self.not_run(i, WorkflowStepState::ConditionNotMet, reason);
                                 continue;
@@ -885,7 +903,19 @@ fn produced(
             let max = (*max_iterations).clamp(1, crate::plan::MAX_UNTIL);
             match until {
                 Some(Err((code, message))) => {
-                    instance_mut(run, i, k).reason = Some(format!("Its predicate could not be evaluated: {message}."));
+                    // The iteration ran, but whether to stop cannot be told:
+                    // it failed, and its outputs reach no consumer.
+                    let failed = instance_mut(run, i, k);
+                    failed.state = WorkflowStepState::Failed;
+                    failed.reason = Some(format!("Its predicate could not be evaluated: {message}."));
+                    if let Some(a) = failed.attempts.last_mut() {
+                        a.state = WorkflowAttemptState::Failed;
+                        a.code = Some(code.to_owned());
+                        a.message = Some(format!(
+                            "The iteration ran, but its predicate could not be evaluated ({message}); its outputs are discarded."
+                        ));
+                        a.outputs.clear();
+                    }
                     if run.steps[i].state == WorkflowStepState::Running {
                         run.steps[i].state = WorkflowStepState::Failed;
                     }
