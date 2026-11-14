@@ -203,7 +203,7 @@ Canvas positions, filters, and hidden items are saved per section with the
 project and never change relationships. On the canvas, connections are
 straight lines that can pass behind other nodes (no edge routing); a
 table view offers the same items and relationships for keyboard use.
-Graph actions are worded by what they change: Hide from View changes the
+Graph actions are worded by what they change: Hide from view changes the
 view only, Delete Relationship and Delete Entity remove hand-made records
 (restorable, and they stay removed when the project is indexed again), and
 Delete Source File deletes the file itself; items found in the sources and
@@ -905,7 +905,9 @@ Exposition has identified the item in the Recycle Bin reliably; it works
 after a restart while the record lasts, and otherwise you restore it from the
 Recycle Bin. Restoring never overwrites: if something new is at the original
 location, you choose to restore under a new name (both kept) or leave it
-deleted. Workflows, run and task records, run outputs, and graph items are
+deleted. A restore interrupted by a crash is completed at the next start,
+and an item that cannot be put back in place returns to the Recycle Bin;
+a restored item is never lost on the way. Workflows, run and task records, run outputs, and graph items are
 deleted recoverably inside Exposition and listed in **Settings › Storage &
 History**, where they can be restored or purged; a restored workflow keeps
 its triggers off, and nothing restarts. Permanent deletion cannot be undone.
@@ -928,16 +930,19 @@ the source; Exposition offers Copy Reference and Copy Text instead, and
 deletes a file-backed item's source file only as an explicit Delete Source
 File.
 
-**Storage & History.** Settings › Storage & History lists run records,
-generated outputs, agent task records, earlier workflow revisions, recently
-deleted items, and disposable records, with sizes where they can be
-measured. Referenced items are marked and kept unless you include them;
-nothing is removed automatically. Purging removes the selected records and
-files; the result says how much space was actually given back. The run
-history and task databases are compacted after a permanent deletion; the
-project graph database is not, so its file keeps its size, and graph backups
-may still hold purged records until they rotate out. Deletion is not secure
-erasure.
+**Storage & History.** Settings › Storage & History lists the open
+project's run records, generated outputs, agent task records, earlier
+workflow revisions, recently deleted items, and disposable records, with
+sizes where they can be measured. Referenced items are marked and kept
+unless you include them; nothing is removed automatically. Purging removes
+the selected records and files in one request (one decision when it needs
+one); the result says how much space was actually given back. Outputs
+deleted recoverably keep their disk space until purged. The run history and
+task databases are compacted after a permanent deletion; the project graph
+database is not (its file does not shrink; the freed space is reused), and
+graph backups may still hold purged records until they rotate out. Deletion
+is not secure erasure. Before an upgrade, the run history and task databases
+are copied aside; a run history written by a newer version is left untouched.
 
 **Agents** delete only to the Recycle Bin and copy only within their scope,
 through the same operations; an agent that applies changes directly cannot
