@@ -12,13 +12,12 @@ use crate::types::{EntryKind, FileEntry};
 /// Directory names never shown in the tree or reported by the watcher.
 pub const HIDDEN_NAMES: &[&str] = &[".git", ".lake", "node_modules", "target"];
 
-/// True if a workspace path is inside a hidden directory, is a save temp
-/// file, or is the project graph's own storage (`.exposition/graph.sqlite3*`,
-/// its backups and set-aside copies): graph writes are not source changes.
+/// True if a workspace path is inside a hidden directory, is (or is inside)
+/// a save temp or staging entry, or is the project graph's own storage
+/// (`.exposition/graph.sqlite3*`, its backups and set-aside copies): graph
+/// writes are not source changes, and a copy being staged is not published yet.
 pub fn is_ignored(path: &WorkspacePath) -> bool {
-    path.components().any(|c| HIDDEN_NAMES.contains(&c))
-        || path.file_name().contains(TEMP_MARKER)
-        || is_graph_storage(path)
+    path.components().any(|c| HIDDEN_NAMES.contains(&c) || c.contains(TEMP_MARKER)) || is_graph_storage(path)
 }
 
 /// The project graph's own files under `.exposition/`.
@@ -159,6 +158,8 @@ mod tests {
         assert!(is_ignored(&WorkspacePath::parse(".lake/build/lib/A.olean").unwrap()));
         assert!(is_ignored(&WorkspacePath::parse("app/node_modules/x/y.js").unwrap()));
         assert!(is_ignored(&WorkspacePath::parse("dir/.main.typ.exposition-save-12.tmp").unwrap()));
+        // Inside a folder being staged by a copy or restore.
+        assert!(is_ignored(&WorkspacePath::parse("dir/.exposition-save-op1-2.tmp/sub/a.csv").unwrap()));
         assert!(is_ignored(&WorkspacePath::parse(".exposition/graph.sqlite3").unwrap()));
         assert!(is_ignored(&WorkspacePath::parse(".exposition/graph.sqlite3-journal").unwrap()));
         assert!(is_ignored(&WorkspacePath::parse(".exposition/graph-backups/b1.sqlite3").unwrap()));
