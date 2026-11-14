@@ -466,7 +466,6 @@ fn review_m9_held_for_each_counts_every_instance_once() {
 /// refused only when the step is dispatched (`workflow.invalidInput`). The
 /// refusal holds (nothing runs); the plan the user approved said it would run.
 #[test]
-#[ignore = "R-m9 F6: the plan of a .py script reaching an R step through a composite has no blocker"]
 fn review_m9_f6_the_plan_refuses_a_python_script_for_an_r_step_inside_a_composite() {
     let f = fixture();
     std::fs::write(

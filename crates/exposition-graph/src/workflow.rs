@@ -1357,6 +1357,33 @@ fn validate_in(definition: &WorkflowDefinition, context: &ValidationContext<'_>,
         }
     }
 
+    // A composite's inputs reach the steps inside it: a code step there also
+    // runs only scripts of its own language (rule 3). Checked on the expanded
+    // definition, where the parent's code inputs are bound to the child steps.
+    if !expanded.is_empty()
+        && let Some(resolve) = context.resolve_workflow
+        && let Ok(flat) = v2::expand_workflow(def, resolve)
+    {
+        for c in &flat.definition.connections {
+            let WorkflowConnection::Data { from: PortSource::Input { input }, to } = c else { continue };
+            let Some((composite, _)) = to.step.split_once('/') else { continue };
+            let Some(WorkflowInput {
+                port_type: PortType::CodeSource, source: InputSource::Resource { path, .. }, ..
+            }) = inputs.get(input.as_str()).copied()
+            else {
+                continue;
+            };
+            let Some(inner) = flat.definition.steps.iter().find(|s| s.id == to.step) else { continue };
+            let Some(contract) = registry::operation(&inner.operation.id, inner.operation.version) else { continue };
+            if let Err(message) = registry::check_script_language(&contract, path.as_str()) {
+                let label = def.steps.iter().find(|s| s.id == composite).map_or(composite, |s| s.label.as_str());
+                d.error("workflow.inputTypeMismatch", Some(3), format!("{message} (inside composite step “{label}”)"))
+                    .step(composite)
+                    .input(input);
+            }
+        }
+    }
+
     if leaves > MAX_EXPANDED_STEPS {
         d.error(
             "workflow.tooManySteps",
@@ -1468,7 +1495,9 @@ fn check_parameters(d: &mut Diags, step: &WorkflowStep, contract: &OperationCont
             .port(name);
             continue;
         };
-        if let Some(problem) = parameter_problem(&spec.kind, value) {
+        if let Some(problem) =
+            parameter_problem(&spec.kind, value).or_else(|| registry::code_parameter_problem(contract, value))
+        {
             d.error("workflow.invalidParameter", None, format!("“{}” {problem}", spec.label)).step(&step.id).port(name);
         }
     }

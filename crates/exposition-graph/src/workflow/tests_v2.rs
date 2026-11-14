@@ -1096,3 +1096,30 @@ fn saving_refuses_nothing_but_records_composite_problems() {
     let looped = save(&graph, None, None, &parent(&a.id, 2));
     assert!(looped.validation.diagnostics.iter().any(|d| d.code == "workflow.compositeRecursive"));
 }
+
+/// JSON number comparisons are exact decimals (R-m9 F5): never a float.
+#[test]
+fn condition_numbers_compare_as_exact_decimals() {
+    use std::cmp::Ordering;
+    let d = |s: &str| super::v2::Decimal::parse(s).unwrap_or_else(|| panic!("{s}"));
+    for (a, b) in [("0.1", "0.10"), ("1e3", "1000"), ("2.5e-1", "0.25"), ("-0", "0"), ("0.000", "0e5"), ("10", "1E1")] {
+        assert_eq!(d(a).cmp(&d(b)), Ordering::Equal, "{a} = {b}");
+    }
+    for (a, b) in [
+        ("9007199254740992", "9007199254740993"),
+        ("1700000000000000000", "1700000000000000001"),
+        ("0.12", "0.125"),
+        ("-1", "-0.5"),
+        ("-0.5", "0"),
+        ("0", "1e-300"),
+        ("99", "1e2"),
+        ("-1e2", "-99"),
+        ("9007199254740992", "9007199254740992.4"),
+    ] {
+        assert_eq!(d(a).cmp(&d(b)), Ordering::Less, "{a} < {b}");
+        assert_eq!(d(b).cmp(&d(a)), Ordering::Greater, "{b} > {a}");
+    }
+    for bad in ["", "-", "1.", ".5", "1e", "1e+", "a", "1e1234567", "--1", "1.2.3"] {
+        assert!(super::v2::Decimal::parse(bad).is_none(), "{bad:?}");
+    }
+}

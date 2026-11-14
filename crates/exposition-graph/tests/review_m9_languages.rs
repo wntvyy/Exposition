@@ -101,7 +101,6 @@ fn review_m9_held_a_python_script_never_reaches_an_r_step_directly() {
 /// is well-formed (and runnable) although its R step will refuse the file
 /// when it is dispatched.
 #[test]
-#[ignore = "R-m9 F6: a .py script reaches an R step through a composite without a validation error"]
 fn review_m9_f6_a_python_script_never_reaches_an_r_step_through_a_composite() {
     let mut store = HashMap::new();
     let child = WorkflowId::mint();
@@ -131,7 +130,6 @@ fn review_m9_f6_a_python_script_never_reaches_an_r_step_through_a_composite() {
 /// anything runs; validation accepts it, so the draft is well-formed and
 /// runnable and the plan shows no blocker.
 #[test]
-#[ignore = "R-m9 F6: validation accepts a batch value the batch runner always refuses (a line break)"]
 fn review_m9_f6_validation_refuses_a_batch_value_the_runner_refuses() {
     let mut def = r_workflow("analysis.R");
     def.steps[0].parameters.insert("value".into(), ParamValue::Text("first line\nsecond line".into()));

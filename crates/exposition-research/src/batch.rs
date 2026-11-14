@@ -119,7 +119,7 @@ pub const ITERATION_VAR: &str = "EXPOSITION_ITERATION";
 /// Prefix of the variables carrying [`BatchRequest::parameters`].
 pub const PARAMETER_PREFIX: &str = "EXPOSITION_PARAM_";
 /// Longest parameter value given to a batch.
-pub const MAX_PARAMETER_BYTES: usize = 4096;
+pub const MAX_PARAMETER_BYTES: usize = exposition_graph::workflow::registry::MAX_CODE_PARAMETER_BYTES;
 
 /// `EXPOSITION_PARAM_<UPPER_SNAKE_NAME>` for a parameter name (`timeoutSeconds`
 /// → `EXPOSITION_PARAM_TIMEOUT_SECONDS`, `value` → `EXPOSITION_PARAM_VALUE`),
