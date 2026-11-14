@@ -10,8 +10,10 @@ import { commands } from "../../lib/ipc";
 import { Banner, Button, IconButton, LoadingState, ProgressBar, Section, StatusPill, StatusText, TextArea } from "../../ui/components";
 import {
   activeToolLabel,
+  asSentence,
   budgetRows,
   CONSENT_LABELS,
+  EFFORT_LABELS,
   EXECUTION_LABELS,
   isActive,
   PERMISSION_LABELS,
@@ -49,8 +51,9 @@ function OutcomeBanner({ status }: { status: TaskStatus }) {
       return <Banner tone="warning" title="Interrupted">Exposition closed while this task was running. Continue it to resume.</Banner>;
     case "budgetExceeded":
       return (
+        // A follow-up from this view sends no new budgets, and usage counts across runs.
         <Banner tone="warning" title={statusLabel(status).label}>
-          {status.detail} Continue the task to give it more room.
+          {asSentence(status.detail)} A follow-up keeps the same budgets and the usage so far.
         </Banner>
       );
     case "refused":
@@ -117,8 +120,7 @@ function Approval({ approval }: { approval: ApprovalRequest }) {
   return (
     <section className="agents-stack agents-approval" aria-label={`Approval needed: ${approval.title}`} data-testid="agents-approval">
       <Banner tone="warning" title={approval.title}>
-        The agent is waiting for your decision. Nothing is applied until you approve. Below is the complete content of
-        what will run or change; scroll to review all of it.
+        Nothing is applied until you approve. Review the complete content below.
       </Banner>
       <p className="ui-meta" data-testid="agents-approval-size">
         {payloadSize(approval.detail)} · complete, nothing omitted
@@ -282,7 +284,7 @@ export function TaskView({ id, variant = "panel" }: { id: TaskId; variant?: "pan
   const provider =
     task.spec.provider.provider === "scripted"
       ? "Scripted provider — development only"
-      : `${task.spec.provider.model} (${task.spec.provider.effort} effort)`;
+      : `${task.spec.provider.model} (${EFFORT_LABELS[task.spec.provider.effort].toLowerCase()} effort)`;
   const servedBy =
     task.spec.provider.provider !== "scripted" && task.usage.servedBy && task.usage.servedBy !== task.spec.provider.model
       ? ` · served by ${task.usage.servedBy}`

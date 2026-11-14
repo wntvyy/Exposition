@@ -44,6 +44,15 @@ export function stopLabel(stopReason: string): string {
 }
 
 /**
+ * A backend detail as a sentence of its own: budget details are worded to
+ * follow "Stopped: " ("the limit of 40 model turns was reached."), so they
+ * start in lower case.
+ */
+export function asSentence(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
  * The one phrase for "blocked on the user's decision", used by the task
  * status, the tool call, the streaming draft, and the status bar alike.
  */

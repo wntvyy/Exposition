@@ -74,7 +74,9 @@ export function ProjectSetupView({ resource }: EditorProps) {
           <section className="xp-proj__group" aria-label="Choices">
             <h3 className="ui-section-title">Continue</h3>
             <p className="ui-meta">
-              Finishing creates only the missing files (files that exist, including ones with different content, are left exactly as they are) and records the project structure. Keeping it stops here: the existing files stay and become project resources.
+              {canFinish &&
+                "Finish Setup creates only the missing files (existing files, including ones with different content, stay exactly as they are) and records the project structure. "}
+              Keep as Is stops here: the existing files stay and become project resources.
             </p>
             <div className="xp-proj__actions">
               {canFinish && (

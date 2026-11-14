@@ -154,6 +154,24 @@ describe("the streaming draft follows the call through approval", () => {
   });
 });
 
+describe("a finished task's outcome", () => {
+  it("a budget stop says what a follow-up keeps, and the spec names the effort", () => {
+    const stopped = summary({
+      status: { kind: "budgetExceeded", budget: "turns", detail: "the limit of 40 model turns was reached." },
+      spec: { ...summary().spec, provider: { provider: "anthropic", model: "claude-opus-5-5", effort: "xhigh" } },
+    });
+    const detail: TaskDetail = { summary: stopped, transcript: [], approvals: [], graph: NO_GRAPH };
+    ipc.agentsTaskDetail.mockResolvedValue(detail);
+    useAgents.setState({ details: { "task-1": detail }, tasks: [stopped] });
+    render(<TaskView id="task-1" />);
+    // The UI's follow-up sends no new budgets and usage counts across runs.
+    expect(
+      screen.getByText("The limit of 40 model turns was reached. A follow-up keeps the same budgets and the usage so far."),
+    ).toBeTruthy();
+    expect(screen.getByText(/claude-opus-5-5 \(extra high effort\)/)).toBeTruthy();
+  });
+});
+
 describe("waiting for approval reads the same everywhere", () => {
   it("in the task list and the status bar", () => {
     useAgents.setState({ tasks: [summary({ status: { kind: "awaitingApproval" } })] });

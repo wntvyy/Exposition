@@ -88,7 +88,7 @@ function PageTaskList({ kept }: { kept: ReadonlySet<string> }) {
         />
       </div>
       {shown.length === 0 ? (
-        <EmptyState size="compact" title={tasks.length === 0 ? "No agent tasks yet." : "No tasks match this filter."} />
+        <EmptyState size="compact" title={tasks.length === 0 ? "No agent tasks yet" : "No tasks match this filter"} />
       ) : (
         <div ref={list.ref} className="xp-ops-surface">
           <div role="list" aria-label="Agent tasks" data-testid="agents-page-tasks">
@@ -118,12 +118,7 @@ function KeptEntities({ snapshot, error }: { snapshot: GraphSnapshot | null; err
   if (error) return <p className="ui-meta">{error}</p>;
   const entities = snapshot?.entities ?? [];
   if (entities.length === 0) {
-    return (
-      <p className="ui-meta">
-        Nothing kept yet. Keep a task as an investigation to admit it into the project graph; saved workflow drafts also
-        appear here.
-      </p>
-    );
+    return <p className="ui-meta">Nothing kept yet. Tasks kept as investigations and saved workflows appear here.</p>;
   }
   return (
     <ul className="agents-list" aria-label="Kept in the project graph" data-testid="agents-kept">
@@ -248,7 +243,7 @@ function TaskDetailSections({ id, kept, onKept }: { id: TaskId; kept: boolean; o
           {task.changedFiles > 0 ? (
             <ReviewView id={id} showBack={false} />
           ) : (
-            <p className="ui-meta">The task has not changed any file.</p>
+            <p className="ui-meta">This task has not changed any files.</p>
           )}
         </TabPanel>
       </Tabs>
@@ -339,7 +334,7 @@ export function AgentsPage() {
             <EmptyState
               icon={FolderOpen}
               title="No folder open"
-              description="Agent tasks work on an open project folder, through the same documents as your editors. Open a folder to start or continue tasks."
+              description="Agent tasks work in the open project folder. Open a folder to start or continue tasks."
               actions={
                 <Button variant="primary" icon={FolderOpen} onPress={() => void registry.runCommand("workspace.openFolder")}>
                   Open Folder…
@@ -350,7 +345,7 @@ export function AgentsPage() {
             <EmptyState
               icon={Bot}
               title="Select a task"
-              description="Tasks from the Agent panel and this page are the same tasks. Select one to see its run, the graph context it was given, the graph changes it proposed, and its reviewable changes."
+              description="These are the same tasks as in the Agent panel. Select one to see its run, graph context, proposals, and changes."
               actions={
                 <Button icon={Plus} onPress={() => agents.setPage({ composing: true })}>
                   New task
