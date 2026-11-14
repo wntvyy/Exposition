@@ -4,12 +4,14 @@
 // rules and arrowheads (canvas.css), so the legend cannot drift from them.
 import type { AssertionStatus, RelationFamily } from "./types";
 
+// Family names as in the inspector's relationship groups and the Filters
+// popover; structure and resource use share the gray line.
 const FAMILIES: { family: RelationFamily; label: string; detail?: string }[] = [
-  { family: "math", label: "Mathematical", detail: "depends on, assumes, is a proof of" },
-  { family: "citation", label: "Reference" },
-  { family: "evidence", label: "Evidence" },
+  { family: "math", label: "Mathematical dependencies", detail: "depends on, assumes, is a proof of" },
+  { family: "citation", label: "References" },
+  { family: "evidence", label: "Evidence and provenance" },
   { family: "formal", label: "Formal association" },
-  { family: "structure", label: "Structure", detail: "contains, is declared in, imports" },
+  { family: "structure", label: "Structure and resource use", detail: "contains, is declared in, imports" },
 ];
 
 const STATUSES: { status: Exclude<AssertionStatus, "rejected">; label: string; detail: string }[] = [

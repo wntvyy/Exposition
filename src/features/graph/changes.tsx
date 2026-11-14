@@ -76,7 +76,18 @@ export async function runChange(operations: GraphOperation[], summary: string, s
 const SEVERITY_ICON = { error: CircleAlert, warning: TriangleAlert, info: Info } as const;
 
 /** Effects of a proposal and its diagnostics, as reviewed before applying. */
-export function ProposalReview({ proposal, busy, error }: { proposal: ChangeProposal | null; busy: boolean; error: string | null }) {
+export function ProposalReview({
+  proposal,
+  busy,
+  error,
+  idle = "Choose what to change.",
+}: {
+  proposal: ChangeProposal | null;
+  busy: boolean;
+  error: string | null;
+  /** What is still needed before the change can be checked. */
+  idle?: string;
+}) {
   if (error) {
     return (
       <div className="xp-graph-review" data-state="error" role="alert">
@@ -86,7 +97,7 @@ export function ProposalReview({ proposal, busy, error }: { proposal: ChangeProp
       </div>
     );
   }
-  if (!proposal) return <p className="xp-graph-review ui-muted">{busy ? "Checking the change…" : "Choose what to change."}</p>;
+  if (!proposal) return <p className="xp-graph-review ui-muted">{busy ? "Checking the change…" : idle}</p>;
   return (
     <div className="xp-graph-review" data-state={proposal.valid ? "valid" : "invalid"} data-testid="graph-proposal-review" aria-live="polite">
       {proposal.valid ? (
@@ -288,7 +299,7 @@ export function RelateDialog({ vocabulary, from: initialFrom, to: initialTo, can
             Swap direction
           </Button>
         </div>
-        <ProposalReview proposal={proposal} busy={busy} error={error} />
+        <ProposalReview proposal={proposal} busy={busy} error={error} idle={ends.to ? "Choose a relationship." : "Choose the related item."} />
       </div>
     </Dialog>
   );
@@ -370,7 +381,7 @@ export function CreateEntityDialog({ vocabulary, kind: initialKind, memberOf, on
         <TextField label="Name" value={label} onChange={setLabel} autoFocus />
         {memberOf && <p className="ui-muted">It will also be added to {memberOf.label}.</p>}
         <p className="ui-muted">Creates a graph item only; no file is created or changed.</p>
-        <ProposalReview proposal={proposal} busy={busy} error={error} />
+        <ProposalReview proposal={proposal} busy={busy} error={error} idle={kind ? "Enter a name." : label.trim() ? "Choose a kind." : "Choose a kind and enter a name."} />
       </div>
     </Dialog>
   );
@@ -425,7 +436,8 @@ export function AddToCollectionDialog({
           onClose={onClose}
           onRefused={(message) => setError(message)}
           onApplied={() => {
-            notify({ tone: "success", title: `Added ${entity.label} to a collection` });
+            const collection = target === NEW ? name.trim() : collections.find((c) => c.id === target)?.label;
+            notify({ tone: "success", title: collection ? `Added ${entity.label} to ${collection}` : `Added ${entity.label} to a collection` });
             onClose();
           }}
         />
@@ -443,7 +455,7 @@ export function AddToCollectionDialog({
         />
         {target === NEW && <TextField label="New collection name" value={name} onChange={setName} />}
         <p className="ui-muted">Collections organize existing items without copying them.</p>
-        <ProposalReview proposal={proposal} busy={busy} error={error} />
+        <ProposalReview proposal={proposal} busy={busy} error={error} idle={target === NEW ? "Enter a name for the new collection." : undefined} />
       </div>
     </Dialog>
   );

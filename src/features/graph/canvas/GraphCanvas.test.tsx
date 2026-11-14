@@ -3,7 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 
 import { History } from "lucide-react";
 
-import { GraphCanvas, toFlowEdges, type CanvasSelection } from "./GraphCanvas";
+import { GraphCanvas, toFlowEdges, toFlowNode, type CanvasSelection } from "./GraphCanvas";
 import type { CanvasEdge, CanvasNode } from "./types";
 
 beforeAll(() => {
@@ -86,11 +86,11 @@ describe("GraphCanvas", () => {
     expect(toggle.getAttribute("aria-controls")).toBe(legend.id);
     const rows = [...legend.querySelectorAll("li")].map((li) => li.textContent);
     expect(rows).toEqual([
-      "Mathematicaldepends on, assumes, is a proof of",
-      "Reference",
-      "Evidence",
+      "Mathematical dependenciesdepends on, assumes, is a proof of",
+      "References",
+      "Evidence and provenance",
       "Formal association",
-      "Structurecontains, is declared in, imports",
+      "Structure and resource usecontains, is declared in, imports",
       "Acceptedsolid",
       "Suggesteddashed",
       "Observeddotted",
@@ -142,6 +142,16 @@ describe("GraphCanvas", () => {
     cleanup();
     renderCanvas({ onConnect: vi.fn() });
     expect(document.querySelector(".xp-graph-node__source.connectable")).not.toBeNull();
+  });
+});
+
+describe("toFlowNode", () => {
+  it("names an inactive item's lifecycle once, through its badge", () => {
+    const archived: CanvasNode = { id: "def", title: "Compactness", typeLabel: "Definition", category: "math", badges: [{ label: "Archived", tone: "neutral", dashed: true }], inactive: true, position: { x: 0, y: 0 } };
+    expect(toFlowNode(archived, undefined, false).ariaLabel).toBe("Definition, Compactness, Archived");
+    const removed = { ...archived, badges: [{ label: "Removed from source", tone: "warning" as const, dashed: true }] };
+    expect(toFlowNode(removed, undefined, false).ariaLabel).toBe("Definition, Compactness, Removed from source");
+    expect(toFlowNode({ ...archived, badges: [] }, undefined, false).ariaLabel).toBe("Definition, Compactness, inactive");
   });
 });
 
