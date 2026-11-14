@@ -26,6 +26,7 @@ import { opCommands, opEvents } from "./ipc";
 import {
   isCollision,
   isDelete,
+  RESTORE_COLLISION,
   planNotices,
   quoted,
   restoreTitle,
@@ -278,7 +279,7 @@ async function runUnguarded(request: OpRequest, options: RunOptions): Promise<Op
       result = await opCommands.apply({ plan: plan.plan, planHash: plan.planHash, choices });
     } catch (error) {
       const code = errorCodeOf(error);
-      if (code === "ops.planStale" || code === "ops.planUnknown" || code === "ops.planExpired") {
+      if (code === "ops.planStale" || code === "ops.planUnknown") {
         // Something changed between plan and apply: re-plan; never apply blindly.
         note = "The items or their consequences changed since this was planned.";
         continue;
@@ -382,7 +383,7 @@ export async function restore(
       } else {
         done.push({
           target: item.target,
-          outcome: { target: item.target, status: "skipped", code: "ops.occupied", message: "Left deleted: its original location is occupied.", created: null, recovery: { kind: "none" }, restore: item.token },
+          outcome: { target: item.target, status: "skipped", code: RESTORE_COLLISION, message: "Left deleted: its original location is occupied.", created: null, recovery: { kind: "none" }, restore: item.token },
         });
       }
     }
@@ -413,6 +414,11 @@ function reportRestore(results: { target: OpTarget; outcome: OpOutcome }[], labe
 }
 
 async function undoEntry(entry: HistoryEntry): Promise<void> {
+  // One operation at a time (the notification's Undo included): the entry stays for later.
+  if (inFlight > 0) {
+    notify({ tone: "info", title: "Another operation is still running", body: "Undo again when it has finished (Ctrl+Z in the explorer)." });
+    return;
+  }
   const index = undoStack.indexOf(entry);
   if (index >= 0) undoStack.splice(index, 1);
   persistHistory();
@@ -437,10 +443,13 @@ export async function undoLast(): Promise<boolean> {
 
 /** Redo: delete again (recoverably) what the last Undo restored. */
 export async function redoLast(): Promise<boolean> {
-  const entry = redoStack.pop();
+  const entry = redoStack.at(-1);
   if (!entry || inFlight > 0) return false;
+  redoStack.pop();
   const kind: OpKind = { kind: "delete", permanent: false };
   const outcome = await runOperation({ kind, targets: entry.targets, actor: { kind: "user" } }, { labels: entry.labels });
+  // Cancelled at its decision, or nothing applied: Redo stays available.
+  if (outcome === null) redoStack.push(entry);
   return outcome !== null;
 }
 

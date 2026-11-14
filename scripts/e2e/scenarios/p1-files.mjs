@@ -33,10 +33,15 @@ import {
   selectFiles,
   setOsClipboardFiles,
   setOsClipboardText,
-  waitForNotification, settle } from "../p1-helpers.mjs";
+  waitForNotification, settle, platformSkip } from "../p1-helpers.mjs";
 import { editorLocator, focusEditor, invoke, makeProject, openInEditor, openWorkspace, waitFor } from "../workspace-helpers.mjs";
 
 export default async function p1Files({ launchApp, artifactsDir, assert, fixture }) {
+  const skip = platformSkip();
+  if (skip) {
+    console.log(`SKIPPED: p1-files ${skip}`);
+    return;
+  }
   const project = await makeProject(fixture);
   const { root, base } = project;
   await mkdir(join(root, "scratch", "sub"), { recursive: true });

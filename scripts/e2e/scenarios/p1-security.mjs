@@ -11,13 +11,18 @@ import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { consoleErrors } from "../p1-helpers.mjs";
+import { consoleErrors, platformSkip } from "../p1-helpers.mjs";
 import { invoke, invokeError, makeProject, openWorkspace, waitFor } from "../workspace-helpers.mjs";
 
 const user = { kind: "user" };
 const del = (targets, permanent = false) => ({ kind: { kind: "delete", permanent }, targets, actor: user });
 
 export default async function p1Security({ launchApp, artifactsDir, assert, fixture }) {
+  const skip = platformSkip();
+  if (skip) {
+    console.log(`SKIPPED: p1-security ${skip}`);
+    return;
+  }
   const project = await makeProject(fixture);
   const { root, outside } = project;
   await writeFile(join(root, "victim.txt"), "keep me\n");

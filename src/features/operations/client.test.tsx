@@ -106,13 +106,16 @@ describe("routine operations", () => {
     const request = del(["a.txt", "locked.txt"]);
     ipc.plan.mockResolvedValue(plan(request));
     ipc.apply.mockResolvedValue(
-      result([outcome("a.txt"), outcome("locked.txt", { status: "failed", code: "ops.io", message: "The file is in use by another program." })]),
+      result([outcome("a.txt"), outcome("locked.txt", { status: "failed", code: "ops.inUse", message: "locked.txt is open in another program; close it there and try again." })]),
     );
     await runOperation(request);
     const note = lastNotification();
     expect(note.tone).toBe("warning");
     expect(note.title).toBe("Moved 1 of 2 items to the Recycle Bin");
-    expect(note.body).toContain("“locked.txt”: The file is in use by another program.");
+    expect(note.body).toContain("“locked.txt”: locked.txt is open in another program; close it there and try again.");
+    // The backend already says what to do; no second hint, and no Delete Permanently for a file in use.
+    expect(note.body).not.toContain("Close the program that is using it");
+    expect(note.actions).toBeUndefined();
     expect(note.timeoutMs).toBeNull();
   });
 
@@ -317,7 +320,7 @@ describe("undo, redo and restore", () => {
     await runOperation(request);
 
     ipc.restore
-      .mockResolvedValueOnce({ ...outcome("a.txt"), status: "skipped", code: "ops.occupied", message: "a.txt exists." })
+      .mockResolvedValueOnce({ ...outcome("a.txt"), status: "skipped", code: "ops.restoreCollision", message: "a.txt exists." })
       .mockResolvedValueOnce({ ...outcome("a.txt"), created: { kind: "path", path: "a (2).txt" } });
     const undo = undoLast();
     const dialog = await screen.findByRole("alertdialog");
@@ -364,12 +367,71 @@ describe("undo, redo and restore", () => {
     expect(opHistory.canUndo()).toBe(false);
   });
 
+  it("Redo while another operation is in flight keeps its entry (nothing is lost)", async () => {
+    const request = del(["a.txt"]);
+    ipc.plan.mockResolvedValue(plan(request));
+    ipc.apply.mockResolvedValue(result([outcome("a.txt", { restore: "tok-a" })]));
+    await runOperation(request);
+    ipc.restore.mockResolvedValueOnce({ ...outcome("a.txt"), code: "ops.restored" });
+    await act(async () => {
+      await undoLast();
+    });
+    expect(opHistory.canRedo()).toBe(true);
+    // Another operation is planning (held open).
+    let release!: (p: OpPlan) => void;
+    ipc.plan.mockReturnValueOnce(new Promise<OpPlan>((r) => (release = r)));
+    const busy = runOperation(del(["b.txt"]));
+    expect(await redoLast()).toBe(false);
+    expect(opHistory.canRedo()).toBe(true);
+    ipc.apply.mockResolvedValueOnce(result([outcome("b.txt")]));
+    release(plan(del(["b.txt"])));
+    await busy;
+    expect(opHistory.canRedo()).toBe(true);
+  });
+
+  it("Redo cancelled at its decision keeps the entry", async () => {
+    const request = del(["a.txt"]);
+    ipc.plan.mockResolvedValue(plan(request));
+    ipc.apply.mockResolvedValue(result([outcome("a.txt", { restore: "tok-a" })]));
+    await runOperation(request);
+    ipc.restore.mockResolvedValueOnce({ ...outcome("a.txt"), code: "ops.restored" });
+    await act(async () => {
+      await undoLast();
+    });
+    ipc.plan.mockResolvedValueOnce(
+      plan(request, { needsDecision: true, impacts: [{ kind: "manuscriptDependency", target: request.targets[0]!, consumers: [], message: "paper.typ uses a.txt." }] }),
+    );
+    const redo = redoLast();
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(await redo).toBe(false);
+    expect(opHistory.canRedo()).toBe(true);
+  });
+
+  it("the notification's Undo waits its turn: nothing is restored while another operation is in flight", async () => {
+    const request = del(["a.txt"]);
+    ipc.plan.mockResolvedValue(plan(request));
+    ipc.apply.mockResolvedValue(result([outcome("a.txt", { restore: "tok-a" })]));
+    await runOperation(request);
+    const undo = lastNotification().actions.find((a: { label: string }) => a.label === "Undo");
+    let release!: (p: OpPlan) => void;
+    ipc.plan.mockReturnValueOnce(new Promise<OpPlan>((r) => (release = r)));
+    const busy = runOperation(del(["b.txt"]));
+    await undo.run();
+    expect(ipc.restore).not.toHaveBeenCalled();
+    expect(opHistory.canUndo()).toBe(true);
+    expect(lastNotification().title).toBe("Another operation is still running");
+    ipc.apply.mockResolvedValueOnce(result([outcome("b.txt")]));
+    release(plan(del(["b.txt"])));
+    await busy;
+  });
+
   it("leaving it deleted restores nothing", async () => {
     const request = del(["a.txt"]);
     ipc.plan.mockResolvedValue(plan(request));
     ipc.apply.mockResolvedValue(result([outcome("a.txt", { restore: "tok-a" })]));
     await runOperation(request);
-    ipc.restore.mockResolvedValueOnce({ ...outcome("a.txt"), status: "skipped", code: "ops.occupied", message: "a.txt exists." });
+    ipc.restore.mockResolvedValueOnce({ ...outcome("a.txt"), status: "skipped", code: "ops.restoreCollision", message: "a.txt exists." });
     const undo = undoLast();
     const dialog = await screen.findByRole("alertdialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Leave Deleted" }));
@@ -378,5 +440,20 @@ describe("undo, redo and restore", () => {
     });
     expect(ipc.restore).toHaveBeenCalledTimes(1);
     expect(lastNotification().title).toBe("Could not restore “a.txt”");
+  });
+
+  it("only the backend's collision code asks about a new name; other refusals are reported as they are", async () => {
+    const request = del(["a.txt"]);
+    ipc.plan.mockResolvedValue(plan(request));
+    ipc.apply.mockResolvedValue(result([outcome("a.txt", { restore: "trash-1" })]));
+    await runOperation(request);
+    ipc.restore.mockResolvedValueOnce({ ...outcome("a.txt"), status: "failed", code: "ops.occupied", message: "Something unexpected." });
+    await act(async () => {
+      await undoLast();
+    });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(ipc.restore).toHaveBeenCalledTimes(1);
+    expect(lastNotification().title).toBe("Could not restore “a.txt”");
+    expect(lastNotification().body).toContain("Something unexpected.");
   });
 });

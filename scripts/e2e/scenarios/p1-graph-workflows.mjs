@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runCommand } from "../palette.mjs";
-import { consoleErrors, dismissNotifications, expectNoDialog, publishShots, recycleBinItemsFrom, waitForNotification, settle } from "../p1-helpers.mjs";
+import { consoleErrors, dismissNotifications, expectNoDialog, publishShots, recycleBinItemsFrom, waitForNotification, settle, platformSkip } from "../p1-helpers.mjs";
 import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const create = (tempId, kind, label) => ({ op: "createEntity", tempId, kind, roles: [], label, key: null, attributes: {}, binding: null });
@@ -58,6 +58,11 @@ function workflow(title, steps, extra = {}) {
 const pythonStep = (id, label) => ({ id, label, operation: { id: "research.pythonBatch", version: 1 }, parameters: { timeoutSeconds: { kind: "integer", value: 60 } }, payload: null });
 
 export default async function p1GraphWorkflows({ launchApp, artifactsDir, assert, fixture }) {
+  const skip = platformSkip();
+  if (skip) {
+    console.log(`SKIPPED: p1-graph-workflows ${skip}`);
+    return;
+  }
   const base = await mkdtemp(join(tmpdir(), "xp-p1-graph-"));
   const root = join(base, "project");
   const dataDir = join(base, "data");
@@ -225,7 +230,7 @@ export default async function p1GraphWorkflows({ launchApp, artifactsDir, assert
     await expectNoDialog(page, assert, 600, "an unused workflow is deleted at once");
     await waitFor(async () => !(await invoke(page, "workflow_list")).some((w) => w.id === dup.id), { timeout: 15_000, message: "workflow removed from active use" });
     await shot(page, "p1-workflow-deleted-light");
-    await runCommand(page, "Storage and History", /Preferences: Storage and History/);
+    await runCommand(page, "Storage & History", /Preferences: Storage & History/);
     const storage = page.getByTestId("settings-storage");
     await storage.waitFor({ timeout: 15_000 });
     const recoverable = page.getByTestId("storage-category-recoverableDeletions");

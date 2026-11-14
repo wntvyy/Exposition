@@ -35,8 +35,7 @@ import {
   recycleBinItemsFrom,
   selectFiles,
   settle,
-  waitForNotification,
-} from "../p1-helpers.mjs";
+  waitForNotification, platformSkip } from "../p1-helpers.mjs";
 import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const IMAGE = "python:3.13-slim";
@@ -106,6 +105,11 @@ async function confirm(page) {
 }
 
 export default async function p1Decisions({ launchApp, artifactsDir, assert, fixture }) {
+  const skip = platformSkip();
+  if (skip) {
+    console.log(`SKIPPED: p1-decisions ${skip}`);
+    return;
+  }
   const docker = dockerAvailable();
   if (!docker && process.env.EXPOSITION_REQUIRE_DOCKER === "1") throw new Error(`Docker with the local image ${IMAGE} is required`);
   const base = await mkdtemp(join(tmpdir(), "xp-p1-decisions-"));
@@ -257,7 +261,7 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
     };
     const parent = await call("workflow_save", { request: { id: null, expectedRevision: null, definition: parentDef } });
     const before = await call("workflow_get", { id: parent.id, revision: null });
-    await runCommand(page, "Storage and History", /Preferences: Storage and History/);
+    await runCommand(page, "Storage & History", /Preferences: Storage & History/);
     const revisions = page.getByTestId("storage-category-workflowRevisions");
     await revisions.waitFor({ timeout: 15_000 });
     const pinnedRow = revisions.locator('[data-testid="storage-item"][data-referenced="true"]').filter({ hasText: "Child count" }).first();

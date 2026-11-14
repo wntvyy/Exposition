@@ -45,7 +45,7 @@ describe("actions", () => {
     expect(actions.delete?.reason).toMatch(/change the source/);
     expect(actions.duplicate?.enabled).toBe(false);
     expect(actions.duplicate?.reason).toMatch(/Copy Text or Copy Reference/);
-    expect(extras.map((e) => e.label)).toEqual(["Hide from View", "Copy Reference", "Copy Text"]);
+    expect(extras.map((e) => e.label)).toEqual(["Hide from view", "Copy Reference", "Copy Text"]);
   });
 
   it("a manual item: Delete Entity; relationships: Delete Relationship; observed ones are blocked", () => {

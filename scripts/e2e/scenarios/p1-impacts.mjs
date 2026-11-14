@@ -32,7 +32,7 @@ import {
   recycleBinItemsFrom,
   selectFiles,
   setTheme,
-  waitForNotification, settle } from "../p1-helpers.mjs";
+  waitForNotification, settle, platformSkip } from "../p1-helpers.mjs";
 import { focusEditor, invoke, monacoState, openInEditor, waitFor } from "../workspace-helpers.mjs";
 
 const OBS = "x,y\n0,1\n1,3\n";
@@ -75,6 +75,11 @@ async function openProject(page, root) {
 }
 
 export default async function p1Impacts({ launchApp, artifactsDir, assert, fixture }) {
+  const skip = platformSkip();
+  if (skip) {
+    console.log(`SKIPPED: p1-impacts ${skip}`);
+    return;
+  }
   const base = await mkdtemp(join(tmpdir(), "xp-p1-impacts-"));
   const root = join(base, "project");
   const dataDir = join(base, "data");

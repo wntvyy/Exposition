@@ -16,10 +16,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runCommand } from "../palette.mjs";
-import { consoleErrors, dismissNotifications, expectNoDialog, publishShots, recycleBinItemsFrom, settle, waitForNotification } from "../p1-helpers.mjs";
+import { consoleErrors, dismissNotifications, expectNoDialog, publishShots, recycleBinItemsFrom, settle, waitForNotification, platformSkip } from "../p1-helpers.mjs";
 import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 export default async function p1Research({ launchApp, artifactsDir, assert }) {
+  const skip = platformSkip();
+  if (skip) {
+    console.log(`SKIPPED: p1-research ${skip}`);
+    return;
+  }
   const base = await mkdtemp(join(tmpdir(), "xp-p1-research-"));
   const root = join(base, "project");
   const dataDir = join(base, "data");

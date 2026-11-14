@@ -43,15 +43,20 @@ function item(id: string, action: SurfaceAction, fallback: string, icon: IconCom
   );
 }
 
-/** Menu items for a surface's actions (sections: clipboard, extras, deletion). */
-export function opMenuItems(actions: SurfaceActions, extras: ExtraItem[] = []): ReactNode {
+/**
+ * Menu items for a surface's actions (sections: clipboard, extras, deletion).
+ * `keys: false` omits key hints where the keys do not act (e.g. the graph
+ * inspector, which is outside the canvas/table selection).
+ */
+export function opMenuItems(actions: SurfaceActions, extras: ExtraItem[] = [], options: { keys?: boolean } = {}): ReactNode {
+  const keys = options.keys !== false;
   const clipboard = ORDER.slice(0, 3).filter((o) => actions[o.id]);
   const deletion = ORDER.slice(3).filter((o) => actions[o.id]);
   const sections: ReactNode[] = [];
   if (clipboard.length) {
     sections.push(
       <MenuSection key="clipboard">
-        {clipboard.map((o) => item(o.id, actions[o.id]!, o.label, o.icon, false, keybindingFor(o.id)))}
+        {clipboard.map((o) => item(o.id, actions[o.id]!, o.label, o.icon, false, keys ? keybindingFor(o.id) : undefined))}
       </MenuSection>,
     );
   }
@@ -71,7 +76,7 @@ export function opMenuItems(actions: SurfaceActions, extras: ExtraItem[] = []): 
     if (sections.length) sections.push(<MenuSeparator key="sep-delete" />);
     sections.push(
       <MenuSection key="delete">
-        {deletion.map((o) => item(o.id, actions[o.id]!, o.label, o.icon, o.danger, keybindingFor(o.id)))}
+        {deletion.map((o) => item(o.id, actions[o.id]!, o.label, o.icon, o.danger, keys ? keybindingFor(o.id) : undefined))}
       </MenuSection>,
     );
   }
