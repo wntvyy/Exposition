@@ -59,7 +59,7 @@ import {
   waitForMirror,
 } from "../workspace-helpers.mjs";
 import { runCommand } from "../palette.mjs";
-import { parsePowerShellJson } from "../processes.mjs";
+import { PROCESS_LIST_COMMAND, descendantsOf, parsePowerShellJson } from "../processes.mjs";
 
 const PAPER = "main.typ";
 const FIT = "analysis/fit.py";
@@ -77,7 +77,7 @@ const TOOL_PROCESS = /^(lean|lake|pdflatex|lualatex|xelatex|latexmk|perl|docker|
 
 // ---------------------------------------------------------------- processes
 
-/** Snapshot of the OS process table: pid -> { parent, name, commandLine }. */
+/** Snapshot of the OS process table: pid -> { parent, name, commandLine, created }. */
 function processTable() {
   const out = execFileSync(
     "powershell.exe",
@@ -85,29 +85,21 @@ function processTable() {
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress",
+      PROCESS_LIST_COMMAND,
     ],
     { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 },
   );
   return new Map(
-    parsePowerShellJson(out).map((p) => [p.ProcessId, { parent: p.ParentProcessId, name: p.Name, commandLine: p.CommandLine ?? "" }]),
+    parsePowerShellJson(out).map((p) => [
+      p.ProcessId,
+      { parent: p.ParentProcessId, name: p.Name, commandLine: p.CommandLine ?? "", created: Number(p.Created) || 0 },
+    ]),
   );
 }
 
-/** All descendants of `rootPid` (one table snapshot). */
+/** All descendants of `rootPid` (one table snapshot; reused parent ids are not followed). */
 function descendants(rootPid, table = processTable()) {
-  const out = [];
-  const queue = [rootPid];
-  while (queue.length) {
-    const parent = queue.shift();
-    for (const [pid, info] of table) {
-      if (info.parent === parent && !out.some((p) => p.pid === pid)) {
-        out.push({ pid, ...info });
-        queue.push(pid);
-      }
-    }
-  }
-  return out;
+  return descendantsOf(table, rootPid);
 }
 
 /** Processes whose command line contains `marker`. */
@@ -590,6 +582,9 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
         interval: 250,
         message: "interpreter discovery finished",
       });
+      // Process snapshot first, then the job list: a discovery probe that started
+      // in between is in the list, so its process can be told apart below.
+      const table = processTable();
       const jobs = await invoke(page, "job_list");
       // Only discovery of system interpreters (outside the project, in the app's
       // probe folder) may run; nothing from or in the project.
@@ -602,7 +597,17 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       note("systemDiscoveryJobs", started.map((j) => `${j.info.label} (cwd ${j.workingDirectory})`));
       assert.deepEqual(offending.map((j) => j.info.label), [], "no build, kernel, Lean, or project job started");
       note("refusedJobs", jobs.filter((j) => j.refusal).map((j) => `${j.info.label}: ${j.refusal.code}`));
-      const tools = descendants(app.child.pid).filter((p) => TOOL_PROCESS.test(p.name));
+      // A tool process inside a system-interpreter discovery job's own process
+      // tree (e.g. `julia --version` in the probe folder) is that probe.
+      const discoveryPids = new Set(jobs.filter((j) => isDiscovery(j) && j.pid !== null).map((j) => j.pid));
+      const inDiscovery = (p) => {
+        for (let pid = p.pid, hops = 0; pid && hops < 32; pid = table.get(pid)?.parent, hops++) {
+          if (discoveryPids.has(pid)) return true;
+        }
+        return false;
+      };
+      const tools = descendants(app.child.pid, table).filter((p) => TOOL_PROCESS.test(p.name) && !inDiscovery(p));
+      note("discoveryProbeProcesses", descendants(app.child.pid, table).filter(inDiscovery).map((p) => p.name));
       assert.deepEqual(tools, [], "no Lean/TeX/Docker process runs");
       assert.deepEqual(processesMentioning(join(dataDir, "research")), [], "no research helper or kernel runs");
       assert.deepEqual(processesMentioning(root).filter((p) => p.pid !== app.child.pid), [], "no process runs on the project");
