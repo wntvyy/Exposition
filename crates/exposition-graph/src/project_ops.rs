@@ -252,6 +252,22 @@ pub struct WorkflowDeleteCheck {
     pub recoverable: bool,
 }
 
+/// One stored workflow revision (Storage & History).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevisionSize {
+    pub workflow: WorkflowId,
+    pub title: String,
+    pub revision: u64,
+    pub bytes: u64,
+    pub saved_at_ms: u64,
+    /// The current revision of a workflow in active use (not history).
+    pub current: bool,
+    /// The workflow was deleted; this revision is kept for recovery or pins.
+    pub retired: bool,
+    /// Titles of the workflows whose composite steps pin it.
+    pub pinned_by: Vec<String>,
+}
+
 /// What a workflow deletion did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkflowDeletion {
@@ -1071,6 +1087,76 @@ impl GraphService {
             self.apply_service_batch(&service_origin(), &batch).map_err(from_graph)?;
         }
         Ok(n)
+    }
+
+    // ------------------------------------------------- storage & history
+
+    /// Every stored workflow revision with its size, whether it is the
+    /// current revision of a workflow in active use, and who pins it.
+    pub fn workflow_revision_sizes(&self) -> Result<Vec<RevisionSize>, OpError> {
+        self.with_store(|store| {
+            let conn = store.connection();
+            let rows: Vec<(String, i64, i64, i64)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, revision, length(body), saved_at FROM workflows ORDER BY id, revision DESC LIMIT 20000",
+                )?;
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<_, _>>()?
+            };
+            let mut out = Vec::new();
+            let mut latest: BTreeMap<String, i64> = BTreeMap::new();
+            for (id, rev, _, _) in &rows {
+                let e = latest.entry(id.clone()).or_insert(*rev);
+                *e = (*e).max(*rev);
+            }
+            let mut pins: BTreeMap<String, Vec<WorkflowPin>> = BTreeMap::new();
+            for (id, rev, bytes, saved) in rows {
+                let Ok(wf) = WorkflowId::parse(&id) else { continue };
+                let retired = is_retired(conn, &wf)?;
+                let title = stored_revision(conn, &wf, Some(rev.max(0) as u64))?
+                    .map(|(_, _, _, d)| d.title)
+                    .unwrap_or_default();
+                if !pins.contains_key(&id) {
+                    pins.insert(id.clone(), pins_of(conn, &wf)?);
+                }
+                let pinned_by: Vec<String> =
+                    pins[&id].iter().filter(|p| p.revision == rev.max(0) as u64).map(|p| p.by_title.clone()).collect();
+                out.push(RevisionSize {
+                    workflow: wf,
+                    title,
+                    revision: rev.max(0) as u64,
+                    bytes: bytes.max(0) as u64,
+                    saved_at_ms: saved.max(0) as u64,
+                    current: !retired && latest.get(&id) == Some(&rev),
+                    retired,
+                    pinned_by,
+                });
+            }
+            Ok(out)
+        })
+        .map_err(from_graph)
+    }
+
+    /// Retained evidence recorded from one service operation (e.g. a
+    /// research run), with its live subject when it has one.
+    pub fn evidence_for_operation(&self, kind: &str, id: &str) -> Result<Vec<(EvidenceId, Option<Entity>)>, OpError> {
+        self.with_store(|store| {
+            let mut stmt =
+                store.connection().prepare("SELECT body FROM evidence WHERE instr(body, ?1) > 0 LIMIT 2000")?;
+            let bodies: Vec<String> = stmt.query_map([id], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            let mut out = Vec::new();
+            for body in bodies {
+                let e: crate::model::Evidence = serde_json::from_str(&body)?;
+                if e.operation.kind == kind && e.operation.id == id {
+                    let subject = match &e.subject {
+                        Some(s) => live(store, s)?,
+                        None => None,
+                    };
+                    out.push((e.id, subject));
+                }
+            }
+            Ok(out)
+        })
+        .map_err(from_graph)
     }
 
     // ------------------------------------------------------------ tombstones

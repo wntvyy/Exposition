@@ -812,3 +812,16 @@ fn saved_views_are_deleted_restored_and_duplicated_as_presentation_only() {
     assert_eq!(p.svc.delete_view_recoverable(&copy.id, true).unwrap(), None);
     assert!(p.svc.view(&copy.id).is_err());
 }
+
+#[test]
+fn evidence_recorded_from_a_run_is_found_by_its_operation() {
+    let p = project(&[("results/fig.svg", "<svg/>"), ("other.svg", "<svg/>")]);
+    let fig = p.resource("results/fig.svg");
+    let evidence = p.evidence(EvidenceKind::Computational, &fig.id, &[], &["results/fig.svg"]);
+    let found = p.svc.evidence_for_operation("researchRun", "run-0123456789abcdef").unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].0, evidence);
+    assert_eq!(found[0].1.as_ref().map(|e| e.id.clone()), Some(fig.id.clone()));
+    assert!(p.svc.evidence_for_operation("researchRun", "run-ffffffffffffffff").unwrap().is_empty());
+    assert!(p.svc.evidence_for_operation("leanAudit", "run-0123456789abcdef").unwrap().is_empty());
+}

@@ -9,7 +9,7 @@
 //! [`RunStore::reconcile`] runs when the service starts: whatever was running
 //! is interrupted (never resumed or replayed).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use exposition_graph::{WorkflowId, WorkflowRunId};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -41,7 +41,21 @@ pub fn state_name(state: WorkflowRunState) -> &'static str {
 
 pub struct RunStore {
     conn: Connection,
+    /// The database file (`None`: in memory).
+    path: Option<PathBuf>,
 }
+
+/// A run removed from the history with app-managed recovery (P1 project
+/// operations): hidden from listings and lookups until restored or purged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeletedRun {
+    pub summary: WorkflowRunSummary,
+    pub deleted_at_ms: u64,
+    pub bytes: u64,
+}
+
+/// Store schema (`PRAGMA user_version`): 1 adds `runs.deleted_at`.
+const STORE_VERSION: i64 = 1;
 
 impl RunStore {
     /// Open (or create) the store; `None` keeps it in memory.
@@ -72,7 +86,8 @@ impl RunStore {
              CREATE INDEX IF NOT EXISTS runs_by_project ON runs(project, started_at DESC);",
         )
         .map_err(store_error)?;
-        Ok(Self { conn })
+        migrate(&conn)?;
+        Ok(Self { conn, path: path.map(Path::to_path_buf) })
     }
 
     /// Insert or replace a run record (one transaction).
@@ -102,9 +117,11 @@ impl RunStore {
     pub fn get(&self, id: &WorkflowRunId) -> Result<Option<(String, WorkflowRun)>, WorkflowRunError> {
         let row: Option<(String, String, String, String)> = self
             .conn
-            .query_row("SELECT id, project, state, body FROM runs WHERE id = ?1", [id.as_str()], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
+            .query_row(
+                "SELECT id, project, state, body FROM runs WHERE id = ?1 AND deleted_at IS NULL",
+                [id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
             .optional()
             .map_err(store_error)?;
         match row {
@@ -126,7 +143,7 @@ impl RunStore {
             .conn
             .prepare_cached(
                 "SELECT CAST(id AS TEXT), CAST(state AS TEXT), CAST(body AS TEXT) FROM runs
-                 WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2)
+                 WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2) AND deleted_at IS NULL
                  ORDER BY started_at DESC, id LIMIT ?3",
             )
             .map_err(store_error)?;
@@ -185,6 +202,121 @@ impl RunStore {
         }
         Ok(count)
     }
+}
+
+impl RunStore {
+    /// A run and its project, deleted or not (restore and purge).
+    pub fn get_any(&self, id: &WorkflowRunId) -> Result<Option<(String, WorkflowRun, Option<u64>)>, WorkflowRunError> {
+        let row: Option<(String, String, String, String, Option<i64>)> = self
+            .conn
+            .query_row("SELECT id, project, state, body, deleted_at FROM runs WHERE id = ?1", [id.as_str()], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .optional()
+            .map_err(store_error)?;
+        match row {
+            None => Ok(None),
+            Some((rid, project, state, body, deleted)) => decode(&rid, &state, &body)
+                .map(|run| Some((project, run, deleted.map(|d| d.max(0) as u64))))
+                .map_err(|m| WorkflowRunError::new("workflow.untrusted", m)),
+        }
+    }
+
+    /// Hide a run from the history (`Some(at)`) or bring it back (`None`).
+    /// Returns whether a row changed.
+    pub fn set_deleted(&self, id: &WorkflowRunId, at: Option<u64>) -> Result<bool, WorkflowRunError> {
+        let n = self
+            .conn
+            .execute("UPDATE runs SET deleted_at = ?2 WHERE id = ?1", params![id.as_str(), at.map(|a| a as i64)])
+            .map_err(store_error)?;
+        Ok(n > 0)
+    }
+
+    /// Remove a run record for good.
+    pub fn remove(&self, id: &WorkflowRunId) -> Result<bool, WorkflowRunError> {
+        Ok(self.conn.execute("DELETE FROM runs WHERE id = ?1", [id.as_str()]).map_err(store_error)? > 0)
+    }
+
+    /// Deleted (recoverable) runs of a project, newest deletion first.
+    pub fn deleted(&self, project: &str) -> Result<Vec<DeletedRun>, WorkflowRunError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT CAST(id AS TEXT), CAST(state AS TEXT), CAST(body AS TEXT), deleted_at, length(body) FROM runs
+                 WHERE project = ?1 AND deleted_at IS NOT NULL ORDER BY deleted_at DESC, id LIMIT 2000",
+            )
+            .map_err(store_error)?;
+        let rows = stmt
+            .query_map([project], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                ))
+            })
+            .map_err(store_error)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let Ok((Some(id), Some(state), Some(body), Some(at), bytes)) = row else { continue };
+            if let Ok(run) = decode(&id, &state, &body) {
+                out.push(DeletedRun {
+                    summary: summary(&run),
+                    deleted_at_ms: at.max(0) as u64,
+                    bytes: bytes.unwrap_or(0).max(0) as u64,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Stored size of each (not deleted) run record of a project.
+    pub fn record_bytes(&self, project: &str) -> Result<Vec<(String, u64)>, WorkflowRunError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT CAST(id AS TEXT), length(body) FROM runs WHERE project = ?1 AND deleted_at IS NULL LIMIT 20000",
+            )
+            .map_err(store_error)?;
+        let rows = stmt
+            .query_map([project], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)))
+            .map_err(store_error)?;
+        Ok(rows.filter_map(Result::ok).filter_map(|(id, n)| Some((id?, n.unwrap_or(0).max(0) as u64))).collect())
+    }
+
+    /// Bytes the history occupies on disk now (database and write-ahead log).
+    pub fn file_bytes(&self) -> Option<u64> {
+        let path = self.path.as_ref()?;
+        let size = |p: PathBuf| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        Some(size(path.clone()) + size(PathBuf::from(format!("{}-wal", path.display()))))
+    }
+
+    /// Give the space of removed records back to the file system (VACUUM,
+    /// then truncate the write-ahead log). Returns the on-disk size before
+    /// and after, so callers report what was actually reclaimed.
+    pub fn compact(&self) -> Result<(Option<u64>, Option<u64>), WorkflowRunError> {
+        let before = self.file_bytes();
+        self.conn.execute_batch("VACUUM;").map_err(store_error)?;
+        let _ = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        Ok((before, self.file_bytes()))
+    }
+}
+
+fn migrate(conn: &Connection) -> Result<(), WorkflowRunError> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).map_err(store_error)?;
+    if version >= STORE_VERSION {
+        return Ok(());
+    }
+    let has: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('runs') WHERE name = 'deleted_at'")
+        .and_then(|mut s| s.exists([]))
+        .map_err(store_error)?;
+    if !has {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN deleted_at INTEGER;").map_err(store_error)?;
+    }
+    conn.pragma_update(None, "user_version", STORE_VERSION).map_err(store_error)?;
+    Ok(())
 }
 
 /// Mark a run that was active when the application stopped.

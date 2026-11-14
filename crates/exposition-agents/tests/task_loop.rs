@@ -873,3 +873,38 @@ async fn review_actions_work_as_soon_as_the_task_reports_finished() {
     assert_eq!(text_of(&h, "main.typ"), MAIN);
     tokio::time::timeout(Duration::from_secs(20), h.service.join(&task.id)).await.expect("worker exits");
 }
+
+/// P1 project operations: an active task's record is never deleted under it;
+/// it is stopped first (through its own cancellation), then deleted
+/// recoverably, restored without restarting, and purged for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_active_task_is_stopped_before_its_record_is_deleted() {
+    let mut h = harness();
+    h.service.load_script(read_edit_done("sat on", "lay on")).unwrap();
+    let task = h.service.create_task(request(&h, PermissionProfile::ReviewEdits)).unwrap();
+    wait_for(&mut h.events, |e| matches!(e, AgentEvent::ApprovalRequested { .. })).await;
+    assert!(h.service.task_record(&task.id).unwrap().active);
+    let refused = h.service.delete_task(&task.id, false).unwrap_err();
+    assert_eq!(refused.code, "agents.taskActive");
+    assert!(h.service.list_tasks().unwrap().iter().any(|t| t.id == task.id), "nothing changed");
+
+    let service = h.service.clone();
+    let id = task.id.clone();
+    let stopped =
+        tokio::task::spawn_blocking(move || service.stop_and_wait(&id, Duration::from_secs(10))).await.unwrap();
+    assert!(stopped);
+    h.service.delete_task(&task.id, false).unwrap();
+    assert!(h.service.list_tasks().unwrap().iter().all(|t| t.id != task.id));
+    assert_eq!(h.service.task(&task.id).unwrap_err().code, "agents.notFound");
+    let deleted = h.service.deleted_task_records().unwrap();
+    assert_eq!(deleted.len(), 1);
+    assert!(deleted[0].bytes > 0 && deleted[0].deleted_at_ms.is_some());
+
+    let restored = h.service.restore_task(&task.id).unwrap();
+    assert_eq!(restored.status, TaskStatus::Canceled, "restored as it was; nothing restarts");
+    assert!(!h.service.is_running(&task.id));
+
+    h.service.delete_task(&task.id, true).unwrap();
+    assert_eq!(h.service.task_record(&task.id).unwrap_err().code, "agents.notFound");
+    assert!(h.service.deleted_task_records().unwrap().is_empty());
+}
