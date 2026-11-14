@@ -43,10 +43,20 @@ export default async function p1Security({ launchApp, artifactsDir, assert, fixt
     evidence.push(`trust: ${JSON.stringify(trust?.kind ?? trust)}`);
 
     // Traversal / absolute / junction escape as delete targets.
-    for (const path of ["../outside/secret.txt", "C:/Windows/win.ini", "escape/secret.txt", "escape"]) {
+    for (const path of ["../outside/secret.txt", "C:/Windows/win.ini", "escape/secret.txt"]) {
       assert.ok(refusedOrRejected(await planOrError(del([{ kind: "path", path }])), `delete ${path}`), `delete ${path} refused`);
     }
     assert.equal(await readFile(join(outside, "secret.txt"), "utf8"), "outside the workspace\n", "outside file untouched");
+    // The junction itself may be removed as a link; its target must never be touched.
+    const link = await planOrError(del([{ kind: "path", path: "escape" }]));
+    if (link.plan && link.plan.effects.length) {
+      evidence.push(`delete the junction itself: ${link.plan.effects[0].description}`);
+      const applied = await invoke(page, "project_op_apply", { apply: { plan: link.plan.plan, planHash: link.plan.planHash, choices: {} } });
+      evidence.push(`junction delete outcome: ${applied.outcomes[0]?.status} ${applied.outcomes[0]?.code ?? ""}`);
+      assert.equal(await readFile(join(outside, "secret.txt"), "utf8"), "outside the workspace\n", "the junction's target is untouched after deleting the link");
+    } else {
+      evidence.push(`delete the junction itself: refused ${JSON.stringify(link.error ?? link.plan?.refusals)}`);
+    }
 
     // External paths are paste sources only.
     for (const kind of [del([{ kind: "external", path: join(outside, "secret.txt") }]), { kind: { kind: "duplicate" }, targets: [{ kind: "external", path: join(outside, "secret.txt") }], actor: user }]) {
