@@ -42,6 +42,7 @@ import { takeRequest, useGraphNavigation } from "./navigation";
 import { coverageSentence } from "./status";
 import { canWrite, useGraph } from "./store";
 import { useGraphLoad } from "./useGraphData";
+import { useGraphOps } from "./useGraphOps";
 import { arrange, ViewCanvas } from "./ViewCanvas";
 import { AssociateDeclarationAction } from "./AssociateDeclaration";
 import type { ViewStore } from "./viewStore";
@@ -404,6 +405,21 @@ export function Mathematics({ store }: { store: ViewStore }) {
     setFitRequest((f) => ({ nonce: f.nonce + 1, nodes: [pending.entity] }));
   }, [request, projection]);
 
+  // Copy / Paste / Duplicate / Delete for the focused selection (P1), with a context menu.
+  const ops = useGraphOps({
+    id: "graph-mathematics",
+    selection,
+    entities,
+    relations,
+    vocabulary,
+    canWrite: writable,
+    onSelect: select,
+    onHide: (ids) => {
+      store.hide(ids);
+      setSelection({ nodes: [], edge: null });
+    },
+  });
+
   if (!view || (!data && overview.loading)) return <LoadingState title="Loading mathematics…" />;
   if (!data || !projection) {
     return <ErrorState title="Could not load the Mathematics view" description={overview.error ?? undefined} actions={<Button onPress={overview.reload}>Retry</Button>} />;
@@ -481,7 +497,7 @@ export function Mathematics({ store }: { store: ViewStore }) {
         </Banner>
       )}
       <div className="xp-graph-body">
-        <div className="xp-graph-main" data-region="graph-main" aria-label="Mathematics">
+        <div className="xp-graph-main" data-region="graph-main" aria-label="Mathematics" ref={ops.ref} onContextMenu={ops.onContextMenu}>
           {mode === "dependencies" ? (
             <ViewCanvas
               aria-label="Mathematics dependency canvas"
@@ -490,6 +506,7 @@ export function Mathematics({ store }: { store: ViewStore }) {
               projection={projection}
               selection={selection}
               onSelectionChange={select}
+              onItemContextMenu={ops.onItemContextMenu}
               onConnect={
                 writable
                   ? (source, target) => {
@@ -510,6 +527,7 @@ export function Mathematics({ store }: { store: ViewStore }) {
           ) : (
             <VerificationTable rows={visibleRows} vocabulary={vocabulary} selected={selectedEntity} onSelect={(id) => select({ nodes: id ? [id] : [], edge: null })} />
           )}
+          {ops.menu}
         </div>
         <InspectorPanel open={inspectorOpen} onClose={() => setInspectorOpen(false)}>
           {selectedEntity ? (

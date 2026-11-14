@@ -2,7 +2,7 @@
 // nodes without one are placed beside the existing layout (never moving the
 // user's positioned nodes) and that placement is saved. Moves, pans/zooms, and
 // collapsed groups save to the view; Arrange is explicit and undoable.
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 
 import { notify } from "../../app/notifications";
 import { GraphCanvas, type CanvasSelection } from "./canvas/GraphCanvas";
@@ -20,6 +20,7 @@ export interface ViewCanvasProps {
   onSelectionChange: (selection: CanvasSelection) => void;
   onConnect?: (source: string, target: string) => void;
   onActivateNode?: (id: string) => void;
+  onItemContextMenu?: (event: MouseEvent, item: { kind: "node" | "edge"; id: string } | null) => void;
   fitRequest?: { nonce: number; nodes?: string[] };
   empty?: ReactNode;
   labels?: "all" | "selection";
@@ -69,6 +70,7 @@ export function ViewCanvas(props: ViewCanvasProps) {
       onConnect={props.onConnect}
       onToggleGroup={(id) => store.toggleCollapsed(id)}
       onActivateNode={props.onActivateNode}
+      onItemContextMenu={props.onItemContextMenu}
       fitRequest={props.fitRequest}
       empty={props.empty}
     />

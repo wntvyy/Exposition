@@ -10,7 +10,8 @@
 // - Connect: drag from a node's handle onto another node. The canvas never
 //   creates a relation itself: it reports the request (`onConnect`) and the
 //   page proposes a typed change to the backend.
-// - Nothing on the canvas deletes anything (the Delete key is not bound).
+// - Nothing on the canvas itself deletes anything: the page binds the focus-
+//   scoped operation commands and reports context menus (`onItemContextMenu`).
 //
 // The component is controlled through plain props (nodes, edges, viewport,
 // selection) and knows nothing about IPC or binding shapes.
@@ -32,7 +33,7 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import { Focus, Maximize, Minus, Plus, ScanSearch } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 
 import { IconButton, Toolbar } from "../../../ui/components";
 import { CanvasContext, type CanvasContextValue } from "./context";
@@ -65,6 +66,11 @@ export interface GraphCanvasProps {
   onToggleGroup?: (id: string) => void;
   /** Double click on a node. */
   onActivateNode?: (id: string) => void;
+  /**
+   * Context menu (right click, Shift+F10, Menu key) on a node, an edge, or
+   * the background (`null`). The page shows its own menu; the canvas only reports.
+   */
+  onItemContextMenu?: (event: ReactMouseEvent, item: { kind: "node" | "edge"; id: string } | null) => void;
   /** Bump `nonce` to fit the view to `nodes` (all nodes when absent), e.g. after Arrange or navigation. */
   fitRequest?: { nonce: number; nodes?: string[] };
   /** Extra controls appended to the canvas toolbar. */
@@ -401,6 +407,9 @@ function CanvasInner(props: GraphCanvasProps) {
           onEdgesChange={onEdgesChange}
           onConnect={handleConnect}
           onNodeDoubleClick={(_, node) => onActivateNode?.(node.id)}
+          onNodeContextMenu={props.onItemContextMenu ? (event, node) => props.onItemContextMenu?.(event, { kind: "node", id: node.id }) : undefined}
+          onEdgeContextMenu={props.onItemContextMenu ? (event, edge) => props.onItemContextMenu?.(event, { kind: "edge", id: edge.id }) : undefined}
+          onPaneContextMenu={props.onItemContextMenu ? (event) => props.onItemContextMenu?.(event as ReactMouseEvent, null) : undefined}
           onMoveEnd={(_, next) => {
             if (sameViewport(next, lastViewport.current)) return;
             lastViewport.current = next;

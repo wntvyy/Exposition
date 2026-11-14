@@ -38,6 +38,7 @@ import { project as projectView } from "./projection";
 import { canWrite, useGraph } from "./store";
 import { EntityTable, RelationTable } from "./Tables";
 import { useGraphLoad } from "./useGraphData";
+import { useGraphOps } from "./useGraphOps";
 import { arrange, ViewCanvas } from "./ViewCanvas";
 import { SaveIndicator } from "./SaveIndicator";
 import { takeRequest, useGraphNavigation } from "./navigation";
@@ -175,6 +176,21 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
     select({ nodes: [pending.entity], edge: null });
     setFitRequest((f) => ({ nonce: f.nonce + 1, nodes: [pending.entity] }));
   }, [request, projection]);
+
+  // Copy / Paste / Duplicate / Delete for the focused selection (P1), with a context menu.
+  const ops = useGraphOps({
+    id: "graph-project",
+    selection,
+    entities,
+    relations,
+    vocabulary,
+    canWrite: writable,
+    onSelect: select,
+    onHide: (ids) => {
+      store.hide(ids);
+      setSelection({ nodes: [], edge: null });
+    },
+  });
 
   const actions: InspectorActions = {
     canWrite: writable,
@@ -318,7 +334,7 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
       )}
 
       <div className="xp-graph-body">
-        <div className="xp-graph-main" data-region="graph-main" aria-label="Project graph">
+        <div className="xp-graph-main" data-region="graph-main" aria-label="Project graph" ref={ops.ref} onContextMenu={ops.onContextMenu}>
           {mode === "canvas" ? (
             <ViewCanvas
               aria-label="Project graph canvas"
@@ -327,6 +343,7 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
               projection={projection}
               selection={selection}
               onSelectionChange={select}
+              onItemContextMenu={ops.onItemContextMenu}
               onConnect={
                 writable
                   ? (source, target) => {
@@ -365,6 +382,7 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
               </TabPanel>
             </Tabs>
           )}
+          {ops.menu}
         </div>
         <InspectorPanel open={inspectorOpen} onClose={() => setInspectorOpen(false)}>
           {selectedEntity ? (

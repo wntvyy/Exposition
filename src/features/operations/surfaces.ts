@@ -41,6 +41,11 @@ export interface OpSurface {
   actions: () => SurfaceActions;
   /** Ctrl/Cmd+Z / Shift+Z undo and redo project operations here (default true). */
   history?: boolean;
+  /**
+   * Whether the focused element stands for the selection (e.g. a canvas node
+   * or a table row, not a toolbar button inside the same region). Default: any.
+   */
+  accepts?: (element: Element) => boolean;
 }
 
 const surfaces = new Set<OpSurface>();
@@ -72,6 +77,12 @@ export function surfaceFor(node: EventTarget | null): OpSurface | null {
   return best;
 }
 
+/** The surface whose selection the focused `element` stands for. */
+function focusedSurface(element: Element): OpSurface | null {
+  const surface = surfaceFor(element);
+  return surface && (!surface.accepts || surface.accepts(element)) ? surface : null;
+}
+
 function connected(surface: OpSurface | null): OpSurface | null {
   return surface && surfaces.has(surface) && surface.element()?.isConnected ? surface : null;
 }
@@ -86,7 +97,7 @@ export function activeSurface(): OpSurface | null {
   if (element && element !== document.body && !inOverlay(element)) {
     // Strict: the focused element itself must be inside a surface (and not edit text).
     if (isEditableTarget(element)) return null;
-    return surfaceFor(element);
+    return focusedSurface(element);
   }
   // Focus is in the palette (or returning from it to the body): the surface it was opened from.
   if (commandPalette.isOpen() || Date.now() - paletteClosedAt < 1500) return connected(paletteSurface);
@@ -101,7 +112,7 @@ export function startSurfaceTracking(): void {
     "focusin",
     (event) => {
       const target = event.target;
-      const surface = surfaceFor(target);
+      const surface = target instanceof Element ? focusedSurface(target) : null;
       if (surface) lastSurface = surface;
       else if (!(target instanceof Element) || !inOverlay(target)) lastSurface = null;
     },
@@ -128,13 +139,24 @@ export function registerSurface(surface: OpSurface): () => void {
  * Register a surface for a component's root element. `actions` is read at
  * command time, so it always sees the latest selection.
  */
-export function useOpSurface(id: string, ref: RefObject<HTMLElement | null>, actions: () => SurfaceActions, history = true): void {
+export function useOpSurface(
+  id: string,
+  ref: RefObject<HTMLElement | null>,
+  actions: () => SurfaceActions,
+  options: { history?: boolean; accepts?: (element: Element) => boolean } = {},
+): void {
   const latest = useRef(actions);
   latest.current = actions;
+  const { history = true, accepts } = options;
   useEffect(
-    () => registerSurface({ id, element: () => ref.current, actions: () => latest.current(), history }),
-    [id, ref, history],
+    () => registerSurface({ id, element: () => ref.current, actions: () => latest.current(), history, accepts }),
+    [id, ref, history, accepts],
   );
+}
+
+/** Canvas nodes/edges and table rows/cells stand for a graph-like selection; toolbars and tabs do not. */
+export function acceptsItems(element: Element): boolean {
+  return element.closest(".react-flow__node, .react-flow__edge, [role='row'], [role='gridcell'], [role='rowheader'], [data-op-item]") !== null;
 }
 
 // ----- the commands -------------------------------------------------------------------

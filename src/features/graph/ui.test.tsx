@@ -5,6 +5,9 @@ import { ConfirmHost } from "../../ui/components";
 
 // Source navigation opens Monaco; not needed here.
 vi.mock("./reveal", () => ({ revealSource: vi.fn() }));
+// P1 operations: the backend contract, mocked at the operation IPC boundary.
+const opIpc = vi.hoisted(() => ({ plan: vi.fn(), apply: vi.fn(), restore: vi.fn() }));
+vi.mock("../operations/ipc", () => ({ opCommands: opIpc, opEvents: { projectOp: vi.fn(async () => () => {}) } }));
 
 import { ipcGraphApi, setGraphApi } from "./api";
 import { RelateDialog } from "./changes";
@@ -126,7 +129,7 @@ describe("Project graph table (keyboard alternative)", () => {
     const observed = await within(inspector).findByText("Observed");
     const item = observed.closest('[data-testid="graph-relation"]') as HTMLElement;
     expect(item.getAttribute("data-status")).toBe("observed");
-    expect(within(item).queryByRole("button", { name: "Remove relationship" })).toBeNull();
+    expect(within(item).queryByRole("button", { name: "Delete relationship" })).toBeNull();
     // Keyboard path to a relationship: Relate to… opens the typed dialog with a target picker.
     fireEvent.click(within(inspector).getByRole("button", { name: "Relate to…" }));
     expect(await screen.findByTestId("graph-relate-dialog")).toBeTruthy();
@@ -149,8 +152,27 @@ describe("Project graph table (keyboard alternative)", () => {
     await waitFor(() => expect([...fake.views.values()][0]?.hidden).toEqual(["lem"]));
   });
 
-  it("removes a relationship only after confirmation, and refuses to remove an observed one", async () => {
+  it("deletes a manual relationship at once through the operation contract (no generic confirmation); an observed one offers no delete", async () => {
     fake.relations.push(relation("acc", "dependsOn", "thm", "lem"));
+    opIpc.plan.mockImplementation(async (request) => ({
+      plan: "p1",
+      request,
+      effects: request.targets.map((target: unknown) => ({ target, description: "Delete the relationship", destination: null, recovery: { kind: "appManaged" } })),
+      refusals: [],
+      impacts: [],
+      needsDecision: false,
+      choices: [],
+      planHash: "h1",
+      expiresAtMs: Date.now() + 60_000,
+    }));
+    opIpc.apply.mockImplementation(async () => {
+      fake.relations.splice(fake.relations.findIndex((r) => r.id === "acc"), 1);
+      return {
+        plan: "p1",
+        outcomes: [{ target: { kind: "graphRelation", relation: "acc" }, status: "succeeded", code: null, message: null, created: null, recovery: { kind: "appManaged" }, restore: null }],
+        notices: [],
+      };
+    });
     localStorage.setItem("exposition.graph.mode.project", "table");
     graph.start();
     await waitFor(() => expect(useGraph.getState().vocabulary).not.toBeNull());
@@ -169,22 +191,17 @@ describe("Project graph table (keyboard alternative)", () => {
     fireEvent.keyDown(row, { key: " ", code: "Space" });
     fireEvent.keyUp(row, { key: " ", code: "Space" });
     const inspector = await screen.findByTestId("graph-relation-inspector");
-    fireEvent.click(within(inspector).getByRole("button", { name: "Remove relationship" }));
-    const alert = await screen.findByRole("alertdialog", { name: "Remove this relationship?" });
-    expect(alert.textContent).toMatch(/No file changes/);
-    // Cancel keeps it.
-    fireEvent.click(within(alert).getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
-    expect(fake.relations.some((r) => r.id === "acc")).toBe(true);
-    fireEvent.click(within(inspector).getByRole("button", { name: "Remove relationship" }));
-    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Remove relationship" }));
-    await waitFor(() => expect(fake.relations.some((r) => r.id === "acc")).toBe(false));
+    fireEvent.click(within(inspector).getByRole("button", { name: "Delete relationship" }));
+    await waitFor(() => expect(opIpc.apply).toHaveBeenCalledWith({ plan: "p1", planHash: "h1", choices: {} }));
+    expect(opIpc.plan).toHaveBeenCalledWith({ kind: { kind: "delete", permanent: false }, targets: [{ kind: "graphRelation", relation: "acc" }], actor: { kind: "user" } });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(fake.relations.some((r) => r.id === "acc")).toBe(false);
     // The observed one offers no remove action and says why.
     const observedRow = grid.querySelector('[data-relation-id="obs"]') as HTMLElement;
     act(() => observedRow.focus());
     fireEvent.keyDown(observedRow, { key: " ", code: "Space" });
     fireEvent.keyUp(observedRow, { key: " ", code: "Space" });
     await waitFor(() => expect(screen.getByTestId("graph-relation-inspector").textContent).toMatch(/change the source/));
-    expect(within(screen.getByTestId("graph-relation-inspector")).queryByRole("button", { name: "Remove relationship" })).toBeNull();
+    expect(within(screen.getByTestId("graph-relation-inspector")).queryByRole("button", { name: "Delete relationship" })).toBeNull();
   });
 });

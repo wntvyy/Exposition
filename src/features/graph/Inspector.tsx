@@ -1,8 +1,9 @@
 // Inspector for the selected graph item: entity detail (bindings, typed
 // relationships, evidence, provenance), change impact, and the actions that
-// apply to it. View-only actions ("Hide from view") and semantic ones
-// ("Remove relationship") are worded and placed apart; nothing here deletes a
-// file.
+// apply to it. View-only actions ("Hide from view"), semantic ones ("Delete
+// relationship", "Delete entity") and file ones ("Delete source file") are
+// worded and placed apart; deletions go through the shared operation client
+// (P1), which asks only when the plan names a concrete consequence.
 import {
   Archive,
   ArchiveRestore,
@@ -38,14 +39,20 @@ import {
   LoadingState,
   Menu,
   MenuItem,
+  MenuSeparator,
   MenuTrigger,
   Section,
   StatusPill,
   Toolbar,
   type BadgeTone,
 } from "../../ui/components";
+import { runUserOperation } from "../operations/client";
+import { targetKey, trashName } from "../operations/model";
+import { opMenuItems, runMenuKey } from "../operations/OpMenu";
+import { keybindingFor } from "../operations/surfaces";
 import { errorText, graphApi } from "./api";
 import { runChange } from "./changes";
+import { graphActions } from "./graphOps";
 import {
   entityDisplay,
   FAMILY_LABELS,
@@ -194,24 +201,25 @@ export function RelationActions({ relation, description }: { relation: Relation;
           />
         </>
       )}
-      <IconButton icon={Trash2} size="sm" aria-label="Remove relationship" onPress={() => void removeRelationship(relation, description)} />
+      <IconButton
+        icon={Trash2}
+        size="sm"
+        aria-label="Delete relationship"
+        keybinding={keybindingFor("delete")}
+        onPress={() => void deleteRelationship(relation, description)}
+      />
     </Toolbar>
   );
 }
 
-export async function removeRelationship(relation: Relation, description: string): Promise<void> {
-  const choice = await confirm<"cancel" | "remove">({
-    title: "Remove this relationship?",
-    message: `“${description.trim()}” will be removed from the project graph. No file changes; the items stay.`,
-    actions: [
-      { id: "cancel", label: "Cancel", variant: "secondary" },
-      { id: "remove", label: "Remove relationship", variant: "danger" },
-    ],
-    cancelId: "cancel",
-    defaultId: "cancel",
-    tone: "warning",
-  });
-  if (choice === "remove") await runChange([{ op: "removeRelation", relation: relation.id }], "Remove the relationship", "Relationship removed");
+/**
+ * Delete a manual relationship through the shared operation client: applied
+ * at once unless the plan names a consequence (one decision then); the items
+ * and files stay. The removal persists across reindexing.
+ */
+export async function deleteRelationship(relation: Relation, description: string): Promise<void> {
+  const target = { kind: "graphRelation" as const, relation: relation.id };
+  await runUserOperation({ kind: "delete", permanent: false }, [target], { labels: new Map([[targetKey(target), description.trim()]]) });
 }
 
 function freshnessOf(detail: EntityDetail, id: string): Freshness | null {
@@ -381,6 +389,8 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
   ];
   const families = [...new Set(relations.map(({ r }) => relationDisplay(vocabulary, r.kind).family))];
   const archived = entity.lifecycle === "archived";
+  // Duplicate / Delete entity / Delete source file / Copy Reference / Copy Text (hide stays the view action above).
+  const ops = graphActions({ entities: [entity], relations: [] }, { vocabulary, canWrite: actions.canWrite });
   return (
     <div className="xp-graph-inspector__body" data-testid="graph-entity-inspector" data-entity-id={entity.id}>
       <header className="xp-graph-inspector__header">
@@ -419,6 +429,7 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
               if (key === "unhide") actions.onUnhide?.(entity.id);
               if (key === "archive") void setLifecycle(entity, "archived");
               if (key === "restore") void setLifecycle(entity, "active");
+              runMenuKey(key, ops.actions, ops.extras);
             }}
           >
             {actions.onAddToCollection ? (
@@ -447,12 +458,15 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
                 </MenuItem>
               )
             ) : null}
+            <MenuSeparator />
+            {opMenuItems({ duplicate: ops.actions.duplicate, delete: ops.actions.delete, deletePermanently: ops.actions.deletePermanently }, ops.extras)}
           </Menu>
         </MenuTrigger>
       </Toolbar>
       {display.kind.fileBacked && (
         <p className="xp-muted xp-graph-inspector__note">
-          Hiding removes it from this view only. Deleting or renaming the underlying file is a file operation and is not done from the graph.
+          Hide from view removes it from this view only. Delete Source {entity.kind === "folder" ? "Folder" : "File"} moves the file itself to{" "}
+          {trashName()}; renaming is done in the Files explorer.
         </p>
       )}
 
