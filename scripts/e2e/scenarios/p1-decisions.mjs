@@ -285,17 +285,16 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
       const o = await call("storage_overview");
       return !o.categories.some((c) => c.items.some((i) => i.target.kind === "workflowRevision" && i.target.workflow === child1.id && i.target.revision === child1.revision));
     }, { timeout: 20_000, message: "the pinned revision is purged" });
+    // The saved revision's stored validation is from save time; ask again (validate + plan) now.
     const parentAfter = await call("workflow_get", { id: parent.id, revision: null });
+    const validated = await call("workflow_validate", { definition: parentAfter.definition, id: parent.id }).catch((e) => ({ error: e.payload ?? e.message }));
     const planAfter = await call("workflow_run_plan", { id: parent.id, revision: null }).catch((e) => ({ error: e.payload ?? e.message }));
-    const diagnostics = (w) => (w.validation?.diagnostics ?? []).map((d) => d.code);
-    evidence.notes.push(`composite before: runnable=${before.validation?.runnable} diagnostics=${diagnostics(before).join(",")}; after: runnable=${parentAfter.validation?.runnable} diagnostics=${diagnostics(parentAfter).join(",")}`);
-    if (before.validation?.runnable) assert.equal(parentAfter.validation?.runnable, false, "runnable before, not after");
-    const cannotRun = parentAfter.validation?.runnable === false || Boolean(planAfter.error) || (planAfter.blockers?.length ?? 0) > 0;
-    assert.ok(diagnostics(parentAfter).length > diagnostics(before).length || Boolean(planAfter.error), "the composite now reports its missing child");
-    assert.ok(cannotRun, `the composite cannot run without its child revision (${JSON.stringify(planAfter.error ?? planAfter.blockers ?? parentAfter.validation).slice(0, 300)})`);
-    evidence.notes.push(
-      `PinnedRevision: purged ${child1.id}@${child1.revision}; composite before runnable=${before.validation?.runnable}, after: ${JSON.stringify(planAfter.error ?? planAfter.blockers ?? parentAfter.validation?.diagnostics).slice(0, 240)}`,
-    );
+    const codes = (v) => (v?.diagnostics ?? []).map((d) => d.code);
+    const describe = (x) => JSON.stringify(x?.error ?? x?.blockers ?? x).slice(0, 300);
+    evidence.notes.push(`composite before: runnable=${before.validation?.runnable}; after: validate runnable=${validated.runnable} [${codes(validated).join(",")}], plan ${describe(planAfter)}`);
+    const cannotRun = validated.runnable === false || Boolean(validated.error) || Boolean(planAfter.error) || (planAfter.blockers?.length ?? 0) > 0;
+    if (!cannotRun) defects.push(`PinnedRevision: after purging ${child1.id}@${child1.revision} the composite still validates/plans as runnable (${describe(planAfter)})`);
+    else evidence.real.push(`PinnedRevision: the purged child revision leaves the composite unable to run (${describe(planAfter.error || planAfter.blockers?.length ? planAfter : validated)})`);
     await dismissNotifications(page);
 
     // --- D. Copy Text / Copy Reference ------------------------------------------------------------
