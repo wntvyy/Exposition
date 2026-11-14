@@ -126,7 +126,7 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
         const item = page.getByTestId(`workflow-run-item-${run.id}`);
         await item.waitFor({ timeout: 15_000 });
         await page.getByTestId(`op-more-${run.id}`).click();
-        await page.getByRole("menuitem", { name: /Delete Run and Its Outputs/ }).click();
+        await page.getByRole("menuitem", { name: /Delete Run and Its Outputs Permanently/ }).click();
         const d = decision(page);
         await d.waitFor({ timeout: 15_000 });
         assert.equal(await d.locator('[data-choice="outputs"]').getAttribute("data-value"), "delete", "outputs scope preset and reviewed");

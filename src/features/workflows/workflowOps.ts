@@ -122,11 +122,12 @@ export function runActions(selected: WorkflowRunSummary[]): { actions: SurfaceAc
     extras: [
       {
         id: "deleteWithOutputs",
-        label: plural(selected.length, "Delete Run and Its Outputs…", "Delete Runs and Their Outputs…"),
+        label: plural(selected.length, "Delete Run and Its Outputs Permanently…", "Delete Runs and Their Outputs Permanently…"),
         icon: FileOutput,
-        description: "Outputs are a separate scope; never source inputs or manuscript files",
+        // Outputs are removed only with a permanent deletion of the record (the backend's rule), and only those nothing keeps.
+        description: "Outputs are a separate, reviewed scope; never source inputs or manuscript files",
         isDisabled: !has,
-        run: remove(false, true),
+        run: remove(true, true),
       },
     ],
   };
