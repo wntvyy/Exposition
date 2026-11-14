@@ -174,13 +174,26 @@ describe("pages", () => {
       act(() => focusNextRegion(false));
       visited.push((document.activeElement?.closest("[data-region]") as HTMLElement | null)?.dataset.region);
     }
-    expect(visited).toEqual(["activitybar", "t-main", "t-inspector", "statusbar"]);
+    expect(visited).toEqual(["pagebar", "t-main", "t-inspector", "statusbar"]);
 
     act(() => void pages.show("t.plain"));
     act(() => focusNextRegion(false));
-    expect((document.activeElement?.closest("[data-region]") as HTMLElement | null)?.dataset.region).toBe("activitybar");
+    expect((document.activeElement?.closest("[data-region]") as HTMLElement | null)?.dataset.region).toBe("pagebar");
     act(() => focusNextRegion(false));
     expect(document.activeElement?.textContent).toBe("plain");
+  });
+
+  it("shows the activity rail only on the Editor page; the page bar is always there", () => {
+    offs.push(registry.registerPage({ id: "graph", title: "Graph", icon: Network, order: 40, render: () => <p>g</p> }));
+    render(<Workbench />);
+    expect(document.querySelector('[data-region="pagebar"]')).not.toBeNull();
+    expect(document.querySelector('[data-region="activitybar"]')).not.toBeNull();
+    act(() => void pages.show("graph"));
+    expect(document.querySelector('[data-region="activitybar"]')).toBeNull();
+    expect(document.querySelector('[data-page-button="graph"]')?.getAttribute("aria-current")).toBe("page");
+    expect(document.querySelector('[data-page-button="graph"]')?.textContent).toBe("Graph");
+    act(() => void pages.show("editor"));
+    expect(document.querySelector('[data-region="activitybar"]')).not.toBeNull();
   });
 
   it("region toggles on another page show the Editor page with that region", async () => {

@@ -178,13 +178,14 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     assert.equal(await regionVisible(page, "auxiliary"), true, "Ctrl+Alt+B shows the auxiliary panel");
 
     // F6 moves between regions, and keyboard focus is visibly indicated.
-    await page.locator("[data-testid=workbench]").click({ position: { x: 600, y: 400 } });
+    // Empty editor area (below the empty state; above it sits the page bar).
+    await page.locator("[data-testid=workbench]").click({ position: { x: 600, y: 540 } });
     const visited = [];
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 7; i++) {
       await page.keyboard.press("F6");
       visited.push(await page.evaluate(() => document.activeElement?.closest("[data-region]")?.getAttribute("data-region")));
     }
-    for (const region of ["activitybar", "sidebar", "editor", "panel", "auxiliary", "statusbar"]) {
+    for (const region of ["pagebar", "activitybar", "sidebar", "editor", "panel", "auxiliary", "statusbar"]) {
       assert.ok(visited.includes(region), `F6 reaches ${region} (visited ${visited.join(", ")})`);
     }
     // F6 into the activity rail: its first button shows the focus ring.

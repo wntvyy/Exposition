@@ -162,10 +162,14 @@
   --space-10: 40px;
   --space-12: 48px;
 
-  /* --- Control dimensions (compact desktop density) --- */
-  --control-height-sm: 22px;
-  --control-height-md: 26px;
+  /* --- Control dimensions (balanced desktop density, UI rework 2026-11-14) --- */
+  --control-height-sm: 24px;
+  --control-height-md: 28px;
   --control-height-lg: 32px;
+  /* Row heights: tree/list rows, table rows, menu and palette items. */
+  --row-height-tree: 26px;
+  --row-height-table: 30px;
+  --row-height-menu: 28px;
   --icon-size-sm: 14px;
   --icon-size-md: 16px;
   --icon-size-lg: 20px;
@@ -174,10 +178,16 @@
   --focus-ring-offset: 1px;
 
   /* --- Workbench dimensions --- */
+  --page-bar-height: 32px;
   --activity-rail-width: 44px;
-  --tab-height: 32px;
-  --pane-header-height: 32px;
+  --tab-height: 36px;
+  --pane-header-height: 36px;
   --statusbar-height: 24px;
+  --inspector-width: 340px;
+  /* Reading width of document-like pages (Settings, workflow editor, New Project). */
+  --content-max-width: 960px;
+  /* Horizontal inset shared by pane headers, page headers, and their content. */
+  --pane-inset: var(--space-3);
   --resize-handle-size: 4px;
 
   /* --- Radii --- */

@@ -21,11 +21,17 @@ export function Tabs({ className, ...props }: Omit<AriaTabsProps, "className"> &
   return <AriaTabs {...props} className={cx("ui-tabs", className)} />;
 }
 
+/**
+ * A tab strip. `content` (default): sections of a view or page (sentence
+ * case). `chrome`: the tab strip of a workbench region (bottom panel,
+ * auxiliary panel), which uses the uppercase chrome label like pane titles.
+ */
 export function TabList<T extends object>({
   className,
+  variant = "content",
   ...props
-}: Omit<AriaTabListProps<T>, "className"> & { className?: string; "aria-label": string }) {
-  return <AriaTabList {...props} className={cx("ui-tab-list", className)} />;
+}: Omit<AriaTabListProps<T>, "className"> & { className?: string; "aria-label": string; variant?: "content" | "chrome" }) {
+  return <AriaTabList {...props} data-variant={variant} className={cx("ui-tab-list", className)} />;
 }
 
 export function Tab({

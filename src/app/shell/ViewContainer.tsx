@@ -4,6 +4,7 @@ import { useId } from "react";
 import { IconButton } from "../../ui/components/Button";
 import { Panel, PanelHeader } from "../../ui/components/Panel";
 import { EmptyState, UnavailableState } from "../../ui/components/States";
+import { StateSizeProvider } from "../../ui/components/stateSize";
 import { Tab, TabList, TabPanel, Tabs } from "../../ui/components/Tabs";
 import { layout, useLayout, type Region } from "../layout";
 import { registry, type ViewContribution } from "../registry";
@@ -83,13 +84,15 @@ export function ViewContainer({ region }: { region: Region }) {
       <Panel className="wb-view-container" aria-labelledby={headingId}>
         <PanelHeader id={headingId} title={title} actions={hide} />
         <div className="wb-view-container__body">
-          {active ? (
-            <ViewErrorBoundary key={active.id} name={`${active.title} view`}>
-              {active.render()}
-            </ViewErrorBoundary>
-          ) : (
-            <RegionFallback region={region} />
-          )}
+          <StateSizeProvider value="compact">
+            {active ? (
+              <ViewErrorBoundary key={active.id} name={`${active.title} view`}>
+                {active.render()}
+              </ViewErrorBoundary>
+            ) : (
+              <RegionFallback region={region} />
+            )}
+          </StateSizeProvider>
         </div>
       </Panel>
     );
@@ -102,7 +105,7 @@ export function ViewContainer({ region }: { region: Region }) {
       onSelectionChange={(key) => layout.setActiveView(region, String(key))}
     >
       <div className="wb-view-container__tabbar">
-        <TabList aria-label={`${regionNames[region]} views`} className="wb-view-container__tabs">
+        <TabList aria-label={`${regionNames[region]} views`} variant="chrome" className="wb-view-container__tabs">
           {views.map((view) => (
             <Tab key={view.id} id={view.id} icon={view.icon}>
               {view.title}
@@ -113,7 +116,9 @@ export function ViewContainer({ region }: { region: Region }) {
       </div>
       {views.map((view) => (
         <TabPanel key={view.id} id={view.id} className="wb-view-container__body">
-          <ViewErrorBoundary name={`${view.title} view`}>{view.render()}</ViewErrorBoundary>
+          <StateSizeProvider value="compact">
+            <ViewErrorBoundary name={`${view.title} view`}>{view.render()}</ViewErrorBoundary>
+          </StateSizeProvider>
         </TabPanel>
       ))}
     </Tabs>

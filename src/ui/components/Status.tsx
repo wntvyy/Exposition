@@ -118,10 +118,37 @@ export interface StatusPillProps {
   className?: string;
 }
 
+export interface StatusTextProps {
+  status: Status;
+  /** Visible text; defaults to the status name. Be specific: "Executed", "Build failed". */
+  label?: string;
+  /** Muted detail after the label, e.g. "0.7 s". */
+  detail?: string;
+  className?: string;
+}
+
 /**
- * Compact status indicator: icon + text, never color alone. Running shows a
- * spinner. Wrap changing pills in a live region only when the change matters
- * to the user (notifications already announce completions).
+ * Quiet inline status for rows, tables, and inspector lines: the status icon
+ * and label in the status color, no container. A surface's one headline state
+ * uses StatusPill instead.
+ */
+export function StatusText({ status, label, detail, className }: StatusTextProps) {
+  const Icon = status === "running" ? null : statusIcons[status];
+  return (
+    <span className={cx("ui-status-text", className)} data-status={status}>
+      {Icon ? <Icon size={14} aria-hidden /> : <Spinner size="sm" aria-hidden />}
+      <span className="ui-status-text__label">{label ?? statusLabels[status]}</span>
+      {detail && <span className="ui-status-text__detail">{detail}</span>}
+    </span>
+  );
+}
+
+/**
+ * Headline status indicator: icon + text in a tinted pill, never color
+ * alone. Use one per surface (a page or editor header, a run or task header,
+ * the status bar); rows and tables use StatusText. Running shows a spinner.
+ * Wrap changing pills in a live region only when the change matters to the
+ * user (notifications already announce completions).
  */
 export function StatusPill({ status, label, detail, size = "md", className }: StatusPillProps) {
   const Icon = status === "running" ? null : statusIcons[status];

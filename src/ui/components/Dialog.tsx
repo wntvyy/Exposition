@@ -1,5 +1,5 @@
 import { CircleAlert, TriangleAlert } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Dialog as AriaDialog,
   DialogTrigger,
@@ -59,11 +59,36 @@ export function Dialog({
           <Heading slot="title" className="ui-dialog__title">
             {title}
           </Heading>
-          <div className="ui-dialog__body">{children}</div>
+          <DialogBody>{children}</DialogBody>
           {footer && <div className="ui-dialog__footer">{footer}</div>}
         </AriaDialog>
       </Modal>
     </ModalOverlay>
+  );
+}
+
+/**
+ * Scrollable dialog body. When its content overflows, the body gets
+ * `data-overflow` and the footer below it shows a divider, so long dialogs
+ * (plan review, impact decisions) keep their actions visible and separated.
+ */
+function DialogBody({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [overflow, setOverflow] = useState(false);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const update = () => setOverflow(element.scrollHeight > element.clientHeight + 1);
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    for (const child of Array.from(element.children)) observer.observe(child);
+    update();
+    return () => observer.disconnect();
+  }, []);
+  return (
+    <div ref={ref} className="ui-dialog__body" data-overflow={overflow || undefined}>
+      {children}
+    </div>
   );
 }
 
@@ -195,7 +220,7 @@ export function ConfirmHost() {
               {options.title}
             </Heading>
           </div>
-          <div className="ui-dialog__body">{options.message}</div>
+          <DialogBody>{options.message}</DialogBody>
           <div className="ui-dialog__footer">
             {options.actions.map((action) => (
               <Button

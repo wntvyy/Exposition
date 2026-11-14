@@ -103,10 +103,13 @@ export interface PageContribution {
   render: () => ReactNode;
 }
 
-/** An item in the status bar. */
+/**
+ * An item in the status bar (left or right), or at the start of the page bar
+ * ("pagebar": the project the window shows; one item, compact text).
+ */
 export interface StatusItemContribution {
   id: string;
-  alignment: "left" | "right";
+  alignment: "left" | "right" | "pagebar";
   /** Lower numbers sort first within an alignment. */
   order?: number;
   render: () => ReactNode;
@@ -155,7 +158,7 @@ class Registry {
     return this.add(this.statusItems, item);
   }
 
-  statusItemsAt(alignment: "left" | "right"): StatusItemContribution[] {
+  statusItemsAt(alignment: StatusItemContribution["alignment"]): StatusItemContribution[] {
     return [...this.statusItems.values()]
       .filter((item) => item.alignment === alignment)
       .sort((a, b) => (a.order ?? 100) - (b.order ?? 100));

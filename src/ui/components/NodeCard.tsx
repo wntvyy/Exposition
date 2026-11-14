@@ -12,7 +12,7 @@ export interface NodeCardProps {
   typeIcon?: IconComponent;
   /** Color category (tokens `--color-graph-<category>-*`). */
   category: GraphCategory;
-  /** Status badges, separate from the type (`Badge` / `StatusPill size="sm"`). */
+  /** Status badges, separate from the type (`Badge` with an icon). */
   badges?: ReactNode;
   /** Trailing control in the header (e.g. a collapse toggle). */
   action?: ReactNode;
@@ -25,10 +25,12 @@ export interface NodeCardProps {
 }
 
 /**
- * The colored rectangle used for items on canvases (project graph, Mathematics
- * dependencies, later workflow steps): a type stripe and label in the
- * category's color, a concise title, and separate status badges. Purely
- * presentational; canvases own positioning, selection, and focus.
+ * The rectangle used for items on canvases (project graph, Mathematics
+ * dependencies, workflow steps): a neutral card whose type header band
+ * carries the category color (icon + type label as text), a concise title,
+ * and separate status badges. Type color never colors the body, the outline,
+ * or the selection, so statuses and selection stay distinct from types.
+ * Purely presentational; canvases own positioning, selection, and focus.
  */
 export function NodeCard({
   title,
@@ -57,10 +59,12 @@ export function NodeCard({
         </span>
         {action}
       </div>
-      <p className="ui-node-card__title" title={title}>
-        {title}
-      </p>
-      {badges && <div className="ui-node-card__badges">{badges}</div>}
+      <div className="ui-node-card__body">
+        <p className="ui-node-card__title" title={title}>
+          {title}
+        </p>
+        {badges && <div className="ui-node-card__badges">{badges}</div>}
+      </div>
     </div>
   );
 }

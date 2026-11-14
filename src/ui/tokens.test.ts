@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { contrastRatio, parseColor, readCustomProperties, resolveVar } from "./color";
-import { colorRoles, graphCategories, palettes, type ColorRole, type ThemeName } from "./tokens";
+import { colorRoles, densityPx, graphCategories, palettes, type ColorRole, type ThemeName } from "./tokens";
 
 // Vitest stubs CSS imports (even `?raw`), so read the stylesheet from disk.
 const nodeFs = "node:fs";
@@ -53,6 +53,14 @@ const textPairs: [ColorRole, ColorRole][] = [
   ),
   ["status-stale-text", "surface"],
   ["status-stale-text", "surface-sunken"],
+  // Quiet inline status (StatusText): colored icon + text on rows, including
+  // hovered and selected rows.
+  ...(["danger", "warning", "success", "info"] as const).flatMap((tone): [ColorRole, ColorRole][] =>
+    (["surface-hover", "surface-selected", "accent-subtle"] as const).map((bg): [ColorRole, ColorRole] => [`${tone}-text`, bg]),
+  ),
+  ...(["surface-raised", "surface-hover", "surface-selected", "accent-subtle"] as const).map(
+    (bg): [ColorRole, ColorRole] => ["status-stale-text", bg],
+  ),
   ["tooltip-text", "tooltip-bg"],
   ["kbd-text", "kbd-bg"],
   ["statusbar-text", "statusbar-bg"],
@@ -116,6 +124,25 @@ describe("design tokens", () => {
       .filter((r) => r.ratio < 3)
       .map((r) => `${r.fg} on ${r.bg}: ${r.ratio.toFixed(2)}`);
     expect(failures).toEqual([]);
+  });
+});
+
+describe("density tokens", () => {
+  it("densityPx mirrors tokens.css", () => {
+    const props = themeProperties("light");
+    const px = (name: string) => Number.parseFloat(resolveVar(props[name] ?? "", props));
+    expect({
+      controlSm: px("--control-height-sm"),
+      controlMd: px("--control-height-md"),
+      controlLg: px("--control-height-lg"),
+      rowTree: px("--row-height-tree"),
+      rowTable: px("--row-height-table"),
+      rowMenu: px("--row-height-menu"),
+      tab: px("--tab-height"),
+      paneHeader: px("--pane-header-height"),
+      pageBar: px("--page-bar-height"),
+      statusbar: px("--statusbar-height"),
+    }).toEqual(densityPx);
   });
 });
 

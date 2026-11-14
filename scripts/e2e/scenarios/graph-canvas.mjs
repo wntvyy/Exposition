@@ -330,7 +330,7 @@ export default async function graphCanvas({ launchApp, artifactsDir, assert, fix
       await page.keyboard.press("F6");
       regions.push(await page.evaluate(() => document.activeElement?.closest("[data-region]")?.getAttribute("data-region")));
     }
-    for (const region of ["activitybar", "graph-header", "graph-toolbar", "graph-main", "graph-inspector", "statusbar"]) {
+    for (const region of ["pagebar", "graph-header", "graph-toolbar", "graph-main", "graph-inspector", "statusbar"]) {
       assert.ok(regions.includes(region), `F6 reaches ${region} (visited ${regions.join(", ")})`);
     }
 

@@ -359,6 +359,30 @@ export const controlHeight = {
   lg: "var(--control-height-lg)",
 } as const;
 
+/** Row heights (balanced density): tree/list rows, table rows, menu/palette items. */
+export const rowHeight = {
+  tree: "var(--row-height-tree)",
+  table: "var(--row-height-table)",
+  menu: "var(--row-height-menu)",
+} as const;
+
+/**
+ * Pixel values of the density tokens, for code that must compute layout in
+ * pixels (virtualized lists, canvases). Kept equal to tokens.css by tokens.test.ts.
+ */
+export const densityPx = {
+  controlSm: 24,
+  controlMd: 28,
+  controlLg: 32,
+  rowTree: 26,
+  rowTable: 30,
+  rowMenu: 28,
+  tab: 36,
+  paneHeader: 36,
+  pageBar: 32,
+  statusbar: 24,
+} as const;
+
 export const zIndex = {
   base: "var(--z-base)",
   sticky: "var(--z-sticky)",

@@ -3,15 +3,23 @@ import { useId, type ReactNode } from "react";
 
 import type { IconComponent } from "./Button";
 import { cx } from "./cx";
+import { useStateSize, type StateSize } from "./stateSize";
 import { Spinner } from "./Status";
 
 interface StateBaseProps {
   title: string;
   description?: ReactNode;
-  /** Buttons for the next useful step. */
+  /** Buttons for the next useful step. In compact states use `size="sm"` secondary or ghost buttons. */
   actions?: ReactNode;
-  /** Fill the containing region and center the content (default true). */
+  /** Fill the containing region and center the content (default true; page size only). */
   fill?: boolean;
+  /**
+   * `page`: centered icon, title, text, actions (pages, editor area).
+   * `compact`: one muted line aligned with the content plus inline actions
+   * (panels, sidebars, inspector sections). Defaults to the surrounding
+   * StateSizeProvider (the shell makes side and bottom regions compact).
+   */
+  size?: StateSize;
   className?: string;
 }
 
@@ -22,6 +30,7 @@ function StateLayout({
   description,
   actions,
   fill = true,
+  size,
   className,
   role,
   media,
@@ -36,10 +45,33 @@ function StateLayout({
   children?: ReactNode;
 }) {
   const titleId = useId();
+  const resolved = useStateSize(size);
+  if (resolved === "compact") {
+    return (
+      <div className={cx("ui-state", className)} data-kind={kind} data-size="compact" role={role} aria-labelledby={titleId}>
+        <div className="ui-state__line">
+          {kind === "loading" ? (
+            <Spinner size="sm" aria-hidden />
+          ) : (
+            Icon && <Icon className="ui-state__inline-icon" size={14} aria-hidden />
+          )}
+          <div className="ui-state__text">
+            <p className="ui-state__title" id={titleId}>
+              {title}
+            </p>
+            {description && <div className="ui-state__description">{description}</div>}
+          </div>
+        </div>
+        {children}
+        {actions && <div className="ui-state__actions">{actions}</div>}
+      </div>
+    );
+  }
   return (
     <div
       className={cx("ui-state", className)}
       data-kind={kind}
+      data-size="page"
       data-fill={fill || undefined}
       role={role}
       aria-labelledby={titleId}
