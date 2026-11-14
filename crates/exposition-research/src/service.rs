@@ -617,6 +617,13 @@ impl ResearchService {
         lock(&self.shared.batches).contains(run_id) || lock(&self.shared.runs).get(run_id).is_some_and(|r| !r.finished)
     }
 
+    /// Whether a workflow batch executes `run_id` now. A batch is part of its
+    /// workflow run and is stopped through it ([`Self::cancel_run`] cancels
+    /// interactive runs only).
+    pub fn is_batch_run(&self, run_id: &str) -> bool {
+        lock(&self.shared.batches).contains(run_id)
+    }
+
     /// Runs executing now in the open project (interactive and batch).
     pub fn active_run_ids(&self) -> Vec<String> {
         let root = self.workspace_root();

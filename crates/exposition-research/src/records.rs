@@ -40,6 +40,9 @@ pub struct RunRecordInfo {
     pub deleted_at_ms: Option<u64>,
     /// Project files the run read (its declared inputs and code file).
     pub inputs: Vec<WorkspacePath>,
+    /// The workflow run (`wrun-…`) whose batch this is: it is part of that
+    /// run and is stopped through it, never on its own.
+    pub workflow_run: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +89,35 @@ fn deleted_outputs_dir(root: &Path, id: &str) -> PathBuf {
     join(root, ARTIFACTS).join(DELETED).join(id)
 }
 
+/// Name of the file recording when something was deleted (next to a
+/// deleted record, inside a run's deleted-outputs folder).
+const DELETED_AT: &str = ".deleted-at";
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn write_deleted_at(path: &Path) {
+    let _ = std::fs::write(path, now_ms().to_string());
+}
+
+/// When something was deleted: the recorded time, else (records deleted by
+/// an earlier build) the file's modification time.
+fn deleted_at(marker: &Path, fallback: &Path) -> u64 {
+    std::fs::read_to_string(marker).ok().and_then(|t| t.trim().parse().ok()).unwrap_or_else(|| modified_ms(fallback))
+}
+
+fn deleted_record_marker(root: &Path, id: &str) -> PathBuf {
+    join(root, RUNS).join(DELETED).join(format!("{id}{DELETED_AT}"))
+}
+
+/// Move a file to `to` only if nothing is there: never replaces (a plain
+/// rename replaces an existing file on Windows). The workspace's shared
+/// create-new move (`AlreadyExists` when anything is at `to`).
+pub(crate) fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    exposition_workspace::fsutil::move_no_replace(from, to)
+}
+
 fn modified_ms(path: &Path) -> u64 {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -110,6 +142,21 @@ fn free_name(dir: &Path, name: &str) -> String {
         .unwrap_or_else(|| format!("{stem} ({}){ext}", uuid::Uuid::new_v4().simple()))
 }
 
+/// Move `from` into `dir` under `name` or a fresh `name (n)`, never
+/// replacing anything (a name taken meanwhile gets the next one). Returns
+/// the name used.
+fn place(from: &Path, dir: &Path, name: &str) -> std::io::Result<String> {
+    for _ in 0..64 {
+        let candidate = free_name(dir, name);
+        match move_no_replace(from, &dir.join(&candidate)) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name"))
+}
+
 /// Regular files directly in `dir` (never through links).
 fn files_in(root: &Path, dir: &Path, rel: &str) -> Vec<OutputFile> {
     if !real_dir_within(root, dir) {
@@ -120,7 +167,7 @@ fn files_in(root: &Path, dir: &Path, rel: &str) -> Vec<OutputFile> {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Ok(meta) = std::fs::symlink_metadata(entry.path()) else { continue };
-        if !meta.is_file() {
+        if !meta.is_file() || name == DELETED_AT {
             continue;
         }
         if let Ok(path) = WorkspacePath::parse(&format!("{rel}/{name}")) {
@@ -193,6 +240,10 @@ fn info(root: &Path, manifest: &RunManifest, active: bool, deleted_at_ms: Option
         active,
         deleted_at_ms,
         inputs: manifest.record.inputs.iter().map(|i| i.path.clone()).collect(),
+        workflow_run: match &manifest.session.owner {
+            crate::types::SessionOwner::Workflow { run, .. } => Some(run.clone()),
+            _ => None,
+        },
     }
 }
 
@@ -231,13 +282,7 @@ impl ResearchService {
             let name = entry.file_name().to_string_lossy().into_owned();
             let Some(id) = name.strip_suffix(".json").filter(|id| valid_run_id(id)) else { continue };
             let Ok(manifest) = read_deleted(&root, id) else { continue };
-            let at = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+            let at = deleted_at(&deleted_record_marker(&root, id), &entry.path());
             out.push(info(&root, &manifest, false, Some(at)));
         }
         out.sort_by(|a, b| b.deleted_at_ms.cmp(&a.deleted_at_ms).then_with(|| a.id.cmp(&b.id)));
@@ -259,12 +304,7 @@ impl ResearchService {
             return Ok(info(&root, &m, true, None));
         }
         let m = read_deleted(&root, id)?;
-        let at = std::fs::metadata(deleted_path(&root, id))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let at = deleted_at(&deleted_record_marker(&root, id), &deleted_path(&root, id));
         Ok(info(&root, &m, false, Some(at)))
     }
 
@@ -297,6 +337,7 @@ impl ResearchService {
             if !found {
                 return Err(ResearchError::UnknownRun(id.to_owned()));
             }
+            let _ = std::fs::remove_file(deleted_record_marker(&root, id));
             let transcript = artifact_dir(&root, id).join(TRANSCRIPT);
             if real_dir_within(&root, &artifact_dir(&root, id)) && transcript.is_file() {
                 std::fs::remove_file(&transcript).map_err(|e| ResearchError::io("removing the run transcript", e))?;
@@ -312,7 +353,9 @@ impl ResearchService {
         if !real_dir_within(&root, &dir) {
             return Err(ResearchError::InvalidWorkspace(format!("{RUNS}/{DELETED} is a link; remove it and retry")));
         }
-        std::fs::rename(&live, &deleted).map_err(|e| ResearchError::io("moving the run record", e))
+        move_no_replace(&live, &deleted).map_err(|e| ResearchError::io("moving the run record", e))?;
+        write_deleted_at(&deleted_record_marker(&root, id));
+        Ok(())
     }
 
     /// Bring a recoverably deleted run record back into the history (never
@@ -329,7 +372,14 @@ impl ResearchService {
         if live.exists() {
             return Err(ResearchError::InvalidRequest(format!("a run record {id} exists again; nothing was replaced")));
         }
-        std::fs::rename(&deleted, &live).map_err(|e| ResearchError::io("restoring the run record", e))?;
+        move_no_replace(&deleted, &live).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                ResearchError::InvalidRequest(format!("a run record {id} exists again; nothing was replaced"))
+            } else {
+                ResearchError::io("restoring the run record", e)
+            }
+        })?;
+        let _ = std::fs::remove_file(deleted_record_marker(&root, id));
         self.run_record(id)
     }
 
@@ -407,11 +457,11 @@ impl ResearchService {
                 continue;
             }
             let from = join(&root, file.path.as_str());
-            let name = free_name(&area, file.path.file_name());
-            std::fs::rename(&from, area.join(&name)).map_err(|e| ResearchError::io("moving a run output", e))?;
+            place(&from, &area, file.path.file_name()).map_err(|e| ResearchError::io("moving a run output", e))?;
             done.bytes += file.bytes;
             done.removed.push(file.path);
         }
+        write_deleted_at(&area.join(DELETED_AT));
         Ok(done)
     }
 
@@ -437,13 +487,18 @@ impl ResearchService {
         }
         let mut restored = Vec::new();
         for file in held {
-            let name = free_name(&dir, file.path.file_name());
-            std::fs::rename(join(&root, file.path.as_str()), dir.join(&name))
-                .map_err(|e| ResearchError::io("restoring a run output", e))?;
+            let from = join(&root, file.path.as_str());
+            let name = if rename {
+                place(&from, &dir, file.path.file_name())
+            } else {
+                move_no_replace(&from, &dir.join(file.path.file_name())).map(|()| file.path.file_name().to_owned())
+            }
+            .map_err(|e| ResearchError::io("restoring a run output", e))?;
             if let Ok(p) = WorkspacePath::parse(&format!("{ARTIFACTS}/{id}/{name}")) {
                 restored.push(p);
             }
         }
+        let _ = std::fs::remove_file(area.join(DELETED_AT));
         remove_if_empty(&root, &area);
         Ok(restored)
     }
@@ -461,6 +516,7 @@ impl ResearchService {
                 .map_err(|e| ResearchError::io("removing a deleted run output", e))?;
             bytes += file.bytes;
         }
+        let _ = std::fs::remove_file(area.join(DELETED_AT));
         remove_if_empty(&root, &area);
         Ok(bytes)
     }
@@ -484,7 +540,7 @@ impl ResearchService {
             if files.is_empty() {
                 continue;
             }
-            let at = files.iter().map(|f| modified_ms(&join(&root, f.path.as_str()))).max().unwrap_or(0);
+            let at = deleted_at(&dir.join(DELETED_AT), &dir);
             out.push(DeletedOutputs { run: id, files, deleted_at_ms: at });
         }
         out.sort_by(|a, b| b.deleted_at_ms.cmp(&a.deleted_at_ms).then_with(|| a.run.cmp(&b.run)));

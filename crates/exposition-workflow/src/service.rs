@@ -187,6 +187,12 @@ impl WorkflowRunService {
         };
         let (store, interrupted) = match open(config.database.as_deref()) {
             Ok(opened) => opened,
+            // A newer history is left exactly as it is (never set aside or
+            // rewritten); this session keeps its runs in memory.
+            Err(e) if e.code == store::STORE_NEWER => {
+                tracing::warn!("{}", e.message);
+                open(None)?
+            }
             Err(e) => match config.database.as_deref() {
                 // An unusable history never keeps the application from
                 // starting: it is set aside (kept for inspection) and a new

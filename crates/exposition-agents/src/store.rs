@@ -285,7 +285,7 @@ impl Store {
     fn init(conn: Connection, path: Option<PathBuf>) -> StoreResult<Self> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        migrate(&conn)?;
+        migrate(&conn, path.as_deref())?;
         Ok(Self { conn: Mutex::new(conn), path })
     }
 
@@ -958,12 +958,26 @@ fn parse_task((id, title, created, updated, spec, status, usage): RawTask) -> St
     })
 }
 
-fn migrate(conn: &Connection) -> StoreResult<()> {
+fn migrate(conn: &Connection, path: Option<&Path>) -> StoreResult<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if current > SCHEMA_VERSION {
         return Err(StoreError(format!(
             "the task database uses schema version {current}, newer than this build supports ({SCHEMA_VERSION})"
         )));
+    }
+    // An existing older database is copied aside (consistently, with
+    // VACUUM INTO) before it is upgraded; no backup, no upgrade.
+    if current > 0
+        && current < SCHEMA_VERSION
+        && let Some(path) = path
+    {
+        let backup = PathBuf::from(format!("{}.premigration-v{current}-{}", path.display(), now_ms()));
+        let target = backup.to_str().ok_or_else(|| StoreError("the backup path is not valid text".into()))?;
+        conn.execute("VACUUM INTO ?1", [target]).map_err(|e| {
+            StoreError(format!(
+                "the task database could not be backed up before upgrading it, so it was not changed: {e}"
+            ))
+        })?;
     }
     for (version, sql) in MIGRATIONS {
         if *version > current {
@@ -1068,6 +1082,18 @@ mod tests {
         let store = Store::open(&db).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(store.tasks().unwrap().len(), 1, "existing tasks stay loadable");
+        // The older database was copied aside before it was upgraded.
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("agents.sqlite3.premigration-v2-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "one pre-migration backup");
+        let old = Connection::open(backups[0].path()).unwrap();
+        let v: i64 = old.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(v, 2, "the backup is the database as it was");
+        let n: i64 = old.query_row("SELECT count(*) FROM tasks", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
         assert!(store.task_bytes(&id).unwrap() > 0);
 
         assert!(store.set_task_deleted(&id, Some(10)).unwrap());

@@ -483,26 +483,57 @@ fn files_declarations_and_structure_are_not_deleted_as_metadata() {
 }
 
 #[test]
-fn entities_with_linked_evidence_need_a_decision() {
+fn only_a_surviving_item_supported_by_evidence_makes_an_entity_deletion_a_decision() {
     let p = project(&[("results/fig.svg", "<svg/>")]);
     let claim = p.create(EntityKind::Claim, "Claim");
+    let finding = p.create(EntityKind::Finding, "Finding");
+    let lone = p.create(EntityKind::Finding, "Lone finding");
     let fig = p.resource("results/fig.svg");
     let evidence = p.evidence(EvidenceKind::Computational, &fig.id, &[], &["results/fig.svg"]);
+    // Only the subject of evidence, nothing else uses it: no decision.
+    p.evidence(EvidenceKind::Computational, &lone, &[], &[]);
+    assert_eq!(p.svc.check_entity_delete(&lone).unwrap().impacts, vec![]);
+    // The finding provides evidence for the claim.
     p.apply(vec![GraphOperation::AddRelation {
         kind: RelationKind::EvidenceFor,
-        from: EntityRef::Id { id: fig.id.clone() },
+        from: EntityRef::Id { id: finding.clone() },
         to: EntityRef::Id { id: claim.clone() },
         evidence_kind: Some(EvidenceKind::Computational),
         evidence: vec![evidence.clone()],
         note: None,
     }]);
-    let check = p.svc.check_entity_delete(&claim).unwrap();
+    let support = p.relation(RelationKind::EvidenceFor, &finding, &claim).unwrap();
+    // Deleting the supported claim affects nothing that remains.
+    assert_eq!(p.svc.check_entity_delete(&claim).unwrap().impacts, vec![]);
+    // Deleting the link itself is the action, not a consequence.
+    assert_eq!(p.svc.check_relation_delete(&support).unwrap().impacts, vec![]);
+    // Deleting what provides the evidence leaves the claim without it.
+    let check = p.svc.check_entity_delete(&finding).unwrap();
     assert_eq!(kinds(&check.impacts), vec![ImpactKind::RetainedEvidence]);
-    assert_eq!(check.impacts[0].consumers[0].label, "fig.svg");
+    assert_eq!(check.impacts[0].consumers[0].label, "Claim");
     // After deletion the evidence record itself is unchanged history.
-    p.svc.delete_entity(&Origin::User, &claim, false).unwrap();
+    p.svc.delete_entity(&Origin::User, &finding, false).unwrap();
     let detail = p.svc.entity_detail(&fig.id).unwrap();
     assert!(detail.evidence.iter().any(|e| e.id == evidence));
+}
+
+#[test]
+fn a_composite_whose_pinned_revision_was_purged_reads_as_incomplete() {
+    let p = project(&[("data/obs.csv", "x\n")]);
+    let child = p.save(child_fit());
+    let parent = p.save(parent(&child.id, 1));
+    assert_eq!(parent.validation.state, DraftState::WellFormed, "{:?}", parent.validation.diagnostics);
+    p.svc.delete_workflow(&Origin::User, &child.id, true, true).unwrap();
+    let read = p.svc.workflow(&parent.id, None).unwrap();
+    assert_eq!(read.validation.state, DraftState::Incomplete);
+    assert!(read.validation.diagnostics.iter().any(|d| d.code == "workflow.compositeMissing"));
+    assert!(!read.validation.runnable);
+    let summary = p.svc.workflows().unwrap().into_iter().find(|w| w.id == parent.id).unwrap();
+    assert_eq!(summary.state, DraftState::Incomplete);
+    assert!(summary.errors >= 1);
+    // A workflow whose pins exist reads as saved.
+    let other = p.save(child_fit());
+    assert_eq!(p.svc.workflow(&other.id, None).unwrap().validation.state, other.validation.state);
 }
 
 // ------------------------------------------------------------ relationships ----

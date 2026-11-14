@@ -817,3 +817,46 @@ fn run_outputs_are_deleted_recoverably_restored_without_overwriting_and_purged()
     assert_eq!(research.trash_run_outputs(one, &|_| false).unwrap_err().code(), "research.runActive");
     research.set_batch_live(one, false);
 }
+
+/// P1 fixes: deletion times are recorded when something is deleted (not the
+/// moved file's own time); moves never replace an existing file; a workflow
+/// batch's record names the workflow run it belongs to.
+#[test]
+fn deletion_times_are_recorded_moves_never_replace_and_batches_name_their_run() {
+    let f = fixture();
+    let research = &f.project.research;
+    let one = "run-cccc000000000001";
+    let batch = "run-cccc000000000002";
+    record_run(&f.root, one, vec![], vec![]);
+    let mut manifest = record_run(&f.root, batch, vec![], vec![]);
+    manifest.session.owner = SessionOwner::Workflow { run: "wrun-0123".into(), step: "fit".into() };
+    write_manifest(&f.root, &manifest).unwrap();
+    let records = research.run_records().unwrap();
+    assert_eq!(records.iter().find(|r| r.id == batch).unwrap().workflow_run.as_deref(), Some("wrun-0123"));
+    assert_eq!(records.iter().find(|r| r.id == one).unwrap().workflow_run, None);
+
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    research.delete_run_record(one, false).unwrap();
+    let deleted = research.deleted_run_records().unwrap();
+    assert!(deleted[0].deleted_at_ms.unwrap() >= before, "{:?} < {before}", deleted[0].deleted_at_ms);
+    assert!(research.run_record(one).unwrap().deleted_at_ms.unwrap() >= before);
+    research.trash_run_outputs(one, &|_| false).unwrap();
+    let held = research.deleted_run_outputs().unwrap();
+    assert!(held[0].deleted_at_ms >= before, "{} < {before}", held[0].deleted_at_ms);
+    assert_eq!(held[0].files.len(), 2, "the deletion-time marker is not an output");
+    research.restore_run_record(one).unwrap();
+    research.purge_deleted_outputs(one).unwrap();
+    assert!(!f.root.join(".exposition/artifacts/deleted").join(one).exists());
+
+    // A move never replaces what is there.
+    let (a, b) = (f.root.join("a.txt"), f.root.join("b.txt"));
+    std::fs::write(&a, "a").unwrap();
+    std::fs::write(&b, "b").unwrap();
+    let err = crate::records::move_no_replace(&a, &b).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "b");
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "a");
+    crate::records::move_no_replace(&a, &f.root.join("c.txt")).unwrap();
+    assert!(!a.exists() && f.root.join("c.txt").is_file());
+}

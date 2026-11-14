@@ -198,6 +198,61 @@ pub(crate) fn is_retired(conn: &Connection, id: &WorkflowId) -> Result<bool, Sto
     Ok(conn.query_row("SELECT 1 FROM retired_workflows WHERE id = ?1", [id.as_str()], |_| Ok(())).optional()?.is_some())
 }
 
+/// Composite steps whose pinned revision no longer exists (a deleted or
+/// purged revision), at any nesting depth: (step id, step label, workflow,
+/// revision). A stored validation is from save time; this is checked when
+/// the revision is read.
+fn missing_pins(
+    conn: &Connection,
+    definition: &WorkflowDefinition,
+) -> Result<Vec<(String, String, WorkflowId, u64)>, StoreError> {
+    fn walk(
+        conn: &Connection,
+        definition: &WorkflowDefinition,
+        depth: u32,
+        out: &mut Vec<(String, String, WorkflowId, u64)>,
+        top: Option<(&str, &str)>,
+    ) -> Result<(), StoreError> {
+        for step in &definition.steps {
+            let Some(c) = &step.composite else { continue };
+            let (id, label) = top.unwrap_or((step.id.as_str(), step.label.as_str()));
+            match load_row(conn, &c.workflow, Some(c.revision))? {
+                None => out.push((id.to_owned(), label.to_owned(), c.workflow.clone(), c.revision)),
+                Some(child) if depth < 3 => walk(conn, &child.body.definition, depth + 1, out, Some((id, label)))?,
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(conn, definition, 1, &mut out, None)?;
+    Ok(out)
+}
+
+/// Mark a stored validation that pins revisions which no longer exist: the
+/// draft is incomplete (and cannot run) until it is pointed elsewhere.
+fn mark_missing_pins(validation: &mut WorkflowValidation, missing: &[(String, String, WorkflowId, u64)]) {
+    for (step, label, _, revision) in missing {
+        validation.diagnostics.push(super::WorkflowDiagnostic {
+            severity: crate::ops::DiagnosticSeverity::Error,
+            code: "workflow.compositeMissing".into(),
+            message: format!(
+                "Step “{label}” runs revision {revision} of a saved workflow, and that revision was deleted; choose another revision before this workflow can run."
+            ),
+            rule: None,
+            step: Some(step.clone()),
+            port: None,
+            input: None,
+            outcome: None,
+            connection: None,
+        });
+        validation.errors += 1;
+    }
+    if !missing.is_empty() {
+        validation.state = DraftState::Incomplete;
+    }
+}
+
 fn workflow_entity(store_entities: Vec<Entity>) -> Option<Entity> {
     store_entities.into_iter().find(|e| e.lifecycle != Lifecycle::Tombstoned)
 }
@@ -415,6 +470,7 @@ impl GraphService {
                 .ok_or_else(|| GraphError::new("workflow.unknown", "That workflow (revision) does not exist."))?;
             let entity = workflow_entity(store.entities_by_key(EntityKind::Workflow, id.as_str())?).map(|e| e.id);
             let mut validation = row.body.validation;
+            mark_missing_pins(&mut validation, &missing_pins(store.connection(), &row.body.definition)?);
             // Never trust a stored claim of runnability.
             validation.runnable = false;
             validation.runnable_reason = super::NOT_RUNNABLE_REASON.to_owned();
@@ -465,14 +521,17 @@ impl GraphService {
                 let id = WorkflowId::parse(&id).map_err(|_| untrusted("id"))?;
                 let row = decode_row(rev, hash, state, body, saved)?;
                 let entity = workflow_entity(store.entities_by_key(EntityKind::Workflow, id.as_str())?).map(|e| e.id);
+                let mut validation = row.body.validation.clone();
+                validation.state = row.state;
+                mark_missing_pins(&mut validation, &missing_pins(conn, &row.body.definition)?);
                 out.push(WorkflowSummary {
                     id,
                     revision: row.revision,
                     title: row.body.definition.title.clone(),
                     preset: row.body.definition.preset.clone(),
-                    state: row.state,
+                    state: validation.state,
                     runnable: false,
-                    errors: row.body.validation.errors,
+                    errors: validation.errors,
                     warnings: row.body.validation.warnings,
                     entity,
                     origin: row.body.origin,

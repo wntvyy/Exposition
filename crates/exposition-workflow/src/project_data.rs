@@ -167,6 +167,10 @@ impl ResearchRecords for ResearchServiceRecords {
         if !self.service.run_active(id) {
             return true;
         }
+        if self.service.is_batch_run(id) {
+            // A workflow batch is stopped through its workflow run only.
+            return false;
+        }
         let (service, runtime, run) = (Arc::clone(&self.service), self.runtime.clone(), id.to_owned());
         // Off any async context: the cancel waits for the kernel.
         let _ = std::thread::spawn(move || runtime.block_on(service.cancel_run(&run))).join();
@@ -254,7 +258,10 @@ fn active_work_choice() -> OpChoice {
     OpChoice {
         key: CHOICE_ACTIVE_WORK.into(),
         label: "Work that is running now".into(),
-        options: vec![option("skip", "Leave it running and keep these items"), option("stop", "Stop it, then delete")],
+        options: vec![
+            option("skip", "Leave it running and keep these items"),
+            option("stop", "Stop it, then delete (stopping cannot be undone, even if a deletion then fails)"),
+        ],
         default: "skip".into(),
     }
 }
@@ -423,9 +430,12 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
         && let Ok(records) = research.records()
     {
         for r in records.iter().filter(|r| r.active) {
+            // A workflow batch is part of its workflow run (listed and
+            // stopped as that run, never on its own).
+            let owner = research_consumer(cx, r);
             for input in &r.inputs {
                 if let Some(t) = under_any(input, paths) {
-                    active.entry(t).or_default().push(consumer("run", &r.id, &r.label));
+                    active.entry(t).or_default().push(owner.clone());
                 }
             }
         }
@@ -433,7 +443,7 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
     if let Some(tasks) = cx.tasks
         && let Ok(records) = tasks.records()
     {
-        for task in records.iter().filter(|t| t.active) {
+        for task in records.iter().filter(|t| t.active && in_project(cx, &t.workspace_root)) {
             for p in tasks.paths(task.id.0.as_str()) {
                 for (t, target) in paths.iter().enumerate() {
                     if overlaps(&p, target) {
@@ -545,9 +555,20 @@ pub fn prepare_paths(cx: &DataContext<'_>, plan: &OpPlan, choices: &BTreeMap<Str
             ),
             ImpactKind::EnabledTrigger => {
                 for c in &impact.consumers {
-                    let ok = cx
-                        .triggers
-                        .is_some_and(|t| WorkflowTriggerId::parse(&c.id).is_ok_and(|id| t.disable(&id).is_ok()));
+                    let ok = cx.triggers.is_some_and(|t| {
+                        WorkflowTriggerId::parse(&c.id).is_ok_and(|id| {
+                            let done = t.disable(&id).is_ok();
+                            if done && let Some(key) = deletion_key(cx, &impact.target) {
+                                DISABLED_FOR_DELETION
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .entry(key)
+                                    .or_default()
+                                    .push(id);
+                            }
+                            done
+                        })
+                    });
                     if !ok {
                         refuse(
                             &impact.target,
@@ -563,6 +584,10 @@ pub fn prepare_paths(cx: &DataContext<'_>, plan: &OpPlan, choices: &BTreeMap<Str
             _ => {}
         }
     }
+    // A refused path is not deleted: its triggers go back on.
+    for r in &refusals {
+        reenable_for(cx, &r.target);
+    }
     refusals
 }
 
@@ -571,10 +596,62 @@ fn stop_consumer(cx: &DataContext<'_>, c: &OpConsumer) -> bool {
         "run" if c.id.starts_with("wrun-") => {
             WorkflowRunId::parse(&c.id).is_ok_and(|id| cx.runs.stop_and_wait(&id, STOP_TIMEOUT))
         }
-        "run" => cx.research.is_some_and(|r| r.stop(&c.id)),
+        "run" => stop_research(cx, &c.id),
         "task" => cx.tasks.is_some_and(|t| t.stop(&c.id)),
         _ => false,
     }
+}
+
+/// Stop a research run: a workflow batch through its workflow run (the
+/// research service cancels interactive runs only), anything else directly.
+fn stop_research(cx: &DataContext<'_>, id: &str) -> bool {
+    let Some(research) = cx.research else { return false };
+    match research.record(id).ok().and_then(|r| r.workflow_run) {
+        Some(owner) => WorkflowRunId::parse(&owner).is_ok_and(|w| cx.runs.stop_and_wait(&w, STOP_TIMEOUT)),
+        None => research.stop(id),
+    }
+}
+
+/// The consumer to name (and stop) for an active research run: its workflow
+/// run when it is a batch of one.
+fn research_consumer(cx: &DataContext<'_>, r: &ResearchRecord) -> OpConsumer {
+    match &r.workflow_run {
+        Some(owner) => {
+            let title = WorkflowRunId::parse(owner)
+                .ok()
+                .and_then(|id| cx.runs.run_any(&id).ok())
+                .map(|(run, _)| run.title)
+                .unwrap_or_else(|| r.label.clone());
+            consumer("run", owner, &title)
+        }
+        None => consumer("run", &r.id, &r.label),
+    }
+}
+
+/// `root` (a task's project folder) is the open project.
+fn in_project(cx: &DataContext<'_>, root: &str) -> bool {
+    cx.root.as_ref().is_some_and(|open| crate::plan::project_key(open) == crate::plan::project_key(Path::new(root)))
+}
+
+/// Triggers `prepare_paths` turned off for a path whose deletion is under
+/// way, keyed by (project, path): turned back on when the deletion does not
+/// happen (refused, failed, skipped).
+type DisabledTriggers = BTreeMap<(String, String), Vec<WorkflowTriggerId>>;
+static DISABLED_FOR_DELETION: std::sync::Mutex<DisabledTriggers> = std::sync::Mutex::new(BTreeMap::new());
+
+fn deletion_key(cx: &DataContext<'_>, target: &OpTarget) -> Option<(String, String)> {
+    let OpTarget::Path { path } = target else { return None };
+    let root = cx.root.as_ref().map(|r| crate::plan::project_key(r)).unwrap_or_default();
+    Some((root, path.as_str().to_owned()))
+}
+
+/// Turn back on the triggers turned off for `target` (its deletion did not
+/// happen). Returns how many were turned back on.
+fn reenable_for(cx: &DataContext<'_>, target: &OpTarget) -> usize {
+    let Some(key) = deletion_key(cx, target) else { return 0 };
+    let ids = DISABLED_FOR_DELETION.lock().unwrap_or_else(|p| p.into_inner()).remove(&key).unwrap_or_default();
+    let Some(triggers) = cx.triggers else { return 0 };
+    ids.iter().filter(|id| triggers.reenable(id).is_ok()).count()
 }
 
 /// After file work: reconcile project data with the ACTUAL outcomes.
@@ -584,6 +661,16 @@ fn stop_consumer(cx: &DataContext<'_>, c: &OpConsumer) -> bool {
 /// provenance. Restored paths are indexed (an unrelated file at an old path
 /// gets a new identity; evidence is re-evaluated by content).
 pub fn after_paths(cx: &DataContext<'_>, outcomes: &[OpOutcome]) {
+    // Triggers turned off for a deletion that did not happen go back on.
+    for o in outcomes {
+        if o.status == OpStatus::Succeeded {
+            if let Some(key) = deletion_key(cx, &o.target) {
+                DISABLED_FOR_DELETION.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
+            }
+        } else {
+            reenable_for(cx, &o.target);
+        }
+    }
     let mut deleted: Vec<WorkspacePath> = Vec::new();
     let mut permanent: Vec<WorkspacePath> = Vec::new();
     let mut copies: Vec<(WorkspacePath, WorkspacePath)> = Vec::new();
@@ -844,7 +931,7 @@ fn plan_delete(cx: &DataContext<'_>, target: &OpTarget, permanent: bool, plan: &
                 plan.impacts.push(OpImpact {
                     kind: ImpactKind::ActiveWork,
                     target: target.clone(),
-                    consumers: vec![consumer("run", run, &record.label)],
+                    consumers: vec![research_consumer(cx, &record)],
                     message: format!(
                         "The run {} is active; it is canceled before its record is deleted.",
                         quoted(&record.label)
@@ -1067,7 +1154,10 @@ fn plan_outputs(
         plan.impacts.push(OpImpact {
             kind: ImpactKind::ActiveWork,
             target: target.clone(),
-            consumers: vec![consumer("run", run, &scope.label)],
+            consumers: vec![match (run.starts_with("wrun-"), cx.research.and_then(|r| r.record(run).ok())) {
+                (false, Some(record)) => research_consumer(cx, &record),
+                _ => consumer("run", run, &scope.label),
+            }],
             message: format!(
                 "{} is active and may still write outputs; it is stopped before its outputs are deleted.",
                 upper_first(&scope.label)
@@ -1452,6 +1542,7 @@ fn apply_delete(
             ) {
                 return Ok(o);
             }
+            let mut turned_off: Vec<WorkflowTriggerId> = Vec::new();
             if let Some(triggers) = cx.triggers {
                 let enabled = triggers
                     .list(Some(&id))
@@ -1460,15 +1551,29 @@ fn apply_delete(
                 if enabled && choice(plan, choices, CHOICE_TRIGGERS, "disable") != "disable" {
                     return Ok(skipped(target, "ops.triggerEnabled", "Its trigger is enabled; the workflow was kept."));
                 }
-                if let Err(e) = triggers.disable_workflow(&id) {
-                    return Err(OpError::new(
-                        "ops.triggerEnabled",
-                        format!("Its triggers could not be turned off ({}); the workflow was kept.", e.message),
-                    ));
+                match triggers.disable_workflow(&id) {
+                    Ok(ids) => turned_off = ids,
+                    Err(e) => {
+                        return Err(OpError::new(
+                            "ops.triggerEnabled",
+                            format!("Its triggers could not be turned off ({}); the workflow was kept.", e.message),
+                        ));
+                    }
                 }
             }
             let purge_pinned = choice(plan, choices, CHOICE_PINNED, "keep") == "purge";
-            let deletion = cx.graph.delete_workflow(origin, &id, permanent, purge_pinned)?;
+            let deletion = match cx.graph.delete_workflow(origin, &id, permanent, purge_pinned) {
+                Ok(d) => d,
+                Err(e) => {
+                    // Not deleted: the triggers turned off for it go back on.
+                    if let Some(triggers) = cx.triggers {
+                        for t in &turned_off {
+                            let _ = triggers.reenable(t);
+                        }
+                    }
+                    return Err(e);
+                }
+            };
             if permanent && let Some(triggers) = cx.triggers {
                 let _ = triggers.remove_workflow(&id);
             }
@@ -1499,7 +1604,7 @@ fn apply_delete(
         OpTarget::ResearchRun { run } => {
             let research = cx.research.ok_or_else(|| OpError::new("ops.notSupported", "Research is not available."))?;
             let active = research.record(run)?.active;
-            if let Some(o) = coordinate(plan, choices, target, || research.stop(run), active) {
+            if let Some(o) = coordinate(plan, choices, target, || stop_research(cx, run), active) {
                 return Ok(o);
             }
             delete_research_run(cx, run, permanent, target)
@@ -1539,7 +1644,7 @@ fn apply_delete(
                 if run.starts_with("wrun-") {
                     WorkflowRunId::parse(run).is_ok_and(|id| cx.runs.stop_and_wait(&id, STOP_TIMEOUT))
                 } else {
-                    research.stop(run)
+                    stop_research(cx, run)
                 }
             };
             if let Some(o) = coordinate(plan, choices, target, stop, active) {
@@ -1667,7 +1772,7 @@ fn purge(
     if id == TOMBSTONES {
         let n = cx.graph.cleanup_tombstones(None)?;
         return Ok(ok(Some(format!(
-            "Removed {n} record(s) of deleted files nothing referred to. The project graph file keeps its size until it is compacted."
+            "Removed {n} record(s) of deleted files nothing referred to. The project graph file does not shrink; the freed space is reused by later changes."
         ))));
     }
     let (kind, record) =
@@ -1682,7 +1787,7 @@ fn purge(
                 let _ = triggers.remove_workflow(&wf);
             }
             let message = if deletion.kept.is_empty() {
-                "Purged. The project graph file keeps its size until it is compacted.".to_owned()
+                "Purged. The project graph file does not shrink; the freed space is reused by later changes.".to_owned()
             } else {
                 format!(
                     "Purged. Revision(s) {} are kept because other workflows run them.",
@@ -1963,11 +2068,13 @@ pub fn storage_overview(cx: &DataContext<'_>) -> StorageOverview {
         }
     }
 
-    // Agent tasks (every project's, in the app's task database).
+    // Agent tasks of the open project (the app's task database holds every
+    // project's; other projects' tasks are not listed or purged from here).
     if let Some(tasks) = cx.tasks {
         if let Ok(records) = tasks.records() {
             let items = records
                 .iter()
+                .filter(|t| in_project(cx, &t.workspace_root))
                 .map(|t| StorageItem {
                     target: OpTarget::AgentTask { task: t.id.0.clone() },
                     label: format!(
@@ -1993,7 +2100,7 @@ pub fn storage_overview(cx: &DataContext<'_>) -> StorageOverview {
             ));
         }
         if let Ok(deleted) = tasks.deleted() {
-            recoverable.extend(deleted.iter().map(|t| StorageItem {
+            recoverable.extend(deleted.iter().filter(|t| in_project(cx, &t.workspace_root)).map(|t| StorageItem {
                 target: OpTarget::Recoverable { id: recoverable_id(RECOVERABLE_AGENT_TASK, &t.id.0) },
                 label: format!("Agent task {}", quoted(&t.title)),
                 bytes: Some(t.bytes),
