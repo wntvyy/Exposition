@@ -100,12 +100,11 @@ export function runActions(selected: WorkflowRunSummary[]): { actions: SurfaceAc
   const targets: OpTarget[] = selected.map((r) => ({ kind: "workflowRun", run: r.id }));
   const labels = new Map(selected.map((r) => [targetKey({ kind: "workflowRun", run: r.id }), `run of ${r.title}`]));
   const active = selected.some((r) => ACTIVE_RUN.has(r.state));
+  // A record delete never deletes outputs; "record and outputs" is both targets in one request (one decision).
+  const outputTargets: OpTarget[] = selected.map((r) => ({ kind: "runOutputs", run: r.id }));
+  for (const r of selected) labels.set(targetKey({ kind: "runOutputs", run: r.id }), `outputs of ${r.title}`);
   const remove = (permanent: boolean, outputs: boolean) => async () => {
-    await runUserOperation(
-      { kind: "delete", permanent },
-      targets,
-      outputs ? { labels, presetChoices: { outputs: "delete" }, review: true } : { labels },
-    );
+    await runUserOperation({ kind: "delete", permanent }, outputs ? [...targets, ...outputTargets] : targets, { labels });
   };
   return {
     actions: {
@@ -122,10 +121,17 @@ export function runActions(selected: WorkflowRunSummary[]): { actions: SurfaceAc
     extras: [
       {
         id: "deleteWithOutputs",
+        label: plural(selected.length, "Delete Run and Its Outputs", "Delete Runs and Their Outputs"),
+        icon: FileOutput,
+        description: "Outputs are held for restore (their files stay on disk until purged); never inputs or files the project keeps",
+        isDisabled: !has,
+        run: remove(false, true),
+      },
+      {
+        id: "deleteWithOutputsPermanently",
         label: plural(selected.length, "Delete Run and Its Outputs Permanently…", "Delete Runs and Their Outputs Permanently…"),
         icon: FileOutput,
-        // Outputs are removed only with a permanent deletion of the record (the backend's rule), and only those nothing keeps.
-        description: "Outputs are a separate, reviewed scope; never source inputs or manuscript files",
+        description: "Removes the record and the output files; cannot be restored",
         isDisabled: !has,
         run: remove(true, true),
       },

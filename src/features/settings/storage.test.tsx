@@ -19,7 +19,7 @@ vi.mock("../workspace/store", async () => {
 
 import { ConfirmHost } from "../../ui/components";
 import { useWorkspace } from "../workspace/store";
-import { purgeGroups, StorageSection, storageScope } from "./StorageSection";
+import { purgeTargets, StorageSection, storageScope } from "./StorageSection";
 
 const overview: StorageOverview = {
   categories: [
@@ -61,20 +61,21 @@ describe("storage scope", () => {
     expect(scope).toMatchObject({ bytes: 2 * 1024 * 1024, unmeasured: 2, referenced: 1, active: 1 });
   });
 
-  it("purges records, records with their outputs, and outputs alone as separate plans (the outputs choice is per plan)", () => {
-    const run = (id: string) => ({ kind: "workflowRun" as const, run: id });
-    const item = (id: string) => ({ target: run(id), label: id, bytes: null, createdAtMs: null, referenced: false, active: false });
+  it("purges records and outputs in ONE request (records and their outputs are separate targets)", () => {
+    const item = (target: { kind: "workflowRun" | "runOutputs"; run: string }) => ({ target, label: target.run, bytes: null, createdAtMs: null, referenced: false, active: false });
     expect(
-      purgeGroups([
-        { category: "workflowRuns", item: item("a") },
-        { category: "workflowRuns", item: item("b") },
-        { category: "generatedOutputs", item: item("b") },
-        { category: "generatedOutputs", item: item("c") },
+      purgeTargets([
+        { category: "workflowRuns", item: item({ kind: "workflowRun", run: "a" }) },
+        { category: "workflowRuns", item: item({ kind: "workflowRun", run: "b" }) },
+        { category: "generatedOutputs", item: item({ kind: "runOutputs", run: "b" }) },
+        { category: "generatedOutputs", item: item({ kind: "runOutputs", run: "c" }) },
+        { category: "generatedOutputs", item: item({ kind: "runOutputs", run: "c" }) },
       ]),
     ).toEqual([
-      { targets: [run("a")] },
-      { targets: [run("b")], outputs: "delete" },
-      { targets: [run("c")], outputs: "only" },
+      { kind: "workflowRun", run: "a" },
+      { kind: "workflowRun", run: "b" },
+      { kind: "runOutputs", run: "b" },
+      { kind: "runOutputs", run: "c" },
     ]);
   });
 });

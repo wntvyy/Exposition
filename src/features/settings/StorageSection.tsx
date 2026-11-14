@@ -59,31 +59,21 @@ export function selectableByDefault(category: StorageCategory): string[] {
   return category.items.filter((i) => !i.referenced).map((i) => rowKey(category.id, i));
 }
 
-export interface PurgeGroup {
-  targets: OpTarget[];
-  /** The `outputs` choice: `delete` (record and outputs), `only` (outputs, keep the record), absent (record only). */
-  outputs?: "delete" | "only";
-}
-
-const OUTPUTS = "generatedOutputs";
-
 /**
- * Purge requests for a scope (the backend's `outputs` choice is per plan):
- * records whose outputs are selected too → `delete`; outputs alone → `only`;
- * everything else → records only. Each group is one plan (one decision).
+ * The targets a purge sends: every selected item in ONE request, so a batch
+ * gets one combined decision (records and their outputs are separate targets;
+ * a record never takes its outputs along). Duplicates collapse.
  */
-export function purgeGroups(items: ScopedItem[]): PurgeGroup[] {
-  const outputKeys = new Set(items.filter((s) => s.category === OUTPUTS).map((s) => targetKey(s.item.target)));
-  const records = items.filter((s) => s.category !== OUTPUTS);
-  const recordKeys = new Set(records.map((s) => targetKey(s.item.target)));
-  const both = records.filter((s) => outputKeys.has(targetKey(s.item.target))).map((s) => s.item.target);
-  const recordsOnly = records.filter((s) => !outputKeys.has(targetKey(s.item.target))).map((s) => s.item.target);
-  const outputsOnly = items.filter((s) => s.category === OUTPUTS && !recordKeys.has(targetKey(s.item.target))).map((s) => s.item.target);
-  return [
-    ...(recordsOnly.length ? [{ targets: recordsOnly }] : []),
-    ...(both.length ? [{ targets: both, outputs: "delete" as const }] : []),
-    ...(outputsOnly.length ? [{ targets: outputsOnly, outputs: "only" as const }] : []),
-  ];
+export function purgeTargets(items: ScopedItem[]): OpTarget[] {
+  const seen = new Set<string>();
+  const targets: OpTarget[] = [];
+  for (const s of items) {
+    const key = targetKey(s.item.target);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    targets.push(s.item.target);
+  }
+  return targets;
 }
 
 function formatDate(ms: number | null): string {
@@ -228,20 +218,12 @@ export function StorageSection() {
   const scope = useMemo(() => storageScope(overview, selected), [overview, selected]);
   const labels = useMemo(() => new Map(scope.items.map((s) => [targetKey(s.item.target), s.item.label])), [scope]);
 
-  // One plan per outputs scope (records only / records with outputs / outputs only).
+  // One request for the whole scope: one combined decision.
   const purge = async () => {
     setPurging(true);
     try {
-      let all = true;
-      for (const group of purgeGroups(scope.items)) {
-        const done = await runUserOperation(
-          { kind: "delete", permanent: true },
-          group.targets,
-          group.outputs ? { labels, presetChoices: { outputs: group.outputs } } : { labels },
-        );
-        if (!done) all = false;
-      }
-      if (all) setSelected(new Set());
+      const done = await runUserOperation({ kind: "delete", permanent: true }, purgeTargets(scope.items), { labels });
+      if (done) setSelected(new Set());
     } finally {
       setPurging(false);
     }
@@ -309,7 +291,6 @@ export function StorageSection() {
                     compacted; the result says what was actually reclaimed.
                     {scope.referenced ? ` ${scope.referenced} referenced item${scope.referenced === 1 ? " is" : "s are"} included: you will see what depends on ${scope.referenced === 1 ? "it" : "them"} first.` : ""}
                     {scope.active ? ` ${scope.active} active item${scope.active === 1 ? " is" : "s are"} included: work is stopped only if you choose so.` : ""}
-                    {purgeGroups(scope.items).length > 1 ? " Records and outputs are purged as separate steps." : ""}
                   </span>
                 </>
               )}
