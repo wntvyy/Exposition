@@ -33,7 +33,10 @@ export function resolveResearchKeys(keys: Iterable<string>, listing: ResearchLis
     }
     const item = parseItemKey(key);
     if (!item) continue;
-    if (item.kind === "file") items.push({ kind: "file", path: item.path, name: files.get(item.path) ?? item.path.split("/").pop() ?? item.path });
+    if (item.kind === "file") {
+      const name = files.get(item.path);
+      if (name !== undefined) items.push({ kind: "file", path: item.path, name });
+    }
     else if (item.kind === "result") {
       const result = listing.results.find((r) => r.entity === item.entity);
       if (result) items.push({ kind: "file", path: result.path, name: result.label });

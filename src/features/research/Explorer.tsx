@@ -107,17 +107,25 @@ export function ResearchExplorer() {
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const ref = useRef<HTMLDivElement>(null);
   const menu = useContextMenu();
+  // Copies just created: selected before the listing shows them.
+  const pending = useRef<Set<string>>(new Set());
   const items = resolveResearchKeys(selected, listing);
   const actions = () =>
     researchActions(items, {
       root: useWorkspace.getState().info?.root ?? null,
-      afterCreate: (paths) => setSelected(new Set(paths.map((path) => itemKey({ kind: "file", path })))),
+      afterCreate: (paths) => {
+        const keys = paths.map((path) => itemKey({ kind: "file", path }));
+        pending.current = new Set(keys);
+        setSelected(new Set(keys));
+      },
     });
   useOpSurface("research", ref, actions);
   // Keys that no longer resolve (deleted files, removed experiments) leave the selection.
   useEffect(() => {
     if (!listing) return;
-    const valid = [...selected].filter((k) => resolveResearchKeys([k], listing).length > 0);
+    const resolves = (k: string) => resolveResearchKeys([k], listing).length > 0;
+    for (const k of pending.current) if (resolves(k)) pending.current.delete(k);
+    const valid = [...selected].filter((k) => resolves(k) || pending.current.has(k));
     if (valid.length !== selected.size) setSelected(new Set(valid));
   }, [listing, selected]);
   if (!listing?.space) return null;

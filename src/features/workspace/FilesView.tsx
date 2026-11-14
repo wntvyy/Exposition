@@ -249,10 +249,14 @@ function FileTree({ name, rootPath, entries }: { name: string; rootPath: string;
   const ref = useRef<HTMLDivElement>(null);
   const menu = useContextMenu();
   const index = useMemo(() => entryIndex(dirs), [dirs]);
+  // Copies just created: selected before their folder listing shows them.
+  const pending = useRef<Set<string>>(new Set());
 
   // Forget selected paths that are gone (deleted, renamed, folder closed).
   useEffect(() => {
-    if ([...selected].some((p) => !index.has(p))) setSelected(new Set([...selected].filter((p) => index.has(p))));
+    for (const p of pending.current) if (index.has(p)) pending.current.delete(p);
+    const keep = (p: string) => index.has(p) || pending.current.has(p);
+    if ([...selected].some((p) => !keep(p))) setSelected(new Set([...selected].filter(keep)));
   }, [index, selected]);
 
   const items: FileSelectionItem[] = [...selected].flatMap((path) => {
@@ -264,6 +268,7 @@ function FileTree({ name, rootPath, entries }: { name: string; rootPath: string;
       root: rootPath,
       afterCreate: (paths, folder) => {
         if (folder) setExpanded(new Set([...useWorkspace.getState().expanded, folder]));
+        pending.current = new Set(paths);
         setSelected(new Set(paths));
       },
     });
