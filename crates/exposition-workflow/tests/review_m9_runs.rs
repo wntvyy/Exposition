@@ -335,21 +335,25 @@ fn sweep_and_join(f: &Fixture) -> WorkflowRun {
 /// `step.instances` — appears with no attempts, no environments, and none of
 /// its validated outputs.
 #[test]
-#[ignore = "R-m9 F1: run manifests omit every attempt, output, and environment of repeated (forEach/until) steps"]
 fn review_m9_f1_manifest_lists_the_instances_of_repeated_steps() {
     let f = fixture();
     let run = sweep_and_join(&f);
     let m = manifest::build_manifest(&run);
     let step = m.steps.iter().find(|s| s.step == "sweep").unwrap();
     let sweep_outputs = m.outputs.iter().filter(|o| o.step == "sweep").count();
-    let environments = step.attempts.iter().filter(|a| a.environment.is_some()).count();
+    // Fixed shape (lane D): a repeated step's attempts live under its
+    // instances (`steps[].instances[].attempts`), each with its index.
+    let attempts: Vec<_> = step.attempts.iter().chain(step.instances.iter().flat_map(|i| i.attempts.iter())).collect();
+    let environments = attempts.iter().filter(|a| a.environment.is_some()).count();
     eprintln!(
-        "manifest step sweep: {} attempts, {} environments; manifest outputs of sweep: {}",
-        step.attempts.len(),
+        "manifest step sweep: {} attempts ({} instances), {} environments; manifest outputs of sweep: {}",
+        attempts.len(),
+        step.instances.len(),
         environments,
         sweep_outputs
     );
-    assert_eq!(step.attempts.len(), 2, "both instance attempts belong in the manifest");
+    assert_eq!(step.instances.iter().map(|i| i.index).collect::<Vec<_>>(), vec![0, 1], "both instances are listed");
+    assert_eq!(attempts.len(), 2, "both instance attempts belong in the manifest");
     assert_eq!(environments, 2, "each instance's environment belongs in the manifest");
     assert_eq!(sweep_outputs, 2, "both validated instance datasets belong in the manifest's outputs");
 }
@@ -358,7 +362,6 @@ fn review_m9_f1_manifest_lists_the_instances_of_repeated_steps() {
 /// `step.attempts` only, so a repeated step's image change is never shown,
 /// not even as "unrecorded" — while the same change on a plain sibling is.
 #[test]
-#[ignore = "R-m9 F1: reproduction drift silently skips repeated (forEach/until) steps"]
 fn review_m9_f1_reproduction_shows_drift_of_repeated_steps() {
     let f = fixture();
     let run = sweep_and_join(&f);
