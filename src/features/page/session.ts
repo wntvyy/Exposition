@@ -76,7 +76,7 @@ interface Position {
 }
 
 const NON_EDITABLE: Record<NonEditableReason, string> = {
-  generated: "Generated content (numbering, markers, captions labels) — edit in source",
+  generated: "Generated content (numbering, markers, caption labels) — edit in source",
   code: "Produced by code — edit in source",
   transformed: "Text transformed by a show rule or function — edit in source",
   raw: "Raw/verbatim text — edit in source",

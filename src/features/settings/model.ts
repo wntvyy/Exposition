@@ -103,7 +103,10 @@ export function imageState(configured: string | null, images: DockerImage[] | nu
   return local ? { kind: "present", image: configured, local } : { kind: "missing", image: configured };
 }
 
-/** Select options for local images; the configured image stays selectable even when missing. */
+/**
+ * Select options for local images; the configured image stays selectable even
+ * when missing (marked so only once the local list says it is missing).
+ */
 export function imageOptions(images: DockerImage[] | null, configured: string | null) {
   const options = (images ?? []).map((i) => ({
     id: i.reference,
@@ -111,7 +114,7 @@ export function imageOptions(images: DockerImage[] | null, configured: string | 
     description: [i.size, i.created].filter(Boolean).join(" · ") || undefined,
   }));
   if (configured && !options.some((o) => o.id === configured)) {
-    options.unshift({ id: configured, label: configured, description: "Not present locally" });
+    options.unshift({ id: configured, label: configured, description: images ? "Not present locally" : undefined });
   }
   return options;
 }

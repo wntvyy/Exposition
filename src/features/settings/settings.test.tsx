@@ -175,7 +175,22 @@ describe("Execution", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Use this executable" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(ipc.toolchainsRefresh).toHaveBeenCalled();
-    expect(await screen.findByRole("button", { name: "Use the discovered Python" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Reset Python to the discovered location" })).toBeTruthy();
+    // The location button's accessible name follows its visible label.
+    expect(screen.getByRole("button", { name: "Change location of Python" }).textContent).toContain("Change…");
+  });
+
+  it("shows why a tool does not work with its location, never as a dangling suffix of an empty source", async () => {
+    const docker = { ...python, id: "docker", name: "Docker", category: "container", path: null, source: null, version: null, status: "broken" as const, detail: "version check timed out" };
+    useJobs.setState({ toolchains: [python, docker] });
+    render(<ExecutionSection />);
+    const row = await waitFor(() => {
+      const found = document.querySelector('tr[data-tool-id="docker"]');
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(row.textContent).toContain("version check timed out");
+    expect(row.textContent).not.toContain("·");
   });
 
   it("states what restricted runs enforce and that nothing is configured yet", async () => {
