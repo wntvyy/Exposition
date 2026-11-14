@@ -140,7 +140,7 @@ export function ProviderSettingsDialog() {
               type="password"
               autoComplete="off"
               code
-              placeholder={configured ? "Paste a new key to replace it" : "Paste your Anthropic API key"}
+              placeholder={configured ? undefined : "Paste your Anthropic API key"}
               value={key}
               onChange={setKey}
               className="agents-grow"
@@ -154,13 +154,12 @@ export function ProviderSettingsDialog() {
             </Button>
           </div>
           <p className="ui-meta">
-            The key is kept only in the operating system's credential store. Exposition never shows it again, never writes it to
-            project files or logs, and never passes it to commands it runs.
+            Exposition never shows the key again, never writes it to project files or logs, and never passes it to commands it runs.
           </p>
         </div>
         <TextField label="Model" code value={model} onChange={setModel} description="For example claude-opus-5-5 (default)." />
         <Select label="Effort" value={effort} onChange={setEffort} options={option(EFFORT_LABELS)} />
-        <Select label="Default content consent" value={consent} onChange={setConsent} options={option(CONSENT_LABELS)} />
+        <Select label="Default content sent to the model provider" value={consent} onChange={setConsent} options={option(CONSENT_LABELS)} />
         {message && (
           <p role="status" className="ui-meta" data-testid="agents-settings-message">
             {message}

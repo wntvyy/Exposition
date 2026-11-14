@@ -217,16 +217,10 @@ export function ReviewView({
     <>
       {running && (
         <Banner tone="info" title="The task is still running">
-          Cancel it before reverting; changes keep arriving while it runs.
+          Changes keep arriving while it runs; Keep and Revert are available once it stops.
         </Banner>
       )}
-      {review.checkpoint && (
-        <p className="ui-meta">
-          Checkpoint recorded {new Date(review.checkpoint.createdAtMs).toLocaleString()} ({review.checkpoint.documents.length} open
-          document{review.checkpoint.documents.length === 1 ? "" : "s"}). Changes apply to open documents and are not saved until
-          you save them.
-        </p>
-      )}
+      {review.checkpoint && <p className="ui-meta">Edits apply to open documents and stay unsaved until you save them.</p>}
       {results.length > 0 && (
         <ul className="agents-list" role="status" data-testid="agents-review-results">
           {results.map((r) => (
@@ -238,7 +232,7 @@ export function ReviewView({
         </ul>
       )}
       {review.files.length === 0 ? (
-        <EmptyState title="No changes" description="This task has not changed any files." fill={false} />
+        <EmptyState title="This task has not changed any files" fill={false} />
       ) : (
         <div role="list" className="agents-rows" aria-label="Changed files">
           {review.files.map((file) => (

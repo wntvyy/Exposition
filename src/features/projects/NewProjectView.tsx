@@ -53,7 +53,7 @@ function Diagnostics({ items }: { items: BlueprintDiagnostic[] }) {
   if (items.length === 0) return null;
   const errors = items.filter((d) => d.severity === "error");
   return (
-    <Banner tone={errors.length ? "danger" : "warning"} title={errors.length ? "This blueprint cannot be created" : "Notes"}>
+    <Banner tone={errors.length ? "danger" : "warning"} title={errors.length ? "This project cannot be created" : "Notes"}>
       <ul className="xp-proj__list" data-testid="project-diagnostics">
         {items.map((d, i) => (
           <li key={i} data-code={d.code}>
@@ -300,7 +300,7 @@ function ObjectiveForm() {
         <Select label="Commands and code" value={execution} onChange={(v) => setOptions({ execution: v })} options={(Object.keys(EXECUTION_LABELS) as (keyof typeof EXECUTION_LABELS)[]).map((id) => ({ id, label: EXECUTION_LABELS[id] }))} />
       </div>
       <Banner tone="info" title="How this works">
-        Exposition creates an empty project in the folder below, opens it, and starts an agent task there with the whole project in scope. The agent proposes an organization — it may be research-only — and creates files, research structure, and project entities through the same checked tools people use. It works only inside the new project, and its changes follow the permission you choose. Content is sent to your model provider according to your provider settings.
+        Exposition creates an empty project in the folder below, opens it, and starts an agent task with the whole project in scope. The agent organizes the project (files, research structure, project entities) and works only inside it; its changes and commands follow the choices above. Content is sent to your model provider according to your provider settings.
       </Banner>
     </section>
   );
@@ -350,7 +350,7 @@ export function NewProjectView(_props: EditorProps) {
       />
       <div className="xp-proj__scroll">
         <div className="xp-proj__page">
-          <p className="ui-meta">Start from a preset, or describe an objective and let an agent organize the project. A project can be research-only — a manuscript is optional.</p>
+          <p className="ui-meta">A project can be research-only; a manuscript is optional.</p>
           {mode === "preset" ? <PresetForm /> : <ObjectiveForm />}
           <Location />
           {mode === "preset" && <Preview />}
@@ -360,7 +360,10 @@ export function NewProjectView(_props: EditorProps) {
             </Banner>
           )}
           <p className="ui-meta" data-testid="project-authorization">
-            Creating a project writes only its starting files and records its structure. It does not grant trust, run any code, install anything, or send anything to a model provider.
+            {mode === "preset"
+              ? "Creating a project writes only its starting files and records its structure. It does not grant trust, run any code, install anything, or send anything to a model provider."
+              : // The agent task then runs with the choices above (see How this works); creating the project itself grants nothing.
+                "Creating the project does not grant trust or install anything."}
           </p>
           <footer className="xp-proj__footer">
             {mode === "preset" ? (
