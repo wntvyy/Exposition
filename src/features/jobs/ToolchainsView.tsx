@@ -34,7 +34,7 @@ const CATEGORY_LABEL: Record<string, string> = {
 };
 
 const COLUMNS: SimpleTableColumn<ToolchainInfo>[] = [
-  { id: "tool", title: "Tool", width: "22%", render: (tool) => tool.name },
+  { id: "tool", title: "Tool", width: "22%", isRowHeader: true, render: (tool) => tool.name },
   {
     id: "status",
     title: "Status",

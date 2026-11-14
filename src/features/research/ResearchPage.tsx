@@ -243,15 +243,14 @@ export function ResearchPage() {
   const enabled = Boolean(listing?.space);
   return (
     <div className="exp-rpage" data-testid="research-page" data-state={enabled ? "enabled" : "disabled"}>
-      {/* One F6 stop for the title row and its session toolbar (as before the shared header). */}
-      <div className="exp-rpage__head" data-region="research-header">
-        <PageHeader
-          title="Research"
-          subtitle={<PageSubtitle />}
-          status={<SessionStatus />}
-          toolbar={<SessionBar status={false} />}
-        />
-      </div>
+      {/* One F6 region for the title row and its session toolbar. */}
+      <PageHeader
+        title="Research"
+        subtitle={<PageSubtitle />}
+        status={<SessionStatus />}
+        toolbar={<SessionBar status={false} />}
+        region="research-header"
+      />
       <div className="exp-research__banners">
         {error && (
           <Banner tone="danger" title="Research error">
@@ -305,7 +304,7 @@ export function ResearchPage() {
                 <div className="exp-research exp-rpage__output" role="region" aria-label="Research output" data-region="research-output">
                   <StateSizeProvider value="compact">
                     <div className="exp-research__main">
-                      <div className="exp-research__work">
+                      <div className="exp-research__work ui-inset-reset">
                         <EnvironmentNotice />
                         <CodeInput />
                         <RunOutputView />

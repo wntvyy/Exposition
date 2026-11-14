@@ -69,11 +69,12 @@ function FileInspector({ path }: { path: string }) {
     facts.push({
       key: "imported",
       label: "Imported",
+      valueProps: { "data-testid": "research-import-origin" },
       value: (
-        <span data-testid="research-import-origin">
+        <>
           {origin.mode === "copy" ? "Copied" : "Referenced"} from <code className="ui-code">{origin.source}</code> on{" "}
           {formatClock(origin.importedAtMs)} · sha256 <code className="ui-code">{origin.contentHash.slice(0, 12)}…</code>
-        </span>
+        </>
       ),
     });
   }
@@ -201,11 +202,8 @@ function ResultInspector({ entity }: { entity: EntityId }) {
   facts.push({
     key: "usedBy",
     label: "Used by",
-    value: (
-      <span data-testid="research-result-used-by">
-        {result.usedBy.length === 0 ? "no manuscript" : result.usedBy.map((u) => u.label).join(", ")}
-      </span>
-    ),
+    valueProps: { "data-testid": "research-result-used-by" },
+    value: result.usedBy.length === 0 ? "no manuscript" : result.usedBy.map((u) => u.label).join(", "),
   });
   return (
     <div className="exp-rinspector" data-testid="research-inspector" data-kind="result" data-entity={entity} data-lifecycle={result.lifecycle}>
@@ -351,7 +349,7 @@ function ExperimentEditor({ entity }: { entity: EntityId | null }) {
             {detail.attempts.length === 0 ? (
               <p className="ui-meta">No run of the procedure yet.</p>
             ) : (
-              <ul className="exp-research__runs exp-rinspector__runs" data-testid="research-attempts">
+              <ul className="exp-research__runs" data-testid="research-attempts">
                 {detail.attempts.map((run) => (
                   <RunRow
                     key={run.id}

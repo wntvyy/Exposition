@@ -19,7 +19,7 @@ describe("Lean status vocabulary", () => {
     [{ kind: "checkedWithAxioms", revision: 5, toolchain, axioms: ["cheat"], declarations: [], warnings: 0 }, "warning", "Checked with axioms"],
     [{ kind: "reliesOnCompiledCode", revision: 5, toolchain, axioms: ["x._native.native_decide.ax_1_1"], declarations: [], warnings: 0 }, "warning", "Relies on compiled code"],
     [{ kind: "partiallyChecked", revision: 5, toolchain, line: 1, reason: "Lean stopped elaborating at `#exit` on line 2." }, "warning", "Partially checked"],
-    [{ kind: "unverified", revision: 5, toolchain, reason: "The file disables kernel type checking." }, "warning", "Not verified"],
+    [{ kind: "unverified", revision: 5, toolchain, reason: "The file disables kernel type checking." }, "idle", "Not verified"],
     [{ kind: "serverUnavailable", reason: "too many interactive sessions are running" }, "unavailable", "Lean not started"],
     [{ kind: "toolchainMissing", toolchain: "leanprover/lean4:v4.0.0", install: "leanprover/lean4:v4.0.0", guidance: "Install the pinned toolchain." }, "unavailable", "Toolchain missing"],
     [{ kind: "untrusted", workspaceRoot: "C:\\p" }, "unavailable", "Untrusted"],

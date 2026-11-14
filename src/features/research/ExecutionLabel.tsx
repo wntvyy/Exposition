@@ -21,18 +21,17 @@ export const RESTRICTED_SCOPE =
 export function ExecutionLabel() {
   const full = `${TRUSTED_NATIVE_LABEL}. The research folder and session separate your work but are not a sandbox. ${RESTRICTED_SCOPE}`;
   return (
-    <span
-      className="exp-research__mode"
+    <Badge
+      tone="warning"
+      icon={ShieldAlert}
       data-testid="research-execution-mode"
       data-mode="trustedNative"
       title={full}
       aria-label={full}
       role="note"
     >
-      <Badge tone="warning" icon={ShieldAlert}>
-        Trusted native — your account&rsquo;s privileges
-      </Badge>
-    </span>
+      Trusted native — your account&rsquo;s privileges
+    </Badge>
   );
 }
 

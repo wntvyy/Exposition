@@ -107,6 +107,7 @@ function JobRow({ job, now, selected }: { job: JobSummary; now: number; selected
     <li className="exp-jobs__row" data-job-id={job.info.id}>
       <ListRow
         selected={selected}
+        current={selected}
         title={
           // The button covers the whole row (jobs.css); Cancel stays above it.
           <button
@@ -221,7 +222,7 @@ function JobDetail({ job, now }: { job: JobSummary; now: number }) {
               value: job.info.policy.kind === "trustedNative" ? "Trusted native" : `Restricted (${job.info.policy.backend})`,
             },
             ...(job.pid !== null
-              ? [{ key: "pid", label: "Process", value: <span data-testid="job-pid">{job.pid}</span> }]
+              ? [{ key: "pid", label: "Process", value: job.pid, valueProps: { "data-testid": "job-pid" } }]
               : []),
           ]}
         />

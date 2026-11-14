@@ -98,7 +98,7 @@ export function DeclarationEvidenceControls({
             evidence of revision {formal.revision ?? "?"} · file {verdictView(formal.fileVerdict).label.toLowerCase()} ·{" "}
             {formal.toolchain}
           </span>
-          <StatusText {...freshnessStatus(latest.freshness)} />
+          <StatusText {...freshnessStatus(latest.freshness)} wrap />
           {evidence && evidence.evidence.length > 1 && <span className="ui-meta">{evidence.evidence.length - 1} older</span>}
           <span className="ui-meta">dependencies: {formal.dependencies.kind === "unavailable" ? "not reported by the audit" : formal.dependencies.names.join(", ")}</span>
         </div>

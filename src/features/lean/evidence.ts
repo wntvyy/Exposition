@@ -52,7 +52,7 @@ export function verdictView(verdict: FormalVerdict | DeclarationVerdict): { stat
     case "partiallyChecked":
       return { status: "warning", label: "Partially checked" };
     case "notVerified":
-      return { status: "warning", label: "Not verified" };
+      return { status: "idle", label: "Not verified" };
     case "errors":
       return { status: "failed", label: "Errors" };
   }

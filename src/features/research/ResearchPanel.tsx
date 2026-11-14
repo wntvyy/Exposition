@@ -161,7 +161,7 @@ export function ResearchPanel() {
         <LoadingState title="Looking for Python, R, and Julia…" />
       ) : environmentsError ? null : (
         <div className="exp-research__main">
-          <div className="exp-research__work">
+          <div className="exp-research__work ui-inset-reset">
             <EnvironmentNotice />
             <CodeInput />
             <RunOutputView />
@@ -306,7 +306,7 @@ export function EnvironmentNotice() {
   }
   if (!session && env && env.availability.kind === "unavailable") {
     return (
-      <div className="exp-research__unavailable" data-testid="research-unavailable" data-environment={env.id}>
+      <div data-testid="research-unavailable" data-environment={env.id}>
         <UnavailableState
           fill={false}
           title={`${env.displayName} is not available`}
@@ -603,8 +603,9 @@ function inputFact(manifest: RunManifest, input: RunManifest["record"]["inputs"]
   return {
     key: `input:${input.path}`,
     label: "Input",
+    valueProps: { "data-testid": "research-input", "data-path": input.path, "data-unsaved": unsaved ? "true" : "false" },
     value: (
-      <span data-testid="research-input" data-path={input.path} data-unsaved={unsaved ? "true" : "false"}>
+      <>
         <code className="ui-code">{input.path}</code>
         {input.revision !== null && ` · revision ${input.revision}`}
         {hash && (
@@ -619,7 +620,7 @@ function inputFact(manifest: RunManifest, input: RunManifest["record"]["inputs"]
           (code
             ? " · unsaved buffer (its exact text is kept in the run manifest)"
             : " · unsaved buffer (only its digest is recorded)")}
-      </span>
+      </>
     ),
   };
 }
@@ -732,6 +733,7 @@ export function RunRow({
         role="button"
         tabIndex={0}
         selected={selected}
+        current={selected}
         aria-current={selected || undefined}
         data-run-id={run.id}
         codeTitle={title === undefined}

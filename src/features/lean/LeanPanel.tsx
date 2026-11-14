@@ -214,12 +214,13 @@ function LeanDocumentView({ state }: { state: LeanDocumentState }) {
   const text = modelText(state);
 
   const facts: KeyValueItem[] = [
-    { key: "revision", label: "Revision", value: <span data-testid="lean-revision">{state.revision}</span> },
+    { key: "revision", label: "Revision", value: state.revision, valueProps: { "data-testid": "lean-revision" } },
     {
       key: "toolchain",
       label: "Toolchain",
+      valueProps: { "data-testid": "lean-toolchain" },
       value: (
-        <div data-testid="lean-toolchain">
+        <>
           {toolchain ? (
             <>
               <code className="ui-code">{toolchain.name}</code>
@@ -231,7 +232,7 @@ function LeanDocumentView({ state }: { state: LeanDocumentState }) {
           ) : (
             "—"
           )}
-        </div>
+        </>
       ),
     },
   ];
@@ -239,8 +240,9 @@ function LeanDocumentView({ state }: { state: LeanDocumentState }) {
     facts.push({
       key: "axioms",
       label: "Axioms",
+      valueProps: { "data-testid": "lean-axioms" },
       value: (
-        <span data-testid="lean-axioms">
+        <>
           {axioms.length
             ? axioms.map((a) => (
                 <code key={a} className="ui-code">
@@ -248,7 +250,7 @@ function LeanDocumentView({ state }: { state: LeanDocumentState }) {
                 </code>
               ))
             : "none"}
-        </span>
+        </>
       ),
     });
   }

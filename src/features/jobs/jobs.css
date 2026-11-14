@@ -39,13 +39,10 @@
   list-style: none;
 }
 
-/* The selected job keeps the focused-list tint while focus is anywhere in the list. */
-.exp-jobs__rows:focus-within .ui-list-row[data-selected] {
-  background: var(--color-accent-subtle);
-}
-
-/* The job's button covers its whole row; the row's Cancel button stays above it. */
-.exp-jobs__row > .ui-list-row {
+/* The job's button covers its whole row (a real button for keyboard and
+   screen readers); the row's Cancel button stays above it. */
+.exp-jobs__row > .ui-list-row,
+.exp-jobs__row .ui-list-row__trailing {
   position: relative;
 }
 .exp-jobs__select {
@@ -55,12 +52,9 @@
   padding: 0;
   border: 0;
   background: none;
-  color: inherit;
-  font: inherit;
   text-align: start;
   text-overflow: ellipsis;
   white-space: nowrap;
-  cursor: default;
 }
 .exp-jobs__select::after {
   content: "";
@@ -72,9 +66,6 @@
 }
 .exp-jobs__select:focus-visible::after {
   box-shadow: inset 0 0 0 var(--focus-ring-width) var(--color-focus-ring);
-}
-.exp-jobs__row .ui-list-row__trailing {
-  position: relative;
 }
 
 .exp-jobs__job {
