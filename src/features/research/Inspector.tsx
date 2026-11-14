@@ -85,7 +85,7 @@ function FileInspector({ path }: { path: string }) {
         actions={
           <>
             {script && (
-              <Button size="sm" variant="primary" icon={Play} onPress={() => void runFile(path)}>
+              <Button size="sm" icon={Play} onPress={() => void runFile(path)}>
                 Run file
               </Button>
             )}
@@ -383,7 +383,6 @@ function WorkflowInspector({ entity }: { entity: EntityId }) {
           editor && (
             <Button
               size="sm"
-              variant="primary"
               onPress={() => {
                 editors.open(resource);
                 pages.show(EDITOR_PAGE);

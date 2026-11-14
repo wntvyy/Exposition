@@ -178,7 +178,7 @@ function CategoryGroup({
   return (
     <SettingsGroup
       title={category.label}
-      count={`(${category.items.length}${category.bytes !== null ? ` · ${formatBytes(category.bytes)}` : ""})`}
+      count={`${category.items.length}${category.bytes !== null ? ` · ${formatBytes(category.bytes)}` : ""}`}
       description={category.note}
       testId={`storage-category-${category.id}`}
       actions={

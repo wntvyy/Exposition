@@ -11,7 +11,8 @@ import type { ImpactReport } from "../../bindings/ImpactReport";
 import type { Relation } from "../../bindings/Relation";
 import { errorMessage } from "../../lib/ipc";
 import { graphCommands } from "../../lib/graphIpc";
-import { Badge, Banner, Section, Spinner, StatusText, type Status } from "../../ui/components";
+import { RelationStatus } from "../graph/RelationStatus";
+import { Banner, Section, Spinner, StatusText, type Status } from "../../ui/components";
 
 const READING: Record<string, string> = {
   contains: "contains",
@@ -104,21 +105,6 @@ export function EvidenceRecord({ evidence, freshness }: { evidence: Evidence; fr
   );
 }
 
-/** A relation's status: settled facts as a muted suffix, a suggestion as a provisional (dashed) badge. */
-function RelationStatus({ status }: { status: Relation["status"] }) {
-  if (status === "suggested") {
-    return (
-      <>
-        {" "}
-        <Badge dashed tone="accent">
-          {status}
-        </Badge>
-      </>
-    );
-  }
-  return <span className="ui-meta"> · {status}</span>;
-}
-
 function RelationRow({ relation, detail, outgoing }: { relation: Relation; detail: EntityDetail; outgoing: boolean }) {
   const otherId = outgoing ? relation.to : relation.from;
   const other = detail.neighbors.find((n) => n.id === otherId);
@@ -128,8 +114,7 @@ function RelationRow({ relation, detail, outgoing }: { relation: Relation; detai
     : `${other?.label ?? otherId} ${READING[relation.kind] ?? relation.kind} ${self}`;
   return (
     <li data-testid="graph-relation" data-kind={relation.kind} data-direction={outgoing ? "out" : "in"} data-status={relation.status}>
-      <span className="exp-graph__relation">{text}</span>
-      <RelationStatus status={relation.status} />
+      <span className="exp-graph__relation">{text}</span> <RelationStatus status={relation.status} />
       {relation.note && <span className="ui-meta"> · {relation.note}</span>}
     </li>
   );

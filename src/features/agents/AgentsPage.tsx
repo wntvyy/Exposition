@@ -287,6 +287,7 @@ export function AgentsPage() {
   return (
     <div className="agents agents-page" data-testid="agents-page">
       <PageHeader
+        level={1}
         title="Agents"
         region="agents-header"
         actions={

@@ -89,7 +89,7 @@ describe("Storage & History", () => {
       </>,
     );
     const runs = await screen.findByTestId("storage-category-workflowRuns");
-    expect(runs.textContent).toContain("Workflow runs (2 · 3.0 MiB)");
+    expect(runs.textContent).toContain("Workflow runs 2 · 3.0 MiB");
     expect(runs.textContent).toContain("outputs stay");
     expect(screen.getByTestId("storage-excluded").textContent).toContain("Graph backups");
 

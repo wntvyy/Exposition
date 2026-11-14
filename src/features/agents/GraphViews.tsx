@@ -9,9 +9,9 @@ import type { ProposalState } from "../../bindings/ProposalState";
 import type { SyncState } from "../../bindings/SyncState";
 import type { TaskGraphInfo } from "../../bindings/TaskGraphInfo";
 import type { TaskProposal } from "../../bindings/TaskProposal";
-import type { AssertionStatus } from "../../bindings/AssertionStatus";
 import { Badge, Banner, DataTable, EmptyState, ListRow, Section, StatusText, type BadgeTone } from "../../ui/components";
-import { relationDisplay, STATUS_LABELS } from "../graph/model";
+import { relationDisplay } from "../graph/model";
+import { RelationStatus } from "../graph/RelationStatus";
 import { CONSENT_LABELS, type PillState } from "./format";
 
 /** Graph synchronization in the shared status vocabulary. */
@@ -85,7 +85,6 @@ const EVIDENCE_KIND: Record<string, string> = {
 };
 
 /** Relation status tones shared with the Graph page (accepted solid; others dashed). */
-const STATUS_TONE: Record<AssertionStatus, BadgeTone> = { accepted: "neutral", suggested: "accent", observed: "info", rejected: "neutral" };
 
 /** Facts about an entity as badges (text always; dashed when provisional). */
 function EntityBadges({ entity }: { entity: ContextEntity }) {
@@ -168,9 +167,7 @@ function ContextRelations({ context }: { context: GraphContext }) {
             {relationDisplay(null, r.kind).reading}
           </span>{" "}
           <span>{entityName(byId.get(r.to), r.to)}</span>{" "}
-          <Badge tone={STATUS_TONE[r.status]} dashed={r.status !== "accepted"}>
-            {STATUS_LABELS[r.status]}
-          </Badge>{" "}
+          <RelationStatus status={r.status} form="text" />{" "}
           <span className="ui-meta">
             by {r.origin}
             {r.note ? ` — ${r.note}` : ""}
@@ -247,10 +244,10 @@ export function GraphContextView({ graph }: { graph: TaskGraphInfo }) {
         {context.pending > 0 ? ` · ${context.pending} file(s) pending reconciliation` : ""}
       </p>
       <ContextNotes context={context} />
-      <Section title={`Entities (${context.entities.length})`} collapsible defaultExpanded className="agents-section">
+      <Section title="Entities" count={context.entities.length} collapsible defaultExpanded className="agents-section">
         <ContextEntities context={context} />
       </Section>
-      <Section title={`Relations (${context.relations.length})`} collapsible defaultExpanded className="agents-section">
+      <Section title="Relations" count={context.relations.length} collapsible defaultExpanded className="agents-section">
         <ContextRelations context={context} />
       </Section>
       <Section title="In scope" collapsible defaultExpanded={false} className="agents-section">
@@ -270,7 +267,7 @@ export function GraphContextView({ graph }: { graph: TaskGraphInfo }) {
           ))}
         </ul>
       </Section>
-      <Section title={`Files resolved to graph identities (${graph.targets.length})`} collapsible defaultExpanded className="agents-section">
+      <Section title="Files resolved to graph identities" count={graph.targets.length} collapsible defaultExpanded className="agents-section">
         {graph.targets.length === 0 ? (
           <p className="ui-meta">The task has not acted on any project file yet.</p>
         ) : (

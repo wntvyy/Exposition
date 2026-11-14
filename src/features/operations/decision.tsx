@@ -120,7 +120,7 @@ function DecisionBody({
         </Banner>
       )}
       {plan.effects.length > 0 && (
-        <Section title={`Details (${plan.effects.length})`} collapsible defaultExpanded={false} className="xp-ops-decision__details">
+        <Section title="Details" count={plan.effects.length} collapsible defaultExpanded={false} className="xp-ops-decision__details">
           <ul className="xp-ops-decision__list" data-testid="op-effects">
             {plan.effects.map((effect, i) => (
               <li key={i}>

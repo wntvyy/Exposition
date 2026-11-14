@@ -189,7 +189,7 @@
   stroke-width: 2.5;
 }
 
-/* Label chip: Badge geometry; family tint; dashed for suggested/observed; status muted. */
+/* Label chip: Badge geometry; family tint; dashed only for a suggestion (provisional); status muted. */
 .xp-graph-edge-label {
   position: absolute;
   display: inline-flex;
@@ -230,9 +230,7 @@
   background: var(--color-graph-formal-bg);
   color: var(--color-graph-formal-text);
 }
-.xp-graph-edge-label[data-status="suggested"],
-.xp-graph-edge-label[data-status="observed"],
-.xp-graph-edge-label[data-status="rejected"] {
+.xp-graph-edge-label[data-status="suggested"] {
   border-style: dashed;
 }
 .xp-graph-edge-label[data-selected] {

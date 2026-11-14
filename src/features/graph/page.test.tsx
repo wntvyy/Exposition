@@ -184,7 +184,7 @@ describe("Graph page", () => {
     expect(status(lemRow, "Current")).toBe("idle");
     // None / Not bound are muted text, not badges.
     expect(within(thmRow).getByText("None").closest(".ui-badge")).toBeNull();
-    expect(within(thmRow).getByText("Not bound").classList.contains("xp-muted")).toBe(true);
+    expect(within(thmRow).getByText("Not bound").classList.contains("ui-muted")).toBe(true);
     expect(grid.querySelectorAll(".ui-status-pill").length).toBe(0);
   });
 });

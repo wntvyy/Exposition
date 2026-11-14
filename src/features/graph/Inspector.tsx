@@ -37,6 +37,7 @@ import type { Relation } from "../../bindings/Relation";
 import type { SourceBinding } from "../../bindings/SourceBinding";
 import {
   Badge,
+  type BadgeTone,
   Button,
   confirm,
   EmptyState,
@@ -55,7 +56,6 @@ import {
   Toolbar,
   type IconComponent,
   type KeyValueItem,
-  type Status,
 } from "../../ui/components";
 import type { GraphCategory } from "../../ui/tokens";
 import { runUserOperation } from "../operations/client";
@@ -72,10 +72,10 @@ import {
   freshnessView,
   originLabel,
   relationDisplay,
-  STATUS_LABELS,
   VERDICT_VIEW,
   type VocabularyIndex,
 } from "./model";
+import { RelationStatus } from "./RelationStatus";
 import { revealSource } from "./reveal";
 import { useGraphLoad } from "./useGraphData";
 
@@ -104,39 +104,7 @@ export function TypeLabel({ category, icon: Icon, label }: { category: GraphCate
   );
 }
 
-function statusTitle(status: Relation["status"]): string {
-  switch (status) {
-    case "accepted":
-      return "An accepted assertion";
-    case "suggested":
-      return "Suggested, not yet accepted";
-    case "observed":
-      return "Observed in the sources by indexing";
-    case "rejected":
-      return "A rejected suggestion, kept for provenance";
-  }
-}
-
-/**
- * A relationship's assertion status. Suggested (provisional) is a dashed
- * accent badge; settled statuses are muted text: a "· observed" suffix in a
- * relationship line (`inline`), or the plain word in a table cell or fact
- * (`text`).
- */
-export function RelationStatus({ status, form = "inline" }: { status: Relation["status"]; form?: "inline" | "text" }) {
-  if (status === "suggested") {
-    return (
-      <Badge tone="accent" dashed title={statusTitle(status)}>
-        {STATUS_LABELS[status]}
-      </Badge>
-    );
-  }
-  return (
-    <span className="xp-muted" title={statusTitle(status)} data-status={status}>
-      {form === "inline" ? `· ${STATUS_LABELS[status].toLowerCase()}` : STATUS_LABELS[status]}
-    </span>
-  );
-}
+export { RelationStatus };
 
 const BINDING_LABEL: Record<Exclude<SourceBinding["state"], "resolved">, string> = {
   missing: "Missing",
@@ -151,9 +119,9 @@ export function BindingRow({ binding }: { binding: SourceBinding }) {
     <li className="xp-graph-row" data-testid="graph-binding" data-path={binding.path} data-state={binding.state}>
       <div className="xp-graph-row__main">
         <p className="xp-graph-row__line">
-          <span className="ui-code">{binding.path}</span> <span className="xp-muted">· {where}</span>
+          <span className="ui-code">{binding.path}</span> <span className="ui-muted">· {where}</span>
           {binding.state === "resolved" ? (
-            <span className="xp-muted"> · resolved</span>
+            <span className="ui-muted"> · resolved</span>
           ) : (
             <>
               {" "}
@@ -207,8 +175,8 @@ function RelationRow({
         ) : (
           <span>{otherLabel}</span>
         )}
-        {other && <span className="xp-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>} <RelationStatus status={relation.status} />
-        {relation.status === "observed" && <span className="xp-muted"> from {originLabel(relation.origin)}</span>}
+        {other && <span className="ui-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>} <RelationStatus status={relation.status} />
+        {relation.status === "observed" && <span className="ui-muted"> from {originLabel(relation.origin)}</span>}
       </p>
       {canEdit && <RelationActions relation={relation} description={`${outgoing ? "" : otherLabel + " "}${info.reading}${outgoing ? " " + otherLabel : ""}`} />}
     </li>
@@ -330,16 +298,16 @@ export function FormalEvidenceBody({ formal }: { formal: NonNullable<Evidence["f
       ) : (
         <p data-testid="graph-formal-deps-unavailable">Formal dependency edges unavailable: {formal.dependencies.reason}</p>
       )}
-      {formal.dependencyFingerprints === null && <p className="xp-muted">Freshness against formal dependencies is unknown (no dependency fingerprints).</p>}
+      {formal.dependencyFingerprints === null && <p className="ui-muted">Freshness against formal dependencies is unknown (no dependency fingerprints).</p>}
     </div>
   );
 }
 
-const ACTION_LABEL: Record<ImpactReport["items"][number]["action"], { label: string; status: Status }> = {
-  needsReview: { label: "Needs review", status: "warning" },
-  stale: { label: "Stale", status: "stale" },
-  citationReview: { label: "Citation review", status: "warning" },
-  informational: { label: "Informational", status: "idle" },
+const ACTION_LABEL: Record<ImpactReport["items"][number]["action"], { label: string; tone: BadgeTone }> = {
+  needsReview: { label: "Needs review", tone: "warning" },
+  stale: { label: "Stale", tone: "stale" },
+  citationReview: { label: "Citation review", tone: "info" },
+  informational: { label: "Informational", tone: "neutral" },
 };
 
 /** "What needs review if this changes?" — bounded impact with reasons and paths. */
@@ -368,7 +336,7 @@ export function ImpactSection({ entityId, labelOf, onSelectEntity }: { entityId:
         {report && (
           <>
             {report.items.length === 0 ? (
-              <p className="xp-muted">Nothing in the graph depends on it.</p>
+              <p className="ui-muted">Nothing in the graph depends on it.</p>
             ) : (
               <ul className="xp-graph-rows" aria-label="Affected items">
                 {report.items.map((item) => (
@@ -382,7 +350,7 @@ export function ImpactSection({ entityId, labelOf, onSelectEntity }: { entityId:
                         ) : (
                           item.entity.label
                         )}{" "}
-                        <StatusText status={ACTION_LABEL[item.action].status} label={ACTION_LABEL[item.action].label} />
+                        <Badge tone={ACTION_LABEL[item.action].tone}>{ACTION_LABEL[item.action].label}</Badge>
                       </p>
                       <p className="ui-meta">
                         {item.reason}
@@ -543,7 +511,7 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
                 ))}
               </ul>
             ) : (
-              <p className="xp-muted">Not bound to a source.</p>
+              <p className="ui-muted">Not bound to a source.</p>
             )}
             {detail.coverage && (
               <p className="ui-meta" data-testid="graph-coverage">
@@ -557,7 +525,7 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
         </Section>
 
         <Section title="Relationships" count={relations.length}>
-          {relations.length === 0 && <p className="xp-muted">No relationships.</p>}
+          {relations.length === 0 && <p className="ui-muted">No relationships.</p>}
           {families.map((family) => (
             <div key={family} className="xp-graph-group" data-family={family}>
               <h4 className="ui-group-label">{FAMILY_LABELS[family]}</h4>
@@ -589,7 +557,7 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
               ))}
             </ul>
           ) : (
-            <p className="xp-muted">No evidence recorded.</p>
+            <p className="ui-muted">No evidence recorded.</p>
           )}
         </Section>
 
@@ -678,9 +646,9 @@ export function RelationInspector({
           <div className="xp-graph-stack">
             <KeyValueList items={facts} />
             {relation.status === "observed" ? (
-              <p className="xp-muted">Observed in the sources: to change it, change the source.</p>
+              <p className="ui-muted">Observed in the sources: to change it, change the source.</p>
             ) : !info.manual ? (
-              <p className="xp-muted">This kind of relationship follows the files; it is not edited by hand.</p>
+              <p className="ui-muted">This kind of relationship follows the files; it is not edited by hand.</p>
             ) : null}
           </div>
         </Section>

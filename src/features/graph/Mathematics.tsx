@@ -150,7 +150,7 @@ export function VerificationTable({
       sortValue: (r) => r.entity.label,
       render: (r) => (
         <span className="xp-graph-table__name">
-          <span className="xp-graph-table__title">{r.entity.label}</span> <span className="xp-muted">{entityDisplay(vocabulary, r.entity).typeLabel}</span>
+          <span className="xp-graph-table__title">{r.entity.label}</span> <span className="ui-muted">{entityDisplay(vocabulary, r.entity).typeLabel}</span>
         </span>
       ),
     },
@@ -160,7 +160,7 @@ export function VerificationTable({
       sortValue: (r) => r.informal,
       render: (r) => {
         const v = INFORMAL[r.informal];
-        if (!v) return <span className="xp-muted">Not applicable</span>;
+        if (!v) return <span className="ui-muted">Not applicable</span>;
         return v.provisional ? (
           <Badge tone={v.tone} dashed>
             {v.label}
@@ -175,11 +175,11 @@ export function VerificationTable({
       title: "Formal association",
       sortValue: (r) => r.formalAssociation,
       render: (r) => {
-        if (r.entity.kind === "formalDeclaration") return <span className="xp-muted">Is a formal declaration</span>;
+        if (r.entity.kind === "formalDeclaration") return <span className="ui-muted">Is a formal declaration</span>;
         const count = r.formalDeclarations.length ? ` (${r.formalDeclarations.length})` : "";
         switch (r.formalAssociation) {
           case "none":
-            return <span className="xp-muted">None</span>;
+            return <span className="ui-muted">None</span>;
           case "suggested":
             return (
               <Badge tone="accent" dashed>
@@ -207,7 +207,7 @@ export function VerificationTable({
       title: "Freshness",
       sortValue: (r) => r.freshness?.kind ?? "~",
       render: (r) => {
-        if (!r.freshness) return <span className="xp-muted">—</span>;
+        if (!r.freshness) return <span className="ui-muted">—</span>;
         const f = freshnessView(r.freshness);
         return <StatusText status={f.status} label={f.label} />;
       },
@@ -227,7 +227,7 @@ export function VerificationTable({
             )}
           </span>
         ) : (
-          <span className="xp-muted">Not bound</span>
+          <span className="ui-muted">Not bound</span>
         ),
     },
   ];
@@ -274,24 +274,24 @@ function DependsOnSection({ entityId, vocabulary, onSelectEntity }: { entityId: 
                 <button type="button" className="xp-link" onClick={() => onSelectEntity(e.id)}>
                   {e.label}
                 </button>
-                <span className="xp-muted"> ({kindDisplay(vocabulary, e.kind).title})</span>
+                <span className="ui-muted"> ({kindDisplay(vocabulary, e.kind).title})</span>
               </p>
             </li>
           ))}
         </ul>
       ) : (
-        <p className="xp-muted">None recorded.</p>
+        <p className="ui-muted">None recorded.</p>
       )}
     </div>
   );
   return (
     <Section title="Depends on" count={loaded.data && !loaded.error ? others.length : undefined}>
       {loaded.loading && !loaded.data ? (
-        <p className="xp-muted">Tracing dependencies…</p>
+        <p className="ui-muted">Tracing dependencies…</p>
       ) : loaded.error ? (
         <p className="xp-inline-error">{loaded.error}</p>
       ) : others.length === 0 ? (
-        <p className="xp-muted">No recorded dependencies or assumptions (through “depends on” and “assumes”).</p>
+        <p className="ui-muted">No recorded dependencies or assumptions (through “depends on” and “assumes”).</p>
       ) : (
         <>
           {group("Assumptions", assumptions)}
@@ -346,12 +346,12 @@ function MathSections({
       <DependsOnSection entityId={detail.entity.id} vocabulary={vocabulary} onSelectEntity={onSelectEntity} />
       {isStatement && (
         <Section title="Proofs targeting this" count={proofs.length}>
-          {proofs.length ? relationList(proofs, (r) => r.from, "graph-proof") : <p className="xp-muted">No proof is linked to this statement.</p>}
+          {proofs.length ? relationList(proofs, (r) => r.from, "graph-proof") : <p className="ui-muted">No proof is linked to this statement.</p>}
         </Section>
       )}
       {detail.entity.kind === "proof" && (
         <Section title="Proves" count={targets.length}>
-          {targets.length ? relationList(targets, (r) => r.to, "graph-proof-target") : <p className="xp-muted">This proof targets no statement yet.</p>}
+          {targets.length ? relationList(targets, (r) => r.to, "graph-proof-target") : <p className="ui-muted">This proof targets no statement yet.</p>}
         </Section>
       )}
       <Section title="Formal verification">
@@ -361,13 +361,13 @@ function MathSections({
               <>
                 <p>Associated formal declarations:</p>
                 {relationList(formalizations, (r) => r.from, "graph-formalization")}
-                <p className="xp-muted" data-testid="graph-correspondence-note">
+                <p className="ui-muted" data-testid="graph-correspondence-note">
                   An association, even a reviewed one, records a correspondence; it is not a machine proof that the
                   declaration and this statement are equivalent.
                 </p>
               </>
             ) : (
-              <p className="xp-muted">No formal declaration is associated with this item.</p>
+              <p className="ui-muted">No formal declaration is associated with this item.</p>
             ))}
           {detail.entity.kind !== "formalDeclaration" && (
             <AssociateDeclarationAction target={detail.entity} declarations={declarations} canWrite={canWrite} />
@@ -375,15 +375,15 @@ function MathSections({
           {row?.verdict ? (
             <p>
               Verifier verdict: <StatusText status={VERDICT_VIEW[row.verdict].status} label={VERDICT_VIEW[row.verdict].label} />{" "}
-              <span className="xp-muted">{VERDICT_VIEW[row.verdict].sentence}</span>
+              <span className="ui-muted">{VERDICT_VIEW[row.verdict].sentence}</span>
             </p>
           ) : (
-            <p className="xp-muted">No formal evidence: nothing about this item has been checked by Lean.</p>
+            <p className="ui-muted">No formal evidence: nothing about this item has been checked by Lean.</p>
           )}
           {row?.freshness && (
             <p>
               Freshness: <StatusText status={freshnessView(row.freshness).status} label={freshnessView(row.freshness).label} />{" "}
-              <span className="xp-muted">{freshnessView(row.freshness).detail}</span>
+              <span className="ui-muted">{freshnessView(row.freshness).detail}</span>
             </p>
           )}
           {row?.evidence?.formal ? (
@@ -393,7 +393,7 @@ function MathSections({
           ) : row?.formalDependencies?.kind === "reported" ? (
             <p>Formal dependencies reported by the checker: {row.formalDependencies.names.join(", ") || "none"}.</p>
           ) : (
-            <p className="xp-muted" data-testid="graph-formal-deps-unavailable">
+            <p className="ui-muted" data-testid="graph-formal-deps-unavailable">
               Formal dependency edges unavailable: no checker evidence exposes them for this item.
             </p>
           )}

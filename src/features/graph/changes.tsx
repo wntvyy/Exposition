@@ -86,7 +86,7 @@ export function ProposalReview({ proposal, busy, error }: { proposal: ChangeProp
       </div>
     );
   }
-  if (!proposal) return <p className="xp-graph-review xp-muted">{busy ? "Checking the change…" : "Choose what to change."}</p>;
+  if (!proposal) return <p className="xp-graph-review ui-muted">{busy ? "Checking the change…" : "Choose what to change."}</p>;
   return (
     <div className="xp-graph-review" data-state={proposal.valid ? "valid" : "invalid"} data-testid="graph-proposal-review" aria-live="polite">
       {proposal.valid ? (
@@ -258,7 +258,7 @@ export function RelateDialog({ vocabulary, from: initialFrom, to: initialTo, can
               <Badge>{entityDisplay(vocabulary, ends.to).typeLabel}</Badge> <strong>{ends.to.label}</strong>
             </>
           ) : (
-            <span className="xp-muted">(choose below)</span>
+            <span className="ui-muted">(choose below)</span>
           )}
         </p>
         {!initialTo && (
@@ -368,8 +368,8 @@ export function CreateEntityDialog({ vocabulary, kind: initialKind, memberOf, on
           />
         )}
         <TextField label="Name" value={label} onChange={setLabel} autoFocus />
-        {memberOf && <p className="xp-muted">It will also be added to {memberOf.label}.</p>}
-        <p className="xp-muted">Creates a graph item only; no file is created or changed.</p>
+        {memberOf && <p className="ui-muted">It will also be added to {memberOf.label}.</p>}
+        <p className="ui-muted">Creates a graph item only; no file is created or changed.</p>
         <ProposalReview proposal={proposal} busy={busy} error={error} />
       </div>
     </Dialog>
@@ -442,7 +442,7 @@ export function AddToCollectionDialog({
           onChange={setTarget}
         />
         {target === NEW && <TextField label="New collection name" value={name} onChange={setName} />}
-        <p className="xp-muted">Collections organize existing items without copying them.</p>
+        <p className="ui-muted">Collections organize existing items without copying them.</p>
         <ProposalReview proposal={proposal} busy={busy} error={error} />
       </div>
     </Dialog>

@@ -245,6 +245,7 @@ export function ResearchPage() {
     <div className="exp-rpage" data-testid="research-page" data-state={enabled ? "enabled" : "disabled"}>
       {/* One F6 region for the title row and its session toolbar. */}
       <PageHeader
+        level={1}
         title="Research"
         subtitle={<PageSubtitle />}
         status={<SessionStatus />}

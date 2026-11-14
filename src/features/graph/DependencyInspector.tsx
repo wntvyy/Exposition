@@ -73,7 +73,7 @@ function InspectedEntityView({ item, vocabulary, primary }: { item: InspectedEnt
         {binding.detail && <p className="ui-meta">{binding.detail}</p>}
       </header>
       {[...groups.keys()].length === 0 ? (
-        <p className="xp-muted">No relationships recorded.</p>
+        <p className="ui-muted">No relationships recorded.</p>
       ) : (
         FAMILY_ORDER.filter((f) => groups.has(f)).map((family) => (
           <div key={family} className="xp-graph-group" data-family={family} data-testid="deps-family">
@@ -83,7 +83,7 @@ function InspectedEntityView({ item, vocabulary, primary }: { item: InspectedEnt
                 <li key={`${relation.id}-${outgoing}`} className="xp-graph-row" data-testid="deps-relation" data-kind={relation.kind} data-status={relation.status}>
                   <p className="xp-graph-row__line xp-graph-row__main">
                     {outgoing ? relationDisplay(vocabulary, relation.kind).reading : relationDisplay(vocabulary, relation.kind).inverse} {other?.label ?? "an item"}
-                    {other && <span className="xp-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>} <RelationStatus status={relation.status} />
+                    {other && <span className="ui-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>} <RelationStatus status={relation.status} />
                   </p>
                 </li>
               ))}
@@ -111,7 +111,7 @@ function EvidenceSummary({ entityId }: { entityId: string }) {
   const loaded = useGraphLoad(`deps-evidence:${entityId}`, () => graphApi().entity(entityId));
   const detail = loaded.data;
   if (!detail) return null;
-  if (detail.evidence.length === 0) return <p className="xp-muted" data-testid="deps-evidence">No evidence recorded for this item.</p>;
+  if (detail.evidence.length === 0) return <p className="ui-muted" data-testid="deps-evidence">No evidence recorded for this item.</p>;
   return (
     <div className="xp-graph-group">
       <h4 className="ui-group-label">Evidence</h4>
@@ -193,7 +193,7 @@ export function DependencyInspector() {
     <div className="xp-deps" data-testid="dependency-inspector" data-path={position.path} aria-busy={inspection.loading}>
       <header className="xp-deps__header">
         <p className="xp-deps__where">
-          <span className="ui-code">{position.path}</span> <span className="xp-muted">· line {position.line}</span>
+          <span className="ui-code">{position.path}</span> <span className="ui-muted">· line {position.line}</span>
         </p>
         {data && (
           <div className="xp-graph-inline">
@@ -215,7 +215,7 @@ export function DependencyInspector() {
           <CoverageNote inspection={data} />
           <Section title="At the caret" count={data.entities.length}>
             {data.entities.length === 0 ? (
-              <p className="xp-muted" data-testid="deps-none">
+              <p className="ui-muted" data-testid="deps-none">
                 No graph item is bound at this position.
               </p>
             ) : (
@@ -226,7 +226,7 @@ export function DependencyInspector() {
             <Section title="File">
               <div className="xp-deps-file" data-testid="deps-resource" data-entity-id={data.resource.id}>
                 <span>
-                  {data.resource.label} <span className="xp-muted">({entityDisplay(vocabulary, data.resource).typeLabel})</span>
+                  {data.resource.label} <span className="ui-muted">({entityDisplay(vocabulary, data.resource).typeLabel})</span>
                 </span>
                 <Button size="sm" variant="ghost" icon={Network} onPress={() => openInGraph(data.resource!.id, "project")}>
                   Open in Graph

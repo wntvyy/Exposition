@@ -23,9 +23,6 @@
 
 /* ---------- Inline text roles ---------- */
 
-.xp-muted {
-  color: var(--color-text-muted);
-}
 .xp-inline-error {
   color: var(--color-danger-text);
 }

@@ -141,6 +141,7 @@ export function GraphPage() {
   return (
     <div className="xp-graph-page" data-testid="graph-page">
       <PageHeader
+        level={1}
         title="Graph"
         region="graph-header"
         views={

@@ -108,7 +108,7 @@ describe("GraphDependencies", () => {
     expect(accepted!.textContent).toBe("fig.png is derived from obs.csv · accepted");
     expect(accepted!.querySelector(".ui-badge")).toBeNull();
     const badge = suggested!.querySelector(".ui-badge")!;
-    expect(badge.textContent).toBe("suggested");
+    expect(badge.textContent).toBe("Suggested");
     expect(badge.hasAttribute("data-dashed")).toBe(true);
 
     const evidence = screen.getByTestId("graph-evidence");

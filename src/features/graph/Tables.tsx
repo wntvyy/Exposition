@@ -12,7 +12,7 @@ import type { Projection } from "./projection";
 type Row = Omit<CanvasNode, "position"> & { entity: Entity | undefined; relationCount: number };
 
 function Badges({ badges }: { badges: CanvasBadge[] }) {
-  if (!badges.length) return <span className="xp-muted">—</span>;
+  if (!badges.length) return <span className="ui-muted">—</span>;
   return (
     <span className="xp-graph-inline">
       {badges.map((b) => (
@@ -53,13 +53,13 @@ export function EntityTable({
         <span className="xp-graph-table__name">
           {r.typeIcon && <r.typeIcon size={14} aria-hidden />}
           {r.title}
-          {r.group?.collapsed ? <span className="xp-muted"> ({r.group.memberCount} inside, collapsed)</span> : null}
+          {r.group?.collapsed ? <span className="ui-muted"> ({r.group.memberCount} inside, collapsed)</span> : null}
         </span>
       ),
     },
     { id: "kind", title: "Kind", sortValue: (r) => r.typeLabel, render: (r) => r.typeLabel, width: "16%" },
     { id: "status", title: "Status", sortValue: (r) => r.badges.map((b) => b.label).join(), render: (r) => <Badges badges={r.badges} />, width: "22%" },
-    { id: "key", title: "Source or key", sortValue: (r) => r.entity?.key ?? "", render: (r) => (r.entity?.key ? <span className="ui-code">{r.entity.key}</span> : <span className="xp-muted">—</span>), width: "24%" },
+    { id: "key", title: "Source or key", sortValue: (r) => r.entity?.key ?? "", render: (r) => (r.entity?.key ? <span className="ui-code">{r.entity.key}</span> : <span className="ui-muted">—</span>), width: "24%" },
     { id: "relations", title: "Relations", numeric: true, sortValue: (r) => r.relationCount, render: (r) => String(r.relationCount), width: "10%" },
   ];
   return (

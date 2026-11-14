@@ -46,6 +46,7 @@ export function TaskRow({
   testId: string;
 }) {
   const metaId = useId();
+  const hintId = useId();
   const pill = statusLabel(task.status);
   return (
     <ListRow
@@ -56,7 +57,7 @@ export function TaskRow({
       current={selected}
       aria-current={selected ? "true" : undefined}
       aria-label={task.title}
-      aria-describedby={metaId}
+      aria-describedby={`${metaId} ${hintId}`}
       data-testid={testId}
       data-task-id={task.id}
       onClick={(event: MouseEvent<HTMLDivElement>) => {
@@ -77,6 +78,9 @@ export function TaskRow({
           {task.pendingReview > 0 && <StatusText status="warning" label={`${task.pendingReview} to review`} />}
           {kept && <span>Kept</span>}
           <span>{relativeTime(task.updatedAtMs)}</span>
+          <span id={hintId} className="ui-visually-hidden">
+            Enter opens the task. Space selects it; Control-click adds it to the selection.
+          </span>
         </span>
       }
       trailing={more}

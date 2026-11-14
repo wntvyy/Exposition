@@ -48,6 +48,11 @@
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
 }
+/* Muted color only (an inline aside inside 13px text, e.g. "(Lemma)"); use
+   .ui-meta for a line of metadata. */
+.ui-muted {
+  color: var(--color-text-muted);
+}
 .ui-code {
   font-family: var(--font-code);
   font-size: var(--font-size-sm);
@@ -912,7 +917,7 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 0 var(--space-5);
+  padding: calc(var(--focus-ring-width) + var(--focus-ring-offset)) var(--space-5);
   color: var(--color-text-muted);
   font-size: var(--font-size-lg);
 }
@@ -1963,8 +1968,9 @@ th.ui-data-table__cell {
 }
 .ui-page-header__lead {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: var(--space-2);
+  gap: 0 var(--space-2);
   min-width: 0;
 }
 .ui-page-header__title {
@@ -1979,11 +1985,9 @@ th.ui-data-table__cell {
 }
 .ui-page-header__subtitle {
   min-width: 0;
-  overflow: hidden;
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .ui-page-header__views,
 .ui-page-header__actions {
@@ -2141,9 +2145,7 @@ th.ui-data-table__cell {
 }
 .ui-list-row__title {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .ui-list-row__title[data-code] {
   font-family: var(--font-code);
