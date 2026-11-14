@@ -137,7 +137,7 @@ function CategoryGroup({
         );
       },
     },
-    { id: "item", title: "Item", render: (item) => <span className="exp-settings__cell-title">{item.label}</span> },
+    { id: "item", title: "Item", render: (item) => item.label },
     {
       id: "size",
       title: "Size",

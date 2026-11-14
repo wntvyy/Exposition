@@ -293,7 +293,6 @@ function toolColumns(
     {
       id: "tool",
       title: "Tool",
-      width: "18%",
       render: (tool) => (
         <>
           <div className="exp-settings__cell-title">{tool.name}</div>
@@ -333,7 +332,6 @@ function toolColumns(
     {
       id: "source",
       title: "Source",
-      width: "24%",
       render: (tool) => (
         <span className="ui-meta">
           {tool.source ? SOURCE_LABELS[tool.source] : tool.override ? "Set in settings" : null}

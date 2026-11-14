@@ -101,6 +101,7 @@
     border-bottom: var(--border-width) solid var(--color-border);
     overflow-x: auto;
     overflow-y: hidden;
+    scrollbar-width: thin;
   }
 
   .exp-settings__nav-item.ui-tab[data-selected]::after {
@@ -237,9 +238,11 @@
   user-select: text;
 }
 
-/* Image state sentences wrap (StatusText keeps short labels on one line). */
+/* Image states are sentences: they wrap and read at text weight (StatusText
+   is sized for short labels). */
 .exp-settings__image-state .ui-status-text {
   align-items: flex-start;
+  font-weight: var(--font-weight-regular);
   white-space: normal;
 }
 
