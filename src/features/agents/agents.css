@@ -1,4 +1,11 @@
-/* Agent view and review editor. Shared tokens only (src/ui/tokens.css). */
+/* Agent view, Agents page, and the review editor: layout plus the transcript,
+   approval payload, and diff content. Tokens only (src/ui/tokens.css); rows,
+   sections, status, and headers come from src/ui/components.
+
+   Inset model: content columns are padded with --pane-inset; shared Sections
+   and ListRow lists carry their own inset, so inside a padded column they
+   span the column (.agents-section, .agents-rows). */
+
 .agents {
   display: flex;
   flex-direction: column;
@@ -8,24 +15,23 @@
   font-size: var(--font-size-md);
 }
 
+/* ---------- Agent view (auxiliary region) ---------- */
+
 .agents-bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-1-5) var(--pane-inset);
   border-bottom: var(--border-width) solid var(--color-border);
 }
 
 .agents-bar__actions {
-  display: flex;
   gap: var(--space-1);
 }
 
 .agents-provider {
   margin-left: auto;
-  color: var(--color-text-subtle);
-  font-size: var(--font-size-sm);
 }
 
 .agents-provider[data-scripted],
@@ -33,15 +39,22 @@
   color: var(--color-warning-text);
 }
 
+.agents-error {
+  padding: var(--space-2) var(--pane-inset) 0;
+}
+
 .agents-content {
   flex: 1;
   min-height: 0;
-  padding: var(--space-3);
+  padding: var(--space-3) var(--pane-inset);
 }
 
-.agents-content > .ui-state[data-fill] {
-  min-height: 240px;
+/* The task list is a flat list of rows from edge to edge. */
+.agents-content[data-view="tasks"] {
+  padding: 0;
 }
+
+/* ---------- Layout helpers ---------- */
 
 .agents-stack {
   display: flex;
@@ -63,7 +76,8 @@
 }
 
 .agents-grow {
-  flex: 1 1 160px;
+  flex: 1;
+  min-width: 0;
 }
 
 .agents-grid {
@@ -76,43 +90,11 @@
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
 }
 
-.agents-approval {
-  padding-bottom: var(--space-3);
-  border-bottom: var(--border-width) solid var(--color-warning-border);
-}
-
-.agents-muted {
-  color: var(--color-text-subtle);
-}
-
-.agents-small {
-  margin: 0;
-  font-size: var(--font-size-sm);
-}
-
-.agents-code {
-  font-family: var(--font-code);
-  font-size: var(--font-size-sm);
-}
-
-.agents-textarea {
-  height: auto;
-  min-height: calc(var(--control-height-md) * 2);
-  padding: var(--space-1-5) var(--space-2);
-  line-height: var(--line-height-normal);
-  resize: vertical;
-  font-family: inherit;
-}
-
-.agents-textarea[data-code] {
-  font-family: var(--font-code);
-  font-size: var(--font-size-sm);
-}
-
-.agents-textarea:focus {
-  border-color: var(--color-focus-ring);
-  outline: var(--border-width) solid var(--color-focus-ring);
-  outline-offset: 0;
+/* A shared content Section or ListRow list inside a padded column spans it. */
+.agents-section,
+.agents-rows {
+  margin-inline: calc(-1 * var(--pane-inset));
+  border-top: var(--border-width) solid var(--color-border-subtle);
 }
 
 .agents-heading {
@@ -122,66 +104,62 @@
   min-width: 0;
 }
 
+/* Item title role (14/600). */
 .agents-heading__title {
   margin: 0;
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
   overflow-wrap: anywhere;
   user-select: text;
 }
 
-/* Task list */
-.agents-task-list,
-.agents-review-files,
-.agents-results {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1-5);
+.agents-list {
+  display: grid;
+  gap: var(--space-1);
   margin: 0;
   padding: 0;
   list-style: none;
+  user-select: text;
 }
 
-.agents-task-item {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  width: 100%;
-  padding: var(--space-2) var(--space-3);
-  border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-surface);
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
+.agents-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-1-5);
 }
 
-.agents-task-item:hover {
-  background: var(--color-surface-hover);
-}
-
-.agents-task-item:focus-visible,
-.agents-review-file__name:focus-visible,
-.agents-disclosure > summary:focus-visible {
-  outline: var(--focus-ring-width) solid var(--color-focus-ring);
-  outline-offset: var(--focus-ring-offset, 1px);
-}
-
-.agents-task-item__title {
-  font-weight: var(--font-weight-medium);
+.agents-folder-path {
+  color: var(--color-text);
   overflow-wrap: anywhere;
 }
 
-.agents-task-item__meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1-5);
-  font-size: var(--font-size-sm);
+/* Native textarea (no shared multi-line field yet) styled as .ui-input. */
+.agents-textarea {
+  height: auto;
+  min-height: calc(var(--control-height-md) * 2);
+  padding: var(--space-1-5) var(--space-2);
+  line-height: var(--line-height-normal);
+  resize: vertical;
+  font-family: inherit;
 }
 
-/* Transcript */
+.agents-textarea:focus {
+  border-color: var(--color-focus-ring);
+  outline: var(--border-width) solid var(--color-focus-ring);
+  outline-offset: 0;
+}
+
+/* ---------- Task rows ---------- */
+
+/* The meta line's parts stay flex items of the ListRow meta line. */
+.agents-task-row__meta {
+  display: contents;
+}
+
+/* ---------- Transcript and approvals ---------- */
+
 .agents-transcript {
   display: flex;
   flex-direction: column;
@@ -195,14 +173,6 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-0-5);
-}
-
-.agents-msg__role {
-  color: var(--color-text-subtle);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .agents-msg__text {
@@ -223,12 +193,12 @@
   align-items: center;
   gap: var(--space-1-5);
   border-radius: var(--radius-sm);
-  cursor: pointer;
+  cursor: default;
 }
 
 .agents-tool {
   padding-left: var(--space-2);
-  border-left: 2px solid var(--color-border-strong);
+  border-left: var(--border-width) solid var(--color-border-strong);
 }
 
 .agents-tool__summary {
@@ -251,21 +221,21 @@
   user-select: text;
 }
 
-/* The complete payload of an approval: taller than other code blocks, and
-   keyboard-scrollable (it is focusable). */
-.agents-approval__payload {
-  max-height: min(60vh, 560px);
+/* The approval is focused from a notification or the status bar. */
+.agents-approval {
+  border-radius: var(--radius-md);
 }
 
-.agents-approval__payload:focus-visible {
-  outline: var(--focus-ring-width) solid var(--color-focus-ring);
-  outline-offset: var(--focus-ring-offset);
+/* The complete payload of an approval: taller than other code blocks, and
+   keyboard-scrollable (it is focusable when it scrolls). */
+.agents-approval__payload {
+  max-height: min(60vh, 560px);
 }
 
 .agents-notice {
   margin: 0;
   padding: var(--space-1) var(--space-2);
-  border-left: 2px solid var(--color-info-border);
+  border-left: var(--border-width) solid var(--color-info-border);
   color: var(--color-info-text);
 }
 
@@ -279,37 +249,40 @@
   color: var(--color-danger-text);
 }
 
-/* Review */
-.agents-review-file {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1-5);
-  padding: var(--space-1-5) var(--space-2);
-  border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-lg);
-}
+/* ---------- Proposals ---------- */
 
-.agents-review-file[data-selected] {
-  border-color: var(--color-accent);
-  background: var(--color-accent-subtle);
-}
-
-.agents-review-file__name {
+.agents-proposal__body {
   display: flex;
   flex-direction: column;
-  flex: 1 1 140px;
-  min-width: 0;
+  gap: var(--space-1-5);
+  margin-top: var(--space-1);
+  user-select: text;
+}
+
+/* ---------- Review ---------- */
+
+/* The file name selects the file (the row does too, for the pointer). */
+.agents-review-file__name {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
   border: 0;
   background: none;
   color: inherit;
   font: inherit;
   text-align: left;
-  cursor: pointer;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.agents-review-file__name:focus-visible {
+  outline-offset: calc(-1 * var(--focus-ring-width));
 }
 
 .agents-review-file__message {
-  flex-basis: 100%;
+  overflow-wrap: anywhere;
 }
 
 .agents-diff {
@@ -319,24 +292,34 @@
   overflow: hidden;
 }
 
+.agents-diff[data-fill] {
+  flex: 1;
+}
+
+/* The review as an editor tab: page header, then a scrolling body. */
 .agents-editor {
   height: 100%;
-  padding: var(--space-3) var(--space-4);
-  overflow: auto;
+  overflow: hidden;
   background: var(--color-surface);
 }
 
-.agents-editor [data-in-editor] {
+.agents-review-editor {
+  display: flex;
+  flex-direction: column;
   height: 100%;
+  min-height: 0;
 }
 
-.agents-editor .agents-diff-section {
+.agents-review-editor__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-3) var(--pane-inset) var(--space-4);
+}
+
+.agents-review-editor .agents-diff-section {
   flex: 1;
   min-height: 320px;
-}
-
-.agents-diff[data-fill] {
-  flex: 1;
 }
 
 /* Status bar: a task is waiting for approval (attention; opens the approval). */
@@ -349,110 +332,84 @@
   background: none;
   color: inherit;
   font: inherit;
-  cursor: pointer;
+  cursor: default;
 }
+
 .agents-status-attention:hover .ui-status-pill {
   border-color: var(--color-warning-text);
 }
-.agents-status-attention:focus-visible {
-  outline: var(--focus-ring-width) solid var(--color-focus-ring);
-  outline-offset: var(--focus-ring-offset);
-}
 
-/* The approval card when focused from a notification or the status bar. */
-.agents-approval:focus-visible {
-  outline: var(--focus-ring-width) solid var(--color-focus-ring);
-  outline-offset: var(--focus-ring-offset);
-  border-radius: var(--radius-lg);
-}
+/* ---------- Agents page ---------- */
 
-/* Agents page (top-level): task list beside the selected task's sections. */
 .agents-page {
-  display: grid;
-  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   overflow: hidden;
   background: var(--color-surface);
 }
 
+.agents-page__body {
+  display: grid;
+  flex: 1;
+  grid-template-columns: var(--inspector-width) minmax(0, 1fr);
+  min-height: 0;
+}
+
 .agents-page__list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
   min-height: 0;
   overflow: auto;
-  padding: var(--space-3);
   border-right: var(--border-width) solid var(--color-border);
   background: var(--color-surface-sunken);
+}
+
+.agents-page__filter {
+  padding: var(--space-2) var(--pane-inset);
+}
+
+.agents-page__kept {
+  margin-top: var(--space-2);
+}
+
+.agents-kept-entity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-1-5);
+}
+
+.agents-kept-entity__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .agents-page__detail {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  padding: var(--space-4);
 }
 
-.agents-page__title {
-  margin: 0;
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-semibold);
-  overflow-wrap: anywhere;
+.agents-page__compose {
+  width: 100%;
+  max-width: var(--content-max-width);
+  padding: var(--space-3) var(--pane-inset) var(--space-6);
 }
 
-.agents-page__subtitle {
-  margin: 0;
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--color-text-muted);
+.agents-page__task {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .agents-page__panel {
-  padding-top: var(--space-3);
-}
-
-.agents-page .agents-task-item[data-selected] {
-  background: var(--color-surface-selected);
-}
-
-.agents-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  margin: 0;
-  padding-left: var(--space-4);
-}
-
-.agents-proposals {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.agents-proposal {
-  padding: var(--space-2) var(--space-3);
-  border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-surface-raised);
-}
-
-.agents-badges {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
+  padding: var(--space-3) var(--pane-inset) var(--space-6);
 }
 
 @media (max-width: 860px) {
-  .agents-page {
+  .agents-page__body {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
   }
@@ -462,20 +419,4 @@
     border-right: none;
     border-bottom: var(--border-width) solid var(--color-border);
   }
-}
-
-/* P1: a task row holds the task button and its "More actions" menu. */
-.agents-task-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.agents-task-row > .agents-task-item {
-  flex: 1;
-  min-width: 0;
-}
-
-.agents-task-row[data-op-selected] > .agents-task-item {
-  border-color: var(--color-accent);
 }

@@ -127,7 +127,7 @@ export function ProviderSettingsDialog() {
               label={configured ? "Configured" : "Not configured"}
               size="sm"
             />
-            {status && <span className="agents-muted agents-small">stored in {status.credentialStore}</span>}
+            {status && <span className="ui-meta">stored in {status.credentialStore}</span>}
           </p>
           {status?.credentialError && (
             <Banner tone="danger" title="Credential storage error">
@@ -153,7 +153,7 @@ export function ProviderSettingsDialog() {
               Remove
             </Button>
           </div>
-          <p className="agents-muted agents-small">
+          <p className="ui-meta">
             The key is kept only in the operating system's credential store. Exposition never shows it again, never writes it to
             project files or logs, and never passes it to commands it runs.
           </p>
@@ -162,7 +162,7 @@ export function ProviderSettingsDialog() {
         <Select label="Effort" value={effort} onChange={setEffort} options={option(EFFORT_LABELS)} />
         <Select label="Default content consent" value={consent} onChange={setConsent} options={option(CONSENT_LABELS)} />
         {message && (
-          <p role="status" className="agents-muted" data-testid="agents-settings-message">
+          <p role="status" className="ui-meta" data-testid="agents-settings-message">
             {message}
           </p>
         )}

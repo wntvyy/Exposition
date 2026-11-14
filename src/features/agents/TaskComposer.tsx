@@ -146,9 +146,9 @@ export function TaskComposer({
         testId="agents-prompt"
       />
       {workspace ? (
-        <p className="agents-small" data-testid="agents-folder">
-          <span className="agents-muted">Project folder: </span>
-          <code className="agents-code">{workspace.root}</code>
+        <p className="ui-meta" data-testid="agents-folder">
+          <span>Project folder: </span>
+          <code className="ui-code agents-folder-path">{workspace.root}</code>
         </p>
       ) : (
         <Banner
@@ -187,7 +187,7 @@ export function TaskComposer({
       />
       <Select label="Commands and code" value={execution} onChange={setExecution} options={option(EXECUTION_LABELS)} />
       <Select label="Content sent to the model provider" value={consent} onChange={setConsent} options={option(CONSENT_LABELS)} />
-      <Section title="Budgets" collapsible defaultExpanded={false}>
+      <Section title="Budgets" collapsible defaultExpanded={false} className="agents-section">
         <div className="agents-grid">
           <NumberField label="Model turns" min={1} value={budgets.maxTurns} onChange={(v) => setBudgets({ ...budgets, maxTurns: v })} />
           <NumberField label="Tool calls" min={0} value={budgets.maxToolCalls} onChange={(v) => setBudgets({ ...budgets, maxToolCalls: v })} />
