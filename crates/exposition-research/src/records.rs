@@ -2,8 +2,9 @@
 //! app-managed recoverable deletion (the manifest moves to
 //! `.exposition/runs/deleted/`, hidden from the history), restore that never
 //! overwrites, permanent removal of the record (manifest + transcript), and —
-//! only as a separate, explicit scope — removal of the run's generated output
-//! files that nothing keeps (retained or attached outputs are kept).
+//! only as a separate, explicit scope — the run's generated output files that
+//! nothing keeps (retained or attached outputs are kept): recoverably (moved
+//! to `.exposition/artifacts/deleted/<run>/`, restorable) or permanently.
 //!
 //! An active run (an interactive run that has not finished, or a workflow
 //! batch executing now) is never removed: it is canceled first.
@@ -47,6 +48,15 @@ pub struct OutputFile {
     pub bytes: u64,
 }
 
+/// Outputs of a run held for recovery (`.exposition/artifacts/deleted/<run>`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeletedOutputs {
+    pub run: String,
+    pub files: Vec<OutputFile>,
+    /// When the newest of them was deleted.
+    pub deleted_at_ms: u64,
+}
+
 /// What removing outputs did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OutputsRemoved {
@@ -70,6 +80,55 @@ fn deleted_path(root: &Path, id: &str) -> PathBuf {
 
 fn artifact_dir(root: &Path, id: &str) -> PathBuf {
     join(root, ARTIFACTS).join(id)
+}
+
+fn deleted_outputs_dir(root: &Path, id: &str) -> PathBuf {
+    join(root, ARTIFACTS).join(DELETED).join(id)
+}
+
+fn modified_ms(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// `name`, or `stem (n).ext` when `dir` already has a file of that name.
+fn free_name(dir: &Path, name: &str) -> String {
+    if !dir.join(name).exists() {
+        return name.to_owned();
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_owned(), format!(".{e}")),
+        _ => (name.to_owned(), String::new()),
+    };
+    (2..10_000)
+        .map(|n| format!("{stem} ({n}){ext}"))
+        .find(|n| !dir.join(n).exists())
+        .unwrap_or_else(|| format!("{stem} ({}){ext}", uuid::Uuid::new_v4().simple()))
+}
+
+/// Regular files directly in `dir` (never through links).
+fn files_in(root: &Path, dir: &Path, rel: &str) -> Vec<OutputFile> {
+    if !real_dir_within(root, dir) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        if let Ok(path) = WorkspacePath::parse(&format!("{rel}/{name}")) {
+            out.push(OutputFile { path, bytes: meta.len() });
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
 }
 
 fn size(path: &Path) -> u64 {
@@ -301,6 +360,135 @@ impl ResearchService {
         }
         remove_if_empty(&root, &artifact_dir(&root, id));
         Ok(done)
+    }
+}
+
+impl ResearchService {
+    /// A run's generated output files on disk now (whether or not its record
+    /// still exists).
+    pub fn run_output_files(&self, id: &str) -> Result<Vec<OutputFile>, ResearchError> {
+        if !valid_run_id(id) {
+            return Err(ResearchError::UnknownRun(id.to_owned()));
+        }
+        Ok(output_files(&self.records_root()?, id))
+    }
+
+    /// Move a run's generated outputs that nothing keeps to its recovery
+    /// area (restorable with [`Self::restore_run_outputs`]; the space is
+    /// given back only when they are purged). The record is not touched.
+    pub fn trash_run_outputs(
+        &self,
+        id: &str,
+        keep: &dyn Fn(&WorkspacePath) -> bool,
+    ) -> Result<OutputsRemoved, ResearchError> {
+        if !valid_run_id(id) {
+            return Err(ResearchError::UnknownRun(id.to_owned()));
+        }
+        if self.run_active(id) {
+            return Err(ResearchError::coded("research.runActive", "The run is still active; cancel it first."));
+        }
+        let root = self.records_root()?;
+        let files = output_files(&root, id);
+        let mut done = OutputsRemoved::default();
+        if files.iter().all(|f| keep(&f.path)) {
+            done.kept = files.into_iter().map(|f| f.path).collect();
+            return Ok(done);
+        }
+        let area = deleted_outputs_dir(&root, id);
+        std::fs::create_dir_all(&area).map_err(|e| ResearchError::io("creating the deleted-outputs folder", e))?;
+        if !real_dir_within(&root, &area) {
+            return Err(ResearchError::InvalidWorkspace(format!(
+                "{ARTIFACTS}/{DELETED} is a link; remove it and retry"
+            )));
+        }
+        for file in files {
+            if keep(&file.path) {
+                done.kept.push(file.path);
+                continue;
+            }
+            let from = join(&root, file.path.as_str());
+            let name = free_name(&area, file.path.file_name());
+            std::fs::rename(&from, area.join(&name)).map_err(|e| ResearchError::io("moving a run output", e))?;
+            done.bytes += file.bytes;
+            done.removed.push(file.path);
+        }
+        Ok(done)
+    }
+
+    /// Bring a run's deleted outputs back into its output folder. A name that
+    /// is taken again gets a fresh one (`rename`) or nothing is moved
+    /// (`research.restoreConflict`); nothing is overwritten.
+    pub fn restore_run_outputs(&self, id: &str, rename: bool) -> Result<Vec<WorkspacePath>, ResearchError> {
+        if !valid_run_id(id) {
+            return Err(ResearchError::UnknownRun(id.to_owned()));
+        }
+        let root = self.records_root()?;
+        let area = deleted_outputs_dir(&root, id);
+        let held = files_in(&root, &area, &format!("{ARTIFACTS}/{DELETED}/{id}"));
+        if held.is_empty() {
+            return Err(ResearchError::coded("research.unknownOutputs", "No deleted outputs of this run are held."));
+        }
+        let dir = store::ensure_dir_within(&root, &store::artifact_dir_path(id))?;
+        if !rename && held.iter().any(|f| dir.join(f.path.file_name()).exists()) {
+            return Err(ResearchError::coded(
+                "research.restoreConflict",
+                "An output with the same name exists again; nothing was restored.",
+            ));
+        }
+        let mut restored = Vec::new();
+        for file in held {
+            let name = free_name(&dir, file.path.file_name());
+            std::fs::rename(join(&root, file.path.as_str()), dir.join(&name))
+                .map_err(|e| ResearchError::io("restoring a run output", e))?;
+            if let Ok(p) = WorkspacePath::parse(&format!("{ARTIFACTS}/{id}/{name}")) {
+                restored.push(p);
+            }
+        }
+        remove_if_empty(&root, &area);
+        Ok(restored)
+    }
+
+    /// Remove a run's deleted outputs for good; returns the bytes removed.
+    pub fn purge_deleted_outputs(&self, id: &str) -> Result<u64, ResearchError> {
+        if !valid_run_id(id) {
+            return Err(ResearchError::UnknownRun(id.to_owned()));
+        }
+        let root = self.records_root()?;
+        let area = deleted_outputs_dir(&root, id);
+        let mut bytes = 0;
+        for file in files_in(&root, &area, &format!("{ARTIFACTS}/{DELETED}/{id}")) {
+            std::fs::remove_file(join(&root, file.path.as_str()))
+                .map_err(|e| ResearchError::io("removing a deleted run output", e))?;
+            bytes += file.bytes;
+        }
+        remove_if_empty(&root, &area);
+        Ok(bytes)
+    }
+
+    /// Deleted outputs held for recovery, per run (newest first).
+    pub fn deleted_run_outputs(&self) -> Result<Vec<DeletedOutputs>, ResearchError> {
+        let root = self.records_root()?;
+        let base = join(&root, ARTIFACTS).join(DELETED);
+        if !real_dir_within(&root, &base) {
+            return Ok(Vec::new());
+        }
+        let Ok(entries) = std::fs::read_dir(&base) else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if !valid_run_id(&id) {
+                continue;
+            }
+            let dir = base.join(&id);
+            let files = files_in(&root, &dir, &format!("{ARTIFACTS}/{DELETED}/{id}"));
+            if files.is_empty() {
+                continue;
+            }
+            let at = files.iter().map(|f| modified_ms(&join(&root, f.path.as_str()))).max().unwrap_or(0);
+            out.push(DeletedOutputs { run: id, files, deleted_at_ms: at });
+        }
+        out.sort_by(|a, b| b.deleted_at_ms.cmp(&a.deleted_at_ms).then_with(|| a.run.cmp(&b.run)));
+        Ok(out)
     }
 }
 
