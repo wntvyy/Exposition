@@ -16,16 +16,18 @@ use exposition_core::artifact::{ArtifactId, ArtifactKind, ArtifactRecord, RunSta
 use exposition_core::path::WorkspacePath;
 use exposition_graph::workflow::presets::{NUMERICAL_EXPERIMENT, WorkflowPresetRequest, draft};
 use exposition_graph::workflow::{
-    AuthorityCeiling, CodeLanguage, CompareOp, ConditionTest, ConditionValue, OutcomeKind, ParamValue, PortSource,
-    StepCondition, StepOperation, StepPayload, StepPort, StepRepeat, WORKFLOW_SCHEMA_V2, WorkflowConnection,
-    WorkflowDefinition, WorkflowExecutionOptions, WorkflowOutcome, WorkflowStep,
+    AuthorityCeiling, CodeLanguage, CompareOp, CompositeRef, ConditionTest, ConditionValue, InputSource, InputVersion,
+    OutcomeKind, ParamValue, PortSource, StepCondition, StepOperation, StepPayload, StepPort, StepRepeat,
+    WORKFLOW_SCHEMA_V2, WorkflowConnection, WorkflowDefinition, WorkflowExecutionOptions, WorkflowInput,
+    WorkflowOutcome, WorkflowStep,
 };
 use exposition_graph::{
     GraphConfig, GraphService, Origin, SaveWorkflowRequest, SavedWorkflow, ValidationContext, WorkflowId,
 };
 use exposition_research::ResearchError;
 use exposition_research::batch::{
-    BatchControl, BatchMode, BatchPortOutput, BatchRequest, BatchResult, BatchRunner, environment_keys as keys,
+    BatchControl, BatchLanguage, BatchMode, BatchPortOutput, BatchRequest, BatchResult, BatchRunner,
+    environment_keys as keys,
 };
 use exposition_workflow::adapters::batch::BatchAdapter;
 use exposition_workflow::adapters::{Adapters, runner_ids, sha256_hex};
@@ -153,6 +155,22 @@ impl BatchRunner for FakeBatch {
     fn current_environment(&self, _root: &Path, _mode: BatchMode) -> Vec<(String, String)> {
         self.current.lock().unwrap().clone()
     }
+    // Lane F: R and Julia batches go through the same fake (native only).
+    fn language_availability(&self, _root: &Path, language: BatchLanguage, mode: BatchMode) -> Result<(), String> {
+        match (language, mode) {
+            (BatchLanguage::Python, _) | (_, BatchMode::TrustedNative) => Ok(()),
+            (_, BatchMode::Restricted) => Err("no R/Julia image in this fake".into()),
+        }
+    }
+    fn run_language(
+        &self,
+        root: &Path,
+        _language: BatchLanguage,
+        request: &BatchRequest,
+        control: &BatchControl<'_>,
+    ) -> Result<BatchResult, ResearchError> {
+        self.run(root, request, control)
+    }
 }
 
 struct Fixture {
@@ -185,8 +203,11 @@ fn fixture() -> Fixture {
         runner_ids::RESTRICTED_PYTHON.into(),
         Arc::new(BatchAdapter::new(Some(runner.clone()), BatchMode::Restricted)),
     );
-    adapters
-        .insert(runner_ids::NATIVE_PYTHON.into(), Arc::new(BatchAdapter::new(Some(runner), BatchMode::TrustedNative)));
+    adapters.insert(
+        runner_ids::NATIVE_PYTHON.into(),
+        Arc::new(BatchAdapter::new(Some(runner.clone()), BatchMode::TrustedNative)),
+    );
+    exposition_workflow::adapters::rj::install(&mut adapters, Some(runner));
     let host = Arc::new(Host { root: root.clone(), graph: graph.clone() });
     let service = WorkflowRunService::new(WorkflowRunConfig {
         database: Some(data.path().join("workflow-runs.sqlite3")),
@@ -433,4 +454,97 @@ fn review_m9_held_for_each_counts_every_instance_once() {
         .collect();
     eprintln!("instance seeds: {seeds:?} (lane F gives instances their own seed)");
     assert!(seeds.iter().all(Option::is_some), "every instance records the seed it was given");
+}
+
+// ------------------------------------------------------- lane F probes ----
+
+/// R-m9 F6 (runtime half): a `.py` script reaching a native R step through a
+/// composite passes validation and the plan (no blocker, approvable), and is
+/// refused only when the step is dispatched (`workflow.invalidInput`). The
+/// refusal holds (nothing runs); the plan the user approved said it would run.
+#[test]
+#[ignore = "R-m9 F6: the plan of a .py script reaching an R step through a composite has no blocker"]
+fn review_m9_f6_the_plan_refuses_a_python_script_for_an_r_step_inside_a_composite() {
+    let f = fixture();
+    std::fs::write(
+        f.root.join("experiment.py"),
+        "print('python, not R')
+",
+    )
+    .unwrap();
+    let code_input = |id: &str, path: &str| WorkflowInput {
+        id: id.into(),
+        label: format!("Code {id}"),
+        port_type: exposition_graph::workflow::PortType::CodeSource,
+        source: InputSource::Resource { path: WorkspacePath::parse(path).unwrap(), version: InputVersion::AtRunStart },
+    };
+    let mut fit = python("fit", true);
+    fit.operation = StepOperation { id: "research.nativeR".into(), version: 1 };
+    fit.payload = None;
+    let mut child = v2(
+        vec![fit],
+        vec![WorkflowConnection::Data {
+            from: PortSource::Input { input: "script".into() },
+            to: StepPort { step: "fit".into(), port: "script".into() },
+        }],
+        "fit",
+    );
+    child.inputs = vec![code_input("script", "analysis.R")];
+    child.execution = None;
+    child.schema = exposition_graph::workflow::WORKFLOW_SCHEMA.into();
+    let child = f.save(child);
+    let composite = WorkflowStep {
+        id: "c".into(),
+        label: "Run the R analysis".into(),
+        operation: StepOperation { id: "workflow.composite".into(), version: 1 },
+        parameters: BTreeMap::new(),
+        payload: None,
+        composite: Some(CompositeRef { workflow: child, revision: 1 }),
+        condition: None,
+        repeat: None,
+    };
+    let mut parent = v2(
+        vec![composite],
+        vec![WorkflowConnection::Data {
+            from: PortSource::Input { input: "code".into() },
+            to: StepPort { step: "c".into(), port: "script".into() },
+        }],
+        "c",
+    );
+    parent.inputs = vec![code_input("code", "experiment.py")];
+    parent.outcomes[0].from = StepPort { step: "c".into(), port: "o-fit".into() };
+    // Saved without asserting it is well-formed (a fixed validator refuses it).
+    let id = f
+        .graph
+        .save_workflow(
+            &Origin::User,
+            &SaveWorkflowRequest { id: None, expected_revision: None, definition: parent },
+            &ValidationContext::default(),
+        )
+        .unwrap()
+        .id;
+    let plan = f.service.plan(&id, None).unwrap();
+    eprintln!("plan blockers: {:?}", plan.blockers);
+    let before = f.batch.counter.load(Ordering::SeqCst);
+    let run = f
+        .service
+        .start(&StartWorkflowRunRequest { plan: plan.plan.clone(), approval_hash: plan.approval_hash.clone() })
+        .map(|r| {
+            assert!(f.service.wait_idle(Duration::from_secs(30)));
+            f.service.get(&r.id).unwrap()
+        });
+    let step = run.as_ref().ok().and_then(|r| r.steps.iter().find(|s| s.step == "c/fit").cloned());
+    let attempt = step.as_ref().and_then(|s| s.attempts.last().cloned());
+    eprintln!(
+        "run: {:?}; c/fit: {:?} {:?} {:?}",
+        run.as_ref().map(|r| r.state),
+        step.as_ref().map(|s| s.state),
+        attempt.as_ref().and_then(|a| a.code.clone()),
+        attempt.as_ref().and_then(|a| a.message.clone())
+    );
+    assert_eq!(f.batch.counter.load(Ordering::SeqCst), before, "held: nothing ran");
+    assert!(
+        plan.blockers.iter().any(|b| b.code == "workflow.notWellFormed" || b.code == "workflow.inputTypeMismatch"),
+        "the plan must say the .py script cannot run in the R step"
+    );
 }
