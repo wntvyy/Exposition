@@ -110,7 +110,7 @@ export function ProblemsPanel() {
 
   if (diagnostics.length === 0) {
     return (
-      <div data-testid="problems-panel" className="problems-empty">
+      <div data-testid="problems-panel">
         <EmptyState
           icon={CircleCheck}
           title="No problems"
