@@ -96,24 +96,13 @@
   padding: 0;
   border: 0;
 }
-/* Multi-line text field (no shared TextArea yet): the shared input look. */
-.xp-wf__textarea {
-  height: auto;
-  min-height: calc(var(--control-height-md) * 3);
-  padding: var(--space-1-5) var(--space-2);
-  line-height: var(--line-height-normal);
-  resize: vertical;
-  font-family: inherit;
-}
-.xp-wf__textarea:focus-visible {
-  border-color: var(--color-focus-ring);
-  outline: var(--border-width) solid var(--color-focus-ring);
-  outline-offset: 0;
-}
-/* A name in running text or a row title: list-title weight, not bold. */
-.xp-wf-name,
-.xp-wf-list .ui-list-row__title {
+/* A name in running text: list-title weight, not bold. */
+.xp-wf-name {
   font-weight: var(--font-weight-medium);
+}
+/* Draft titles stay a <strong> (an e2e hook) at the shared list-title weight. */
+.xp-wf-list strong {
+  font-weight: inherit;
 }
 .xp-wf-bullets,
 .xp-wf-notes,
@@ -123,22 +112,8 @@
   padding-left: var(--space-5);
 }
 
-/* Shared Section workarounds (requested upstream): a collapsible content
-   section's chevron hangs 18px into a 12px inset and is clipped at a page
-   edge; and every nested chevron rotates under an expanded ancestor. */
-.xp-wf .ui-section[data-variant="content"] > .ui-section__header .ui-section__toggle {
-  margin-left: calc(-1 * var(--pane-inset));
-}
-.xp-wf .ui-section:not([data-expanded]) > .ui-section__header .ui-section__chevron {
-  transform: none;
-}
-
 /* ---------- Rows and blocks ---------- */
 
-/* ListRow lists span the section's full width (rows carry the inset). */
-.xp-wf-list {
-  margin: 0 calc(-1 * var(--pane-inset));
-}
 .xp-wf-list > .ui-list-row:last-child {
   border-bottom: 0;
 }
@@ -366,11 +341,7 @@
 
 /* ---------- Plan review and trigger dialogs ---------- */
 
-/* The plan scrolls inside a wider dialog; the footer (Cancel / Start run) stays visible. */
-.ui-modal[data-size]:has(> .xp-wf-plan-dialog) {
-  width: min(var(--content-max-width), calc(100vw - var(--space-8)));
-  max-height: 86vh;
-}
+/* The plan is read as content (body text), not as dialog prose. */
 .xp-wf-plan-dialog .ui-dialog__body {
   color: var(--color-text);
   font-size: var(--font-size-md);
@@ -500,17 +471,11 @@
 .xp-wfc__message:empty {
   display: none;
 }
-/* Nodes use the shared NodeCard look (neutral card, tinted type band); port
-   rows reach the card edges so their handles sit on the outline. */
-.xp-wfc-node.ui-node-card {
-  gap: 0;
+/* Nodes are NodeCards; port rows (NodeCard children) reach the card edges,
+   so their handles sit on the outline. */
+.xp-wfc-node {
   width: 240px;
-  height: auto;
-  overflow: visible;
   user-select: none;
-}
-.xp-wfc-node .ui-node-card__header {
-  border-radius: calc(var(--radius-md) - var(--border-width)) calc(var(--radius-md) - var(--border-width)) 0 0;
 }
 .xp-wfc-ports,
 .xp-wfc-composite__children {
@@ -548,6 +513,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  padding: 0 var(--space-2) var(--space-1-5);
 }
 .xp-wfc-composite__children {
   padding-left: var(--space-5);

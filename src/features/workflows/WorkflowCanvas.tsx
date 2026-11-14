@@ -40,14 +40,15 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import { ChevronDown, ChevronRight, Cog, FileInput, Flag, Focus, Layers, LayoutGrid, Maximize, Minus, Plus } from "lucide-react";
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { createContext, Fragment, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 
 import type { OperationContract } from "../../bindings/OperationContract";
 import type { PortSpec } from "../../bindings/PortSpec";
 import type { PortType } from "../../bindings/PortType";
 import type { WorkflowDefinition } from "./contract";
 import type { WorkflowDiagnostic } from "../../bindings/WorkflowDiagnostic";
-import { Badge, Banner, Button, IconButton, Toolbar, useContextMenu } from "../../ui/components";
+import { Badge, Banner, Button, IconButton, NodeCard, Toolbar, useContextMenu } from "../../ui/components";
+import type { GraphCategory } from "../../ui/tokens";
 import { appClipboard } from "../operations/clipboard";
 import { OpContextMenu } from "../operations/OpMenu";
 import { acceptsItems, useOpSurface, type SurfaceActions } from "../operations/surfaces";
@@ -73,7 +74,7 @@ import type { CompositeInfo } from "./useComposites";
 export type { CanvasSelectionItem } from "./canvasModel";
 
 /** Port type → token category (color) and handle shape (a second, non-color cue; the type is also text). */
-export const PORT_VISUAL: Record<PortType, { category: string; shape: "circle" | "square" | "diamond" }> = {
+export const PORT_VISUAL: Record<PortType, { category: GraphCategory; shape: "circle" | "square" | "diamond" }> = {
   codeSource: { category: "document", shape: "square" },
   document: { category: "document", shape: "square" },
   formalSource: { category: "formal", shape: "square" },
@@ -99,15 +100,21 @@ const useNodeContext = () => useContext(NodeContext) as NodeContextValue;
 type WfNodeData = { ref: string };
 type WfNode = Node<WfNodeData, "wfStep" | "wfInput" | "wfOutcome">;
 
-function ProblemBadge({ items }: { items: WorkflowDiagnostic[] }) {
-  const errors = items.filter((d) => d.severity === "error");
+function problemBadge(items: WorkflowDiagnostic[]): ReactNode {
   if (items.length === 0) return null;
+  const errors = items.filter((d) => d.severity === "error");
   const text = items.map((d) => d.message).join("\n");
   return (
     <Badge tone={errors.length ? "danger" : "warning"} title={text}>
       {errors.length ? `${errors.length} problem${errors.length === 1 ? "" : "s"}` : `${items.length} note${items.length === 1 ? "" : "s"}`}
     </Badge>
   );
+}
+
+/** NodeCard badges: only those that apply (none: no badge row). */
+function badgeRow(...items: ReactNode[]): ReactNode {
+  const shown = items.filter(Boolean);
+  return shown.length ? shown.map((item, i) => <Fragment key={i}>{item}</Fragment>) : undefined;
 }
 
 function PortRow({ side, spec, stepId }: { side: "in" | "out"; spec: PortSpec; stepId: string }) {
@@ -134,16 +141,14 @@ function PortRow({ side, spec, stepId }: { side: "in" | "out"; spec: PortSpec; s
         <span className="xp-wfc-port__type"> · {types}</span>
         {side === "in" && spec.required && <span className="xp-wfc-port__required"> · required</span>}
       </span>
-      <ProblemBadge items={problems} />
+      {problemBadge(problems)}
     </li>
   );
 }
 
 /** The workflow a composite step runs, its pinned revision, and its steps (read-only, on request). */
-function CompositeInfoView({ stepId, pinned }: { stepId: string; pinned: { workflow: string; revision: number } }) {
-  const { composites } = useNodeContext();
+function CompositeInfoView({ stepId, pinned, info }: { stepId: string; pinned: { workflow: string; revision: number }; info: CompositeInfo | undefined }) {
   const [open, setOpen] = useState(false);
-  const info = composites.get(compositeKey(pinned));
   const child = info?.saved?.definition;
   const newer = info?.latest != null && info.latest > pinned.revision ? info.latest : null;
   return (
@@ -151,18 +156,20 @@ function CompositeInfoView({ stepId, pinned }: { stepId: string; pinned: { workf
       <p className="ui-meta">
         Runs <span className="xp-wf-name">“{child?.title ?? pinned.workflow}”</span> · revision {pinned.revision} (pinned)
       </p>
-      <div className="ui-node-card__badges">
-        {newer !== null && (
-          <Badge tone="accent" dashed title="Choose “Use latest revision” in the step's inspector to adopt it (an edit of this workflow).">
-            Revision {newer} available
-          </Badge>
-        )}
-        {info?.error && (
-          <Badge tone="danger" dashed title={info.error}>
-            Child not loaded
-          </Badge>
-        )}
-      </div>
+      {(newer !== null || info?.error) && (
+        <div className="xp-wf__line">
+          {newer !== null && (
+            <Badge tone="accent" dashed title="Choose “Use latest revision” in the step's inspector to adopt it (an edit of this workflow).">
+              Revision {newer} available
+            </Badge>
+          )}
+          {info?.error && (
+            <Badge tone="danger" dashed title={info.error}>
+              Child not loaded
+            </Badge>
+          )}
+        </div>
+      )}
       {child && (
         <>
           <div>
@@ -195,36 +202,26 @@ function CompositeInfoView({ stepId, pinned }: { stepId: string; pinned: { workf
 }
 
 function StepNodeView({ data, selected }: NodeProps<WfNode>) {
-  const { draft, contracts, diagnostics } = useNodeContext();
+  const { draft, contracts, diagnostics, composites } = useNodeContext();
   const step = draft.steps.find((s) => s.id === data.ref);
   if (!step) return null;
   const contract = contractOf(contracts, step);
   const own = diagnostics.filter((d) => d.step === step.id && d.port === null && d.outcome === null);
   const composite = isComposite(step);
+  const pinned = composite ? step.composite : undefined;
+  const info = pinned ? composites.get(compositeKey(pinned)) : undefined;
   const repeat = step.repeat;
   return (
-    <div
-      className="xp-wfc-node ui-node-card"
-      data-category="workflow"
-      data-selected={selected || undefined}
-      data-step={step.id}
-      data-composite={composite || undefined}
-      data-testid={`wfc-step-${step.id}`}
-    >
+    <div className="xp-wfc-node" data-step={step.id} data-composite={composite || undefined} data-testid={`wfc-step-${step.id}`}>
       <Handle type="target" position={Position.Top} id={PRE_IN} className="xp-wfc-handle xp-wfc-handle--pre" aria-label={`Runs after (prerequisite into ${step.label})`} title="Drop a prerequisite here: this step runs after that one (no data)" />
-      <div className="ui-node-card__header">
-        <span className="ui-node-card__type">
-          {composite ? <Layers size={12} aria-hidden /> : <Cog size={12} aria-hidden />}
-          <span>{composite ? "Workflow step" : contract ? contract.title : "Unknown operation"}</span>
-        </span>
-      </div>
-      <div className="ui-node-card__body">
-        <p className="ui-node-card__title" title={step.label}>
-          {step.label}
-        </p>
-        {composite && step.composite && <CompositeInfoView stepId={step.id} pinned={step.composite} />}
-        <div className="ui-node-card__badges">
-          {step.condition && (
+      <NodeCard
+        title={step.label}
+        typeLabel={composite ? "Workflow step" : contract ? contract.title : "Unknown operation"}
+        typeIcon={composite ? Layers : Cog}
+        category="workflow"
+        selected={selected}
+        badges={badgeRow(
+          step.condition && (
             <Badge
               tone="info"
               dashed
@@ -232,40 +229,46 @@ function StepNodeView({ data, selected }: NodeProps<WfNode>) {
             >
               If {shortTest(step.condition.test, step.condition.negate)}
             </Badge>
-          )}
-          {repeat?.kind === "forEach" && (
+          ),
+          repeat?.kind === "forEach" && (
             <Badge tone="info" title={`One instance for each of ${repeat.values.length} values of ${repeat.parameter}`}>
               For each {repeat.parameter} ×{repeat.values.length}
             </Badge>
-          )}
-          {repeat?.kind === "until" && (
+          ),
+          repeat?.kind === "until" && (
             <Badge tone="info" title={`Repeats until ${shortTest(repeat.test, repeat.negate)}, at most ${repeat.maxIterations} times`}>
               Until · at most {repeat.maxIterations}
             </Badge>
-          )}
-          {!contract && (
+          ),
+          !contract && (
             <Badge tone="danger" dashed>
               Not a registered operation
             </Badge>
-          )}
-          {contract && !contract.runner.available && (
+          ),
+          contract && !contract.runner.available && (
             <Badge tone="neutral" dashed title={contract.runner.availability}>
               Runner unavailable
             </Badge>
-          )}
-          <ProblemBadge items={own} />
-        </div>
-      </div>
-      {contract && (
-        <ul className="xp-wfc-ports" aria-label={`Ports of ${step.label}`}>
-          {contract.inputs.map((p) => (
-            <PortRow key={`in-${p.name}`} side="in" spec={p} stepId={step.id} />
-          ))}
-          {contract.outputs.map((p) => (
-            <PortRow key={`out-${p.name}`} side="out" spec={p} stepId={step.id} />
-          ))}
-        </ul>
-      )}
+          ),
+          problemBadge(own),
+        )}
+      >
+        {(pinned || contract) && (
+          <>
+            {pinned && <CompositeInfoView stepId={step.id} pinned={pinned} info={info} />}
+            {contract && (
+              <ul className="xp-wfc-ports" aria-label={`Ports of ${step.label}`}>
+                {contract.inputs.map((p) => (
+                  <PortRow key={`in-${p.name}`} side="in" spec={p} stepId={step.id} />
+                ))}
+                {contract.outputs.map((p) => (
+                  <PortRow key={`out-${p.name}`} side="out" spec={p} stepId={step.id} />
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </NodeCard>
       <Handle type="source" position={Position.Bottom} id={PRE_OUT} className="xp-wfc-handle xp-wfc-handle--pre" aria-label={`Runs before (drag to a step that should run after ${step.label})`} title="Drag to another step's top edge: that step runs after this one (no data)" />
     </div>
   );
@@ -279,22 +282,24 @@ function InputNodeView({ data, selected }: NodeProps<WfNode>) {
   const path = input.source.kind === "resource" ? input.source.path : null;
   const name = `Output of input ${input.label} (${PORT_TYPE_LABELS[input.portType]})`;
   return (
-    <div className="xp-wfc-node ui-node-card" data-category={visual.category} data-selected={selected || undefined} data-testid={`wfc-input-${input.id}`}>
-      <div className="ui-node-card__header">
-        <span className="ui-node-card__type">
-          <FileInput size={12} aria-hidden />
-          <span>Input · {PORT_TYPE_LABELS[input.portType]}</span>
-        </span>
-      </div>
-      <div className="ui-node-card__body">
-        <p className="ui-node-card__title" title={input.label}>
-          {input.label}
-        </p>
-        <div className="ui-node-card__badges">
-          {path ? <code className="xp-wfc-path">{path}</code> : <Badge tone="warning" dashed>No file chosen</Badge>}
-          <ProblemBadge items={diagnostics.filter((d) => d.input === input.id)} />
-        </div>
-      </div>
+    <div className="xp-wfc-node" data-testid={`wfc-input-${input.id}`}>
+      <NodeCard
+        title={input.label}
+        typeLabel={`Input · ${PORT_TYPE_LABELS[input.portType]}`}
+        typeIcon={FileInput}
+        category={visual.category}
+        selected={selected}
+        badges={badgeRow(
+          path ? (
+            <code className="xp-wfc-path">{path}</code>
+          ) : (
+            <Badge tone="warning" dashed>
+              No file chosen
+            </Badge>
+          ),
+          problemBadge(diagnostics.filter((d) => d.input === input.id)),
+        )}
+      />
       <Handle type="source" position={Position.Right} id="out" className="xp-wfc-handle" data-shape={visual.shape} data-category={visual.category} aria-label={name} title={name} />
     </div>
   );
@@ -305,23 +310,24 @@ function OutcomeNodeView({ data, selected }: NodeProps<WfNode>) {
   const outcome = draft.outcomes.find((o) => o.id === data.ref);
   if (!outcome) return null;
   return (
-    <div className="xp-wfc-node ui-node-card" data-category="workflow" data-inactive={outcome.optional || undefined} data-selected={selected || undefined} data-testid={`wfc-outcome-${outcome.id}`}>
+    <div className="xp-wfc-node" data-testid={`wfc-outcome-${outcome.id}`}>
       <Handle type="target" position={Position.Left} id="in" className="xp-wfc-handle" data-shape="diamond" data-category="workflow" aria-label={`Realizes the outcome ${outcome.label}`} title={`Realizes ${outcome.label}`} />
-      <div className="ui-node-card__header">
-        <span className="ui-node-card__type">
-          <Flag size={12} aria-hidden />
-          <span>Outcome · {OUTCOME_LABELS[outcome.kind]}</span>
-        </span>
-      </div>
-      <div className="ui-node-card__body">
-        <p className="ui-node-card__title" title={outcome.label}>
-          {outcome.label}
-        </p>
-        <div className="ui-node-card__badges">
-          {outcome.optional && <Badge tone="neutral" dashed>Optional</Badge>}
-          <ProblemBadge items={diagnostics.filter((d) => d.outcome === outcome.id)} />
-        </div>
-      </div>
+      <NodeCard
+        title={outcome.label}
+        typeLabel={`Outcome · ${OUTCOME_LABELS[outcome.kind]}`}
+        typeIcon={Flag}
+        category="workflow"
+        selected={selected}
+        inactive={outcome.optional}
+        badges={badgeRow(
+          outcome.optional && (
+            <Badge tone="neutral" dashed>
+              Optional
+            </Badge>
+          ),
+          problemBadge(diagnostics.filter((d) => d.outcome === outcome.id)),
+        )}
+      />
     </div>
   );
 }

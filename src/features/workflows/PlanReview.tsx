@@ -537,7 +537,7 @@ export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onS
   return (
     <Dialog
       title={plan ? `${heading} “${plan.title}”` : heading}
-      size="lg"
+      size="xl"
       isOpen={isOpen}
       onOpenChange={onOpenChange}
       isDismissable={!starting}

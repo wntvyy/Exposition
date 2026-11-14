@@ -2,7 +2,7 @@
 // drafts from the workflow presets, strict imports, and recent runs. Nothing
 // here starts a run: a run starts only from a reviewed plan in the editor.
 import { Bell, BellOff, BellRing, FileUp, Plus } from "lucide-react";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { editors } from "../../app/editors";
 import type { EditorProps } from "../../app/registry";
@@ -23,6 +23,7 @@ import {
   Section,
   StateSizeProvider,
   StatusText,
+  TextArea,
 } from "../../ui/components";
 import { onProjectOp } from "../operations/client";
 import { useOpList } from "../operations/useOpList";
@@ -41,7 +42,6 @@ export function WorkflowsView(_props: EditorProps) {
   const [error, setError] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
-  const id = useId();
   const root = useWorkspace((s) => s.info?.root ?? null);
 
   const refresh = async () => {
@@ -137,7 +137,7 @@ export function WorkflowsView(_props: EditorProps) {
                       role="listitem"
                       data-workflow={d.id}
                       aria-label={d.title}
-                      title={<strong className="xp-wf-name">{d.title}</strong>}
+                      title={<strong>{d.title}</strong>}
                       meta={
                         <>
                           <StatusText
@@ -158,11 +158,14 @@ export function WorkflowsView(_props: EditorProps) {
                             </Badge>
                           ) : (
                             triggers.some((t) => t.workflow === d.id && t.state.kind === "disabled") && (
-                              <span data-testid={`workflow-trigger-off-${d.id}`}>
-                                <Badge icon={BellRing} dashed title="Triggers stay off until you enable one again in the workflow's Triggers section">
-                                  Trigger off
-                                </Badge>
-                              </span>
+                              <Badge
+                                icon={BellRing}
+                                dashed
+                                title="Triggers stay off until you enable one again in the workflow's Triggers section"
+                                data-testid={`workflow-trigger-off-${d.id}`}
+                              >
+                                Trigger off
+                              </Badge>
                             )
                           )}
                           {d.origin.kind === "agent" && (
@@ -194,21 +197,7 @@ export function WorkflowsView(_props: EditorProps) {
                   definition. It is checked strictly, saved as new drafts with new identities, never trusted, and never run; triggers,
                   approvals, and trust are never imported.
                 </p>
-                <div className="ui-field">
-                  <label className="ui-field__label" htmlFor={id}>
-                    Definition (JSON)
-                  </label>
-                  <textarea
-                    id={id}
-                    className="ui-input xp-wf__textarea"
-                    data-code
-                    rows={6}
-                    value={text}
-                    onChange={(e) => setText(e.target.value)}
-                    spellCheck={false}
-                    data-testid="workflow-import-text"
-                  />
-                </div>
+                <TextArea label="Definition (JSON)" code rows={6} value={text} onChange={setText} testId="workflow-import-text" />
                 <div className="xp-wf__row">
                   <Button
                     icon={FileUp}
