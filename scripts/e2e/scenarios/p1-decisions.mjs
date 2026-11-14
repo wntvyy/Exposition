@@ -263,7 +263,8 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
     const pinnedRow = revisions.locator('[data-testid="storage-item"][data-referenced="true"]').filter({ hasText: "Child count" }).first();
     await pinnedRow.waitFor({ timeout: 15_000 });
     assert.equal(await revisions.getByRole("button", { name: "Select unreferenced" }).count(), 0, "a pinned revision is never selected by default");
-    await pinnedRow.getByRole("checkbox").check();
+    await pinnedRow.locator("label").first().click();
+    await waitFor(async () => (await page.getByTestId("storage-scope").getAttribute("data-count")) === "1", { message: "the pinned revision is included" });
     assert.match(await page.getByTestId("storage-scope").textContent(), /referenced item is included/);
     await page.getByTestId("storage-purge").click();
     await decision(page).waitFor({ timeout: 15_000 });
