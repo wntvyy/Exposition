@@ -35,6 +35,14 @@
   display: none;
 }
 
+/* A page's root fills its page area at any window size (the page area is a
+   flex row; a root without this shrank to its content width). */
+.wb-page > * {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
 .wb-columns,
 .wb-rows {
   flex: 1;

@@ -1,8 +1,8 @@
 // Top-level pages against the UI standard in the real app (M7 lane D review):
 // Research, Agents, and Graph with no folder open (honest states), then with a
 // project: keyboard page switching (Mod+2/3/4) moves focus into the page, F6
-// cycles each page's regions, the narrow window keeps every page usable without
-// horizontal overflow, both themes, no console errors. Screens go to
+// cycles each page's regions, every page fills its area at wide, maximized, and
+// narrow sizes, the narrow window keeps every page usable without horizontal overflow, both themes, no console errors. Screens go to
 // test-results/e2e/pages-review/ and, with EXPOSITION_DEV_HOME set, to
 // $EXPOSITION_DEV_HOME/ui-reference/pages/.
 import { copyFile, cp, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
@@ -14,6 +14,7 @@ import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const WIDE = { width: 1440, height: 900 };
 const NARROW = { width: 900, height: 640 };
+const MAXIMIZED = { width: 2560, height: 1369 };
 
 async function setViewport(page, size) {
   await page.setViewportSize(size);
@@ -63,6 +64,20 @@ async function f6Regions(page) {
   return seen;
 }
 
+/** Width of the shown page's root against its page area (a page fills the area at any window size). */
+async function fill(page) {
+  return page.evaluate(() => {
+    const shown = [...document.querySelectorAll(".wb-pages > [data-page]")].find((p) => !p.hasAttribute("hidden"));
+    const root = shown?.firstElementChild;
+    return { area: Math.round(shown?.getBoundingClientRect().width ?? 0), root: Math.round(root?.getBoundingClientRect().width ?? 0) };
+  });
+}
+
+async function assertFills(page, assert, id, size) {
+  const f = await fill(page);
+  assert.ok(f.area > 0 && Math.abs(f.area - f.root) <= 1, `${id} fills its page area at ${size.width}px (${JSON.stringify(f)})`);
+}
+
 /** Horizontal overflow of the shown page (content wider than its box). */
 async function overflow(page) {
   return page.evaluate(() => {
@@ -98,6 +113,7 @@ export default async function pagesReview({ launchApp, artifactsDir, assert, fix
     assert.deepEqual(names, ["Editor", "Research", "Agents", "Graph"], "pages in rail order");
     for (const id of ["research", "agents", "graph"]) {
       await showPage(page, id);
+      await assertFills(page, assert, id, WIDE);
       const text = await page.getByTestId(PAGES[id].testId).innerText();
       assert.match(text, /No folder open|Open a project folder|Open Folder/i, `${id} with no folder says so (${text.slice(0, 120)})`);
       await shot(page, `${id}-no-folder-light`);
@@ -119,7 +135,15 @@ export default async function pagesReview({ launchApp, artifactsDir, assert, fix
       for (const region of expected[id]) assert.ok(regions.includes(region), `F6 reaches ${region} on ${id} (visited ${regions.join(", ")})`);
       assert.ok(regions.includes("statusbar"), `F6 reaches the status bar from ${id}`);
       assert.ok(!regions.some((r) => ["sidebar", "editor", "panel", "auxiliary"].includes(r)), `the hidden Editor page takes no focus (${regions.join(", ")})`);
+      await assertFills(page, assert, id, WIDE);
       await shot(page, `${id}-project-light`);
+    }
+
+    // --- Maximized window: every page grows with the window -------------------
+    await setViewport(page, MAXIMIZED);
+    for (const id of ["research", "agents", "graph"]) {
+      await showPage(page, id);
+      await assertFills(page, assert, id, MAXIMIZED);
     }
 
     // --- Narrow window: usable, no horizontal overflow ------------------------
@@ -128,6 +152,7 @@ export default async function pagesReview({ launchApp, artifactsDir, assert, fix
       await showPage(page, id);
       const o = await overflow(page);
       assert.ok(o.document <= 0 && o.page <= 1, `${id} has no horizontal overflow at ${NARROW.width}px (${JSON.stringify(o)})`);
+      await assertFills(page, assert, id, NARROW);
       await shot(page, `${id}-narrow-light`);
     }
 
