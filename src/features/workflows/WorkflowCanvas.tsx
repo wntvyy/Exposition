@@ -40,14 +40,18 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import { ChevronDown, ChevronRight, Focus, LayoutGrid, Maximize, Minus, Plus } from "lucide-react";
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 
 import type { OperationContract } from "../../bindings/OperationContract";
 import type { PortSpec } from "../../bindings/PortSpec";
 import type { PortType } from "../../bindings/PortType";
 import type { WorkflowDefinition } from "./contract";
 import type { WorkflowDiagnostic } from "../../bindings/WorkflowDiagnostic";
-import { Badge, Banner, IconButton, Toolbar } from "../../ui/components";
+import { Badge, Banner, IconButton, Toolbar, useContextMenu } from "../../ui/components";
+import { appClipboard } from "../operations/clipboard";
+import { OpContextMenu } from "../operations/OpMenu";
+import { acceptsItems, useOpSurface, type SurfaceActions } from "../operations/surfaces";
+import { copySubgraph, pasteMessage, pasteSubgraph, type WorkflowFragment } from "./subgraph";
 import {
   autoLayout,
   connect,
@@ -369,6 +373,14 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
 
   const layout = useMemo(() => autoLayout(draft, contracts), [draft, contracts]);
   const selectedId = selectedNodeId(selection);
+  // Nodes picked together (box selection, Ctrl/Cmd+click) for Copy / Duplicate / Delete.
+  const [picked, setPicked] = useState<Set<string>>(() => new Set());
+  const wrapper = useRef<HTMLDivElement>(null);
+  const menu = useContextMenu();
+  // The inspected item changed elsewhere (form, Escape, an edge): the picks follow it.
+  useEffect(() => {
+    setPicked((current) => (selectedId ? (current.has(selectedId) ? current : new Set([selectedId])) : current.size ? new Set() : current));
+  }, [selectedId]);
 
   const desired = useMemo<WfNode[]>(() => {
     const make = (id: string, type: WfNode["type"], ref: string): WfNode => ({
@@ -376,7 +388,7 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
       type,
       data: { ref },
       position: saved[id] ?? layout.get(id) ?? { x: 0, y: 0 },
-      selected: id === selectedId,
+      selected: id === selectedId || picked.has(id),
       ariaLabel: undefined,
     });
     return [
@@ -393,7 +405,7 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
             : `Outcome ${draft.outcomes.find((o) => o.id === parsed.id)?.label ?? parsed.id}`;
       return { ...n, ariaLabel: label };
     });
-  }, [draft, layout, saved, selectedId]);
+  }, [draft, layout, saved, selectedId, picked]);
 
   const [nodes, setNodes] = useState<WfNode[]>(desired);
   // Keep React Flow's measurements and an in-progress drag across draft edits.
@@ -433,9 +445,21 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
     (changes: NodeChange<WfNode>[]) => {
       setNodes((current) => applyNodeChanges(changes, current));
       const moved: Record<string, Point> = {};
+      const pick: { id: string; selected: boolean }[] = [];
       for (const change of changes) {
         if (change.type === "position" && change.dragging === false && change.position) moved[change.id] = { ...change.position };
+        if (change.type === "select") pick.push({ id: change.id, selected: change.selected });
         if (change.type === "select" && change.selected) onSelectionChange(toSelection(change.id));
+      }
+      if (pick.length) {
+        setPicked((current) => {
+          const next = new Set(current);
+          for (const p of pick) {
+            if (p.selected) next.add(p.id);
+            else next.delete(p.id);
+          }
+          return next;
+        });
       }
       if (Object.keys(moved).length) {
         setSaved((prev) => {
@@ -457,7 +481,56 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
     [draft, contracts, onChange],
   );
 
+  const pickedNodes = () => {
+    const ids = new Set(picked);
+    if (selectedId) ids.add(selectedId);
+    const present = new Set([...draft.inputs.map((i) => nodeIdOf.input(i.id)), ...draft.steps.map((st) => nodeIdOf.step(st.id)), ...draft.outcomes.map((o) => nodeIdOf.outcome(o.id))]);
+    return [...ids].filter((id) => present.has(id));
+  };
+
+  const positionsNow = (): Record<string, Point> => {
+    const all: Record<string, Point> = {};
+    for (const n of nodes) all[n.id] = { ...n.position };
+    return all;
+  };
+
+  const insertFragment = (fragment: WorkflowFragment) => {
+    const result = pasteSubgraph(draft, workflowId, fragment);
+    if (result.added.length === 0) return;
+    setSaved((prev) => {
+      const next = { ...prev, ...result.positions };
+      savePositions(workflowId, next);
+      return next;
+    });
+    onChange(result.draft);
+    setPicked(new Set(result.added));
+    const first = parseNodeId(result.added[0]!);
+    onSelectionChange(first ? { kind: first.kind, id: first.id } : null);
+    setMessage({ ok: result.dropped.length === 0, text: pasteMessage(result) });
+  };
+
+  const copyPicked = (): WorkflowFragment | null => copySubgraph(draft, workflowId, pickedNodes(), positionsNow());
+
+  const removeMany = () => {
+    const ids = pickedNodes();
+    if (ids.length < 2) return false;
+    let next = draft;
+    for (const id of ids) {
+      const parsed = parseNodeId(id);
+      if (!parsed) continue;
+      if (parsed.kind === "step") next = removeStep(next, parsed.id);
+      else if (parsed.kind === "input") next = removeInput(next, parsed.id);
+      else next = { ...next, outcomes: next.outcomes.filter((o) => o.id !== parsed.id) };
+    }
+    onChange(next);
+    onSelectionChange(null);
+    setPicked(new Set());
+    setMessage({ ok: true, text: `Removed ${ids.length} items with their connections. Save to keep the change.` });
+    return true;
+  };
+
   const removeSelected = () => {
+    if (removeMany()) return true;
     if (!selection) return false;
     if (selection.kind === "edge") {
       const next = removeEdge(draft, selection.id);
@@ -496,6 +569,61 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
     return true;
   };
 
+  const surfaceActions = (): SurfaceActions => {
+    const ids = pickedNodes();
+    const copyable = ids.some((id) => !id.startsWith("outcome:"));
+    const clip = appClipboard.get();
+    const none = "Select steps or inputs on the canvas";
+    return {
+      copy: {
+        enabled: copyable,
+        reason: none,
+        description: "Steps keep their configuration; outcomes are not copied",
+        run: () => {
+          const fragment = copyPicked();
+          if (!fragment) return;
+          appClipboard.set({ kind: "workflowSubgraph", workflow: workflowId, fragment, steps: fragment.steps.length });
+          setMessage({ ok: true, text: `Copied ${fragment.steps.length} step${fragment.steps.length === 1 ? "" : "s"}${fragment.inputs.length ? ` and ${fragment.inputs.length} input${fragment.inputs.length === 1 ? "" : "s"}` : ""}. Paste into this or another workflow draft.` });
+        },
+      },
+      paste: {
+        enabled: clip?.kind === "workflowSubgraph",
+        reason: "Copy steps from a workflow canvas first",
+        label: "Paste into Draft",
+        description: "New ids, offset slightly; nothing runs",
+        run: () => {
+          const current = appClipboard.get();
+          if (current?.kind === "workflowSubgraph") insertFragment(current.fragment as WorkflowFragment);
+        },
+      },
+      duplicate: {
+        enabled: copyable,
+        reason: none,
+        description: "A copy beside the selection, with new ids",
+        run: () => {
+          const fragment = copyPicked();
+          if (fragment) insertFragment(fragment);
+        },
+      },
+      delete: {
+        enabled: ids.length > 0 || selection?.kind === "edge",
+        reason: "Select a step, input, outcome, or connection",
+        label: "Remove from Draft",
+        description: "Save to keep the change",
+        run: () => void removeSelected(),
+      },
+    };
+  };
+  useOpSurface(`workflow-canvas:${workflowId}`, wrapper, surfaceActions, { history: false, accepts: acceptsItems });
+
+  const onNodeContextMenu = (event: MouseEvent, id: string | null) => {
+    if (id && !pickedNodes().includes(id)) {
+      setPicked(new Set([id]));
+      onSelectionChange(toSelection(id));
+    }
+    menu.openFromEvent(event);
+  };
+
   const arrange = () => {
     setSaved({});
     savePositions(workflowId, {});
@@ -530,8 +658,11 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
           )}
         </div>
         <div
+          ref={wrapper}
           className="xp-graph-canvas xp-wfc__canvas"
           onKeyDown={onKeyDown}
+          tabIndex={-1}
+          data-op-canvas=""
           role="group"
           aria-roledescription="canvas"
           aria-label={`Workflow canvas of ${draft.title || "this workflow"}. Drag from an output to a compatible input to connect; Delete removes the selected connection or step.`}
@@ -545,7 +676,14 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
               for (const change of changes) if (change.type === "select" && change.selected) onSelectionChange({ kind: "edge", id: change.id });
             }}
             onConnect={onConnect}
-            onPaneClick={() => onSelectionChange(null)}
+            onPaneClick={() => {
+              onSelectionChange(null);
+              setPicked(new Set());
+              // Keep keyboard focus on the canvas so Paste (Ctrl/Cmd+V) works after a background click.
+              wrapper.current?.focus({ preventScroll: true });
+            }}
+            onNodeContextMenu={(event, node) => onNodeContextMenu(event, node.id)}
+            onPaneContextMenu={(event) => onNodeContextMenu(event as MouseEvent, null)}
             fitView
             fitViewOptions={{ padding: 0.15, maxZoom: 1 }}
             nodesConnectable
@@ -556,7 +694,7 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
             edgesReconnectable={false}
             deleteKeyCode={null}
             selectionKeyCode="Shift"
-            multiSelectionKeyCode={null}
+            multiSelectionKeyCode={["Control", "Meta"]}
             panActivationKeyCode="Space"
             panOnDrag={[0, 1]}
             panOnScroll={false}
@@ -577,6 +715,7 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
           >
             <Controls onArrange={arrange} />
           </ReactFlow>
+          {menu.position && <OpContextMenu controller={menu} label="Canvas actions" actions={surfaceActions()} testId="workflow-canvas-context-menu" />}
         </div>
         <ul className="xp-wfc__legend" aria-label="Legend">
           <li>

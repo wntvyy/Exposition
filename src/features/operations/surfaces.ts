@@ -156,6 +156,8 @@ export function useOpSurface(
 
 /** Canvas nodes/edges and table rows/cells stand for a graph-like selection; toolbars and tabs do not. */
 export function acceptsItems(element: Element): boolean {
+  // A canvas wrapper itself (focused after a background click, for Paste) also counts.
+  if (element.matches("[data-op-canvas]")) return true;
   return element.closest(".react-flow__node, .react-flow__edge, [role='row'], [role='gridcell'], [role='rowheader'], [data-op-item]") !== null;
 }
 
