@@ -379,3 +379,12 @@ export function restoreTitle(original: OpTarget, outcome: OpOutcome, labels: Tar
   if (!sameTarget(restoredAt, original)) return `Restored ${name} as ${quoted(targetName(restoredAt, labels))}`;
   return `Restored ${name}`;
 }
+
+/** Sizes in binary units (KiB, MiB, GiB); `null` = not measurable. */
+export function formatBytes(size: number | null): string {
+  if (size === null) return "not measured";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MiB`;
+  return `${(size / 1024 / 1024 / 1024).toFixed(2)} GiB`;
+}

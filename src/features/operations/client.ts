@@ -385,3 +385,16 @@ export async function redoLast(): Promise<boolean> {
 export function runUserOperation(kind: OpKind, targets: OpTarget[], options: RunOptions = {}): Promise<OperationOutcome | null> {
   return runOperation({ kind, targets, actor: { kind: "user" } }, options);
 }
+
+/** Restore app-managed deletions chosen in Storage & History, and report the outcome. */
+export async function restoreAndReport(restores: { token: string; target: OpTarget }[], labels: TargetLabels = new Map()): Promise<number> {
+  if (inFlight > 0) return 0;
+  inFlight += 1;
+  try {
+    const results = await restore(restores, labels);
+    reportRestore(results, labels);
+    return results.filter((r) => r.outcome.status === "succeeded").length;
+  } finally {
+    inFlight -= 1;
+  }
+}

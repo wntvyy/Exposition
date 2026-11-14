@@ -52,6 +52,13 @@ registry.registerCommand({
 });
 
 registry.registerCommand({
+  id: "settings.storage",
+  title: "Storage and History",
+  category: "Preferences",
+  run: () => openSettings("storage"),
+});
+
+registry.registerCommand({
   id: "latex.useLuaLatex",
   title: "Build This File with LuaLaTeX",
   category: "LaTeX",
