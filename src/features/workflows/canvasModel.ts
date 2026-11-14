@@ -250,17 +250,17 @@ export function connect(def: WorkflowDefinition, contracts: OperationContract[],
   }
   const from = parseNodeId(source);
   const to = parseNodeId(target);
-  if (!from || !to || !sourceHandle || !targetHandle) return { ok: false, message: "Refused: connect an output (right side) to an input (left side)." };
+  if (!from || !to || !sourceHandle || !targetHandle) return { ok: false, message: "Connect an output (right side) to an input (left side)." };
   const stepLabel = (id: string) => def.steps.find((s) => s.id === id)?.label ?? id;
 
   // Prerequisite: step → step, no data.
   if (sourceHandle === PRE_OUT || targetHandle === PRE_IN) {
     if (sourceHandle !== PRE_OUT || targetHandle !== PRE_IN || from.kind !== "step" || to.kind !== "step") {
-      return { ok: false, message: "Refused: a prerequisite connects the bottom of one step to the top of another." };
+      return { ok: false, message: "A prerequisite connects the bottom of one step to the top of another." };
     }
-    if (from.id === to.id) return { ok: false, message: "Refused: a step cannot run after itself." };
+    if (from.id === to.id) return { ok: false, message: "A step cannot run after itself." };
     if (downstreamOf(def, to.id).has(from.id)) {
-      return { ok: false, message: `Refused: “${stepLabel(from.id)}” already runs after “${stepLabel(to.id)}”; this would form a cycle.` };
+      return { ok: false, message: `“${stepLabel(from.id)}” already runs after “${stepLabel(to.id)}”; this would form a cycle.` };
     }
     const existing = prerequisitesOf(def, to.id);
     if (existing.includes(from.id)) return { ok: false, message: `“${stepLabel(to.id)}” already runs after “${stepLabel(from.id)}”.` };
@@ -271,28 +271,28 @@ export function connect(def: WorkflowDefinition, contracts: OperationContract[],
     };
   }
 
-  if (!sourceHandle.startsWith("out")) return { ok: false, message: "Refused: connect an output (right side) to an input (left side)." };
+  if (!sourceHandle.startsWith("out")) return { ok: false, message: "Connect an output (right side) to an input (left side)." };
   const portSource: PortSource | null =
     from.kind === "input" ? { kind: "input", input: from.id } : from.kind === "step" ? { kind: "step", step: from.id, port: sourceHandle.slice(4) } : null;
-  if (!portSource) return { ok: false, message: "Refused: an outcome has no output." };
+  if (!portSource) return { ok: false, message: "An outcome has no output." };
   const type = sourceType(def, contracts, portSource);
   const typeLabel = type ? PORT_TYPE_LABELS[type] : "unknown type";
 
   if (to.kind === "outcome") {
     const outcome = def.outcomes.find((o) => o.id === to.id);
-    if (!outcome || portSource.kind !== "step") return { ok: false, message: "Refused: an outcome is realized by a step's output, not by an external input." };
+    if (!outcome || portSource.kind !== "step") return { ok: false, message: "An outcome is realized by a step's output, not by an external input." };
     const repeating = def.steps.find((s) => s.id === portSource.step);
     if (repeating?.repeat?.kind === "forEach") {
       return {
         ok: false,
-        message: `Refused: “${repeating.label}” runs once for each value, so it produces several outputs; collect its outputs in a step that takes several first.`,
+        message: `“${repeating.label}” runs once for each value, so it produces several outputs; collect its outputs in a step that takes several first.`,
       };
     }
     const accepts = OUTCOME_ACCEPTS[outcome.kind];
     if (!type || !accepts.includes(type)) {
       return {
         ok: false,
-        message: `Refused: ${OUTCOME_LABELS[outcome.kind]} needs ${accepts.map((t) => PORT_TYPE_LABELS[t]).join(" or ")}, but “${sourceLabel(def, portSource)}” produces ${typeLabel}.`,
+        message: `${OUTCOME_LABELS[outcome.kind]} needs ${accepts.map((t) => PORT_TYPE_LABELS[t]).join(" or ")}, but “${sourceLabel(def, portSource)}” produces ${typeLabel}.`,
       };
     }
     return {
@@ -302,37 +302,37 @@ export function connect(def: WorkflowDefinition, contracts: OperationContract[],
     };
   }
 
-  if (to.kind !== "step" || !targetHandle.startsWith("in:")) return { ok: false, message: "Refused: connect an output (right side) to an input (left side)." };
+  if (to.kind !== "step" || !targetHandle.startsWith("in:")) return { ok: false, message: "Connect an output (right side) to an input (left side)." };
   const port = targetHandle.slice(3);
   const step = def.steps.find((s) => s.id === to.id);
   const contract = step && contractOf(contracts, step);
   const spec = contract?.inputs.find((p) => p.name === port);
-  if (!step || !spec) return { ok: false, message: "Refused: that input port is not part of the step's operation." };
-  if (portSource.kind === "step" && portSource.step === step.id) return { ok: false, message: "Refused: a step cannot feed its own input." };
+  if (!step || !spec) return { ok: false, message: "That input port is not part of the step's operation." };
+  if (portSource.kind === "step" && portSource.step === step.id) return { ok: false, message: "A step cannot feed its own input." };
   const key = sourceKey(portSource);
   const bound = bindingsInto(def, step.id, port);
   const producer = portSource.kind === "step" ? def.steps.find((s) => s.id === portSource.step) : undefined;
   if (producer?.repeat?.kind === "forEach" && !spec.multiple) {
     return {
       ok: false,
-      message: `Refused: “${producer.label}” runs once for each value, so it produces several outputs; “${spec.label}” of “${step.label}” takes one source. Connect it to an input that accepts several sources.`,
+      message: `“${producer.label}” runs once for each value, so it produces several outputs; “${spec.label}” of “${step.label}” takes one source. Connect it to an input that accepts several sources.`,
     };
   }
   if (bound.some((b) => sourceKey(b) === key)) return { ok: false, message: `“${spec.label}” of “${step.label}” is already connected to ${sourceLabel(def, portSource)}.` };
   const options = compatibleSources(def, contracts, step.id, port);
   if (!options.some((o) => o.key === key)) {
     if (portSource.kind === "step" && downstreamOf(def, step.id).has(portSource.step)) {
-      return { ok: false, message: `Refused: “${stepLabel(portSource.step)}” runs after “${step.label}”; this connection would form a cycle.` };
+      return { ok: false, message: `“${stepLabel(portSource.step)}” runs after “${step.label}”; this connection would form a cycle.` };
     }
     return {
       ok: false,
-      message: `Refused: “${spec.label}” of “${step.label}” accepts ${spec.types.map((t) => PORT_TYPE_LABELS[t]).join(" or ")}, but “${sourceLabel(def, portSource)}” is ${typeLabel}.`,
+      message: `“${spec.label}” of “${step.label}” accepts ${spec.types.map((t) => PORT_TYPE_LABELS[t]).join(" or ")}, but “${sourceLabel(def, portSource)}” is ${typeLabel}.`,
     };
   }
   if (!spec.multiple && bound.length > 0) {
     return {
       ok: false,
-      message: `Refused: “${spec.label}” of “${step.label}” takes one source and already has one. Select its connection and press Delete first.`,
+      message: `“${spec.label}” of “${step.label}” takes one source and already has one. Select its connection and press Delete first.`,
     };
   }
   return {
