@@ -31,6 +31,12 @@ import { formatSeconds, formatTime, shortHash } from "./runModel";
 
 /** A standing plan that no longer matches what was reviewed: review it again. */
 export const STALE_TRIGGER_CODES = ["trigger.planStale", "workflow.planStale"];
+/** Inputs a trigger never watches (lane C refuses them): their content is code. */
+const UNWATCHABLE: string[] = ["codeSource", "formalSource"];
+/** The trigger store could not be written or read (`trigger.storeUnavailable`). */
+const STORE_UNAVAILABLE = "trigger.storeUnavailable";
+const STORE_TITLE = "Triggers cannot be saved right now";
+
 /** Lane C's minimum interval (the plan's limits are authoritative once loaded). */
 const MIN_INTERVAL_MINUTES = 15;
 
@@ -216,8 +222,9 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
     }
   };
 
-  const watchable = definition.inputs.filter((i) => i.portType !== "codeSource");
-  const unwatchable = definition.inputs.filter((i) => i.portType === "codeSource");
+  // Code and Lean sources are code (Lean elaboration runs code): never watched; a change needs a new review.
+  const watchable = definition.inputs.filter((i) => !UNWATCHABLE.includes(i.portType));
+  const unwatchable = definition.inputs.filter((i) => UNWATCHABLE.includes(i.portType));
   const enableReason = !standing
     ? null
     : standing.blockers.length
@@ -332,7 +339,8 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
               </div>
               {unwatchable.length > 0 && (
                 <p className="xp-wf__muted">
-                  Code inputs cannot be watched ({unwatchable.map((i) => i.label).join(", ")}): changed code always needs a new review.
+                  Code and Lean sources cannot be watched ({unwatchable.map((i) => i.label).join(", ")}): changed code always needs a new
+                  review.
                 </p>
               )}
             </fieldset>
@@ -369,8 +377,8 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
                     {failure.message} Nothing was enabled.
                   </Banner>
                 ) : (
-                  <Banner tone="danger" title="The trigger was not enabled" live>
-                    {failure.message}
+                  <Banner tone="danger" title={failure.code === STORE_UNAVAILABLE ? STORE_TITLE : "The trigger was not enabled"} live>
+                    {failure.message} Nothing was enabled.
                   </Banner>
                 )}
               </div>
@@ -512,7 +520,7 @@ function TriggerCard({
   onReapprove: (trigger: WorkflowTrigger) => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ code: string; message: string } | null>(null);
   const view = TRIGGER_STATE_VIEW[trigger.state.kind];
   const disable = async () => {
     setBusy(true);
@@ -521,7 +529,7 @@ function TriggerCard({
       await workflowTriggerCommands.disable(trigger.id);
       onChanged();
     } catch (e) {
-      setError(errorMessage(e));
+      setError({ code: isCommandError(e) ? e.code : "error", message: errorMessage(e) });
     } finally {
       setBusy(false);
     }
@@ -587,10 +595,19 @@ function TriggerCard({
           </Banner>
         </div>
       )}
+      {trigger.storeProblem && (
+        <div data-testid={`trigger-store-problem-${trigger.id}`}>
+          <Banner tone="warning" title="The trigger store could not be saved or read">
+            {trigger.storeProblem} Changes shown here may not survive a restart until it can be saved.
+          </Banner>
+        </div>
+      )}
       {error && (
-        <Banner tone="danger" title="Not changed" live>
-          {error}
-        </Banner>
+        <div data-testid={`trigger-error-${trigger.id}`} data-code={error.code}>
+          <Banner tone="danger" title={error.code === STORE_UNAVAILABLE ? STORE_TITLE : "Not changed"} live>
+            {error.message}
+          </Banner>
+        </div>
       )}
       {history.length > 0 && (
         <Section title={`Recent history (${history.length})`} collapsible defaultExpanded={false}>

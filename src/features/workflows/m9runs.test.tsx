@@ -455,6 +455,7 @@ const definition: WorkflowDefinition = {
   inputs: [
     { id: "data", label: "Data", portType: "dataset", source: { kind: "resource", path: "data/obs.csv", version: { kind: "atRunStart" } } },
     { id: "script", label: "Script", portType: "codeSource", source: { kind: "resource", path: "fit.py", version: { kind: "atRunStart" } } },
+    { id: "proof", label: "Proof", portType: "formalSource", source: { kind: "resource", path: "Main.lean", version: { kind: "atRunStart" } } },
   ],
   steps: [],
   connections: [],
@@ -491,6 +492,7 @@ const trigger = (overrides: Partial<WorkflowTrigger> = {}): WorkflowTrigger => (
   runsLastDay: 3,
   modelRequestsLastDay: 0,
   history: [],
+  storeProblem: null,
   ...overrides,
 });
 
@@ -571,7 +573,8 @@ describe("triggers panel", () => {
     expect(screen.getByTestId("trigger-problems").textContent).toContain("Choose at least one input to watch.");
     // Code inputs cannot be watched.
     expect(screen.queryByTestId("trigger-watch-script")).toBeNull();
-    expect(screen.getByTestId("trigger-watch").textContent).toMatch(/Code inputs cannot be watched \(Script\)/);
+    expect(screen.queryByTestId("trigger-watch-proof")).toBeNull();
+    expect(screen.getByTestId("trigger-watch").textContent).toMatch(/Code and Lean sources cannot be watched \(Script, Proof\)/);
     fireEvent.click(within(screen.getByTestId("trigger-watch-data")).getByRole("checkbox"));
     fireEvent.click(screen.getByTestId("trigger-review"));
     await waitFor(() => expect(triggerIpc.plan).toHaveBeenCalledWith({ workflow: "wf-1", kind: { kind: "inputsChanged", inputs: ["data"] } }));
@@ -747,5 +750,56 @@ describe("R-m9 F4: native steps need explicit consent in every standing-plan rev
     fireEvent.click(await screen.findByTestId("trigger-review"));
     await screen.findByTestId("trigger-standing");
     expect(screen.getByTestId("trigger-native").getAttribute("data-allowed")).toBe("false");
+  });
+});
+
+describe("lane C fix round: trigger store problems, Lean sources", () => {
+  it("warns on a trigger card when the trigger store could not be saved or read", async () => {
+    triggerIpc.list.mockResolvedValue([trigger({ id: "wtrg-s", storeProblem: "The disk is full." }), trigger({ id: "wtrg-ok" })]);
+    render(<TriggersSection workflow="wf-1" revision={2} definition={definition} reviewBlock={null} />);
+    const problem = await screen.findByTestId("trigger-store-problem-wtrg-s");
+    expect(problem.textContent).toContain("The trigger store could not be saved or read");
+    expect(problem.textContent).toContain("The disk is full.");
+    expect(problem.textContent).toMatch(/may not survive a restart/);
+    expect(screen.queryByTestId("trigger-store-problem-wtrg-ok")).toBeNull();
+  });
+
+  it("shows trigger.storeUnavailable as a clear error when enabling or turning off", async () => {
+    triggerIpc.list.mockResolvedValue([trigger({ id: "wtrg-1" })]);
+    triggerIpc.disable.mockRejectedValueOnce({ code: "trigger.storeUnavailable", message: "The trigger store cannot be written: access denied." });
+    triggerIpc.plan.mockResolvedValue(standing({ nativeSteps: [], modelRequestsPerRun: 0 }));
+    triggerIpc.enable.mockRejectedValueOnce({ code: "trigger.storeUnavailable", message: "The trigger store cannot be written: access denied." });
+    render(<TriggersSection workflow="wf-1" revision={2} definition={definition} reviewBlock={null} />);
+    fireEvent.click(await screen.findByTestId("trigger-disable-wtrg-1"));
+    const off = await screen.findByTestId("trigger-error-wtrg-1");
+    expect(off.textContent).toContain("Triggers cannot be saved right now");
+    expect(off.textContent).toContain("access denied");
+    fireEvent.click(screen.getByTestId("workflow-trigger-add"));
+    fireEvent.click(within(await screen.findByTestId("trigger-watch-data")).getByRole("checkbox"));
+    fireEvent.click(screen.getByTestId("trigger-review"));
+    await screen.findByTestId("trigger-standing");
+    fireEvent.click(screen.getByTestId("trigger-enable"));
+    const err = await screen.findByTestId("trigger-enable-error");
+    expect(err.getAttribute("data-code")).toBe("trigger.storeUnavailable");
+    expect(err.textContent).toContain("Triggers cannot be saved right now");
+    expect(err.textContent).toContain("Nothing was enabled.");
+  });
+
+  it("labels a Lean source input as the text the audit elaborates", async () => {
+    const lean = "theorem two : 2 = 2 := rfl";
+    const base = plan();
+    runIpc.plan.mockResolvedValue(
+      plan({
+        inputs: [...base.inputs, { id: "proof", label: "Proof", portType: "formalSource", path: "Main.lean", sha256: HASH, bytes: lean.length, pinned: false, text: lean }],
+        steps: [{ ...base.steps[0]!, bindings: [{ port: "source", from: { kind: "input", input: "proof" } }] }],
+      }),
+    );
+    render(<PlanReviewDialog workflow="wf-1" revision={2} isOpen onOpenChange={() => {}} onStarted={vi.fn()} />);
+    const listing = await screen.findByTestId("plan-script-audit");
+    expect(listing.textContent).toBe(`${lean}\n`);
+    const step = screen.getByTestId("plan-step-audit");
+    expect(step.textContent).toContain("Lean source Main.lean");
+    expect(step.textContent).toMatch(/the audit elaborates exactly this text/);
+    expect(step.textContent).not.toContain("Code from");
   });
 });
