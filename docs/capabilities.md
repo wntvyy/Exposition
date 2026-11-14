@@ -203,6 +203,12 @@ Canvas positions, filters, and hidden items are saved per section with the
 project and never change relationships. On the canvas, connections are
 straight lines that can pass behind other nodes (no edge routing); a
 table view offers the same items and relationships for keyboard use.
+Graph actions are worded by what they change: Hide from View changes the
+view only, Delete Relationship and Delete Entity remove hand-made records
+(restorable, and they stay removed when the project is indexed again), and
+Delete Source File deletes the file itself; items found in the sources and
+relationships observed there change only with the source (see Deleting,
+copying, and restoring).
 
 ## Projects and workflows
 
@@ -269,7 +275,11 @@ reported as runnable only when it is well formed and every step's runner is
 available in the open project right now (for example, a native step needs
 a trusted folder, a restricted step a configured container image that is
 present locally, an agent review step a configured model provider); a
-stored or imported claim of runnability is ignored.
+stored or imported claim of runnability is ignored. Duplicating or pasting
+a workflow makes a new draft ("… (copy)", revision 1, fresh step ids) with no
+triggers, runs, or approvals; deleting one turns its triggers off and keeps
+it restorable in Storage & History; steps and inputs copied on the workflow
+canvas paste into a draft with new ids, and nothing runs.
 
 ### Parallel steps, composite workflows, conditions, and repeats
 
@@ -662,7 +672,10 @@ refused if either changed before approval. If the project graph cannot be
 updated after an insertion, the insertion stays (undoable) and a pending
 record asks for reconciliation. Data files a script reads are pinned only
 when declared (experiment inputs); the kernel does not report the files it
-reads.
+reads. Research files are copied, pasted into Sources, Data, or Notes,
+duplicated, and deleted in the Research explorer like project files; a
+run's record and its generated outputs are deleted separately (outputs a
+manuscript uses or the project keeps stay), restorably until purged.
 
 ## Lean
 
@@ -713,8 +726,12 @@ The first provider is Anthropic's Messages API (`claude-opus-5-5` by default).
 Agents use the same services as people: they read and edit documents through
 the shared document service (every change is reviewable and revertible), build
 documents, run Python (in their own research sessions when you approve native
-runs, or one run at a time in the container in restricted mode), and check
-Lean files.
+runs, or one run at a time in the container in restricted mode), check
+Lean files, and move project files to the Recycle Bin or copy them within
+the project through the same operations you use (never a permanent
+deletion; a deletion that needs your decision is refused in tasks that apply
+changes directly; review shows each deletion with Restore and each copy with
+Remove Copy).
 
 The application, not the model, enforces each task's scope, consent, permission
 profile, execution mode, and budgets. Every tool declares what it reads,
@@ -728,6 +745,7 @@ happens:
 | Build Typst or Markdown (in-process) | allowed | allowed | allowed | entry in scope; the build reads only the scope; refused under "file names only" |
 | Build LaTeX, check Lean | refused | trusted folder + approval | refused | whole project + content consent |
 | Run Python, run a command | refused | trusted folder + approval | container only, unattended | whole project + content consent |
+| Delete files (to the Recycle Bin only), copy files | allowed (approval when reviewing edits; refused when applying directly and the deletion needs your decision; never in a read-only task) | same | same | paths in scope; file names suffice |
 
 The project graph is part of every agent task, enforced by the application:
 each run starts with a scoped graph context (the project's identity and
@@ -821,6 +839,14 @@ otherwise. A third, `npm run e2e -- live-graph`, has the model read the project 
   every kernel as data, never as code.
 - Rendered pages, kernel HTML/SVG, and Lean output are displayed as inert
   content without access to application commands.
+- Deleting, copying, and restoring go through one application service for
+  every route (shortcut, menu, Storage & History, agent): paths are checked
+  inside the project, links and junctions are never followed out of it,
+  Exposition's own data cannot be deleted as files, a changed plan is
+  re-planned rather than applied, and nothing is overwritten. Manual file
+  operations need no folder trust and run nothing; clipboard and pasted
+  outside paths are explicit inputs that grant no access; agents keep their
+  existing scope and permissions and never delete permanently.
 
 ## Files
 
@@ -828,7 +854,102 @@ Text files in UTF-8 (with or without BOM) and UTF-16 (with BOM) are edited
 byte-exactly, including CRLF line endings; files with mixed line endings open
 read-only until you normalize them. Saves are atomic and never touch the
 original on failure; unsaved work is recovered after a crash. Binary and
-legacy-encoded files are not opened as text.
+legacy-encoded files are not opened as text. **Save a Copy…** writes an
+open document's current text, unsaved edits included, to a new file; it
+never replaces an existing one.
+
+## Deleting, copying, and restoring
+
+Files and folders (in the Files tree and the Research explorer), workflows,
+workflow and research run records and their outputs, agent task records, and
+graph items can be copied and pasted, duplicated, deleted, and deleted
+permanently, from context menus, the command palette, and shortcuts:
+
+| Action | Windows | macOS |
+|---|---|---|
+| Copy / Paste / Duplicate | Ctrl+C / Ctrl+V / Ctrl+D | Cmd+C / Cmd+V / Cmd+D |
+| Delete (recoverable) / Delete Permanently | Delete / Shift+Delete | Cmd+Backspace / Cmd+Option+Backspace |
+| Undo / Redo the last deletion | Ctrl+Z / Ctrl+Shift+Z | Cmd+Z / Cmd+Shift+Z |
+
+The shortcuts act only on the selection of the list, tree, canvas, or table
+that has focus. While you edit text (Monaco, the page editor, a text field,
+a name, a terminal) those keys keep their usual meaning: Ctrl+D in Monaco
+selects the next match and Delete deletes text, never a file. A held key does
+not repeat a deletion, and nothing acts while a dialog or menu is open.
+
+**When Exposition asks.** Routine operations happen at once, without "Are you
+sure?". Exposition asks once, in one combined decision that names what is
+affected, only when the operation has a concrete consequence in the project:
+a manuscript uses the file, a saved workflow takes it as a required input,
+retained evidence records it, other workflows run a revision you are
+deleting, an open document has unsaved changes, running work or an enabled
+trigger uses it, or a permanent deletion destroys the last recoverable copy.
+Belonging to the project graph, sitting in a folder or collection, or being
+cited or derived from something are not reasons to ask. The decision offers
+the choices those consequences need (keep the unsaved text in the editor or
+discard it, stop running work or leave it and keep the item, turn a trigger
+off or keep it, keep or delete revisions other workflows run); Cancel changes
+nothing. Deleting something others use leaves them showing it as missing
+rather than deleting them too. A confirmation never overrides a refusal:
+files outside the project, Exposition's own data under `.exposition`,
+read-only files, and copying a folder into itself are refused with a reason.
+Afterwards one notification reports what actually happened to each item,
+including partial failures.
+
+**Recovery.** Deleted files and folders go to the Windows Recycle Bin. If the
+Recycle Bin cannot take an item (or the file is open in another program, or
+access is denied), that item is not deleted, and nothing is ever deleted
+permanently instead; only when the Recycle Bin itself cannot take it does
+Exposition offer an explicit Delete Permanently. Undo appears only when
+Exposition has identified the item in the Recycle Bin reliably; it works
+after a restart while the record lasts, and otherwise you restore it from the
+Recycle Bin. Restoring never overwrites: if something new is at the original
+location, you choose to restore under a new name (both kept) or leave it
+deleted. Workflows, run and task records, run outputs, and graph items are
+deleted recoverably inside Exposition and listed in **Settings › Storage &
+History**, where they can be restored or purged; a restored workflow keeps
+its triggers off, and nothing restarts. Permanent deletion cannot be undone.
+Deleting a file whose open document has unsaved changes keeps that text in
+the editor (it is no longer saved or journaled to the deleted file; use
+**Save a Copy…** to keep it).
+
+**Copies.** Copy and Duplicate use the saved file on disk (a note says so when
+the editor has unsaved changes), never overwrite or merge anything, and give
+a taken name a readable new one (`plot (2).png`). Links and junctions are
+never followed or copied. On Windows, copied files paste into Explorer and
+files copied in Explorer paste into a project folder; pasting is always an
+explicit choice, and clipboard text is never treated as a command. A copy is
+a new, independent item: it carries no evidence, verification status,
+trigger, approval, or run history, and nothing runs. Workflow copies are new
+drafts with fresh step ids; a finished run or task is never duplicated as a
+new result. Graph items extracted from a source (a theorem, proof, section,
+Lean declaration, or reference) are deleted or duplicated only by editing
+the source; Exposition offers Copy Reference and Copy Text instead, and
+deletes a file-backed item's source file only as an explicit Delete Source
+File.
+
+**Storage & History.** Settings › Storage & History lists run records,
+generated outputs, agent task records, earlier workflow revisions, recently
+deleted items, and disposable records, with sizes where they can be
+measured. Referenced items are marked and kept unless you include them;
+nothing is removed automatically. Purging removes the selected records and
+files; the result says how much space was actually given back. The run
+history and task databases are compacted after a permanent deletion; the
+project graph database is not, so its file keeps its size, and graph backups
+may still hold purged records until they rotate out. Deletion is not secure
+erasure.
+
+**Agents** delete only to the Recycle Bin and copy only within their scope,
+through the same operations; an agent that applies changes directly cannot
+perform a deletion that needs your decision, and reviewing an agent's
+deletion offers Restore.
+
+**Platforms.** On Windows the Recycle Bin, Undo, the file clipboard, junction
+handling, and files locked by other programs are exercised against the real
+operating system. On macOS Delete moves items to the Trash but Exposition
+cannot undo it, and on macOS and Linux the file clipboard is not available
+(copies paste within Exposition only); neither platform is verified. Cut and
+move, rename, and copying a whole project are not offered.
 
 ## Installation
 

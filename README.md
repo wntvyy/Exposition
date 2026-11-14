@@ -44,10 +44,11 @@ npm run build:release  # release build and installer
 
 | Path | Contents |
 |---|---|
-| `crates/exposition-core` | Shared contracts: text positions, document transactions, jobs, builds, artifacts |
+| `crates/exposition-core` | Shared contracts: text positions, document transactions, jobs, builds, artifacts, project operations (plan → apply → restore) |
+| `crates/exposition-workspace` | Project files and documents: buffers, safe saves, recovery, external changes, and the file engine of project operations (Recycle Bin, collision-free copies, restore) |
 | `crates/exposition-graph` | Project graph: typed vocabulary, validated SQLite store with backups and recovery, reconciliation with files and open buffers, impact, operation journal, project blueprints, workflow definitions (schemas /1 and /2, composites, validation) and bundles |
-| `crates/exposition-workflow` | Workflow runs: reviewed plans and approval hashes, the bounded parallel scheduler, step adapters, conditions and repeats, triggers, environment capture, run manifests, reproduction |
-| `crates/exposition-*` | Other domain services (workspace/documents, execution, typesetting, research, Lean, agents, ...) |
+| `crates/exposition-workflow` | Workflow runs: reviewed plans and approval hashes, the bounded parallel scheduler, step adapters, conditions and repeats, triggers, environment capture, run manifests, reproduction; the data side of project operations and Storage & History |
+| `crates/exposition-*` | Other domain services (execution, typesetting, research, Lean, agents, ...) |
 | `src-tauri` | Application wiring: state, commands, events, capabilities |
 | `src/bindings` | TypeScript types generated from the Rust contracts (`cargo test`); do not edit |
 | `src/app` | Workbench composition contract |
