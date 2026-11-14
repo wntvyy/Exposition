@@ -168,6 +168,12 @@
     "allow-workflow-trigger-plan",
     "allow-workflow-trigger-enable",
     "allow-workflow-trigger-disable",
-    "allow-workflow-trigger-list"
+    "allow-workflow-trigger-list",
+    "allow-project-op-plan",
+    "allow-project-op-apply",
+    "allow-project-op-restore",
+    "allow-clipboard-files-read",
+    "allow-clipboard-files-write",
+    "allow-storage-overview"
   ]
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-clipboard-files-write"
+description = "Enables the clipboard_files_write command without any pre-configured scope."
+commands.allow = ["clipboard_files_write"]
+
+[[permission]]
+identifier = "deny-clipboard-files-write"
+description = "Denies the clipboard_files_write command without any pre-configured scope."
+commands.deny = ["clipboard_files_write"]

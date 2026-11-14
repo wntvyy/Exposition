@@ -4,6 +4,7 @@
 
 mod agents;
 mod app;
+mod clipboard;
 mod documents;
 mod error;
 mod execution;
@@ -11,6 +12,7 @@ mod graph;
 mod lean;
 mod page;
 mod project_data;
+mod project_ops;
 mod projects;
 mod research;
 mod settings;
@@ -52,6 +54,7 @@ pub fn run() {
             workflow_runs::forward_events(app.handle().clone());
             workflow_triggers::start(app.handle().clone());
             app.state::<AppState>().typesetting.start(app.handle().clone());
+            project_ops::start(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -224,6 +227,12 @@ pub fn run() {
             workflow_triggers::workflow_trigger_enable,
             workflow_triggers::workflow_trigger_disable,
             workflow_triggers::workflow_trigger_list,
+            project_ops::project_op_plan,
+            project_ops::project_op_apply,
+            project_ops::project_op_restore,
+            project_ops::clipboard_files_read,
+            project_ops::clipboard_files_write,
+            project_ops::storage_overview,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

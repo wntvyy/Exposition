@@ -176,6 +176,13 @@ const COMMANDS: &[&str] = &[
     "workflow_trigger_enable",
     "workflow_trigger_disable",
     "workflow_trigger_list",
+    // P1 project operations and the native file clipboard (src/project_ops.rs).
+    "project_op_plan",
+    "project_op_apply",
+    "project_op_restore",
+    "clipboard_files_read",
+    "clipboard_files_write",
+    "storage_overview",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,
