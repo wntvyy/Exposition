@@ -21,6 +21,8 @@ use crate::project_data::*;
 
 #[derive(Default)]
 struct Research {
+    /// Batches are active while their workflow run is (set by `env`).
+    runs: Mutex<Option<WorkflowRunService>>,
     records: Mutex<Vec<ResearchRecord>>,
     removed_outputs: Mutex<Vec<String>>,
     stopped: Mutex<Vec<String>>,
@@ -48,6 +50,13 @@ impl Research {
         (done, taken)
     }
 
+    fn current(&self, mut r: ResearchRecord) -> ResearchRecord {
+        if let (Some(owner), Some(runs)) = (&r.workflow_run, self.runs.lock().unwrap().as_ref()) {
+            r.active = WorkflowRunId::parse(owner).is_ok_and(|id| runs.is_active(&id));
+        }
+        r
+    }
+
     fn outputs_of(&self, id: &str) -> Vec<OutputFile> {
         self.records.lock().unwrap().iter().find(|r| r.id == id).map(|r| r.outputs.clone()).unwrap_or_default()
     }
@@ -55,19 +64,15 @@ impl Research {
 
 impl ResearchRecords for Research {
     fn records(&self) -> Result<Vec<ResearchRecord>, OpError> {
-        Ok(self.records.lock().unwrap().iter().filter(|r| r.deleted_at_ms.is_none()).cloned().collect())
+        let all: Vec<ResearchRecord> = self.records.lock().unwrap().clone();
+        Ok(all.into_iter().filter(|r| r.deleted_at_ms.is_none()).map(|r| self.current(r)).collect())
     }
     fn deleted(&self) -> Result<Vec<ResearchRecord>, OpError> {
         Ok(self.records.lock().unwrap().iter().filter(|r| r.deleted_at_ms.is_some()).cloned().collect())
     }
     fn record(&self, id: &str) -> Result<ResearchRecord, OpError> {
-        self.records
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|r| r.id == id)
-            .cloned()
-            .ok_or_else(|| OpError::new("research.unknownRun", "unknown run"))
+        let found = self.records.lock().unwrap().iter().find(|r| r.id == id).cloned();
+        found.map(|r| self.current(r)).ok_or_else(|| OpError::new("research.unknownRun", "unknown run"))
     }
     fn delete(&self, id: &str, permanent: bool) -> Result<(), OpError> {
         let mut records = self.records.lock().unwrap();
@@ -126,6 +131,10 @@ impl ResearchRecords for Research {
             .collect())
     }
     fn stop(&self, id: &str) -> bool {
+        if self.records.lock().unwrap().iter().any(|r| r.id == id && r.workflow_run.is_some()) {
+            // The research service cancels interactive runs only.
+            return false;
+        }
         if let Some(r) = self.records.lock().unwrap().iter_mut().find(|r| r.id == id && r.active) {
             r.active = false;
             self.stopped.lock().unwrap().push(id.to_owned());
@@ -193,12 +202,12 @@ impl TaskRecords for Tasks {
     }
 }
 
-fn task(id: &str, active: bool) -> TaskRecord {
+fn task(e: &Env, id: &str, active: bool) -> TaskRecord {
     TaskRecord {
         id: exposition_agents::TaskId(id.into()),
         title: format!("Task {id}"),
         created_at_ms: 1,
-        workspace_root: "C:/project".into(),
+        workspace_root: e.fx.root.display().to_string(),
         bytes: 1234,
         active,
         pending_review: 0,
@@ -216,6 +225,7 @@ fn research_run(id: &str, active: bool, inputs: &[&str], outputs: &[&str]) -> Re
         active,
         deleted_at_ms: None,
         inputs: inputs.iter().map(|p| path(p)).collect(),
+        workflow_run: None,
     }
 }
 
@@ -234,7 +244,9 @@ fn env() -> Env {
         })
         .unwrap();
     fx.open_ready();
-    Env { fx, research: Research::default(), tasks: Tasks::default() }
+    let research = Research::default();
+    *research.runs.lock().unwrap() = Some(fx.runs.clone());
+    Env { fx, research, tasks: Tasks::default() }
 }
 
 impl Env {
@@ -416,7 +428,7 @@ fn active_work_on_a_path_is_coordinated_before_deletion() {
     let e = env();
     let id = e.workflow();
     let (run, release) = e.hold_run(&id);
-    e.tasks.records.lock().unwrap().push(task("task-1", true));
+    e.tasks.records.lock().unwrap().push(task(&e, "task-1", true));
     e.tasks.paths.lock().unwrap().insert("task-1".into(), vec![path("data")]);
     e.research.records.lock().unwrap().push(research_run("run-live", true, &["data/obs.csv"], &[]));
     let plan = e.plan(e.request(delete(false), vec![p("data/obs.csv")]));
@@ -794,7 +806,7 @@ fn an_active_run_record_is_never_deleted_under_its_worker() {
 #[test]
 fn agent_tasks_and_research_runs_follow_the_same_rules() {
     let e = env();
-    e.tasks.records.lock().unwrap().push(task("task-a", true));
+    e.tasks.records.lock().unwrap().push(task(&e, "task-a", true));
     e.research.records.lock().unwrap().push(research_run(
         "run-r1",
         false,
@@ -851,7 +863,7 @@ fn storage_overview_lists_categories_with_sizes_references_and_exclusions() {
     let plan = e.fx.runs.plan(&id, None).unwrap();
     e.fx.runs.start(&StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash }).unwrap();
     assert!(e.fx.runs.wait_idle(Duration::from_secs(10)));
-    e.tasks.records.lock().unwrap().push(task("task-b", false));
+    e.tasks.records.lock().unwrap().push(task(&e, "task-b", false));
     e.research.records.lock().unwrap().push(research_run("run-o", false, &[], &["data/obs.csv", "out/x.csv"]));
     std::fs::create_dir_all(e.fx.root.join(".exposition/graph-backups")).unwrap();
     std::fs::write(e.fx.root.join(".exposition/graph-backups/graph-1-r1-manual.sqlite3"), b"backup").unwrap();
@@ -961,6 +973,16 @@ fn an_earlier_run_history_keeps_its_runs_when_it_gains_recoverable_deletion() {
     }
     let store = crate::store::RunStore::open(Some(&db)).unwrap();
     assert_eq!(store.list("p", None, 10).unwrap().len(), 1, "earlier runs stay loadable");
+    let backups: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|f| f.path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("workflow-runs.sqlite3.premigration-v0-"))
+        .collect();
+    assert_eq!(backups.len(), 1, "backed up before the upgrade");
+    let old = rusqlite::Connection::open(&backups[0]).unwrap();
+    let n: i64 = old.query_row("SELECT count(*) FROM runs", [], |r| r.get(0)).unwrap();
+    assert_eq!(n, 1, "the backup holds the history as it was");
     assert!(store.set_deleted(&finished.id, Some(5)).unwrap());
     assert!(store.list("p", None, 10).unwrap().is_empty());
     assert!(store.get(&finished.id).unwrap().is_none(), "a deleted run is not looked up");
@@ -1040,6 +1062,140 @@ fn graph_items_go_through_the_same_plan_and_come_back_by_token() {
     let file = e.fx.graph.resource(&path("notes.md")).unwrap().unwrap();
     let plan = e.plan(e.request(delete(false), vec![OpTarget::GraphEntity { entity: file.id.to_string() }]));
     assert_eq!(plan.refusals[0].code, "ops.useSourceFile");
+    // Purging a deleted item says honestly that the graph file does not shrink.
+    let c = create("Claim C");
+    let plan = e.plan(e.request(delete(false), vec![OpTarget::GraphEntity { entity: c.to_string() }]));
+    let token = e.apply(&plan, &[])[0].restore.clone().unwrap();
+    let purge = e.plan(e.request(delete(true), vec![OpTarget::Recoverable { id: token }]));
+    let message = e.apply(&purge, &[])[0].message.clone().unwrap_or_default();
+    assert!(message.contains("does not shrink") && !message.contains("compacted"), "{message}");
     // Unknown tokens belong to the file side.
     assert!(restore_data(&e.cx(), &OpRestore { restore: "trash-1234".into(), on_collision: None }).is_none());
+}
+
+// ------------------------------------------------------- P1 fix round ----
+
+#[test]
+fn a_workflow_batch_is_part_of_its_workflow_run_and_stopped_through_it() {
+    let e = env();
+    let id = e.workflow();
+    let (run, release) = e.hold_run(&id);
+    let target = p("data/obs.csv");
+    let before = e.plan(e.request(delete(false), vec![target.clone()]));
+    // The batch's own research record appears a moment later.
+    let mut batch = research_run("run-batch1", false, &["data/obs.csv"], &[]);
+    batch.workflow_run = Some(run.to_string());
+    e.research.records.lock().unwrap().push(batch);
+    let plan = e.plan(e.request(delete(false), vec![target]));
+    let active = plan.impacts.iter().find(|i| i.kind == ImpactKind::ActiveWork).unwrap();
+    let ids: Vec<&str> = active.consumers.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, vec![run.as_str()], "the batch is listed as its workflow run, not on its own");
+    assert_eq!(plan.plan_hash, before.plan_hash, "the plan does not go stale when the batch record appears");
+    // Its own record and outputs name the workflow run too.
+    let record = e.plan(e.request(delete(false), vec![OpTarget::ResearchRun { run: "run-batch1".into() }]));
+    assert_eq!(record.impacts[0].consumers[0].id, run.to_string());
+    // Stop, then delete: the workflow run (and with it the batch) stops.
+    assert_eq!(e.prepare(&plan, &[(CHOICE_ACTIVE_WORK, "stop")]), vec![]);
+    assert!(!e.fx.runs.is_active(&run));
+    assert!(!e.research.record("run-batch1").unwrap().active);
+    release.store(true, Ordering::SeqCst);
+}
+
+#[test]
+fn agent_tasks_of_other_projects_are_never_stopped_or_listed() {
+    let e = env();
+    let mut there = task(&e, "task-there", true);
+    there.workspace_root = "C:/elsewhere/another project".into();
+    let mut there_deleted = task(&e, "task-there-old", false);
+    there_deleted.workspace_root = "C:/elsewhere/another project".into();
+    there_deleted.deleted_at_ms = Some(5);
+    e.tasks.records.lock().unwrap().extend([task(&e, "task-here", true), there, there_deleted]);
+    for id in ["task-here", "task-there"] {
+        e.tasks.paths.lock().unwrap().insert(id.into(), vec![path("data")]);
+    }
+    let plan = e.plan(e.request(delete(false), vec![p("data/obs.csv")]));
+    let active = plan.impacts.iter().find(|i| i.kind == ImpactKind::ActiveWork).unwrap();
+    let ids: Vec<&str> = active.consumers.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, vec!["task-here"], "a task of another project is not this project's work");
+    let overview = storage_overview(&e.cx());
+    let tasks = overview.categories.iter().find(|c| c.id == "agentTasks").unwrap();
+    let listed: Vec<OpTarget> = tasks.items.iter().map(|i| i.target.clone()).collect();
+    assert_eq!(listed, vec![OpTarget::AgentTask { task: "task-here".into() }]);
+    let recent = overview.categories.iter().find(|c| c.id == "recoverableDeletions").unwrap();
+    assert!(recent.items.iter().all(|i| i.target != OpTarget::Recoverable { id: "agentTask:task-there-old".into() }));
+}
+
+#[test]
+fn a_deletion_that_does_not_happen_turns_the_trigger_back_on() {
+    let e = env();
+    let id = e.workflow();
+    e.fx.enable(&id, watch(&["data"]));
+    let target = p("data/obs.csv");
+    let plan = e.plan(e.request(delete(false), vec![target.clone()]));
+    let outcome = |status: OpStatus| OpOutcome {
+        target: target.clone(),
+        status,
+        code: None,
+        message: None,
+        created: None,
+        recovery: exposition_core::ops::OpRecovery::OsTrash,
+        restore: None,
+    };
+    // The file operation failed: the trigger the deletion turned off is on again.
+    assert_eq!(e.prepare(&plan, &[]), vec![]);
+    assert_eq!(e.trigger_state(&id), TriggerState::Disabled);
+    after_paths(&e.cx(), &[outcome(OpStatus::Failed)]);
+    assert_eq!(e.trigger_state(&id), TriggerState::Active);
+    // Skipped: the same.
+    e.prepare(&plan, &[]);
+    after_paths(&e.cx(), &[outcome(OpStatus::Skipped)]);
+    assert_eq!(e.trigger_state(&id), TriggerState::Active);
+    // Refused in the same preparation (work could not be stopped): back on at once.
+    let (run, release) = e.hold_run(&id);
+    let both = e.plan(e.request(delete(false), vec![target.clone()]));
+    let refused = e.prepare(&both, &[]);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(e.trigger_state(&id), TriggerState::Active, "a path that is kept keeps its trigger");
+    assert!(e.fx.runs.is_active(&run));
+    release.store(true, Ordering::SeqCst);
+    assert!(e.fx.runs.wait_idle(Duration::from_secs(10)));
+    // Deleted: it stays off.
+    e.prepare(&plan, &[]);
+    std::fs::remove_file(e.fx.root.join("data/obs.csv")).unwrap();
+    after_paths(&e.cx(), &[outcome(OpStatus::Succeeded)]);
+    assert_eq!(e.trigger_state(&id), TriggerState::Disabled);
+    // The choice says that stopping work cannot be undone.
+    let choice = both.choices.iter().find(|c| c.key == CHOICE_ACTIVE_WORK).unwrap();
+    assert!(choice.options.iter().any(|o| o.value == "stop" && o.label.contains("cannot be undone")));
+}
+
+#[test]
+fn a_newer_run_history_is_left_unchanged_and_an_older_one_is_backed_up_first() {
+    let e = env();
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("workflow-runs.sqlite3");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE runs (id TEXT PRIMARY KEY); PRAGMA user_version = 7;").unwrap();
+    }
+    let before = std::fs::read(&db).unwrap();
+    let err = crate::store::RunStore::open(Some(&db)).err().expect("refused");
+    assert_eq!(err.code, crate::store::STORE_NEWER);
+    let h: Arc<dyn WorkflowHost> = e.fx.host.clone();
+    let service = WorkflowRunService::new(WorkflowRunConfig {
+        database: Some(db.clone()),
+        host: h,
+        adapters: BTreeMap::new(),
+        lean: None,
+        research: None,
+    })
+    .expect("the app still starts");
+    drop(service);
+    assert_eq!(std::fs::read(&db).unwrap(), before, "the newer history is byte for byte unchanged");
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|f| f.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(names.iter().all(|n| !n.contains(".bad-")), "never set aside: {names:?}");
 }

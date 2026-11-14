@@ -296,32 +296,28 @@ impl GraphService {
             }
             let outgoing = store.relations_from(id)?;
             let incoming = store.relations_to(id)?;
+            // Like a path: only a surviving item that relies on evidence this
+            // item provides is a consequence (an item it supports loses that
+            // support). Being the subject of evidence, or being supported,
+            // affects nothing that remains.
             let mut consumers = Vec::new();
-            for r in outgoing.iter().chain(incoming.iter()) {
-                if r.kind == RelationKind::EvidenceFor && !r.evidence.is_empty() {
-                    let other = if &r.from == id { &r.to } else { &r.from };
-                    if let Some(o) = live(store, other)? {
-                        consumers.push(consumer_entity(&o));
-                    }
+            for r in &outgoing {
+                if r.kind == RelationKind::EvidenceFor
+                    && !r.evidence.is_empty()
+                    && let Some(o) = live(store, &r.to)?
+                {
+                    consumers.push(consumer_entity(&o));
                 }
             }
-            let held = store.evidence_for_subject(id)?;
             let mut impacts = Vec::new();
-            if !consumers.is_empty() || !held.is_empty() {
+            if !consumers.is_empty() {
                 consumers.sort_by(|a, b| a.id.cmp(&b.id));
                 consumers.dedup_by(|a, b| a.id == b.id);
-                let message = if consumers.is_empty() {
-                    format!(
-                        "{} has recorded evidence. The evidence stays as history, but it will no longer be attached to an item.",
-                        quoted(&entity.label)
-                    )
-                } else {
-                    format!(
-                        "Evidence links {} with {}. Deleting it removes those links; the evidence records and their verdicts stay as history.",
-                        quoted(&entity.label),
-                        names(&consumers)
-                    )
-                };
+                let message = format!(
+                    "{} provides recorded evidence for {}; deleting it removes that support. The evidence records and their verdicts stay as history.",
+                    quoted(&entity.label),
+                    names(&consumers)
+                );
                 impacts.push(OpImpact {
                     kind: ImpactKind::RetainedEvidence,
                     target: OpTarget::GraphEntity { entity: id.to_string() },
@@ -395,20 +391,9 @@ impl GraphService {
             let to = store.entity(&relation.to)?;
             let label = |e: &Option<Entity>| e.as_ref().map(|e| e.label.clone()).unwrap_or_else(|| "(missing)".into());
             let description = format!("{} {} {}", label(&from), relation.kind.reading(), label(&to));
-            let mut impacts = Vec::new();
-            if relation.kind == RelationKind::EvidenceFor && !relation.evidence.is_empty() {
-                let consumers: Vec<OpConsumer> =
-                    [from.as_ref(), to.as_ref()].into_iter().flatten().map(consumer_entity).collect();
-                impacts.push(OpImpact {
-                    kind: ImpactKind::RetainedEvidence,
-                    target: OpTarget::GraphRelation { relation: id.to_string() },
-                    consumers,
-                    message: format!(
-                        "This relationship cites recorded evidence ({description}). Deleting it removes the link; the evidence records and their verdicts stay as history."
-                    ),
-                });
-            }
-            Ok(Ok(RelationDeleteCheck { relation, description, impacts }))
+            // Removing the link is the action itself: the evidence records stay
+            // (and stay available), so nothing surviving loses anything else.
+            Ok(Ok(RelationDeleteCheck { relation, description, impacts: Vec::new() }))
         })
         .map_err(from_graph)?
     }

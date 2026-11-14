@@ -55,7 +55,9 @@ pub struct DeletedRun {
 }
 
 /// Store schema (`PRAGMA user_version`): 1 adds `runs.deleted_at`.
-const STORE_VERSION: i64 = 1;
+pub const STORE_VERSION: i64 = 1;
+/// Error code of a history written by a newer version (left unchanged).
+pub const STORE_NEWER: &str = "workflow.storeNewer";
 
 impl RunStore {
     /// Open (or create) the store; `None` keeps it in memory.
@@ -70,6 +72,33 @@ impl RunStore {
             None => Connection::open_in_memory().map_err(store_error)?,
         };
         conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(store_error)?;
+        // A history written by a newer version is never read or changed.
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).map_err(store_error)?;
+        if version > STORE_VERSION {
+            return Err(WorkflowRunError::new(
+                STORE_NEWER,
+                format!(
+                    "The workflow run history was written by a newer version of Exposition (store version {version}, this version reads {STORE_VERSION}); it is left unchanged."
+                ),
+            ));
+        }
+        // An existing older history is copied aside before it is upgraded.
+        let existed: bool = conn
+            .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'runs'")
+            .and_then(|mut s| s.exists([]))
+            .map_err(store_error)?;
+        if existed
+            && version < STORE_VERSION
+            && let Some(p) = path
+        {
+            let backup = PathBuf::from(format!("{}.premigration-v{version}-{}", p.display(), crate::now_ms()));
+            let target = backup.to_str().ok_or_else(|| store_error("the backup path is not valid text"))?;
+            conn.execute("VACUUM INTO ?1", [target]).map_err(|e| {
+                store_error(format!(
+                    "the history could not be backed up before upgrading it, so it was not changed: {e}"
+                ))
+            })?;
+        }
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = FULL;

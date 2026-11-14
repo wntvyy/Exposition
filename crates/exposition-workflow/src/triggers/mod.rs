@@ -1351,6 +1351,38 @@ impl TriggerService {
         Ok(changed)
     }
 
+    /// Turn a trigger that was turned off for a deletion back on, when that
+    /// deletion did not happen: back to listening with its standing plan as
+    /// the user approved it (nothing else changes; a trigger that is no
+    /// longer off is left as it is).
+    pub fn reenable(&self, id: &WorkflowTriggerId) -> Result<WorkflowTrigger, WorkflowRunError> {
+        let now = self.now();
+        let mut engine = lock(&self.shared.engine);
+        self.ensure_store(&mut engine)?;
+        let Some(i) = engine.find(id) else {
+            return Err(WorkflowRunError::new("trigger.unknown", "That trigger does not exist."));
+        };
+        if engine.entries[i].stored.trigger.state == TriggerState::Disabled {
+            let before = engine.entries[i].clone();
+            let entry = &mut engine.entries[i];
+            entry.stored.trigger.state = TriggerState::Active;
+            entry.rt = Runtime::default();
+            entry.version += 1;
+            let revision = entry.stored.trigger.revision;
+            record(entry, now, TriggerHistoryEvent::Enabled { revision });
+            if let Err(e) = self.persist(&mut engine) {
+                engine.entries[i] = before;
+                return Err(e);
+            }
+        }
+        let view = engine.view(&engine.entries[i], now);
+        let event = engine.event(&engine.entries[i], None);
+        drop(engine);
+        self.emit(event);
+        self.wake();
+        Ok(view)
+    }
+
     /// Remove every trigger of `workflow` in the open project for good (the
     /// workflow was purged). Returns how many were removed.
     pub fn remove_workflow(&self, workflow: &WorkflowId) -> Result<usize, WorkflowRunError> {
