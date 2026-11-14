@@ -723,3 +723,24 @@ describe("lane F: R and Julia runners in plans and runs", () => {
     expect(facts.find((f) => f.label === "Interpreter")?.value).toBe("R 4.6.2");
   });
 });
+
+describe("R-m9 F4: native steps need explicit consent in every standing-plan review", () => {
+  it("starts a re-review with native steps not allowed, even when the trigger allowed them", async () => {
+    triggerIpc.list.mockResolvedValue([trigger({ id: "wtrg-n", state: { kind: "suspended", code: "trigger.planChanged", message: "Changed." }, allowNative: true })]);
+    triggerIpc.plan.mockResolvedValue(standing({ nativeSteps: ["Audit"], modelRequestsPerRun: 0, defaults: { debounceSeconds: 30, maxRunsPerHour: 6, maxRunsPerDay: 24, allowNative: true, maxModelRequestsPerDay: 0 } }));
+    render(<TriggersSection workflow="wf-1" revision={2} definition={definition} reviewBlock={null} />);
+    fireEvent.click(await screen.findByTestId("trigger-reapprove-wtrg-n"));
+    fireEvent.click(await screen.findByTestId("trigger-review"));
+    await screen.findByTestId("trigger-standing");
+    expect(screen.getByTestId("trigger-native").getAttribute("data-allowed")).toBe("false");
+    expect((screen.getByTestId("trigger-enable") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("trigger-enable-reason").textContent).toMatch(/allow them explicitly/);
+    // Going back and reviewing again asks again.
+    fireEvent.click(within(screen.getByTestId("trigger-native")).getByRole("checkbox"));
+    expect(screen.getByTestId("trigger-native").getAttribute("data-allowed")).toBe("true");
+    fireEvent.click(screen.getByTestId("trigger-back"));
+    fireEvent.click(await screen.findByTestId("trigger-review"));
+    await screen.findByTestId("trigger-standing");
+    expect(screen.getByTestId("trigger-native").getAttribute("data-allowed")).toBe("false");
+  });
+});

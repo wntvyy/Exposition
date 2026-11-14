@@ -181,7 +181,9 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
     setFailure(null);
     try {
       const standing = await workflowTriggerCommands.plan({ workflow, kind });
-      setSettings((current) => current ?? standing.defaults);
+      // Native steps need explicit consent in every review: never carried over from
+      // the trigger being reviewed again, an earlier review, or the defaults (R-m9 F4).
+      setSettings((current) => ({ ...(current ?? standing.defaults), allowNative: false }));
       setPhase({ kind: "review", standing });
     } catch (e) {
       setPhase({ kind: "error", message: errorMessage(e) });
