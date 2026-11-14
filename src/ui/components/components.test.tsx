@@ -18,6 +18,7 @@ import {
   SimpleTable,
   StateSizeProvider,
   StatusPill,
+  StatusPillScopeProvider,
   StatusText,
   Tabs,
   type EditorTabItem,
@@ -245,5 +246,28 @@ describe("UI rework shared components", () => {
     const row = screen.getByText("Least-squares fit").closest(".ui-list-row");
     expect(row?.getAttribute("data-selected")).toBe("true");
     expect(row?.getAttribute("data-op-item")).toBe("run-1");
+  });
+});
+
+describe("status bar scope", () => {
+  it("keeps only failed and warning states as chips in the status bar", () => {
+    render(
+      <StatusPillScopeProvider value="statusbar">
+        <StatusPill status="succeeded" label="Built main.typ" detail="3 ms" />
+        <StatusPill status="running" label="2 jobs running" />
+        <StatusPill status="warning" label="Agent: waiting for approval" />
+        <StatusPill status="failed" label="Build failed" />
+      </StatusPillScopeProvider>,
+    );
+    expect(screen.getByText("Built main.typ").closest(".ui-status-text")).not.toBeNull();
+    expect(screen.getByText("Built main.typ").closest(".ui-status-pill")).toBeNull();
+    expect(screen.getByText("2 jobs running").closest(".ui-status-text")).not.toBeNull();
+    expect(screen.getByText("Agent: waiting for approval").closest(".ui-status-pill")).not.toBeNull();
+    expect(screen.getByText("Build failed").closest(".ui-status-pill")).not.toBeNull();
+  });
+
+  it("renders headline chips outside the status bar", () => {
+    render(<StatusPill status="succeeded" label="Graph synchronized" />);
+    expect(screen.getByText("Graph synchronized").closest(".ui-status-pill")).not.toBeNull();
   });
 });

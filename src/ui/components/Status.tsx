@@ -8,6 +8,7 @@ import {
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
+import { createContext, useContext, type ReactNode } from "react";
 import { ProgressBar as AriaProgressBar, Label } from "react-aria-components";
 
 import { cx } from "./cx";
@@ -152,13 +153,33 @@ export function StatusText({ status, label, detail, wrap, className, ...rest }: 
 }
 
 /**
- * Headline status indicator: icon + text in a tinted pill, never color
+ * Where a StatusPill renders. In the status bar (`statusbar`), states that do
+ * not need the user render as quiet StatusText; only failed and warning
+ * states keep the tinted chip (U1: "quiet unless it needs you").
+ */
+export type StatusPillScope = "default" | "statusbar";
+
+const StatusPillScopeContext = createContext<StatusPillScope>("default");
+
+export function StatusPillScopeProvider({ value, children }: { value: StatusPillScope; children: ReactNode }) {
+  return <StatusPillScopeContext.Provider value={value}>{children}</StatusPillScopeContext.Provider>;
+}
+
+/** Statuses that ask for the user's attention keep a tinted chip in the status bar. */
+const ATTENTION: ReadonlySet<Status> = new Set<Status>(["failed", "warning"]);
+
+/**
+ * Headline status indicator: icon + text in a tinted chip, never color
  * alone. Use one per surface (a page or editor header, a run or task header,
  * the status bar); rows and tables use StatusText. Running shows a spinner.
  * Wrap changing pills in a live region only when the change matters to the
  * user (notifications already announce completions).
  */
 export function StatusPill({ status, label, detail, size = "md", className }: StatusPillProps) {
+  const scope = useContext(StatusPillScopeContext);
+  if (scope === "statusbar" && !ATTENTION.has(status)) {
+    return <StatusText status={status} label={label} detail={detail} className={className} />;
+  }
   const Icon = status === "running" ? null : statusIcons[status];
   return (
     <span className={cx("ui-status-pill", className)} data-status={status} data-size={size}>
