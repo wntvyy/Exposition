@@ -192,6 +192,8 @@
 
   /* --- Radii --- */
   --radius-sm: 3px;
+  /* Status chips and badges (headline status and facts share one geometry). */
+  --radius-chip: 4px;
   --radius-md: 5px;
   --radius-lg: 8px;
   --radius-full: 999px;

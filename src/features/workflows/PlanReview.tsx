@@ -204,9 +204,8 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
             {step.operationTitle} ({step.operation.id} v{step.operation.version}) · runner: {step.runnerTitle}
           </span>
         </div>
-        <Badge tone={containment.tone} title={containment.detail}>
-          {containment.label}
-        </Badge>
+        {/* Its detail is the visible line below, so the badge carries no tooltip. */}
+        <Badge tone={containment.tone}>{containment.label}</Badge>
       </div>
       <p className="ui-meta">{containment.detail}</p>
       {!step.available && (

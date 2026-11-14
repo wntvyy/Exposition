@@ -92,7 +92,7 @@ function SourceArea() {
           fill
           icon={FlaskConical}
           title="No source open"
-          description="Select a source or data file in the research explorer to edit it here. Files open in the same document model as the Editor page."
+          description="Select a file in the explorer to edit it here. Unsaved changes are shared with the Editor page."
         />
       </div>
     );
@@ -139,7 +139,10 @@ function PendingPromotions() {
   if (pending.length === 0) return null;
   return (
     <div data-testid="research-pending-promotions" data-count={pending.length}>
-      <Banner tone="warning" title={`${pending.length} promotion${pending.length === 1 ? "" : "s"} need reconciliation`}>
+      <Banner
+        tone="warning"
+        title={`${pending.length} insertion${pending.length === 1 ? "" : "s"} not recorded in the project graph`}
+      >
         <ul className="exp-rpage__pending">
           {pending.map((r) => (
             <li key={r.id} data-operation={r.id}>
@@ -280,7 +283,7 @@ export function ResearchPage() {
                         fill={false}
                         icon={FlaskConical}
                         title="Research is not enabled"
-                        description="Enabling creates one research space for this project — Sources, Data, and Notes folders under .exposition/research — and starts nothing. No manuscript is needed."
+                        description="Creates Sources, Data, and Notes folders under .exposition/research. Nothing runs, and no manuscript is needed."
                         actions={
                           <Button size="sm" variant="primary" isPending={enabling} onPress={() => void enableResearch()}>
                             Enable Research

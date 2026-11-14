@@ -293,7 +293,7 @@ export default async function settings({ launchApp, artifactsDir, assert }) {
     evidence.pythonAfter = { path: after.path, version: after.version, source: after.source };
     await waitFor("override row", async () => (await pythonRow.getAttribute("data-source")) === "override", 60_000);
     assert.equal(await pythonRow.getByTestId("tool-path").innerText(), pythonOverride);
-    await pythonRow.getByRole("button", { name: "Use the discovered Python" }).waitFor();
+    await pythonRow.getByRole("button", { name: "Reset Python to the discovered location" }).waitFor();
     await pythonRow.scrollIntoViewIfNeeded();
     await shot(page, "settings-tools-light");
 

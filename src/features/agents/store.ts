@@ -16,7 +16,7 @@ import { dismiss, notify } from "../../app/notifications";
 import { registry } from "../../app/registry";
 import { commands, errorMessage, events } from "../../lib/ipc";
 import { onProjectOp } from "../operations/client";
-import { isActive, statusLabel } from "./format";
+import { asSentence, isActive, statusLabel } from "./format";
 
 /** The Agent view (auxiliary region). */
 export const AGENT_VIEW_ID = "agents.panel";
@@ -140,7 +140,7 @@ export function finishedNotification(previous: TaskSummary | undefined, task: Ta
     case "canceled":
       return undefined;
     case "budgetExceeded":
-      return { id, tone: "warning", title: `${label}: ${task.title}`, body: task.status.detail + review };
+      return { id, tone: "warning", title: `${label}: ${task.title}`, body: asSentence(task.status.detail) + review };
     case "failed":
       return { id, tone: "danger", title: `${label}: ${task.title}`, body: task.status.message };
     case "stopped":

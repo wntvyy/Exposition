@@ -110,8 +110,8 @@ export function WorkflowsView(_props: EditorProps) {
           <StateSizeProvider value="compact">
             <div className="xp-wf__lead">
               <p className="ui-meta">
-                Saved procedures for this project, validated against the strict workflow contract. A saved, well-formed revision runs
-                only after you review its full plan and press Start run; saving, importing, or an agent proposal never runs anything.
+                A saved, well-formed revision runs only after you review its full plan and press Start run; saving, importing, or an
+                agent proposal never runs anything.
               </p>
               {importError && (
                 <Banner tone="danger" title="Not imported" live>
@@ -140,13 +140,23 @@ export function WorkflowsView(_props: EditorProps) {
                       title={<strong>{d.title}</strong>}
                       meta={
                         <>
+                          {/* Runnable implies well formed: an incomplete draft states its problems instead. */}
                           <StatusText
                             status={d.state === "wellFormed" ? "idle" : "warning"}
                             label={d.state === "wellFormed" ? "Well-formed draft" : "Incomplete draft"}
+                            detail={
+                              d.state === "wellFormed"
+                                ? d.runnable
+                                  ? "can be reviewed and run"
+                                  : "cannot run yet"
+                                : d.errors > 0
+                                  ? `${d.errors} problem${d.errors === 1 ? "" : "s"}`
+                                  : undefined
+                            }
                           />
                           <span>
                             Revision {d.revision}
-                            {d.imported ? " · imported" : ""} · {d.runnable ? "can be reviewed and run" : "cannot run yet"}
+                            {d.imported ? " · imported" : ""}
                           </span>
                           {triggers.some((t) => t.workflow === d.id && t.state.kind === "suspended") ? (
                             <Badge tone="warning" icon={BellOff} title="A trigger of this workflow is suspended until you review its standing plan again">
@@ -193,9 +203,8 @@ export function WorkflowsView(_props: EditorProps) {
             <Section title="Import a definition">
               <div className="xp-wf__stack">
                 <p className="ui-meta">
-                  Import a workflow bundle file (a workflow with the workflows it runs), or paste an exposition.workflow/1 or /2
-                  definition. It is checked strictly, saved as new drafts with new identities, never trusted, and never run; triggers,
-                  approvals, and trust are never imported.
+                  Paste an exposition.workflow/1 or /2 definition, or use Import Bundle… for a workflow with the workflows it runs.
+                  Importing saves new drafts and runs nothing; triggers, approvals, and trust are not imported.
                 </p>
                 <TextArea label="Definition (JSON)" code rows={6} value={text} onChange={setText} testId="workflow-import-text" />
                 <div className="xp-wf__row">

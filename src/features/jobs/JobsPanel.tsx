@@ -66,7 +66,7 @@ export function JobsPanel() {
           <EmptyState
             icon={ListChecks}
             title="No jobs yet"
-            description="Builds, runs, and checks appear here while they run, and stay listed when they finish."
+            description="Builds, runs, and checks are listed here."
           />
         ) : (
           <ul className="exp-jobs__rows" aria-label="Job list">
@@ -80,7 +80,7 @@ export function JobsPanel() {
         {selectedJob ? (
           <JobDetail job={selectedJob} now={now} />
         ) : (
-          visible.length > 0 && <EmptyState title="Select a job" description="Its output and details appear here." />
+          visible.length > 0 && <EmptyState title="Select a job to see its output" />
         )}
       </div>
     </div>

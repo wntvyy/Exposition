@@ -325,7 +325,7 @@ export default async function m9WorkflowUi({ launchApp, artifactsDir, assert }) 
 
       const flagged = visible("workflow-run-step-flagged");
       const reason = await visible("workflow-step-reason-flagged").innerText().catch(() => "");
-      note("condition-not-met-with-reason", (await flagged.getAttribute("data-state")) === "conditionNotMet" && /condition was not met/.test(reason) && !/Skipped/.test(await flagged.innerText()), {
+      note("condition-not-met-with-reason", (await flagged.getAttribute("data-state")) === "conditionNotMet" && /condition did not hold/.test(reason) && !/Skipped/.test(await flagged.innerText()), {
         state: await flagged.getAttribute("data-state"),
         reason,
       });

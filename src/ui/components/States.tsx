@@ -138,7 +138,8 @@ const bannerIcons: Record<BannerTone, LucideIcon> = {
 
 export interface BannerProps {
   tone: BannerTone;
-  title: string;
+  /** Optional: omit when the state is already named next to the banner (e.g. by a status chip). */
+  title?: string;
   children?: ReactNode;
   actions?: ReactNode;
   className?: string;
@@ -157,7 +158,7 @@ export function Banner({ tone, title, children, actions, className, live, ...res
     <div className={cx("ui-banner", className)} data-tone={tone} role={live ? "status" : undefined} data-testid={rest["data-testid"]}>
       <Icon className="ui-banner__icon" size={16} aria-hidden />
       <div className="ui-banner__body">
-        <p className="ui-banner__title">{title}</p>
+        {title && <p className="ui-banner__title">{title}</p>}
         {children && <div className="ui-banner__text">{children}</div>}
       </div>
       {actions && <div className="ui-banner__actions">{actions}</div>}

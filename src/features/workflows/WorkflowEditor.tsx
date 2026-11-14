@@ -316,7 +316,8 @@ function StepCard({
           </div>
           {contract.payload?.kind === "prompt" && (
             <TextArea
-              label="Instructions for the agent (read-only review; it cannot run code or change files)"
+              label="Instructions for the agent"
+              description="Read-only review: it cannot run code or change files."
               value={step.payload?.kind === "prompt" ? step.payload.text : ""}
               onChange={(text) => onChange(updateStep(draft, step.id, { payload: { kind: "prompt", text } }))}
               rows={4}
@@ -643,7 +644,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
   const inputsSection = (
     <Section title="Inputs">
       <div className="xp-wf__stack">
-        <p className="ui-meta">Explicit project files the workflow reads, versioned when a run is reviewed or pinned to exact content.</p>
+        <p className="ui-meta">Project files the workflow reads.</p>
         {draft.inputs.length > 0 && (
           <ul className="xp-wf-blocks">
             {draft.inputs.map((input) => (
@@ -716,7 +717,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
   const outcomesSection = (
     <Section title="Outcomes">
       <div className="xp-wf__stack">
-        <p className="ui-meta">What the workflow produces. Every step must lead to one; a manuscript promotion is an optional destination.</p>
+        <p className="ui-meta">What the workflow produces. Every step must lead to one.</p>
         {draft.outcomes.length > 0 && (
           <ul className="xp-wf-blocks">
             {draft.outcomes.map((o) => {
@@ -780,9 +781,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
 
   const selectedStep = selection?.kind === "step" ? draft.steps.find((s) => s.id === selection.id) : undefined;
   const selectedInput = selection?.kind === "input" ? draft.inputs.find((i) => i.id === selection.id) : undefined;
-  const subtitle = `Revision ${saved.revision} of ${saved.revisions.length}${saved.imported ? " · imported (untrusted, never run automatically)" : ""}${
-    draft.preset ? ` · from the ${draft.preset} preset` : ""
-  }${dirty ? " · unsaved changes" : ""}`;
+  const subtitle = `Revision ${saved.revision} of ${saved.revisions.length}${saved.imported ? " · imported (untrusted)" : ""}${dirty ? " · unsaved changes" : ""}`;
 
   return (
     <div className="xp-wf" data-testid="workflow-editor" data-workflow={saved.id} data-revision={saved.revision} data-view={view}>
@@ -851,8 +850,8 @@ export function WorkflowEditor({ resource }: EditorProps) {
                 <Banner tone={dirty ? "info" : "warning"} title={dirty ? "Unsaved changes" : "Cannot run this revision"}>
                   <span id={reasonId} data-testid="workflow-run-reason">
                     {runBlock}
-                  </span>{" "}
-                  Saving keeps every revision; drafts may be incomplete and are saved with their problems listed.
+                  </span>
+                  {dirty && " Saving keeps earlier revisions, and an incomplete draft can be saved."}
                 </Banner>
               ) : (
                 <Banner tone="info" title={`Revision ${saved.revision} can run`}>
@@ -862,7 +861,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
               {origin && (
                 <div data-testid="workflow-origin" data-origin={saved.origin.kind}>
                   <Banner tone="info" title="Agent proposal">
-                    {origin} It is a draft like any other: review and edit it, save it, and it runs only from a plan you review and start.
+                    {origin} Like any draft, it runs only from a plan you review and start.
                   </Banner>
                 </div>
               )}
@@ -938,7 +937,6 @@ export function WorkflowEditor({ resource }: EditorProps) {
                       options={Array.from({ length: MAX_PARALLEL }, (_, i) => ({
                         id: i + 1,
                         label: i === 0 ? "1 — one at a time" : String(i + 1),
-                        description: i === 0 ? "Each step waits for the previous one" : "Only steps that do not depend on each other; global limits still apply",
                       }))}
                       description="Independent steps and repeat instances run side by side up to this limit and the application's global limits (4 steps in flight, 2 containers, 2 native, 2 model, 1 Lean)."
                       data-testid="workflow-max-parallel"
@@ -965,9 +963,8 @@ export function WorkflowEditor({ resource }: EditorProps) {
                 <Section title="Steps">
                   <div className="xp-wf__stack">
                     <p className="ui-meta">
-                      Each step is a registered operation or another saved workflow (pinned revision). Data reaches a step only through a
-                      compatible binding. A step may run only when a fixed condition on an earlier output holds, and may repeat a bounded number
-                      of times; there is no expression language and no open-ended loop.
+                      Each step runs an operation or another saved workflow (at a pinned revision) and reads only the data bound to its
+                      inputs. Conditions and repeats are optional and bounded.
                     </p>
                     {draft.steps.length > 0 && (
                       <ul className="xp-wf-blocks">
@@ -995,7 +992,8 @@ export function WorkflowEditor({ resource }: EditorProps) {
                     <ol className="xp-wf-order" data-testid="workflow-plan">
                       {validation.plan.map((p) => (
                         <li key={p.step}>
-                          <span className="xp-wf-name">{p.label}</span> — {p.operation} via {p.runner}. Effects: {p.effects.join(", ")}.
+                          <span className="xp-wf-name">{p.label}</span> — {p.operation} via {p.runner}. Effects:{" "}
+                          {p.effects.map((e) => (EFFECT_LABELS[e] ?? e).toLowerCase()).join("; ")}.
                         </li>
                       ))}
                     </ol>

@@ -70,11 +70,7 @@ export function TrustSection() {
         <>
           <SettingsGroup title="Trusted">
             {trust.roots.length === 0 ? (
-              <EmptyState
-                size="compact"
-                title="No trusted folders"
-                description="When a build, kernel, or command needs to run on this computer, Exposition asks first. Folders you trust appear here."
-              />
+              <EmptyState size="compact" title="No trusted folders" />
             ) : (
               <div className="exp-settings__list" role="list" data-testid="trusted-folders">
                 {trust.roots.map((root) => (

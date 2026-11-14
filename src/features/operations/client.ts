@@ -406,10 +406,11 @@ export async function restore(
     const names = collisions.map((c) => quoted(targetName(c.target, labels))).join(", ");
     const choice = await confirm<"keep" | "rename">({
       title: collisions.length === 1 ? `${names} already exists` : `${collisions.length} original locations are occupied`,
+      // The buttons name both choices; the message says what is there and what a new name keeps.
       message:
         collisions.length === 1
-          ? `Something new is at the original location of ${names}. Restore the deleted version under a new name (both are kept), or leave it deleted.`
-          : `New items now occupy the original locations of ${names}. Restore the deleted versions under new names (both versions are kept), or leave them deleted.`,
+          ? `Something new is at the original location of ${names}. Restoring with a new name keeps both.`
+          : `New items occupy the original locations of ${names}. Restoring with new names keeps both versions of each.`,
       actions: [
         { id: "keep", label: "Leave Deleted", variant: "secondary" },
         { id: "rename", label: "Restore with a New Name", variant: "primary" },

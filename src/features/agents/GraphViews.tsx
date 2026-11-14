@@ -71,7 +71,7 @@ function entityName(entity: ContextEntity | undefined, id: string): string {
 /** One-line summary for the task view (panel and page). */
 export function graphSummary(context: GraphContext): string {
   const entities = context.entities.length;
-  return `Graph context given at the start of the run: revision ${context.revision} · ${entities} ${entities === 1 ? "entity" : "entities"} in scope${
+  return `Graph context sent with the latest run: revision ${context.revision} · ${entities} ${entities === 1 ? "entity" : "entities"} in scope${
     context.truncated ? " (summarized)" : ""
   }`;
 }
@@ -159,7 +159,7 @@ function ContextRelations({ context }: { context: GraphContext }) {
   const byId = new Map(context.entities.map((e) => [e.id, e]));
   if (context.relations.length === 0) return <p className="ui-meta">No relations among these entities.</p>;
   return (
-    <ul className="agents-list" aria-label="Relations in the task's graph context">
+    <ul className="agents-list" aria-label="Relationships in the task's graph context">
       {context.relations.map((r) => (
         <li key={r.id} data-testid="agents-graph-relation" data-status={r.status}>
           <span>{entityName(byId.get(r.from), r.from)}</span>{" "}
@@ -221,7 +221,7 @@ export function GraphContextView({ graph }: { graph: TaskGraphInfo }) {
       <EmptyState
         icon={Network}
         title="No graph context"
-        description="This task has no recorded graph context (it was created before the project graph was attached to agent tasks)."
+        description="This task was created before agent tasks recorded a graph context."
       />
     );
   }
@@ -247,7 +247,7 @@ export function GraphContextView({ graph }: { graph: TaskGraphInfo }) {
       <Section title="Entities" count={context.entities.length} collapsible defaultExpanded className="agents-section">
         <ContextEntities context={context} />
       </Section>
-      <Section title="Relations" count={context.relations.length} collapsible defaultExpanded className="agents-section">
+      <Section title="Relationships" count={context.relations.length} collapsible defaultExpanded className="agents-section">
         <ContextRelations context={context} />
       </Section>
       <Section title="In scope" collapsible defaultExpanded={false} className="agents-section">
@@ -337,7 +337,7 @@ export function ProposalList({ proposals }: { proposals: TaskProposal[] }) {
       <EmptyState
         icon={Network}
         title="No graph changes proposed"
-        description="When the agent proposes entities or relations for the project graph, they appear here with their review state."
+        description="Entities and relations the agent proposes for the project graph appear here."
       />
     );
   }

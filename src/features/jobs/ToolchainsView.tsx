@@ -94,7 +94,7 @@ export function ToolchainsView() {
         <Button size="sm" variant="ghost" icon={RefreshCw} isPending={loading} onPress={() => void loadToolchains(true)}>
           {loading ? "Checking…" : "Refresh"}
         </Button>
-        <span className="ui-meta">Exposition finds tools on this computer; it never installs them.</span>
+        <span className="ui-meta">Exposition finds tools on this computer and installs nothing automatically.</span>
       </Toolbar>
       {[...groups.entries()].map(([category, tools]) => (
         <Section key={category} title={CATEGORY_LABEL[category] ?? category} count={tools.length}>

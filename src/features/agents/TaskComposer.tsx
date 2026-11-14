@@ -129,7 +129,7 @@ export function TaskComposer({
             </Button>
           }
         >
-          The agent works on the open project, through the same documents as your editors.
+          An agent task works only inside the open project folder.
         </Banner>
       )}
       <Select

@@ -632,7 +632,7 @@ describe("canvas connections", () => {
 
   it("refuses an incompatible type with the reason and changes nothing", () => {
     const result = connect(def, contracts, { source: "input:notes", sourceHandle: "out", target: "step:audit", targetHandle: "in:source" });
-    expect(result).toEqual({ ok: false, message: expect.stringMatching(/Refused: .*accepts Lean source, but “Notes” is Document/) });
+    expect(result).toEqual({ ok: false, message: expect.stringMatching(/^“.*accepts Lean source, but “Notes” is Document/) });
   });
 
   it("refuses cycles, self-feeds, a second source on a single port, and an incompatible outcome", () => {

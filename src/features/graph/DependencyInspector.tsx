@@ -19,7 +19,7 @@ import { graphApi } from "./api";
 import { evidenceKindLabel, OutcomeText, RelationStatus, TypeLabel } from "./Inspector";
 import { entityDisplay, FAMILY_LABELS, FAMILY_ORDER, freshnessView, kindDisplay, relationDisplay, type VocabularyIndex } from "./model";
 import { openInGraph } from "./navigation";
-import { FreshnessPill } from "./status";
+import { coverageStateLabel, FreshnessPill } from "./status";
 import "./graph.css";
 import { canRead, graph, useGraph } from "./store";
 import { useGraphLoad } from "./useGraphData";
@@ -142,19 +142,9 @@ function CoverageNote({ inspection }: { inspection: SourceInspection }) {
       </p>
     );
   }
-  const label =
-    coverage.state === "complete"
-      ? "Complete"
-      : coverage.state === "partial"
-        ? "Partial"
-        : coverage.state === "pending"
-          ? "Pending"
-          : coverage.state === "unsupported"
-            ? "Not supported"
-            : "Failed";
   return (
     <p className="ui-meta xp-deps__note" data-testid="deps-coverage" data-state={coverage.state}>
-      Extraction: {label}
+      Extraction: {coverageStateLabel(coverage.state)}
       {coverage.extractor ? ` (${coverage.extractor})` : ""}
       {coverage.detail ? ` — ${coverage.detail}` : ""}
       {coverage.unresolved ? `. ${coverage.unresolved} unresolved ${coverage.unresolved === 1 ? "binding" : "bindings"} in this file.` : ""}

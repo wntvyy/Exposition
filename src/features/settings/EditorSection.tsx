@@ -87,11 +87,10 @@ export function EditorSection() {
                 />
               )}
             </SettingRow>
-            <SettingRow label="Indent with spaces" description="Off inserts tab characters.">
-              {({ labelId, descriptionId }) => (
+            <SettingRow label="Indent with spaces">
+              {({ labelId }) => (
                 <Switch
                   aria-labelledby={labelId}
-                  aria-describedby={descriptionId}
                   isSelected={editor.insertSpaces}
                   onChange={(insertSpaces) => void change({ insertSpaces })}
                 />
@@ -99,7 +98,7 @@ export function EditorSection() {
             </SettingRow>
             <SettingRow
               label="Line ending for new lines"
-              description="Used in files that have no line endings yet; other files keep the endings they already use."
+              description="Only for files without line endings yet; other files keep theirs."
             >
               {({ labelId, descriptionId }) => (
                 <Select

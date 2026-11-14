@@ -34,6 +34,15 @@ import { statusSentence, statusView } from "./status";
 import { startLeanTracking, useLean } from "./store";
 
 export const LEAN_VIEW_ID = "lean.infoview";
+/** States whose banner explains them (with the action), so the status sentence is not repeated above it. */
+const EXPLAINED_BY_BANNER = new Set<LeanDocumentState["status"]["kind"]>([
+  "untrusted",
+  "unavailable",
+  "serverUnavailable",
+  "serverCrashed",
+  "partiallyChecked",
+  "unverified",
+]);
 /** The infoview lists at most this many diagnostics (all are markers in Monaco). */
 const MAX_DIAGNOSTICS_SHOWN = 200;
 
@@ -116,7 +125,7 @@ function GoalsSection({ state }: { state: LeanDocumentState }) {
     body = (
       <>
         {goals == null && !term && !view.loading && <p className="ui-meta" data-testid="lean-no-goals">No goals here (not inside a tactic proof).</p>}
-        {goals && goals.length === 0 && <p data-testid="lean-goals-done"><StatusText status="succeeded" label="No goals" /> No goals remain at this point.</p>}
+        {goals && goals.length === 0 && <p data-testid="lean-goals-done"><StatusText status="succeeded" label="No goals remain" /></p>}
         {goals?.map((g, i) => (
           <div key={i} className="exp-lean__goal-block">
             {goals.length > 1 && <div className="ui-group-label">Goal {i + 1} of {goals.length}</div>}
@@ -161,7 +170,7 @@ function DiagnosticRow({ d, state, text }: { d: Diagnostic; state: LeanDocumentS
         className="exp-lean__diag-jump"
         disabled={!d.location}
         onClick={() => d.location && void revealInEditor(state.path, { range: d.location.range })}
-        aria-label={line ? `Go to line ${line}` : "No location"}
+        aria-label={line ? `${label}, line ${line}: show in editor` : `${label}, no location`}
       >
         <StatusText status={pill} label={label} />
         {line != null && <span className="ui-meta">Ln {line}</span>}
@@ -212,6 +221,9 @@ function LeanDocumentView({ state }: { state: LeanDocumentState }) {
   const shown = state.diagnostics.slice(0, MAX_DIAGNOSTICS_SHOWN);
   const stale = state.diagnosticsRevision != null && state.diagnosticsRevision !== state.revision;
   const text = modelText(state);
+  // While Lean starts or checks, the progress bar names the revision; the audit sentence adds that no errors were found.
+  const sentence =
+    EXPLAINED_BY_BANNER.has(status.kind) || (status.kind === "checking" && !status.auditing) ? null : statusSentence(status);
 
   const facts: KeyValueItem[] = [
     { key: "revision", label: "Revision", value: state.revision, valueProps: { "data-testid": "lean-revision" } },
@@ -270,7 +282,11 @@ function LeanDocumentView({ state }: { state: LeanDocumentState }) {
             <IconButton icon={RefreshCw} aria-label="Restart Lean server" onPress={() => void commands.leanRestart(state.document)} />
           </Toolbar>
         </div>
-        <p className="exp-lean__sentence ui-meta" data-testid="lean-status-sentence">{statusSentence(status)}</p>
+        {sentence && (
+          <p className="exp-lean__sentence ui-meta" data-testid="lean-status-sentence">
+            {sentence}
+          </p>
+        )}
         <KeyValueList items={facts} />
 
         {status.kind === "checking" && (
@@ -291,7 +307,7 @@ function LeanDocumentView({ state }: { state: LeanDocumentState }) {
             title="Workspace not trusted"
             actions={<Button size="sm" variant="primary" icon={ShieldCheck} onPress={() => void trustAndRestart(state)}>Trust workspace…</Button>}
           >
-            Lean has not run. Checking executes the project’s code.
+            Lean has not run. Checking runs the project’s code (the lakefile, macros, and #eval) on this computer.
           </Banner>
         )}
         {status.kind === "toolchainMissing" && (
@@ -312,7 +328,11 @@ function LeanDocumentView({ state }: { state: LeanDocumentState }) {
         {status.kind === "serverCrashed" && (
           <Banner
             tone="danger"
-            title={status.restarting ? "Lean server crashed — restarting" : "Lean server crashed"}
+            title={
+              status.restarting
+                ? `Lean server crashed — restarting (attempt ${status.attempts})`
+                : "Lean server crashed — not restarted automatically"
+            }
             actions={<Button size="sm" onPress={() => void commands.leanRestart(state.document)}>Restart server</Button>}
           >
             <pre className="exp-lean__message">{status.message}</pre>

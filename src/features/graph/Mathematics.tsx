@@ -48,9 +48,17 @@ import { graphApi } from "./api";
 import type { CanvasBadge } from "./canvas/types";
 import type { CanvasSelection } from "./canvas/GraphCanvas";
 import { FiltersButton } from "./Filters";
-import { EntityInspector, FormalEvidenceBody, InspectorEmpty, RelationInspector, RelationStatus, type InspectorActions } from "./Inspector";
+import {
+  EntityInspector,
+  FormalEvidenceBody,
+  InspectorEmpty,
+  inspectorSelectionState,
+  RelationInspector,
+  RelationStatus,
+  type InspectorActions,
+} from "./Inspector";
 import { entityDisplay, freshnessView, kindDisplay, VERDICT_VIEW, type VocabularyIndex } from "./model";
-import { GraphDialogs, InspectorPanel, useInspectorOpen, type DialogState } from "./ProjectGraph";
+import { countLabel, GraphDialogs, InspectorPanel, useInspectorOpen, type DialogState } from "./ProjectGraph";
 import { project } from "./projection";
 import { revealSource } from "./reveal";
 import { SaveIndicator } from "./SaveIndicator";
@@ -392,11 +400,12 @@ function MathSections({
             <p data-testid="graph-formal-deps-unavailable">Formal dependency edges unavailable: {row.formalDependencies.reason}</p>
           ) : row?.formalDependencies?.kind === "reported" ? (
             <p>Formal dependencies reported by the checker: {row.formalDependencies.names.join(", ") || "none"}.</p>
-          ) : (
+          ) : row?.verdict ? (
+            // Without any formal evidence the "No formal evidence" line above already says nothing was checked.
             <p className="ui-muted" data-testid="graph-formal-deps-unavailable">
               Formal dependency edges unavailable: no checker evidence exposes them for this item.
             </p>
-          )}
+          ) : null}
         </div>
       </Section>
     </>
@@ -573,8 +582,12 @@ export function Mathematics({ store }: { store: ViewStore }) {
                   size="page"
                   fill={false}
                   icon={Sigma}
-                  title={`No mathematical items${quick !== "all" ? " match" : " yet"}`}
-                  description="Definitions, statements, proofs, and formal declarations appear here as they are extracted from sources or created with New."
+                  title={data.rows.length === 0 ? "No mathematical items yet" : "No mathematical items match this view"}
+                  description={
+                    data.rows.length === 0
+                      ? "Definitions, statements, proofs, and formal declarations appear here as they are extracted from sources or created with New."
+                      : "Choose All or change the filters."
+                  }
                 />
               }
             />
@@ -600,7 +613,11 @@ export function Mathematics({ store }: { store: ViewStore }) {
           ) : selectedRelation ? (
             <RelationInspector relation={selectedRelation} entities={entities} vocabulary={vocabulary} actions={actions} />
           ) : (
-            <InspectorEmpty counts={`${visibleRows.length} mathematical items shown. Select one to trace its dependencies, proofs, and formal evidence.`} />
+            <InspectorEmpty
+              {...(inspectorSelectionState(selection, projection.edges) ?? {
+                description: `Select an item to see its dependencies, proofs, and formal evidence. ${countLabel(visibleRows.length, "mathematical item", "mathematical items")} shown.`,
+              })}
+            />
           )}
         </InspectorPanel>
       </div>

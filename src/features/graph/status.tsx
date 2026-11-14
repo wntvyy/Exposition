@@ -1,6 +1,7 @@
 // Shared graph status displays: synchronization freshness and extraction
 // coverage. Pending or unavailable synchronization is never shown as current.
 // Wording matches the Agents page's graph context ("Graph synchronized" etc.).
+import type { CoverageState } from "../../bindings/CoverageState";
 import type { CoverageSummary } from "../../bindings/CoverageSummary";
 import type { GraphFreshness } from "../../bindings/GraphFreshness";
 import { Badge, StatusPill } from "../../ui/components";
@@ -35,6 +36,22 @@ export function FreshnessPill({ freshness, size = "md" }: { freshness: GraphFres
       )}
     </span>
   );
+}
+
+/** A file's extraction coverage state, worded the same in the Graph inspector and the Dependencies view. */
+export function coverageStateLabel(state: CoverageState): string {
+  switch (state) {
+    case "complete":
+      return "Complete";
+    case "partial":
+      return "Partial";
+    case "pending":
+      return "Pending";
+    case "unsupported":
+      return "Not supported";
+    case "failed":
+      return "Failed";
+  }
 }
 
 /** One line on extraction coverage; unknown/partial coverage is stated, never implied complete. */

@@ -96,7 +96,7 @@ export function TaskList() {
       <EmptyState
         icon={Bot}
         title="No agent tasks yet"
-        description="Describe a change, calculation, or new document. The agent works through the same document service as your editors, and every change stays reviewable."
+        description="Describe a change, calculation, or new document. The agent's edits appear in your open documents, and every change stays reviewable."
         actions={
           <Button size="sm" icon={Plus} onPress={() => agents.show("compose")}>
             New task

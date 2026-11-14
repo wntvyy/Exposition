@@ -34,16 +34,32 @@ export function TabList<T extends object>({
   return <AriaTabList {...props} data-variant={variant} className={cx("ui-tab-list", className)} />;
 }
 
+/**
+ * A tab. `count` renders a muted number or short fact after the label
+ * ("Proposals 2 · 1 waiting"); counts are never written in parentheses.
+ */
 export function Tab({
   className,
   icon: Icon,
   children,
+  count,
   ...props
-}: Omit<AriaTabProps, "className" | "children"> & { className?: string; icon?: IconComponent; children: ReactNode }) {
+}: Omit<AriaTabProps, "className" | "children"> & {
+  className?: string;
+  icon?: IconComponent;
+  children: ReactNode;
+  count?: number | string;
+}) {
   return (
     <AriaTab {...props} className={cx("ui-tab", className)}>
       {Icon && <Icon size={14} aria-hidden />}
       <span className="ui-tab__label">{children}</span>
+      {count !== undefined && (
+        <>
+          {" "}
+          <span className="ui-tab__count">{count}</span>
+        </>
+      )}
     </AriaTab>
   );
 }

@@ -32,30 +32,19 @@ const TOOL_STATUS: Record<ToolRow["status"], { status: Status; label: string }> 
 };
 
 /**
- * What an image row says about its image: present locally (succeeded), not
- * configured (refused, unavailable), or configured but not verified yet (a
- * settled fact, muted). A configured image that is missing gets a warning
- * banner below the row; the default image's row then says nothing more.
+ * What an image row says about its image: present locally (succeeded) or not
+ * configured (refused, unavailable). A configured image that is missing gets
+ * a warning banner below the row; one not verified yet (the local list is
+ * loading or could not be read) adds nothing to the select that shows it.
  */
-function ImageStateText({
-  image,
-  notConfigured,
-  testId,
-  showMissing,
-}: {
-  image: ImageState;
-  notConfigured: string;
-  testId: string;
-  showMissing: boolean;
-}) {
-  if (image.kind === "missing" && !showMissing) return null;
+function ImageStateText({ image, notConfigured, testId }: { image: ImageState; notConfigured: string; testId: string }) {
+  if (image.kind === "missing" || image.kind === "unverified") return null;
   return (
     <span data-testid={testId}>
       {image.kind === "notConfigured" && <StatusText status="unavailable" label={notConfigured} wrap />}
       {image.kind === "present" && (
         <StatusText status="succeeded" label={`${image.image} is present locally (${image.local.id}, ${image.local.size}).`} wrap />
       )}
-      {(image.kind === "unverified" || image.kind === "missing") && <span className="ui-meta">Configured: {image.image}</span>}
     </span>
   );
 }
@@ -97,7 +86,7 @@ function DockerGroup() {
       </SettingRow>
       <SettingRow
         label="Container image"
-        description="Only images already on this computer are listed. Exposition never pulls images; run docker pull yourself to add one."
+        description="Only images already on this computer are listed; run docker pull yourself to add one."
         testId="docker-image"
       >
         {({ labelId, descriptionId }) => (
@@ -133,7 +122,6 @@ function DockerGroup() {
               image={image}
               notConfigured="No image configured: restricted runs are refused."
               testId="docker-image-state"
-              showMissing={false}
             />
           </div>
         )}
@@ -207,7 +195,6 @@ function LanguageImageRow({ language }: { language: RestrictedLanguage }) {
               image={image}
               notConfigured={`No ${name} image: restricted ${name} batches are refused; they never run natively instead.`}
               testId={`${testId}-state`}
-              showMissing
             />
           </div>
         )}
@@ -326,6 +313,7 @@ function toolColumns(
               Configured: <code className="ui-code exp-settings__path">{tool.override}</code>
             </div>
           )}
+          {tool.detail && <div className="ui-meta">{tool.detail}</div>}
           {tool.status === "missing" && tool.guidance && <div className="ui-meta">{tool.guidance}</div>}
         </>
       ),
@@ -334,10 +322,7 @@ function toolColumns(
       id: "source",
       title: "Source",
       render: (tool) => (
-        <span className="ui-meta">
-          {tool.source ? SOURCE_LABELS[tool.source] : tool.override ? "Set in settings" : null}
-          {tool.detail && <span> · {tool.detail}</span>}
-        </span>
+        <span className="ui-meta">{tool.source ? SOURCE_LABELS[tool.source] : tool.override ? "Set in settings" : null}</span>
       ),
     },
     {
@@ -347,7 +332,12 @@ function toolColumns(
       width: "1%",
       render: (tool) => (
         <div className="exp-settings__actions">
-          <Button size="sm" icon={FolderSearch} aria-label={`Set location of ${tool.name}`} onPress={() => edit(tool)}>
+          <Button
+            size="sm"
+            icon={FolderSearch}
+            aria-label={`${tool.override ? "Change" : "Set"} location of ${tool.name}`}
+            onPress={() => edit(tool)}
+          >
             {tool.override ? "Change…" : "Set…"}
           </Button>
           {tool.override && (
@@ -355,7 +345,7 @@ function toolColumns(
               size="sm"
               variant="ghost"
               icon={RotateCcw}
-              aria-label={`Use the discovered ${tool.name}`}
+              aria-label={`Reset ${tool.name} to the discovered location`}
               isPending={resetting === tool.id}
               onPress={() => reset(tool)}
             >

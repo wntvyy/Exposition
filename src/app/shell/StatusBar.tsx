@@ -1,3 +1,4 @@
+import { StatusPillScopeProvider } from "../../ui/components/Status";
 import { registry } from "../registry";
 import { useRegistryVersion } from "./useRegistry";
 import { ViewErrorBoundary } from "./ViewErrorBoundary";
@@ -11,10 +12,13 @@ export function StatusBar() {
         <ViewErrorBoundary name={item.id} compact>{item.render()}</ViewErrorBoundary>
       </div>
     ));
+  // Status bar items stay quiet unless they need the user (failed, warning).
   return (
     <footer className="wb-statusbar" data-region="statusbar" aria-label="Status bar">
-      <div className="wb-statusbar__side">{render("left")}</div>
-      <div className="wb-statusbar__side wb-statusbar__side--end">{render("right")}</div>
+      <StatusPillScopeProvider value="statusbar">
+        <div className="wb-statusbar__side">{render("left")}</div>
+        <div className="wb-statusbar__side wb-statusbar__side--end">{render("right")}</div>
+      </StatusPillScopeProvider>
     </footer>
   );
 }

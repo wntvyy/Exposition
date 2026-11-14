@@ -52,7 +52,7 @@ function StartupGroup() {
     <SettingsGroup title="Startup">
       <SettingRow
         label="Reopen the last project"
-        description="When Exposition starts, open the most recent folder again. Opening a folder never runs anything in it."
+        description="Opening a folder never runs anything in it."
         testId="reopen-last-project"
       >
         {({ labelId, descriptionId }) => (
@@ -315,7 +315,7 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
         <EmptyState
           size="compact"
           title="No LaTeX targets"
-          description="Every .tex file builds with pdfLaTeX. Add a target to build a file with LuaLaTeX or to make it the project's default."
+          description="Add a target to build a file with LuaLaTeX or to make it the project's default."
           actions={
             <Button size="sm" icon={Plus} onPress={add}>
               Add target…
@@ -377,7 +377,7 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
 export function ProjectSection() {
   const info = useWorkspace((s) => s.info);
   return (
-    <SettingsPage title="Project" description="Opening projects, and how the open project is built." testId="settings-project">
+    <SettingsPage title="Project" testId="settings-project">
       <StartupGroup />
       {info ? (
         <TargetsGroup root={info.root} name={info.name} />
@@ -385,7 +385,7 @@ export function ProjectSection() {
         <SettingsGroup title="LaTeX targets">
           <EmptyState
             size="compact"
-              icon={FolderOpen}
+          icon={FolderOpen}
             title="No folder open"
             description="Open a project folder to choose how its LaTeX files are built."
           />

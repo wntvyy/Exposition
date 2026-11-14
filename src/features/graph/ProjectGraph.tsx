@@ -33,7 +33,7 @@ import { graphApi } from "./api";
 import type { CanvasSelection } from "./canvas/GraphCanvas";
 import { AddToCollectionDialog, CreateEntityDialog, RelateDialog } from "./changes";
 import { FiltersButton } from "./Filters";
-import { EntityInspector, InspectorEmpty, RelationInspector, type InspectorActions } from "./Inspector";
+import { EntityInspector, InspectorEmpty, inspectorSelectionState, RelationInspector, type InspectorActions } from "./Inspector";
 import type { EntityKind } from "../../bindings/EntityKind";
 import type { ViewFocus, VocabularyIndex } from "./model";
 import { project as projectView } from "./projection";
@@ -54,6 +54,9 @@ export type DialogState =
   | null;
 
 export const DEFAULT_LIMIT = 300;
+
+/** "1 item", "3 items". */
+export const countLabel = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const MODE_KEY = "exposition.graph.mode";
 const NARROW_WIDTH = 1100;
 
@@ -226,7 +229,7 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
   const focusEntity = focus ? entities.get(focus.entity) : undefined;
   const selectedEntity = selection.nodes.length === 1 ? selection.nodes[0]! : null;
   const selectedRelation = selection.edge ? relations.get(selection.edge) : undefined;
-  const counts = `${projection.nodes.length} items and ${projection.edges.length} relationships shown.`;
+  const counts = `${countLabel(projection.nodes.length, "item", "items")} and ${countLabel(projection.edges.length, "relationship", "relationships")} shown.`;
 
   return (
     <div className="xp-graph-section" data-testid="graph-project">
@@ -329,7 +332,7 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
             </>
           }
         >
-          Large projects start with a subset. Search, filter by kind, or show the neighborhood of an item to see others.
+          Search, filter by kind, or show an item's neighborhood to see the others.
         </Banner>
       )}
       {status?.state.kind === "temporaryReadOnly" && (
@@ -364,8 +367,12 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
           ) : (
             <Tabs selectedKey={tableTab} onSelectionChange={(k) => setTableTab(k as "entities" | "relations")} className="xp-graph-tables">
               <TabList aria-label="Tables">
-                <Tab id="entities">Items ({projection.nodes.length})</Tab>
-                <Tab id="relations">Relationships ({projection.edges.length})</Tab>
+                <Tab id="entities" count={projection.nodes.length}>
+                  Items
+                </Tab>
+                <Tab id="relations" count={projection.edges.length}>
+                  Relationships
+                </Tab>
               </TabList>
               <TabPanel id="entities" className="xp-graph-tables__panel">
                 <EntityTable
@@ -394,12 +401,8 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
             <EntityInspector key={selectedEntity} entityId={selectedEntity} vocabulary={vocabulary} actions={actions} />
           ) : selectedRelation ? (
             <RelationInspector relation={selectedRelation} entities={entities} vocabulary={vocabulary} actions={actions} />
-          ) : selection.edge ? (
-            <InspectorEmpty counts="This relationship stands for several relationships folded into a collapsed group; expand the group to inspect them." />
-          ) : selection.nodes.length > 1 ? (
-            <InspectorEmpty counts={`${selection.nodes.length} items selected. Select one to inspect it.`} />
           ) : (
-            <InspectorEmpty counts={counts} />
+            <InspectorEmpty {...(inspectorSelectionState(selection, projection.edges) ?? { description: `Select an item or relationship to inspect it. ${counts}` })} />
           )}
         </InspectorPanel>
       </div>
@@ -419,7 +422,7 @@ function EmptyCanvas({ filtered, total }: { filtered: number; total: number }) {
         description={
           total === 0
             ? "Resources appear as the project is indexed. You can also create claims, theorems, questions, and collections with New."
-            : `${filtered} items are hidden or filtered out. Change the filters, clear the search, or show hidden items.`
+            : `${countLabel(filtered, "item is", "items are")} hidden or filtered out. Change the filters, clear the search, or show hidden items.`
         }
       />
     </div>

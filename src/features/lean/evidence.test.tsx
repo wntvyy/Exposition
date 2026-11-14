@@ -95,6 +95,9 @@ describe("Lean evidence", () => {
     expect(screen.getByTestId("lean-decl-association").textContent).toMatch(/reviewed correspondence \(not a proof of equivalence\)/);
     expect(screen.getByTestId("lean-evidence-latest").getAttribute("data-freshness")).toBe("stale");
     expect(screen.getByTestId("lean-evidence-history").textContent).toMatch(/changed since revision 1/);
+    // The stale reason is shown once (the history line), not again beside the freshness label.
+    expect(screen.getByTestId("lean-evidence-latest").textContent).not.toMatch(/changed since revision 1/);
+    expect(screen.getByTestId("lean-evidence-latest").textContent).toContain("file: Checked");
     // The current audit (revision 2) has no evidence yet: it can be recorded.
     expect(screen.getByRole("button", { name: "Record evidence" })).toBeTruthy();
   });

@@ -12,6 +12,7 @@ import type { Relation } from "../../bindings/Relation";
 import { errorMessage } from "../../lib/ipc";
 import { graphCommands } from "../../lib/graphIpc";
 import { RelationStatus } from "../graph/RelationStatus";
+import { verdictView } from "../lean/evidence";
 import { Banner, Section, Spinner, StatusText, type Status } from "../../ui/components";
 
 const READING: Record<string, string> = {
@@ -45,6 +46,11 @@ export function freshnessStatus(f: Freshness | undefined): { status: Status; lab
   }
 }
 
+/** The kind of evidence as the Graph inspector names it ("Formal check", "Computational", ...). */
+function kindLabel(kind: Evidence["kind"]): string {
+  return kind === "formalCheck" ? "Formal check" : kind.charAt(0).toUpperCase() + kind.slice(1);
+}
+
 function outcomeText(e: Evidence): string {
   switch (e.outcome.kind) {
     case "succeeded":
@@ -56,7 +62,7 @@ function outcomeText(e: Evidence): string {
     case "interrupted":
       return "run interrupted";
     case "verdict":
-      return `verdict: ${e.outcome.verdict}`;
+      return `verdict: ${verdictView(e.outcome.verdict).label}`;
     case "reported":
       return e.outcome.summary;
   }
@@ -70,7 +76,7 @@ export function EvidenceRecord({ evidence, freshness }: { evidence: Evidence; fr
       <div className="exp-graph__evidence-head">
         <StatusText status={fresh.status} label={fresh.label} />
         <span>
-          {evidence.kind === "computational" ? "Computational" : evidence.kind === "formalCheck" ? "Formal check" : evidence.kind} ·{" "}
+          {kindLabel(evidence.kind)} ·{" "}
           {evidence.operation.kind} <code className="ui-code">{evidence.operation.id}</code> · {outcomeText(evidence)}
         </span>
       </div>
@@ -164,9 +170,9 @@ export function GraphDependencies({ entity, revision }: { entity: EntityId; revi
   const incoming = detail.incoming.filter((r) => r.status !== "rejected");
   return (
     <div className="exp-graph" data-testid="graph-dependencies" data-entity={entity} data-graph-revision={detail.graphRevision}>
-      <Section title="Relations" count={outgoing.length + incoming.length}>
+      <Section title="Relationships" count={outgoing.length + incoming.length}>
         {outgoing.length + incoming.length === 0 ? (
-          <p className="ui-meta">No relations yet.</p>
+          <p className="ui-meta">No relationships yet.</p>
         ) : (
           <ul className="exp-graph__list">
             {outgoing.map((r) => (
@@ -189,7 +195,7 @@ export function GraphDependencies({ entity, revision }: { entity: EntityId; revi
           </ul>
         )}
       </Section>
-      <Section title="If this changes" count={impact?.items.length ?? 0} collapsible defaultExpanded={false}>
+      <Section title="Change impact" count={impact?.items.length ?? 0} collapsible defaultExpanded={false}>
         {!impact || impact.items.length === 0 ? (
           <p className="ui-meta">Nothing in the graph depends on it.</p>
         ) : (

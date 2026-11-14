@@ -19,11 +19,7 @@ export function AppearanceSection() {
       <SettingsGroup title="Theme">
         <SettingRow
           label="Color theme"
-          description={
-            preference === "system"
-              ? `Follows your system setting (currently ${resolved}).`
-              : "Applies to the whole workbench, including source editors."
-          }
+          description={preference === "system" ? `Follows your system setting (currently ${resolved}).` : undefined}
         >
           <SegmentedControl
             aria-label="Color theme"

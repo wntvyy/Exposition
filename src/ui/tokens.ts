@@ -346,6 +346,7 @@ export const fontSize = {
 
 export const radius = {
   sm: "var(--radius-sm)",
+  chip: "var(--radius-chip)",
   md: "var(--radius-md)",
   lg: "var(--radius-lg)",
   full: "var(--radius-full)",
