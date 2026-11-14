@@ -16,10 +16,12 @@ import { notify } from "../../app/notifications";
 import { registry } from "../../app/registry";
 import { commands, errorMessage } from "../../lib/ipc";
 import {
-  Badge,
   Banner,
   Button,
   EmptyState,
+  InspectorHeader,
+  PageHeader,
+  Section,
   SegmentedControl,
   StatusPill,
   Tab,
@@ -27,13 +29,14 @@ import {
   TabPanel,
   Tabs,
 } from "../../ui/components";
-import { isActive, relativeTime, statusLabel } from "./format";
+import { isActive, statusLabel } from "./format";
 import { agentGraph } from "./graphIpc";
 import { useOpList } from "../operations/useOpList";
 import { GraphContextView, kindTitle, ProposalList } from "./GraphViews";
 import { ReviewView } from "./ReviewView";
 import { AGENT_VIEW_ID, AGENTS_PAGE_ID, agents, type PageTab, type TaskFilter, useAgents } from "./store";
 import { TaskComposer } from "./TaskComposer";
+import { TaskRow } from "./TaskList";
 import { taskActions } from "./taskOps";
 import { TaskView } from "./TaskView";
 import "./agents.css";
@@ -75,72 +78,48 @@ function PageTaskList({ kept }: { kept: ReadonlySet<string> }) {
   const shown = tasks.filter((t) => taskMatches(t, page.filter, kept));
   const list = useOpList({ id: "agent-tasks-page", label: "Task actions", items: shown, keyOf: (t) => t.id, actionsFor: taskActions });
   return (
-    <div className="agents-stack">
-      <SegmentedControl
-        aria-label="Show tasks"
-        value={page.filter}
-        onChange={(filter) => agents.setPage({ filter })}
-        options={FILTERS}
-      />
+    <>
+      <div className="agents-page__filter">
+        <SegmentedControl
+          aria-label="Show tasks"
+          value={page.filter}
+          onChange={(filter) => agents.setPage({ filter })}
+          options={FILTERS}
+        />
+      </div>
       {shown.length === 0 ? (
-        <p className="agents-muted agents-small">{tasks.length === 0 ? "No agent tasks yet." : "No tasks match this filter."}</p>
+        <EmptyState size="compact" title={tasks.length === 0 ? "No agent tasks yet." : "No tasks match this filter."} />
       ) : (
         <div ref={list.ref} className="xp-ops-surface">
-        <ul className="agents-task-list" aria-label="Agent tasks" data-testid="agents-page-tasks">
-          {shown.map((task) => {
-            const pill = statusLabel(task.status);
-            const selected = page.selected === task.id && !page.composing;
-            const op = list.itemProps(task.id);
-            return (
-              <li
+          <div role="list" aria-label="Agent tasks" data-testid="agents-page-tasks">
+            {shown.map((task) => (
+              <TaskRow
                 key={task.id}
-                data-op-item={op["data-op-item"]}
-                data-op-selected={op["data-op-selected"]}
-                className="agents-task-row"
-                onMouseDown={op.onMouseDown}
-                onClick={op.onClick}
-                onFocus={op.onFocus}
-                onContextMenu={op.onContextMenu}
-              >
-                <button
-                  type="button"
-                  className="agents-task-item"
-                  aria-current={selected ? "true" : undefined}
-                  data-selected={selected || undefined}
-                  onClick={() => agents.setPage({ selected: task.id, composing: false })}
-                  data-testid="agents-page-task"
-                  data-task-id={task.id}
-                >
-                  <span className="agents-task-item__title">{task.title}</span>
-                  <span className="agents-task-item__meta">
-                    <StatusPill status={pill.status} label={pill.label} size="sm" />
-                    {task.pendingReview > 0 && (
-                      <StatusPill status="warning" label={`${task.pendingReview} to review`} size="sm" />
-                    )}
-                    {kept.has(task.id) && <Badge tone="info">Kept</Badge>}
-                    <span className="agents-muted">{relativeTime(task.updatedAtMs)}</span>
-                  </span>
-                </button>
-                {list.moreButton(task.id, task.title)}
-              </li>
-            );
-          })}
-        </ul>
-        {list.contextMenu}
+                task={task}
+                op={list.itemProps(task.id)}
+                more={list.moreButton(task.id, task.title)}
+                onOpen={() => agents.setPage({ selected: task.id, composing: false })}
+                selected={page.selected === task.id && !page.composing}
+                kept={kept.has(task.id)}
+                testId="agents-page-task"
+              />
+            ))}
+          </div>
+          {list.contextMenu}
         </div>
       )}
-    </div>
+    </>
   );
 }
 
 /** Saved investigations and workflow definitions in the project graph. */
 function KeptEntities({ snapshot, error }: { snapshot: GraphSnapshot | null; error: string | null }) {
   const tasks = useAgents((s) => s.tasks);
-  if (error) return <p className="agents-muted agents-small">{error}</p>;
+  if (error) return <p className="ui-meta">{error}</p>;
   const entities = snapshot?.entities ?? [];
   if (entities.length === 0) {
     return (
-      <p className="agents-muted agents-small">
+      <p className="ui-meta">
         Nothing kept yet. Keep a task as an investigation to admit it into the project graph; saved workflow drafts also
         appear here.
       </p>
@@ -154,8 +133,8 @@ function KeptEntities({ snapshot, error }: { snapshot: GraphSnapshot | null; err
         // A workflow draft opens in the workflow editor (review, edit, save; it runs only from a plan the user starts).
         const workflowId = entity.kind === "workflow" ? entity.attributes["workflow.id"] : undefined;
         return (
-          <li key={entity.id} data-testid="agents-kept-entity" data-entity-id={entity.id} data-kind={entity.kind}>
-            <Badge tone="neutral">{kindTitle(entity.kind)}</Badge> {entity.label}
+          <li key={entity.id} className="agents-kept-entity" data-testid="agents-kept-entity" data-entity-id={entity.id} data-kind={entity.kind}>
+            <span className="ui-meta">{kindTitle(entity.kind)}</span> <span className="agents-kept-entity__label">{entity.label}</span>
             {known && (
               <Button size="sm" variant="ghost" onPress={() => agents.setPage({ selected: known.id, composing: false })}>
                 Open task
@@ -192,42 +171,46 @@ function TaskHeader({ task, kept, onKept }: { task: TaskSummary; kept: boolean; 
     }
   }
   return (
-    <div className="agents-stack">
-      <h2 className="agents-page__title">{task.title}</h2>
-      <div className="agents-row">
+    <InspectorHeader
+      title={task.title}
+      meta={
         <span data-testid="agents-page-status" data-status={task.status.kind}>
           <StatusPill status={pill.status} label={pill.label} />
         </span>
-        {active && (
-          <Button size="sm" variant="secondary" icon={Square} onPress={() => void agents.run(() => commands.agentsTaskCancel(task.id))}>
-            Cancel
+      }
+      actions={
+        <>
+          {active && (
+            <Button size="sm" variant="secondary" icon={Square} onPress={() => void agents.run(() => commands.agentsTaskCancel(task.id))}>
+              Cancel
+            </Button>
+          )}
+          <Button
+            size="sm"
+            icon={kept ? BookmarkCheck : Archive}
+            isDisabled={active || kept}
+            isPending={busy}
+            onPress={() => void keep()}
+            data-testid="agents-keep-investigation"
+          >
+            {kept ? "Kept as investigation" : "Keep as investigation"}
           </Button>
-        )}
-        <Button
-          size="sm"
-          icon={kept ? BookmarkCheck : Archive}
-          isDisabled={active || kept}
-          isPending={busy}
-          onPress={() => void keep()}
-          data-testid="agents-keep-investigation"
-        >
-          {kept ? "Kept as investigation" : "Keep as investigation"}
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          icon={PanelRight}
-          onPress={() => {
-            pages.show(EDITOR_PAGE);
-            layout.showView("auxiliary", AGENT_VIEW_ID);
-            agents.show("task", task.id);
-          }}
-          data-testid="agents-show-in-panel"
-        >
-          Show in Agent panel
-        </Button>
-      </div>
-    </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={PanelRight}
+            onPress={() => {
+              pages.show(EDITOR_PAGE);
+              layout.showView("auxiliary", AGENT_VIEW_ID);
+              agents.show("task", task.id);
+            }}
+            data-testid="agents-show-in-panel"
+          >
+            Show in Agent panel
+          </Button>
+        </>
+      }
+    />
   );
 }
 
@@ -239,7 +222,7 @@ function TaskDetailSections({ id, kept, onKept }: { id: TaskId; kept: boolean; o
   const proposals = graph?.proposals ?? [];
   const waiting = proposals.filter((p) => p.state === "awaitingApproval").length;
   return (
-    <div className="agents-stack" data-testid="agents-page-task-detail" data-task-id={id}>
+    <div className="agents-page__task" data-testid="agents-page-task-detail" data-task-id={id}>
       <TaskHeader task={task} kept={kept} onKept={onKept} />
       <Tabs selectedKey={tab} onSelectionChange={(key) => agents.setPage({ tab: key as PageTab })}>
         <TabList aria-label="Task sections">
@@ -265,7 +248,7 @@ function TaskDetailSections({ id, kept, onKept }: { id: TaskId; kept: boolean; o
           {task.changedFiles > 0 ? (
             <ReviewView id={id} showBack={false} />
           ) : (
-            <p className="agents-muted agents-small">The task has not changed any file.</p>
+            <p className="ui-meta">The task has not changed any file.</p>
           )}
         </TabPanel>
       </Tabs>
@@ -303,9 +286,10 @@ export function AgentsPage() {
   const keptIds = keptTaskIds(kept);
   return (
     <div className="agents agents-page" data-testid="agents-page">
-      <aside className="agents-page__list" aria-label="Agent tasks and kept work" data-region="agents-tasks">
-        <div className="agents-row">
-          <h2 className="agents-page__title">Agents</h2>
+      <PageHeader
+        title="Agents"
+        region="agents-header"
+        actions={
           <Button
             variant={workspace ? "primary" : "secondary"}
             size="sm"
@@ -315,61 +299,66 @@ export function AgentsPage() {
           >
             New task
           </Button>
-        </div>
-        <PageTaskList kept={keptIds} />
-        <section className="agents-stack" aria-label="Kept in the project graph">
-          <h3 className="agents-page__subtitle">Kept in the project graph</h3>
-          <KeptEntities snapshot={kept} error={keptError} />
-        </section>
-      </aside>
-      <section className="agents-page__detail" aria-label="Selected agent task" data-region="agents-detail">
-        {error && (
-          <div data-testid="agents-page-error">
-            <Banner
-              tone="danger"
-              title="Agent action failed"
-              live
+        }
+      />
+      <div className="agents-page__body">
+        <aside className="agents-page__list" aria-label="Agent tasks and kept work" data-region="agents-tasks">
+          <PageTaskList kept={keptIds} />
+          <Section title="Kept in the project graph" className="agents-page__kept">
+            <KeptEntities snapshot={kept} error={keptError} />
+          </Section>
+        </aside>
+        <section className="agents-page__detail" aria-label="Selected agent task" data-region="agents-detail">
+          {error && (
+            <div className="agents-error" data-testid="agents-page-error">
+              <Banner
+                tone="danger"
+                title="Agent action failed"
+                live
+                actions={
+                  <Button size="sm" variant="ghost" onPress={() => agents.setError(null)}>
+                    Dismiss
+                  </Button>
+                }
+              >
+                {error}
+              </Banner>
+            </div>
+          )}
+          {page.composing ? (
+            <div className="agents-page__compose">
+              <TaskComposer
+                onCreated={(id) => agents.setPage({ selected: id, composing: false, tab: "run" })}
+                onCancel={() => agents.setPage({ composing: false })}
+              />
+            </div>
+          ) : page.selected ? (
+            <TaskDetailSections id={page.selected} kept={keptIds.has(page.selected)} onKept={() => void refreshKept()} />
+          ) : !workspace ? (
+            <EmptyState
+              icon={FolderOpen}
+              title="No folder open"
+              description="Agent tasks work on an open project folder, through the same documents as your editors. Open a folder to start or continue tasks."
               actions={
-                <Button size="sm" variant="ghost" onPress={() => agents.setError(null)}>
-                  Dismiss
+                <Button variant="primary" icon={FolderOpen} onPress={() => void registry.runCommand("workspace.openFolder")}>
+                  Open Folder…
                 </Button>
               }
-            >
-              {error}
-            </Banner>
-          </div>
-        )}
-        {page.composing ? (
-          <TaskComposer
-            onCreated={(id) => agents.setPage({ selected: id, composing: false, tab: "run" })}
-            onCancel={() => agents.setPage({ composing: false })}
-          />
-        ) : page.selected ? (
-          <TaskDetailSections id={page.selected} kept={keptIds.has(page.selected)} onKept={() => void refreshKept()} />
-        ) : !workspace ? (
-          <EmptyState
-            icon={FolderOpen}
-            title="No folder open"
-            description="Agent tasks work on an open project folder, through the same documents as your editors. Open a folder to start or continue tasks."
-            actions={
-              <Button variant="primary" icon={FolderOpen} onPress={() => void registry.runCommand("workspace.openFolder")}>
-                Open Folder…
-              </Button>
-            }
-          />
-        ) : (
-          <EmptyState
-            icon={Bot}
-            title="Select a task"
-            description="Tasks from the Agent panel and this page are the same tasks. Select one to see its run, the graph context it was given, the graph changes it proposed, and its reviewable changes."
-            actions={
-              <Button icon={Plus} onPress={() => agents.setPage({ composing: true })}>
-                New task
-              </Button>
-            }
-          />
-        )}
-      </section>
+            />
+          ) : (
+            <EmptyState
+              icon={Bot}
+              title="Select a task"
+              description="Tasks from the Agent panel and this page are the same tasks. Select one to see its run, the graph context it was given, the graph changes it proposed, and its reviewable changes."
+              actions={
+                <Button icon={Plus} onPress={() => agents.setPage({ composing: true })}>
+                  New task
+                </Button>
+              }
+            />
+          )}
+        </section>
+      </div>
     </div>
   );
 }

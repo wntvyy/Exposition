@@ -1,10 +1,87 @@
 import { Bot, Plus } from "lucide-react";
+import { useId, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 
-import { Button, EmptyState, StatusPill } from "../../ui/components";
+import type { TaskSummary } from "../../bindings/TaskSummary";
+import { Button, cx, EmptyState, ListRow, StatusText } from "../../ui/components";
 import { useOpList } from "../operations/useOpList";
 import { relativeTime, statusLabel } from "./format";
 import { agents, useAgents } from "./store";
 import { taskActions } from "./taskOps";
+
+/** Operation attributes and handlers of one list item (`useOpList().itemProps`). */
+export type TaskOpProps = ReturnType<ReturnType<typeof useOpList<TaskSummary>>["itemProps"]>;
+
+/**
+ * Whether a click belongs to a control in the row (its More actions button)
+ * or did not happen in the row at all (a menu item in the row's popover:
+ * React events bubble through portals).
+ */
+export function clickOnControl(event: MouseEvent<HTMLElement>): boolean {
+  const target = event.target;
+  if (!(target instanceof Node) || !event.currentTarget.contains(target)) return true;
+  return target instanceof Element && target.closest("button, a, input, textarea, [role='button']") !== null;
+}
+
+/**
+ * One agent task in a list (Agent view and Agents page): a flat row with the
+ * title, its state and age, and a More actions button. The row is the P1
+ * operation item: click opens the task and selects it, Ctrl/Cmd+click adds
+ * it to the selection, Space selects, Enter opens.
+ */
+export function TaskRow({
+  task,
+  op,
+  more,
+  onOpen,
+  selected,
+  kept,
+  testId,
+}: {
+  task: TaskSummary;
+  op: TaskOpProps;
+  more: ReactNode;
+  onOpen: () => void;
+  selected?: boolean;
+  kept?: boolean;
+  testId: string;
+}) {
+  const metaId = useId();
+  const pill = statusLabel(task.status);
+  return (
+    <ListRow
+      role="listitem"
+      {...op}
+      className={cx("agents-task-row", op.className)}
+      selected={selected}
+      aria-current={selected ? "true" : undefined}
+      aria-label={task.title}
+      aria-describedby={metaId}
+      data-testid={testId}
+      data-task-id={task.id}
+      onClick={(event: MouseEvent<HTMLDivElement>) => {
+        op.onClick(event);
+        if (!event.ctrlKey && !event.metaKey && !clickOnControl(event)) onOpen();
+      }}
+      onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
+        op.onKeyDown(event);
+        if (event.key === "Enter" && event.target === event.currentTarget && !event.repeat) {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+      title={task.title}
+      meta={
+        <span id={metaId} className="agents-task-row__meta">
+          <StatusText status={pill.status} label={pill.label} />
+          {task.pendingReview > 0 && <StatusText status="warning" label={`${task.pendingReview} to review`} />}
+          {kept && <span>Kept</span>}
+          <span>{relativeTime(task.updatedAtMs)}</span>
+        </span>
+      }
+      trailing={more}
+    />
+  );
+}
 
 export function TaskList() {
   const tasks = useAgents((s) => s.tasks);
@@ -16,7 +93,7 @@ export function TaskList() {
         title="No agent tasks yet"
         description="Describe a change, calculation, or new document. The agent works through the same document service as your editors, and every change stays reviewable."
         actions={
-          <Button variant="primary" icon={Plus} onPress={() => agents.show("compose")}>
+          <Button size="sm" icon={Plus} onPress={() => agents.show("compose")}>
             New task
           </Button>
         }
@@ -25,42 +102,19 @@ export function TaskList() {
   }
   return (
     <div ref={list.ref} className="xp-ops-surface">
-    <ul className="agents-task-list" aria-label="Agent tasks" data-testid="agents-task-list">
-      {tasks.map((task) => {
-        const pill = statusLabel(task.status);
-        const op = list.itemProps(task.id);
-        return (
-          <li
+      <div role="list" aria-label="Agent tasks" data-testid="agents-task-list">
+        {tasks.map((task) => (
+          <TaskRow
             key={task.id}
-            data-op-item={op["data-op-item"]}
-            data-op-selected={op["data-op-selected"]}
-            className="agents-task-row"
-            onMouseDown={op.onMouseDown}
-            onClick={op.onClick}
-            onFocus={op.onFocus}
-            onContextMenu={op.onContextMenu}
-          >
-            <button
-              type="button"
-              className="agents-task-item"
-              onClick={() => agents.show("task", task.id)}
-              data-testid="agents-task-item"
-            >
-              <span className="agents-task-item__title">{task.title}</span>
-              <span className="agents-task-item__meta">
-                <StatusPill status={pill.status} label={pill.label} size="sm" />
-                {task.pendingReview > 0 && (
-                  <StatusPill status="warning" label={`${task.pendingReview} to review`} size="sm" />
-                )}
-                <span className="agents-muted">{relativeTime(task.updatedAtMs)}</span>
-              </span>
-            </button>
-            {list.moreButton(task.id, task.title)}
-          </li>
-        );
-      })}
-    </ul>
-    {list.contextMenu}
+            task={task}
+            op={list.itemProps(task.id)}
+            more={list.moreButton(task.id, task.title)}
+            onOpen={() => agents.show("task", task.id)}
+            testId="agents-task-item"
+          />
+        ))}
+      </div>
+      {list.contextMenu}
     </div>
   );
 }
