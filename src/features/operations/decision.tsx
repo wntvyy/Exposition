@@ -124,7 +124,9 @@ function DecisionBody({
             {plan.effects.map((effect, i) => (
               <li key={i}>
                 <span className="xp-ops-decision__target">{targetDetail(effect.target, labels)}</span> — {effect.description}
-                {isDelete(plan.request.kind) && <span className="xp-ops-decision__recovery"> ({recoveryText(effect.recovery)})</span>}
+                {isDelete(plan.request.kind) && !/recycle bin|trash|restor|permanent/i.test(effect.description) && (
+                  <span className="xp-ops-decision__recovery"> ({recoveryText(effect.recovery)})</span>
+                )}
               </li>
             ))}
           </ul>
