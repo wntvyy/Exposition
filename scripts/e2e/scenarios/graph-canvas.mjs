@@ -448,7 +448,8 @@ export default async function graphCanvas({ launchApp, artifactsDir, assert, fix
     for (const key of ["lem", "hyp", "def"]) assert.ok(dependsOn.includes(ids[key]), `${key} is among what the theorem depends on`);
     assert.ok(await page.getByTestId("graph-proof").and(page.locator(`[data-entity-id="${ids.prf}"]`)).count(), "the proof targeting the theorem is listed");
     assert.match(await page.getByTestId("graph-formal-section").innerText(), /No formal evidence/);
-    assert.match(await page.getByTestId("graph-formal-deps-unavailable").innerText(), /Formal dependency edges unavailable/);
+    assert.match(await page.getByTestId("graph-formal-section").innerText(), /nothing about this item has been checked by Lean/);
+    assert.equal(await page.getByTestId("graph-formal-deps-unavailable").count(), 0, "no separate formal-dependency line repeats the absence of formal evidence");
     // Associating a Lean declaration needs a formal declaration entity (from a Lean audit; see graph-lean-association).
     assert.equal(await page.getByTestId("graph-associate-button").isDisabled(), true, "no declaration to associate yet");
     assert.match(await page.getByTestId("graph-associate-unavailable").innerText(), /No formal declarations/);

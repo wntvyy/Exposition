@@ -63,7 +63,7 @@ import { targetKey, trashName } from "../operations/model";
 import { opMenuItems, runMenuKey } from "../operations/OpMenu";
 import { errorText, graphApi } from "./api";
 import { runChange } from "./changes";
-import { graphActions } from "./graphOps";
+import { classifyEntity, graphActions } from "./graphOps";
 import {
   entityDisplay,
   RELATION_FAMILY_CATEGORY,
@@ -77,6 +77,7 @@ import {
 } from "./model";
 import { RelationStatus } from "./RelationStatus";
 import { revealSource } from "./reveal";
+import { coverageStateLabel } from "./status";
 import { useGraphLoad } from "./useGraphData";
 
 export interface InspectorActions {
@@ -424,6 +425,9 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
   const archived = entity.lifecycle === "archived";
   // Duplicate / Delete entity / Delete source file / Copy Reference / Copy Text (hide stays the view action above).
   const ops = graphActions({ entities: [entity], relations: [] }, { vocabulary, canWrite: actions.canWrite });
+  // The note names Delete Source File/Folder only while the item still stands for an existing file or folder.
+  const entityClass = classifyEntity(entity, vocabulary);
+  const sourceFile = entityClass === "fileBacked" || entityClass === "folder";
   return (
     <div className="xp-graph-inspector__item" data-testid="graph-entity-inspector" data-entity-id={entity.id}>
       <InspectorHeader
@@ -433,11 +437,11 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
           <>
             {entity.lifecycle !== "active" && <Badge dashed>{LIFECYCLE_LABEL[entity.lifecycle]}</Badge>}
             {hidden && <Badge dashed>Hidden from this view</Badge>}
-            <span title="Who admitted it">Admitted by {originLabel(entity.origin)}</span>
+            <span>Admitted by {originLabel(entity.origin)}</span>
             {entity.tombstoneReason && <span className="xp-graph-inspector__note">{entity.tombstoneReason}</span>}
-            {display.kind.fileBacked && (
+            {sourceFile && (
               <span className="xp-graph-inspector__note">
-                Hide from view removes it from this view only. Delete Source {entity.kind === "folder" ? "Folder" : "File"} moves the file itself to{" "}
+                Hide from view removes it from this view only. Delete Source {entity.kind === "folder" ? "Folder moves the folder" : "File moves the file"} itself to{" "}
                 {trashName()}; renaming is done in the Files explorer.
               </span>
             )}
@@ -474,7 +478,7 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
                   </MenuItem>
                 ) : null}
                 {actions.onHide && !hidden ? (
-                  <MenuItem id="hide" icon={EyeOff} description="Removes it from this view only">
+                  <MenuItem id="hide" icon={EyeOff} description="This view only; nothing is deleted">
                     Hide from view
                   </MenuItem>
                 ) : null}
@@ -515,9 +519,11 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
             )}
             {detail.coverage && (
               <p className="ui-meta" data-testid="graph-coverage">
-                Extraction: {detail.coverage.state}
+                Extraction: {coverageStateLabel(detail.coverage.state)}
                 {detail.coverage.extractor ? ` (${detail.coverage.extractor})` : ""}
-                {detail.coverage.unresolved ? ` · ${detail.coverage.unresolved} unresolved` : ""}
+                {detail.coverage.unresolved
+                  ? ` · ${detail.coverage.unresolved} unresolved ${detail.coverage.unresolved === 1 ? "binding" : "bindings"}`
+                  : ""}
                 {detail.coverage.detail ? ` · ${detail.coverage.detail}` : ""}
               </p>
             )}
@@ -624,8 +630,8 @@ export function RelationInspector({
   const facts: KeyValueItem[] = [
     { key: "from", label: "From", value: end(relation.from, from?.label ?? relation.from) },
     { key: "to", label: "To", value: end(relation.to, to?.label ?? relation.to) },
-    { key: "rule", label: "Rule", value: info.rule },
-    ...(relation.evidenceKind ? [{ key: "evidence", label: "Evidence kind", value: relation.evidenceKind }] : []),
+    ...(info.rule ? [{ key: "rule", label: "Rule", value: info.rule }] : []),
+    ...(relation.evidenceKind ? [{ key: "evidence", label: "Evidence kind", value: evidenceKindLabel(relation.evidenceKind) }] : []),
     ...(relation.note ? [{ key: "note", label: "Note", value: relation.note }] : []),
   ];
   return (
@@ -657,10 +663,29 @@ export function RelationInspector({
   );
 }
 
-export function InspectorEmpty({ counts }: { counts?: string }) {
+/** The inspector without one inspectable item: what is selected, if anything, and how to inspect. */
+export function InspectorEmpty({ title = "Nothing selected", description }: { title?: string; description: string }) {
   return (
     <InspectorBody>
-      <EmptyState title="Nothing selected" description={`Select an item or relationship to inspect it.${counts ? ` ${counts}` : ""}`} />
+      <EmptyState title={title} description={description} />
     </InspectorBody>
   );
+}
+
+/**
+ * The inspector's state for a selection it cannot show as one item: several
+ * nodes, or an edge standing for relationships folded into a collapsed group.
+ */
+export function inspectorSelectionState(
+  selection: { nodes: string[]; edge: string | null },
+  edges: { id: string; count?: number }[],
+): { title: string; description: string } | null {
+  const folded = selection.edge ? edges.find((e) => e.id === selection.edge)?.count : undefined;
+  if (folded !== undefined) {
+    return folded === 1
+      ? { title: "1 relationship in a collapsed group", description: "Expand the group to inspect it." }
+      : { title: `${folded} relationships in a collapsed group`, description: "Expand the group to inspect them one by one." };
+  }
+  if (selection.nodes.length > 1) return { title: `${selection.nodes.length} items selected`, description: "Select one to inspect it." };
+  return null;
 }

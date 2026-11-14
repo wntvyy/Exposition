@@ -60,7 +60,7 @@ export function EntityTable({
     { id: "kind", title: "Kind", sortValue: (r) => r.typeLabel, render: (r) => r.typeLabel, width: "16%" },
     { id: "status", title: "Status", sortValue: (r) => r.badges.map((b) => b.label).join(), render: (r) => <Badges badges={r.badges} />, width: "22%" },
     { id: "key", title: "Source or key", sortValue: (r) => r.entity?.key ?? "", render: (r) => (r.entity?.key ? <span className="ui-code">{r.entity.key}</span> : <span className="ui-muted">—</span>), width: "24%" },
-    { id: "relations", title: "Relations", numeric: true, sortValue: (r) => r.relationCount, render: (r) => String(r.relationCount), width: "10%" },
+    { id: "relations", title: "Relationships", numeric: true, sortValue: (r) => r.relationCount, render: (r) => String(r.relationCount), width: "13%" },
   ];
   return (
     <DataTable

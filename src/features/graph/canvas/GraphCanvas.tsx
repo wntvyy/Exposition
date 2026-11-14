@@ -110,7 +110,8 @@ const duration = () => (reducedMotion() ? 0 : 160);
 /** React Flow node for a canvas node, keeping measured size and position of `previous`. */
 export function toFlowNode(node: CanvasNode, previous: EntityRFNode | undefined, selected: boolean): EntityRFNode {
   const { position, size, ...data } = node;
-  const ariaLabel = [node.typeLabel, node.title, ...node.badges.map((b) => b.label), node.inactive ? "archived" : ""]
+  // Badges already name an inactive item's lifecycle ("Archived", "Removed from source"); add a word only when none does.
+  const ariaLabel = [node.typeLabel, node.title, ...node.badges.map((b) => b.label), node.inactive && node.badges.length === 0 ? "inactive" : ""]
     .filter(Boolean)
     .join(", ");
   return {

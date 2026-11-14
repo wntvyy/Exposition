@@ -17,6 +17,7 @@ const { useLayout } = await import("../../app/layout");
 const { ipcGraphApi, setGraphApi } = await import("./api");
 const { createFakeGraph, entity, relation } = await import("./fakeApi");
 const { GraphPage, mathViewStore, projectViewStore } = await import("./GraphPage");
+const { inspectorSelectionState } = await import("./Inspector");
 const { mathBadges } = await import("./Mathematics");
 const { VERDICT_VIEW } = await import("./model");
 const { useGraphPage } = await import("./navigation");
@@ -186,6 +187,19 @@ describe("Graph page", () => {
     expect(within(thmRow).getByText("None").closest(".ui-badge")).toBeNull();
     expect(within(thmRow).getByText("Not bound").classList.contains("ui-muted")).toBe(true);
     expect(grid.querySelectorAll(".ui-status-pill").length).toBe(0);
+  });
+});
+
+describe("Inspector without one inspectable item", () => {
+  it("says what is selected instead of \"Nothing selected\"", () => {
+    const edges = [{ id: "r1" }, { id: "folded:g:thm:dependsOn:accepted", count: 3 }, { id: "folded:g:lem:references:observed", count: 1 }];
+    expect(inspectorSelectionState({ nodes: [], edge: null }, edges)).toBeNull();
+    expect(inspectorSelectionState({ nodes: ["thm"], edge: null }, edges)).toBeNull();
+    expect(inspectorSelectionState({ nodes: ["thm", "lem"], edge: null }, edges)).toEqual({ title: "2 items selected", description: "Select one to inspect it." });
+    expect(inspectorSelectionState({ nodes: [], edge: "folded:g:thm:dependsOn:accepted" }, edges)?.title).toBe("3 relationships in a collapsed group");
+    expect(inspectorSelectionState({ nodes: [], edge: "folded:g:lem:references:observed" }, edges)?.title).toBe("1 relationship in a collapsed group");
+    // A relationship that is gone (not in the view) is not described as folded.
+    expect(inspectorSelectionState({ nodes: [], edge: "gone" }, edges)).toBeNull();
   });
 });
 
