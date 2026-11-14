@@ -88,6 +88,23 @@ async function choose(page, key, optionName) {
   await waitFor(async () => (await decision(page).locator(`[data-choice="${key}"]`).getAttribute("data-value")) !== null, { message: `choice ${key}` });
 }
 
+/** Press the decision's primary action; re-confirm a re-planned decision (choices kept). Returns the number of re-plans. */
+async function confirm(page) {
+  let replans = 0;
+  await decision(page).locator(".ui-dialog__footer button").last().click();
+  for (let i = 0; i < 3; i++) {
+    const again = await decision(page)
+      .filter({ hasText: "changed since this was planned" })
+      .waitFor({ timeout: 2500 })
+      .then(() => true)
+      .catch(() => false);
+    if (!again) break;
+    replans += 1;
+    await decision(page).locator(".ui-dialog__footer button").last().click();
+  }
+  return replans;
+}
+
 export default async function p1Decisions({ launchApp, artifactsDir, assert, fixture }) {
   const docker = dockerAvailable();
   if (!docker && process.env.EXPOSITION_REQUIRE_DOCKER === "1") throw new Error(`Docker with the local image ${IMAGE} is required`);
@@ -150,7 +167,8 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
       await decision(page).waitFor({ timeout: 15_000 });
       await choose(page, "activeWork", /Stop it, then delete/);
       assert.equal(await decision(page).locator('[data-choice="activeWork"]').getAttribute("data-value"), "stop");
-      await decision(page).locator(".ui-dialog__footer button").last().click();
+      const replansA = await confirm(page);
+      evidence.notes.push(`ActiveWork stop: re-planned ${replansA} time(s) before applying (the running work changed the plan)`);
       await waitFor(async () => !existsSync(join(root, "data", "slow.csv")), { timeout: 30_000, message: "deleted after stopping" });
       const stopped = await waitFor(async () => {
         const r = await call("workflow_run_get", { run: run.id });
@@ -185,7 +203,8 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
       assert.ok((await trigImpact.count()) >= 1, "the trigger is named");
       assert.equal(await decision(page).locator('[data-choice="triggers"]').getAttribute("data-value"), "disable", "default turns the trigger off first");
       await shot("p1-trigger-decision-light");
-      await decision(page).locator(".ui-dialog__footer button").last().click();
+      const replansB = await confirm(page);
+      if (replansB) evidence.notes.push(`EnabledTrigger: re-planned ${replansB} time(s)`);
       await waitFor(async () => !existsSync(join(root, "data", "watched.csv")), { timeout: 30_000, message: "watched file deleted" });
       const off = (await call("workflow_trigger_list", { workflow: trig.id }))[0];
       assert.equal(off.state.kind, "disabled", `the trigger is off (${JSON.stringify(off.state)})`);
@@ -234,7 +253,8 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
     assert.equal(await decision(page).locator('[data-choice="pinnedRevisions"]').getAttribute("data-value"), "keep", "default keeps pinned revisions");
     await choose(page, "pinnedRevisions", /Delete them too/);
     await shot("p1-pinned-revision-decision-light");
-    await decision(page).locator(".ui-dialog__footer button").last().click();
+    const replansC = await confirm(page);
+    if (replansC) evidence.notes.push(`PinnedRevision: re-planned ${replansC} time(s)`);
     await waitFor(async () => {
       const o = await call("storage_overview");
       return !o.categories.some((c) => c.items.some((i) => i.target.kind === "workflowRevision" && i.target.workflow === child1.id && i.target.revision === child1.revision));

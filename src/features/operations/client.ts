@@ -254,6 +254,8 @@ export async function runOperation(request: OpRequest, options: RunOptions = {})
 async function runUnguarded(request: OpRequest, options: RunOptions): Promise<OperationOutcome | null> {
   const labels = options.labels ?? new Map<string, string>();
   let note: string | undefined;
+  // What the person chose in an earlier decision of this same request (kept when it must be re-planned).
+  let decidedBefore: Record<string, string> = {};
   for (let attempt = 0; attempt < 3; attempt++) {
     const plan = await planOrReport(request);
     if (!plan) return null;
@@ -263,9 +265,10 @@ async function runUnguarded(request: OpRequest, options: RunOptions): Promise<Op
     }
     let choices: Record<string, string> = { ...(options.presetChoices ?? {}) };
     if (plan.needsDecision || options.review || note) {
-      const decided = await requestDecision(plan, { labels, presetChoices: options.presetChoices, note });
+      const decided = await requestDecision(plan, { labels, presetChoices: { ...(options.presetChoices ?? {}), ...decidedBefore }, note });
       if (!decided) return null; // Cancel changes nothing.
       choices = decided;
+      decidedBefore = decided;
     } else {
       // Only values for choices the plan offers.
       choices = Object.fromEntries(Object.entries(choices).filter(([key]) => plan.choices.some((c) => c.key === key)));

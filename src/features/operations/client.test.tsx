@@ -288,6 +288,25 @@ describe("the combined decision", () => {
     expect(ipc.plan).toHaveBeenCalledTimes(2);
     expect(ipc.apply).toHaveBeenCalledTimes(2);
   });
+
+  it("the person's choice survives a re-plan (stop stays stop)", async () => {
+    ipc.plan.mockResolvedValueOnce(decisionPlan()).mockResolvedValueOnce(decisionPlan());
+    ipc.apply
+      .mockRejectedValueOnce({ code: "ops.planStale", message: "The plan changed." })
+      .mockResolvedValueOnce(result([outcome("figures/plot.png"), outcome("data/raw.csv")]));
+    const pending = runOperation(request);
+    let dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /Running work/ }));
+    fireEvent.click(await screen.findByRole("option", { name: "Stop the run, then delete" }));
+    await waitFor(() => expect(dialog.querySelector('[data-choice="activeWork"]')?.getAttribute("data-value")).toBe("stop"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(screen.getByText("The items or their consequences changed since this was planned.")).toBeTruthy());
+    dialog = screen.getByRole("alertdialog");
+    expect(dialog.querySelector('[data-choice="activeWork"]')?.getAttribute("data-value")).toBe("stop");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await pending;
+    expect(ipc.apply).toHaveBeenLastCalledWith({ plan: "plan-1", planHash: "hash-1", choices: { activeWork: "stop" } });
+  });
 });
 
 describe("undo, redo and restore", () => {
