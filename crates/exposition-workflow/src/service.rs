@@ -677,15 +677,27 @@ impl WorkflowRunService {
         let Some(planned) = run.plan.steps.iter().find(|s| s.step == decision.step).cloned() else {
             return Err(WorkflowRunError::new("workflow.unknownStep", "That step is not part of the run."));
         };
-        // The audit result the proposal was made from.
+        if planned.repeat.is_some() || !run.steps[step_index].instances.is_empty() {
+            return Err(WorkflowRunError::new(
+                "workflow.repeatedProposal",
+                "This association step ran as several instances; association proposals are decided only for a step that runs once.",
+            ));
+        }
+        // The audit result the proposal was made from: the last successful
+        // attempt of the producing step (for an until audit, the iteration
+        // whose result the step consumed — the last one that succeeded).
         let audit = planned.bindings.iter().find_map(|b| match &b.from {
-            exposition_graph::workflow::PortSource::Step { step, port } => run
-                .steps
-                .iter()
-                .find(|s| &s.step == step)
-                .and_then(|s| s.attempts.last())
-                .and_then(|a| a.outputs.iter().find(|o| &o.port == port))
-                .map(|o| o.value.clone()),
+            exposition_graph::workflow::PortSource::Step { step, port } => {
+                let producer = run.steps.iter().find(|s| &s.step == step)?;
+                producer
+                    .attempts
+                    .iter()
+                    .chain(producer.instances.iter().flat_map(|i| i.attempts.iter()))
+                    .rev()
+                    .filter(|a| a.state == crate::model::WorkflowAttemptState::Succeeded)
+                    .find_map(|a| a.outputs.iter().find(|o| &o.port == port))
+                    .map(|o| o.value.clone())
+            }
             _ => None,
         });
         let Some(WorkflowOutputValue::FormalEvidence { file, file_sha256, declarations: audited, .. }) = audit else {
