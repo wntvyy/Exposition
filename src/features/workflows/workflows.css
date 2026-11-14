@@ -1,152 +1,102 @@
-/* Workflow draft editor and list. Tokens only (src/ui/tokens.css); controls,
-   pills, banners, and region states come from src/ui/components. */
+/* Workflows list, workflow editor, plan review, run monitor, triggers, and
+   the workflow canvas. Tokens only (src/ui/tokens.css). Headers, sections,
+   rows, tables, facts, statuses, badges, and banners come from
+   src/ui/components; this file holds page layout and specialized content:
+   code/prompt listings, logs, previews, canvas ports and handles. */
 
+/* ---------- Page layout (editor-area tabs) ---------- */
+
+/* Tab root: the page header stays put, the body scrolls. */
 .xp-wf {
   container-type: inline-size;
+  display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
-  overflow-y: auto;
   background: var(--color-surface);
   color: var(--color-text);
   font-size: var(--font-size-md);
+}
+.xp-wf__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   user-select: text;
 }
-
+/* Reading width; sections carry the shared inset. */
 .xp-wf__page {
-  max-width: 960px;
-  padding: var(--space-6) var(--space-8) var(--space-10);
+  max-width: var(--content-max-width);
+  padding-bottom: var(--space-10);
 }
-
-@container (max-width: 640px) {
-  .xp-wf__page {
-    padding: var(--space-4) var(--space-4) var(--space-8);
-  }
+.xp-wf__page--wide {
+  max-width: none;
 }
-
-.xp-wf__header {
+/* Top-level parts of a page are separated by rules, not boxes. */
+.xp-wf__page > * + * {
+  border-top: var(--border-width) solid var(--color-border-subtle);
+}
+/* Banners and notes under the page header. */
+.xp-wf__lead {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: var(--space-3);
-  margin-bottom: var(--space-3);
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--pane-inset);
 }
-
-.xp-wf__title {
-  margin: 0;
-  font-size: var(--font-size-xl);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--line-height-tight);
-}
-
-.xp-wf__group {
-  margin-top: var(--space-6);
-}
-
-.xp-wf__group-title {
-  margin: 0 0 var(--space-1);
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-semibold);
-}
-
-.xp-wf__form {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-3) var(--space-4);
-  align-items: start;
-  margin-top: var(--space-2);
-}
-
-@container (max-width: 640px) {
-  .xp-wf__form {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.xp-wf__wide {
-  grid-column: 1 / -1;
-}
-
-.xp-wf__grow {
-  flex: 1;
+.xp-wf__stack,
+.xp-wf__multi {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   min-width: 0;
 }
-
+.xp-wf__multi {
+  gap: var(--space-1);
+}
+/* Inline items on one line (status, facts, small actions). */
+.xp-wf__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+/* Labelled controls side by side, aligned on their inputs. */
 .xp-wf__row {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
   gap: var(--space-2);
-  margin-top: var(--space-2);
 }
-
+.xp-wf__grow {
+  flex: 1;
+  min-width: 0;
+}
+.xp-wf__form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
+  align-items: start;
+}
+@container (max-width: 640px) {
+  .xp-wf__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.xp-wf__wide {
+  grid-column: 1 / -1;
+}
 .xp-wf__inline {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2) var(--space-4);
 }
-
-.xp-wf__cards {
-  margin: var(--space-2) 0 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.xp-wf__card {
-  padding: var(--space-3) var(--space-4);
-  border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-surface-raised);
-}
-
-.xp-wf__card-header {
-  display: flex;
-  align-items: flex-end;
-  gap: var(--space-2);
-}
-
-.xp-wf__multi {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  margin-top: var(--space-2);
-}
-
-.xp-wf__chips {
+.xp-wf__fieldset {
+  min-width: 0;
   margin: 0;
   padding: 0;
-  list-style: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
+  border: 0;
 }
-
-.xp-wf__chips li {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: 0 var(--space-1) 0 var(--space-2);
-  border: var(--border-width) solid var(--color-border-strong);
-  border-radius: var(--radius-full);
-  font-size: var(--font-size-sm);
-}
-
-.xp-wf__payload {
-  margin-top: var(--space-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.xp-wf__code {
-  height: 200px;
-  border: var(--border-width) solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
+/* Multi-line text field (no shared TextArea yet): the shared input look. */
 .xp-wf__textarea {
   height: auto;
   min-height: calc(var(--control-height-md) * 3);
@@ -155,247 +105,238 @@
   resize: vertical;
   font-family: inherit;
 }
-
-.xp-wf__textarea[data-code] {
-  font-family: var(--font-code);
-  font-size: var(--font-size-sm);
-}
-
-.xp-wf__textarea:focus {
+.xp-wf__textarea:focus-visible {
   border-color: var(--color-focus-ring);
   outline: var(--border-width) solid var(--color-focus-ring);
   outline-offset: 0;
 }
+/* A name in running text or a row title: list-title weight, not bold. */
+.xp-wf-name,
+.xp-wf-list .ui-list-row__title {
+  font-weight: var(--font-weight-medium);
+}
+.xp-wf-bullets,
+.xp-wf-notes,
+.xp-wf-order,
+.xp-wf-cause__changes {
+  margin: 0;
+  padding-left: var(--space-5);
+}
 
-.xp-wf__diagnostics {
-  margin: var(--space-2) 0 0;
+/* Shared Section workarounds (requested upstream): a collapsible content
+   section's chevron hangs 18px into a 12px inset and is clipped at a page
+   edge; and every nested chevron rotates under an expanded ancestor. */
+.xp-wf .ui-section[data-variant="content"] > .ui-section__header .ui-section__toggle {
+  margin-left: calc(-1 * var(--pane-inset));
+}
+.xp-wf .ui-section:not([data-expanded]) > .ui-section__header .ui-section__chevron {
+  transform: none;
+}
+
+/* ---------- Rows and blocks ---------- */
+
+/* ListRow lists span the section's full width (rows carry the inset). */
+.xp-wf-list {
+  margin: 0 calc(-1 * var(--pane-inset));
+}
+.xp-wf-list > .ui-list-row:last-child {
+  border-bottom: 0;
+}
+/* Items with fields or details (steps, inputs, outcomes, triggers, plan and
+   run steps): stacked and separated by rules. */
+.xp-wf-blocks,
+.xp-wf-rows {
+  margin: 0;
   padding: 0;
   list-style: none;
+}
+.xp-wf-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3) 0;
+}
+.xp-wf-blocks > li:first-child {
+  padding-top: var(--space-1);
+}
+.xp-wf-blocks > li + li {
+  border-top: var(--border-width) solid var(--color-border);
+}
+.xp-wf-block__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-1) var(--space-2);
+}
+.xp-wf-block__lead {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  min-width: 0;
+}
+.xp-wf-block__title {
+  font-weight: var(--font-weight-medium);
+  overflow-wrap: anywhere;
+}
+/* The item's name field with its remove button. */
+.xp-wf-block__fields {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+/* Numbered steps (plan, run): the number sits in a gutter; details align with the title. */
+.xp-wf-index {
+  display: inline-flex;
+  flex: none;
+  width: var(--space-6);
+  padding-top: var(--space-0-5);
+}
+.xp-wf-block--numbered > :not(.xp-wf-block__head) {
+  margin-left: calc(var(--space-6) + var(--space-2));
+}
+/* Lighter rows inside a step (instances, outputs, outcomes). */
+.xp-wf-rows > li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+  padding: var(--space-2) 0;
+}
+.xp-wf-rows > li + li {
+  border-top: var(--border-width) solid var(--color-border-subtle);
+}
+/* Sub-groups of one step (composite, condition, repeat): a light rule. */
+.xp-wf-orch {
+  padding-top: var(--space-2);
+  border-top: var(--border-width) solid var(--color-border-subtle);
+}
+/* A plan's expanded composite: group label and indented steps. */
+.xp-wf-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) 0 0;
+}
+.xp-wf-group__label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+}
+.xp-wf-group__steps {
+  margin-left: var(--space-1-5);
+  padding-left: var(--space-4);
+  border-left: var(--border-width) solid var(--color-border);
+}
+/* Simple lists of inline items. */
+.xp-wf-diagnostics,
+.xp-wf-sources,
+.xp-wf-checklist,
+.xp-wf-history,
+.xp-wf-running,
+.xp-wf-rejected {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.xp-wf-diagnostics > li,
+.xp-wf-checklist > li,
+.xp-wf-history > li,
+.xp-wf-running > li,
+.xp-wf-sources > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  overflow-wrap: anywhere;
+}
+.xp-wf-diagnostics > li {
+  align-items: flex-start;
+}
+.xp-wf-sources {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.xp-wf-sources > li {
+  gap: 0;
+}
+.xp-wf-checklist__statement {
+  flex-basis: 100%;
+  color: var(--color-text-muted);
+}
+.xp-wf-history {
+  font-size: var(--font-size-sm);
+}
+.xp-wf-params {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+}
+.xp-wf-order {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
 }
-
-.xp-wf__diagnostics li {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  font-size: var(--font-size-sm);
+.xp-wf-values {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-
-.xp-wf__plan {
+.xp-wf-values__item {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-1);
+}
+.xp-wf-values__item > .ui-field {
+  flex: 1;
+  min-width: 0;
+}
+.xp-wf-children {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
   margin: var(--space-1) 0 0;
   padding-left: var(--space-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.xp-wf__muted {
-  margin: var(--space-1) 0;
-  color: var(--color-text-muted);
   font-size: var(--font-size-sm);
-  line-height: var(--line-height-normal);
 }
 
-/* ---------- Plan review, run monitor (M8) ---------- */
+/* ---------- Code, logs, hashes ---------- */
 
-.xp-wf__page--wide {
-  max-width: none;
-}
-
-/* The plan scrolls inside a wider dialog; the footer (Cancel / Start run) stays visible. */
-.ui-modal:has(> .xp-wf-plan-dialog) {
-  width: min(960px, calc(100vw - var(--space-8)));
-  max-height: 86vh;
-}
-.xp-wf-plan-dialog.ui-dialog {
+/* The step's code editor (Monaco): one bordered box. */
+.xp-wf__code {
+  height: 200px;
   overflow: hidden;
-}
-.xp-wf-plan-dialog .ui-dialog__body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  color: var(--color-text);
-  font-size: var(--font-size-md);
-}
-.xp-wf-plan-dialog .ui-dialog__footer {
-  flex-wrap: wrap;
-  align-items: center;
-}
-
-.xp-wf-plan-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  user-select: text;
-}
-
-.xp-wf-plan {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.xp-wf-plan__heading {
-  margin: var(--space-2) 0 0;
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-semibold);
-}
-
-.xp-wf-plan__reason {
-  flex: 1;
-  margin: 0;
-  align-self: center;
-}
-
-.xp-wf-plan__blockers ul,
-.xp-wf-plan__effects {
-  margin: 0;
-  padding-left: var(--space-5);
-}
-
-.xp-wf-plan__notices {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.xp-wf-plan__steps {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.xp-wf-plan__step,
-.xp-wf-runstep {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-surface-raised);
-}
-
-.xp-wf-plan__step-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.xp-wf-plan__index {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  width: 22px;
-  height: 22px;
   border: var(--border-width) solid var(--color-border-strong);
-  border-radius: var(--radius-full);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
+  border-radius: var(--radius-md);
 }
-
-.xp-wf-plan__containment {
-  margin: 0;
-}
-
-.xp-wf-plan__payload {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.xp-wf-plan__label {
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-medium);
-}
-
-.xp-wf-plan__param {
-  display: inline-block;
-  margin-right: var(--space-3);
-}
-
-.xp-wf-facts {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: var(--space-1) var(--space-3);
-  margin: 0;
-  font-size: var(--font-size-sm);
-}
-
-.xp-wf-facts dt {
-  color: var(--color-text-muted);
-  font-weight: var(--font-weight-medium);
-}
-
-.xp-wf-facts dd {
-  margin: 0;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.xp-wf-hash {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-0-5);
-  vertical-align: middle;
-}
-
-.xp-wf-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--font-size-sm);
-}
-
-.xp-wf-table th,
-.xp-wf-table td {
-  padding: var(--space-1) var(--space-2);
-  border-bottom: var(--border-width) solid var(--color-border-subtle);
-  text-align: left;
-  vertical-align: top;
-  overflow-wrap: anywhere;
-}
-
-.xp-wf-table thead th {
-  color: var(--color-text-muted);
-  font-weight: var(--font-weight-semibold);
-}
-
-/* Full code with line numbers; the numbers are generated content (never copied). */
-.xp-wf-code {
+/* Complete code or prompt, and logs, reports, manifests: one sunken,
+   focusable, scrollable block. Line numbers are generated (never copied). */
+.xp-wf-code,
+.xp-wf-log {
   max-height: 360px;
   margin: 0;
   overflow: auto;
-  padding: var(--space-2) 0;
-  border: var(--border-width) solid var(--color-border-strong);
+  border: var(--border-width) solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--color-surface);
+  background: var(--color-surface-sunken);
   font-family: var(--font-code);
-  font-size: var(--font-size-code);
   line-height: var(--line-height-code);
+}
+.xp-wf-code {
+  padding: var(--space-2) 0;
+  font-size: var(--font-size-code);
   white-space: pre;
 }
-
-.xp-wf-code:focus-visible,
-.xp-wf-log:focus-visible {
-  outline: var(--focus-ring-width) solid var(--color-focus-ring);
-  outline-offset: 0;
-}
-
 .xp-wf-code__line {
   display: block;
   padding-right: var(--space-3);
 }
-
 .xp-wf-code__line::before {
   content: attr(data-line);
   display: inline-block;
@@ -406,86 +347,95 @@
   text-align: right;
   user-select: none;
 }
-
 .xp-wf-log {
   max-height: 280px;
-  margin: 0;
-  overflow: auto;
   padding: var(--space-2);
-  border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-sunken);
-  font-family: var(--font-code);
   font-size: var(--font-size-sm);
-  line-height: var(--line-height-code);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.xp-wf-manifest {
+  max-height: 360px;
+}
+.xp-wf-hash {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-0-5);
+  vertical-align: middle;
+}
 
+/* ---------- Plan review and trigger dialogs ---------- */
+
+/* The plan scrolls inside a wider dialog; the footer (Cancel / Start run) stays visible. */
+.ui-modal[data-size]:has(> .xp-wf-plan-dialog) {
+  width: min(var(--content-max-width), calc(100vw - var(--space-8)));
+  max-height: 86vh;
+}
+.xp-wf-plan-dialog .ui-dialog__body {
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+}
+.xp-wf-plan-dialog .ui-dialog__footer {
+  flex-wrap: wrap;
+  align-items: center;
+}
+.xp-wf-plan__reason {
+  flex: 1;
+}
+.xp-wf-plan-body,
+.xp-wf-plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  user-select: text;
+}
+.xp-wf-banner-line {
+  margin-top: var(--space-2);
+}
+
+/* ---------- Run monitor ---------- */
+
+.xp-wf-cause__text {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.xp-wf-cause__changes {
+  flex-basis: 100%;
+  font-size: var(--font-size-sm);
+}
 .xp-wf-usage {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: var(--space-3);
 }
-
+/* An attempt's details hang from a rule under its step or instance. */
 .xp-wf-attempt {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--space-1-5);
   padding-left: var(--space-3);
-  border-left: 2px solid var(--color-border);
+  border-left: var(--border-width) solid var(--color-border);
 }
-
-.xp-wf-attempt .xp-wf__row {
-  align-items: center;
-  margin-top: 0;
-}
-
-.xp-wf-outputs,
-.xp-wf-rejected,
-.xp-wf-checklist {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.xp-wf-output {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-2);
-  border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-}
-
-.xp-wf-output__head,
 .xp-wf-output__facts {
   font-size: var(--font-size-sm);
   overflow-wrap: anywhere;
 }
-
+/* Inert previews: an image from a blob URL, CSV/TSV as plain cells. */
 .xp-wf-output__image {
   display: block;
   align-self: flex-start;
-  width: auto;
-  height: auto;
   max-width: 100%;
   max-height: 360px;
   border: var(--border-width) solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-surface-raised);
 }
-
 .xp-wf-output__table {
   max-height: 320px;
   overflow: auto;
 }
-
-/* Refused outputs: danger tint, dashed outline, icon, and the word "Refused". */
+/* Refused outputs: one danger-tinted dashed row each, icon and "Refused:". */
 .xp-wf-rejected__item {
   display: flex;
   align-items: flex-start;
@@ -494,105 +444,117 @@
   border: var(--border-width) dashed var(--color-danger-border);
   border-radius: var(--radius-md);
   background: var(--color-danger-bg);
-  color: var(--color-danger-text);
   font-size: var(--font-size-sm);
   overflow-wrap: anywhere;
 }
-
-.xp-wf-rejected__item svg {
+.xp-wf-rejected__item > svg {
   flex: none;
-  margin-top: 2px;
+  margin-top: var(--space-0-5);
+}
+.xp-wf-rejected__item > svg,
+.xp-wf-rejected__label {
+  color: var(--color-danger-text);
+  font-weight: var(--font-weight-semibold);
+}
+.xp-wf-env__packages {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--space-0-5) var(--space-3);
+  max-height: 240px;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  font-size: var(--font-size-sm);
 }
 
-.xp-wf-proposal {
+/* ---------- Workflow canvas ---------- */
+
+.xp-wf-canvas-view {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-4);
+  padding: var(--space-3) var(--pane-inset);
 }
-
-.xp-wf-proposal .xp-wf__row {
-  align-items: center;
+/* Canvas-view inspector: a pane with the shared pane header. */
+.xp-wf-inspector {
+  overflow: hidden;
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
 }
-
-.xp-wf-checklist li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--font-size-sm);
+.xp-wf-inspector .xp-wf-blocks {
+  padding: var(--space-2) var(--pane-inset);
 }
-
-.xp-wf-checklist__statement {
-  flex-basis: 100%;
-  color: var(--color-text-muted);
-  overflow-wrap: anywhere;
-}
-
-/* ---------- Workflow canvas (M8) ---------- */
-
 .xp-wfc {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
-
 .xp-wfc .xp-wfc__canvas {
   flex: none;
   height: 520px;
-  border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-lg);
   overflow: hidden;
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
 }
-
 .xp-wfc__message:empty {
   display: none;
 }
-
-.xp-wfc-node {
+/* Nodes use the shared NodeCard look (neutral card, tinted type band); port
+   rows reach the card edges so their handles sit on the outline. */
+.xp-wfc-node.ui-node-card {
+  gap: 0;
   width: 240px;
   height: auto;
+  overflow: visible;
   user-select: none;
 }
-
-.xp-wfc-ports {
-  margin: var(--space-1) calc(-1 * var(--space-2)) 0 calc(-1 * (var(--space-2) + 3px));
+.xp-wfc-node .ui-node-card__header {
+  border-radius: calc(var(--radius-md) - var(--border-width)) calc(var(--radius-md) - var(--border-width)) 0 0;
+}
+.xp-wfc-ports,
+.xp-wfc-composite__children {
+  margin: 0;
   padding: 0;
   list-style: none;
-  display: flex;
-  flex-direction: column;
 }
-
 .xp-wfc-port {
   position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1);
-  min-height: 26px;
+  min-height: var(--row-height-tree);
   padding: 0 var(--space-3);
   border-top: var(--border-width) solid var(--color-border-subtle);
   font-size: var(--font-size-sm);
 }
-
 .xp-wfc-port[data-side="out"] {
   justify-content: flex-end;
   text-align: right;
 }
-
 .xp-wfc-port__type,
 .xp-wfc-port__required {
   color: var(--color-text-muted);
 }
-
 .xp-wfc-port__required {
   font-weight: var(--font-weight-semibold);
 }
-
 .xp-wfc-path {
   font-size: var(--font-size-xs);
   overflow-wrap: anywhere;
 }
-
+.xp-wfc-composite {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.xp-wfc-composite__children {
+  padding-left: var(--space-5);
+  list-style: decimal;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
 /* Typed handles: color by port category, shape as a second cue (the type is also text). */
 .xp-graph-canvas .xp-wfc-handle.react-flow__handle {
   width: 12px;
@@ -603,7 +565,7 @@
   cursor: crosshair;
 }
 .xp-graph-canvas .xp-wfc-handle[data-shape="square"].react-flow__handle {
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
 }
 .xp-graph-canvas .xp-wfc-handle[data-shape="diamond"].react-flow__handle {
   border-radius: 1px;
@@ -631,15 +593,15 @@
 .xp-graph-canvas .xp-wfc-handle.react-flow__handle.connectingto {
   background: var(--handle-color, var(--color-accent));
 }
+/* Prerequisite handles (step top/bottom): dashed bars. */
 .xp-graph-canvas .xp-wfc-handle--pre.react-flow__handle {
   width: 24px;
   height: 8px;
-  border-width: 1px;
+  border-width: var(--border-width);
   border-style: dashed;
   border-radius: var(--radius-sm);
 }
-
-/* Connection families: solid data, dashed prerequisite, dotted annotation. */
+/* Connection families: solid data, dashed prerequisite, dotted annotation, dash-dot condition. */
 .xp-graph-canvas .xp-wfc-edge .react-flow__edge-path {
   stroke: var(--color-graph-edge);
   stroke-width: 1.75;
@@ -650,6 +612,10 @@
 .xp-graph-canvas .xp-wfc-edge--annotation .react-flow__edge-path {
   stroke-dasharray: 2 3;
   stroke: var(--color-text-subtle);
+}
+.xp-graph-canvas .xp-wfc-edge--condition .react-flow__edge-path {
+  stroke: var(--color-info-text);
+  stroke-dasharray: 8 3 2 3;
 }
 .xp-graph-canvas .xp-wfc-edge--problem .react-flow__edge-path {
   stroke: var(--color-danger-text);
@@ -665,7 +631,6 @@
   fill: var(--color-text-muted);
   font-size: var(--font-size-xs);
 }
-
 .xp-wfc__legend {
   display: flex;
   flex-wrap: wrap;
@@ -676,13 +641,11 @@
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
 }
-
 .xp-wfc__legend li {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
 }
-
 .xp-wfc__swatch {
   display: inline-block;
   width: 24px;
@@ -695,266 +658,8 @@
   border-top-style: dotted;
   border-top-color: var(--color-text-subtle);
 }
-
-/* ---------- M9: composites, conditions, repeats, parallel runs, environment, triggers ---------- */
-
-.xp-wf-orch {
-  margin-top: var(--space-3);
-  padding-top: var(--space-2);
-  border-top: var(--border-width) solid var(--color-border-subtle);
-}
-
-.xp-wf__fieldset {
-  margin: 0;
-  padding: 0;
-  border: 0;
-  min-width: 0;
-}
-
-.xp-wf-values {
-  margin: var(--space-2) 0 0;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: var(--space-2) var(--space-3);
-}
-
-.xp-wf-values__item {
-  display: flex;
-  align-items: flex-end;
-  gap: var(--space-1);
-}
-
-.xp-wf-values__item > .ui-field {
-  flex: 1;
-  min-width: 0;
-}
-
-.xp-wf-children {
-  margin: var(--space-1) 0 0;
-  padding-left: var(--space-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-0-5);
-  font-size: var(--font-size-sm);
-}
-
-/* Plan review: expanded composite steps under their composite. */
-.xp-wf-plan__group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3) var(--space-3);
-  border: var(--border-width) dashed var(--color-graph-workflow-border);
-  border-left-width: 4px;
-  border-left-style: solid;
-  border-radius: var(--radius-lg);
-  background: var(--color-surface-sunken);
-}
-
-.xp-wf-plan__group-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1-5);
-  color: var(--color-graph-workflow-text);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
-}
-
-/* Run view */
-.xp-wf-cause {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1) var(--space-2);
-}
-
-.xp-wf-cause .xp-wf__muted {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  margin: 0;
-}
-
-.xp-wf-cause__changes {
-  flex-basis: 100%;
-  margin: 0;
-  padding-left: var(--space-5);
-  font-size: var(--font-size-sm);
-}
-
-.xp-wf-running {
-  margin: var(--space-1) 0 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.xp-wf-running li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  border: var(--border-width) solid var(--color-status-running-border);
-  border-radius: var(--radius-md);
-  background: var(--color-status-running-bg);
-  color: var(--color-status-running-text);
-}
-
-.xp-wf-reason {
-  margin: 0;
-  padding: var(--space-1-5) var(--space-2);
-  border: var(--border-width) dashed var(--color-border-strong);
-  border-radius: var(--radius-md);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.xp-wf-reason--condition {
-  border-color: var(--color-info-border);
-  background: var(--color-info-bg);
-  color: var(--color-info-text);
-}
-
-.xp-wf-instances__list {
-  margin: var(--space-1) 0 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.xp-wf-instance {
-  padding: var(--space-2) var(--space-3);
-  border: var(--border-width) solid var(--color-border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-}
-
-.xp-wf-instance[data-state="running"] {
-  border-color: var(--color-status-running-border);
-}
-
-.xp-wf-instance .xp-wf__row {
-  margin-top: 0;
-  align-items: center;
-}
-
-.xp-wf-env {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.xp-wf-env__row {
-  display: contents;
-}
-
-.xp-wf-env__packages {
-  margin: var(--space-1) 0 0;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: var(--space-0-5) var(--space-3);
-  max-height: 240px;
-  overflow-y: auto;
-  font-size: var(--font-size-sm);
-}
-
-/* Triggers */
-.xp-wf-standing {
-  margin: var(--space-2) 0;
-  padding: var(--space-3);
-  border: var(--border-width) solid var(--color-warning-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-warning-bg);
-}
-
-.xp-wf-standing ul {
-  margin: var(--space-1) 0;
-  padding-left: var(--space-5);
-}
-
-.xp-wf-history {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  font-size: var(--font-size-sm);
-}
-
-.xp-wf-history li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-/* Canvas: composite info, condition edges */
-.xp-wfc-composite {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: 0 var(--space-3) var(--space-1);
-}
-
-.xp-wfc-composite__line {
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.xp-wfc-composite__toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  align-self: flex-start;
-  height: var(--control-height-sm);
-  padding: 0 var(--space-1-5);
-  border: var(--border-width) solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  color: var(--color-text);
-  font: inherit;
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-}
-
-.xp-wfc-composite__toggle:hover {
-  background: var(--color-surface-hover);
-}
-
-.xp-wfc-composite__toggle:focus-visible {
-  outline: var(--focus-ring-width) solid var(--color-focus-ring);
-  outline-offset: 1px;
-}
-
-.xp-wfc-composite__children {
-  margin: 0;
-  padding-left: var(--space-5);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.xp-graph-canvas .xp-wfc-edge--condition .react-flow__edge-path {
-  stroke: var(--color-info-text);
-  stroke-dasharray: 8 3 2 3;
-}
-
 .xp-wfc__swatch[data-kind="condition"] {
   height: 2px;
   border-top: 0;
   background: repeating-linear-gradient(90deg, var(--color-info-text) 0 8px, transparent 8px 11px, var(--color-info-text) 11px 13px, transparent 13px 16px);
-}
-
-.xp-wf-manifest {
-  max-height: 360px;
 }

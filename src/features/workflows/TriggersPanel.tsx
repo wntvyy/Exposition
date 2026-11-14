@@ -8,11 +8,26 @@
 // `trigger.planStale` when the plan changed). Any other change suspends the
 // trigger with a visible reason until it is reviewed again. Agents, imports,
 // and generated graphs never enable one (no agent tool; the backend refuses).
-import { Bell, BellOff, ChevronLeft, Plus, RefreshCw, ShieldCheck } from "lucide-react";
+import { BellOff, ChevronLeft, Plus, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useId, useState } from "react";
 
 import { errorMessage, isCommandError } from "../../lib/ipc";
-import { Badge, Banner, Button, Checkbox, Dialog, EmptyState, ErrorState, LoadingState, Section, Select, TextField } from "../../ui/components";
+import {
+  Badge,
+  Banner,
+  Button,
+  Checkbox,
+  Dialog,
+  EmptyState,
+  ErrorState,
+  KeyValueList,
+  LoadingState,
+  Section,
+  Select,
+  StatusText,
+  TextField,
+  type Status,
+} from "../../ui/components";
 import type {
   TriggerHistoryEvent,
   TriggerKind,
@@ -40,10 +55,10 @@ const STORE_TITLE = "Triggers cannot be saved right now";
 /** Lane C's minimum interval (the plan's limits are authoritative once loaded). */
 const MIN_INTERVAL_MINUTES = 15;
 
-export const TRIGGER_STATE_VIEW: Record<TriggerState["kind"], { label: string; tone: "success" | "warning" | "neutral"; dashed: boolean }> = {
-  active: { label: "Active", tone: "success", dashed: false },
-  suspended: { label: "Suspended", tone: "warning", dashed: false },
-  disabled: { label: "Off", tone: "neutral", dashed: true },
+export const TRIGGER_STATE_VIEW: Record<TriggerState["kind"], { label: string; status: Status }> = {
+  active: { label: "Active", status: "succeeded" },
+  suspended: { label: "Suspended", status: "warning" },
+  disabled: { label: "Off", status: "idle" },
 };
 
 export function historyText(event: TriggerHistoryEvent): string {
@@ -267,7 +282,7 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
       footer={
         <>
           {enableReason && (
-            <span className="xp-wf__muted xp-wf-plan__reason" id={reasonId} data-testid="trigger-enable-reason">
+            <span className="ui-meta xp-wf-plan__reason" id={reasonId} data-testid="trigger-enable-reason">
               {enableReason}
             </span>
           )}
@@ -310,7 +325,7 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
         )}
         {phase.kind === "choose" && (
           <>
-            <p className="xp-wf__muted">
+            <p className="ui-meta">
               A trigger starts runs of the latest saved revision (now {revision}) by itself, only under the standing plan you review next.
               It never fires when the project opens or for changes made while it was closed, and it stops when the project closes or
               trust is revoked.
@@ -341,7 +356,7 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
               <legend className="ui-field__label">
                 {kind.kind === "interval" ? "Inputs whose saved content may change between runs" : "Watched inputs (their saved content may change without asking)"}
               </legend>
-              {watchable.length === 0 && <p className="xp-wf__muted">This workflow has no inputs that can be watched.</p>}
+              {watchable.length === 0 && <p className="ui-meta">This workflow has no inputs that can be watched.</p>}
               <div className="xp-wf__inline">
                 {watchable.map((input) => {
                   const path = input.source.kind === "resource" ? input.source.path : "no file chosen";
@@ -352,20 +367,20 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
                       onChange={(on) => setInputs(on ? [...watchedIds, input.id] : watchedIds.filter((x) => x !== input.id))}
                       data-testid={`trigger-watch-${input.id}`}
                     >
-                      {input.label} <span className="xp-wf__muted">({path}, {PORT_TYPE_LABELS[input.portType]})</span>
+                      {input.label} <span className="ui-meta">({path}, {PORT_TYPE_LABELS[input.portType]})</span>
                     </Checkbox>
                   );
                 })}
               </div>
               {unwatchable.length > 0 && (
-                <p className="xp-wf__muted">
+                <p className="ui-meta">
                   Code and Lean sources cannot be watched ({unwatchable.map((i) => i.label).join(", ")}): changed code always needs a new
                   review.
                 </p>
               )}
             </fieldset>
             {chooseProblem && (
-              <p className="xp-wf__muted" data-testid="trigger-problems">
+              <p className="ui-meta" data-testid="trigger-problems">
                 {chooseProblem}
               </p>
             )}
@@ -376,8 +391,8 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
           <ErrorState title="Could not make a standing plan" description={phase.message} actions={<Button onPress={() => void review()}>Retry</Button>} />
         )}
         {standing && settings && (
-          <div data-testid="trigger-standing" data-standing-hash={standing.standingHash} data-plan={standing.plan.plan}>
-            <p className="xp-wf__muted">
+          <div className="xp-wf-plan-body" data-testid="trigger-standing" data-standing-hash={standing.standingHash} data-plan={standing.plan.plan}>
+            <p className="ui-meta">
               Enabling approves this plan as a standing plan: each time the trigger fires, the run plan is recomputed and must match it
               exactly, except for the watched content. Review it before {formatTime(standing.expiresAtMs)}.
             </p>
@@ -416,43 +431,44 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
                 </Banner>
               </div>
             )}
-            <section className="xp-wf-standing" data-testid="trigger-may-change" aria-label="What may change without asking">
-              <h3 className="xp-wf-plan__heading">What may change without asking</h3>
-              <ul data-testid="trigger-may-change-list">
-                {standing.mayChange.map((m, i) => (
-                  <li key={i}>{m}</li>
-                ))}
-              </ul>
-              {standing.watched.length > 0 && (
-                <p className="xp-wf__muted" data-testid="trigger-watched">
-                  Watched:{" "}
-                  {standing.watched.map((w, i) => (
-                    <span key={w.input} data-input={w.input}>
-                      {i > 0 ? ", " : ""}
-                      {w.label} (<code>{w.path}</code>)
-                    </span>
+            <section data-testid="trigger-may-change" aria-label="What may change without asking">
+              <Banner tone="warning" title="What may change without asking">
+                <ul data-testid="trigger-may-change-list">
+                  {standing.mayChange.map((m, i) => (
+                    <li key={i}>{m}</li>
                   ))}
-                </p>
-              )}
-              <h3 className="xp-wf-plan__heading">Anything else suspends it until you review it again</h3>
-              <ul data-testid="trigger-suspends-on">
-                {standing.suspendsOn.map((m, i) => (
-                  <li key={i}>{m}</li>
-                ))}
-              </ul>
+                </ul>
+                {standing.watched.length > 0 && (
+                  <p className="xp-wf-banner-line" data-testid="trigger-watched">
+                    Watched:{" "}
+                    {standing.watched.map((w, i) => (
+                      <span key={w.input} data-input={w.input}>
+                        {i > 0 ? ", " : ""}
+                        {w.label} (<code>{w.path}</code>)
+                      </span>
+                    ))}
+                  </p>
+                )}
+                <p className="xp-wf-banner-line ui-section-title">Anything else suspends it until you review it again</p>
+                <ul data-testid="trigger-suspends-on">
+                  {standing.suspendsOn.map((m, i) => (
+                    <li key={i}>{m}</li>
+                  ))}
+                </ul>
+              </Banner>
             </section>
             {standing.notices.length > 0 && (
-              <ul className="xp-wf-plan__notices" data-testid="trigger-notices">
-                {standing.notices.map((n, i) => (
-                  <li key={i}>
-                    <Banner tone="info" title="Note">
-                      {n}
-                    </Banner>
-                  </li>
-                ))}
-              </ul>
+              <div data-testid="trigger-notices">
+                <Banner tone="info" title={standing.notices.length === 1 ? "Note" : "Notes"}>
+                  <ul>
+                    {standing.notices.map((n, i) => (
+                      <li key={i}>{n}</li>
+                    ))}
+                  </ul>
+                </Banner>
+              </div>
             )}
-            <h3 className="xp-wf-plan__heading">Settings</h3>
+            <h3 className="ui-section-title">Settings</h3>
             <div className="xp-wf__form" data-testid="trigger-settings">
               {standing.kind.kind !== "interval" && (
                 <NumberField
@@ -494,10 +510,10 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
               )}
               <div className="xp-wf__wide" data-testid="trigger-native" data-native-steps={standing.nativeSteps.length} data-allowed={String(settings.allowNative)}>
                 {standing.nativeSteps.length === 0 ? (
-                  <p className="xp-wf__muted">No step of this plan runs natively.</p>
+                  <p className="ui-meta">No step of this plan runs natively.</p>
                 ) : (
                   <>
-                    <p className="xp-wf__muted">
+                    <p className="ui-meta">
                       Runs natively with your account's privileges on every fire: {standing.nativeSteps.map((s) => `“${s}”`).join(", ")}.
                     </p>
                     <Checkbox isSelected={settings.allowNative} onChange={(allowNative) => setSettings({ ...settings, allowNative })} data-testid="trigger-allow-native">
@@ -508,18 +524,13 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
               </div>
             </div>
             {problems.length > 0 && (
-              <ul className="xp-wf__muted" data-testid="trigger-problems">
+              <ul className="xp-wf-bullets ui-meta" data-testid="trigger-problems">
                 {problems.map((p) => (
                   <li key={p}>{p}</li>
                 ))}
               </ul>
             )}
-            <dl className="xp-wf-facts">
-              <dt>Standing hash</dt>
-              <dd>
-                <FullHash hash={standing.standingHash} label="the standing plan" />
-              </dd>
-            </dl>
+            <KeyValueList items={[{ key: "standing", label: "Standing hash", value: <FullHash hash={standing.standingHash} label="the standing plan" /> }]} />
             <PlanDetails plan={standing.plan} />
           </div>
         )}
@@ -559,20 +570,20 @@ function TriggerCard({
   const history = [...trigger.history].sort((a, b) => b.atMs - a.atMs).slice(0, 20);
   return (
     <li
-      className="xp-wf__card"
+      className="xp-wf-block"
       data-testid={`workflow-trigger-${trigger.id}`}
       data-state={trigger.state.kind}
       data-queued={String(trigger.queued)}
       data-listening={String(trigger.listening)}
     >
-      <div className="xp-wf__row">
-        <div className="xp-wf__grow">
-          <strong>{describeKind(trigger.kind, trigger.watched)}</strong>
-          <p className="xp-wf__muted">
+      <div className="xp-wf-block__head">
+        <div className="xp-wf-block__lead">
+          <span className="xp-wf-block__title">{describeKind(trigger.kind, trigger.watched)}</span>
+          <p className="ui-meta">
             Revision {trigger.revision}
             {trigger.revision !== currentRevision ? ` (the workflow is now at revision ${currentRevision})` : ""} · {describeSettings(trigger, trigger.kind)}
           </p>
-          <p className="xp-wf__muted" data-testid={`trigger-last-fired-${trigger.id}`}>
+          <p className="ui-meta" data-testid={`trigger-last-fired-${trigger.id}`}>
             {trigger.lastFiredMs !== null ? `Last fired ${formatTime(trigger.lastFiredMs)}` : "Has not fired yet"} · runs this hour {trigger.runsLastHour} of{" "}
             {trigger.maxRunsPerHour}, today {trigger.runsLastDay} of {trigger.maxRunsPerDay}
             {trigger.maxModelRequestsPerDay > 0 ? ` · model requests today ${trigger.modelRequestsLastDay} of ${trigger.maxModelRequestsPerDay}` : ""}
@@ -589,9 +600,7 @@ function TriggerCard({
             Not listening yet
           </Badge>
         )}
-        <Badge tone={view.tone} dashed={view.dashed} icon={trigger.state.kind === "active" ? Bell : BellOff}>
-          {view.label}
-        </Badge>
+        <StatusText status={view.status} label={view.label} />
         {trigger.state.kind === "disabled" ? (
           <Button size="sm" onPress={() => onReapprove(trigger)} data-testid={`trigger-reapprove-${trigger.id}`}>
             Review and turn on…
@@ -638,11 +647,11 @@ function TriggerCard({
               const event = h.event;
               return (
                 <li key={i} data-event={event.kind}>
-                  <span className="xp-wf__muted">{formatTime(h.atMs)}</span> {historyText(event)}
+                  <span className="ui-meta">{formatTime(h.atMs)}</span> {historyText(event)}
                   {event.kind === "fired" && (
                     <>
                       {event.changed.map((c) => (
-                        <span key={c.input} className="xp-wf__muted">
+                        <span key={c.input} className="ui-meta">
                           {" "}
                           ({c.input}: {c.before ? shortHash(c.before) : "absent"} → {c.after ? shortHash(c.after) : "absent"})
                         </span>
@@ -720,41 +729,44 @@ export function TriggersSection({
     });
 
   return (
-    <section className="xp-wf__group" aria-label="Triggers" data-testid="workflow-triggers">
-      <h3 className="xp-wf__group-title">Triggers</h3>
-      <p className="xp-wf__muted">
-        Off by default. A trigger starts runs by itself only under a standing plan you approve here; agents and imported workflows never
-        enable one.
-      </p>
-      {error && (
-        <Banner tone="danger" title="Triggers are unavailable" actions={<Button size="sm" onPress={() => void refresh()}>Retry</Button>}>
-          {error}
-        </Banner>
-      )}
-      {triggers && triggers.length === 0 && <EmptyState fill={false} title="No triggers" description="Runs start only when you review and start them." />}
-      {triggers && triggers.length > 0 && (
-        <ul className="xp-wf__cards" data-testid="workflow-trigger-list">
-          {triggers.map((t) => (
-            <TriggerCard key={t.id} trigger={t} currentRevision={revision} onChanged={() => void refresh()} onReapprove={reapprove} />
-          ))}
-        </ul>
-      )}
-      <div className="xp-wf__row">
-        <Button
-          icon={Plus}
-          isDisabled={reviewBlock !== null}
-          aria-describedby={reviewBlock ? reasonId : undefined}
-          onPress={() => setDialog({ open: true })}
-          data-testid="workflow-trigger-add"
-        >
-          {triggers && triggers.length > 0 ? "Replace trigger…" : "New trigger…"}
-        </Button>
-        {reviewBlock && (
-          <span className="xp-wf__muted" id={reasonId}>
-            {reviewBlock}
-          </span>
-        )}
-      </div>
+    <div data-testid="workflow-triggers">
+      <Section title="Triggers">
+        <div className="xp-wf__stack">
+          <p className="ui-meta">
+            Off by default. A trigger starts runs by itself only under a standing plan you approve here; agents and imported workflows
+            never enable one.
+          </p>
+          {error && (
+            <Banner tone="danger" title="Triggers are unavailable" actions={<Button size="sm" onPress={() => void refresh()}>Retry</Button>}>
+              {error}
+            </Banner>
+          )}
+          {triggers && triggers.length === 0 && <EmptyState title="No triggers" description="Runs start only when you review and start them." />}
+          {triggers && triggers.length > 0 && (
+            <ul className="xp-wf-blocks" data-testid="workflow-trigger-list">
+              {triggers.map((t) => (
+                <TriggerCard key={t.id} trigger={t} currentRevision={revision} onChanged={() => void refresh()} onReapprove={reapprove} />
+              ))}
+            </ul>
+          )}
+          <div className="xp-wf__line">
+            <Button
+              icon={Plus}
+              isDisabled={reviewBlock !== null}
+              aria-describedby={reviewBlock ? reasonId : undefined}
+              onPress={() => setDialog({ open: true })}
+              data-testid="workflow-trigger-add"
+            >
+              {triggers && triggers.length > 0 ? "Replace trigger…" : "New trigger…"}
+            </Button>
+            {reviewBlock && (
+              <span className="ui-meta" id={reasonId}>
+                {reviewBlock}
+              </span>
+            )}
+          </div>
+        </div>
+      </Section>
       <TriggerDialog
         workflow={workflow}
         revision={revision}
@@ -765,6 +777,6 @@ export function TriggersSection({
         onOpenChange={(open) => setDialog((d) => ({ ...d, open }))}
         onEnabled={() => void refresh()}
       />
-    </section>
+    </div>
   );
 }

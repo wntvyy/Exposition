@@ -567,7 +567,7 @@ describe("run monitor", () => {
     render(<RunHistory workflow="wf-1" />);
     const list = await screen.findByTestId("workflow-runs");
     expect(runIpc.list).toHaveBeenCalledWith("wf-1");
-    const ids = [...list.querySelectorAll("li")].map((li) => li.getAttribute("data-testid"));
+    const ids = [...list.querySelectorAll("[role='listitem']")].map((row) => row.getAttribute("data-testid"));
     expect(ids).toEqual(["workflow-run-item-new", "workflow-run-item-old"]);
     expect(screen.getByTestId("workflow-run-item-new").textContent).toContain("Needs review");
     fireEvent.click(within(screen.getByTestId("workflow-run-item-new")).getByRole("button", { name: /^Open run of/ }));
