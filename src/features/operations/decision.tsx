@@ -73,7 +73,7 @@ function DecisionBody({
       )}
       {groups.map((group) => (
         <section key={group.kind} className="xp-ops-decision__group" data-impact={group.kind} aria-label={group.heading}>
-          <h4 className="xp-ops-decision__heading">{group.heading}</h4>
+          <h4 className="ui-section-title">{group.heading}</h4>
           <ul className="xp-ops-decision__list">
             {group.impacts.map((impact, index) => (
               <li key={index} className="xp-ops-decision__impact" data-testid="op-impact" data-kind={impact.kind}>
