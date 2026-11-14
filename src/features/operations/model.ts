@@ -371,7 +371,9 @@ export function summarizeResult(
   }
   for (const outcome of failed) lines.push(failureLine(outcome, labels, false));
   for (const outcome of skipped) lines.push(failureLine(outcome, labels, true));
-  if (trashUnavailable.length) {
+  // Say it once: the backend's message may already explain the trash and Delete Permanently.
+  const explained = failed.some((o) => o.code === TRASH_UNAVAILABLE && /delete permanently/i.test(o.message ?? ""));
+  if (trashUnavailable.length && !explained) {
     lines.push(`${trash.charAt(0).toUpperCase()}${trash.slice(1)} is unavailable, so nothing was deleted permanently. Use Delete Permanently to remove ${trashUnavailable.length === 1 ? "it" : "them"} without recovery.`);
   }
 

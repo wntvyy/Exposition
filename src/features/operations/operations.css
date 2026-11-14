@@ -86,3 +86,16 @@
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
 }
+
+/* Choice labels from the plan can be long: the select grows instead of overflowing. */
+.xp-ops-decision__choices .ui-select__button {
+  height: auto;
+  min-height: var(--control-height-md);
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
+}
+
+.xp-ops-decision__choices .ui-select__value {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

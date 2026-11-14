@@ -1,5 +1,6 @@
 // P1 project operations — deletions with concrete consequences (spec §5 rows
 // 3, 4, 5), in the real app on a disposable project:
+// Order: D, E, F first (file side), then A, B, C (data side).
 //  A. A bibliography the manuscript uses: ONE decision naming the manuscript;
 //     Cancel changes nothing; Proceed deletes it without touching the
 //     manuscript (no cascade).
@@ -102,63 +103,6 @@ export default async function p1Impacts({ launchApp, artifactsDir, assert, fixtu
     await openProject(page, root);
     const saved = await invoke(page, "workflow_save", { request: { id: null, expectedRevision: null, definition: workflow() } });
 
-    // --- A. manuscript dependency: one decision; Cancel changes nothing --------------------
-    await selectFiles(page, ["refs.bib"]);
-    await page.keyboard.press("Delete");
-    const dialog = decision(page);
-    await dialog.waitFor({ timeout: 15_000 });
-    assert.equal(await page.getByRole("alertdialog").count(), 1, "one decision");
-    const text = await dialog.textContent();
-    assert.match(text, /paper\.tex/, "names the manuscript that uses it");
-    assert.doesNotMatch(text, /are you sure/i);
-    assert.ok((await dialog.locator('[data-testid="op-impact"][data-kind="manuscriptDependency"]').count()) >= 1, "manuscript impact listed");
-    await shot(page, "p1-impact-decision-light");
-    await dialog.getByRole("button", { name: /^Details/ }).click();
-    await shot(page, "p1-impact-decision-details-light");
-    await dialog.getByRole("button", { name: "Cancel" }).click();
-    await page.waitForTimeout(400);
-    assert.ok(existsSync(join(root, "refs.bib")), "Cancel changed nothing");
-    // Proceed: the bibliography goes, the manuscript is untouched.
-    await selectFiles(page, ["refs.bib"]);
-    await page.keyboard.press("Delete");
-    await decision(page).waitFor();
-    await setTheme(page, "dark");
-    await shot(page, "p1-impact-decision-dark");
-    await setTheme(page, "light");
-    await decision(page).getByRole("button", { name: /^Delete$/ }).click();
-    await waitFor(async () => !existsSync(join(root, "refs.bib")), { message: "refs.bib deleted after the decision" });
-    assert.equal(await readFile(join(root, "paper.tex"), "utf8"), paper, "no cascade into the manuscript");
-    evidence.notes.push("manuscript dependency: one decision naming paper.tex; Cancel kept the file; Delete removed only refs.bib");
-    await dismissNotifications(page);
-
-    // --- B. a required workflow input ------------------------------------------------------
-    await selectFiles(page, ["data/obs.csv"]);
-    await page.keyboard.press("Delete");
-    await decision(page).waitFor({ timeout: 15_000 });
-    assert.match(await decision(page).textContent(), /Fit observations/, "names the workflow that requires it");
-    await decision(page).getByRole("button", { name: /^Delete$/ }).click();
-    await waitFor(async () => !existsSync(join(root, "data", "obs.csv")), { message: "input deleted" });
-    const after = await invoke(page, "workflow_get", { id: saved.id, revision: null });
-    assert.deepEqual(after.definition.inputs, workflow().inputs, "the workflow is unchanged (still names its input)");
-    const summary = (await invoke(page, "workflow_list")).find((w) => w.id === saved.id);
-    assert.ok(summary, "the workflow still exists");
-    const plan = await invoke(page, "workflow_run_plan", { id: saved.id, revision: null }).catch((e) => e);
-    evidence.notes.push(`workflow after its input was deleted: runnable=${summary.runnable}; plan=${plan instanceof Error ? plan.message.slice(0, 160) : JSON.stringify(plan.blockers ?? plan).slice(0, 160)}`);
-    await dismissNotifications(page);
-
-    // --- C. one combined decision for a batch ----------------------------------------------
-    await writeFile(join(root, "data", "obs.csv"), OBS);
-    await waitFor(async () => (await fileRow(page, "data/obs.csv").count()) > 0, { message: "obs.csv back in the tree" });
-    await selectFiles(page, ["data/obs.csv", "experiment.py", "scratch/unused.txt"]);
-    await page.keyboard.press("Delete");
-    await decision(page).waitFor({ timeout: 15_000 });
-    await page.waitForTimeout(300);
-    assert.equal(await page.getByRole("alertdialog").count(), 1, "exactly one decision for the batch");
-    assert.match(await decision(page).textContent(), /Delete 3 items/);
-    await decision(page).getByRole("button", { name: "Cancel" }).click();
-    assert.ok(existsSync(join(root, "scratch", "unused.txt")) && existsSync(join(root, "experiment.py")), "Cancel kept the whole batch");
-    await expectNoDialog(page, assert, 400, "no second confirmation");
-
     // --- D. a dirty buffer ----------------------------------------------------------------
     await openInEditor(page, "notes.md");
     await focusEditor(page, "notes.md", "end");
@@ -220,6 +164,64 @@ export default async function p1Impacts({ launchApp, artifactsDir, assert, fixtu
       { timeout: 30_000, message: "graph agrees with the disk after restart" },
     );
     evidence.notes.push(`after a kill right after Delete: x.txt on disk=${onDisk}; graph agrees`);
+
+    // Data-side consequences (manuscript, workflow input, batch) come from the graph lane.
+    // --- A. manuscript dependency: one decision; Cancel changes nothing --------------------
+    await selectFiles(page, ["refs.bib"]);
+    await page.keyboard.press("Delete");
+    const dialog = decision(page);
+    await dialog.waitFor({ timeout: 15_000 });
+    assert.equal(await page.getByRole("alertdialog").count(), 1, "one decision");
+    const text = await dialog.textContent();
+    assert.match(text, /paper\.tex/, "names the manuscript that uses it");
+    assert.doesNotMatch(text, /are you sure/i);
+    assert.ok((await dialog.locator('[data-testid="op-impact"][data-kind="manuscriptDependency"]').count()) >= 1, "manuscript impact listed");
+    await shot(page, "p1-impact-decision-light");
+    await dialog.getByRole("button", { name: /^Details/ }).click();
+    await shot(page, "p1-impact-decision-details-light");
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await page.waitForTimeout(400);
+    assert.ok(existsSync(join(root, "refs.bib")), "Cancel changed nothing");
+    // Proceed: the bibliography goes, the manuscript is untouched.
+    await selectFiles(page, ["refs.bib"]);
+    await page.keyboard.press("Delete");
+    await decision(page).waitFor();
+    await setTheme(page, "dark");
+    await shot(page, "p1-impact-decision-dark");
+    await setTheme(page, "light");
+    await decision(page).getByRole("button", { name: /^Delete$/ }).click();
+    await waitFor(async () => !existsSync(join(root, "refs.bib")), { message: "refs.bib deleted after the decision" });
+    assert.equal(await readFile(join(root, "paper.tex"), "utf8"), paper, "no cascade into the manuscript");
+    evidence.notes.push("manuscript dependency: one decision naming paper.tex; Cancel kept the file; Delete removed only refs.bib");
+    await dismissNotifications(page);
+
+    // --- B. a required workflow input ------------------------------------------------------
+    await selectFiles(page, ["data/obs.csv"]);
+    await page.keyboard.press("Delete");
+    await decision(page).waitFor({ timeout: 15_000 });
+    assert.match(await decision(page).textContent(), /Fit observations/, "names the workflow that requires it");
+    await decision(page).getByRole("button", { name: /^Delete$/ }).click();
+    await waitFor(async () => !existsSync(join(root, "data", "obs.csv")), { message: "input deleted" });
+    const after = await invoke(page, "workflow_get", { id: saved.id, revision: null });
+    assert.deepEqual(after.definition.inputs, workflow().inputs, "the workflow is unchanged (still names its input)");
+    const summary = (await invoke(page, "workflow_list")).find((w) => w.id === saved.id);
+    assert.ok(summary, "the workflow still exists");
+    const plan = await invoke(page, "workflow_run_plan", { id: saved.id, revision: null }).catch((e) => e);
+    evidence.notes.push(`workflow after its input was deleted: runnable=${summary.runnable}; plan=${plan instanceof Error ? plan.message.slice(0, 160) : JSON.stringify(plan.blockers ?? plan).slice(0, 160)}`);
+    await dismissNotifications(page);
+
+    // --- C. one combined decision for a batch ----------------------------------------------
+    await writeFile(join(root, "data", "obs.csv"), OBS);
+    await waitFor(async () => (await fileRow(page, "data/obs.csv").count()) > 0, { message: "obs.csv back in the tree" });
+    await selectFiles(page, ["data/obs.csv", "experiment.py", "scratch/unused.txt"]);
+    await page.keyboard.press("Delete");
+    await decision(page).waitFor({ timeout: 15_000 });
+    await page.waitForTimeout(300);
+    assert.equal(await page.getByRole("alertdialog").count(), 1, "exactly one decision for the batch");
+    assert.match(await decision(page).textContent(), /Delete 3 items/);
+    await decision(page).getByRole("button", { name: "Cancel" }).click();
+    assert.ok(existsSync(join(root, "scratch", "unused.txt")) && existsSync(join(root, "experiment.py")), "Cancel kept the whole batch");
+    await expectNoDialog(page, assert, 400, "no second confirmation");
 
     assert.deepEqual(consoleErrors(app), [], "no console errors");
   } finally {
