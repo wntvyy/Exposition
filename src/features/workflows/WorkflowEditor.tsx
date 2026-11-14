@@ -49,7 +49,18 @@ import { useWorkspace } from "../workspace/store";
 import { CodePayloadEditor } from "./CodePayloadEditor";
 import { exportBundle } from "./actions";
 import { workflowCommands } from "./ipc";
-import { addCompositeStep, isComposite, isDerivedContract, MAX_PARALLEL, maxParallelOf, normalizeSchema, setMaxParallel, withComposites } from "./orchestration";
+import {
+  addCompositeStep,
+  isComposite,
+  isDerivedContract,
+  MAX_PARALLEL,
+  maxParallelOf,
+  normalizeSchema,
+  oneLine,
+  setMaxParallel,
+  textValueProblem,
+  withComposites,
+} from "./orchestration";
 import { PlanReviewDialog } from "./PlanReview";
 import { CONTAINMENT_VIEW, EFFECT_LABELS } from "./runModel";
 import { openRun, RunHistory } from "./RunView";
@@ -161,15 +172,20 @@ function ParameterField({
         />
       );
     }
-    default:
+    default: {
+      const text = value?.kind === "text" ? value.value : "";
+      const problem = spec.kind.kind === "text" ? textValueProblem(text, spec.kind.maxLen) : null;
       return (
         <TextField
           label={label}
           code={spec.kind.kind === "path"}
-          value={value?.kind === "text" ? value.value : ""}
-          onChange={(v) => onChange(v === "" ? null : { kind: "text", value: v })}
+          value={text}
+          isInvalid={problem !== null}
+          errorMessage={problem ?? undefined}
+          onChange={(v) => onChange(v === "" ? null : { kind: "text", value: oneLine(v) })}
         />
       );
+    }
   }
 }
 

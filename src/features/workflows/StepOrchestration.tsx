@@ -25,6 +25,8 @@ import {
   describeRepeat,
   isComposite,
   KNOWN_VERDICTS,
+  oneLine,
+  textValueProblem,
   MAX_FOR_EACH_VALUES,
   MAX_UNTIL_ITERATIONS,
   numberProblem,
@@ -280,12 +282,16 @@ function ValueField({ spec, value, index, onChange }: { spec: ParameterSpec; val
       />
     );
   }
+  const text = value.kind === "text" ? value.value : "";
+  const problem = spec.kind.kind === "text" ? textValueProblem(text, spec.kind.maxLen) : null;
   return (
     <TextField
       label={label}
       code={spec.kind.kind === "path"}
-      value={value.kind === "text" ? value.value : ""}
-      onChange={(v) => onChange({ kind: "text", value: v })}
+      value={text}
+      isInvalid={problem !== null}
+      errorMessage={problem ?? undefined}
+      onChange={(v) => onChange({ kind: "text", value: oneLine(v) })}
     />
   );
 }
@@ -323,7 +329,8 @@ export function RepeatSection({
   const choose = (next: RepeatKind) => {
     if (next === "once") return onChange(setRepeat(draft, step.id, null));
     if (next === "forEach") {
-      const spec = params[0];
+      // The batches' free `value` (EXPOSITION_PARAM_VALUE) is what a sweep is for.
+      const spec = params.find((p) => p.name === "value") ?? params[0];
       if (!spec) return;
       const existing = step.parameters[spec.name];
       return onChange(setRepeat(draft, step.id, { kind: "forEach", parameter: spec.name, values: [existing ?? defaultParamValue(spec, 0)] }));

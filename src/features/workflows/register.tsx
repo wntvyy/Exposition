@@ -13,7 +13,7 @@ import type { WorkflowRunState } from "../../bindings/WorkflowRunState";
 import { workflowEvents } from "./ipc";
 import { RUN_STATE_VIEW, WORKFLOW_RUN_KEY_PREFIX } from "./runModel";
 import { openRun, WorkflowRunView } from "./RunView";
-import { suspensionTitle } from "./TriggersPanel";
+import { suspensionNotificationTitle } from "./TriggersPanel";
 import { WorkflowEditor } from "./WorkflowEditor";
 import { WorkflowsView } from "./WorkflowsView";
 import "./workflows.css";
@@ -113,7 +113,7 @@ void workflowEvents
     notify({
       id: `workflow-trigger-${event.trigger}`,
       tone: "warning",
-      title: `Workflow trigger: ${suspensionTitle(event.state.code).toLowerCase()}`,
+      title: suspensionNotificationTitle(event.state.code),
       body: event.state.message,
       actions: [{ label: "Open workflow", run: () => editors.open({ key: workflowKey(event.workflow), title: "Workflow" }) }],
     });

@@ -340,6 +340,16 @@ export function defaultParamValue(spec: ParameterSpec, index = 0): ParamValue {
   }
 }
 
+/** A text parameter value: one line, at most `maxBytes` UTF-8 bytes (Rust checks the same). */
+export function textValueProblem(text: string, maxBytes: number): string | null {
+  if (/[\r\n]/.test(text)) return "One line only.";
+  const bytes = new TextEncoder().encode(text).length;
+  return bytes > maxBytes ? `At most ${maxBytes} bytes (this is ${bytes}).` : null;
+}
+
+/** Keep a typed text value on one line (line breaks become spaces). */
+export const oneLine = (text: string) => text.replace(/\r\n|\r|\n/g, " ");
+
 /** Client-side hints only (Rust is the validator); empty when nothing looks wrong. */
 export function pointerProblem(pointer: string): string | null {
   if (pointer.length > 256) return "A JSON pointer is at most 256 characters.";

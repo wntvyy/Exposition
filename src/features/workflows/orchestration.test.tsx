@@ -610,3 +610,34 @@ describe("lane F: the batch operations' free value parameter", () => {
     expect(within(card).getAllByText(/Varies: one instance per value/).length).toBe(1);
   });
 });
+
+describe("docs audit polish: the free value parameter", () => {
+  const valueSpec = { name: "value", label: "Value (passed to the code as EXPOSITION_PARAM_VALUE; forEach sweeps it)", kind: { kind: "text" as const, maxLen: 1000 }, required: false };
+  const withValue = contracts.map((c) => (c.id === "research.pythonBatch" ? { ...c, parameters: [...c.parameters, valueSpec] } : c));
+
+  it("defaults a new forEach to the value parameter when the operation has it", async () => {
+    wfIpc.operations.mockResolvedValue(withValue);
+    openEditor(parent);
+    await screen.findByTestId("repeat-sim");
+    await choose("repeat-kind-sim", /Once for each value of a parameter/);
+    await waitFor(() => expect((wfIpc.validate.mock.lastCall?.[0] as WorkflowDefinition).steps[0]!.repeat).toMatchObject({ kind: "forEach", parameter: "value" }));
+  });
+
+  it("keeps a text value on one line and within its byte limit", async () => {
+    expect(orch.textValueProblem("a\nb", 1000)).toBe("One line only.");
+    expect(orch.textValueProblem("é".repeat(501), 1000)).toBe("At most 1000 bytes (this is 1002).");
+    expect(orch.textValueProblem("ok", 1000)).toBeNull();
+    wfIpc.operations.mockResolvedValue(withValue);
+    openEditor(parent);
+    const card = await screen.findByTestId("workflow-step-sim");
+    const field = within(card).getByRole("textbox", { name: /EXPOSITION_PARAM_VALUE/ });
+    fireEvent.change(field, { target: { value: "x".repeat(1001) } });
+    await waitFor(() => expect(within(card).getByText("At most 1000 bytes (this is 1001).")).toBeTruthy());
+    fireEvent.change(field, { target: { value: "two\nlines" } });
+    // A single-line input drops line breaks itself; none reaches the definition.
+    await waitFor(() => expect((wfIpc.validate.mock.lastCall?.[0] as WorkflowDefinition).steps[0]!.parameters.value).toMatchObject({ kind: "text" }));
+    const value = (wfIpc.validate.mock.lastCall?.[0] as WorkflowDefinition).steps[0]!.parameters.value;
+    expect(value?.kind === "text" && /[\r\n]/.test(value.value)).toBe(false);
+    expect(orch.oneLine("two\nlines")).toBe("two lines");
+  });
+});

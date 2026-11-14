@@ -65,18 +65,30 @@ export function historyText(event: TriggerHistoryEvent): string {
   }
 }
 
-/** A suspension's title by its code; the backend's message (shown once, as is) says what to do. */
-export function suspensionTitle(code: string): string {
+/** Why a trigger was suspended, by its code (null: the backend's message says it). */
+function suspensionReason(code: string): string | null {
   switch (code) {
     case "trigger.planChanged":
-      return "Suspended: the approved plan no longer matches";
+      return "the approved plan no longer matches";
     case "trigger.trustRevoked":
-      return "Suspended: folder trust was revoked";
+      return "folder trust was revoked";
     case "trigger.nativeNotAllowed":
-      return "Suspended: native steps are not allowed";
+      return "native steps are not allowed";
     default:
-      return "Suspended";
+      return null;
   }
+}
+
+/** A suspension's title by its code; the backend's message (shown once, as is) says what to do. */
+export function suspensionTitle(code: string): string {
+  const reason = suspensionReason(code);
+  return reason ? `Suspended: ${reason}` : "Suspended";
+}
+
+/** The one-line title of a suspension notification. */
+export function suspensionNotificationTitle(code: string): string {
+  const reason = suspensionReason(code);
+  return reason ? `Workflow trigger suspended: ${reason}` : "Workflow trigger suspended";
 }
 
 export function describeKind(kind: TriggerKind, watched: { label: string; path: string }[]): string {
@@ -85,9 +97,11 @@ export function describeKind(kind: TriggerKind, watched: { label: string; path: 
   return `When the saved content of ${names || "its watched inputs"} changes`;
 }
 
-export function describeSettings(t: WorkflowTriggerSettings): string {
+/** Settings in words; the quiet period applies only to triggers on saved changes. */
+export function describeSettings(t: WorkflowTriggerSettings, kind?: TriggerKind): string {
+  const quiet = kind?.kind === "interval" ? "" : `Waits for ${formatSeconds(t.debounceSeconds)} without further changes · `;
   return (
-    `Waits for ${formatSeconds(t.debounceSeconds)} without further changes · at most ${t.maxRunsPerHour} run${t.maxRunsPerHour === 1 ? "" : "s"} an hour and ` +
+    `${quiet}at most ${t.maxRunsPerHour} run${t.maxRunsPerHour === 1 ? "" : "s"} an hour and ` +
     `${t.maxRunsPerDay} a day · at most one queued follow-up (the latest change wins)` +
     (t.maxModelRequestsPerDay > 0 ? ` · at most ${t.maxModelRequestsPerDay} model requests a day` : "") +
     ` · ${t.allowNative ? "native steps allowed without asking (your account's privileges)" : "native steps not allowed"}`
@@ -95,9 +109,15 @@ export function describeSettings(t: WorkflowTriggerSettings): string {
 }
 
 /** Problems with settings against the plan's limits (the backend checks them again). */
-export function settingsProblems(s: WorkflowTriggerSettings, limits: WorkflowTriggerLimits, plan: Pick<WorkflowTriggerPlan, "nativeSteps" | "modelRequestsPerRun">): string[] {
+export function settingsProblems(
+  s: WorkflowTriggerSettings,
+  limits: WorkflowTriggerLimits,
+  plan: Pick<WorkflowTriggerPlan, "nativeSteps" | "modelRequestsPerRun">,
+  kind?: TriggerKind,
+): string[] {
   const problems: string[] = [];
-  if (s.debounceSeconds < limits.minDebounceSeconds || s.debounceSeconds > limits.maxDebounceSeconds)
+  // The quiet period applies to saved changes only (interval triggers ignore it).
+  if (kind?.kind !== "interval" && (s.debounceSeconds < limits.minDebounceSeconds || s.debounceSeconds > limits.maxDebounceSeconds))
     problems.push(`The quiet period is ${formatSeconds(limits.minDebounceSeconds)} to ${formatSeconds(limits.maxDebounceSeconds)}.`);
   if (s.maxRunsPerHour < 1 || s.maxRunsPerHour > limits.maxRunsPerHour) problems.push(`Runs per hour: 1 to ${limits.maxRunsPerHour}.`);
   if (s.maxRunsPerDay < 1 || s.maxRunsPerDay > limits.maxRunsPerDay) problems.push(`Runs per day: 1 to ${limits.maxRunsPerDay}.`);
@@ -198,7 +218,7 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
 
   const standing = phase.kind === "review" ? phase.standing : null;
   const stale = failure !== null && STALE_TRIGGER_CODES.includes(failure.code);
-  const problems = standing && settings ? settingsProblems(settings, standing.limits, standing) : [];
+  const problems = standing && settings ? settingsProblems(settings, standing.limits, standing, standing.kind) : [];
   const watchedIds = kind.inputs;
   const chooseProblem =
     kind.kind === "inputsChanged" && watchedIds.length === 0
@@ -434,15 +454,17 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
             )}
             <h3 className="xp-wf-plan__heading">Settings</h3>
             <div className="xp-wf__form" data-testid="trigger-settings">
-              <NumberField
-                label="Quiet period (seconds)"
-                value={settings.debounceSeconds}
-                min={standing.limits.minDebounceSeconds}
-                max={standing.limits.maxDebounceSeconds}
-                onChange={(debounceSeconds) => setSettings({ ...settings, debounceSeconds })}
-                testId="trigger-debounce"
-                description="Fires only after no further saved change for this long."
-              />
+              {standing.kind.kind !== "interval" && (
+                <NumberField
+                  label="Quiet period (seconds)"
+                  value={settings.debounceSeconds}
+                  min={standing.limits.minDebounceSeconds}
+                  max={standing.limits.maxDebounceSeconds}
+                  onChange={(debounceSeconds) => setSettings({ ...settings, debounceSeconds })}
+                  testId="trigger-debounce"
+                  description="Fires only after no further saved change for this long."
+                />
+              )}
               <NumberField
                 label="Runs per hour, at most"
                 value={settings.maxRunsPerHour}
@@ -548,7 +570,7 @@ function TriggerCard({
           <strong>{describeKind(trigger.kind, trigger.watched)}</strong>
           <p className="xp-wf__muted">
             Revision {trigger.revision}
-            {trigger.revision !== currentRevision ? ` (the workflow is now at revision ${currentRevision})` : ""} · {describeSettings(trigger)}
+            {trigger.revision !== currentRevision ? ` (the workflow is now at revision ${currentRevision})` : ""} · {describeSettings(trigger, trigger.kind)}
           </p>
           <p className="xp-wf__muted" data-testid={`trigger-last-fired-${trigger.id}`}>
             {trigger.lastFiredMs !== null ? `Last fired ${formatTime(trigger.lastFiredMs)}` : "Has not fired yet"} · runs this hour {trigger.runsLastHour} of{" "}
@@ -598,7 +620,7 @@ function TriggerCard({
       {trigger.storeProblem && (
         <div data-testid={`trigger-store-problem-${trigger.id}`}>
           <Banner tone="warning" title="The trigger store could not be saved or read">
-            {trigger.storeProblem} Changes shown here may not survive a restart until it can be saved.
+            {trigger.storeProblem}
           </Banner>
         </div>
       )}
@@ -654,7 +676,8 @@ export function TriggersSection({
 }) {
   const [triggers, setTriggers] = useState<WorkflowTrigger[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<{ open: boolean; initial?: TriggerDialogProps["initial"] }>({ open: false });
+  // `reviewing`: the trigger being reviewed again (it is not replaced by itself).
+  const [dialog, setDialog] = useState<{ open: boolean; initial?: TriggerDialogProps["initial"]; reviewing?: string }>({ open: false });
   const reasonId = useId();
 
   const refresh = useCallback(async () => {
@@ -689,6 +712,7 @@ export function TriggersSection({
   const reapprove = (t: WorkflowTrigger) =>
     setDialog({
       open: true,
+      reviewing: t.id,
       initial: {
         kind: t.kind,
         settings: { debounceSeconds: t.debounceSeconds, maxRunsPerHour: t.maxRunsPerHour, maxRunsPerDay: t.maxRunsPerDay, allowNative: t.allowNative, maxModelRequestsPerDay: t.maxModelRequestsPerDay },
@@ -736,7 +760,7 @@ export function TriggersSection({
         revision={revision}
         definition={definition}
         initial={dialog.initial}
-        replaces={triggers?.[0] ?? null}
+        replaces={triggers?.find((t) => t.id !== dialog.reviewing) ?? null}
         isOpen={dialog.open}
         onOpenChange={(open) => setDialog((d) => ({ ...d, open }))}
         onEnabled={() => void refresh()}

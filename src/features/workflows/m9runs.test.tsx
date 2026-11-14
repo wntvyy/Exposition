@@ -53,7 +53,7 @@ vi.mock("../research/Promotion", () => ({ PreviewView: () => null }));
 
 const { PlanReviewDialog, groupByComposite } = await import("./PlanReview");
 const { RunMonitor, RunHistory, notRunReason } = await import("./RunView");
-const { TriggersSection, settingsProblems, suspensionTitle } = await import("./TriggersPanel");
+const { TriggersSection, settingsProblems, suspensionTitle, suspensionNotificationTitle, describeSettings } = await import("./TriggersPanel");
 const runModel = await import("./runModel");
 
 const HASH = "ab12cd34ef56".padEnd(64, "0");
@@ -225,6 +225,12 @@ const run = (overrides: Partial<WorkflowRun> = {}): WorkflowRun => ({
   plan: plan(),
   ...overrides,
 });
+
+/** Open a react-aria Select (by its test id) and choose the option named `name`. */
+async function choose(testId: string, name: string | RegExp) {
+  fireEvent.click(within(screen.getByTestId(testId)).getByRole("button"));
+  fireEvent.click(await screen.findByRole("option", { name }));
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -755,12 +761,15 @@ describe("R-m9 F4: native steps need explicit consent in every standing-plan rev
 
 describe("lane C fix round: trigger store problems, Lean sources", () => {
   it("warns on a trigger card when the trigger store could not be saved or read", async () => {
-    triggerIpc.list.mockResolvedValue([trigger({ id: "wtrg-s", storeProblem: "The disk is full." }), trigger({ id: "wtrg-ok" })]);
+    triggerIpc.list.mockResolvedValue([
+      trigger({ id: "wtrg-s", storeProblem: "The trigger store could not be saved (the disk is full); changes may not survive a restart." }),
+      trigger({ id: "wtrg-ok" }),
+    ]);
     render(<TriggersSection workflow="wf-1" revision={2} definition={definition} reviewBlock={null} />);
     const problem = await screen.findByTestId("trigger-store-problem-wtrg-s");
     expect(problem.textContent).toContain("The trigger store could not be saved or read");
-    expect(problem.textContent).toContain("The disk is full.");
-    expect(problem.textContent).toMatch(/may not survive a restart/);
+    expect(problem.textContent).toContain("the disk is full");
+    expect(problem.textContent!.match(/may not survive a restart/g)).toHaveLength(1);
     expect(screen.queryByTestId("trigger-store-problem-wtrg-ok")).toBeNull();
   });
 
@@ -801,5 +810,75 @@ describe("lane C fix round: trigger store problems, Lean sources", () => {
     expect(step.textContent).toContain("Lean source Main.lean");
     expect(step.textContent).toMatch(/the audit elaborates exactly this text/);
     expect(step.textContent).not.toContain("Code from");
+  });
+});
+
+describe("docs audit polish", () => {
+  it("shows the default image only when a step runs in it, and names R/Julia runners by title", async () => {
+    const base = plan();
+    const rStep = planStep({ step: "fit", label: "Fit in R", runner: "restrictedR", runnerTitle: "Restricted R batch", operationTitle: "R batch (restricted)" });
+    runIpc.plan.mockResolvedValue(
+      plan({
+        steps: [rStep],
+        execution: {
+          ...base.execution,
+          restrictedImage: null,
+          restrictedImageId: null,
+          nativeSteps: [],
+          modelSteps: [],
+          runnerImages: [{ runner: "restrictedR", image: "r-base:4.6.2", imageId: `sha256:${"a".repeat(64)}` }],
+        },
+      }),
+    );
+    render(<PlanReviewDialog workflow="wf-1" revision={2} isOpen onOpenChange={() => {}} onStarted={vi.fn()} />);
+    const images = await screen.findByTestId("plan-runner-images");
+    const execution = screen.getByTestId("plan-execution");
+    expect(execution.textContent).not.toContain("no image configured");
+    expect(execution.textContent).toContain("Restricted backend docker");
+    expect(images.querySelector('[data-runner="restrictedR"]')!.textContent).toMatch(/^Restricted R batch runs in r-base:4\.6\.2/);
+  });
+
+  it("says nothing about replacing when re-reviewing the workflow's own trigger", async () => {
+    triggerIpc.list.mockResolvedValue([trigger({ id: "wtrg-own", state: { kind: "suspended", code: "trigger.planChanged", message: "Changed." } })]);
+    triggerIpc.plan.mockResolvedValue(standing({ nativeSteps: [], modelRequestsPerRun: 0 }));
+    render(<TriggersSection workflow="wf-1" revision={2} definition={definition} reviewBlock={null} />);
+    fireEvent.click(await screen.findByTestId("trigger-reapprove-wtrg-own"));
+    await screen.findByTestId("trigger-dialog");
+    expect(screen.queryByTestId("trigger-replaces")).toBeNull();
+    fireEvent.click(screen.getByTestId("trigger-review"));
+    await screen.findByTestId("trigger-standing");
+    expect(screen.getByTestId("trigger-enable").textContent).toBe("Enable trigger");
+  });
+
+  it("titles a suspension notification once, clearly", () => {
+    expect(suspensionNotificationTitle("trigger.trustRevoked")).toBe("Workflow trigger suspended: folder trust was revoked");
+    expect(suspensionNotificationTitle("trigger.planChanged")).toBe("Workflow trigger suspended: the approved plan no longer matches");
+    expect(suspensionNotificationTitle("workflow.untrustedFolder")).toBe("Workflow trigger suspended");
+  });
+
+  it("does not show or check a quiet period for interval triggers", async () => {
+    const intervalSettings = { debounceSeconds: 1, maxRunsPerHour: 1, maxRunsPerDay: 24, allowNative: false, maxModelRequestsPerDay: 0 };
+    expect(settingsProblems(intervalSettings, limits, { nativeSteps: [], modelRequestsPerRun: 0 }, { kind: "interval", minutes: 60, inputs: [] })).toEqual([]);
+    expect(settingsProblems(intervalSettings, limits, { nativeSteps: [], modelRequestsPerRun: 0 }, { kind: "inputsChanged", inputs: ["data"] })[0]).toMatch(/quiet period/);
+    expect(describeSettings(intervalSettings, { kind: "interval", minutes: 60, inputs: [] })).not.toMatch(/Waits for/);
+    triggerIpc.list.mockResolvedValue([trigger({ id: "wtrg-i", kind: { kind: "interval", minutes: 60, inputs: [] }, watched: [] })]);
+    triggerIpc.plan.mockResolvedValue(standing({ kind: { kind: "interval", minutes: 60, inputs: [] }, watched: [], nativeSteps: [], modelRequestsPerRun: 0 }));
+    render(<TriggersSection workflow="wf-1" revision={2} definition={definition} reviewBlock={null} />);
+    const card = await screen.findByTestId("workflow-trigger-wtrg-i");
+    expect(card.textContent).not.toMatch(/Waits for/);
+    fireEvent.click(screen.getByTestId("workflow-trigger-add"));
+    await screen.findByTestId("trigger-dialog");
+    await choose("trigger-kind", /On a fixed interval/);
+    fireEvent.click(screen.getByTestId("trigger-review"));
+    await screen.findByTestId("trigger-standing");
+    expect(screen.queryByTestId("trigger-debounce")).toBeNull();
+  });
+
+  it("numbers instances and iterations from 1 in the UI (data attributes keep the 0-based index)", () => {
+    render(<RunMonitor run={run()} onRun={vi.fn()} />);
+    const first = screen.getByTestId("workflow-instance-sweep-0");
+    expect(first.getAttribute("data-index")).toBe("0");
+    expect(first.textContent).toContain("instance 1");
+    expect(runModel.instanceLabel({ index: 0, parameter: null, state: "succeeded", attempts: [], reason: null })).toBe("Iteration 1");
   });
 });

@@ -237,6 +237,10 @@ export function PlanDetails({ plan }: { plan: ReviewPlan }) {
   const limits = plan.limits ?? DEFAULT_LIMITS;
   const groups = groupByComposite(plan.steps);
   const drift = plan.drift ?? [];
+  // R/Julia batches run in their own images; the default image matters only to the other restricted steps.
+  const ownImage = new Set((execution.runnerImages ?? []).map((r) => r.runner));
+  const defaultImageSteps = plan.steps.some((s) => s.containment === "restrictedContainer" && !ownImage.has(s.runner));
+  const runnerTitle = (runner: string) => plan.steps.find((s) => s.runner === runner)?.runnerTitle ?? runner;
   // Drift is also summarized in the plan's notices; show each fact once.
   const notices = plan.notices.filter((n) => !drift.some((d) => d.message === n));
   const stepNames = (ids: string[]) => ids.map((id) => `“${plan.steps.find((s) => s.step === id)?.label ?? id}”`).join(", ");
@@ -257,11 +261,13 @@ export function PlanDetails({ plan }: { plan: ReviewPlan }) {
           {ceiling.proposeChanges ? "; may propose reviewable changes" : ""}
         </dd>
         <dt>Execution</dt>
-        <dd>
+        <dd data-testid="plan-execution">
           {execution.restrictedBackend
-            ? `Restricted backend ${execution.restrictedBackend}${execution.restrictedImage ? ` with image ${execution.restrictedImage}` : " (no image configured)"}`
+            ? `Restricted backend ${execution.restrictedBackend}${
+                defaultImageSteps ? (execution.restrictedImage ? ` with image ${execution.restrictedImage}` : " (no image configured)") : ""
+              }`
             : "No restricted backend configured"}
-          {execution.restrictedImageId && (
+          {defaultImageSteps && execution.restrictedImageId && (
             <span data-testid="plan-image-id">
               {" "}
               (exactly the image <FullHash hash={execution.restrictedImageId} label="the approved image" />; a re-tagged or updated image is refused)
@@ -275,10 +281,10 @@ export function PlanDetails({ plan }: { plan: ReviewPlan }) {
             <ul className="xp-wf-plan__effects" data-testid="plan-runner-images" aria-label="Images of the R and Julia runners">
               {execution.runnerImages.map((r) => (
                 <li key={r.runner} data-runner={r.runner}>
-                  {r.runner} runs in{" "}
+                  {runnerTitle(r.runner)} runs in{" "}
                   {r.imageId ? (
                     <>
-                      <code>{r.image}</code>, exactly the image <FullHash hash={r.imageId} label={`the image of ${r.runner}`} />
+                      <code>{r.image}</code>, exactly the image <FullHash hash={r.imageId} label={`the image of ${runnerTitle(r.runner)}`} />
                     </>
                   ) : (
                     <>
