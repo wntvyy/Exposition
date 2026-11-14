@@ -628,3 +628,76 @@ fn folder_timestamp_changes_are_not_file_changes() {
         other => panic!("expected FilesChanged for a file, got {other:?}"),
     }
 }
+
+// ----- save a copy (P1) -------------------------------------------------------
+
+#[test]
+fn a_copy_saves_the_current_text_with_its_encoding_to_a_new_file_only() {
+    let f = fixture();
+    let id = f.service.open_document(&wp("utf16.py")).unwrap().state.info.id;
+    edit(&f.service, &id, vec![TextPatch { range: TextRange::new(0, 0), text: "# unsaved\r\n".into() }]);
+    let saved = f.service.save_document_copy(&id, "copies/utf16 copy.py").unwrap();
+    assert_eq!(saved.path, Some(wp("copies/utf16 copy.py")));
+    let expected: Vec<u8> =
+        [0xFF, 0xFE].into_iter().chain("# unsaved\r\nx = 1\r\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    assert_eq!(fs::read(f.file("copies/utf16 copy.py")).unwrap(), expected, "BOM, UTF-16 and CRLF kept");
+    assert_eq!(saved.bytes, expected.len() as u64);
+    // The buffer is unchanged and still unsaved; its own file is untouched.
+    assert!(dirty(&f.service, &id));
+    assert!(fs::read(f.file("utf16.py")).unwrap().len() < expected.len());
+    // Never over an existing file or folder, an open document, or itself.
+    for taken in ["main.typ", "chapters", "utf16.py", "copies/utf16 copy.py"] {
+        let e = f.service.save_document_copy(&id, taken).unwrap_err();
+        assert_eq!(e.code, "document.exists", "{taken}");
+    }
+    assert_eq!(fs::read(f.file("main.typ")).unwrap(), b"= Title\n\nBody.\n");
+}
+
+#[test]
+fn a_copy_can_go_outside_the_project_but_never_into_app_data_or_through_links() {
+    let f = fixture();
+    let id = f.service.open_document(&wp("main.typ")).unwrap().state.info.id;
+    edit(&f.service, &id, vec![TextPatch { range: TextRange::new(0, 0), text: "unsaved ".into() }]);
+    let outside = f.dir.path().join("elsewhere");
+    fs::create_dir_all(&outside).unwrap();
+    let target = outside.join("main copy.typ");
+    let saved = f.service.save_document_copy(&id, &target.display().to_string()).unwrap();
+    assert_eq!(saved.path, None);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "unsaved = Title\n\nBody.\n");
+    // An absolute path inside the project follows the project rules.
+    let inside = f.file("chapters").join("from-abs.typ");
+    let saved = f.service.save_document_copy(&id, &inside.display().to_string()).unwrap();
+    assert_eq!(saved.path, Some(wp("chapters/from-abs.typ")));
+    // Exposition's own data folder is never a destination.
+    fs::create_dir_all(f.data()).unwrap();
+    let e = f.service.save_document_copy(&id, &f.data().join("x.typ").display().to_string()).unwrap_err();
+    assert_eq!(e.code, "document.protected");
+    // The project's application data is not a destination either.
+    for p in [".exposition/runs/r.json", ".exposition/graph.sqlite3-x"] {
+        assert_eq!(f.service.save_document_copy(&id, p).unwrap_err().code, "document.protected", "{p}");
+    }
+    // A project path through a link that leaves the project is refused.
+    junction(&f.file("escape"), &outside);
+    let e = f.service.save_document_copy(&id, "escape/through.typ").unwrap_err();
+    assert_eq!(e.code, "path.outsideWorkspace");
+    assert!(!outside.join("through.typ").exists());
+    // A missing folder outside the project is reported, not created.
+    let e = f.service.save_document_copy(&id, &f.dir.path().join("nope").join("x.typ").display().to_string());
+    assert_eq!(e.unwrap_err().code, "path.notFound");
+}
+
+#[test]
+fn a_preserved_buffer_of_a_deleted_file_can_be_saved_as_a_copy() {
+    let f = fixture();
+    let id = f.service.open_document(&wp("main.typ")).unwrap().state.info.id;
+    edit(&f.service, &id, vec![TextPatch { range: TextRange::new(0, 0), text: "kept ".into() }]);
+    f.service.suspend_document(&id).unwrap();
+    fs::remove_file(f.file("main.typ")).unwrap();
+    let saved = f.service.save_document_copy(&id, "rescued.typ").unwrap();
+    assert_eq!(saved.path, Some(wp("rescued.typ")));
+    assert_eq!(fs::read_to_string(f.file("rescued.typ")).unwrap(), "kept = Title\n\nBody.\n");
+    assert!(f.service.is_suspended(&id), "still detached from the deleted path");
+    assert!(!f.file("main.typ").exists(), "the deleted file is not brought back");
+    // Not at its own deleted path: that would bring the file back.
+    assert_eq!(f.service.save_document_copy(&id, "main.typ").unwrap_err().code, "document.exists");
+}

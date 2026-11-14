@@ -154,15 +154,18 @@ impl TrashBin for FakeTrash {
     fn name(&self) -> &'static str {
         "the test trash"
     }
-    fn delete(&self, paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, String>> {
+    fn delete(&self, paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, TrashFailure>> {
         paths
             .iter()
             .map(|p| {
                 if self.fail {
-                    Err("the Recycle Bin is not available on this drive".into())
+                    Err(TrashFailure::new(
+                        TrashFailureKind::Unavailable,
+                        "the Recycle Bin is not available on this drive",
+                    ))
                 } else {
                     let to = p.with_extension("faketrashed");
-                    fs::rename(p, &to).map_err(|e| e.to_string())?;
+                    fs::rename(p, &to).map_err(|e| TrashFailure::new(TrashFailureKind::Other, e.to_string()))?;
                     self.deleted.lock().unwrap().push(p.clone());
                     Ok(None)
                 }
@@ -294,8 +297,11 @@ fn a_locked_file_fails_to_trash_and_is_never_deleted_permanently_instead() {
     // Partial success is reported per target.
     assert_eq!(status_of(&outcomes, &path("chapters/end.typ")), OpStatus::Failed);
     let failed = outcomes.iter().find(|o| o.outcome.target == path("chapters/end.typ")).unwrap();
-    assert_eq!(failed.outcome.code.as_deref(), Some("ops.trashUnavailable"));
-    assert!(failed.outcome.message.as_deref().unwrap().contains("Nothing was deleted permanently"));
+    // A file open elsewhere is in use, not a missing Recycle Bin: no
+    // Delete Permanently suggestion (it would fail too).
+    assert_eq!(failed.outcome.code.as_deref(), Some("ops.inUse"), "{:?}", failed.outcome);
+    let message = failed.outcome.message.as_deref().unwrap();
+    assert!(message.contains("open in another program") && !message.contains("Delete Permanently"), "{message}");
     assert_eq!(fx.read("chapters/end.typ"), "end\n", "the locked file is intact");
     assert_eq!(status_of(&outcomes, &path("chapters/intro.typ")), OpStatus::Succeeded);
     assert!(!fx.exists("chapters/intro.typ"));
@@ -313,8 +319,51 @@ fn an_unavailable_trash_never_falls_back_to_permanent_deletion() {
     for o in &outcomes {
         assert_eq!(o.outcome.status, OpStatus::Failed);
         assert_eq!(o.outcome.code.as_deref(), Some("ops.trashUnavailable"));
+        assert!(o.outcome.message.as_deref().unwrap().contains("use Delete Permanently"), "{:?}", o.outcome);
     }
     assert!(fx.exists("main.typ") && fx.exists("data/raw/a.csv"), "nothing removed");
+}
+
+/// The current user's SID (`*S-1-…`, as icacls takes it).
+#[cfg(windows)]
+fn current_sid() -> String {
+    let out = std::process::Command::new("whoami").args(["/user", "/fo", "csv", "/nh"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let sid = text.trim().rsplit(',').next().unwrap().trim_matches('"').to_owned();
+    assert!(sid.starts_with("S-1-"), "{text}");
+    format!("*{sid}")
+}
+
+#[cfg(windows)]
+fn icacls(path: &Path, args: &[&str]) {
+    let status =
+        std::process::Command::new("icacls").arg(path).args(args).stdout(std::process::Stdio::null()).status().unwrap();
+    assert!(status.success(), "icacls {args:?}");
+}
+
+#[cfg(windows)]
+#[test]
+fn access_refused_by_the_os_is_permission_denied_and_nothing_is_deleted() {
+    let fx = fixture();
+    let Some(bin) = real_trash(fx.dir.path()) else { return };
+    // Real OS refusal: deny this user deleting the file and deleting
+    // children of its folder (removed again below).
+    let sid = current_sid();
+    let file = fx.file("chapters/end.typ");
+    let folder = fx.file("chapters");
+    icacls(&file, &["/deny", &format!("{sid}:(DE)")]);
+    icacls(&folder, &["/deny", &format!("{sid}:(DC)")]);
+    let plan = fx.service.plan_paths(&delete(false), &[path("chapters/end.typ")], &OpActor::User);
+    let outcomes = apply(&fx, &plan, &bin, &[]);
+    icacls(&folder, &["/remove:d", &sid]);
+    icacls(&file, &["/remove:d", &sid]);
+    let o = &outcomes[0].outcome;
+    assert_eq!(o.status, OpStatus::Failed, "{o:?}");
+    assert_eq!(o.code.as_deref(), Some("ops.permissionDenied"), "{o:?}");
+    assert!(!o.message.as_deref().unwrap().contains("Delete Permanently"));
+    assert_eq!(fx.read("chapters/end.typ"), "end\n", "nothing deleted");
+    let items: Vec<_> = outcomes.iter().filter_map(|o| o.trashed.clone()).collect();
+    let _ = bin.purge(&items);
 }
 
 #[test]

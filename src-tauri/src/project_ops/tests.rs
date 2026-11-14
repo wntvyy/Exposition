@@ -19,7 +19,7 @@ use exposition_core::ops::{
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::TextRange;
 use exposition_graph::OperationState;
-use exposition_workspace::ops::{OsTrash, TrashBin, TrashedItem};
+use exposition_workspace::ops::{OsTrash, TrashBin, TrashFailure, TrashFailureKind, TrashedItem};
 use exposition_workspace::{DocumentService, WorkspaceService};
 
 use super::*;
@@ -142,15 +142,20 @@ impl TrashBin for FakeTrash {
     fn name(&self) -> &'static str {
         "the test trash"
     }
-    fn delete(&self, paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, String>> {
+    fn delete(&self, paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, TrashFailure>> {
         let mut out = Vec::new();
         for (i, p) in paths.iter().enumerate() {
             if p.to_string_lossy().contains("fail") {
-                out.push(Err("the Recycle Bin is not available on this drive".into()));
+                out.push(Err(TrashFailure::new(
+                    TrashFailureKind::Unavailable,
+                    "the Recycle Bin is not available on this drive",
+                )));
                 continue;
             }
             let aside = p.with_file_name(format!("trashed-{i}-{}", now_millis()));
-            let moved = fs::rename(p, aside.with_extension("gone")).map(|_| None).map_err(|e| e.to_string());
+            let moved = fs::rename(p, aside.with_extension("gone"))
+                .map(|_| None)
+                .map_err(|e| TrashFailure::new(TrashFailureKind::Other, e.to_string()));
             if self.crash_after_first {
                 panic!("simulated crash during file work");
             }

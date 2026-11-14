@@ -183,6 +183,8 @@ const COMMANDS: &[&str] = &[
     "clipboard_files_read",
     "clipboard_files_write",
     "storage_overview",
+    // Save a copy of a document's current text (src/workspace.rs).
+    "document_save_copy",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

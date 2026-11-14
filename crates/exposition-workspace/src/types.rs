@@ -206,3 +206,17 @@ pub enum WorkspaceEvent {
         message: String,
     },
 }
+
+/// A copy of a document's current text saved to a new file
+/// (`document_save_copy`); the document itself is unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedCopy {
+    /// Where the copy was written (absolute, for display).
+    pub location: String,
+    /// The copy's project path when it is inside the open project.
+    pub path: Option<WorkspacePath>,
+    /// Bytes written.
+    pub bytes: u64,
+}

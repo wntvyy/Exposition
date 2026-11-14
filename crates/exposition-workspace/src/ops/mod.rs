@@ -37,7 +37,7 @@ use exposition_core::path::WorkspacePath;
 use crate::root::{WorkspaceRoot, display_path};
 use crate::service::WorkspaceService;
 use fsops::{EntryKind, PublishError};
-pub use trash::{OsTrash, TrashBin, TrashedItem};
+pub use trash::{OsTrash, TrashBin, TrashFailure, TrashFailureKind, TrashedItem};
 
 /// Choice key for open documents with unsaved changes in deleted paths.
 pub const CHOICE_UNSAVED: &str = "unsavedBuffers";
@@ -197,7 +197,7 @@ fn list_some(items: &[String], max: usize) -> String {
 }
 
 /// Is `path` equal to `ancestor` or inside it (component-wise, case-insensitive on Windows)?
-fn within(path: &Path, ancestor: &Path) -> bool {
+pub(crate) fn within(path: &Path, ancestor: &Path) -> bool {
     let key = |p: &Path| -> Vec<String> {
         Path::new(&display_path(p))
             .components()
@@ -880,7 +880,8 @@ impl WorkspaceService {
                 .trash
                 .delete(&paths)
                 .into_iter()
-                .map(|r| r.map_err(|reason| ("ops.trashUnavailable".to_owned(), reason)))
+                .zip(ready.iter())
+                .map(|(r, item)| r.map_err(|f| (f.code().to_owned(), trash_message(&f, &item.shown(), bin))))
                 .collect()
         };
         for (item, result) in ready.iter().zip(results) {
@@ -897,26 +898,19 @@ impl WorkspaceService {
                     }
                     trashed = found;
                 }
-                Err((code, reason)) if !permanent && gone => {
+                Err((code, _)) if !permanent && gone => {
                     // The shell reported a problem, but the entry left the project.
                     o.recovery = OpRecovery::OsTrash;
                     o.code = Some(code);
                     o.message = Some(format!(
-                        "{bin} reported a problem ({reason}), but {} is no longer in the project; look for it in {bin}.",
+                        "{bin} reported a problem, but {} is no longer in the project; look for it in {bin}.",
                         item.shown()
                     ));
                 }
-                Err((code, reason)) => {
+                Err((code, message)) => {
                     o.status = OpStatus::Failed;
-                    o.message = Some(if permanent {
-                        reason
-                    } else {
-                        format!(
-                            "{} could not be moved to {bin} ({reason}). Nothing was deleted permanently; use Delete Permanently to remove it without {bin}.",
-                            item.shown()
-                        )
-                    });
                     o.code = Some(code);
+                    o.message = Some(message);
                 }
             }
             if o.status == OpStatus::Succeeded {
@@ -1117,6 +1111,26 @@ impl WorkspaceService {
             }
         }
         removed
+    }
+}
+
+/// What a failed move to the trash means for the person (only an
+/// unavailable trash suggests deleting permanently).
+fn trash_message(failure: &trash::TrashFailure, shown: &str, bin: &str) -> String {
+    let reason = &failure.reason;
+    match failure.kind {
+        trash::TrashFailureKind::InUse => format!(
+            "{shown} is open in another program ({reason}), so it was not moved to {bin}. Close it there and try again; nothing was deleted."
+        ),
+        trash::TrashFailureKind::PermissionDenied => {
+            format!("{shown} could not be moved to {bin}: access was denied ({reason}). Nothing was deleted.")
+        }
+        trash::TrashFailureKind::Unavailable => format!(
+            "{bin} cannot take {shown} ({reason}). Nothing was deleted permanently; use Delete Permanently to remove it without {bin}."
+        ),
+        trash::TrashFailureKind::Other => {
+            format!("{shown} could not be moved to {bin} ({reason}). Nothing was deleted.")
+        }
     }
 }
 

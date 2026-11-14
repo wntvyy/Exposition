@@ -47,7 +47,8 @@ use crate::settings::{
 use crate::tree::{is_ignored, list_dir};
 use crate::types::{
     ConflictKind, DiskConflict, DocumentOpened, FileChange, FileChangeKind, FileEntry, RecentProject,
-    RecoveryDiskState, RecoveryEntry, RestoreOutcome, SaveAllOutcome, SaveFailure, WorkspaceEvent, WorkspaceInfo,
+    RecoveryDiskState, RecoveryEntry, RestoreOutcome, SaveAllOutcome, SaveFailure, SavedCopy, WorkspaceEvent,
+    WorkspaceInfo,
 };
 
 /// Delay between a buffer change and its recovery journal write (throttled:
@@ -705,6 +706,130 @@ impl WorkspaceService {
             let _ = store.remove_live(&path);
         }
         Ok(info)
+    }
+
+    /// Save the document's CURRENT text (unsaved edits included, in its
+    /// encoding and line endings) to a NEW file, leaving the document as it is
+    /// (still bound to its own path, still unsaved, still suspended if its file
+    /// was deleted). `destination` is a project path, or an absolute path
+    /// inside the project (project rules: no link escapes, not the project's
+    /// application data) or outside it (an existing folder, never Exposition's
+    /// own data folder). Never replaces anything (`document.exists`).
+    pub fn save_document_copy(&self, id: &DocumentId, destination: &str) -> WorkspaceResult<SavedCopy> {
+        let _io = lock(&self.io);
+        let state = self.documents.state(id)?;
+        let root = self.root()?;
+        let invalid = || WorkspaceError::new("path.invalid", format!("{destination} is not a file path."));
+        let raw = Path::new(destination);
+        let (target, path) = if raw.is_absolute() {
+            let name = raw.file_name().and_then(|n| n.to_str()).ok_or_else(invalid)?;
+            let parent = raw.parent().ok_or_else(invalid)?;
+            let parent = fs::canonicalize(parent).map_err(|e| WorkspaceError::io(parent.display(), &e))?;
+            if !fs::metadata(&parent).map(|m| m.is_dir()).unwrap_or(false) {
+                return Err(WorkspaceError::new("path.notDirectory", format!("{} is not a folder.", parent.display())));
+            }
+            if root.contains(&parent) {
+                let path = match root.relativize(&parent) {
+                    Some(folder) => folder.join(name)?,
+                    None => WorkspacePath::parse(name)?,
+                };
+                self.copy_target_in_project(&root, path)?
+            } else {
+                // A valid file name by the same rules as project files.
+                WorkspacePath::parse(name)?;
+                let data = fs::canonicalize(&self.data_dir).unwrap_or_else(|_| self.data_dir.clone());
+                if crate::ops::within(&parent, &data) {
+                    return Err(WorkspaceError::new(
+                        "document.protected",
+                        "Exposition's own data folder is never a place for copies.",
+                    ));
+                }
+                (parent.join(name), None)
+            }
+        } else {
+            self.copy_target_in_project(&root, WorkspacePath::parse(destination)?)?
+        };
+        let shown = path.as_ref().map(|p| p.to_string()).unwrap_or_else(|| crate::root::display_path(&target));
+        let exists = || {
+            WorkspaceError::new("document.exists", format!("{shown} already exists; a copy never replaces anything."))
+        };
+        if fs::symlink_metadata(&target).is_ok() {
+            return Err(exists());
+        }
+        let bytes = encode(&state.text, state.info.encoding);
+        check_reopenable(&state.text, bytes.len()).map_err(|refusal| match refusal {
+            SaveRefusal::TooLarge { size } => WorkspaceError::new(
+                "file.tooLarge",
+                format!(
+                    "The copy would be {:.1} MB; Exposition saves text files up to {} MB.",
+                    size as f64 / 1_048_576.0,
+                    MAX_TEXT_BYTES / 1_048_576
+                ),
+            ),
+            SaveRefusal::Binary => WorkspaceError::new(
+                "file.binary",
+                "The text contains many control characters (such as NUL) and would be treated as binary, so no copy was saved.",
+            ),
+        })?;
+        if let Some(parent) = target.parent()
+            && path.is_some()
+        {
+            fs::create_dir_all(parent).map_err(|e| WorkspaceError::io(&shown, &e))?;
+        }
+        // Reserve the name (never replacing anything), then write the bytes
+        // atomically over that reservation.
+        match fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(exists()),
+            Err(e) => return Err(WorkspaceError::io(&shown, &e)),
+        }
+        if let Err(e) = write_atomic(&target, &bytes) {
+            let _ = fs::remove_file(&target);
+            return Err(WorkspaceError::new("file.writeFailed", format!("{shown} could not be saved: {e}.")));
+        }
+        Ok(SavedCopy { location: crate::root::display_path(&target), path, bytes: bytes.len() as u64 })
+    }
+
+    /// Where a copy at project path `path` goes (project rules).
+    fn copy_target_in_project(
+        &self,
+        root: &WorkspaceRoot,
+        path: WorkspacePath,
+    ) -> WorkspaceResult<(PathBuf, Option<WorkspacePath>)> {
+        let protected = crate::ops::policy::refuse_change(&path)
+            .or_else(|| path.parent().and_then(|p| crate::ops::policy::refuse_destination(&p)));
+        if let Some(message) = protected {
+            return Err(WorkspaceError::new("document.protected", message));
+        }
+        if self.documents.find_by_path(&path).is_some() {
+            return Err(WorkspaceError::new(
+                "document.exists",
+                format!("{path} is open in the editor; a copy never takes the place of an open document."),
+            ));
+        }
+        let target = root.resolve_for_write(&path)?;
+        Ok((target, Some(path)))
+    }
+
+    /// Where the save dialog for a copy of this document starts: the
+    /// document's folder (absolute) and a free name next to it.
+    pub fn copy_suggestion(&self, id: &DocumentId) -> WorkspaceResult<(PathBuf, String)> {
+        let info = self.documents.info(id)?;
+        let root = self.root()?;
+        let Some(path) = info.path else {
+            return Ok((PathBuf::from(root.display_path()), "Untitled.txt".into()));
+        };
+        let parent = path.parent();
+        let folder = match &parent {
+            Some(p) => root.resolve_existing(p).unwrap_or_else(|_| root.path().to_path_buf()),
+            None => root.path().to_path_buf(),
+        };
+        let name = crate::ops::names::first_free(parent.as_ref(), path.file_name(), false, false, |candidate| {
+            fs::symlink_metadata(folder.join(candidate.file_name())).is_ok()
+        })
+        .map(|p| p.file_name().to_owned())
+        .unwrap_or_else(|| path.file_name().to_owned());
+        Ok((PathBuf::from(crate::root::display_path(&folder)), name))
     }
 
     /// Save every open project document with unsaved changes.
