@@ -137,7 +137,7 @@ function CategoryGroup({
         );
       },
     },
-    { id: "item", title: "Item", render: (item) => item.label },
+    { id: "item", title: "Item", isRowHeader: true, render: (item) => item.label },
     {
       id: "size",
       title: "Size",
@@ -177,15 +177,8 @@ function CategoryGroup({
   }
   return (
     <SettingsGroup
-      title={
-        <>
-          {category.label}{" "}
-          <span className="exp-storage__measure">
-            ({category.items.length}
-            {category.bytes !== null ? ` · ${formatBytes(category.bytes)}` : ""})
-          </span>
-        </>
-      }
+      title={category.label}
+      count={`(${category.items.length}${category.bytes !== null ? ` · ${formatBytes(category.bytes)}` : ""})`}
       description={category.note}
       testId={`storage-category-${category.id}`}
       actions={

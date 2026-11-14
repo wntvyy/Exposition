@@ -1,8 +1,8 @@
 // Layout pieces shared by the settings sections (structure only; controls,
-// headers, and text roles come from src/ui/components).
+// headers, sections, and text roles come from src/ui/components).
 import { useId, type ReactNode } from "react";
 
-import { cx, PageHeader } from "../../ui/components";
+import { PageHeader, Section } from "../../ui/components";
 
 /**
  * One settings page: the shared page header (title and page actions), then a
@@ -24,7 +24,7 @@ export function SettingsPage({
   const id = useId();
   return (
     <section className="exp-settings__page" aria-labelledby={id} data-testid={testId}>
-      <PageHeader title={<span id={id}>{title}</span>} actions={actions} />
+      <PageHeader title={title} titleId={id} actions={actions} />
       <div className="exp-settings__body">
         <div className="exp-settings__content">
           {description && <p className="exp-settings__description ui-meta">{description}</p>}
@@ -35,34 +35,32 @@ export function SettingsPage({
   );
 }
 
-/** A titled group of related settings within a page (sentence-case section title). */
+/**
+ * A titled group of related settings within a page: a content Section (the
+ * sentence-case section title, a muted count or fact, trailing actions) with
+ * an optional short description before its rows.
+ */
 export function SettingsGroup({
   title,
+  count,
   description,
   actions,
   children,
-  className,
   testId,
 }: {
-  title: ReactNode;
+  title: string;
+  /** Muted fact after the title, e.g. "(2 · 3.0 MiB)". */
+  count?: string;
   description?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
-  className?: string;
   testId?: string;
 }) {
-  const id = useId();
   return (
-    <section className={cx("exp-settings__group", className)} aria-labelledby={id} data-testid={testId}>
-      <div className="exp-settings__group-header">
-        <h3 id={id} className="exp-settings__group-title ui-section-title">
-          {title}
-        </h3>
-        {actions && <div className="exp-settings__group-actions">{actions}</div>}
-      </div>
+    <Section title={title} count={count} actions={actions} data-testid={testId}>
       {description && <p className="exp-settings__group-description ui-meta">{description}</p>}
       {children}
-    </section>
+    </Section>
   );
 }
 

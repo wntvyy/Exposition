@@ -64,7 +64,9 @@
   min-height: 0;
 }
 
-/* A page: the shared page header, then the scrolling body at reading width. */
+/* A page: the shared page header, then the scrolling body at reading width.
+   Groups are content Sections, which carry the pane inset themselves; other
+   page-level content takes the same inset. */
 .exp-settings__page {
   display: flex;
   flex: 1;
@@ -76,7 +78,7 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: var(--space-4) var(--pane-inset) var(--space-10);
+  padding: var(--space-2) 0 var(--space-10);
 }
 
 .exp-settings__content {
@@ -85,8 +87,13 @@
 
 .exp-settings__description {
   max-width: 72ch;
-  margin: 0 0 var(--space-4);
+  margin: var(--space-2) 0;
+  padding-inline: var(--pane-inset);
   line-height: var(--line-height-normal);
+}
+
+.exp-settings__inset {
+  margin-inline: var(--pane-inset);
 }
 
 @container (max-width: 640px) {
@@ -114,29 +121,6 @@
   }
 }
 
-/* Groups: section title, optional actions, short description, then rows. */
-.exp-settings__group {
-  margin-top: var(--space-6);
-}
-
-.exp-settings__content > .exp-settings__group:first-child,
-.exp-settings__description + .exp-settings__group {
-  margin-top: 0;
-}
-
-.exp-settings__group-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: var(--control-height-sm);
-}
-
-.exp-settings__group-title {
-  flex: 1;
-  min-width: 0;
-}
-
-.exp-settings__group-actions,
 .exp-settings__actions {
   display: flex;
   flex-wrap: nowrap;
@@ -146,27 +130,27 @@
 
 .exp-settings__group-description {
   max-width: 80ch;
-  margin: var(--space-0-5) 0 var(--space-2);
+  margin: 0 0 var(--space-2);
   line-height: var(--line-height-normal);
 }
 
 .exp-settings__notice {
-  margin: var(--space-2) 0;
+  margin-block: var(--space-2);
 }
 
-/* Region states and list rows carry the pane inset themselves: pull them out
-   so their text aligns with the group's. Tables pull out by their cell padding. */
-.exp-settings__bleed,
+/* List rows inside a group: the section body already pads them. */
 .exp-settings__list {
-  margin-inline: calc(-1 * var(--pane-inset));
+  --list-inset: 0;
 }
 
+/* Tables pull out by their cell padding so cell text aligns with the group's;
+   facts under a row header read at text weight. */
 .exp-settings__table {
   margin-inline: calc(-1 * var(--space-2));
 }
 
-.exp-settings__cell-title {
-  font-weight: var(--font-weight-medium);
+.exp-settings__table th .ui-meta {
+  font-weight: var(--font-weight-regular);
 }
 
 .exp-settings__footnote {
@@ -238,18 +222,6 @@
   user-select: text;
 }
 
-/* Image states are sentences: they wrap and read at text weight (StatusText
-   is sized for short labels). */
-.exp-settings__image-state .ui-status-text {
-  align-items: flex-start;
-  font-weight: var(--font-weight-regular);
-  white-space: normal;
-}
-
-.exp-settings__image-state .ui-status-text > svg {
-  margin-top: var(--space-0-5);
-}
-
 .exp-settings__bullets,
 .exp-settings__locations {
   display: grid;
@@ -284,7 +256,7 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  padding-bottom: var(--space-3);
+  padding: var(--space-1) var(--pane-inset) var(--space-3);
   border-bottom: var(--border-width) solid var(--color-border);
 }
 
@@ -298,11 +270,6 @@
 
 .exp-storage__scope-summary {
   font-weight: var(--font-weight-semibold);
-}
-
-.exp-storage__measure {
-  color: var(--color-text-subtle);
-  font-weight: var(--font-weight-regular);
 }
 
 .exp-storage__nowrap,
@@ -323,5 +290,5 @@
 }
 
 .exp-storage__excluded {
-  margin-top: var(--space-6);
+  margin: var(--space-3) var(--pane-inset) 0;
 }

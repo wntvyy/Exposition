@@ -175,7 +175,6 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
       <SettingsGroup title="LaTeX targets">
         <ErrorState
           size="compact"
-          className="exp-settings__bleed"
           title="Could not read the project settings"
           details={error}
           actions={
@@ -190,7 +189,7 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
   if (!project) {
     return (
       <SettingsGroup title="LaTeX targets">
-        <LoadingState size="compact" className="exp-settings__bleed" title="Loading project settings…" />
+        <LoadingState size="compact" title="Loading project settings…" />
       </SettingsGroup>
     );
   }
@@ -216,9 +215,10 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
       id: "name",
       title: "Name",
       width: "24%",
+      isRowHeader: true,
       render: (target) => (
         <>
-          <div className="exp-settings__cell-title">{target.name}</div>
+          <div>{target.name}</div>
           {settings.defaultTarget === target.name && <div className="ui-meta">Default</div>}
         </>
       ),
@@ -314,7 +314,6 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
       {targets.length === 0 ? (
         <EmptyState
           size="compact"
-          className="exp-settings__bleed"
           title="No LaTeX targets"
           description="Every .tex file builds with pdfLaTeX. Add a target to build a file with LuaLaTeX or to make it the project's default."
           actions={
@@ -324,16 +323,15 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
           }
         />
       ) : (
-        <div aria-busy={saving}>
-          <SimpleTable
-            aria-label="LaTeX targets"
-            className="exp-settings__table"
-            columns={columns}
-            rows={targets}
-            rowKey={(target) => target.name}
-            rowProps={(target) => ({ "data-testid": "latex-target", "data-name": target.name, "data-engine": target.engine })}
-          />
-        </div>
+        <SimpleTable
+          aria-label="LaTeX targets"
+          aria-busy={saving}
+          className="exp-settings__table"
+          columns={columns}
+          rows={targets}
+          rowKey={(target) => target.name}
+          rowProps={(target) => ({ "data-testid": "latex-target", "data-name": target.name, "data-engine": target.engine })}
+        />
       )}
       {settings.targets.length > 0 && (
         <SettingRow
@@ -387,8 +385,7 @@ export function ProjectSection() {
         <SettingsGroup title="LaTeX targets">
           <EmptyState
             size="compact"
-            className="exp-settings__bleed"
-            icon={FolderOpen}
+              icon={FolderOpen}
             title="No folder open"
             description="Open a project folder to choose how its LaTeX files are built."
           />

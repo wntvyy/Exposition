@@ -17,9 +17,10 @@ const COLUMNS: SimpleTableColumn<RuntimeEnvironment>[] = [
     id: "environment",
     title: "Environment",
     width: "24%",
+    isRowHeader: true,
     render: (runtime) => (
       <>
-        <div className="exp-settings__cell-title">{runtime.displayName}</div>
+        <div>{runtime.displayName}</div>
         {runtime.version && !runtime.displayName.includes(runtime.version) && <div className="ui-meta">{runtime.version}</div>}
       </>
     ),
@@ -88,18 +89,18 @@ export function ResearchSection() {
           description={`Scanned ${new Date(report.scannedAtMs).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}.`}
         >
           {report.runtimes.length === 0 ? (
-            <EmptyState size="compact" className="exp-settings__bleed" title="No environments found" description="Install Python, R, or Julia, then refresh." />
+            <EmptyState size="compact" title="No environments found" description="Install Python, R, or Julia, then refresh." />
           ) : (
-            <div data-testid="research-environments" aria-busy={loading}>
-              <SimpleTable
-                aria-label="Environments"
-                className="exp-settings__table"
-                columns={COLUMNS}
-                rows={report.runtimes}
-                rowKey={(runtime) => runtime.id}
-                rowProps={(runtime) => ({ "data-runtime-id": runtime.id, "data-language": runtime.language })}
-              />
-            </div>
+            <SimpleTable
+              aria-label="Environments"
+              aria-busy={loading}
+              data-testid="research-environments"
+              className="exp-settings__table"
+              columns={COLUMNS}
+              rows={report.runtimes}
+              rowKey={(runtime) => runtime.id}
+              rowProps={(runtime) => ({ "data-runtime-id": runtime.id, "data-language": runtime.language })}
+            />
           )}
         </SettingsGroup>
       )}
