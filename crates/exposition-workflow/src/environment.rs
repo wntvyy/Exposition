@@ -269,6 +269,10 @@ pub fn apply_batch_pairs(env: &mut WorkflowEnvironment, pairs: &[(String, String
         if let Some(limit) = get(keys::PACKAGES_TRUNCATED) {
             env.note(format!("The runner listed at most {limit} packages; more are installed."));
         }
+    } else if let Some(source) = get(keys::PACKAGES_SOURCE) {
+        // An empty list from a report that checks particular packages means
+        // none of those were found, not that nothing is installed.
+        env.note(format!("Packages: {source} — none of the checked packages were found."));
     }
     if let Some(seed) = get(keys::SEED).and_then(|s| s.parse::<u64>().ok()) {
         env.seed = Some(seed);
@@ -576,6 +580,23 @@ mod tests {
 
     fn pkgs(list: &[(&str, &str)]) -> Vec<(String, String)> {
         list.iter().map(|(n, v)| ((*n).to_owned(), (*v).to_owned())).collect()
+    }
+
+    /// A report that checks packages but found none of them still says where
+    /// the (empty) list comes from — "no packages" never reads as "nothing
+    /// installed" (e.g. a native Python without the packages discovery checks).
+    #[test]
+    fn an_empty_package_report_still_says_where_packages_come_from() {
+        let mut env = WorkflowEnvironment::base("nativePython", Containment::NativeAccount);
+        let source = "the research environment report (the packages it checks, not every installed package)";
+        apply_batch_pairs(&mut env, &[(keys::PACKAGES_SOURCE.to_owned(), source.to_owned())]);
+        assert!(env.packages.is_empty());
+        assert_eq!(env.packages_digest, None);
+        assert!(
+            env.notes.iter().any(|n| n.contains("environment report") && n.contains("none of the checked packages")),
+            "{:?}",
+            env.notes
+        );
     }
 
     #[test]
