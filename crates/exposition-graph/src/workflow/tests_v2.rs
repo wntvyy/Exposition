@@ -1123,3 +1123,38 @@ fn condition_numbers_compare_as_exact_decimals() {
         assert!(super::v2::Decimal::parse(bad).is_none(), "{bad:?}");
     }
 }
+
+/// An association step's proposals are decided once per step, so the step
+/// cannot repeat: refused at validation (not only when its proposal is
+/// decided after the run).
+#[test]
+fn an_association_step_cannot_repeat() {
+    let repeats = [
+        StepRepeat::ForEach {
+            parameter: "declarations".into(),
+            values: vec![ParamValue::Text("main_theorem".into()), ParamValue::Text("helper".into())],
+        },
+        StepRepeat::Until {
+            port: "proposal".into(),
+            test: ConditionTest::OutputPresent,
+            negate: false,
+            max_iterations: 2,
+            on_exhausted: Exhausted::UseLast,
+        },
+    ];
+    let well_formed = {
+        let mut def = audit();
+        def.schema = WORKFLOW_SCHEMA_V2.into();
+        def
+    };
+    assert_eq!(validate(&well_formed).state, DraftState::WellFormed, "{:?}", errors(&validate(&well_formed)));
+    for repeat in repeats {
+        let mut def = well_formed.clone();
+        assert_eq!(def.steps[1].operation.id, registry::FORMAL_ASSOCIATE);
+        def.steps[1].repeat = Some(repeat);
+        let v = validate(&def);
+        assert_eq!(v.state, DraftState::Incomplete);
+        let d = v.diagnostics.iter().find(|d| d.code == "workflow.repeatInvalid").expect("repeatInvalid");
+        assert!(d.message.contains("decided once per step") && d.message.contains("cannot repeat"), "{}", d.message);
+    }
+}

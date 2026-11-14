@@ -789,6 +789,68 @@ fn a_repeated_step_seeds_each_instance_and_its_instances_reach_the_manifest_drif
     assert_eq!(copy_seeds, expected);
 }
 
+/// Instances are numbered from 1 in what users read (drift, seed notices);
+/// a step or instance that ran without recording an environment says why.
+#[test]
+fn drift_numbers_instances_from_one_and_says_why_an_environment_is_unrecorded() {
+    let f = fixture();
+    let original = f.run(&f.save(sweep()));
+    assert_eq!(original.state, WorkflowRunState::Succeeded, "{:?}", original.message);
+    *f.host.image_id.lock().unwrap() = Some(IMAGE_B.into());
+    *f.batch.current.lock().unwrap() = image_pairs(IMAGE_B, "2.3.1");
+    let current = f.current();
+    let sweep_at = original.steps.iter().position(|s| s.step == "sweep").unwrap();
+    let join_at = original.steps.iter().position(|s| s.step == "join").unwrap();
+    let planned = original.plan.steps.iter().find(|s| s.step == "sweep").unwrap();
+    let now = current(&original.plan, planned).expect("the current environment");
+
+    // Only the second instance (index 1) ran in another image than now.
+    let mut run = original.clone();
+    run.steps[sweep_at].instances[0].attempts.last_mut().unwrap().environment = Some(now.clone());
+    let drift = crate::reproduce::reproduction_drift(&run, &current);
+    let image = drift.iter().find(|d| d.step.as_deref() == Some("sweep") && d.aspect == "image").unwrap();
+    assert!(image.message.ends_with("(instance 2)"), "{}", image.message);
+    let notices = crate::reproduce::reproduction_notices(&original, &[]);
+    let seeds = notices.iter().find(|n| n.contains("EXPOSITION_SEED")).unwrap();
+    assert!(seeds.contains("“Step sweep” #1 ") && seeds.contains("“Step sweep” #2 "), "{seeds}");
+    assert!(!seeds.contains("#0"), "{seeds}");
+
+    // Unrecorded: an interrupted instance, a run that predates capture, a
+    // step that was never dispatched; each says why.
+    let mut run = original.clone();
+    let interrupted = run.steps[sweep_at].instances[1].attempts.last_mut().unwrap();
+    interrupted.environment = None;
+    interrupted.state = WorkflowAttemptState::Interrupted;
+    for attempt in &mut run.steps[join_at].attempts {
+        attempt.environment = None;
+    }
+    let drift = crate::reproduce::reproduction_drift(&run, &current);
+    let unrecorded = |step: &str| -> Vec<String> {
+        drift
+            .iter()
+            .filter(|d| d.step.as_deref() == Some(step) && d.aspect == "unrecorded")
+            .map(|d| d.message.clone())
+            .collect()
+    };
+    assert_eq!(
+        unrecorded("sweep"),
+        ["no environment was recorded for instance 2 (the application stopped while it ran (interrupted))"]
+    );
+    assert_eq!(unrecorded("join"), ["no environment was recorded (the run predates environment capture)"]);
+    for attempt in &mut run.steps[join_at].attempts {
+        attempt.operation = None;
+        attempt.dispatched_at_ms = None;
+        attempt.state = WorkflowAttemptState::Failed;
+    }
+    let drift = crate::reproduce::reproduction_drift(&run, &current);
+    let never: Vec<&str> = drift
+        .iter()
+        .filter(|d| d.step.as_deref() == Some("join") && d.aspect == "unrecorded")
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(never, ["no environment was recorded (it was never dispatched)"]);
+}
+
 #[test]
 fn a_served_model_id_is_recorded_but_only_a_configured_model_change_is_drift() {
     let f = fixture();

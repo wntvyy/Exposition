@@ -30,8 +30,11 @@ use crate::model::{
 };
 use crate::service::WorkflowRunService;
 
-/// Schema of a run manifest.
-pub const MANIFEST_SCHEMA: &str = "exposition.workflowRunManifest/1";
+/// Schema of a run manifest. /2 (M9): repeated steps' attempts under
+/// `steps[].instances`, `outputs[].instance`, and `execution.runnerImages`.
+pub const MANIFEST_SCHEMA: &str = "exposition.workflowRunManifest/2";
+/// Manifest schemas an export may replace (an earlier export of either).
+pub const REPLACEABLE_MANIFEST_SCHEMAS: [&str; 2] = ["exposition.workflowRunManifest/1", MANIFEST_SCHEMA];
 /// An exported manifest is never larger than this.
 pub const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 
@@ -563,9 +566,7 @@ pub fn manifest_json(manifest: &WorkflowRunManifest) -> String {
 fn is_manifest(bytes: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(bytes)
         .ok()
-        .and_then(|v| {
-            v.get("schema").and_then(|s| s.as_str()).map(|s| s.starts_with("exposition.workflowRunManifest/"))
-        })
+        .and_then(|v| v.get("schema").and_then(|s| s.as_str()).map(|s| REPLACEABLE_MANIFEST_SCHEMAS.contains(&s)))
         .unwrap_or(false)
 }
 
@@ -685,6 +686,17 @@ mod tests {
         assert_eq!(first.sha256, sha256_hex(json.as_bytes()));
         let again = write_manifest_file(&target, json).expect("an earlier manifest may be replaced");
         assert_eq!(again.bytes, json.len() as u64);
+        // A manifest of either schema may be replaced; an unknown one is not.
+        for (existing, replaceable) in [
+            ("{\"schema\": \"exposition.workflowRunManifest/1\"}", true),
+            ("{\"schema\": \"exposition.workflowRunManifest/2\"}", true),
+            ("{\"schema\": \"exposition.workflowRunManifest/99\"}", false),
+            ("{\"schema\": \"exposition.workflowRunManifestX\"}", false),
+        ] {
+            std::fs::write(&target, existing).unwrap();
+            assert_eq!(write_manifest_file(&target, json).is_ok(), replaceable, "{existing}");
+        }
+        assert_eq!(MANIFEST_SCHEMA, "exposition.workflowRunManifest/2");
     }
 
     #[test]

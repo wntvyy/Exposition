@@ -11,12 +11,13 @@
 //    marker file the edited Lean source writes appears outside the project).
 //    The run sections B and C use then fires through a watched data input,
 //    over the reviewed Lean text.
-// B. The run-manifest export takes a destination path from the webview and
-//    writes new .json files into the app data folder and the project's
-//    `.exposition` records, which the bundle export refuses (R-m9 F3).
-//    The exported manifest is checked for absolute user paths (held).
-// C. Re-approving a trigger opens the standing-plan dialog with "allow native
-//    steps" already ticked from the earlier approval (R-m9 F4).
+// B. Regression check for R-m9 F3 (fixed): the run-manifest export refuses
+//    destinations the bundle export refuses (the app data folder, the
+//    project's `.exposition` records) and writes exactly the manifest to a
+//    chosen file; the exported manifest has no absolute user paths (held).
+// C. Regression check for R-m9 F4 (fixed): re-approving a trigger opens the
+//    standing-plan dialog with "allow native steps" unticked, so native
+//    consent is asked anew.
 // D. The plan binds the saved Lean file while the Lean service checks the
 //    document buffer. Held at 8fd980b: a manual or triggered run over an
 //    unsaved buffer is refused (workflow.inputChanged) and does not execute
