@@ -118,7 +118,7 @@ export function researchActions(
           notify({
             tone: "info",
             title: experiments.length === 1 ? `Copied experiment “${experiments[0]!.name}”` : `Copied ${experiments.length} experiments`,
-            body: "Paste in the project graph makes a separate copy.",
+            body: "Pasting on the Graph page makes a separate copy.",
           });
         }
       },

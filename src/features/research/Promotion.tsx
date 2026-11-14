@@ -327,8 +327,8 @@ function PromotionForm({ run, artifact, onDone }: { run: RunSummary; artifact: A
           <Spinner size="sm" aria-label="Loading documents" />
         ) : targets.length === 0 ? (
           <p className="ui-meta">
-            The project has no Typst, LaTeX, or Markdown manuscript to insert this {what} into. Promotion is optional: kept
-            results stay in Research.
+            The project has no Typst, LaTeX, or Markdown manuscript to insert this {what} into. Kept results stay in
+            Research.
           </p>
         ) : (
           <>
@@ -414,8 +414,8 @@ function PromotionForm({ run, artifact, onDone }: { run: RunSummary; artifact: A
               </Button>
             }
           >
-            {step.outcome.graph.kind === "pendingReconciliation" ? step.outcome.graph.reason : null} A pending record was
-            kept in the operation journal; reconciling records the attachment without changing the document again.
+            {step.outcome.graph.kind === "pendingReconciliation" ? step.outcome.graph.reason : null} Reconciling records the
+            attachment without changing the document again.
           </Banner>
         </div>
       )}
@@ -482,7 +482,7 @@ export function PreviewView({ preview }: { preview: PromotionPreview }) {
           },
         ]}
       />
-      <p className="ui-meta">The format adapter makes exactly these changes, as one undoable change:</p>
+      <p className="ui-meta">Approving makes exactly these changes, as one undoable edit:</p>
       {preview.edits.map((e, i) => (
         <div key={i} className="exp-promotion__edit">
           <div className="ui-meta">{e.replaced ? `Replace from line ${e.line}` : `Insert at line ${e.line}`}</div>

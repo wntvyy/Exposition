@@ -10,16 +10,16 @@
 import { Ban, ShieldAlert, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { Badge, Banner, Section } from "../../ui/components";
+import { Badge, Section } from "../../ui/components";
 import { workflowCommands } from "../workflows/ipc";
 
 export const TRUSTED_NATIVE_LABEL = "Trusted native — runs with your account's privileges";
 export const RESTRICTED_SCOPE =
-  "Interactive research sessions run natively. Restricted research execution is available only for workflow Python batch steps (a container that sees only declared inputs).";
+  "Restricted research execution is available only for workflow Python batch steps (a container that sees only declared inputs).";
 
 /** Compact label for session toolbars (the full sentence is its accessible name). */
 export function ExecutionLabel() {
-  const full = `${TRUSTED_NATIVE_LABEL}. The research folder and session separate your work but are not a sandbox. ${RESTRICTED_SCOPE}`;
+  const full = `${TRUSTED_NATIVE_LABEL}. The research folder and session organize work; they are not a sandbox. ${RESTRICTED_SCOPE}`;
   return (
     <Badge
       tone="warning"
@@ -84,13 +84,5 @@ export function ExecutionModes() {
         </div>
       </div>
     </Section>
-  );
-}
-
-export function TrustedNativeBanner() {
-  return (
-    <Banner tone="warning" title={TRUSTED_NATIVE_LABEL}>
-      The session and research folder organize work; they are not a sandbox. {RESTRICTED_SCOPE}
-    </Banner>
   );
 }

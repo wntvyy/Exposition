@@ -27,7 +27,7 @@ vi.mock("../../lib/graphIpc", () => ({ graphCommands: graph, graphEvents: { grap
 vi.mock("./store", async (importOriginal) => ({ ...(await importOriginal<typeof import("./store")>()), ...store }));
 
 const { useResearch } = await import("./store");
-const { RunHistory } = await import("./ResearchPanel");
+const { RunHistory, RunRow } = await import("./ResearchPanel");
 const { GraphDependencies, freshnessStatus } = await import("./GraphInspect");
 
 function run(id: string, code: string): RunSummary {
@@ -68,6 +68,19 @@ describe("RunHistory", () => {
     fireEvent.keyDown(second, { key: " " });
     expect(store.selectRun).toHaveBeenLastCalledWith("run-2");
     expect(store.selectRun).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("RunRow", () => {
+  it("joins its facts without a dangling separator when the title replaces the time", () => {
+    const attempt = { ...run("run-3", "fit(x)"), owner: { kind: "agent" } } as unknown as RunSummary;
+    const { container } = render(
+      <ul>
+        <RunRow run={attempt} now={2_000} title="10:00:00" onSelect={() => {}} />
+      </ul>,
+    );
+    const facts = container.querySelector(".ui-list-row__meta > span:last-child")!;
+    expect(facts.textContent).toBe("agent · figure");
   });
 });
 

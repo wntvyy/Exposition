@@ -20,7 +20,7 @@ export function ResearchFilesSection() {
       <Section key="disabled" title="Research" variant="chrome" collapsible defaultExpanded={false}>
         <div className="xp-files__research" data-testid="files-research" data-enabled="false">
           <EmptyState
-            title="Research is not enabled for this project."
+            title="Research is not enabled"
             actions={
               <Button size="sm" variant="ghost" icon={FlaskConical} onPress={() => revealInResearch(null)}>
                 Open Research…

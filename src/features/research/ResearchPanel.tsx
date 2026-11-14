@@ -103,7 +103,7 @@ export function ResearchPanel() {
         <EmptyState
           icon={FlaskConical}
           title="No folder open"
-          description="Open a project folder to run Python, R, or Julia next to your paper. Runs, figures, and tables are recorded in the project's .exposition folder."
+          description="Open a project folder to run Python, R, or Julia. Runs and their outputs are recorded in its .exposition folder."
           actions={
             <Button size="sm" icon={FolderOpen} onPress={() => void openProjectFolder()}>
               Open Folder…
@@ -148,7 +148,7 @@ export function ResearchPanel() {
               </Button>
             }
           >
-            Research kernels run code with your account&rsquo;s permissions; trust this folder to start a session.
+            Research kernels run code with your account&rsquo;s privileges; trust this folder to start a session.
           </Banner>
         )}
         {!(environmentsLoading && !environments) && environmentsError && (
@@ -415,12 +415,12 @@ export function RunOutputView() {
       </div>
       {run.status.kind === "interrupted" && (
         <Banner tone="canceled" title="Interrupted">
-          The kernel stopped this run; output below is partial and the session state is kept.
+          Output below is partial; the session&rsquo;s state is kept.
         </Banner>
       )}
       {run.status.kind === "canceled" && (
         <Banner tone="canceled" title="Canceled">
-          This run was canceled; output below is partial.
+          Output below is partial.
         </Banner>
       )}
       {output.truncated && (
@@ -721,6 +721,13 @@ export function RunRow({
   onSelect: () => void;
 }) {
   const pill = runPill(run);
+  // Joined so a missing first fact never leaves a dangling separator.
+  const facts = [
+    title === undefined ? formatClock(run.startedAtMs) : null,
+    run.owner.kind === "agent" ? "agent" : null,
+    run.outputs.some((a) => a.kind === "figure") ? "figure" : null,
+    run.outputs.some((a) => a.kind === "table") ? "table" : null,
+  ].filter((f): f is string => f !== null);
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
@@ -741,12 +748,7 @@ export function RunRow({
         meta={
           <>
             <StatusText status={pill.status} label={pill.label} detail={formatDuration(run, now)} />
-            <span>
-              {title === undefined && formatClock(run.startedAtMs)}
-              {run.owner.kind === "agent" && " · agent"}
-              {run.outputs.some((a) => a.kind === "figure") && " · figure"}
-              {run.outputs.some((a) => a.kind === "table") && " · table"}
-            </span>
+            {facts.length > 0 && <span>{facts.join(" · ")}</span>}
           </>
         }
         onClick={onSelect}
@@ -765,7 +767,7 @@ export function RunHistory() {
     <div className="exp-research__history">
       <PanelHeader title="Runs" />
       {visible.length === 0 ? (
-        <EmptyState fill={false} title="No runs yet" description="Every run is recorded with its inputs and versions." />
+        <EmptyState fill={false} title="No runs yet" />
       ) : (
         <ul className="exp-research__runs" aria-label="Run history" data-testid="research-history">
           {visible.map((run) => (
