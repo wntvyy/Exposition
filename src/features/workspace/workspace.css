@@ -6,12 +6,13 @@
   min-height: 0;
 }
 
+/* Open folder row: one tree row tall, text at the pane inset. */
 .xp-files__header {
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  min-height: var(--control-height-md);
-  padding: 0 var(--space-1) 0 var(--space-3);
+  min-height: var(--row-height-tree);
+  padding: 0 var(--space-1) 0 var(--pane-inset);
 }
 
 .xp-files__name {
@@ -20,9 +21,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: var(--font-weight-semibold);
 }
 
+/* Shared by the Files tree and the Research trees (src/features/research). */
 .xp-tree {
   flex: 1;
   min-height: 0;
@@ -34,56 +35,61 @@
   color: var(--color-text-subtle);
 }
 
+/* Recent projects: list rows (pane inset of their own) inside the Recent
+   section; the open button's hit area covers its row. */
 .xp-recent {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+  margin-inline: calc(-1 * var(--pane-inset));
 }
 
 .xp-recent__row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-0-5);
+  position: relative;
+}
+
+.xp-recent__open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+  outline: none;
+}
+
+.xp-recent__open::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.xp-recent__open:focus-visible::after {
+  box-shadow: inset 0 0 0 var(--focus-ring-width) var(--color-focus-ring);
 }
 
 .xp-recent__remove {
-  flex: none;
-}
-
-.xp-recent__item {
-  flex: 1;
-  min-width: 0;
-  width: 100%;
-  justify-content: flex-start;
-  height: auto;
-  padding-block: var(--space-1);
-}
-
-.xp-recent__item .ui-button__label {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  min-width: 0;
-}
-
-.xp-recent__name {
-  font-weight: var(--font-weight-medium);
+  position: relative;
+  z-index: var(--z-sticky);
 }
 
 .xp-recent__path {
+  min-width: 0;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
 }
 
 .xp-recovery {
   margin: var(--space-2);
 }
 
-.xp-recovery__list {
+/* (Beats the banner's own list indent: these entries align with its title.) */
+.xp-recovery .xp-recovery__list {
   list-style: none;
   margin: var(--space-1) 0 0;
   padding: 0;

@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { Settings2 } from "lucide-react";
 
 import { registry } from "../../app/registry";
-import { Banner, Button, LoadingState, StatusPill } from "../../ui/components";
+import { Banner, Button, LoadingState, StatusText } from "../../ui/components";
 import { agents, useAgents } from "../agents/store";
 import { SettingRow, SettingsGroup, SettingsPage } from "./parts";
 
@@ -44,7 +44,7 @@ export function AgentsSection() {
             <span>{PROVIDER_LABELS[status.settings.provider] ?? status.settings.provider}</span>
           </SettingRow>
           <SettingRow label="Model">
-            <code className="exp-settings__path">{status.settings.model}</code>
+            <code className="ui-code exp-settings__path">{status.settings.model}</code>
           </SettingRow>
           <SettingRow
             label="API key"
@@ -55,14 +55,10 @@ export function AgentsSection() {
             }
             testId="agents-key"
           >
-            <StatusPill
-              size="sm"
-              status={status.configured ? "succeeded" : "unavailable"}
-              label={status.configured ? "Configured" : "Not configured"}
-            />
+            <StatusText status={status.configured ? "succeeded" : "unavailable"} label={status.configured ? "Configured" : "Not configured"} />
           </SettingRow>
           {status.credentialError && (
-            <Banner tone="danger" title="Credential storage error">
+            <Banner tone="danger" title="Credential storage error" className="exp-settings__notice">
               {status.credentialError}
             </Banner>
           )}

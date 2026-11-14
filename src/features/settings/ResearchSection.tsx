@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import { RefreshCw } from "lucide-react";
 
 import type { RuntimeEnvironment } from "../../bindings/RuntimeEnvironment";
-import { Button, EmptyState, ErrorState, LoadingState, StatusPill } from "../../ui/components";
+import { Button, EmptyState, ErrorState, LoadingState, SimpleTable, StatusText, type SimpleTableColumn } from "../../ui/components";
 import { loadEnvironments, useResearch } from "../research/store";
 import { SettingsGroup, SettingsPage } from "./parts";
 
@@ -11,6 +11,47 @@ function kernelLabel(runtime: RuntimeEnvironment): string {
   if (!runtime.kernel) return "—";
   return runtime.kernel.kind === "python" ? "ipykernel" : `kernelspec ${runtime.kernel.name}`;
 }
+
+const COLUMNS: SimpleTableColumn<RuntimeEnvironment>[] = [
+  {
+    id: "environment",
+    title: "Environment",
+    width: "24%",
+    render: (runtime) => (
+      <>
+        <div className="exp-settings__cell-title">{runtime.displayName}</div>
+        {runtime.version && !runtime.displayName.includes(runtime.version) && <div className="ui-meta">{runtime.version}</div>}
+      </>
+    ),
+  },
+  {
+    id: "status",
+    title: "Status",
+    width: "1%",
+    render: (runtime) =>
+      runtime.availability.kind === "available" ? (
+        <StatusText status="succeeded" label="Available" />
+      ) : (
+        <StatusText status="unavailable" label="Unavailable" />
+      ),
+  },
+  {
+    id: "details",
+    title: "Executable and kernel",
+    render: (runtime) => (
+      <>
+        {runtime.executable && <code className="ui-code exp-settings__path">{runtime.executable}</code>}
+        <div className="ui-meta">Kernel: {kernelLabel(runtime)}</div>
+        {runtime.packages.length > 0 && <div className="ui-meta">{runtime.packages.map((p) => `${p.name} ${p.version}`).join(", ")}</div>}
+        {runtime.availability.kind === "unavailable" && (
+          <div className="ui-meta">
+            {runtime.availability.reason}. {runtime.availability.guidance}
+          </div>
+        )}
+      </>
+    ),
+  },
+];
 
 export function ResearchSection() {
   const report = useResearch((s) => s.environments);
@@ -47,54 +88,18 @@ export function ResearchSection() {
           description={`Scanned ${new Date(report.scannedAtMs).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}.`}
         >
           {report.runtimes.length === 0 ? (
-            <EmptyState title="No environments found" description="Install Python, R, or Julia, then refresh." />
+            <EmptyState size="compact" className="exp-settings__bleed" title="No environments found" description="Install Python, R, or Julia, then refresh." />
           ) : (
-            <table className="exp-settings__table" data-testid="research-environments" aria-busy={loading}>
-              <thead>
-                <tr>
-                  <th scope="col" className="exp-settings__col-name">
-                    Environment
-                  </th>
-                  <th scope="col" className="exp-settings__col-fit">
-                    Status
-                  </th>
-                  <th scope="col">Executable and kernel</th>
-                </tr>
-              </thead>
-              <tbody>
-                {report.runtimes.map((runtime) => (
-                  <tr key={runtime.id} data-runtime-id={runtime.id} data-language={runtime.language}>
-                    <th scope="row">
-                      {runtime.displayName}
-                      {runtime.version && !runtime.displayName.includes(runtime.version) && (
-                        <div className="exp-settings__muted">{runtime.version}</div>
-                      )}
-                    </th>
-                    <td>
-                      {runtime.availability.kind === "available" ? (
-                        <StatusPill size="sm" status="succeeded" label="Available" />
-                      ) : (
-                        <StatusPill size="sm" status="unavailable" label="Unavailable" />
-                      )}
-                    </td>
-                    <td>
-                      {runtime.executable && <code className="exp-settings__path">{runtime.executable}</code>}
-                      <div className="exp-settings__muted">Kernel: {kernelLabel(runtime)}</div>
-                      {runtime.packages.length > 0 && (
-                        <div className="exp-settings__muted">
-                          {runtime.packages.map((p) => `${p.name} ${p.version}`).join(", ")}
-                        </div>
-                      )}
-                      {runtime.availability.kind === "unavailable" && (
-                        <div className="exp-settings__muted">
-                          {runtime.availability.reason}. {runtime.availability.guidance}
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div data-testid="research-environments" aria-busy={loading}>
+              <SimpleTable
+                aria-label="Environments"
+                className="exp-settings__table"
+                columns={COLUMNS}
+                rows={report.runtimes}
+                rowKey={(runtime) => runtime.id}
+                rowProps={(runtime) => ({ "data-runtime-id": runtime.id, "data-language": runtime.language })}
+              />
+            </div>
           )}
         </SettingsGroup>
       )}

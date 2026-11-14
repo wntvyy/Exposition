@@ -6,9 +6,21 @@ import { useEffect, useState } from "react";
 import { FolderSearch, RefreshCw, RotateCcw, X } from "lucide-react";
 
 import type { RestrictedLanguage } from "../../bindings/RestrictedLanguage";
-import { Banner, Button, Dialog, ErrorState, LoadingState, Select, StatusPill, TextField, type Status } from "../../ui/components";
+import {
+  Banner,
+  Button,
+  Dialog,
+  ErrorState,
+  LoadingState,
+  Select,
+  SimpleTable,
+  StatusText,
+  TextField,
+  type SimpleTableColumn,
+  type Status,
+} from "../../ui/components";
 import { loadToolchains, useJobs } from "../jobs/store";
-import { dockerAvailability, imageOptions, imageState, restrictedGuarantees, SOURCE_LABELS, toolRows, type ToolRow } from "./model";
+import { dockerAvailability, imageOptions, imageState, restrictedGuarantees, SOURCE_LABELS, toolRows, type ImageState, type ToolRow } from "./model";
 import { SettingRow, SettingsGroup, SettingsPage } from "./parts";
 import { loadExecutionSettings, loadImages, setDockerImage, setLanguageImage, setToolPath, useSettings } from "./store";
 
@@ -18,6 +30,35 @@ const TOOL_STATUS: Record<ToolRow["status"], { status: Status; label: string }> 
   broken: { status: "failed", label: "Not working" },
   checking: { status: "running", label: "Checking" },
 };
+
+/**
+ * What an image row says about its image: present locally (succeeded), not
+ * configured (refused, unavailable), or configured but not verified yet (a
+ * settled fact, muted). A configured image that is missing gets a warning
+ * banner below the row; the default image's row then says nothing more.
+ */
+function ImageStateText({
+  image,
+  notConfigured,
+  testId,
+  showMissing,
+}: {
+  image: ImageState;
+  notConfigured: string;
+  testId: string;
+  showMissing: boolean;
+}) {
+  if (image.kind === "missing" && !showMissing) return null;
+  return (
+    <span className="exp-settings__image-state" data-testid={testId}>
+      {image.kind === "notConfigured" && <StatusText status="unavailable" label={notConfigured} />}
+      {image.kind === "present" && (
+        <StatusText status="succeeded" label={`${image.image} is present locally (${image.local.id}, ${image.local.size}).`} />
+      )}
+      {(image.kind === "unverified" || image.kind === "missing") && <span className="ui-meta">Configured: {image.image}</span>}
+    </span>
+  );
+}
 
 function DockerGroup() {
   const toolchains = useJobs((s) => s.toolchains);
@@ -43,17 +84,15 @@ function DockerGroup() {
     >
       <SettingRow label="Docker" testId="docker-status">
         <div className="exp-settings__stack">
-          {docker.kind === "checking" && <StatusPill size="sm" status="running" label="Checking" />}
-          {docker.kind === "available" && (
-            <StatusPill size="sm" status="succeeded" label="Available" detail={docker.version ?? undefined} />
-          )}
-          {docker.kind === "broken" && <StatusPill size="sm" status="failed" label="Not working" />}
-          {docker.kind === "missing" && <StatusPill size="sm" status="unavailable" label="Not found" />}
+          {docker.kind === "checking" && <StatusText status="running" label="Checking" />}
+          {docker.kind === "available" && <StatusText status="succeeded" label="Available" detail={docker.version ?? undefined} />}
+          {docker.kind === "broken" && <StatusText status="failed" label="Not working" />}
+          {docker.kind === "missing" && <StatusText status="unavailable" label="Not found" />}
           {(docker.kind === "available" || docker.kind === "broken") && docker.path && (
-            <code className="exp-settings__path">{docker.path}</code>
+            <code className="ui-code exp-settings__path">{docker.path}</code>
           )}
-          {docker.kind === "broken" && <span className="exp-settings__muted">{docker.detail}</span>}
-          {docker.kind === "missing" && <span className="exp-settings__muted">{docker.guidance}</span>}
+          {docker.kind === "broken" && <span className="ui-meta">{docker.detail}</span>}
+          {docker.kind === "missing" && <span className="ui-meta">{docker.guidance}</span>}
         </div>
       </SettingRow>
       <SettingRow
@@ -90,44 +129,34 @@ function DockerGroup() {
                 Reload images
               </Button>
             </div>
-            {image.kind === "notConfigured" && (
-              <span className="exp-settings__muted" data-testid="docker-image-state">
-                No image configured: restricted runs are refused.
-              </span>
-            )}
-            {image.kind === "present" && (
-              <span className="exp-settings__muted" data-testid="docker-image-state">
-                {image.image} is present locally ({image.local.id}, {image.local.size}).
-              </span>
-            )}
-            {image.kind === "unverified" && (
-              <span className="exp-settings__muted" data-testid="docker-image-state">
-                Configured: {image.image}
-              </span>
-            )}
+            <ImageStateText
+              image={image}
+              notConfigured="No image configured: restricted runs are refused."
+              testId="docker-image-state"
+              showMissing={false}
+            />
           </div>
         )}
       </SettingRow>
       {imagesError && (
-        <Banner tone="warning" title="Could not list local images">
+        <Banner tone="warning" title="Could not list local images" className="exp-settings__notice">
           {imagesError}
         </Banner>
       )}
       {image.kind === "missing" && (
-        <Banner tone="warning" title={`${image.image} is not present locally`}>
+        <Banner tone="warning" title={`${image.image} is not present locally`} className="exp-settings__notice">
           Restricted runs are refused until the image is available. Choose a local image, or pull it with Docker yourself.
         </Banner>
       )}
       <LanguageImageRow language="r" />
       <LanguageImageRow language="julia" />
-      <div className="exp-settings__enforce" data-testid="restricted-guarantees">
-        <h4 className="exp-settings__subhead">Every restricted run</h4>
-        <ul>
+      <SettingRow label="Every restricted run" testId="restricted-guarantees">
+        <ul className="exp-settings__bullets">
           {restrictedGuarantees(execution.settings.docker).map((line) => (
             <li key={line}>{line}</li>
           ))}
         </ul>
-      </div>
+      </SettingRow>
     </SettingsGroup>
   );
 }
@@ -174,17 +203,17 @@ function LanguageImageRow({ language }: { language: RestrictedLanguage }) {
                 Clear
               </Button>
             </div>
-            <span className="exp-settings__muted" data-testid={`${testId}-state`}>
-              {image.kind === "notConfigured" && `No ${name} image: restricted ${name} batches are refused; they never run natively instead.`}
-              {image.kind === "present" && `${image.image} is present locally (${image.local.id}, ${image.local.size}).`}
-              {image.kind === "unverified" && `Configured: ${image.image}`}
-              {image.kind === "missing" && `Configured: ${image.image}`}
-            </span>
+            <ImageStateText
+              image={image}
+              notConfigured={`No ${name} image: restricted ${name} batches are refused; they never run natively instead.`}
+              testId={`${testId}-state`}
+              showMissing
+            />
           </div>
         )}
       </SettingRow>
       {image.kind === "missing" && (
-        <Banner tone="warning" title={`${image.image} is not present locally`}>
+        <Banner tone="warning" title={`${image.image} is not present locally`} className="exp-settings__notice">
           Restricted {name} batches are refused until the image is available. Choose a local image, or pull it with Docker yourself.
         </Banner>
       )}
@@ -245,13 +274,97 @@ function ToolPathDialog({ tool, onClose }: { tool: ToolRow; onClose: () => void 
           data-testid="tool-path-input"
         />
         {tool.path && tool.source !== "override" && (
-          <p className="exp-settings__muted">
-            Currently found: <code className="exp-settings__path">{tool.path}</code>
+          <p className="ui-meta">
+            Currently found: <code className="ui-code exp-settings__path">{tool.path}</code>
           </p>
         )}
       </form>
     </Dialog>
   );
+}
+
+/** Tool locations: what was found, where, how, and the actions that change it. */
+function toolColumns(
+  edit: (tool: ToolRow) => void,
+  resetting: string | null,
+  reset: (tool: ToolRow) => void,
+): SimpleTableColumn<ToolRow>[] {
+  return [
+    {
+      id: "tool",
+      title: "Tool",
+      render: (tool) => (
+        <>
+          <div className="exp-settings__cell-title">{tool.name}</div>
+          {tool.version && (
+            <div className="ui-meta" data-testid="tool-version">
+              {tool.version}
+            </div>
+          )}
+        </>
+      ),
+    },
+    {
+      id: "status",
+      title: "Status",
+      width: "1%",
+      render: (tool) => <StatusText status={TOOL_STATUS[tool.status].status} label={TOOL_STATUS[tool.status].label} />,
+    },
+    {
+      id: "location",
+      title: "Location",
+      render: (tool) => (
+        <>
+          {tool.path && (
+            <code className="ui-code exp-settings__path" data-testid="tool-path">
+              {tool.path}
+            </code>
+          )}
+          {tool.override && tool.override !== tool.path && (
+            <div>
+              Configured: <code className="ui-code exp-settings__path">{tool.override}</code>
+            </div>
+          )}
+          {tool.status === "missing" && tool.guidance && <div className="ui-meta">{tool.guidance}</div>}
+        </>
+      ),
+    },
+    {
+      id: "source",
+      title: "Source",
+      render: (tool) => (
+        <span className="ui-meta">
+          {tool.source ? SOURCE_LABELS[tool.source] : tool.override ? "Set in settings" : null}
+          {tool.detail && <span> · {tool.detail}</span>}
+        </span>
+      ),
+    },
+    {
+      id: "actions",
+      title: "Actions",
+      hideTitle: true,
+      width: "1%",
+      render: (tool) => (
+        <div className="exp-settings__actions">
+          <Button size="sm" icon={FolderSearch} aria-label={`Set location of ${tool.name}`} onPress={() => edit(tool)}>
+            {tool.override ? "Change…" : "Set…"}
+          </Button>
+          {tool.override && (
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={RotateCcw}
+              aria-label={`Use the discovered ${tool.name}`}
+              isPending={resetting === tool.id}
+              onPress={() => reset(tool)}
+            >
+              Reset
+            </Button>
+          )}
+        </div>
+      ),
+    },
+  ];
 }
 
 function ToolsGroup() {
@@ -282,83 +395,25 @@ function ToolsGroup() {
       }
     >
       {error && (
-        <Banner tone="danger" title="Could not check tools">
+        <Banner tone="danger" title="Could not check tools" className="exp-settings__notice">
           {error}
         </Banner>
       )}
       {resetError && (
-        <Banner tone="danger" title="Could not reset the location">
+        <Banner tone="danger" title="Could not reset the location" className="exp-settings__notice">
           {resetError}
         </Banner>
       )}
-      <table className="exp-settings__table" aria-busy={loading}>
-        <thead>
-          <tr>
-            <th scope="col" className="exp-settings__col-name">
-              Tool
-            </th>
-            <th scope="col" className="exp-settings__col-fit">
-              Status
-            </th>
-            <th scope="col">Location</th>
-            <th scope="col" className="exp-settings__col-fit">
-              <span className="exp-settings__sr-only">Actions</span>
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((tool) => (
-            <tr key={tool.id} data-tool-id={tool.id} data-status={tool.status} data-source={tool.source ?? undefined}>
-              <th scope="row">
-                {tool.name}
-                {tool.version && <div className="exp-settings__muted" data-testid="tool-version">{tool.version}</div>}
-              </th>
-              <td>
-                <StatusPill size="sm" status={TOOL_STATUS[tool.status].status} label={TOOL_STATUS[tool.status].label} />
-              </td>
-              <td>
-                {tool.path && (
-                  <code className="exp-settings__path" data-testid="tool-path">
-                    {tool.path}
-                  </code>
-                )}
-                {tool.override && tool.override !== tool.path && (
-                  <div>
-                    Configured: <code className="exp-settings__path">{tool.override}</code>
-                  </div>
-                )}
-                <div className="exp-settings__muted">
-                  {tool.source ? SOURCE_LABELS[tool.source] : tool.override ? "Set in settings" : null}
-                  {tool.detail && <span> · {tool.detail}</span>}
-                </div>
-                {tool.status === "missing" && tool.guidance && <div className="exp-settings__muted">{tool.guidance}</div>}
-              </td>
-              <td className="exp-settings__actions">
-                <Button
-                  size="sm"
-                  icon={FolderSearch}
-                  aria-label={`Set location of ${tool.name}`}
-                  onPress={() => setEditing(tool)}
-                >
-                  {tool.override ? "Change…" : "Set…"}
-                </Button>
-                {tool.override && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    icon={RotateCcw}
-                    aria-label={`Use the discovered ${tool.name}`}
-                    isPending={resetting === tool.id}
-                    onPress={() => void reset(tool)}
-                  >
-                    Reset
-                  </Button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div aria-busy={loading}>
+        <SimpleTable
+          aria-label="Tool locations"
+          className="exp-settings__table"
+          columns={toolColumns(setEditing, resetting, (tool) => void reset(tool))}
+          rows={rows}
+          rowKey={(tool) => tool.id}
+          rowProps={(tool) => ({ "data-tool-id": tool.id, "data-status": tool.status, "data-source": tool.source ?? undefined })}
+        />
+      </div>
       {editing && <ToolPathDialog tool={editing} onClose={() => setEditing(null)} />}
     </SettingsGroup>
   );
@@ -387,7 +442,7 @@ export function ExecutionSection() {
       ) : (
         <>
           {execution.warning && (
-            <div data-testid="execution-settings-warning">
+            <div className="exp-settings__notice" data-testid="execution-settings-warning">
               <Banner tone="warning" title="Invalid execution settings were reset">
                 {execution.warning}
               </Banner>

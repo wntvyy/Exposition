@@ -17,6 +17,7 @@ import {
   EmptyState,
   ErrorState,
   IconButton,
+  ListRow,
   LoadingState,
   Section,
   Toolbar,
@@ -75,29 +76,43 @@ function EmptyFolder() {
       )}
       {recent.length > 0 && (
         <Section title="Recent">
-          <ul className="xp-recent">
+          <div className="xp-recent" role="list" aria-label="Recent projects">
             {recent.map((project) => (
-              <li key={project.path} className="xp-recent__row" data-testid="recent-project" data-path={project.path}>
-                <Button
-                  variant="ghost"
-                  className="xp-recent__item"
-                  icon={Folder}
-                  aria-label={`Open ${project.name} (${project.path})`}
-                  onPress={() => void openWorkspace(project.path)}
-                >
-                  <span className="xp-recent__name">{project.name}</span>
-                  <span className="xp-recent__path">{project.path}</span>
-                </Button>
-                <IconButton
-                  icon={X}
-                  size="sm"
-                  className="xp-recent__remove"
-                  aria-label={`Remove ${project.name} from Recent`}
-                  onPress={() => void forgetRecent(project)}
-                />
-              </li>
+              <ListRow
+                key={project.path}
+                role="listitem"
+                className="xp-recent__row"
+                data-testid="recent-project"
+                data-path={project.path}
+                icon={<Folder size={14} aria-hidden />}
+                title={
+                  // The whole row opens the project (the button's hit area covers it).
+                  <button
+                    type="button"
+                    className="xp-recent__open"
+                    aria-label={`Open ${project.name} (${project.path})`}
+                    onClick={() => void openWorkspace(project.path)}
+                  >
+                    {project.name}
+                  </button>
+                }
+                meta={
+                  <span className="xp-recent__path" title={project.path}>
+                    {project.path}
+                  </span>
+                }
+                trailing={
+                  <IconButton
+                    icon={X}
+                    size="sm"
+                    className="xp-recent__remove"
+                    aria-label={`Remove ${project.name} from Recent`}
+                    onPress={() => void forgetRecent(project)}
+                  />
+                }
+              />
             ))}
-          </ul>
+          </div>
         </Section>
       )}
     </div>
@@ -132,7 +147,7 @@ function RecoveryItem({ entry }: { entry: RecoveryEntry }) {
               Copy Location
             </Button>
           )}
-          <Button size="sm" variant="secondary" onPress={() => void discardRecovery(entry)}>
+          <Button size="sm" variant="ghost" onPress={() => void discardRecovery(entry)}>
             Discard
           </Button>
         </span>
@@ -148,10 +163,10 @@ function RecoveryItem({ entry }: { entry: RecoveryEntry }) {
         {entry.disk === "missing" && " · file no longer exists"}
       </span>
       <span className="xp-recovery__actions">
-        <Button size="sm" variant="primary" onPress={() => void restoreRecovery(entry)}>
+        <Button size="sm" variant="secondary" onPress={() => void restoreRecovery(entry)}>
           Restore
         </Button>
-        <Button size="sm" variant="secondary" onPress={() => void discardRecovery(entry)}>
+        <Button size="sm" variant="ghost" onPress={() => void discardRecovery(entry)}>
           Discard
         </Button>
       </span>
@@ -208,11 +223,9 @@ function renderEntries(entries: FileEntry[], dirs: Record<string, DirState>, exp
         icon={entryIcon(entry, expanded.has(entry.path))}
         trailing={
           entry.unavailable ? (
-            <span className="xp-tree-note" title={entry.unavailable}>
-              {entry.link ? "outside folder" : "unavailable"}
-            </span>
+            <span title={entry.unavailable}>{entry.link ? "outside folder" : "unavailable"}</span>
           ) : entry.link ? (
-            <Link2 size={12} aria-label="Link" />
+            <Link2 size={14} aria-label="Link" />
           ) : undefined
         }
         hasChildItems={isDir}
@@ -329,7 +342,7 @@ export function FilesView() {
   return (
     <div className="xp-files" data-testid="files-view" data-root={info.root}>
       <div className="xp-files__header">
-        <span className="xp-files__name" title={info.root}>
+        <span className="xp-files__name ui-section-title" title={info.root}>
           {info.name}
         </span>
         <Toolbar aria-label="Folder actions">
