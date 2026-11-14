@@ -1529,9 +1529,18 @@ fn apply_copy(cx: &DataContext<'_>, origin: &Origin, target: &OpTarget) -> Resul
 pub fn restore_data(cx: &DataContext<'_>, restore: &OpRestore) -> Option<OpOutcome> {
     let (kind, record) = split_recoverable(&restore.restore)?;
     let target = OpTarget::Recoverable { id: restore.restore.clone() };
+    let mut notes: Vec<String> = Vec::new();
     let result: Result<OpTarget, OpError> = match kind {
         RECOVERABLE_ENTITY | RECOVERABLE_RELATION | RECOVERABLE_VIEW | RECOVERABLE_WORKFLOW => {
-            cx.graph.restore_recoverable(&Origin::User, &restore.restore).map(|r| r.target)
+            cx.graph.restore_recoverable(&Origin::User, &restore.restore).map(|r| {
+                if r.skipped_relations > 0 {
+                    notes.push(format!(
+                        "{} relationship(s) were not restored: an item they connect no longer exists, or the same relationship exists again.",
+                        r.skipped_relations
+                    ));
+                }
+                r.target
+            })
         }
         RECOVERABLE_WORKFLOW_RUN => workflow_run_id(record).and_then(|id| {
             cx.runs.restore_run(&id).map(|_| OpTarget::WorkflowRun { run: id.to_string() }).map_err(run_error)
@@ -1546,11 +1555,14 @@ pub fn restore_data(cx: &DataContext<'_>, restore: &OpRestore) -> Option<OpOutco
         },
         _ => return None,
     };
+    if kind == RECOVERABLE_WORKFLOW {
+        notes.insert(0, "Restored. Its triggers stay off until you turn them on again.".to_owned());
+    }
     Some(match result {
         Ok(created) => OpOutcome {
             created: Some(created),
-            message: (kind == RECOVERABLE_WORKFLOW)
-                .then(|| "Restored. Its triggers stay off until you turn them on again.".to_owned()),
+            recovery: OpRecovery::AppManaged,
+            message: (!notes.is_empty()).then(|| notes.join(" ")),
             ..outcome(&target, OpStatus::Succeeded)
         },
         Err(e) => failed(&target, e),

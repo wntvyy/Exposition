@@ -778,3 +778,71 @@ fn an_earlier_run_history_keeps_its_runs_when_it_gains_recoverable_deletion() {
     let (before, after) = store.compact().unwrap();
     assert!(before.is_some() && after.is_some());
 }
+
+#[test]
+fn graph_items_go_through_the_same_plan_and_come_back_by_token() {
+    use exposition_graph::{ApplyOutcome, ChangeRequest, EntityKind, EntityRef, GraphOperation, RelationKind};
+    let e = env();
+    let create = |label: &str| -> exposition_graph::EntityId {
+        let base = e.fx.graph.status().revision;
+        let op = GraphOperation::CreateEntity {
+            temp_id: "t".into(),
+            kind: EntityKind::Claim,
+            roles: vec![],
+            label: label.into(),
+            key: None,
+            attributes: BTreeMap::new(),
+            binding: None,
+        };
+        let request = ChangeRequest { base_revision: base, operations: vec![op], summary: None };
+        match e.fx.graph.propose_and_apply(Origin::User, &request).unwrap().1 {
+            ApplyOutcome::Applied { created, .. } => created[0].id.clone(),
+            other => panic!("{other:?}"),
+        }
+    };
+    let (a, b) = (create("Claim A"), create("Claim B"));
+    let base = e.fx.graph.status().revision;
+    let relate = GraphOperation::AddRelation {
+        kind: RelationKind::DependsOn,
+        from: EntityRef::Id { id: a.clone() },
+        to: EntityRef::Id { id: b.clone() },
+        evidence_kind: None,
+        evidence: vec![],
+        note: None,
+    };
+    e.fx.graph
+        .propose_and_apply(
+            Origin::User,
+            &ChangeRequest { base_revision: base, operations: vec![relate], summary: None },
+        )
+        .unwrap();
+
+    // Routine deletion of a curated item: no decision, restorable.
+    let ta = OpTarget::GraphEntity { entity: a.to_string() };
+    let plan = e.plan(e.request(delete(false), vec![ta.clone()]));
+    assert!(!plan.needs_decision, "{:?}", plan.impacts);
+    assert!(plan.effects[0].description.contains("1 relationship"), "{}", plan.effects[0].description);
+    let token = e.apply(&plan, &[])[0].restore.clone().expect("restorable");
+    assert!(e.fx.graph.entity_detail(&a).is_err());
+    // Permanent deletion explains the loss of recovery.
+    let tb = OpTarget::GraphEntity { entity: b.to_string() };
+    let plan = e.plan(e.request(delete(true), vec![tb]));
+    assert_eq!(kinds(&plan), vec![ImpactKind::RecoveryLoss]);
+    assert_eq!(e.apply(&plan, &[])[0].restore, None);
+    // Restoring A: same identity; the relationship to the purged B cannot come back.
+    let restored = restore_data(&e.cx(), &OpRestore { restore: token, on_collision: None }).unwrap();
+    assert_eq!(restored.status, OpStatus::Succeeded);
+    assert_eq!(restored.created, Some(ta.clone()));
+    assert!(restored.message.unwrap_or_default().contains("not restored"));
+    assert!(e.fx.graph.entity_detail(&a).unwrap().outgoing.is_empty());
+    // Duplicate: a fresh identity.
+    let plan = e.plan(e.request(OpKind::Duplicate, vec![ta]));
+    let Some(OpTarget::GraphEntity { entity }) = e.apply(&plan, &[])[0].created.clone() else { panic!() };
+    assert_ne!(entity, a.to_string());
+    // A file-backed resource is deleted as its source file.
+    let file = e.fx.graph.resource(&path("notes.md")).unwrap().unwrap();
+    let plan = e.plan(e.request(delete(false), vec![OpTarget::GraphEntity { entity: file.id.to_string() }]));
+    assert_eq!(plan.refusals[0].code, "ops.useSourceFile");
+    // Unknown tokens belong to the file side.
+    assert!(restore_data(&e.cx(), &OpRestore { restore: "trash-1234".into(), on_collision: None }).is_none());
+}
