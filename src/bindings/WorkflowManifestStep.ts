@@ -3,11 +3,16 @@ import type { Containment } from "./Containment";
 import type { ParamValue } from "./ParamValue";
 import type { StepOperation } from "./StepOperation";
 import type { WorkflowManifestAttempt } from "./WorkflowManifestAttempt";
+import type { WorkflowManifestInstance } from "./WorkflowManifestInstance";
 import type { WorkflowStepState } from "./WorkflowStepState";
 
 export type WorkflowManifestStep = { step: string, label: string, operation: StepOperation, runner: string, containment: Containment, state: WorkflowStepState, 
 /**
- * SHA-256 (hex) of the step's code or prompt as approved (the full
- * text is in the definition revision).
+ * SHA-256 (hex) of the exact code or prompt text the step ran (the
+ * full text is in the definition revision).
  */
-payloadSha256: string | null, parameters: { [key in string]: ParamValue }, timeLimitSeconds: number, attempts: Array<WorkflowManifestAttempt>, };
+payloadSha256: string | null, parameters: { [key in string]: ParamValue }, timeLimitSeconds: number, attempts: Array<WorkflowManifestAttempt>, 
+/**
+ * A repeated step's instances (its attempts live there).
+ */
+instances: Array<WorkflowManifestInstance>, };

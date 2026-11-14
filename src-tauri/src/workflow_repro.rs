@@ -110,10 +110,19 @@ fn file_name_for(title: &str) -> String {
     format!("{}-run-manifest.json", if stem.is_empty() { "workflow" } else { &stem })
 }
 
-/// Export the run's manifest to `destination` (an absolute `.json` path), or
-/// to a file chosen in the save dialog when `destination` is `None`
-/// (`workflow.exportCanceled` when the dialog is dismissed). An existing file
-/// is replaced only when it is an earlier run manifest.
+/// Where an export may write: the same rules as workflow bundle exports
+/// (an absolute `.json` path in an existing folder, never inside the
+/// project's `.exposition` folder or the app data folder, never a folder or a
+/// link).
+fn export_target(raw: &str, state: &Ctx) -> Result<PathBuf, CommandError> {
+    crate::workflows::chosen_file(raw, &state.workspace.open_root(), &state.data_dir)
+}
+
+/// Export the run's manifest to `destination`, or to a file chosen in the
+/// save dialog when `destination` is `None` (`workflow.exportCanceled` when
+/// the dialog is dismissed). Either way the bundle-export location rules
+/// apply, and an existing file is replaced only when it is an earlier run
+/// manifest.
 #[tauri::command]
 pub async fn workflow_run_manifest_export(
     app: AppHandle,
@@ -123,8 +132,8 @@ pub async fn workflow_run_manifest_export(
 ) -> Result<WorkflowManifestExport, CommandError> {
     blocking(&state, move |s| {
         let (json, title) = manifest_json(s, &run)?;
-        let destination = match destination {
-            Some(path) => PathBuf::from(path),
+        let raw = match destination {
+            Some(path) => path,
             None => app
                 .dialog()
                 .file()
@@ -132,10 +141,13 @@ pub async fn workflow_run_manifest_export(
                 .add_filter("JSON", &["json"])
                 .set_file_name(file_name_for(&title))
                 .blocking_save_file()
-                .and_then(|picked| picked.as_path().map(Path::to_path_buf))
+                .and_then(|picked| picked.as_path().map(|p| p.display().to_string()))
                 .ok_or_else(|| CommandError::new("workflow.exportCanceled", "The export was canceled."))?,
         };
-        manifest::write_manifest_file(&destination, &json).map_err(CommandError::from)
+        let target = export_target(&raw, s)?;
+        let written = manifest::write_manifest_file(&target, &json).map_err(CommandError::from)?;
+        // The location as the person chose it (as bundle exports report it).
+        Ok(WorkflowManifestExport { path: raw, ..written })
     })
     .await
 }

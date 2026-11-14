@@ -23,4 +23,8 @@ sha256: string | null, bytes: number | null, mediaType: string | null,
 /**
  * Verdict of formal evidence, status of a proposal.
  */
-status: string | null, provenance: WorkflowOutputProvenance, };
+status: string | null, 
+/**
+ * The instance of a repeated step that produced it.
+ */
+instance: number | null, provenance: WorkflowOutputProvenance, };

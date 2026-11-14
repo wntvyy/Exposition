@@ -62,7 +62,8 @@ pub fn lean_provenance(workspace_root: &Path, file: &Path) -> LeanProvenance {
     let mut out = LeanProvenance::default();
     match &project.pin {
         Ok(pin) => out.toolchain_pin = pin.as_ref().map(|p| p.requested.clone()),
-        Err(e) => out.pin_error = Some(e.clone()),
+        // Recorded with runs: never the absolute location.
+        Err(e) => out.pin_error = Some(without_root(e, workspace_root)),
     }
     if !matches!(project.kind, ProjectKind::Lake { .. }) {
         return out;
@@ -78,6 +79,23 @@ pub fn lean_provenance(workspace_root: &Path, file: &Path) -> LeanProvenance {
             }
         }
         Err(e) => out.manifest_error = Some(e),
+    }
+    out
+}
+
+/// `text` with the workspace root's absolute location removed (paths
+/// become project-relative).
+fn without_root(text: &str, root: &Path) -> String {
+    let display = root.display().to_string();
+    let mut out = text.to_owned();
+    for form in [display.clone(), display.strip_prefix(r"\\?\").unwrap_or(&display).to_owned()] {
+        if form.is_empty() {
+            continue;
+        }
+        for sep in ['\\', '/'] {
+            out = out.replace(&format!("{form}{sep}"), "");
+        }
+        out = out.replace(&form, ".");
     }
     out
 }
@@ -214,6 +232,17 @@ mod tests {
         assert!(p.manifest_digest.is_some(), "the bytes are still identified");
         assert!(p.manifest_error.as_deref().is_some_and(|e| e.contains("not valid JSON")), "{p:?}");
         assert!(p.packages.is_empty());
+    }
+
+    #[test]
+    fn a_pin_error_names_the_file_relative_to_the_project() {
+        let (_tmp, root) = project(&[("lean-toolchain", &"x".repeat(5000)), ("A.lean", "")]);
+        let p = lean_provenance(&root, &root.join("A.lean"));
+        let error = p.pin_error.expect("an oversized pin is an error");
+        assert!(error.starts_with("lean-toolchain"), "{error}");
+        let bare = root.display().to_string();
+        let bare = bare.strip_prefix(r"\\?\").unwrap_or(&bare).to_owned();
+        assert!(!error.contains(&bare), "{error}");
     }
 
     #[test]
