@@ -251,6 +251,18 @@ describe("the combined decision", () => {
     expect(ipc.apply).toHaveBeenCalledWith(expect.objectContaining({ choices: { outputs: "delete" } }));
   });
 
+  it("a preset scope the plan does not offer is stated, not implied", async () => {
+    const runDelete: OpRequest = { kind: { kind: "delete", permanent: false }, targets: [{ kind: "workflowRun", run: "wrun-1" }], actor: { kind: "user" } };
+    ipc.plan.mockResolvedValue(plan(runDelete));
+    ipc.apply.mockResolvedValue(result([{ ...outcome("x"), target: runDelete.targets[0]!, recovery: { kind: "appManaged" } }]));
+    const pending = runOperation(runDelete, { presetChoices: { outputs: "delete" }, review: true });
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText("Deleting the outputs is not offered for this item")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await pending;
+    expect(ipc.apply).toHaveBeenCalledWith(expect.objectContaining({ choices: {} }));
+  });
+
   it("a stale plan is re-planned and decided again, never applied blindly", async () => {
     ipc.plan.mockResolvedValueOnce(plan(request)).mockResolvedValueOnce(decisionPlan());
     ipc.apply.mockRejectedValueOnce({ code: "ops.planStale", message: "The plan changed." }).mockResolvedValueOnce(result([outcome("figures/plot.png"), outcome("data/raw.csv")]));

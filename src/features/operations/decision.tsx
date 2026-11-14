@@ -29,7 +29,22 @@ export interface DecisionOptions {
   note?: string;
 }
 
-function DecisionBody({ plan, labels, values, note }: { plan: OpPlan; labels: TargetLabels; values: Record<string, string>; note?: string }) {
+/** Plain names of explicit scopes a request may preset. */
+const SCOPE_NAMES: Record<string, string> = { outputs: "Deleting the outputs" };
+
+function DecisionBody({
+  plan,
+  labels,
+  values,
+  note,
+  unoffered,
+}: {
+  plan: OpPlan;
+  labels: TargetLabels;
+  values: Record<string, string>;
+  note?: string;
+  unoffered: string[];
+}) {
   const [choices, setChoices] = useState(values);
   const groups = decisionGroups(plan);
   const multiple = plan.request.targets.length > 1;
@@ -42,6 +57,11 @@ function DecisionBody({ plan, labels, values, note }: { plan: OpPlan; labels: Ta
       {note && (
         <Banner tone="warning" title={note}>
           Review the consequences again before continuing.
+        </Banner>
+      )}
+      {unoffered.length > 0 && (
+        <Banner tone="warning" title={`${unoffered.map((k) => SCOPE_NAMES[k] ?? k).join(", ")} is not offered for ${plan.request.targets.length === 1 ? "this item" : "these items"}`}>
+          Only what is listed below happens.
         </Banner>
       )}
       {groups.length > 0 ? (
@@ -121,10 +141,12 @@ function DecisionBody({ plan, labels, values, note }: { plan: OpPlan; labels: Ta
 export async function requestDecision(plan: OpPlan, options: DecisionOptions = {}): Promise<Record<string, string> | null> {
   const labels = options.labels ?? new Map<string, string>();
   const values = initialChoices(plan.choices, options.presetChoices);
+  // A preset scope the plan does not offer is said plainly, never implied.
+  const unoffered = Object.keys(options.presetChoices ?? {}).filter((key) => !plan.choices.some((c) => c.key === key));
   const destructive = isDelete(plan.request.kind);
   const answer = await confirm<"cancel" | "proceed">({
     title: decisionTitle(plan, labels),
-    message: <DecisionBody plan={plan} labels={labels} values={values} note={options.note} />,
+    message: <DecisionBody plan={plan} labels={labels} values={values} note={options.note} unoffered={unoffered} />,
     actions: [
       { id: "cancel", label: "Cancel", variant: "secondary" },
       { id: "proceed", label: decisionAction(plan), variant: destructive ? "danger" : "primary" },
