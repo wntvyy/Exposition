@@ -1,11 +1,11 @@
 // Trusted folders: list (with grant time) and revoke. Granting is deliberately
 // not offered here: it only happens in the trust prompt an action raises.
 import { useEffect } from "react";
-import { RefreshCw, ShieldOff } from "lucide-react";
+import { FolderLock, RefreshCw, ShieldOff, TriangleAlert } from "lucide-react";
 
 import type { TrustRuleLocation } from "../../bindings/TrustRuleLocation";
 import { events } from "../../lib/ipc";
-import { Button, EmptyState, ErrorState, LoadingState, StatusPill } from "../../ui/components";
+import { Badge, Button, EmptyState, ErrorState, ListRow, LoadingState, StatusText } from "../../ui/components";
 import { formatGrantedAt } from "./model";
 import { SettingsGroup, SettingsPage } from "./parts";
 import { loadTrust, revokeTrust, useSettings } from "./store";
@@ -15,7 +15,7 @@ function LocationList({ locations }: { locations: TrustRuleLocation[] }) {
     <ul className="exp-settings__locations">
       {locations.map((l) => (
         <li key={l.path}>
-          <code className="exp-settings__path">{l.path}</code> <span className="exp-settings__muted">{l.description}</span>
+          <code className="ui-code exp-settings__path">{l.path}</code> <span className="ui-meta">{l.description}</span>
         </li>
       ))}
     </ul>
@@ -71,48 +71,56 @@ export function TrustSection() {
           <SettingsGroup title="Trusted">
             {trust.roots.length === 0 ? (
               <EmptyState
+                size="compact"
+                className="exp-settings__bleed"
                 title="No trusted folders"
                 description="When a build, kernel, or command needs to run on this computer, Exposition asks first. Folders you trust appear here."
               />
             ) : (
-              <ul className="exp-settings__list" data-testid="trusted-folders">
+              <div className="exp-settings__list" role="list" data-testid="trusted-folders">
                 {trust.roots.map((root) => (
-                  <li key={root.path} className="exp-settings__list-item" data-testid="trusted-folder" data-path={root.path}>
-                    <div className="exp-settings__list-text">
-                      <code className="exp-settings__path">{root.path}</code>
-                      <span className="exp-settings__muted">
-                        {root.grantedAtMs === null ? "Trusted (date not recorded)" : `Trusted ${formatGrantedAt(root.grantedAtMs)}`}
-                      </span>
-                      {(!root.exists || root.ignoredReason) && (
-                        <span className="exp-settings__pills">
-                          {!root.exists && <StatusPill size="sm" status="unavailable" label="Folder no longer exists" />}
-                          {root.ignoredReason && (
-                            <StatusPill size="sm" status="warning" label="Ignored: too broad" detail={root.ignoredReason} />
-                          )}
-                        </span>
-                      )}
-                    </div>
-                    <Button
-                      size="sm"
-                      icon={ShieldOff}
-                      aria-label={`Revoke trust for ${root.path}`}
-                      onPress={() => void revokeTrust(root)}
-                    >
-                      Revoke…
-                    </Button>
-                  </li>
+                  <ListRow
+                    key={root.path}
+                    role="listitem"
+                    data-testid="trusted-folder"
+                    data-path={root.path}
+                    icon={<FolderLock size={14} aria-hidden />}
+                    title={<span className="exp-settings__path" title={root.path}>
+                        {root.path}
+                      </span>}
+                    codeTitle
+                    meta={
+                      <>
+                        <span>{root.grantedAtMs === null ? "Trusted (date not recorded)" : `Trusted ${formatGrantedAt(root.grantedAtMs)}`}</span>
+                        {!root.exists && <StatusText status="unavailable" label="Folder no longer exists" />}
+                        {root.ignoredReason && (
+                          <>
+                            <Badge tone="warning" icon={TriangleAlert}>
+                              Ignored: too broad
+                            </Badge>
+                            <span>{root.ignoredReason}</span>
+                          </>
+                        )}
+                      </>
+                    }
+                    trailing={
+                      <Button size="sm" icon={ShieldOff} aria-label={`Revoke trust for ${root.path}`} onPress={() => void revokeTrust(root)}>
+                        Revoke…
+                      </Button>
+                    }
+                  />
                 ))}
-              </ul>
+              </div>
             )}
           </SettingsGroup>
           <SettingsGroup title="What can be trusted" testId="trust-rules" description={trust.rules.summary}>
             <div className="exp-settings__rules">
               <div>
-                <h4 className="exp-settings__subhead">Personal folders (and anything containing them)</h4>
+                <h4 className="ui-group-label">Personal folders (and anything containing them)</h4>
                 <LocationList locations={trust.rules.personal} />
               </div>
               <div>
-                <h4 className="exp-settings__subhead">System folders (and anything inside or containing them)</h4>
+                <h4 className="ui-group-label">System folders (and anything inside or containing them)</h4>
                 <LocationList locations={trust.rules.system} />
               </div>
             </div>

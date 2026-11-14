@@ -1,5 +1,6 @@
-/* Settings editor. Tokens only (src/ui/tokens.css); controls, pills, banners,
-   and region states come from src/ui/components. */
+/* Settings editor: layout only. Headers, text roles (ui-section-title,
+   ui-group-label, ui-meta, ui-code), tables, list rows, status, and states
+   come from src/ui/components; every value is a token. */
 
 .exp-settings {
   container-type: inline-size;
@@ -17,12 +18,12 @@
 }
 
 .exp-settings__nav.ui-tab-list {
-  flex: 0 0 200px;
+  flex: 0 0 calc(var(--space-10) * 5);
   flex-direction: column;
   align-items: stretch;
   gap: var(--space-0-5);
   min-height: 0;
-  padding: var(--space-4) var(--space-2);
+  padding: var(--space-1) var(--space-2);
   border-bottom: none;
   border-right: var(--border-width) solid var(--color-border);
   background: var(--color-surface-sunken);
@@ -30,25 +31,19 @@
 }
 
 .exp-settings__nav-item.ui-tab {
-  flex: 0 0 auto;
-  height: var(--control-height-lg);
-  padding: 0 var(--space-3);
+  flex: none;
+  height: var(--control-height-md);
+  padding: 0 var(--space-2);
   border-radius: var(--radius-md);
-  font-size: var(--font-size-md);
   font-weight: var(--font-weight-regular);
-  text-transform: none;
-  letter-spacing: normal;
-  color: var(--color-text-muted);
 }
 
 .exp-settings__nav-item.ui-tab[data-hovered] {
   background: var(--color-surface-hover);
-  color: var(--color-text);
 }
 
 .exp-settings__nav-item.ui-tab[data-selected] {
   background: var(--color-accent-subtle);
-  color: var(--color-text);
   font-weight: var(--font-weight-medium);
 }
 
@@ -62,10 +57,36 @@
 }
 
 .exp-settings__panel.ui-tab-panel {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
+}
+
+/* A page: the shared page header, then the scrolling body at reading width. */
+.exp-settings__page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.exp-settings__body {
+  flex: 1;
+  min-height: 0;
   overflow: auto;
-  padding: var(--space-6) var(--space-8) var(--space-10);
+  padding: var(--space-4) var(--pane-inset) var(--space-10);
+}
+
+.exp-settings__content {
+  max-width: var(--content-max-width);
+}
+
+.exp-settings__description {
+  max-width: 72ch;
+  margin: 0 0 var(--space-4);
+  line-height: var(--line-height-normal);
 }
 
 @container (max-width: 640px) {
@@ -74,9 +95,8 @@
   }
 
   .exp-settings__nav.ui-tab-list {
-    flex: 0 0 auto;
+    flex: none;
     flex-direction: row;
-    padding: var(--space-1) var(--space-2);
     border-right: none;
     border-bottom: var(--border-width) solid var(--color-border);
     overflow-x: auto;
@@ -91,87 +111,74 @@
     width: auto;
     height: 2px;
   }
-
-  .exp-settings__panel.ui-tab-panel {
-    padding: var(--space-4) var(--space-4) var(--space-8);
-  }
 }
 
-/* Pages and groups */
-.exp-settings__page {
-  max-width: 920px;
-}
-
-.exp-settings__page-header {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-4);
-  margin-bottom: var(--space-2);
-}
-
-.exp-settings__page-heading {
-  flex: 1;
-  min-width: 0;
-}
-
-.exp-settings__page-title {
-  margin: 0;
-  font-size: var(--font-size-xl);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--line-height-tight);
-}
-
-.exp-settings__page-description {
-  margin: var(--space-1-5) 0 0;
-  color: var(--color-text-muted);
-  line-height: var(--line-height-normal);
-  max-width: 72ch;
-}
-
-.exp-settings__page-actions,
-.exp-settings__group-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-}
-
+/* Groups: section title, optional actions, short description, then rows. */
 .exp-settings__group {
   margin-top: var(--space-6);
+}
+
+.exp-settings__content > .exp-settings__group:first-child,
+.exp-settings__description + .exp-settings__group {
+  margin-top: 0;
 }
 
 .exp-settings__group-header {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: var(--control-height-md);
+  min-height: var(--control-height-sm);
 }
 
 .exp-settings__group-title {
   flex: 1;
-  margin: 0;
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-semibold);
+  min-width: 0;
+}
+
+.exp-settings__group-actions,
+.exp-settings__actions {
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
 }
 
 .exp-settings__group-description {
-  margin: var(--space-1) 0 var(--space-2);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-normal);
   max-width: 80ch;
+  margin: var(--space-0-5) 0 var(--space-2);
+  line-height: var(--line-height-normal);
 }
 
-.exp-settings__group > .ui-banner {
+.exp-settings__notice {
   margin: var(--space-2) 0;
 }
 
-/* Setting rows */
+/* Region states and list rows carry the pane inset themselves: pull them out
+   so their text aligns with the group's. Tables pull out by their cell padding. */
+.exp-settings__bleed,
+.exp-settings__list {
+  margin-inline: calc(-1 * var(--pane-inset));
+}
+
+.exp-settings__table {
+  margin-inline: calc(-1 * var(--space-2));
+}
+
+.exp-settings__cell-title {
+  font-weight: var(--font-weight-medium);
+}
+
+.exp-settings__footnote {
+  margin: var(--space-2) 0 0;
+}
+
+/* Setting rows: label and description beside the control. */
 .exp-settings__row {
   display: grid;
-  grid-template-columns: minmax(180px, 2fr) minmax(0, 3fr);
-  gap: var(--space-2) var(--space-6);
+  grid-template-columns: minmax(calc(var(--space-12) * 4), 2fr) minmax(0, 3fr);
+  gap: var(--space-1) var(--space-6);
   align-items: start;
-  padding: var(--space-3) 0;
+  padding: var(--space-2) 0;
   border-top: var(--border-width) solid var(--color-border-subtle);
 }
 
@@ -182,13 +189,13 @@
 }
 
 .exp-settings__row-label {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-height-md);
   font-weight: var(--font-weight-medium);
 }
 
 .exp-settings__row-description {
-  margin-top: var(--space-0-5);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
   line-height: var(--line-height-normal);
 }
 
@@ -198,6 +205,7 @@
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
+  min-height: var(--control-height-md);
 }
 
 .exp-settings__stack {
@@ -216,203 +224,101 @@
 }
 
 .exp-settings__select {
-  min-width: 260px;
-}
-
-/* Text */
-.exp-settings__muted {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.exp-settings__path {
-  font-family: var(--font-code);
-  font-size: var(--font-size-sm);
-  overflow-wrap: anywhere;
-  user-select: text;
-}
-
-.exp-settings__subhead {
-  margin: 0 0 var(--space-1);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-label);
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-}
-
-.exp-settings__sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-/* Lists (trusted folders) */
-.exp-settings__list {
-  list-style: none;
-  margin: var(--space-1) 0 0;
-  padding: 0;
-  border-top: var(--border-width) solid var(--color-border-subtle);
-}
-
-.exp-settings__list-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) 0;
-  border-bottom: var(--border-width) solid var(--color-border-subtle);
-}
-
-.exp-settings__list-text {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-0-5);
-  user-select: text;
-}
-
-.exp-settings__pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-}
-
-.exp-settings__rules {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: var(--space-4);
-}
-
-.exp-settings__locations {
-  margin: 0;
-  padding-left: var(--space-4);
-  color: var(--color-text);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-normal);
-}
-
-/* Tables (tools, environments, capabilities) */
-.exp-settings__table {
-  width: 100%;
-  margin-top: var(--space-1);
-  border-collapse: collapse;
-  table-layout: auto;
-}
-
-.exp-settings__table th,
-.exp-settings__table td {
-  padding: var(--space-2) var(--space-2) var(--space-2) 0;
-  text-align: left;
-  vertical-align: top;
-  border-bottom: var(--border-width) solid var(--color-border-subtle);
-  overflow-wrap: anywhere;
-}
-
-.exp-settings__table thead th {
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-medium);
-  color: var(--color-text-muted);
-  border-bottom-color: var(--color-border);
-}
-
-.exp-settings__table tbody th {
-  font-weight: var(--font-weight-medium);
-  min-width: 120px;
-}
-
-.exp-settings__table td {
-  user-select: text;
-}
-
-.exp-settings__table td:nth-child(2) {
-  white-space: nowrap;
-}
-
-.exp-settings__table .exp-settings__col-name {
-  width: 28%;
-}
-
-/* Shrink to content (status pills, action buttons). */
-.exp-settings__table .exp-settings__col-fit {
-  width: 1%;
-  white-space: nowrap;
-}
-
-.exp-settings__actions {
-  white-space: nowrap;
-  text-align: right;
-}
-
-.exp-settings__actions .ui-button + .ui-button {
-  margin-left: var(--space-1);
-}
-
-/* LaTeX targets (Project): paths wrap; the engine select stays compact. */
-.exp-settings__table--targets td:nth-child(2) {
-  white-space: normal;
+  min-width: min(100%, calc(var(--space-8) * 8));
 }
 
 .exp-settings__engine {
-  width: 132px;
+  width: calc(var(--space-8) * 4);
 }
 
-/* What restricted runs enforce */
-.exp-settings__enforce {
-  margin-top: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-surface-sunken);
+/* Paths and ids: monospace via ui-code; these wrap and can be copied. */
+.exp-settings__path {
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
-.exp-settings__enforce ul {
+/* Image state sentences wrap (StatusText keeps short labels on one line). */
+.exp-settings__image-state .ui-status-text {
+  align-items: flex-start;
+  white-space: normal;
+}
+
+.exp-settings__image-state .ui-status-text > svg {
+  margin-top: var(--space-0-5);
+}
+
+.exp-settings__bullets,
+.exp-settings__locations {
+  display: grid;
+  gap: var(--space-1);
   margin: 0;
   padding-left: var(--space-4);
   line-height: var(--line-height-normal);
 }
 
-/* Dialogs */
-.exp-settings__dialog {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+/* What can be trusted: two lists side by side when there is room. */
+.exp-settings__rules {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--space-12) * 6)), 1fr));
+  gap: var(--space-4);
 }
 
+.exp-settings__rules .ui-group-label {
+  margin-bottom: var(--space-1);
+}
+
+/* Dialogs */
+.exp-settings__dialog,
 .exp-settings__confirm {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
 }
 
-/* Storage & History (P1): the selected scope and the purge action. */
+/* Storage & History (P1): the selected scope beside the purge action. */
 .exp-storage__scope {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  margin-bottom: var(--space-4);
-  padding: var(--space-3) var(--space-4);
-  border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-surface-sunken);
+  padding-bottom: var(--space-3);
+  border-bottom: var(--border-width) solid var(--color-border);
 }
 
 .exp-storage__scope-text {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--space-0-5);
   min-width: 0;
+  line-height: var(--line-height-normal);
+}
+
+.exp-storage__scope-summary {
+  font-weight: var(--font-weight-semibold);
+}
+
+.exp-storage__measure {
+  color: var(--color-text-subtle);
+  font-weight: var(--font-weight-regular);
+}
+
+.exp-storage__nowrap,
+.exp-storage__state {
+  white-space: nowrap;
+}
+
+.exp-storage__state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.exp-storage__referenced {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
 }
 
 .exp-storage__excluded {
-  margin-top: var(--space-4);
-}
-
-.exp-storage__excluded-list {
-  margin: 0 0 var(--space-1);
-  padding-left: var(--space-4);
+  margin-top: var(--space-6);
 }

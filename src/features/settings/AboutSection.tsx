@@ -2,12 +2,12 @@
 // from live service status (toolchains, research discovery, provider, settings).
 import { useEffect } from "react";
 
-import { StatusPill, type Status } from "../../ui/components";
+import { KeyValueList, SimpleTable, StatusText, type SimpleTableColumn, type Status } from "../../ui/components";
 import { agents, useAgents } from "../agents/store";
 import { loadToolchains, useJobs } from "../jobs/store";
 import { loadEnvironments, useResearch } from "../research/store";
-import { deriveCapabilities, type CapabilityState } from "./model";
-import { SettingRow, SettingsGroup, SettingsPage } from "./parts";
+import { deriveCapabilities, type Capability, type CapabilityState } from "./model";
+import { SettingsGroup, SettingsPage } from "./parts";
 import { loadAppInfo, loadExecutionSettings, loadImages, useSettings } from "./store";
 
 const CAPABILITY_STATUS: Record<CapabilityState, { status: Status; label: string }> = {
@@ -15,6 +15,17 @@ const CAPABILITY_STATUS: Record<CapabilityState, { status: Status; label: string
   unavailable: { status: "unavailable", label: "Unavailable" },
   checking: { status: "running", label: "Checking" },
 };
+
+const CAPABILITY_COLUMNS: SimpleTableColumn<Capability>[] = [
+  { id: "capability", title: "Capability", width: "28%", render: (c) => <span className="exp-settings__cell-title">{c.label}</span> },
+  {
+    id: "status",
+    title: "Status",
+    width: "1%",
+    render: (c) => <StatusText status={CAPABILITY_STATUS[c.state].status} label={CAPABILITY_STATUS[c.state].label} />,
+  },
+  { id: "details", title: "Details", render: (c) => <span className="ui-meta">{c.detail}</span> },
+];
 
 const PLATFORM_LABELS: Record<string, string> = { windows: "Windows", macos: "macOS", linux: "Linux" };
 
@@ -40,53 +51,50 @@ export function AboutSection() {
   return (
     <SettingsPage title="About" testId="settings-about">
       <SettingsGroup title="Application">
-        <SettingRow label="Version">
-          <span data-testid="about-version">
-            {app ? `${app.name} ${app.version}${app.debugBuild ? " (debug build)" : ""}` : "…"}
-          </span>
-        </SettingRow>
-        <SettingRow label="Platform">
-          <span>{app ? `${PLATFORM_LABELS[app.platform] ?? app.platform} (${app.arch})` : "…"}</span>
-        </SettingRow>
-        <SettingRow label="Data directory" description="Settings, trust, recovery journals, and task history.">
-          {app ? (
-            <code className="exp-settings__path" data-testid="about-data-dir">
-              {app.dataDir}
-            </code>
-          ) : (
-            <span>…</span>
-          )}
-        </SettingRow>
+        <KeyValueList
+          items={[
+            {
+              key: "version",
+              label: "Version",
+              value: (
+                <span data-testid="about-version">
+                  {app ? `${app.name} ${app.version}${app.debugBuild ? " (debug build)" : ""}` : "…"}
+                </span>
+              ),
+            },
+            { key: "platform", label: "Platform", value: app ? `${PLATFORM_LABELS[app.platform] ?? app.platform} (${app.arch})` : "…" },
+            {
+              key: "dataDir",
+              label: "Data directory",
+              value: (
+                <>
+                  {app ? (
+                    <code className="ui-code exp-settings__path" data-testid="about-data-dir">
+                      {app.dataDir}
+                    </code>
+                  ) : (
+                    <span>…</span>
+                  )}
+                  <div className="ui-meta">Settings, trust, recovery journals, and task history.</div>
+                </>
+              ),
+            },
+          ]}
+        />
       </SettingsGroup>
       <SettingsGroup
         title="Capabilities"
         testId="capabilities"
         description="What works on this computer right now, from the services' own checks."
       >
-        <table className="exp-settings__table">
-          <thead>
-            <tr>
-              <th scope="col" className="exp-settings__col-name">
-                Capability
-              </th>
-              <th scope="col" className="exp-settings__col-fit">
-                Status
-              </th>
-              <th scope="col">Details</th>
-            </tr>
-          </thead>
-          <tbody>
-            {capabilities.map((c) => (
-              <tr key={c.id} data-capability={c.id} data-state={c.state}>
-                <th scope="row">{c.label}</th>
-                <td>
-                  <StatusPill size="sm" status={CAPABILITY_STATUS[c.state].status} label={CAPABILITY_STATUS[c.state].label} />
-                </td>
-                <td className="exp-settings__muted">{c.detail}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <SimpleTable
+          aria-label="Capabilities"
+          className="exp-settings__table"
+          columns={CAPABILITY_COLUMNS}
+          rows={capabilities}
+          rowKey={(c) => c.id}
+          rowProps={(c) => ({ "data-capability": c.id, "data-state": c.state })}
+        />
       </SettingsGroup>
     </SettingsPage>
   );
