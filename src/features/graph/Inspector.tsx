@@ -97,7 +97,7 @@ export interface InspectorActions {
 /** Type indicator (icon + type text) in its category's text color: inspector headers, dependency items. */
 export function TypeLabel({ category, icon: Icon, label }: { category: GraphCategory; icon?: IconComponent; label: string }) {
   return (
-    <span className="xp-graph-type" data-category={category}>
+    <span className="xp-graph-type ui-category-text" data-category={category}>
       {Icon && <Icon size={12} aria-hidden />}
       {label}
     </span>
@@ -480,16 +480,13 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
             <Button size="sm" icon={FileSearch} isDisabled={!resolved} onPress={() => resolved && void revealSource(resolved.path, resolved.range)}>
               Open source
             </Button>
-            {actions.onFocus && (
-              <Button size="sm" variant="ghost" icon={Crosshair} onPress={() => actions.onFocus?.(entity.id)}>
-                Show neighborhood
-              </Button>
-            )}
             {actions.onRelate && (
               <Button size="sm" variant="ghost" icon={GitBranchPlus} isDisabled={!actions.canWrite} onPress={() => actions.onRelate?.(entity)}>
                 Relate to…
               </Button>
             )}
+            {/* Icon-only (accessible name and tooltip "Show neighborhood") so the actions keep one line at the inspector width. */}
+            {actions.onFocus && <IconButton icon={Crosshair} size="sm" aria-label="Show neighborhood" onPress={() => actions.onFocus?.(entity.id)} />}
             <MenuTrigger>
               <IconButton icon={MoreHorizontal} size="sm" aria-label="More actions" />
               <Menu

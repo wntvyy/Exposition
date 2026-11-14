@@ -133,11 +133,17 @@ describe("Graph page", () => {
 
     const inspector = await selectRow("Main theorem");
     const header = inspector.querySelector(".ui-inspector-header")!;
-    expect(header.querySelector('.xp-graph-type[data-category="math"]')!.textContent).toBe("Theorem");
+    // The type in its category color (the shared category text role).
+    const type = header.querySelector('.ui-category-text[data-category="math"]')!;
+    expect(type.textContent).toBe("Theorem");
     expect(within(inspector).getByRole("heading", { name: "Main theorem", level: 3 })).toBeTruthy();
-    for (const name of ["Open source", "Show neighborhood", "Relate to…", "More actions"]) {
-      expect(within(header as HTMLElement).getByRole("button", { name })).toBeTruthy();
-    }
+    const actions = within(header as HTMLElement).getByRole("toolbar", { name: "Item actions" });
+    expect(within(actions).getAllByRole("button").map((b) => b.getAttribute("aria-label") ?? b.textContent)).toEqual([
+      "Open source",
+      "Relate to…",
+      "Show neighborhood",
+      "More actions",
+    ]);
     expect(await within(inspector).findByRole("heading", { name: "Relationships 2" })).toBeTruthy();
     expect(within(inspector).getByRole("heading", { name: "Source 1" })).toBeTruthy();
     const binding = within(inspector).getByTestId("graph-binding");
