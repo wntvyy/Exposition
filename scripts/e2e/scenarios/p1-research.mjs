@@ -91,7 +91,7 @@ export default async function p1Research({ launchApp, artifactsDir, assert }) {
     await dataGroup.click({ button: "right" });
     const menu = page.getByTestId("research-context-menu");
     await menu.waitFor();
-    const pasteItem = menu.getByRole("menuitem", { name: /^Paste into .*\/data\/$/ });
+    const pasteItem = menu.getByRole("menuitem", { name: /^Paste into Data$/ });
     assert.ok(await pasteItem.isVisible(), "the menu names the Data folder as the destination");
     await shot("p1-research-paste-menu-light");
     await pasteItem.click();
