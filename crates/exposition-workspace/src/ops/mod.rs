@@ -1044,7 +1044,12 @@ impl WorkspaceService {
             Err(e) => return fail("ops.restoreUnavailable", format!("{bin} cannot be read: {e}.")),
         }
         let parent = original.parent();
+        // A retained research output goes back into its run's artifact
+        // folder (only such files could be deleted from there).
+        let artifact = policy::classify(original) == policy::Area::Artifacts
+            && parent.as_ref().is_some_and(|p| p.components().count() >= 3);
         if let Some(parent) = &parent
+            && !artifact
             && let Some(message) = policy::refuse_destination(parent)
         {
             return fail("ops.protected", message);
@@ -1080,14 +1085,33 @@ impl WorkspaceService {
         if let Err(e) = trash.restore_to(item, &parent_abs, &staged_name) {
             return fail("ops.restoreFailed", format!("{original} could not be restored from {bin}: {e}."));
         }
-        let is_dir = std::fs::symlink_metadata(&staged).map(|m| m.is_dir()).unwrap_or(false);
+        if artifact && std::fs::symlink_metadata(&staged).map(|m| m.is_dir()).unwrap_or(false) {
+            return self.unplaced(&target, original, &staged, trash, "only retained files go back there".into());
+        }
+        self.place_restored(&target, original, parent.as_ref(), &parent_abs, &staged, trash)
+    }
+
+    /// Publish a restored item from its staging name under the original name
+    /// or, when that is taken, a fresh one (never replacing anything). An
+    /// item that cannot be placed is returned to the trash, or left where it
+    /// is and reported: it is the only copy and is never deleted.
+    fn place_restored(
+        &self,
+        target: &OpTarget,
+        original: &WorkspacePath,
+        parent: Option<&WorkspacePath>,
+        parent_abs: &Path,
+        staged: &Path,
+        trash: &dyn TrashBin,
+    ) -> OpOutcome {
+        let is_dir = std::fs::symlink_metadata(staged).map(|m| m.is_dir()).unwrap_or(false);
         let mut published = None;
         for candidate in names::candidates(original.file_name(), is_dir, true) {
-            let Ok(path) = names::join(parent.as_ref(), &candidate) else { continue };
+            let Ok(path) = names::join(parent, &candidate) else { continue };
             let result = if is_dir {
-                fsops::publish_dir(&staged, &parent_abs.join(&candidate))
+                fsops::publish_dir(staged, &parent_abs.join(&candidate))
             } else {
-                fsops::publish_file(&staged, &parent_abs.join(&candidate))
+                fsops::publish_file(staged, &parent_abs.join(&candidate))
             };
             match result {
                 Ok(()) => {
@@ -1096,21 +1120,21 @@ impl WorkspaceService {
                 }
                 Err(PublishError::Exists) => continue,
                 Err(PublishError::Io(e)) => {
-                    return fail(
-                        io_code(&e),
-                        format!(
-                            "{original} was taken out of {bin} but could not be put back in place ({e}); it is in {} under a temporary name.",
-                            parent.as_ref().map(|p| p.to_string()).unwrap_or_else(|| "the project folder".into())
-                        ),
+                    return self.unplaced(
+                        target,
+                        original,
+                        staged,
+                        trash,
+                        format!("it could not be put in place: {e}"),
                     );
                 }
             }
         }
         let Some(restored) = published else {
-            return fail("ops.nameUnavailable", format!("No free name was found to restore {original}."));
+            return self.unplaced(target, original, staged, trash, "no free name was found".into());
         };
         // Marked as a restore (the data side tells it apart from a copy).
-        let mut o = outcome(&target, OpStatus::Succeeded, Some("ops.restored"), None);
+        let mut o = outcome(target, OpStatus::Succeeded, Some("ops.restored"), None);
         if &restored == original {
             self.resume_documents_under(original);
         } else {
@@ -1120,8 +1144,70 @@ impl WorkspaceService {
         o
     }
 
-    /// Remove staging leftovers of operation `tag` in `folders` (after an
-    /// interruption). Returns how many were removed.
+    /// A restored item that could not be put in place: back to the trash
+    /// (under a new identity), else left at its staging name. Never deleted.
+    fn unplaced(
+        &self,
+        target: &OpTarget,
+        original: &WorkspacePath,
+        staged: &Path,
+        trash: &dyn TrashBin,
+        why: String,
+    ) -> OpOutcome {
+        let bin = trash.name();
+        let message = match trash.delete(&[staged.to_path_buf()]).pop() {
+            Some(Ok(_)) => format!("{original} was taken out of {bin} but {why}; it was put back in {bin}."),
+            _ => format!(
+                "{original} was taken out of {bin} but {why}; it is kept under the hidden name {} next to where it was.",
+                staged.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            ),
+        };
+        outcome(target, OpStatus::Failed, Some("ops.restoreIncomplete"), Some(message))
+    }
+
+    /// Finish restores that an interruption left at a staging name of
+    /// operation `tag` in `folder` (the item was already out of the trash):
+    /// each is published under `original`'s name or a fresh one, else put
+    /// back in the trash or kept and reported. Never deleted.
+    pub fn recover_restore_leftovers(
+        &self,
+        folder: &Path,
+        tag: &str,
+        original: &WorkspacePath,
+        trash: &dyn TrashBin,
+    ) -> Vec<OpOutcome> {
+        let Ok(root) = self.root() else { return Vec::new() };
+        let Ok(canonical) = std::fs::canonicalize(folder) else { return Vec::new() };
+        if !root.contains(&canonical) {
+            return Vec::new();
+        }
+        let target = OpTarget::Path { path: original.clone() };
+        let parent = original.parent();
+        let Ok(read) = std::fs::read_dir(&canonical) else { return Vec::new() };
+        let leftovers: Vec<PathBuf> = read
+            .flatten()
+            .filter(|e| fsops::is_staging_name(&e.file_name().to_string_lossy(), tag))
+            .map(|e| e.path())
+            .collect();
+        leftovers
+            .into_iter()
+            .map(|staged| {
+                let mut o = self.place_restored(&target, original, parent.as_ref(), &canonical, &staged, trash);
+                let note = "Exposition stopped while restoring it; the restore was completed now.";
+                o.message = Some(match o.message.take() {
+                    Some(m) if o.status == OpStatus::Succeeded => format!("{note} {m}"),
+                    Some(m) => m,
+                    None => note.to_owned(),
+                });
+                o
+            })
+            .collect()
+    }
+
+    /// Remove staging leftovers of COPY operation `tag` in `folders` (after an
+    /// interruption): partial copies whose originals are intact. Never used
+    /// for a restore (see [`Self::recover_restore_leftovers`]). Returns how
+    /// many were removed.
     pub fn remove_staging_leftovers(&self, folders: &[PathBuf], tag: &str) -> usize {
         let Ok(root) = self.root() else { return 0 };
         let mut removed = 0;
