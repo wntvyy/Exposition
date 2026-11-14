@@ -114,6 +114,11 @@ pub trait TrashBin: Send + Sync {
     fn restore_to(&self, item: &TrashedItem, parent: &Path, name: &str) -> Result<(), String>;
     /// Remove items from the trash for good (test cleanup).
     fn purge(&self, items: &[TrashedItem]) -> Result<(), String>;
+    /// Which of these items are still in the trash (same identity and
+    /// deletion time), in order.
+    fn present(&self, items: &[TrashedItem]) -> Result<Vec<bool>, String> {
+        items.iter().map(|i| self.contains(i)).collect()
+    }
 }
 
 /// The operating system's trash.
@@ -193,6 +198,15 @@ impl TrashBin for OsTrash {
     fn contains(&self, item: &TrashedItem) -> Result<bool, String> {
         let record = item.clone();
         on_fresh_thread(move || listing::list().map(|items| listing::find(&items, &record).is_some()))?
+    }
+
+    /// One listing of the trash for all of them.
+    #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+    fn present(&self, items: &[TrashedItem]) -> Result<Vec<bool>, String> {
+        let records = items.to_vec();
+        on_fresh_thread(move || {
+            listing::list().map(|listed| records.iter().map(|r| listing::find(&listed, r).is_some()).collect())
+        })?
     }
 
     #[cfg(not(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
