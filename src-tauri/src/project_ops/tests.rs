@@ -643,3 +643,263 @@ fn retained_artifacts_are_deleted_through_the_path_plan_with_data_impacts() {
         .unwrap();
     assert_eq!(plan.refusals[0].code, "ops.protected");
 }
+
+// ----- restore records that survive a restart ---------------------------------
+
+/// A test trash folder that can restore (the real Recycle Bin is used below
+/// where the restart test needs it): ids are unique across instances.
+struct DirTrash {
+    dir: PathBuf,
+}
+
+impl DirTrash {
+    fn new(dir: &Path) -> Self {
+        fs::create_dir_all(dir).unwrap();
+        Self { dir: dir.to_path_buf() }
+    }
+}
+
+impl TrashBin for DirTrash {
+    fn name(&self) -> &'static str {
+        "the test trash"
+    }
+    fn delete(&self, paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, TrashFailure>> {
+        static N: AtomicU64 = AtomicU64::new(0);
+        paths
+            .iter()
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let id = format!("{}-{name}", N.fetch_add(1, Ordering::SeqCst));
+                fs::rename(path, self.dir.join(&id))
+                    .map_err(|e| TrashFailure::new(TrashFailureKind::Other, e.to_string()))?;
+                Ok(Some(TrashedItem {
+                    id,
+                    name: path.file_name().unwrap().to_string_lossy().into_owned(),
+                    original_parent: path.parent().unwrap().to_path_buf(),
+                    deleted_at: 7,
+                }))
+            })
+            .collect()
+    }
+    fn contains(&self, item: &TrashedItem) -> Result<bool, String> {
+        Ok(self.dir.join(&item.id).exists())
+    }
+    fn restore_to(&self, item: &TrashedItem, parent: &Path, name: &str) -> Result<(), String> {
+        fs::rename(self.dir.join(&item.id), parent.join(name)).map_err(|e| e.to_string())
+    }
+    fn purge(&self, _items: &[TrashedItem]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn delete_tokens(ops: &ProjectOps, fx: &Fixture, ws: &WorkspaceService, targets: &[&str]) -> Vec<String> {
+    let data = FakeData::default();
+    let plan = ops.plan(ws, &data, request(OpKind::Delete { permanent: false }, targets)).unwrap();
+    let result = ops
+        .apply(
+            ws,
+            &data,
+            OpApply { plan: plan.plan.clone(), plan_hash: plan.plan_hash.clone(), choices: BTreeMap::new() },
+        )
+        .unwrap();
+    let _ = fx;
+    result.outcomes.iter().map(|o| o.restore.clone().expect("a restore token")).collect()
+}
+
+#[test]
+fn restore_tokens_survive_a_restart_and_the_item_is_re_identified_first() {
+    let fx = fixture();
+    let trash = fx.dir.0.join("trash");
+    let ops = fx.ops(DirTrash::new(&trash));
+    let tokens = delete_tokens(&ops, &fx, &fx.ws, &["a.txt", "b.txt"]);
+    assert!(!fx.exists("a.txt") && !fx.exists("b.txt"));
+    drop(ops);
+
+    // Restart: a new orchestrator over the same application data.
+    let ws = fx.restart();
+    let ops = fx.ops(DirTrash::new(&trash));
+    let data = FakeData::default();
+    let restored = ops.restore(&ws, &data, OpRestore { restore: tokens[0].clone(), on_collision: None }).unwrap();
+    assert_eq!(restored.outcomes[0].status, OpStatus::Succeeded, "{:?}", restored.outcomes);
+    assert_eq!(restored.outcomes[0].code.as_deref(), Some("ops.restored"));
+    assert_eq!(fs::read_to_string(fx.file("a.txt")).unwrap(), "a");
+    // Used once.
+    let again = ops.restore(&ws, &data, OpRestore { restore: tokens[0].clone(), on_collision: None }).unwrap_err();
+    assert_eq!(again.code, "ops.restoreUnknown");
+
+    // Emptied from the bin since: an honest refusal, nothing created, not offered again.
+    for entry in fs::read_dir(&trash).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let gone = ops.restore(&ws, &data, OpRestore { restore: tokens[1].clone(), on_collision: None }).unwrap();
+    assert_eq!(gone.outcomes[0].status, OpStatus::Failed);
+    assert_eq!(gone.outcomes[0].code.as_deref(), Some("ops.restoreUnavailable"));
+    assert!(!fx.exists("b.txt"));
+    let after = ops.restore(&ws, &data, OpRestore { restore: tokens[1].clone(), on_collision: None }).unwrap_err();
+    assert_eq!(after.code, "ops.restoreUnknown");
+    // Another restart: still spent.
+    let ops = fx.ops(DirTrash::new(&trash));
+    let e = ops.restore(&ws, &data, OpRestore { restore: tokens[0].clone(), on_collision: None }).unwrap_err();
+    assert_eq!(e.code, "ops.restoreUnknown");
+}
+
+#[test]
+fn a_persisted_restore_never_overwrites_the_original_path() {
+    let fx = fixture();
+    let trash = fx.dir.0.join("trash");
+    let ops = fx.ops(DirTrash::new(&trash));
+    let tokens = delete_tokens(&ops, &fx, &fx.ws, &["a.txt"]);
+    fs::write(fx.file("a.txt"), "a NEW file").unwrap();
+    let ws = fx.restart();
+    let ops = fx.ops(DirTrash::new(&trash));
+    let data = FakeData::default();
+    let cancelled =
+        ops.restore(&ws, &data, OpRestore { restore: tokens[0].clone(), on_collision: Some("cancel".into()) });
+    assert_eq!(cancelled.unwrap().outcomes[0].code.as_deref(), Some("ops.restoreCollision"));
+    let renamed = ops.restore(&ws, &data, OpRestore { restore: tokens[0].clone(), on_collision: None }).unwrap();
+    assert_eq!(renamed.outcomes[0].created, Some(path("a (2).txt")));
+    assert_eq!(fs::read_to_string(fx.file("a.txt")).unwrap(), "a NEW file");
+    assert_eq!(fs::read_to_string(fx.file("a (2).txt")).unwrap(), "a");
+}
+
+#[test]
+fn restore_records_are_bounded_and_pruned_once_their_item_is_gone() {
+    let fx = fixture();
+    let trash = fx.dir.0.join("trash");
+    fs::create_dir_all(fx.file("many")).unwrap();
+    let names: Vec<String> = (0..MAX_RESTORABLE + 3).map(|i| format!("many/f{i:04}.txt")).collect();
+    for n in &names {
+        fs::write(fx.file(n), "x").unwrap();
+    }
+    let ops = fx.ops(DirTrash::new(&trash));
+    let targets: Vec<&str> = names.iter().map(String::as_str).collect();
+    let tokens = delete_tokens(&ops, &fx, &fx.ws, &targets);
+    let root = fx.ws.open_root().unwrap();
+    let live = ops.persisted_tokens(&root);
+    assert_eq!(live.len(), MAX_RESTORABLE, "capped");
+    assert!(!live.contains(&tokens[0]) && live.contains(tokens.last().unwrap()), "the oldest go first");
+    // An item that left the bin is pruned when the project is next reconciled.
+    let gone = &tokens[tokens.len() - 1];
+    let last_name = format!("-f{:04}.txt", MAX_RESTORABLE + 2);
+    let item = fs::read_dir(&trash)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(&last_name))
+        .expect("the newest item");
+    fs::remove_file(item).unwrap();
+    let ws = fx.restart();
+    let ops = fx.ops(DirTrash::new(&trash));
+    ops.reconcile_interrupted(&ws, &FakeData::default());
+    let live = ops.persisted_tokens(&root);
+    assert_eq!(live.len(), MAX_RESTORABLE - 1);
+    assert!(!live.contains(gone));
+}
+
+#[test]
+fn a_restore_token_survives_a_restart_with_the_real_recycle_bin() {
+    let fx = fixture();
+    let probe = fx.dir.0.join("probe.txt");
+    fs::write(&probe, "p").unwrap();
+    match OsTrash.delete(&[probe]).pop().unwrap() {
+        Ok(Some(item)) => {
+            let _ = OsTrash.purge(&[item]);
+        }
+        other => {
+            eprintln!("SKIPPED: the Recycle Bin cannot be used or matched here: {other:?}");
+            return;
+        }
+    }
+    let ops = fx.ops(OsTrash);
+    let tokens = delete_tokens(&ops, &fx, &fx.ws, &["b.txt"]);
+    drop(ops);
+    let ws = fx.restart();
+    let ops = fx.ops(OsTrash);
+    let data = FakeData::default();
+    let restored = ops.restore(&ws, &data, OpRestore { restore: tokens[0].clone(), on_collision: None }).unwrap();
+    assert_eq!(restored.outcomes[0].status, OpStatus::Succeeded, "{:?}", restored.outcomes);
+    assert_eq!(fs::read_to_string(fx.file("b.txt")).unwrap(), "b");
+}
+
+/// The application's adapter for agent tools, without a Tauri app.
+struct TestAgentOps<'a> {
+    ops: &'a ProjectOps,
+    ws: &'a WorkspaceService,
+    data: &'a FakeData,
+}
+
+impl exposition_agents::tools::services::ProjectOperations for TestAgentOps<'_> {
+    fn plan(&self, request: OpRequest) -> Result<OpPlan, OpError> {
+        self.ops.plan(self.ws, self.data, request)
+    }
+    fn apply(&self, plan: &OpPlan) -> Result<OpResult, OpError> {
+        let apply = OpApply { plan: plan.plan.clone(), plan_hash: plan.plan_hash.clone(), choices: BTreeMap::new() };
+        self.ops.apply(self.ws, self.data, apply)
+    }
+    fn restore(&self, token: &str) -> Result<OpResult, OpError> {
+        self.ops.restore(self.ws, self.data, OpRestore { restore: token.to_owned(), on_collision: None })
+    }
+}
+
+#[test]
+fn an_agent_deletion_can_be_reverted_after_a_restart() {
+    use exposition_agents::store::{Store, TaskRow};
+    use exposition_agents::{
+        Budgets, ContextConsent, Effort, ExecutionMode, PermissionProfile, ProviderChoice, ProviderKind, TaskId,
+        TaskScope, TaskSpec, TaskStatus, TaskUsage,
+    };
+    let fx = fixture();
+    let trash = fx.dir.0.join("trash");
+    let task = TaskId::new();
+    let store = Store::open_in_memory().unwrap();
+    let spec = TaskSpec {
+        prompt: "tidy".into(),
+        workspace_root: fx.project().display().to_string(),
+        scope: TaskScope::Workspace,
+        permission: PermissionProfile::AutoApply,
+        execution: ExecutionMode::Disabled,
+        consent: ContextConsent::MetadataOnly,
+        budgets: Budgets::default(),
+        provider: ProviderChoice { provider: ProviderKind::Scripted, model: "scripted".into(), effort: Effort::Low },
+    };
+    store
+        .insert_task(&TaskRow {
+            id: task.clone(),
+            title: "tidy".into(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            spec,
+            status: TaskStatus::Completed,
+            usage: TaskUsage::default(),
+        })
+        .unwrap();
+    {
+        // The agent deletes through the orchestrator (its task as the actor).
+        let ops = fx.ops(DirTrash::new(&trash));
+        let data = FakeData::default();
+        let agent = TestAgentOps { ops: &ops, ws: &fx.ws, data: &data };
+        use exposition_agents::tools::services::ProjectOperations;
+        let plan = agent
+            .plan(OpRequest {
+                kind: OpKind::Delete { permanent: false },
+                targets: vec![path("notes/n1.md")],
+                actor: OpActor::Agent { task: task.0.clone() },
+            })
+            .unwrap();
+        let result = agent.apply(&plan).unwrap();
+        let token = result.outcomes[0].restore.clone().expect("token");
+        exposition_agents::review::record_delete(&store, &task, "t1", &wp("notes/n1.md"), Some(token)).unwrap();
+    }
+    assert!(!fx.exists("notes/n1.md"));
+    // Restart, then the user reverts the agent's change from the review.
+    let ws = fx.restart();
+    let ops = fx.ops(DirTrash::new(&trash));
+    let data = FakeData::default();
+    let agent = TestAgentOps { ops: &ops, ws: &ws, data: &data };
+    let files = exposition_agents::workspace::LocalProjectFiles::open(&fx.project()).unwrap();
+    let row = store.task_file(&task, &wp("notes/n1.md")).unwrap().unwrap();
+    let result =
+        exposition_agents::review::revert_file(&store, &task, ws.documents(), Some(&ws), &files, Some(&agent), row)
+            .unwrap();
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(fs::read_to_string(fx.file("notes/n1.md")).unwrap(), "n1");
+}

@@ -51,8 +51,10 @@ pub const PROJECT_OP_EVENT: &str = "project-op";
 pub const PLAN_TTL_MS: u64 = 15 * 60 * 1000;
 /// Targets per operation (keeps the intent record bounded).
 pub const MAX_TARGETS: usize = 1000;
-/// Restore tokens kept per session (oldest dropped first).
+/// Restore tokens kept in memory per session (oldest dropped first).
 const MAX_RESTORES: usize = 2000;
+/// Restore records kept in the operation journal per project (newest kept).
+pub const MAX_RESTORABLE: usize = 500;
 /// Path outcomes journaled per write (bounds journal rewrites for large selections).
 const JOURNAL_BATCH: usize = 16;
 /// Marks the operation journal records this module writes.
@@ -111,6 +113,23 @@ struct StoredRestore {
     path: WorkspacePath,
     item: TrashedItem,
     order: u64,
+    /// The journal record holding the persisted copy of this restore record.
+    record: Option<OperationId>,
+}
+
+/// A trashed entry the app identified reliably, as kept in the operation
+/// journal (step `restorable`) so Undo and agent reverts survive a restart.
+/// A record is only a pointer: the item is re-identified in the trash (same
+/// identity and deletion time) before anything is restored, and a used,
+/// vanished or expired record is marked spent (step `restoreSpent`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Restorable {
+    token: String,
+    /// The original project path (normalized).
+    path: WorkspacePath,
+    /// The trash item's identity, original location and deletion time.
+    item: TrashedItem,
 }
 
 /// What a journal record of this module carries to reconcile after a restart.
@@ -369,14 +388,30 @@ impl ProjectOps {
         let _ = self.journal.record_step(root, &record, "graph", BTreeMap::new(), true, None);
         let _ = self.journal.complete(root, &record);
 
-        // 5. One outcome per target, in the request's order.
+        // 5. One outcome per target, in the request's order. Reliably
+        // identified trash items get a restore token, kept in memory and in
+        // the operation journal (so Undo and agent reverts survive a restart).
         let mut outcomes: Vec<OpOutcome> = Vec::new();
+        let mut restorable: Vec<Restorable> = Vec::new();
         for o in path_outcomes {
             let mut outcome = o.outcome;
             if let (Some(item), Some(path)) = (o.trashed, o.path) {
-                outcome.restore = Some(self.keep_restore(root, path, item));
+                let token = self.keep_restore(root, path.clone(), item.clone(), Some(record.clone()));
+                restorable.push(Restorable { token: token.clone(), path, item });
+                outcome.restore = Some(token);
             }
             outcomes.push(outcome);
+        }
+        if !restorable.is_empty() {
+            let kept = serde_json::to_string(&restorable).map_err(|e| e.to_string()).and_then(|items| {
+                self.journal
+                    .record_step(root, &record, "restorable", BTreeMap::from([("items".to_owned(), items)]), true, None)
+                    .map_err(|e| e.to_string())
+            });
+            if let Err(e) = kept {
+                journal_error = Some(err("ops.failed", e));
+            }
+            self.prune_restorable(root, false);
         }
         outcomes.extend(data_outcomes);
         for r in &plan.refusals {
@@ -443,7 +478,7 @@ impl ProjectOps {
             .map_err(|e| err("ops.failed", e.to_string()))
     }
 
-    fn keep_restore(&self, root: &Path, path: WorkspacePath, item: TrashedItem) -> String {
+    fn keep_restore(&self, root: &Path, path: WorkspacePath, item: TrashedItem, record: Option<OperationId>) -> String {
         // `trash-…`: never a data token (`<kind>:<id>`, no colon here).
         let token = self.mint("trash");
         let mut restores = lock(&self.restores);
@@ -453,8 +488,85 @@ impl ProjectOps {
         {
             restores.remove(&oldest);
         }
-        restores.insert(token.clone(), StoredRestore { root: root.to_path_buf(), path, item, order });
+        restores.insert(token.clone(), StoredRestore { root: root.to_path_buf(), path, item, order, record });
         token
+    }
+
+    /// The live restore records of a project's journal, newest first (records
+    /// newest first, and the last-deleted item of a record first).
+    fn persisted(&self, root: &Path) -> Vec<(OperationId, Restorable)> {
+        let records = self.journal.list(root);
+        let mut spent: HashSet<String> = HashSet::new();
+        for record in &records {
+            for step in record.steps.iter().filter(|s| s.name == "restoreSpent") {
+                if let Some(tokens) = step.refs.get("tokens").and_then(|t| serde_json::from_str::<Vec<String>>(t).ok())
+                {
+                    spent.extend(tokens);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for record in &records {
+            for step in record.steps.iter().filter(|s| s.name == "restorable") {
+                let Some(items) = step.refs.get("items").and_then(|t| serde_json::from_str::<Vec<Restorable>>(t).ok())
+                else {
+                    continue;
+                };
+                for item in items.into_iter().rev() {
+                    if !spent.contains(&item.token) {
+                        out.push((record.id.clone(), item));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Tokens of the open project's live restore records (newest first).
+    #[cfg(test)]
+    pub fn persisted_tokens(&self, root: &Path) -> Vec<String> {
+        self.persisted(root).into_iter().map(|(_, r)| r.token).collect()
+    }
+
+    /// Mark restore records spent (used, gone from the trash, or expired).
+    fn mark_spent(&self, root: &Path, spent: Vec<(OperationId, String)>) {
+        let mut by_record: HashMap<OperationId, Vec<String>> = HashMap::new();
+        {
+            let mut restores = lock(&self.restores);
+            for (record, token) in spent {
+                restores.remove(&token);
+                by_record.entry(record).or_default().push(token);
+            }
+        }
+        for (record, tokens) in by_record {
+            if let Ok(text) = serde_json::to_string(&tokens) {
+                let refs = BTreeMap::from([("tokens".to_owned(), text)]);
+                let _ = self.journal.record_step(root, &record, "restoreSpent", refs, true, None);
+            }
+        }
+    }
+
+    /// Keep at most [`MAX_RESTORABLE`] live restore records per project
+    /// (the newest), and with `check_trash` drop those whose item is no
+    /// longer in the trash (restored or emptied elsewhere).
+    fn prune_restorable(&self, root: &Path, check_trash: bool) {
+        let live = self.persisted(root);
+        let mut spent: Vec<(OperationId, String)> = Vec::new();
+        let (kept, expired) = live.split_at(live.len().min(MAX_RESTORABLE));
+        spent.extend(expired.iter().map(|(record, r)| (record.clone(), r.token.clone())));
+        if check_trash && !kept.is_empty() {
+            let items: Vec<TrashedItem> = kept.iter().map(|(_, r)| r.item.clone()).collect();
+            if let Ok(present) = self.trash.present(&items) {
+                for ((record, r), here) in kept.iter().zip(present) {
+                    if !here {
+                        spent.push((record.clone(), r.token.clone()));
+                    }
+                }
+            }
+        }
+        if !spent.is_empty() {
+            self.mark_spent(root, spent);
+        }
     }
 
     /// `project_op_restore`.
@@ -463,12 +575,20 @@ impl ProjectOps {
         if let Some(outcome) = data.restore_data(&restore) {
             return Ok(OpResult { plan: restore.restore, outcomes: vec![outcome], notices: Vec::new() });
         }
-        let (root, path, item) = {
-            let restores = lock(&self.restores);
-            let stored = restores.get(&restore.restore).ok_or_else(|| {
-                err("ops.restoreUnknown", "Exposition can no longer restore this item; look for it in the Recycle Bin.")
-            })?;
-            (stored.root.clone(), stored.path.clone(), stored.item.clone())
+        let unknown =
+            || err("ops.restoreUnknown", "Exposition can no longer restore this item; look for it in the Recycle Bin.");
+        let in_memory = lock(&self.restores)
+            .get(&restore.restore)
+            .map(|stored| (stored.root.clone(), stored.path.clone(), stored.item.clone(), stored.record.clone()));
+        let (root, path, item, kept_in) = match in_memory {
+            Some(found) => found,
+            // From an earlier session: the open project's journal.
+            None => {
+                let root = Self::root(ws)?;
+                let (record, found) =
+                    self.persisted(&root).into_iter().find(|(_, r)| r.token == restore.restore).ok_or_else(unknown)?;
+                (root, found.path, found.item, Some(record))
+            }
         };
         if Self::root(ws)? != root {
             return Err(err("ops.noProject", "The project this item was deleted from is not open."));
@@ -517,10 +637,20 @@ impl ProjectOps {
             true,
             None,
         );
+        // The item is re-identified in the trash before anything moves.
         let outcome = ws.restore_trashed(&path, &item, restore.on_collision.as_deref(), self.trash.as_ref(), &tag);
         let _ = self.record_done(&root, &record.id, &[Done { outcome: outcome.clone(), path: Some(path.clone()) }]);
+        let spent = outcome.status == OpStatus::Succeeded || outcome.code.as_deref() == Some("ops.restoreUnavailable");
+        if spent {
+            // Used, or gone from the trash: never offered again.
+            match kept_in {
+                Some(kept_in) => self.mark_spent(&root, vec![(kept_in, restore.restore.clone())]),
+                None => {
+                    lock(&self.restores).remove(&restore.restore);
+                }
+            }
+        }
         if outcome.status == OpStatus::Succeeded {
-            lock(&self.restores).remove(&restore.restore);
             data.after_paths(std::slice::from_ref(&outcome));
         }
         let _ = self.journal.complete(&root, &record.id);
@@ -535,6 +665,8 @@ impl ProjectOps {
         if !lock(&self.reconciled).insert(root.clone()) {
             return Vec::new();
         }
+        // Restore records whose item left the trash (or beyond the cap) go.
+        self.prune_restorable(&root, true);
         let mut results = Vec::new();
         for record in self.journal.unresolved_before(&root, self.session_started_ms) {
             if !record.description.starts_with(RECORD_PREFIX)
