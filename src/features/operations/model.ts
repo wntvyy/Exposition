@@ -386,7 +386,10 @@ export function restoreTitle(original: OpTarget, outcome: OpOutcome, labels: Tar
   const name = quoted(targetName(original, labels));
   if (outcome.status !== "succeeded") return `Could not restore ${name}`;
   const restoredAt = outcome.created ?? outcome.target;
-  if (!sameTarget(restoredAt, original)) return `Restored ${name} as ${quoted(targetName(restoredAt, labels))}`;
+  // A file restored under a new name (its original location was occupied) says which name.
+  if (restoredAt.kind === "path" && original.kind === "path" && !sameTarget(restoredAt, original)) {
+    return `Restored ${name} as ${quoted(targetName(restoredAt))}`;
+  }
   return `Restored ${name}`;
 }
 
