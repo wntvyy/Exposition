@@ -16,7 +16,7 @@
 // the run states its cause; each attempt shows its recorded environment.
 // Export manifest writes the run manifest; Reproduce opens a new plan pinned
 // to this run's inputs, with environment drift notices, approved like any.
-import { Ban, Check, CircleSlash, Cpu, Eye, FileDown, FileWarning, History, RotateCcw, Square, X, Zap } from "lucide-react";
+import { Check, Cpu, Eye, FileDown, FileWarning, History, RotateCcw, Square, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { editors } from "../../app/editors";
@@ -44,11 +44,18 @@ import {
   Checkbox,
   EmptyState,
   ErrorState,
+  KeyValueList,
+  ListRow,
   LoadingState,
+  PageHeader,
   ProgressBar,
   Section,
+  SimpleTable,
+  type SimpleTableColumn,
   Spinner,
+  StateSizeProvider,
   StatusPill,
+  StatusText,
 } from "../../ui/components";
 import { onProjectOp } from "../operations/client";
 import { useOpList } from "../operations/useOpList";
@@ -57,7 +64,7 @@ import { PreviewView } from "../research/Promotion";
 import { workflowEvents, workflowRunCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
 import { describeRepeat, describeTest } from "./orchestration";
-import { FullHash, PlanDetails, PlanReviewDialog } from "./PlanReview";
+import { FullHash, PlanDetails, PlanReviewDialog, StepIndex } from "./PlanReview";
 import { runActions } from "./workflowOps";
 import {
   ATTEMPT_STATE_VIEW,
@@ -119,37 +126,28 @@ function ImagePreview({ bytes, mediaType, alt }: { bytes: ArrayBuffer; mediaType
   return url ? <img className="xp-wf-output__image" src={url} alt={alt} data-testid="workflow-output-image" /> : null;
 }
 
+type PreviewRow = { cells: string[]; index: number };
+
 function TablePreview({ bytes, path }: { bytes: ArrayBuffer; path: string }) {
   const grid = useMemo(() => {
     const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
     return parseDelimited(text, path.toLowerCase().endsWith(".tsv") ? "\t" : ",", 100);
   }, [bytes, path]);
-  if (grid.rows.length === 0) return <p className="xp-wf__muted">The table is empty.</p>;
+  if (grid.rows.length === 0) return <p className="ui-meta">The table is empty.</p>;
   const [head, ...body] = grid.rows;
+  // Cells are plain text (React escapes them); markup in a cell is never interpreted.
+  const columns: SimpleTableColumn<PreviewRow>[] = head!.map((title, i) => ({ id: String(i), title, render: (row) => row.cells[i] }));
   return (
     <div className="xp-wf-output__table" data-testid="workflow-output-table">
-      <table className="xp-wf-table">
-        <thead>
-          <tr>
-            {head!.map((c, i) => (
-              <th key={i} scope="col">
-                {c}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {body.map((r, i) => (
-            <tr key={i}>
-              {r.map((c, j) => (
-                <td key={j}>{c}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <SimpleTable
+        aria-label={`Preview of ${path}`}
+        columns={columns}
+        rows={body.map((cells, index) => ({ cells, index }))}
+        rowKey={(row) => String(row.index)}
+        empty=""
+      />
       {grid.truncated && (
-        <p className="xp-wf__muted">
+        <p className="ui-meta">
           Showing {grid.rows.length} of {grid.totalRows} rows.
         </p>
       )}
@@ -161,9 +159,9 @@ function FilePreview({ value }: { value: Extract<WorkflowOutputValue, { kind: "f
   const kind = filePreviewKind(value.mediaType, value.path);
   const bytes = useArtifactBytes(kind === "none" ? null : value.researchRun, kind === "none" ? null : value.artifact);
   if (kind === "none") return null;
-  if (!value.researchRun || !value.artifact) return <p className="xp-wf__muted">No preview: this file is not a research run artifact.</p>;
+  if (!value.researchRun || !value.artifact) return <p className="ui-meta">No preview: this file is not a research run artifact.</p>;
   if (!bytes || bytes.kind === "loading") return <Spinner size="sm" aria-label={`Loading a preview of ${value.path}`} />;
-  if (bytes.kind === "error") return <p className="xp-wf__muted">No preview: {bytes.message}</p>;
+  if (bytes.kind === "error") return <p className="ui-meta">No preview: {bytes.message}</p>;
   return kind === "image" ? (
     <ImagePreview bytes={bytes.bytes} mediaType={value.mediaType} alt={`Preview of ${value.path}`} />
   ) : (
@@ -218,8 +216,8 @@ function PromotionReview({
   };
 
   return (
-    <div className="xp-wf-proposal" data-testid="workflow-promotion-proposal" data-promotion={value.promotion} data-status={value.status}>
-      <div className="xp-wf__row">
+    <div className="xp-wf__stack" data-testid="workflow-promotion-proposal" data-promotion={value.promotion} data-status={value.status}>
+      <div className="xp-wf__line">
         <span className="xp-wf__grow">
           Manuscript change for <code>{value.document}</code>
         </span>
@@ -233,17 +231,17 @@ function PromotionReview({
         )}
       </div>
       {pending && value.expiresAtMs !== null && (
-        <p className="xp-wf__muted" data-testid="workflow-promotion-expiry">
+        <p className="ui-meta" data-testid="workflow-promotion-expiry">
           The prepared change can be reviewed until {formatTime(value.expiresAtMs)}.
         </p>
       )}
       {value.status === "accepted" && value.attachmentKey !== null && (
-        <p className="xp-wf__muted" data-testid="workflow-promotion-attachment">
+        <p className="ui-meta" data-testid="workflow-promotion-attachment">
           Inserted as attachment <code>{value.attachmentKey}</code>; undo it in the document.
         </p>
       )}
       {open && (
-        <div className="xp-wf-proposal__review">
+        <div className="xp-wf__stack">
           {error && (
             <Banner tone="danger" title="The change could not be reviewed" live>
               {error} Nothing was changed.
@@ -251,7 +249,7 @@ function PromotionReview({
           )}
           {!preview && !error && <Spinner size="sm" aria-label="Loading the prepared change" />}
           {preview && <PreviewView preview={preview} />}
-          <div className="xp-wf__row">
+          <div className="xp-wf__line">
             <Button size="sm" variant="secondary" isDisabled={busy} onPress={() => void decide(false)}>
               Discard proposal
             </Button>
@@ -296,14 +294,14 @@ function AssociationReview({
   };
 
   return (
-    <div className="xp-wf-proposal" data-testid="workflow-association-proposal" data-proposal={value.proposal} data-status={value.status}>
-      <div className="xp-wf__row">
+    <div className="xp-wf__stack" data-testid="workflow-association-proposal" data-proposal={value.proposal} data-status={value.status}>
+      <div className="xp-wf__line">
         <span className="xp-wf__grow">Associate audited declarations with their evidence</span>
         <Badge tone={status.tone} dashed={status.dashed}>
           {status.label}
         </Badge>
       </div>
-      <p className="xp-wf__muted">
+      <p className="ui-meta">
         Accepting records each selected declaration's audit evidence. The verdict is the Lean audit's own; an association is a
         reviewed correspondence, not a machine proof of anything else.
       </p>
@@ -321,13 +319,9 @@ function AssociationReview({
               )}
               {!pending &&
                 (value.accepted.includes(name) ? (
-                  <Badge tone="success">
-                    Associated
-                  </Badge>
+                  <StatusText status="succeeded" label="Associated" />
                 ) : (
-                  <Badge tone="neutral" dashed>
-                    Not associated
-                  </Badge>
+                  <StatusText status="canceled" label="Not associated" />
                 ))}
               {facts ? (
                 <Badge tone={verdictTone(facts.verdict)}>{facts.verdict}</Badge>
@@ -336,7 +330,7 @@ function AssociationReview({
                   Verdict not in this run
                 </Badge>
               )}
-              {facts && facts.axioms.length > 0 && <span className="xp-wf__muted">Axioms: {facts.axioms.join(", ")}</span>}
+              {facts && facts.axioms.length > 0 && <span className="ui-meta">Axioms: {facts.axioms.join(", ")}</span>}
               {facts?.statement && <code className="xp-wf-checklist__statement">{facts.statement}</code>}
             </li>
           );
@@ -348,7 +342,7 @@ function AssociationReview({
         </Banner>
       )}
       {pending && (
-        <div className="xp-wf__row">
+        <div className="xp-wf__line">
           <Button size="sm" variant="secondary" icon={X} isPending={busy === "reject"} isDisabled={busy !== null} onPress={() => void decide([], "reject")} data-testid="workflow-association-reject">
             Reject all
           </Button>
@@ -389,7 +383,7 @@ function OutputValueView({ run, step, value, onRun }: { run: WorkflowRun; step: 
       );
     case "formalEvidence":
       return (
-        <div>
+        <div className="xp-wf__stack">
           <div className="xp-wf-output__facts">
             Lean audit of <code>{value.file}</code> · <FullHash hash={value.fileSha256} label={value.file} /> · file verdict{" "}
             <Badge tone={verdictTone(value.verdict)}>{value.verdict}</Badge>
@@ -398,14 +392,18 @@ function OutputValueView({ run, step, value, onRun }: { run: WorkflowRun; step: 
             {value.declarations.map((d) => (
               <li key={d.name}>
                 <code>{d.name}</code> <Badge tone={verdictTone(d.verdict)}>{d.verdict}</Badge>
-                {d.axioms.length > 0 && <span className="xp-wf__muted">Axioms: {d.axioms.join(", ")}</span>}
+                {d.axioms.length > 0 && <span className="ui-meta">Axioms: {d.axioms.join(", ")}</span>}
               </li>
             ))}
           </ul>
         </div>
       );
     case "report":
-      return <pre className="xp-wf-log" aria-label="Report">{value.text}</pre>;
+      return (
+        <pre className="xp-wf-log" tabIndex={0} aria-label="Report">
+          {value.text}
+        </pre>
+      );
     case "promotionProposal":
       return <PromotionReview run={run} value={value} onRun={onRun} />;
     case "associationProposal":
@@ -422,11 +420,11 @@ function provenanceInstance(provenance: object): number | null {
 function OutputItem({ run, step, output, onRun }: { run: WorkflowRun; step: string; output: WorkflowStepOutput; onRun: (run: WorkflowRun) => void }) {
   const instance = provenanceInstance(output.provenance);
   return (
-    <li className="xp-wf-output" data-testid={`workflow-output-${step}-${output.port}`} data-kind={output.value.kind} data-port={output.port}>
-      <div className="xp-wf-output__head">
-        <strong>{output.port}</strong> <Badge tone="neutral">{PORT_TYPE_LABELS[output.portType]}</Badge>
-        <span className="xp-wf__muted">
-          {" "}
+    <li data-testid={`workflow-output-${step}-${output.port}`} data-kind={output.value.kind} data-port={output.port}>
+      <div className="xp-wf__line">
+        <span className="xp-wf-name">{output.port}</span>
+        <Badge tone="neutral">{PORT_TYPE_LABELS[output.portType]}</Badge>
+        <span className="ui-meta">
           validated · from {output.provenance.operation.kind} {output.provenance.operation.id} (attempt {output.provenance.attempt}
           {instance !== null ? `, instance ${instance + 1}` : ""})
         </span>
@@ -442,12 +440,13 @@ function OutputItem({ run, step, output, onRun }: { run: WorkflowRun; step: stri
 export function EnvironmentView({ env, testId }: { env: WorkflowEnvironment; testId: string }) {
   const [packages, setPackages] = useState(false);
   return (
-    <div className="xp-wf-env" data-testid={testId} data-runner={env.runner}>
-      <dl className="xp-wf-facts">
-        {environmentFacts(env).map((f) => (
-          <div key={f.label} className="xp-wf-env__row" data-fact={f.label}>
-            <dt>{f.label}</dt>
-            <dd>
+    <div className="xp-wf__stack" data-testid={testId} data-runner={env.runner}>
+      <KeyValueList
+        items={environmentFacts(env).map((f) => ({
+          key: f.label,
+          label: f.label,
+          value: (
+            <span data-fact={f.label}>
               {f.value}
               {f.hash && (
                 <>
@@ -455,10 +454,10 @@ export function EnvironmentView({ env, testId }: { env: WorkflowEnvironment; tes
                   <FullHash hash={f.hash} label={`${f.label.toLowerCase()} of this attempt`} />
                 </>
               )}
-            </dd>
-          </div>
-        ))}
-      </dl>
+            </span>
+          ),
+        }))}
+      />
       {env.packages.length > 0 && (
         <div>
           <Button size="sm" variant="ghost" aria-expanded={packages} onPress={() => setPackages(!packages)}>
@@ -478,7 +477,7 @@ export function EnvironmentView({ env, testId }: { env: WorkflowEnvironment; tes
         </div>
       )}
       {env.notes.length > 0 && (
-        <ul className="xp-wf__muted">
+        <ul className="xp-wf-notes ui-meta">
           {env.notes.map((n, i) => (
             <li key={i}>{n}</li>
           ))}
@@ -506,10 +505,10 @@ function AttemptView({
   const id = scope ?? step.step;
   return (
     <div className="xp-wf-attempt" data-testid={`workflow-attempt-${id}-${attempt.attempt}`} data-state={attempt.state}>
-      <div className="xp-wf__row">
-        <span>Attempt {attempt.attempt}</span>
-        <StatusPill size="sm" status={view.status} label={view.label} detail={formatDuration(attempt.dispatchedAtMs ?? attempt.intentAtMs, attempt.finishedAtMs)} />
-        <span className="xp-wf__muted">
+      <div className="xp-wf__line">
+        <span className="xp-wf-name">Attempt {attempt.attempt}</span>
+        <StatusText status={view.status} label={view.label} detail={formatDuration(attempt.dispatchedAtMs ?? attempt.intentAtMs, attempt.finishedAtMs)} />
+        <span className="ui-meta">
           {attempt.operation ? (
             <>
               {attempt.operation.kind} <code>{attempt.operation.id}</code>
@@ -519,7 +518,7 @@ function AttemptView({
           )}
         </span>
       </div>
-      <p className="xp-wf__muted">
+      <p className="ui-meta">
         Recorded {formatTime(attempt.intentAtMs)}
         {attempt.dispatchedAtMs !== null ? ` · dispatched ${formatTime(attempt.dispatchedAtMs)}` : ""}
         {attempt.finishedAtMs !== null ? ` · finished ${formatTime(attempt.finishedAtMs)}` : ""}
@@ -542,13 +541,13 @@ function AttemptView({
         </Section>
       ) : (
         attempt.dispatchedAtMs !== null && (
-          <p className="xp-wf__muted" data-testid={`workflow-env-missing-${id}-${attempt.attempt}`}>
+          <p className="ui-meta" data-testid={`workflow-env-missing-${id}-${attempt.attempt}`}>
             No environment was recorded for this attempt.
           </p>
         )
       )}
       {attempt.outputs.length > 0 && (
-        <ul className="xp-wf-outputs" aria-label={`Outputs of ${step.label}`}>
+        <ul className="xp-wf-rows" aria-label={`Outputs of ${step.label}`}>
           {attempt.outputs.map((o, i) => (
             <OutputItem key={`${o.port}-${i}`} run={run} step={step.step} output={o} onRun={onRun} />
           ))}
@@ -560,7 +559,7 @@ function AttemptView({
             <li key={i} className="xp-wf-rejected__item" data-testid={`workflow-rejected-${step.step}`} data-name={r.name}>
               <FileWarning size={14} aria-hidden="true" />
               <span>
-                <strong>Refused:</strong> <code>{r.name}</code> — {r.reason}
+                <span className="xp-wf-rejected__label">Refused:</span> <code>{r.name}</code> — {r.reason}
               </span>
             </li>
           ))}
@@ -589,15 +588,15 @@ function InstanceView({ run, step, instance, parameter, onRun }: { run: Workflow
   const view = STEP_STATE_VIEW[instance.state];
   const scope = `${step.step}-i${instance.index}`;
   return (
-    <li className="xp-wf-instance" data-testid={`workflow-instance-${step.step}-${instance.index}`} data-state={instance.state} data-index={instance.index}>
-      <div className="xp-wf__row">
+    <li data-testid={`workflow-instance-${step.step}-${instance.index}`} data-state={instance.state} data-index={instance.index}>
+      <div className="xp-wf__line">
         <span className="xp-wf__grow">
-          <strong>{instanceLabel(instance, parameter)}</strong>
-          <span className="xp-wf__muted"> · instance {instance.index + 1}</span>
+          <span className="xp-wf-name">{instanceLabel(instance, parameter)}</span>
+          <span className="ui-meta"> · instance {instance.index + 1}</span>
         </span>
-        <StatusPill size="sm" status={view.status} label={view.label} />
+        <StatusText status={view.status} label={view.label} />
       </div>
-      {instance.reason && <p className="xp-wf__muted">{instance.reason}</p>}
+      {instance.reason && <p className="ui-meta">{instance.reason}</p>}
       {instance.attempts.map((a) => (
         <AttemptView key={a.attempt} run={run} step={step} attempt={a} onRun={onRun} scope={scope} />
       ))}
@@ -616,47 +615,47 @@ function StepView({ run, step, index, onRun }: { run: WorkflowRun; step: Workflo
   const reason = notRunReason(step, planStep, run.plan);
   return (
     <li
-      className="xp-wf-runstep"
+      className="xp-wf-block xp-wf-block--numbered"
       data-testid={`workflow-run-step-${step.step}`}
       data-state={step.state}
       data-instances={instances.length || undefined}
       data-composite-path={path.length ? path.join(" › ") : undefined}
     >
-      <div className="xp-wf-plan__step-head">
-        <span className="xp-wf-plan__index" aria-hidden="true">
-          {index + 1}
-        </span>
-        <div className="xp-wf__grow">
-          <strong>{step.label}</strong>
-          <div className="xp-wf__muted">
+      <div className="xp-wf-block__head">
+        <StepIndex index={index} />
+        <div className="xp-wf-block__lead">
+          <span className="xp-wf-block__title">{step.label}</span>
+          <span className="ui-meta">
             {path.length > 0 && <>Inside {path.map((t) => `“${t}”`).join(" › ")} · </>}
             {step.operationTitle} · runner: {step.runnerTitle}
-          </div>
+          </span>
         </div>
         <Badge tone={containment.tone} title={containment.detail}>
           {containment.label}
         </Badge>
-        <StatusPill status={view.status} label={view.label} />
+        <StatusText status={view.status} label={view.label} />
       </div>
       {planStep?.repeat && (
-        <p className="xp-wf__muted" data-testid={`workflow-run-repeat-${step.step}`}>
+        <p className="ui-meta" data-testid={`workflow-run-repeat-${step.step}`}>
           {describeRepeat(planStep.repeat, (port) => `its output “${port}”`, (name) => `“${name}”`)}
         </p>
       )}
       {reason && (step.state === "conditionNotMet" || step.state === "skipped" || step.reason) && (
-        <p className={step.state === "conditionNotMet" ? "xp-wf-reason xp-wf-reason--condition" : "xp-wf-reason"} data-testid={`workflow-step-reason-${step.step}`} data-state={step.state}>
-          {reason}
-        </p>
+        <Banner tone={step.state === "conditionNotMet" ? "info" : "canceled"} title={view.label}>
+          <span data-testid={`workflow-step-reason-${step.step}`} data-state={step.state}>
+            {reason}
+          </span>
+        </Banner>
       )}
       {instances.length > 0 && (
-        <div className="xp-wf-instances">
-          <p className="xp-wf__muted" data-testid={`workflow-instances-summary-${step.step}`}>
+        <div className="xp-wf__stack">
+          <p className="ui-meta" data-testid={`workflow-instances-summary-${step.step}`}>
             {instances.length} instance{instances.length === 1 ? "" : "s"}:{" "}
             {Object.entries(counts)
               .map(([state, n]) => `${n} ${STEP_STATE_VIEW[state as keyof typeof STEP_STATE_VIEW].label.toLowerCase()}`)
               .join(", ")}
           </p>
-          <ol className="xp-wf-instances__list" aria-label={`Instances of ${step.label}`}>
+          <ol className="xp-wf-rows" aria-label={`Instances of ${step.label}`}>
             {instances.map((i) => (
               <InstanceView key={i.index} run={run} step={step} instance={i} parameter={parameter} onRun={onRun} />
             ))}
@@ -664,7 +663,7 @@ function StepView({ run, step, index, onRun }: { run: WorkflowRun; step: Workflo
         </div>
       )}
       {step.attempts.length === 0
-        ? instances.length === 0 && !reason && <p className="xp-wf__muted">Not dispatched.</p>
+        ? instances.length === 0 && !reason && <p className="ui-meta">Not dispatched.</p>
         : step.attempts.map((a) => <AttemptView key={a.attempt} run={run} step={step} attempt={a} onRun={onRun} />)}
     </li>
   );
@@ -691,15 +690,17 @@ function ManifestView({ run }: { run: WorkflowRun }) {
     }
   };
   return (
-    <div data-testid="workflow-run-manifest-view" data-state={state.kind}>
-      <p className="xp-wf__muted">
+    <div className="xp-wf__stack" data-testid="workflow-run-manifest-view" data-state={state.kind}>
+      <p className="ui-meta">
         The revision, definition and approval hashes, every input and output digest, each attempt's environment, budgets and usage,
         and the cause. Export manifest writes the same JSON to a file.
       </p>
       {state.kind !== "ready" && (
-        <Button size="sm" isPending={state.kind === "loading"} onPress={() => void load()} data-testid="workflow-run-manifest-show">
-          Show the manifest
-        </Button>
+        <div>
+          <Button size="sm" isPending={state.kind === "loading"} onPress={() => void load()} data-testid="workflow-run-manifest-show">
+            Show the manifest
+          </Button>
+        </div>
       )}
       {state.kind === "error" && (
         <Banner tone="danger" title="The manifest is unavailable" live>
@@ -718,8 +719,8 @@ function ManifestView({ run }: { run: WorkflowRun }) {
 function CauseView({ cause, run }: { cause: WorkflowRunCause | undefined; run: WorkflowRun }) {
   const kind = cause?.kind ?? "manual";
   return (
-    <div className="xp-wf-cause" data-testid="workflow-run-cause" data-kind={kind}>
-      <span className="xp-wf__muted">
+    <div className="xp-wf__line" data-testid="workflow-run-cause" data-kind={kind}>
+      <span className="xp-wf-cause__text ui-meta">
         {kind === "trigger" ? <Zap size={14} aria-hidden="true" /> : kind === "reproduce" ? <History size={14} aria-hidden="true" /> : null} {describeCause(cause)}.
       </span>
       {cause?.kind === "reproduce" && (
@@ -793,185 +794,185 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
     }
   };
 
+  const times = `Revision ${run.revision} · started ${formatTime(run.startedAtMs)}${
+    run.finishedAtMs !== null ? ` · finished ${formatTime(run.finishedAtMs)} (${formatDuration(run.startedAtMs, run.finishedAtMs)})` : ""
+  }`;
+
   return (
-    <div className="xp-wf__page xp-wf-run" data-testid="workflow-run" data-run={run.id} data-state={run.state} data-acknowledged={String(run.acknowledged)}>
-      <header className="xp-wf__header">
-        <div className="xp-wf__grow">
-          <h2 className="xp-wf__title">{run.title}</h2>
-          <p className="xp-wf__muted">
-            Revision {run.revision} · started {formatTime(run.startedAtMs)}
-            {run.finishedAtMs !== null ? ` · finished ${formatTime(run.finishedAtMs)} (${formatDuration(run.startedAtMs, run.finishedAtMs)})` : ""}
-          </p>
-          <CauseView cause={run.cause} run={run} />
-        </div>
-        <span data-testid="workflow-run-state" data-state={run.state} aria-live="polite">
-          <StatusPill status={view.status} label={view.label} />
-        </span>
-        {run.state === "running" ? (
-          <Button variant="secondary" icon={Square} isPending={busy === "cancel"} isDisabled={busy !== null} onPress={() => void act("cancel")} data-testid="workflow-run-cancel">
-            Cancel run
-          </Button>
-        ) : (
-          <>
-            {run.state !== "interrupted" && (
-              <Button variant="secondary" icon={RotateCcw} onPress={() => setReviewOpen(true)} data-testid="workflow-run-again">
-                Review a new run…
-              </Button>
-            )}
-            <Button variant="secondary" icon={History} onPress={() => setReproduceOpen(true)} data-testid="workflow-run-reproduce">
-              Reproduce…
+    <div className="xp-wf xp-wf-run" data-testid="workflow-run" data-run={run.id} data-state={run.state} data-acknowledged={String(run.acknowledged)}>
+      <PageHeader
+        title={run.title}
+        subtitle={<span title={times}>{times}</span>}
+        actions={
+          run.state === "running" ? (
+            <Button variant="secondary" icon={Square} isPending={busy === "cancel"} isDisabled={busy !== null} onPress={() => void act("cancel")} data-testid="workflow-run-cancel">
+              Cancel run
             </Button>
-          </>
-        )}
-        {run.state !== "running" && (
-          <Button
-            variant="ghost"
-            icon={FileDown}
-            isPending={busy === "manifest"}
-            isDisabled={busy !== null}
-            onPress={() => void exportManifest()}
-            data-testid="workflow-run-export-manifest"
-          >
-            Export manifest…
-          </Button>
-        )}
-      </header>
-
-      {manifest && (
-        <div data-testid="workflow-run-manifest" data-path={manifest.path}>
-          <Banner tone="info" title="Run manifest exported">
-            <code>{manifest.path}</code> · {formatBytes(manifest.bytes)} · <FullHash hash={manifest.sha256} label="the manifest" />. It lists the revision,
-            definition and approval hashes, input and output digests, each attempt's environment, budgets and usage, and the cause.
-          </Banner>
-        </div>
-      )}
-
-      {run.state === "interrupted" && (
-        <div data-testid="workflow-run-interrupted">
-          <Banner
-            tone="warning"
-            title="The application stopped during this run"
-            actions={
-              <>
-                {!run.acknowledged && (
-                  <Button size="sm" icon={Check} isPending={busy === "ack"} isDisabled={busy !== null} onPress={() => void act("ack")} data-testid="workflow-run-acknowledge">
-                    Mark as reviewed
-                  </Button>
-                )}
-                <Button size="sm" icon={RotateCcw} onPress={() => setReviewOpen(true)} data-testid="workflow-run-review-new">
-                  Review a new run
-                </Button>
-              </>
-            }
-          >
-            Nothing was repeated automatically. A step marked “Outcome unknown” may have partly run; check its effects before
-            starting a new run.{run.acknowledged ? " Reviewed." : ""}
-          </Banner>
-        </div>
-      )}
-      {run.state === "canceled" && (
-        <Banner tone="canceled" title="This run was canceled">
-          Steps after the cancellation were not run. Outputs already validated are listed below.
-        </Banner>
-      )}
-      {run.state === "failed" && (
-        <div data-testid="workflow-run-failure" data-code={run.code ?? undefined}>
-          <Banner tone="danger" title={run.code ? `Run failed: ${run.code}` : "Run failed"}>
-            {run.message ?? "A step failed; later steps were not run."}
-          </Banner>
-        </div>
-      )}
-      {error && (
-        <Banner tone="danger" title="Not done" live>
-          {error}
-        </Banner>
-      )}
-
-      {run.state === "running" && (
-        <section className="xp-wf__group" aria-label="Running now" data-testid="workflow-run-concurrent" data-count={running.length}>
-          <h3 className="xp-wf__group-title">
-            Running now ({running.length}
-            {maxParallel > 1 ? ` of at most ${maxParallel} at once` : ""})
-          </h3>
-          {running.length === 0 ? (
-            <p className="xp-wf__muted">Nothing is in flight: the next step waits for its inputs or a free slot.</p>
           ) : (
-            <ul className="xp-wf-running">
-              {running.map((r) => (
-                <li key={`${r.step}-${r.instance ?? "s"}`} data-testid={`workflow-running-${r.step}${r.instance === null ? "" : `-${r.instance}`}`}>
-                  <Cpu size={14} aria-hidden="true" />
-                  <strong>{r.label}</strong>
-                  {r.detail && <span> · {r.detail}</span>}
-                  {r.sinceMs !== null && <span className="xp-wf__muted"> · since {formatTime(r.sinceMs)}</span>}
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      )}
-
-      <section className="xp-wf__group" aria-label="Usage">
-        <h3 className="xp-wf__group-title">Usage against the run's budgets</h3>
-        <div className="xp-wf-usage" data-testid="workflow-run-usage">
-          {usageRows(run).map((r) => (
-            <ProgressBar
-              key={r.label}
-              label={r.label}
-              value={r.limit > 0 ? Math.min(100, (r.used / r.limit) * 100) : 0}
-              valueLabel={`${r.format(r.used)} of ${r.format(r.limit)}`}
-              tone={r.limit > 0 && r.used >= r.limit ? "danger" : "accent"}
-            />
-          ))}
-        </div>
-      </section>
-
-      <section className="xp-wf__group" aria-label="Steps">
-        <h3 className="xp-wf__group-title">Steps</h3>
-        <ol className="xp-wf-plan__steps" data-testid="workflow-run-steps">
-          {run.steps.map((s, i) => (
-            <StepView key={s.step} run={run} step={s} index={i} onRun={onRun} />
-          ))}
-        </ol>
-      </section>
-
-      <section className="xp-wf__group" aria-label="Outcomes">
-        <h3 className="xp-wf__group-title">Outcomes</h3>
-        <ul className="xp-wf-outputs" data-testid="workflow-run-outcomes">
-          {run.outcomes.map((o) => (
-            <li key={o.id} className="xp-wf-output" data-outcome={o.id} data-realized={String(o.value !== null)}>
-              <div className="xp-wf-output__head">
-                <strong>{o.label}</strong>
-                {o.optional && <Badge tone="neutral">Optional</Badge>}{" "}
-                {o.value ? (
-                  <Badge tone="success" icon={Check}>
-                    Produced
-                  </Badge>
-                ) : (
-                  <Badge tone="neutral" dashed icon={o.optional ? CircleSlash : Ban}>
-                    Not produced
-                  </Badge>
-                )}
-              </div>
-              {o.value && <span className="xp-wf__muted">{o.value.kind === "file" || o.value.kind === "retained" ? o.value.path : `${o.step} → ${o.port}`}</span>}
-              {!o.value && o.reason && (
-                <span className="xp-wf__muted" data-testid={`workflow-outcome-reason-${o.id}`}>
-                  {o.reason}
-                </span>
+            <>
+              {run.state !== "interrupted" && (
+                <Button variant="secondary" icon={RotateCcw} onPress={() => setReviewOpen(true)} data-testid="workflow-run-again">
+                  Review a new run…
+                </Button>
               )}
-            </li>
-          ))}
-        </ul>
-      </section>
+              <Button variant="secondary" icon={History} onPress={() => setReproduceOpen(true)} data-testid="workflow-run-reproduce">
+                Reproduce…
+              </Button>
+              <Button
+                variant="ghost"
+                icon={FileDown}
+                isPending={busy === "manifest"}
+                isDisabled={busy !== null}
+                onPress={() => void exportManifest()}
+                data-testid="workflow-run-export-manifest"
+              >
+                Export manifest…
+              </Button>
+            </>
+          )
+        }
+        status={
+          <span data-testid="workflow-run-state" data-state={run.state} aria-live="polite">
+            <StatusPill status={view.status} label={view.label} />
+          </span>
+        }
+      />
 
-      <Section title="The plan exactly as approved" collapsible defaultExpanded={false}>
-        <PlanDetails plan={run.plan} />
-      </Section>
+      <div className="xp-wf__body">
+        <div className="xp-wf__page">
+          <StateSizeProvider value="compact">
+            <div className="xp-wf__lead">
+              <CauseView cause={run.cause} run={run} />
+              {manifest && (
+                <div data-testid="workflow-run-manifest" data-path={manifest.path}>
+                  <Banner tone="info" title="Run manifest exported">
+                    <code>{manifest.path}</code> · {formatBytes(manifest.bytes)} · <FullHash hash={manifest.sha256} label="the manifest" />. It lists the
+                    revision, definition and approval hashes, input and output digests, each attempt's environment, budgets and usage, and the
+                    cause.
+                  </Banner>
+                </div>
+              )}
+              {run.state === "interrupted" && (
+                <div data-testid="workflow-run-interrupted">
+                  <Banner
+                    tone="warning"
+                    title="The application stopped during this run"
+                    actions={
+                      <>
+                        {!run.acknowledged && (
+                          <Button size="sm" icon={Check} isPending={busy === "ack"} isDisabled={busy !== null} onPress={() => void act("ack")} data-testid="workflow-run-acknowledge">
+                            Mark as reviewed
+                          </Button>
+                        )}
+                        <Button size="sm" icon={RotateCcw} onPress={() => setReviewOpen(true)} data-testid="workflow-run-review-new">
+                          Review a new run
+                        </Button>
+                      </>
+                    }
+                  >
+                    Nothing was repeated automatically. A step marked “Outcome unknown” may have partly run; check its effects before
+                    starting a new run.{run.acknowledged ? " Reviewed." : ""}
+                  </Banner>
+                </div>
+              )}
+              {run.state === "canceled" && (
+                <Banner tone="canceled" title="This run was canceled">
+                  Steps after the cancellation were not run. Outputs already validated are listed below.
+                </Banner>
+              )}
+              {run.state === "failed" && (
+                <div data-testid="workflow-run-failure" data-code={run.code ?? undefined}>
+                  <Banner tone="danger" title={run.code ? `Run failed: ${run.code}` : "Run failed"}>
+                    {run.message ?? "A step failed; later steps were not run."}
+                  </Banner>
+                </div>
+              )}
+              {error && (
+                <Banner tone="danger" title="Not done" live>
+                  {error}
+                </Banner>
+              )}
+            </div>
 
-      {run.state !== "running" && (
-        <Section title="Run manifest" collapsible defaultExpanded={false}>
-          <ManifestView run={run} />
-        </Section>
-      )}
+            {run.state === "running" && (
+              <div data-testid="workflow-run-concurrent" data-count={running.length}>
+                <Section title={`Running now (${running.length}${maxParallel > 1 ? ` of at most ${maxParallel} at once` : ""})`}>
+                  {running.length === 0 ? (
+                    <p className="ui-meta">Nothing is in flight: the next step waits for its inputs or a free slot.</p>
+                  ) : (
+                    <ul className="xp-wf-running">
+                      {running.map((r) => (
+                        <li key={`${r.step}-${r.instance ?? "s"}`} data-testid={`workflow-running-${r.step}${r.instance === null ? "" : `-${r.instance}`}`}>
+                          <Cpu size={14} aria-hidden="true" />
+                          <span className="xp-wf-name">{r.label}</span>
+                          {r.detail && <span> · {r.detail}</span>}
+                          {r.sinceMs !== null && <span className="ui-meta"> · since {formatTime(r.sinceMs)}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </Section>
+              </div>
+            )}
+
+            <Section title="Usage against the run's budgets">
+              <div className="xp-wf-usage" data-testid="workflow-run-usage">
+                {usageRows(run).map((r) => (
+                  <ProgressBar
+                    key={r.label}
+                    label={r.label}
+                    value={r.limit > 0 ? Math.min(100, (r.used / r.limit) * 100) : 0}
+                    valueLabel={`${r.format(r.used)} of ${r.format(r.limit)}`}
+                    tone={r.limit > 0 && r.used >= r.limit ? "danger" : "accent"}
+                  />
+                ))}
+              </div>
+            </Section>
+
+            <Section title="Steps">
+              <ol className="xp-wf-blocks" data-testid="workflow-run-steps">
+                {run.steps.map((s, i) => (
+                  <StepView key={s.step} run={run} step={s} index={i} onRun={onRun} />
+                ))}
+              </ol>
+            </Section>
+
+            <Section title="Outcomes">
+              <ul className="xp-wf-rows" data-testid="workflow-run-outcomes">
+                {run.outcomes.map((o) => (
+                  <li key={o.id} data-outcome={o.id} data-realized={String(o.value !== null)}>
+                    <div className="xp-wf__line">
+                      <span className="xp-wf-name">{o.label}</span>
+                      {o.value ? (
+                        <StatusText status="succeeded" label="Produced" />
+                      ) : (
+                        <StatusText status={o.optional ? "canceled" : "unavailable"} label="Not produced" />
+                      )}
+                      {o.optional && <span className="ui-meta">Optional</span>}
+                    </div>
+                    {o.value && <span className="ui-meta">{o.value.kind === "file" || o.value.kind === "retained" ? o.value.path : `${o.step} → ${o.port}`}</span>}
+                    {!o.value && o.reason && (
+                      <span className="ui-meta" data-testid={`workflow-outcome-reason-${o.id}`}>
+                        {o.reason}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </Section>
+
+            <Section title="The plan exactly as approved" collapsible defaultExpanded={false}>
+              <PlanDetails plan={run.plan} />
+            </Section>
+
+            {run.state !== "running" && (
+              <Section title="Run manifest" collapsible defaultExpanded={false}>
+                <ManifestView run={run} />
+              </Section>
+            )}
+          </StateSizeProvider>
+        </div>
+      </div>
 
       <PlanReviewDialog
         workflow={run.workflow}
@@ -1041,11 +1042,7 @@ export function WorkflowRunView({ resource }: EditorProps) {
     );
   }
   if (!run) return <LoadingState title="Loading the run…" />;
-  return (
-    <div className="xp-wf">
-      <RunMonitor run={run} onRun={(next) => setRun(next)} />
-    </div>
-  );
+  return <RunMonitor run={run} onRun={(next) => setRun(next)} />;
 }
 
 // ----- history -----------------------------------------------------------------------------
@@ -1095,61 +1092,65 @@ export function RunHistory({ workflow, title = "Runs" }: { workflow: string | nu
   });
 
   return (
-    <section className="xp-wf__group" aria-label={title}>
-      <h3 className="xp-wf__group-title">{title}</h3>
+    <Section title={title}>
       {error && (
         <Banner tone="danger" title="Runs are unavailable" actions={<Button size="sm" onPress={() => void refresh()}>Retry</Button>}>
           {error}
         </Banner>
       )}
-      {runs && runs.length === 0 && <EmptyState fill={false} title="No runs yet" description="Review and run a saved, well-formed revision to see its runs here." />}
+      {runs && runs.length === 0 && <EmptyState title="No runs yet" description="Review and run a saved, well-formed revision to see its runs here." />}
       {runs && runs.length > 0 && (
         <div ref={list.ref} className="xp-ops-surface">
-        <ul className="xp-wf__cards" data-testid="workflow-runs">
-          {runs.map((r) => {
-            const view = RUN_STATE_VIEW[r.state];
-            return (
-              <li
-                key={r.id}
-                {...list.itemProps(r.id)}
-                className="xp-wf__card xp-wf__row xp-ops-item"
-                data-testid={`workflow-run-item-${r.id}`}
-                data-state={r.state}
-                aria-label={`Run of ${r.title}, ${view.label}, started ${formatTime(r.startedAtMs)}`}
-              >
-                <div className="xp-wf__grow">
-                  <strong>{r.title}</strong>
-                  <p className="xp-wf__muted">
-                    Revision {r.revision} · {formatTime(r.startedAtMs)} · {r.stepsDone} of {r.stepsTotal} steps
-                  </p>
-                </div>
-                {r.state === "interrupted" && !r.acknowledged && (
-                  <Badge tone="warning" dashed>
-                    Needs review
-                  </Badge>
-                )}
-                {r.cause?.kind === "trigger" && (
-                  <Badge tone="info" icon={Zap} title={`Started by trigger ${r.cause.trigger}`}>
-                    Trigger
-                  </Badge>
-                )}
-                {r.cause?.kind === "reproduce" && (
-                  <Badge tone="info" icon={History} title={`Reproduction of run ${r.cause.of}`}>
-                    Reproduction
-                  </Badge>
-                )}
-                <StatusPill status={view.status} label={view.label} />
-                <Button size="sm" onPress={() => openRun(r)} aria-label={`Open run of ${r.title} started ${formatTime(r.startedAtMs)}`}>
-                  Open
-                </Button>
-                {list.moreButton(r.id, `the run of ${r.title}`)}
-              </li>
-            );
-          })}
-        </ul>
-        {list.contextMenu}
+          <div className="xp-wf-list" role="list" data-testid="workflow-runs" aria-label={title}>
+            {runs.map((r) => {
+              const view = RUN_STATE_VIEW[r.state];
+              return (
+                <ListRow
+                  key={r.id}
+                  {...list.itemProps(r.id)}
+                  role="listitem"
+                  data-testid={`workflow-run-item-${r.id}`}
+                  data-state={r.state}
+                  aria-label={`Run of ${r.title}, ${view.label}, started ${formatTime(r.startedAtMs)}`}
+                  title={r.title}
+                  meta={
+                    <>
+                      <StatusText status={view.status} label={view.label} />
+                      <span>
+                        Revision {r.revision} · {formatTime(r.startedAtMs)} · {r.stepsDone} of {r.stepsTotal} steps
+                      </span>
+                      {r.state === "interrupted" && !r.acknowledged && (
+                        <Badge tone="warning" dashed>
+                          Needs review
+                        </Badge>
+                      )}
+                      {r.cause?.kind === "trigger" && (
+                        <Badge icon={Zap} title={`Started by trigger ${r.cause.trigger}`}>
+                          Trigger
+                        </Badge>
+                      )}
+                      {r.cause?.kind === "reproduce" && (
+                        <Badge icon={History} title={`Reproduction of run ${r.cause.of}`}>
+                          Reproduction
+                        </Badge>
+                      )}
+                    </>
+                  }
+                  trailing={
+                    <>
+                      <Button size="sm" variant="ghost" onPress={() => openRun(r)} aria-label={`Open run of ${r.title} started ${formatTime(r.startedAtMs)}`}>
+                        Open
+                      </Button>
+                      {list.moreButton(r.id, `the run of ${r.title}`)}
+                    </>
+                  }
+                />
+              );
+            })}
+          </div>
+          {list.contextMenu}
         </div>
       )}
-    </section>
+    </Section>
   );
 }

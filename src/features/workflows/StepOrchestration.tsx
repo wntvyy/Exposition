@@ -171,7 +171,7 @@ export function ConditionSection({
   if (isComposite(step)) {
     return (
       <div className="xp-wf__multi xp-wf-orch" data-testid={`condition-${step.id}`} data-enabled="false">
-        <p className="xp-wf__muted">
+        <p className="ui-meta">
           A step that runs a saved workflow cannot carry a condition; put conditions on the steps inside that workflow.
         </p>
         {condition && (
@@ -200,7 +200,7 @@ export function ConditionSection({
         Run this step only when a condition holds
       </Checkbox>
       {!condition && sources.length === 0 && (
-        <p className="xp-wf__muted">
+        <p className="ui-meta">
           A condition tests an earlier step's formal evidence (its verdict), a JSON dataset, or an optional output. No such output can
           come before this step yet.
         </p>
@@ -236,7 +236,7 @@ export function ConditionSection({
             label="Holds when"
             onChange={(test) => onChange(setCondition(draft, step.id, { ...condition, test }))}
           />
-          <p className="xp-wf__muted" data-testid={`condition-summary-${step.id}`}>
+          <p className="ui-meta" data-testid={`condition-summary-${step.id}`}>
             {describeCondition(condition, (s, p) => `“${outputLabel(draft, contracts, s, p)}”`)} An unreadable source fails the step.
           </p>
         </>
@@ -311,7 +311,7 @@ export function RepeatSection({
   const repeat = step.repeat ?? null;
   if (isComposite(step) && !repeat) {
     return (
-      <p className="xp-wf__muted xp-wf-orch" data-testid={`repeat-${step.id}`} data-kind="once">
+      <p className="ui-meta xp-wf-orch" data-testid={`repeat-${step.id}`} data-kind="once">
         A step that runs a saved workflow runs once; repeat steps inside that workflow instead.
       </p>
     );
@@ -401,7 +401,7 @@ export function RepeatSection({
         </>
       )}
       {repeat && (
-        <p className="xp-wf__muted" data-testid={`repeat-summary-${step.id}`}>
+        <p className="ui-meta" data-testid={`repeat-summary-${step.id}`}>
           {describeRepeat(repeat, own, paramLabel)}
         </p>
       )}
@@ -469,7 +469,7 @@ function ForEachFields({
           >
             Add value
           </Button>
-          <span className="xp-wf__muted">
+          <span className="ui-meta">
             {repeat.values.length} of at most {MAX_FOR_EACH_VALUES}. Instances may run at the same time within the workflow's limit. Its
             outputs can feed only inputs that accept several sources.
           </span>
@@ -489,7 +489,7 @@ function ChildSteps({ def, infos, depth }: { def: WorkflowDefinition; infos: Rea
         return (
           <li key={s.id} data-child-step={s.id}>
             <span>{s.label}</span>{" "}
-            <span className="xp-wf__muted">
+            <span className="ui-meta">
               {s.composite
                 ? `runs “${nested?.saved?.definition.title ?? s.composite.workflow}” revision ${s.composite.revision}`
                 : `${s.operation.id} v${s.operation.version}`}
@@ -530,8 +530,8 @@ export function CompositeSection({
   const newer = info?.latest !== null && info?.latest !== undefined && info.latest > ref.revision ? info.latest : null;
   return (
     <div className="xp-wf__multi xp-wf-orch" data-testid={`composite-${step.id}`} data-workflow={ref.workflow} data-revision={ref.revision}>
-      <p className="xp-wf__muted">
-        Runs the saved workflow <strong>“{title}”</strong> at revision <span data-testid={`composite-revision-${step.id}`}>{ref.revision}</span>{" "}
+      <p className="ui-meta">
+        Runs the saved workflow <span className="xp-wf-name">“{title}”</span> at revision <span data-testid={`composite-revision-${step.id}`}>{ref.revision}</span>{" "}
         (pinned). Its inputs and outcomes are this step's ports; its steps appear expanded in the plan review. Editing that workflow
         makes a new revision and never changes this pin by itself.
       </p>
