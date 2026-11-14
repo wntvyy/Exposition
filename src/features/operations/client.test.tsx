@@ -23,6 +23,10 @@ const ipc = vi.hoisted(() => ({
 vi.mock("./ipc", () => ({ opCommands: ipc, opEvents: { projectOp: vi.fn(async () => () => {}) } }));
 const notifications = vi.hoisted(() => ({ notify: vi.fn(), dismiss: vi.fn() }));
 vi.mock("../../app/notifications", () => notifications);
+const docs = vi.hoisted(() => ({ documentState: vi.fn(), documentUndo: vi.fn() }));
+vi.mock("../../lib/ipc", async (importOriginal) => ({ ...(await importOriginal<typeof import("../../lib/ipc")>()), commands: docs }));
+const reveal = vi.hoisted(() => ({ revealSource: vi.fn(async () => true) }));
+vi.mock("../editor/reveal", () => reveal);
 
 import { ConfirmHost } from "../../ui/components";
 import { onProjectOp, opHistory, operationInFlight, redoLast, runOperation, undoLast } from "./client";
@@ -455,5 +459,41 @@ describe("undo, redo and restore", () => {
     expect(ipc.restore).toHaveBeenCalledTimes(1);
     expect(lastNotification().title).toBe("Could not restore “a.txt”");
     expect(lastNotification().body).toContain("Something unexpected.");
+  });
+});
+
+describe("removal from a source", () => {
+  const thm = { kind: "graphEntity" as const, entity: "ent-thm" };
+  const edit = { path: "paper.tex", document: "doc-1", revision: 5, at: 120 };
+
+  it("shows the unsaved edit, offers Undo Removal, and undoes only while the document is at that revision", async () => {
+    const request: OpRequest = { kind: { kind: "delete", permanent: false }, targets: [thm], actor: { kind: "user" } };
+    ipc.plan.mockResolvedValue(plan(request, { effects: [{ target: thm, description: "Remove", destination: null, recovery: { kind: "sourceEdit", edit: null } }] }));
+    ipc.apply.mockResolvedValue(
+      result([
+        { target: thm, status: "succeeded", code: "ops.sourceEdited", message: "Removed from paper.tex, lines 7–9 with its proof as an unsaved edit.", created: null, recovery: { kind: "sourceEdit", edit }, restore: null },
+      ]),
+    );
+    reveal.revealSource.mockClear();
+    await runOperation(request, { labels: new Map([["graphEntity:ent-thm", "Theorem thm:main"]]) });
+    await waitFor(() => expect(reveal.revealSource).toHaveBeenCalledWith("paper.tex", { start: 120, end: 120 }));
+    const shown = lastNotification();
+    expect(shown.title).toBe("Removed “Theorem thm:main” from its source");
+    expect(shown.body).toContain("with its proof");
+    expect(shown.actions.map((a: { label: string }) => a.label)).toEqual(["Show in Editor", "Undo Removal"]);
+    expect(opHistory.canUndo()).toBe(false);
+    const undo = shown.actions.find((a: { label: string }) => a.label === "Undo Removal");
+
+    docs.documentState.mockResolvedValueOnce({ info: { revision: 5 }, text: "" });
+    docs.documentUndo.mockResolvedValueOnce({});
+    undo.run();
+    await waitFor(() => expect(docs.documentUndo).toHaveBeenCalledWith("doc-1", { kind: "source" }));
+    await waitFor(() => expect(lastNotification().title).toBe("Removal undone"));
+
+    // Edited after the removal: the editor's Undo is the way, nothing is undone here.
+    docs.documentState.mockResolvedValueOnce({ info: { revision: 6 }, text: "" });
+    undo.run();
+    await waitFor(() => expect(lastNotification().title).toBe("Undo it in the editor"));
+    expect(docs.documentUndo).toHaveBeenCalledTimes(1);
   });
 });

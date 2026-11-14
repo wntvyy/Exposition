@@ -6,6 +6,7 @@
 // components (Monaco, the page editor, dialogs) see keys first; an event they
 // handled (`preventDefault`) is never re-dispatched. While focus is in a text
 // input, textarea, contenteditable, or Monaco, only "global" bindings fire.
+import { notify } from "./notifications";
 import { registry, type CommandContribution } from "./registry";
 
 export type Platform = "mac" | "windows" | "linux";
@@ -222,11 +223,49 @@ export function commandForEvent(event: KeyboardEvent, platform: Platform = detec
   });
 }
 
+/**
+ * Why the command bound to this event is unavailable, when it says so (see
+ * `CommandContribution.disabledReason`); null when an enabled command takes
+ * the key, the key edits text, or no command explains itself.
+ */
+export function unavailableReasonForEvent(
+  event: KeyboardEvent,
+  platform: Platform = detectPlatform(),
+): { title: string; body?: string } | null {
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.repeat) return null;
+  if (["Control", "Shift", "Alt", "Meta", "AltGraph"].includes(event.key)) return null;
+  if (isEditableTarget(event.target)) return null;
+  const chord = chordFromEvent(event);
+  for (const command of registry.allCommands()) {
+    if (!command.keybinding || !command.disabledReason) continue;
+    const bound = cachedChord(command.keybinding, platform);
+    if (!bound || !chordsEqual(bound, chord)) continue;
+    if (!command.enabled || command.enabled()) return null;
+    const reason = command.disabledReason();
+    if (reason) return reason;
+  }
+  return null;
+}
+
+let lastExplained = { title: "", at: 0 };
+
 /** Install the keydown dispatcher. Returns an uninstaller. */
 export function installKeybindings(target: Window = window, platform: Platform = detectPlatform()): () => void {
   const onKeyDown = (event: KeyboardEvent) => {
     const command = commandForEvent(event, platform);
-    if (!command) return;
+    if (!command) {
+      const reason = unavailableReasonForEvent(event, platform);
+      if (reason) {
+        event.preventDefault();
+        // Once per reason while the key is pressed again and again.
+        const now = Date.now();
+        if (reason.title !== lastExplained.title || now - lastExplained.at > 2000) {
+          lastExplained = { title: reason.title, at: now };
+          notify({ tone: "info", title: reason.title, body: reason.body, timeoutMs: 6000 });
+        }
+      }
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     void registry.runCommand(command.id).catch((error: unknown) => {

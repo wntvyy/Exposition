@@ -7,9 +7,12 @@
 // - Delete source file/folder — a file-backed resource: its delete IS the file's
 //   delete (the backend delegates to the file operation); never a metadata-only
 //   delete that would reappear on reindex.
-// Items that come from a source (theorems, sections, Lean declarations) are
-// neither deleted nor duplicated here: that needs a source edit, so the actions
-// are disabled with the reason, and Copy Reference / Copy Text are offered.
+// - Delete from Source — an item declared in a source (a theorem or proof
+//   environment, a Lean declaration, a BibTeX entry): the backend removes its
+//   text from the source as an unsaved, undoable edit the person reviews and
+//   saves (anything still using it is listed in the one decision). It is not
+//   duplicated (Copy Reference / Copy Text instead) and not deleted
+//   "permanently" (the edit itself is the deletion).
 // Copies never carry verification status; the backend decides each copy contract.
 import { ClipboardCopy, EyeOff, Quote } from "lucide-react";
 
@@ -70,7 +73,6 @@ const REASONS: Partial<Record<EntityClass, { delete?: string; duplicate?: string
   managed: { delete: "The research space is managed by Research", duplicate: "The research space is managed by Research" },
   workflow: { delete: "Delete saved workflows from the Workflows list", duplicate: "Duplicate saved workflows from the Workflows list" },
   sourceAnchored: {
-    delete: "It comes from its source; change the source to remove it",
     duplicate: "It comes from its source and has no independent copy; use Copy Text or Copy Reference",
   },
   reference: { duplicate: "It identifies one source; a second card would duplicate its identity. Use Copy Reference" },
@@ -91,6 +93,7 @@ function deleteLabel(classes: EntityClass[], relations: number): string {
   if (classes.length === 0) return plural(relations, "Delete Relationship", "Delete Relationships");
   if (relations === 0 && classes.every((c) => c === "fileBacked")) return plural(classes.length, "Delete Source File", "Delete Source Files");
   if (relations === 0 && classes.every((c) => c === "folder")) return plural(classes.length, "Delete Source Folder", "Delete Source Folders");
+  if (relations === 0 && classes.every((c) => c === "sourceAnchored")) return "Delete from Source";
   if (relations === 0 && classes.every((c) => c === "manual" || c === "reference" || c === "missingFile")) return plural(classes.length, "Delete Entity", "Delete Entities");
   return "Delete Selected Items";
 }
@@ -120,6 +123,21 @@ async function copyText(entity: Entity): Promise<void> {
     else notify({ tone: "warning", title: "Could not copy to the clipboard" });
   } catch (error) {
     notify({ tone: "danger", title: "Could not copy the text", body: errorMessage(error) || errorText(error) });
+  }
+}
+
+/** Show where an item is declared (its bound range, or the file). */
+async function openSourceOf(entity: Entity): Promise<void> {
+  try {
+    const detail = await graphApi().entity(entity.id);
+    const binding = detail.bindings.find((b) => b.state === "resolved") ?? detail.bindings[0];
+    if (!binding) {
+      notify({ tone: "info", title: `${quoted(entity.label)} has no known place in a source` });
+      return;
+    }
+    await revealSource(binding.path, binding.range);
+  } catch (error) {
+    notify({ tone: "danger", title: "Could not open the source", body: errorMessage(error) || errorText(error) });
   }
 }
 
@@ -189,18 +207,32 @@ export function graphActions(selection: GraphSelection, options: GraphActionOpti
         run: () => void runUserOperation({ kind: "delete", permanent: false }, [{ kind: "path", path }], { labels: new Map([[targetKey({ kind: "path", path }), file.label]]) }),
       });
     }
+    // Declared in a source but not located exactly now (unsaved edits around it, declared twice):
+    // the person removes it in the editor.
+    const unlocated = refused
+      .map((r) => (r.code === "ops.sourceChanged" || r.code === "ops.sourceDerived" ? entityOf(r.target) : undefined))
+      .find(Boolean);
+    if (unlocated) actions.push({ label: "Open Source", run: () => void openSourceOf(unlocated) });
     return actions;
   };
   const files = classes.filter((c) => c === "fileBacked" || c === "folder").length;
-  const deleteDescription = files ? `Source ${plural(files, "file moves", "files move")} to ${trashName()}` : undefined;
+  const anchored = classes.filter((c) => c === "sourceAnchored").length;
+  const deleteDescription = files
+    ? `Source ${plural(files, "file moves", "files move")} to ${trashName()}`
+    : anchored
+      ? "Removes its text from the source as an unsaved edit you review and save"
+      : undefined;
+  const anchoredIndex = classes.indexOf("sourceAnchored");
+  const blockedPermanent =
+    anchoredIndex >= 0 ? `${quoted(entities[anchoredIndex]!.label)}: it is removed from its source as an edit you review and save; use Delete from Source` : null;
 
   const createdEntities = (outcome: Awaited<ReturnType<typeof runUserOperation>>) =>
     (outcome?.result.outcomes ?? []).flatMap((o) => (o.status === "succeeded" && o.created?.kind === "graphEntity" ? [o.created.entity] : []));
   const pasteTargets = (clipped: { id: string }[]): OpTarget[] => clipped.map((e) => ({ kind: "graphEntity", entity: e.id }));
 
   const del = (permanent: boolean): SurfaceAction => ({
-    enabled: deleteEnabled,
-    reason: count === 0 ? none : (readOnly ?? blockedDelete ?? undefined),
+    enabled: deleteEnabled && !(permanent && blockedPermanent),
+    reason: count === 0 ? none : (readOnly ?? blockedDelete ?? (permanent ? blockedPermanent : null) ?? undefined),
     label: permanent ? "Delete Permanently" : deleteLabel(classes, relations.length),
     description: permanent ? "Cannot be restored" : deleteDescription,
     run: async () => {

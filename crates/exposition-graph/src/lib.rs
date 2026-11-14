@@ -47,6 +47,7 @@ pub mod project_ops;
 pub mod query;
 pub mod reconcile;
 pub mod service;
+pub mod source_removal;
 pub mod store;
 pub mod validate;
 pub mod vocabulary;

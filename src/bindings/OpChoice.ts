@@ -7,7 +7,8 @@ import type { OpChoiceOption } from "./OpChoiceOption";
 export type OpChoice = { 
 /**
  * Stable key, e.g. `unsavedBuffers` (`preserve` | `discard` | `cancel`),
- * `activeWork` (`stop`), `triggers` (`disable`).
+ * `activeWork` (`stop`), `triggers` (`disable`), `proofs` (`remove` |
+ * `keep`: the proofs of a statement removed from its source).
  */
 key: string, label: string, options: Array<OpChoiceOption>, 
 /**

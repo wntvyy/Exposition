@@ -8,6 +8,7 @@ import {
   isEditableTarget,
   isGlobalChord,
   parseKeybinding,
+  unavailableReasonForEvent,
 } from "./keybindings";
 import { registry } from "./registry";
 
@@ -133,6 +134,28 @@ describe("installKeybindings", () => {
     input.dispatchEvent(handled);
     await Promise.resolve();
     expect(run).toHaveBeenCalledTimes(1);
+    input.remove();
+  });
+
+  it("explains a disabled command's key instead of ignoring it silently, never inside text fields", async () => {
+    const run = vi.fn();
+    const reason = { title: "Delete Selected Items is not available", body: "“exposition-try”: The project itself is not deleted from the graph" };
+    offs.push(
+      registry.registerCommand({ id: "t.opdel", title: "Delete", keybinding: "Delete", keybindingScope: "workbench", enabled: () => false, disabledReason: () => reason, run }),
+    );
+    offs.push(installKeybindings(window, "windows"));
+    expect(unavailableReasonForEvent(key({ key: "Delete", code: "Delete" }), "windows")).toEqual(reason);
+    expect(unavailableReasonForEvent(key({ key: "Delete", code: "Delete", repeat: true }), "windows")).toBeNull();
+    const event = key({ key: "Delete", code: "Delete" });
+    document.body.dispatchEvent(event);
+    await Promise.resolve();
+    expect(run).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+    const input = document.createElement("input");
+    document.body.append(input);
+    const typed = key({ key: "Delete", code: "Delete" });
+    input.dispatchEvent(typed);
+    expect(typed.defaultPrevented).toBe(false);
     input.remove();
   });
 

@@ -11,6 +11,7 @@
 // falls back to anything the plan did not offer. Undo/Redo restore and
 // re-delete through the same contract; restores never overwrite (a collision
 // asks before using a fresh name).
+import { detectPlatform } from "../../app/keybindings";
 import { notify, type NotificationAction } from "../../app/notifications";
 import type { OpKind } from "../../bindings/OpKind";
 import type { OpOutcome } from "../../bindings/OpOutcome";
@@ -18,7 +19,8 @@ import type { OpPlan } from "../../bindings/OpPlan";
 import type { OpRequest } from "../../bindings/OpRequest";
 import type { OpResult } from "../../bindings/OpResult";
 import type { OpTarget } from "../../bindings/OpTarget";
-import { errorMessage } from "../../lib/ipc";
+import type { SourceEditAt } from "../../bindings/SourceEditAt";
+import { commands, errorMessage } from "../../lib/ipc";
 import { confirm } from "../../ui/components";
 import { parseJson, readStored, writeStored } from "../../ui/storage";
 import { requestDecision } from "./decision";
@@ -313,6 +315,15 @@ function report(plan: OpPlan, result: OpResult, labels: TargetLabels, options: R
       run: () => void runOperation({ kind: { kind: "delete", permanent: true }, targets, actor: { kind: "user" } }, { labels }),
     });
   }
+  if (summary.sourceEdits.length > 0) {
+    // Removed from a source: show the unsaved edit where it was made (the person reviews and saves it).
+    const first = summary.sourceEdits[0]!;
+    // Loaded on use: the editor brings Monaco with it.
+    const show = () => void import("../editor/reveal").then(({ revealSource }) => revealSource(first.path, { start: first.at, end: first.at }));
+    show();
+    actions.push({ label: "Show in Editor", run: show });
+    actions.push({ label: "Undo Removal", run: () => void undoSourceEdits(summary.sourceEdits) });
+  }
   actions.push(...followUps);
   notify({
     tone: summary.tone,
@@ -325,6 +336,44 @@ function report(plan: OpPlan, result: OpResult, labels: TargetLabels, options: R
   const notices = [...new Set([...planNotices(plan), ...result.notices])];
   if (notices.length) {
     notify({ tone: "info", title: kind.kind === "delete" ? "Note" : "Saved version copied", body: notices.join("\n"), timeoutMs: 10_000 });
+  }
+}
+
+// ----- source edits ------------------------------------------------------------------------
+
+/**
+ * Undo removals from sources: one step of each document's shared history, and
+ * only while the document is still at the revision the removal produced (a
+ * later edit would be undone instead; then the editor's Undo is the way).
+ */
+export async function undoSourceEdits(edits: SourceEditAt[]): Promise<void> {
+  const byDocument = new Map<string, SourceEditAt>();
+  for (const edit of edits) byDocument.set(edit.document, edit);
+  const undone: string[] = [];
+  const changed: string[] = [];
+  for (const edit of byDocument.values()) {
+    try {
+      const state = await commands.documentState(edit.document);
+      if (state.info.revision !== edit.revision) {
+        changed.push(edit.path);
+        continue;
+      }
+      await commands.documentUndo(edit.document, { kind: "source" });
+      undone.push(edit.path);
+    } catch (error) {
+      changed.push(`${edit.path} (${errorMessage(error)})`);
+    }
+  }
+  if (undone.length) {
+    notify({ tone: "info", title: "Removal undone", body: `The text is back in ${undone.join(", ")} (still unsaved).` });
+  }
+  if (changed.length) {
+    notify({
+      tone: "warning",
+      title: "Undo it in the editor",
+      body: `${changed.join(", ")} changed after the removal, so it was not undone here. Use Undo in the editor (${detectPlatform() === "mac" ? "Cmd+Z" : "Ctrl+Z"}) to step back to it.`,
+      timeoutMs: null,
+    });
   }
 }
 

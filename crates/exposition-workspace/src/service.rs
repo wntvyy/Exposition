@@ -489,6 +489,21 @@ impl WorkspaceService {
         self.opened(&info.id)
     }
 
+    /// The text of a project file as `open_document` would show it (same
+    /// resolution inside the folder, size limit and decoding), without opening
+    /// a document. For planning that must change nothing.
+    pub fn read_text(&self, path: &WorkspacePath) -> WorkspaceResult<String> {
+        let root = self.root()?;
+        let target = root.resolve_existing(path)?;
+        let meta = fs::metadata(&target).map_err(|e| WorkspaceError::io(path, &e))?;
+        if meta.is_dir() {
+            return Err(WorkspaceError::new("file.isDirectory", format!("{path} is a folder.")));
+        }
+        let read = read_with_identity(&target, MAX_TEXT_BYTES).map_err(|e| WorkspaceError::io(path, &e))?;
+        let bytes = read.bytes.map_err(|size| too_large(path, size))?;
+        Ok(decode(&bytes).map_err(|e| decode_error(path, e))?.text)
+    }
+
     /// The open document backed by the physical file `identity`, if any.
     fn document_with_identity(&self, identity: &FileIdentity) -> Option<DocumentId> {
         let state = lock(&self.state);

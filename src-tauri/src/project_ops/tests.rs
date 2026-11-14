@@ -62,6 +62,8 @@ struct FakeData {
     resources: Vec<String>,
     /// Data restore tokens this side owns (`<kind>:<id>`).
     data_restores: Mutex<Vec<String>>,
+    /// Graph entities the source side asks about.
+    details: Vec<exposition_graph::model::EntityDetail>,
 }
 
 fn wp(s: &str) -> WorkspacePath {
@@ -141,6 +143,9 @@ impl DataSide for FakeData {
     }
     fn graph_resource(&self, path: &WorkspacePath) -> bool {
         self.resources.iter().any(|r| r == path.as_str())
+    }
+    fn entity_detail(&self, entity: &str) -> Option<exposition_graph::model::EntityDetail> {
+        self.details.iter().find(|d| d.entity.id.as_str() == entity).cloned()
     }
     fn after_paths(&self, outcomes: &[OpOutcome]) {
         self.after.lock().unwrap().push(outcomes.to_vec());
@@ -1063,4 +1068,293 @@ fn a_reconciliation_triggered_by_planning_is_announced() {
     let announced = announced.lock().unwrap();
     assert_eq!(announced.len(), 1, "one project-op event for the reconciliation");
     assert!(announced[0].notices[0].contains("interrupted"));
+}
+
+// ----- items declared in a source: "Delete from Source" ----------------------------------
+
+mod source_items {
+    use exposition_graph::ids::{EntityId, RelationId};
+    use exposition_graph::model::{
+        AssertionStatus, BindingState, Entity, EntityDetail, Lifecycle, Origin, Relation, SourceBinding,
+        SourceSelector, SourceVersion,
+    };
+    use exposition_graph::reconcile::extract::extract;
+    use exposition_graph::reconcile::matching::encode_fingerprint;
+    use exposition_graph::source_removal::content_hash;
+    use exposition_graph::vocabulary::{EntityKind, RelationKind};
+
+    use super::*;
+
+    pub const PAPER: &str = "\\begin{document}\n\n\\begin{lemma}\\label{lem:closed}\nA closed subset is compact.\n\\end{lemma}\n\n\\begin{theorem}\\label{thm:main}\nThe image is compact.\n\\end{theorem}\n\n\\begin{proof}\nSee Lemma~\\ref{lem:closed}.\n\\end{proof}\n\n\\end{document}\n";
+    pub const WITHOUT_THEOREM_AND_PROOF: &str = "\\begin{document}\n\n\\begin{lemma}\\label{lem:closed}\nA closed subset is compact.\n\\end{lemma}\n\n\\end{document}\n";
+
+    pub fn entity(kind: EntityKind, label: &str, key: Option<&str>) -> Entity {
+        Entity {
+            id: EntityId::mint(),
+            kind,
+            roles: Vec::new(),
+            label: label.into(),
+            key: key.map(Into::into),
+            lifecycle: Lifecycle::Active,
+            tombstone_reason: None,
+            revision: 1,
+            origin: Origin::Extracted { extractor: "latex/1".into() },
+            attributes: Default::default(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
+    }
+
+    pub fn relation(kind: RelationKind, from: &Entity, to: &Entity) -> Relation {
+        Relation {
+            id: RelationId::mint(),
+            kind,
+            from: from.id.clone(),
+            to: to.id.clone(),
+            origin: Origin::Extracted { extractor: "latex/1".into() },
+            status: AssertionStatus::Observed,
+            evidence_kind: None,
+            evidence: Vec::new(),
+            from_version: None,
+            to_version: None,
+            note: None,
+            revision: 1,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
+    }
+
+    /// The binding the graph would hold for a declaration of `text` at `path`.
+    pub fn binding(e: &Entity, path: &str, text: &str, syntax: &str, name: Option<&str>) -> SourceBinding {
+        let x = extract(&wp(path), text).unwrap();
+        let d = x.declarations.iter().find(|d| d.syntax == syntax && d.name.as_deref() == name).unwrap();
+        SourceBinding {
+            entity: e.id.clone(),
+            path: wp(path),
+            selector: SourceSelector::Declaration { syntax: syntax.into(), name: name.map(Into::into), ordinal: None },
+            range: Some(d.range),
+            version: Some(SourceVersion { content_hash: content_hash(text), revision: None, saved: true }),
+            fingerprint: Some(encode_fingerprint(d)),
+            state: BindingState::Resolved,
+            detail: None,
+        }
+    }
+
+    pub fn detail(
+        entity: Entity,
+        bindings: Vec<SourceBinding>,
+        incoming: Vec<Relation>,
+        neighbors: Vec<Entity>,
+    ) -> EntityDetail {
+        EntityDetail {
+            entity,
+            bindings,
+            outgoing: Vec::new(),
+            incoming,
+            neighbors,
+            evidence: Vec::new(),
+            evidence_freshness: Vec::new(),
+            imported_evidence: Vec::new(),
+            coverage: None,
+            graph_revision: 1,
+        }
+    }
+
+    pub struct Paper {
+        pub data: FakeData,
+        pub theorem: Entity,
+        pub proof: Entity,
+    }
+
+    /// paper.tex with a theorem, its proof, and a curated claim that depends on the theorem.
+    pub fn paper(fx: &Fixture) -> Paper {
+        fs::write(fx.file("paper.tex"), PAPER).unwrap();
+        let theorem = entity(EntityKind::Theorem, "Theorem thm:main", Some("thm:main"));
+        let proof = entity(EntityKind::Proof, "Proof (paper.tex)", None);
+        let mut claim = entity(EntityKind::Claim, "Claim C", None);
+        claim.origin = Origin::User;
+        let thm_binding = binding(&theorem, "paper.tex", PAPER, "latex.env:theorem", Some("thm:main"));
+        let proof_binding = binding(&proof, "paper.tex", PAPER, "latex.env:proof", None);
+        let proof_of = relation(RelationKind::ProofOf, &proof, &theorem);
+        let mut depends = relation(RelationKind::DependsOn, &claim, &theorem);
+        depends.origin = Origin::User;
+        depends.status = AssertionStatus::Accepted;
+        let data = FakeData {
+            details: vec![
+                detail(theorem.clone(), vec![thm_binding], vec![proof_of, depends], vec![proof.clone(), claim]),
+                detail(proof.clone(), vec![proof_binding], Vec::new(), vec![theorem.clone()]),
+            ],
+            ..FakeData::default()
+        };
+        Paper { data, theorem, proof }
+    }
+
+    pub fn delete(targets: &[&Entity], permanent: bool, actor: OpActor) -> OpRequest {
+        OpRequest {
+            kind: OpKind::Delete { permanent },
+            targets: targets.iter().map(|e| OpTarget::GraphEntity { entity: e.id.to_string() }).collect(),
+            actor,
+        }
+    }
+
+    pub fn buffer(fx: &Fixture, path: &str) -> exposition_core::document::DocumentState {
+        let id = fx.ws.documents().find_by_path(&wp(path)).expect("the document is open");
+        fx.ws.documents().state(&id).unwrap()
+    }
+}
+
+use exposition_graph::model::{BindingState, Origin};
+use exposition_graph::vocabulary::EntityKind;
+use source_items::*;
+
+#[test]
+fn a_theorem_is_removed_from_its_source_with_its_proof_as_one_unsaved_undoable_edit() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let p = paper(&fx);
+    let plan = ops.plan(&fx.ws, &p.data, delete(&[&p.theorem], false, OpActor::User)).unwrap();
+    assert!(plan.refusals.is_empty(), "the data side never sees it: {:?}", plan.refusals);
+    assert_eq!(plan.effects.len(), 1);
+    assert!(matches!(plan.effects[0].recovery, OpRecovery::SourceEdit { edit: None }));
+    assert!(plan.effects[0].description.contains("paper.tex, lines 7–9"), "{}", plan.effects[0].description);
+    assert!(plan.needs_decision, "its proof and a claim use it: one decision");
+    let kinds: Vec<ImpactKind> = plan.impacts.iter().map(|i| i.kind).collect();
+    assert_eq!(kinds, vec![ImpactKind::SourceDependents, ImpactKind::SourceDependents]);
+    assert!(plan.impacts.iter().any(|i| i.message.contains("“Claim C” depends on it")), "{:?}", plan.impacts);
+    let proofs = plan.choices.iter().find(|c| c.key == "proofs").expect("the proofs choice");
+    assert_eq!(proofs.default, "remove");
+    // Planning opened nothing and changed nothing.
+    assert!(fx.ws.documents().find_by_path(&wp("paper.tex")).is_none());
+
+    let result = apply_plan(&ops, &fx, &p.data, &plan).unwrap();
+    assert_eq!(result.outcomes.len(), 1);
+    let o = &result.outcomes[0];
+    assert_eq!((o.status, o.code.as_deref()), (OpStatus::Succeeded, Some("ops.sourceEdited")), "{o:?}");
+    let OpRecovery::SourceEdit { edit: Some(at) } = &o.recovery else { panic!("{o:?}") };
+    assert_eq!(at.path, wp("paper.tex"));
+    let state = buffer(&fx, "paper.tex");
+    assert_eq!(state.text, WITHOUT_THEOREM_AND_PROOF, "theorem and proof removed, one blank line between blocks");
+    assert_eq!((at.document.clone(), at.revision), (state.info.id.clone(), state.info.revision));
+    assert_ne!(state.info.saved_revision, Some(state.info.revision), "unsaved");
+    assert_eq!(fs::read_to_string(fx.file("paper.tex")).unwrap(), PAPER, "nothing written to disk");
+    assert_eq!(&state.text[at.at as usize..at.at as usize + 14], "\\end{document}", "the removal point");
+    // One undo step brings both back.
+    fx.ws.documents().undo(&state.info.id, EditOrigin::Source).unwrap();
+    assert_eq!(buffer(&fx, "paper.tex").text, PAPER);
+}
+
+#[test]
+fn keeping_the_proof_removes_only_the_statement_and_an_edit_after_planning_changes_nothing() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let p = paper(&fx);
+    // An open buffer with unsaved text above the theorem: located there, not on disk.
+    let opened = fx.ws.open_document(&wp("paper.tex")).unwrap().state;
+    let typed = |rev: u64, at: u32, text: &str| TransactionRequest {
+        id: TransactionId(format!("t-{rev}-{at}")),
+        origin: EditOrigin::Source,
+        edits: vec![DocumentEdit {
+            document: opened.info.id.clone(),
+            base_revision: rev,
+            patches: vec![TextPatch { range: TextRange::empty(at), text: text.into() }],
+        }],
+        undo: UndoBehavior::NewGroup,
+        conflict: ConflictPolicy::Reject,
+        label: None,
+        selection: None,
+    };
+    fx.ws.documents().apply(typed(opened.info.revision, 17, "% unsaved note\n")).unwrap();
+
+    let plan = ops.plan(&fx.ws, &p.data, delete(&[&p.theorem], false, OpActor::User)).unwrap();
+    // More typing after the plan: the plan is stale and nothing is removed.
+    let rev = buffer(&fx, "paper.tex").info.revision;
+    fx.ws.documents().apply(typed(rev, 0, "%")).unwrap();
+    let e = apply_plan(&ops, &fx, &p.data, &plan).unwrap_err();
+    assert_eq!(e.code, "ops.planStale");
+    assert!(buffer(&fx, "paper.tex").text.contains("\\begin{theorem}"));
+
+    let plan = ops.plan(&fx.ws, &p.data, delete(&[&p.theorem], false, OpActor::User)).unwrap();
+    let result = ops
+        .apply(
+            &fx.ws,
+            &p.data,
+            OpApply {
+                plan: plan.plan.clone(),
+                plan_hash: plan.plan_hash.clone(),
+                choices: BTreeMap::from([("proofs".to_owned(), "keep".to_owned())]),
+            },
+        )
+        .unwrap();
+    assert!(result.outcomes[0].message.as_deref().unwrap().contains("its proof stays"), "{:?}", result.outcomes);
+    let text = buffer(&fx, "paper.tex").text;
+    assert!(text.starts_with("%\\begin{document}\n% unsaved note\n"), "{text}");
+    assert!(!text.contains("\\begin{theorem}") && text.contains("\\begin{proof}"), "{text}");
+}
+
+#[test]
+fn permanent_agent_unlocated_and_covered_items_are_refused_without_changes() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let p = paper(&fx);
+    let permanent = ops.plan(&fx.ws, &p.data, delete(&[&p.theorem], true, OpActor::User)).unwrap();
+    assert!(permanent.effects.is_empty());
+    assert_eq!(permanent.refusals[0].code, "ops.notSupported");
+    assert!(permanent.refusals[0].message.contains("use Delete"), "{}", permanent.refusals[0].message);
+    let agent = ops.plan(&fx.ws, &p.data, delete(&[&p.theorem], false, OpActor::Agent { task: "t-1".into() })).unwrap();
+    assert_eq!(agent.refusals[0].code, "ops.agentScope");
+
+    // A binding the graph could not resolve: never guessed.
+    let mut data = paper(&fx).data;
+    data.details[0].bindings[0].state = BindingState::Missing;
+    let theorem = data.details[0].entity.clone();
+    let unresolved = ops.plan(&fx.ws, &data, delete(&[&theorem], false, OpActor::User)).unwrap();
+    assert_eq!(unresolved.refusals[0].code, "ops.sourceDerived");
+
+    // Its source file deleted in the same request: covered, the file goes to the trash.
+    let mut req = delete(&[&p.theorem], false, OpActor::User);
+    req.targets.push(path("paper.tex"));
+    let plan = ops.plan(&fx.ws, &p.data, req).unwrap();
+    assert_eq!(plan.refusals[0].code, "ops.covered");
+    let result = apply_plan(&ops, &fx, &p.data, &plan).unwrap();
+    assert!(!fx.exists("paper.tex"));
+    assert!(fx.ws.documents().find_by_path(&wp("paper.tex")).is_none(), "no edit of a deleted file");
+    assert_eq!(result.outcomes[0].code.as_deref(), Some("ops.covered"));
+
+    // A proof selected with its theorem: one edit, no decision about the proof.
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let p = paper(&fx);
+    let plan = ops.plan(&fx.ws, &p.data, delete(&[&p.theorem, &p.proof], false, OpActor::User)).unwrap();
+    assert!(plan.choices.iter().all(|c| c.key != "proofs"), "{:?}", plan.choices);
+    let result = apply_plan(&ops, &fx, &p.data, &plan).unwrap();
+    assert!(result.outcomes.iter().all(|o| o.status == OpStatus::Succeeded), "{:?}", result.outcomes);
+    assert_eq!(buffer(&fx, "paper.tex").text, WITHOUT_THEOREM_AND_PROOF);
+}
+
+#[test]
+fn a_lean_declaration_lists_literal_uses_of_its_name_in_other_lean_files() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let basel =
+        "namespace LeanBasic\n\n/-- The Basel sum. -/\ntheorem basel : True := by\n  trivial\n\nend LeanBasic\n";
+    let user = "import LeanBasic.Basel\n\nnamespace Other\n\ntheorem uses : True := LeanBasic.basel\n\n-- LeanBasic.basel in a comment\nend Other\n";
+    fs::create_dir_all(fx.file("lean/LeanBasic")).unwrap();
+    fs::create_dir_all(fx.file("lean/.lake/packages")).unwrap();
+    fs::write(fx.file("lean/LeanBasic/Basel.lean"), basel).unwrap();
+    fs::write(fx.file("lean/User.lean"), user).unwrap();
+    fs::write(fx.file("lean/.lake/packages/Dep.lean"), "theorem d : True := LeanBasic.basel\n").unwrap();
+    let mut decl = entity(EntityKind::FormalDeclaration, "LeanBasic.basel", Some("LeanBasic.basel"));
+    decl.origin = Origin::Extracted { extractor: "lean/1".into() };
+    let b = binding(&decl, "lean/LeanBasic/Basel.lean", basel, "lean.theorem", Some("LeanBasic.basel"));
+    let data = FakeData { details: vec![detail(decl.clone(), vec![b], Vec::new(), Vec::new())], ..FakeData::default() };
+    let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+    assert!(plan.needs_decision);
+    let impact = &plan.impacts[0];
+    assert_eq!(impact.kind, ImpactKind::SourceDependents);
+    let consumers: Vec<(&str, Option<&str>)> =
+        impact.consumers.iter().map(|c| (c.label.as_str(), c.path.as_ref().map(|p| p.as_str()))).collect();
+    assert_eq!(consumers, vec![("Other.uses", Some("lean/User.lean"))], "not the comment, not .lake: {impact:?}");
+    let result = apply_plan(&ops, &fx, &data, &plan).unwrap();
+    assert_eq!(result.outcomes[0].status, OpStatus::Succeeded);
+    assert_eq!(buffer(&fx, "lean/LeanBasic/Basel.lean").text, "namespace LeanBasic\n\nend LeanBasic\n");
 }

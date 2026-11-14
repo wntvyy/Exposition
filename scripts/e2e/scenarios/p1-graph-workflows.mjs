@@ -1,8 +1,9 @@
 // P1 project operations — graph items and workflows in the real app (spec §5
 // rows 7, 8, 9), disposable project:
-//  1. Graph: a theorem from the source is neither deleted nor duplicated
-//     (disabled with the reason; Delete on the focused node does nothing);
-//     Copy Reference / Copy Text are offered.
+//  1. Graph: a theorem from the source is deleted only from its source
+//     ("Delete from Source"; the edit itself is p1-source-removal), never
+//     permanently or duplicated (disabled with the reason; Ctrl+D on the
+//     focused row explains instead of acting); Copy Reference / Copy Text.
 //  2. A manual claim: Duplicate (Ctrl+D) makes a new item without evidence,
 //     the original intact; Delete (key) removes the copy at once.
 //  3. A manual relationship: Delete relationship at once (no generic alert).
@@ -105,18 +106,20 @@ export default async function p1GraphWorkflows({ launchApp, artifactsDir, assert
     await thmRow.click({ button: "right" });
     const menu = page.getByTestId("graph-context-menu");
     await menu.waitFor();
-    const del = menu.getByRole("menuitem", { name: /Delete/ }).first();
-    assert.equal(await del.getAttribute("aria-disabled"), "true", "a source-anchored theorem is not deleted from the graph");
-    assert.match(await menu.textContent(), /change the source/);
+    // Deleted only from its source (an unsaved edit, p1-source-removal), never "permanently" or duplicated.
+    const del = menu.getByRole("menuitem", { name: /^Delete from Source/ });
+    assert.notEqual(await del.getAttribute("aria-disabled"), "true", "a source-anchored theorem is deleted from its source");
+    assert.equal(await menu.getByRole("menuitem", { name: /^Delete Permanently/ }).getAttribute("aria-disabled"), "true");
+    assert.match(await menu.textContent(), /use Delete from Source/);
     assert.ok(await menu.getByRole("menuitem", { name: /Copy Reference/ }).isVisible());
     assert.ok(await menu.getByRole("menuitem", { name: /Copy Text/ }).isVisible());
     await shot(page, "p1-graph-context-menu-light");
     await page.keyboard.press("Escape");
     await thmRow.focus();
-    await page.keyboard.press("Delete");
     await page.keyboard.press("Control+D");
     await expectNoDialog(page, assert, 500);
     assert.equal((await invoke(page, "graph_entity", { entity: theorem.id })).entity.lifecycle, "active", "theorem intact");
+    await dismissNotifications(page);
 
     // 2. manual claim: duplicate then delete the copy
     const claimRow = grid.locator(`[data-entity-id="${claim}"]`);

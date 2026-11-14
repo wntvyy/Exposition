@@ -161,3 +161,37 @@ describe("operation menus", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 });
+
+describe("removal from a source", () => {
+  const thm = { kind: "graphEntity" as const, entity: "ent-thm" };
+  const labels = new Map([["graphEntity:ent-thm", "Theorem thm:main"]]);
+  it("names the source edit in the decision and the result, and keeps where it happened", () => {
+    const plan: OpPlan = {
+      plan: "p",
+      request: { kind: { kind: "delete", permanent: false }, targets: [thm], actor: { kind: "user" } },
+      effects: [{ target: thm, description: "Remove …", destination: null, recovery: { kind: "sourceEdit", edit: null } }],
+      refusals: [],
+      impacts: [{ kind: "sourceDependents", target: thm, consumers: [], message: "“Claim C” depends on it." }],
+      needsDecision: true,
+      choices: [],
+      planHash: "h",
+      expiresAtMs: 0,
+    };
+    expect(decisionTitle(plan, labels)).toBe("Delete “Theorem thm:main” from its source");
+    expect(decisionGroups(plan).map((g) => g.heading)).toEqual(["Used elsewhere in the sources"]);
+    const edit = { path: "paper.tex", document: "doc-1", revision: 4, at: 10 };
+    const summary = summarizeResult(
+      plan.request.kind,
+      {
+        plan: "p",
+        outcomes: [{ target: thm, status: "succeeded", code: "ops.sourceEdited", message: "Removed from paper.tex, lines 7–9 as an unsaved edit.", created: null, recovery: { kind: "sourceEdit", edit }, restore: null }],
+        notices: [],
+      },
+      labels,
+    );
+    expect(summary.title).toBe("Removed “Theorem thm:main” from its source");
+    expect(summary.lines).toEqual(["Removed from paper.tex, lines 7–9 as an unsaved edit."]);
+    expect(summary.sourceEdits).toEqual([edit]);
+    expect(summary.restoreTokens).toEqual([]);
+  });
+});

@@ -57,6 +57,9 @@ pub enum OpTarget {
     AgentTask { task: String },
     /// A graph entity. File-backed entities are refused here (`ops.useSourceFile`):
     /// their deletion is the deletion of the source file, a `Path` target.
+    /// An entity declared in a source (a theorem environment, a Lean
+    /// declaration, a BibTeX entry, …) is deleted by removing its text from
+    /// that source as an unsaved, undoable edit ([`OpRecovery::SourceEdit`]).
     GraphEntity { entity: String },
     /// A graph relationship.
     GraphRelation { relation: String },
@@ -143,6 +146,11 @@ pub enum ImpactKind {
     /// Informational, no decision: a source with unsaved edits was copied as
     /// its SAVED version.
     SavedVersionCopied,
+    /// Removing an item from its source leaves other source text that uses
+    /// it: a `\ref`/`\cite` of it, its proof, a curated relationship, or a
+    /// literal mention of a Lean declaration's name. The manuscript or proof
+    /// shows the reference broken until it is edited too.
+    SourceDependents,
 }
 
 impl ImpactKind {
@@ -183,7 +191,8 @@ pub struct OpImpact {
 #[serde(rename_all = "camelCase")]
 pub struct OpChoice {
     /// Stable key, e.g. `unsavedBuffers` (`preserve` | `discard` | `cancel`),
-    /// `activeWork` (`stop`), `triggers` (`disable`).
+    /// `activeWork` (`stop`), `triggers` (`disable`), `proofs` (`remove` |
+    /// `keep`: the proofs of a statement removed from its source).
     pub key: String,
     pub label: String,
     pub options: Vec<OpChoiceOption>,
@@ -214,6 +223,25 @@ pub enum OpRecovery {
     AppManaged,
     /// Not recoverable (permanent deletion, or nothing to recover).
     None,
+    /// Removed from its source file as an UNSAVED edit in the shared document
+    /// history: undo it in the editor, or close without saving. Nothing is
+    /// written to disk; the graph follows when the file is saved. `edit` is
+    /// set on outcomes (where the text was removed), absent in plans.
+    SourceEdit { edit: Option<SourceEditAt> },
+}
+
+/// Where a source edit removed text (after the edit).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceEditAt {
+    pub path: WorkspacePath,
+    pub document: crate::document::DocumentId,
+    /// The document revision the edit produced (Undo from the notification
+    /// applies only while the document is still at this revision).
+    pub revision: u64,
+    /// UTF-16 offset of the removal point in that revision.
+    pub at: u32,
 }
 
 /// A target the plan will not touch, and why.

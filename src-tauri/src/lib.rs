@@ -16,6 +16,7 @@ mod project_ops;
 mod projects;
 mod research;
 mod settings;
+mod source_removal;
 mod state;
 mod tex;
 mod typesetting;

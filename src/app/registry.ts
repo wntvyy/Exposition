@@ -78,6 +78,12 @@ export interface CommandContribution {
   ignoreRepeat?: boolean;
   /** Return false (or a promise of false) when the command is unavailable. */
   enabled?: () => boolean;
+  /**
+   * Why the command is unavailable right now, when that is worth saying: its
+   * key, pressed while the command is disabled, then shows this instead of
+   * doing nothing silently (e.g. Delete on an item that cannot be deleted).
+   */
+  disabledReason?: () => { title: string; body?: string } | null;
   run: () => void | Promise<void>;
 }
 

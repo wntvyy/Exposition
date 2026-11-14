@@ -39,10 +39,14 @@ describe("actions", () => {
     expect(extras.map((e) => e.id)).toEqual(["hide", "copyReference"]);
   });
 
-  it("a source-anchored theorem: no delete or duplicate, with the reason; Copy Reference and Copy Text instead", () => {
+  it("a source-anchored theorem: Delete from Source (an unsaved edit), never permanently; no duplicate; Copy Reference and Copy Text", () => {
     const { actions, extras } = graphActions({ entities: [theorem], relations: [] }, opts);
-    expect(actions.delete?.enabled).toBe(false);
-    expect(actions.delete?.reason).toMatch(/change the source/);
+    expect(actions.delete).toMatchObject({ enabled: true, label: "Delete from Source" });
+    expect(actions.delete?.description).toMatch(/unsaved edit/);
+    expect(actions.deletePermanently?.enabled).toBe(false);
+    expect(actions.deletePermanently?.reason).toMatch(/use Delete from Source/);
+    // Mixed with a manual item: the generic label, still one request.
+    expect(graphActions({ entities: [theorem, claim], relations: [] }, opts).actions.delete).toMatchObject({ enabled: true, label: "Delete Selected Items" });
     expect(actions.duplicate?.enabled).toBe(false);
     expect(actions.duplicate?.reason).toMatch(/Copy Text or Copy Reference/);
     expect(extras.map((e) => e.label)).toEqual(["Hide from view", "Copy Reference", "Copy Text"]);

@@ -16,6 +16,7 @@ import type { OpRecovery } from "../../bindings/OpRecovery";
 import type { OpRefusal } from "../../bindings/OpRefusal";
 import type { OpResult } from "../../bindings/OpResult";
 import type { OpTarget } from "../../bindings/OpTarget";
+import type { SourceEditAt } from "../../bindings/SourceEditAt";
 
 /** Display names for targets, keyed by `targetKey` (surfaces know their items' names). */
 export type TargetLabels = ReadonlyMap<string, string>;
@@ -127,6 +128,7 @@ export const IMPACT_HEADINGS: Record<ImpactKind, string> = {
   activeWork: "Work in progress",
   enabledTrigger: "Enabled triggers",
   manuscriptDependency: "Used by a manuscript",
+  sourceDependents: "Used elsewhere in the sources",
   workflowInput: "Required workflow inputs",
   pinnedRevision: "Pinned workflow revisions",
   retainedEvidence: "Retained evidence",
@@ -206,12 +208,19 @@ export function subjectOf(targets: OpTarget[], labels: TargetLabels = NO_LABELS)
   return targets.length === 1 ? quoted(targetName(targets[0]!, labels)) : countText(targets.length);
 }
 
+/** Every effect of the plan removes text from a source (an unsaved edit). */
+function onlySourceEdits(plan: OpPlan): boolean {
+  return plan.effects.length > 0 && plan.effects.every((e) => e.recovery.kind === "sourceEdit");
+}
+
 /** The decision's title: names the action and its subject (never "Are you sure?"). */
 export function decisionTitle(plan: OpPlan, labels: TargetLabels = NO_LABELS): string {
   const subject = subjectOf(plan.request.targets, labels);
   switch (plan.request.kind.kind) {
     case "delete":
-      return plan.request.kind.permanent ? `Permanently delete ${subject}` : `Delete ${subject}`;
+      if (plan.request.kind.permanent) return `Permanently delete ${subject}`;
+      if (onlySourceEdits(plan)) return `Delete ${subject} from ${plan.request.targets.length === 1 ? "its source" : "their sources"}`;
+      return `Delete ${subject}`;
     case "duplicate":
       return `Duplicate ${subject}`;
     case "paste":
@@ -238,6 +247,8 @@ export function recoveryText(recovery: OpRecovery): string {
       return "restorable from Settings › Storage & History";
     case "none":
       return "not recoverable";
+    case "sourceEdit":
+      return "an unsaved edit in the editor";
   }
 }
 
@@ -262,6 +273,8 @@ export interface ResultSummary {
   restoreTokens: { token: string; target: OpTarget }[];
   /** Targets whose ordinary deletion failed because the trash is unavailable. */
   trashUnavailable: OpTarget[];
+  /** Where items were removed from their sources (unsaved edits to show or undo). */
+  sourceEdits: SourceEditAt[];
 }
 
 /** What the person can do about a failure code, when the message does not say it already. */
@@ -284,6 +297,7 @@ function successVerb(kind: OpKind, succeeded: OpOutcome[]): string {
   if (kind.kind === "paste") return "Pasted";
   if (kind.permanent) return "Permanently deleted";
   if (succeeded.length > 0 && succeeded.every((o) => o.recovery.kind === "osTrash")) return "Moved";
+  if (succeeded.length > 0 && succeeded.every((o) => o.recovery.kind === "sourceEdit")) return "Removed";
   return "Deleted";
 }
 
@@ -321,11 +335,12 @@ export function summarizeResult(
   const trash = trashName();
   const restoreTokens = succeeded.flatMap((o) => (o.restore ? [{ token: o.restore, target: o.target }] : []));
   const trashUnavailable = failed.filter((o) => o.code === TRASH_UNAVAILABLE).map((o) => o.target);
+  const sourceEdits = succeeded.flatMap((o) => (o.recovery.kind === "sourceEdit" && o.recovery.edit ? [o.recovery.edit] : []));
 
   let title: string;
   const lines: string[] = [];
   const where = kind.kind === "paste" ? ` into ${destinationLabel(kind.destination)}` : "";
-  const toTrash = verb === "Moved" ? ` to ${trash}` : "";
+  const toTrash = verb === "Moved" ? ` to ${trash}` : verb === "Removed" ? ` from ${total === 1 ? "its source" : "their sources"}` : "";
   if (succeeded.length === 0 && failed.length === 0 && skipped.length > 0) {
     // Everything was kept on purpose (e.g. "leave it running and keep it"): not a failure.
     const past = kind.kind === "delete" ? "deleted" : kind.kind === "duplicate" ? "duplicated" : "pasted";
@@ -353,6 +368,7 @@ export function summarizeResult(
       const inTrash = succeeded.filter((o) => o.recovery.kind === "osTrash");
       const managed = succeeded.filter((o) => o.recovery.kind === "appManaged");
       const none = succeeded.filter((o) => o.recovery.kind === "none");
+      const edited = succeeded.filter((o) => o.recovery.kind === "sourceEdit");
       const undoable = new Set(restoreTokens.map((t) => targetKey(t.target)));
       const trashNoUndo = inTrash.filter((o) => !undoable.has(targetKey(o.target)));
       if (inTrash.length && verb !== "Moved") lines.push(`${countText(inTrash.length)} moved to ${trash}.`);
@@ -371,6 +387,14 @@ export function summarizeResult(
         );
       }
       if (none.length) lines.push(`${countText(none.length)} cannot be restored.`);
+      if (edited.length === 1 && edited[0]!.message) {
+        lines.push(edited[0]!.message);
+      } else if (edited.length) {
+        const files = [...new Set(sourceEdits.map((e) => e.path))];
+        lines.push(
+          `Unsaved ${files.length === 1 ? `edit in ${files[0]}` : `edits in ${files.join(", ")}`}: review and save. Undo in the editor brings them back; the graph follows when you save.`,
+        );
+      }
       if (managed.some((o) => o.target.kind === "runOutputs")) {
         lines.push("Held outputs keep their disk space until you purge them in Settings › Storage & History.");
       }
@@ -389,7 +413,7 @@ export function summarizeResult(
   }
 
   const tone: Tone = succeeded.length === 0 && failed.length > 0 ? "danger" : failed.length || skipped.length ? "warning" : "info";
-  return { tone, title, lines, succeeded, failed, skipped, restoreTokens, trashUnavailable };
+  return { tone, title, lines, succeeded, failed, skipped, restoreTokens, trashUnavailable, sourceEdits };
 }
 
 /** Title for a restore outcome; mentions a new name when the original location was occupied. */

@@ -232,6 +232,13 @@ export function operationCommands(): CommandContribution[] {
         if (DESTRUCTIVE.has(id) && operationInFlight()) return false;
         return actionOf(id) !== null;
       },
+      // The key on a focused item that cannot take it says why (the menu shows the same reason).
+      disabledReason: () => {
+        if (id === "copy" || operationInFlight()) return null;
+        const action = activeSurface()?.actions()[id];
+        if (!action || action.enabled || !action.reason) return null;
+        return { title: `${action.label ?? TITLES[id]} is not available`, body: action.reason };
+      },
       run: async () => {
         const action = actionOf(id);
         if (action) await action.run();

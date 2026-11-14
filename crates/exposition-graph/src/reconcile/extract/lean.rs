@@ -200,7 +200,7 @@ fn blank(m: &mut [u8], from: usize, to: usize) {
 /// Mask comments, strings, and character literals (keeping line breaks and
 /// string quotes). Returns the masked text, the `/-- … -/` doc comment byte
 /// ranges, and whether something ran to the end of the text unterminated.
-fn mask(text: &str) -> (String, Vec<(usize, usize)>, bool) {
+pub(crate) fn mask(text: &str) -> (String, Vec<(usize, usize)>, bool) {
     let b = text.as_bytes();
     let mut m = b.to_vec();
     let mut docs = Vec::new();

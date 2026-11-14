@@ -43,7 +43,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::project_data::{self, DataPlan};
+use crate::source_removal::{self, SourcePlan};
 use crate::state::AppState;
+use exposition_graph::model::EntityDetail;
 
 /// Event after every apply/restore (payload [`OpResult`]) so views refresh.
 pub const PROJECT_OP_EVENT: &str = "project-op";
@@ -74,6 +76,9 @@ pub trait DataSide {
     /// The project graph keeps `path` as a resource (a retained research
     /// output under `.exposition/artifacts/` is then deletable as a file).
     fn graph_resource(&self, path: &WorkspacePath) -> bool;
+    /// A graph entity with its bindings and relations (`None`: unknown, or no
+    /// graph). The source side uses it for items declared in a source.
+    fn entity_detail(&self, entity: &str) -> Option<EntityDetail>;
 }
 
 /// The application's data side.
@@ -100,6 +105,10 @@ impl DataSide for AppData<'_> {
     }
     fn graph_resource(&self, path: &WorkspacePath) -> bool {
         self.0.graph.resource(path).ok().flatten().is_some()
+    }
+    fn entity_detail(&self, entity: &str) -> Option<EntityDetail> {
+        let id = exposition_graph::ids::EntityId::parse(entity).ok()?;
+        self.0.graph.entity_detail(&id).ok()
     }
 }
 
@@ -193,10 +202,23 @@ pub fn require_user(request: &OpRequest) -> Result<(), OpError> {
     }
 }
 
-/// The full plan and its file part (kept for apply).
+/// The full plan, its file part and its source part (kept for apply).
 struct Computed {
     plan: OpPlan,
     paths: PathPlan,
+    source: SourcePlan,
+}
+
+/// `plan` without the targets the source side owns (the data side never sees them).
+fn without(plan: &OpPlan, handled: &[OpTarget]) -> OpPlan {
+    let mut plan = plan.clone();
+    if !handled.is_empty() {
+        plan.request.targets.retain(|t| !handled.contains(t));
+        plan.effects.retain(|e| !handled.contains(&e.target));
+        plan.refusals.retain(|r| !handled.contains(&r.target));
+        plan.impacts.retain(|i| !handled.contains(&i.target));
+    }
+    plan
 }
 
 impl ProjectOps {
@@ -250,14 +272,30 @@ impl ProjectOps {
             if matches!(request.kind, OpKind::Delete { .. }) { &paths.deleted } else { &paths.copied };
         let on_paths =
             if consulted.is_empty() { DataPlan::default() } else { data.impacts_for_paths(consulted, &request.kind) };
-        let on_data = data.plan_data(request);
+        // Items declared in a source are removed from it (an unsaved edit); the
+        // data side plans every other non-path target.
+        let source = source_removal::plan(ws, data, request, &paths.deleted);
+        let on_data = if source.handled.is_empty() {
+            data.plan_data(request)
+        } else {
+            let mut rest = request.clone();
+            rest.targets.retain(|t| !source.handled.contains(t));
+            data.plan_data(&rest)
+        };
+        let on_source = DataPlan {
+            effects: source.effects.clone(),
+            refusals: source.refusals.clone(),
+            impacts: source.impacts.clone(),
+            choices: source.choices.clone(),
+            fingerprint: source.fingerprint.clone(),
+        };
 
         let mut effects = paths.effects.clone();
         let mut refusals = paths.refusals.clone();
         let mut impacts: Vec<OpImpact> = paths.impacts.clone();
         let mut choices = paths.choices.clone();
         let mut fingerprint = paths.fingerprint.clone();
-        for part in [on_paths, on_data] {
+        for part in [on_paths, on_data, on_source] {
             effects.extend(part.effects);
             for r in part.refusals {
                 if !refusals.iter().any(|x| x.target == r.target) {
@@ -310,6 +348,7 @@ impl ProjectOps {
                 expires_at_ms: now_millis() + PLAN_TTL_MS,
             },
             paths,
+            source,
         })
     }
 
@@ -338,25 +377,25 @@ impl ProjectOps {
         if Self::root(ws)? != stored.root {
             return Err(stale());
         }
-        let fresh = self.compute(ws, data, &stored.plan.request)?;
+        let mut fresh = self.compute(ws, data, &stored.plan.request)?;
         if fresh.plan.plan_hash != stored.plan.plan_hash {
             return Err(stale());
         }
-        let mut plan = fresh.plan;
-        plan.plan = stored.plan.plan.clone();
-        let choices = resolve_choices(&plan, &apply.choices)?;
-        self.run(ws, data, &plan, &fresh.paths, &choices, &stored.root)
+        fresh.plan.plan = stored.plan.plan.clone();
+        let choices = resolve_choices(&fresh.plan, &apply.choices)?;
+        self.run(ws, data, &fresh, &choices, &stored.root)
     }
 
     fn run(
         &self,
         ws: &WorkspaceService,
         data: &dyn DataSide,
-        plan: &OpPlan,
-        paths: &PathPlan,
+        computed: &Computed,
         choices: &BTreeMap<String, String>,
         root: &Path,
     ) -> Result<OpResult, OpError> {
+        let Computed { plan, paths, source } = computed;
+        let data_plan = without(plan, &source.handled);
         let tag = format!("op{:x}", self.counter.fetch_add(1, Ordering::Relaxed) ^ (now_millis() & 0xffff_ffff));
         let intent = Intent {
             kind: plan.request.kind.clone(),
@@ -369,7 +408,7 @@ impl ProjectOps {
         let record = self.begin(root, plan, &intent)?;
 
         // 1. The data side stops/disables what the user chose (before files change).
-        let mut skip = data.prepare_paths(plan, choices);
+        let mut skip = data.prepare_paths(&data_plan, choices);
         skip.extend(plan.refusals.iter().cloned());
 
         // 2. Files, one target at a time; outcomes journaled as they happen.
@@ -395,8 +434,10 @@ impl ProjectOps {
         }
 
         // 3. Data targets (workflows, runs, tasks, graph records).
-        let data_outcomes = data.apply_data(plan, choices);
+        let data_outcomes = data.apply_data(&data_plan, choices);
         let _ = self.journal.record_step(root, &record, "data", BTreeMap::new(), true, None);
+        // Items declared in a source: one unsaved edit per file (nothing on disk changes).
+        let source_outcomes = source_removal::apply(ws, source, choices);
 
         // 4. Project data follows what actually happened on disk.
         // Targets covered by a selected folder were not acted on separately.
@@ -431,6 +472,7 @@ impl ProjectOps {
             self.prune_restorable(root, false);
         }
         outcomes.extend(data_outcomes);
+        outcomes.extend(source_outcomes);
         for r in &plan.refusals {
             if !outcomes.iter().any(|o| o.target == r.target) {
                 outcomes.push(OpOutcome {
