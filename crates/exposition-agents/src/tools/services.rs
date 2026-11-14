@@ -8,10 +8,12 @@
 //! reports every tool as unavailable. Results are never simulated.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use exposition_core::artifact::ArtifactRecord;
 use exposition_core::job::ExecutionPolicy;
+use exposition_core::ops::{OpError, OpPlan, OpRequest, OpResult};
 use exposition_core::path::WorkspacePath;
 use exposition_research::project::types::{AttachmentNotice, AttachmentRecorded};
 use serde_json::{Value, json};
@@ -25,6 +27,8 @@ pub enum ServiceKind {
     Research,
     Lean,
     Execution,
+    /// The application's project operations (P1: delete, copy, restore).
+    ProjectOps,
 }
 
 impl ServiceKind {
@@ -34,6 +38,7 @@ impl ServiceKind {
             ServiceKind::Research => "Python research sessions",
             ServiceKind::Lean => "Lean checking",
             ServiceKind::Execution => "command execution (execution service)",
+            ServiceKind::ProjectOps => "project file operations (delete and copy)",
         }
     }
 }
@@ -150,6 +155,29 @@ pub trait ToolServices: Send + Sync {
     /// A task run ended: release what the services hold for it (e.g. the
     /// agent's research sessions).
     async fn task_finished(&self, _task_id: &str) {}
+
+    /// The application's project-operations orchestrator (the same one the
+    /// interface uses), when present.
+    fn project_operations(&self) -> Option<Arc<dyn ProjectOperations>> {
+        None
+    }
+}
+
+/// The application's project operations (P1) as agent tools use them: the
+/// same orchestrator as the interface, with the agent task as the actor.
+/// Plans list concrete consequences; applying re-validates the plan and
+/// reports every target's actual outcome. Nothing here widens a grant: the
+/// central gate has already checked every path against the task's scope and
+/// path policy, and the orchestrator refuses what file operations may never
+/// touch (and every non-file target for agents).
+pub trait ProjectOperations: Send + Sync {
+    /// Plan `request` (its actor is the agent task).
+    fn plan(&self, request: OpRequest) -> Result<OpPlan, OpError>;
+    /// Apply a plan with each choice's default (never a destructive one).
+    fn apply(&self, plan: &OpPlan) -> Result<OpResult, OpError>;
+    /// Restore a trashed item by its restore token (reverting an agent's
+    /// deletion from the review).
+    fn restore(&self, token: &str) -> Result<OpResult, OpError>;
 }
 
 /// A research-side refusal (with its stable code) as a service outcome.

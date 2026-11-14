@@ -37,6 +37,10 @@ pub const INSERT_ARTIFACT: &str = "insert_artifact";
 pub const GRAPH_QUERY: &str = "graph_query";
 pub const GRAPH_PROPOSE: &str = "graph_propose";
 pub const WORKFLOW_PROPOSE: &str = "workflow_propose";
+pub const DELETE_PATHS: &str = "delete_paths";
+pub const COPY_PATHS: &str = "copy_paths";
+/// Paths one delete/copy call may name.
+pub const MAX_OP_PATHS: usize = 100;
 
 /// The tool list, in a fixed order.
 pub fn definitions() -> Vec<ToolDefinition> {
@@ -280,6 +284,46 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 anything; only the user runs a workflow, from a reviewed run plan. Steps cannot stand in for service-owned results (formal evidence, retained artifacts). Use \
                 \"\", [] and -1 for unused fields.",
             input_schema: workflow_schema(),
+        },
+        ToolDefinition {
+            name: DELETE_PATHS,
+            // Non-strict, like the graph tools: the strict grammar stays the
+            // size proven in live runs. Rust validates the input exactly.
+            strict: false,
+            description: "Move project files or folders to the Recycle Bin (never a permanent deletion) through \
+                the application's project operations, as the user's Delete does. Open documents with unsaved \
+                changes keep their text in the editor. When deleting would affect something else (a manuscript, \
+                a workflow or evidence that uses it, unsaved changes, running work), nothing is deleted unless \
+                the user reviews it: in tasks that apply changes directly the call is refused with the \
+                consequences, so ask the user. The application's own data under .exposition is never deleted \
+                this way. The result lists every item's actual outcome.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": MAX_OP_PATHS, "description": "Files or folders, relative to the project root."}
+                },
+                "required": ["paths"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: COPY_PATHS,
+            strict: false,
+            description: "Copy project files or folders into a project folder through the application's project \
+                operations, as the user's Copy and Paste do: the saved version on disk is copied (not unsaved \
+                editor text), a taken name gets a readable new one such as \"name (2).ext\", nothing is ever \
+                overwritten or merged, and links are not copied. Copies get fresh identities; nothing about the \
+                originals (evidence, verification, workflow wiring) carries over. The result lists every \
+                item's actual outcome and the path it was copied to.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": MAX_OP_PATHS, "description": "Files or folders to copy, relative to the project root."},
+                    "destination": {"type": "string", "description": "An existing project folder to copy into; \"\" for the project root."}
+                },
+                "required": ["paths", "destination"],
+                "additionalProperties": false
+            }),
         },
     ]
 }
@@ -571,6 +615,19 @@ pub struct RunCommandInput {
     pub working_directory: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeletePathsInput {
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CopyPathsInput {
+    pub paths: Vec<String>,
+    pub destination: String,
+}
+
 /// A validated tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolCall {
@@ -586,6 +643,8 @@ pub enum ToolCall {
     RunPython(RunPythonInput),
     CheckLean(CheckLeanInput),
     RunCommand(RunCommandInput),
+    DeletePaths(DeletePathsInput),
+    CopyPaths(CopyPathsInput),
 }
 
 /// How a call uses a project path it names.
@@ -764,6 +823,39 @@ impl ToolCall {
                 Some(ServiceKind::Lean),
                 "Lean checking (the project's own toolchain)",
             ),
+            // Deletions change the named entries (scope and path policy as for
+            // any write); no content reaches the model.
+            ToolCall::DeletePaths(input) => Effects {
+                targets: false,
+                ..effects(
+                    input.paths.iter().map(|p| (p.as_str(), PathUse::Write)).collect(),
+                    Exposure::Metadata,
+                    Launch::None,
+                    true,
+                    Some(ServiceKind::ProjectOps),
+                    "Deleting files",
+                )
+            },
+            // Copies read their sources and create entries in the destination
+            // folder (the project root needs a whole-project task: see the gate).
+            ToolCall::CopyPaths(input) => {
+                let mut paths: Vec<(&'a str, PathUse)> =
+                    input.paths.iter().map(|p| (p.as_str(), PathUse::Read)).collect();
+                if !is_root(&input.destination) {
+                    paths.push((input.destination.as_str(), PathUse::Create));
+                }
+                Effects {
+                    targets: false,
+                    ..effects(
+                        paths,
+                        Exposure::Metadata,
+                        Launch::None,
+                        true,
+                        Some(ServiceKind::ProjectOps),
+                        "Copying files",
+                    )
+                }
+            }
             ToolCall::RunCommand(input) => {
                 let paths = if is_root(&input.working_directory) {
                     Vec::new()
@@ -825,6 +917,20 @@ impl ToolCall {
                 let parsed: WorkflowProposeInput = typed(input)?;
                 parsed.check_bounds()?;
                 ToolCall::WorkflowPropose(parsed)
+            }
+            DELETE_PATHS => {
+                let parsed: DeletePathsInput = typed(input)?;
+                if parsed.paths.is_empty() || parsed.paths.len() > MAX_OP_PATHS {
+                    return Err(format!("paths must name 1 to {MAX_OP_PATHS} files or folders"));
+                }
+                ToolCall::DeletePaths(parsed)
+            }
+            COPY_PATHS => {
+                let parsed: CopyPathsInput = typed(input)?;
+                if parsed.paths.is_empty() || parsed.paths.len() > MAX_OP_PATHS {
+                    return Err(format!("paths must name 1 to {MAX_OP_PATHS} files or folders"));
+                }
+                ToolCall::CopyPaths(parsed)
             }
             other => return Err(format!("unknown tool {other:?}")),
         })
@@ -898,7 +1004,7 @@ mod tests {
         }
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 14);
     }
 
     #[test]
@@ -910,6 +1016,11 @@ mod tests {
         assert!(ToolCall::parse(EDIT_DOCUMENT, &json!({"path": "a", "base_revision": -1, "edits": []})).is_err());
         assert!(ToolCall::parse(EDIT_DOCUMENT, &json!({"path": "a", "base_revision": 2, "edits": []})).is_err());
         assert!(ToolCall::parse("delete_everything", &json!({})).is_err());
+        assert!(ToolCall::parse(DELETE_PATHS, &json!({"paths": []})).is_err());
+        assert!(ToolCall::parse(DELETE_PATHS, &json!({"paths": ["a"], "permanent": true})).is_err(), "never permanent");
+        let many: Vec<String> = (0..=MAX_OP_PATHS).map(|i| format!("f{i}")).collect();
+        assert!(ToolCall::parse(DELETE_PATHS, &json!({"paths": many})).is_err());
+        assert!(ToolCall::parse(COPY_PATHS, &json!({"paths": ["a"]})).is_err());
         // Every documented example input validates.
         let ok = [
             (LIST_FILES, json!({"path": "", "recursive": true})),
@@ -923,6 +1034,8 @@ mod tests {
             (RUN_PYTHON, json!({"code": "print(1)"})),
             (CHECK_LEAN, json!({"path": "Main.lean"})),
             (RUN_COMMAND, json!({"program": "latexmk", "args": ["-pdf"], "working_directory": ""})),
+            (DELETE_PATHS, json!({"paths": ["notes/old.typ"]})),
+            (COPY_PATHS, json!({"paths": ["figures/plot.png"], "destination": ""})),
             (
                 GRAPH_QUERY,
                 json!({"query": "search", "text": "", "kinds": ["claim"], "entity": "", "path": "", "depth": 1, "limit": 20}),

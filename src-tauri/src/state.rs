@@ -55,7 +55,13 @@ pub struct AppState {
     /// Explicit, user-only workflow triggers (M9): standing plans the user
     /// enabled, in `workflow-triggers.json` (app-local, never in a project).
     pub workflow_triggers: exposition_workflow::triggers::TriggerService,
+    /// Project operations for agent tools (P1 `delete_paths`/`copy_paths`):
+    /// filled by `project_ops::start` once the orchestrator exists.
+    pub agent_project_ops: AgentProjectOpsSlot,
 }
+
+/// Where the agent tools find the application's project operations.
+pub type AgentProjectOpsSlot = Arc<std::sync::OnceLock<Arc<dyn exposition_agents::tools::services::ProjectOperations>>>;
 
 impl AppState {
     pub fn initialize(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
@@ -121,6 +127,7 @@ impl AppState {
         // agent insertions are recorded through it too.
         let research_project =
             Arc::new(ResearchProject::new(Arc::clone(&graph), Arc::clone(&research), Arc::clone(&documents)));
+        let agent_project_ops: AgentProjectOpsSlot = Arc::new(std::sync::OnceLock::new());
         let agents = AgentService::new(AgentConfig {
             database: Some(data_dir.join("agents.sqlite3")),
             documents: Arc::clone(&documents),
@@ -136,7 +143,8 @@ impl AppState {
                     .with_tex(tex.clone())
                     .with_research(Arc::clone(&research))
                     .with_research_project(Arc::clone(&research_project))
-                    .with_lean(lean.clone()),
+                    .with_lean(lean.clone())
+                    .with_project_ops(Arc::clone(&agent_project_ops)),
             ),
             runtime: tauri::async_runtime::handle().inner().clone(),
             allow_scripted: cfg!(debug_assertions),
@@ -194,6 +202,7 @@ impl AppState {
             reconciler,
             workflow_runs,
             workflow_triggers,
+            agent_project_ops,
         })
     }
 }

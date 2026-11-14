@@ -58,6 +58,10 @@ struct FakeData {
     fingerprint: Mutex<Vec<String>>,
     after: Mutex<Vec<Vec<OpOutcome>>>,
     crash_after_paths: bool,
+    /// Paths the project graph keeps as resources.
+    resources: Vec<String>,
+    /// Data restore tokens this side owns (`<kind>:<id>`).
+    data_restores: Mutex<Vec<String>>,
 }
 
 fn wp(s: &str) -> WorkspacePath {
@@ -122,6 +126,21 @@ impl DataSide for FakeData {
                 message: "a run could not be stopped".into(),
             })
             .collect()
+    }
+    fn restore_data(&self, restore: &OpRestore) -> Option<OpOutcome> {
+        self.data_restores.lock().unwrap().push(restore.restore.clone());
+        restore.restore.starts_with("workflow:").then(|| OpOutcome {
+            target: OpTarget::Recoverable { id: restore.restore.clone() },
+            status: OpStatus::Succeeded,
+            code: Some("ops.restored".into()),
+            message: None,
+            created: Some(OpTarget::Workflow { workflow: "wf-1".into() }),
+            recovery: exposition_core::ops::OpRecovery::None,
+            restore: None,
+        })
+    }
+    fn graph_resource(&self, path: &WorkspacePath) -> bool {
+        self.resources.iter().any(|r| r == path.as_str())
     }
     fn after_paths(&self, outcomes: &[OpOutcome]) {
         self.after.lock().unwrap().push(outcomes.to_vec());
@@ -558,11 +577,69 @@ fn a_restore_token_brings_back_a_real_recycle_bin_item_and_reconciles_it() {
     let plan = ops.plan(&fx.ws, &data, request(OpKind::Delete { permanent: false }, &["b.txt"])).unwrap();
     let result = apply_plan(&ops, &fx, &data, &plan).unwrap();
     let token = result.outcomes[0].restore.clone().expect("restorable");
+    assert!(file_token_shape(&token), "{token}");
     assert!(!fx.exists("b.txt"));
     let restored = ops.restore(&fx.ws, &data, OpRestore { restore: token.clone(), on_collision: None }).unwrap();
     assert_eq!(restored.outcomes[0].status, OpStatus::Succeeded, "{:?}", restored.outcomes);
+    assert_eq!(restored.outcomes[0].code.as_deref(), Some("ops.restored"));
+    assert_eq!(data.data_restores.lock().unwrap().as_slice(), std::slice::from_ref(&token), "data side first");
     assert_eq!(fs::read_to_string(fx.file("b.txt")).unwrap(), "b");
     assert_eq!(data.after.lock().unwrap().last().unwrap()[0].created, Some(path("b.txt")));
     let again = ops.restore(&fx.ws, &data, OpRestore { restore: token, on_collision: None }).unwrap_err();
     assert_eq!(again.code, "ops.restoreUnknown");
+}
+
+/// File restore tokens can never be mistaken for the data side's
+/// `<kind>:<id>` tokens.
+fn file_token_shape(token: &str) -> bool {
+    const DATA_KINDS: &[&str] = &["entity", "relation", "view", "workflow", "workflowRun", "researchRun", "agentTask"];
+    !token.contains(':') && !DATA_KINDS.iter().any(|k| token.starts_with(k)) && token.starts_with("trash-")
+}
+
+#[test]
+fn data_restore_tokens_are_handled_by_the_data_side_first() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let data = FakeData::default();
+    let result = ops.restore(&fx.ws, &data, OpRestore { restore: "workflow:wf-1".into(), on_collision: None }).unwrap();
+    assert_eq!(result.outcomes[0].created, Some(OpTarget::Workflow { workflow: "wf-1".into() }));
+    assert_eq!(result.outcomes[0].code.as_deref(), Some("ops.restored"));
+    assert!(records(&ops, &fx).is_empty(), "no file work was recorded");
+    // Unknown tokens: neither side knows them.
+    let e = ops.restore(&fx.ws, &data, OpRestore { restore: "trash-0-0".into(), on_collision: None }).unwrap_err();
+    assert_eq!(e.code, "ops.restoreUnknown");
+    for t in ["restore-1-2", "relation:x", "workflowRun:wrun-1"] {
+        assert!(!file_token_shape(t), "{t}");
+    }
+}
+
+#[test]
+fn retained_artifacts_are_deleted_through_the_path_plan_with_data_impacts() {
+    let fx = fixture();
+    let artifact = ".exposition/artifacts/r1/output-1.png";
+    fs::create_dir_all(fx.file(".exposition/artifacts/r1")).unwrap();
+    fs::write(fx.file(artifact), "PNG").unwrap();
+    fs::create_dir_all(fx.file(".exposition/runs")).unwrap();
+    fs::write(fx.file(".exposition/runs/r1.json"), "{}").unwrap();
+    let ops = fx.ops(FakeTrash::default());
+    let data = FakeData {
+        resources: vec![artifact.into()],
+        impacts: vec![(artifact.into(), ImpactKind::RetainedEvidence)],
+        ..FakeData::default()
+    };
+    let plan = ops
+        .plan(&fx.ws, &data, request(OpKind::Delete { permanent: false }, &[artifact, ".exposition/runs/r1.json"]))
+        .unwrap();
+    assert!(plan.needs_decision);
+    assert!(plan.impacts.iter().any(|i| i.kind == ImpactKind::RetainedEvidence && i.target == path(artifact)));
+    assert!(plan.refusals.iter().any(|r| r.target == path(".exposition/runs/r1.json") && r.code == "ops.protected"));
+    let result = apply_plan(&ops, &fx, &data, &plan).unwrap();
+    assert_eq!(result.outcomes[0].status, OpStatus::Succeeded);
+    assert!(!fx.exists(artifact) && fx.exists(".exposition/runs/r1.json"));
+    // Not a graph resource: still protected.
+    fs::write(fx.file(".exposition/artifacts/r1/other.png"), "x").unwrap();
+    let plan = ops
+        .plan(&fx.ws, &data, request(OpKind::Delete { permanent: false }, &[".exposition/artifacts/r1/other.png"]))
+        .unwrap();
+    assert_eq!(plan.refusals[0].code, "ops.protected");
 }

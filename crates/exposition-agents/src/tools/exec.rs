@@ -172,6 +172,12 @@ pub mod codes {
     /// A workflow whose current revision uses schema /2 features (parallel
     /// steps, composites, conditions, repeats): agents edit only /1 workflows.
     pub const WORKFLOW_UNSUPPORTED: &str = "agents.workflowUnsupported";
+    /// A deletion or copy with concrete consequences (a manuscript, workflow
+    /// or evidence uses it, unsaved changes, running work) in a task that
+    /// applies changes without review: only the user decides those.
+    pub const NEEDS_DECISION: &str = "agents.needsDecision";
+    /// Every item of a deletion or copy was refused by the project operations.
+    pub const OPERATION_REFUSED: &str = "agents.operationRefused";
 }
 
 /// A refusal with its stable code.
@@ -195,6 +201,17 @@ pub struct Authorization {
     proposal: Option<Box<Prepared>>,
     /// A workflow draft validated (and shown) at the gate.
     workflow: Option<Box<crate::graph::workflow::PreparedWorkflow>>,
+    /// A project operation (delete/copy) planned (and shown) at the gate.
+    project_op: Option<Box<PreparedOp>>,
+}
+
+/// A deletion or copy planned by the application's project operations at
+/// the gate: the plan, and its complete description for approval.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedOp {
+    plan: exposition_core::ops::OpPlan,
+    title: String,
+    detail: String,
 }
 
 impl Authorization {
@@ -394,6 +411,13 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         }
         _ => None,
     };
+    let project_op = match call {
+        ToolCall::DeletePaths(_) | ToolCall::CopyPaths(_) => {
+            let review = spec.permission == PermissionProfile::ReviewEdits;
+            Some(prepare_project_op(call, env, review)?)
+        }
+        _ => None,
+    };
     let policy = match (effects.launch, spec.execution) {
         (Launch::None, _) => None,
         (_, ExecutionMode::Disabled) => return Err(execution_disabled()),
@@ -427,18 +451,22 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         insertion: None,
         proposal: None,
         workflow: None,
+        project_op: None,
     };
     if !(native || review) {
         authorization.insertion = insertion.map(|(planned, _)| planned);
         authorization.proposal = proposal.map(Box::new);
         authorization.workflow = workflow.map(Box::new);
+        authorization.project_op = project_op.map(Box::new);
         return Ok(Gate::Allowed(authorization));
     }
-    let (title, mut detail) = match (&proposal, &workflow) {
-        (Some(prepared), _) => (prepared.title.clone(), prepared.detail.clone()),
-        (_, Some(prepared)) => (prepared.title.clone(), prepared.detail.clone()),
+    let (title, mut detail) = match (&proposal, &workflow, &project_op) {
+        (Some(prepared), _, _) => (prepared.title.clone(), prepared.detail.clone()),
+        (_, Some(prepared), _) => (prepared.title.clone(), prepared.detail.clone()),
+        (_, _, Some(prepared)) => (prepared.title.clone(), prepared.detail.clone()),
         _ => describe(call, insertion.as_ref().map(|(_, shown)| shown.as_str())),
     };
+    authorization.project_op = project_op.map(Box::new);
     authorization.proposal = proposal.map(Box::new);
     authorization.workflow = workflow.map(Box::new);
     if native {
@@ -606,7 +634,9 @@ fn describe(call: &ToolCall, insertion: Option<&str>) -> (String, String) {
         | ToolCall::ReadFile(_)
         | ToolCall::GraphQuery(_)
         | ToolCall::GraphPropose(_)
-        | ToolCall::WorkflowPropose(_) => (String::new(), String::new()),
+        | ToolCall::WorkflowPropose(_)
+        | ToolCall::DeletePaths(_)
+        | ToolCall::CopyPaths(_) => (String::new(), String::new()),
     };
     let detail = if detail.contains("⟨U+") {
         format!(
@@ -762,7 +792,7 @@ pub async fn run(
     if let Err(reason) = workspace::check_root(env.workspace, &authorization.root) {
         return project_changed(&reason);
     }
-    let Authorization { policy, insertion, proposal, workflow, .. } = authorization;
+    let Authorization { policy, insertion, proposal, workflow, project_op, .. } = authorization;
     let result = match call {
         ToolCall::GraphQuery(input) => match env.graph {
             Some(graph) => crate::graph::query::run(graph, env.files.root(), env.spec, &input),
@@ -785,6 +815,10 @@ pub async fn run(
                 crate::graph::workflow::save(graph, env.files.root(), env.task_id, &prepared)
             }
             _ => Err(crate::graph::unavailable("the workflow draft was not validated by the gate")),
+        },
+        ToolCall::DeletePaths(_) | ToolCall::CopyPaths(_) => match project_op {
+            Some(prepared) => apply_project_op(env, tool_use_id, &prepared),
+            None => Err(ToolOutput::error("the operation was not planned by the gate")),
         },
         ToolCall::ListFiles(input) => list_files(env, input),
         ToolCall::ReadFile(input) => read_file(env, seen, input),
@@ -1461,6 +1495,178 @@ fn create_file_inner(
         }
     };
     Ok(opened)
+}
+
+// ----- project operations: delete_paths, copy_paths (P1) ---------------------
+
+/// Plan a deletion or copy with the application's project operations (the
+/// orchestrator the interface uses, with this task as the actor). The gate
+/// has already checked every named path against the task's scope and the
+/// path policy. A plan with concrete consequences runs only after the user
+/// reviewed them (tasks that review edits); elsewhere it is refused with
+/// them, and nothing changes.
+fn prepare_project_op(call: &ToolCall, env: &ToolEnv<'_>, review: bool) -> Result<PreparedOp, ToolOutput> {
+    use exposition_core::ops::{OpActor, OpDestination, OpKind, OpRequest, OpTarget};
+    let ops = env.services.project_operations().ok_or_else(|| {
+        refusal(
+            codes::SERVICE_UNAVAILABLE,
+            ServiceError::NotAvailable(super::services::ServiceKind::ProjectOps).to_string(),
+        )
+    })?;
+    let (kind, raws, destination) = match call {
+        ToolCall::DeletePaths(input) => (OpKind::Delete { permanent: false }, &input.paths, None),
+        ToolCall::CopyPaths(input) => {
+            // Copies into the project root create entries outside any narrower scope.
+            let folder = if tools::is_root(&input.destination) {
+                if env.spec.scope != TaskScope::Workspace {
+                    return Err(refusal(
+                        codes::OUT_OF_SCOPE,
+                        "The project root is outside this task's scope; copy into a folder in scope.",
+                    ));
+                }
+                None
+            } else {
+                Some(parse_path(input.destination.trim())?)
+            };
+            (
+                OpKind::Paste { destination: OpDestination::Folder { folder: folder.clone() } },
+                &input.paths,
+                Some(folder),
+            )
+        }
+        _ => return Err(ToolOutput::error("not a project operation")),
+    };
+    let mut targets = Vec::new();
+    for raw in raws {
+        targets.push(OpTarget::Path { path: parse_path(raw.trim())? });
+    }
+    let request = OpRequest { kind, targets, actor: OpActor::Agent { task: env.task_id.0.clone() } };
+    let plan = ops
+        .plan(request)
+        .map_err(|e| ToolOutput::error_with(e.message.clone(), json!({"code": e.code, "status": "refused"})))?;
+    if plan.effects.is_empty() {
+        let reasons: Vec<Value> = plan
+            .refusals
+            .iter()
+            .map(|r| json!({"path": target_label(&r.target), "code": r.code, "reason": r.message}))
+            .collect();
+        return Err(ToolOutput::error_with(
+            "Nothing was changed: every item was refused.",
+            json!({"code": codes::OPERATION_REFUSED, "refusals": reasons}),
+        ));
+    }
+    if plan.needs_decision && !review {
+        let impacts: Vec<Value> = plan
+            .impacts
+            .iter()
+            .filter(|i| i.kind.needs_decision())
+            .map(|i| json!({"path": target_label(&i.target), "kind": i.kind, "consequence": i.message}))
+            .collect();
+        return Err(ToolOutput::error_with(
+            "This needs the user's decision because it has consequences beyond the files themselves (listed in \
+             `impacts`). Nothing was changed; ask the user to do it, or to run the task with review of each change.",
+            json!({"code": codes::NEEDS_DECISION, "impacts": impacts}),
+        ));
+    }
+    let n = plan.effects.len();
+    let items = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
+    let title = match &destination {
+        None => format!("Move {items} to the Recycle Bin"),
+        Some(None) => format!("Copy {items} into the project folder"),
+        Some(Some(folder)) => format!("Copy {items} into {folder}"),
+    };
+    let mut detail = String::new();
+    for effect in &plan.effects {
+        detail.push_str(&format!("- {}\n", shown(&effect.description)));
+    }
+    if !plan.refusals.is_empty() {
+        detail.push_str("\nNot changed:\n");
+        for r in &plan.refusals {
+            detail.push_str(&format!("- {}: {}\n", shown(&target_label(&r.target)), shown(&r.message)));
+        }
+    }
+    let decisions: Vec<&exposition_core::ops::OpImpact> =
+        plan.impacts.iter().filter(|i| i.kind.needs_decision()).collect();
+    if !decisions.is_empty() {
+        detail.push_str("\nConsequences:\n");
+        for impact in decisions {
+            detail.push_str(&format!("- {}\n", shown(&impact.message)));
+            for consumer in &impact.consumers {
+                detail.push_str(&format!("    {} {}\n", consumer.kind, shown(&consumer.label)));
+            }
+        }
+    }
+    for notice in plan.impacts.iter().filter(|i| !i.kind.needs_decision()) {
+        detail.push_str(&format!("\nNote: {}\n", shown(&notice.message)));
+    }
+    for choice in &plan.choices {
+        let chosen = choice.options.iter().find(|o| o.value == choice.default).map(|o| o.label.as_str()).unwrap_or("");
+        detail.push_str(&format!("\n{}: {}\n", choice.label, chosen));
+    }
+    if destination.is_none() {
+        detail.push_str("\nItems go to the Recycle Bin, never deleted permanently.");
+    }
+    Ok(PreparedOp { plan, title, detail: detail.trim_end().to_owned() })
+}
+
+fn target_label(target: &exposition_core::ops::OpTarget) -> String {
+    match target {
+        exposition_core::ops::OpTarget::Path { path } => path.to_string(),
+        exposition_core::ops::OpTarget::External { path } => path.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// Apply a planned deletion or copy (the orchestrator re-validates the plan)
+/// and record what actually happened for review: deleted entries with their
+/// restore token, copies with their content digest.
+fn apply_project_op(env: &ToolEnv<'_>, tool_use_id: &str, prepared: &PreparedOp) -> Result<ToolOutput, ToolOutput> {
+    use exposition_core::ops::{OpKind, OpStatus, OpTarget};
+    let ops = env.services.project_operations().ok_or_else(|| {
+        refusal(
+            codes::SERVICE_UNAVAILABLE,
+            ServiceError::NotAvailable(super::services::ServiceKind::ProjectOps).to_string(),
+        )
+    })?;
+    let result = ops
+        .apply(&prepared.plan)
+        .map_err(|e| ToolOutput::error_with(e.message.clone(), json!({"code": e.code, "status": "notChanged"})))?;
+    let deleting = matches!(prepared.plan.request.kind, OpKind::Delete { .. });
+    let mut outcomes = Vec::new();
+    let mut any = false;
+    for o in &result.outcomes {
+        let ok = o.status == OpStatus::Succeeded;
+        any |= ok;
+        if ok {
+            let recorded = match (&o.target, &o.created, deleting) {
+                (OpTarget::Path { path }, None, true) => {
+                    review::record_delete(env.store, env.task_id, tool_use_id, path, o.restore.clone())
+                }
+                (_, Some(OpTarget::Path { path }), false) => {
+                    let digest = review::entry_digest(env.files, path);
+                    review::record_copy(env.store, env.task_id, tool_use_id, path, digest)
+                }
+                _ => Ok(()),
+            };
+            if let Err(e) = recorded {
+                return Err(ToolOutput::error(format!(
+                    "The operation was applied but could not be recorded for review: {e}"
+                )));
+            }
+        }
+        let mut item = json!({
+            "path": target_label(&o.target),
+            "status": o.status,
+            "code": o.code,
+            "message": o.message,
+        });
+        if let Some(created) = &o.created {
+            item["created"] = json!(target_label(created));
+        }
+        outcomes.push(item);
+    }
+    let content = json!({"outcomes": outcomes, "notices": result.notices});
+    if any { Ok(ToolOutput::ok(content)) } else { Err(ToolOutput::error_with("Nothing was changed.", content)) }
 }
 
 #[cfg(test)]

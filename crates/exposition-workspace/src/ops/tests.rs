@@ -237,6 +237,7 @@ fn delete_moves_files_and_folders_to_the_real_recycle_bin_and_restores_them() {
         let Some(item) = &o.trashed else { continue };
         let restored = fx.service.restore_trashed(o.path.as_ref().unwrap(), item, None, &bin, "r1");
         assert_eq!(restored.status, OpStatus::Succeeded, "{restored:?}");
+        assert_eq!(restored.code.as_deref(), Some("ops.restored"));
         assert_eq!(restored.created, Some(o.outcome.target.clone()));
     }
     if cfg!(windows) {
@@ -271,6 +272,7 @@ fn restore_never_overwrites_an_occupied_original_path() {
 
     let renamed = fx.service.restore_trashed(&wp("chapters/intro.typ"), &item, None, &bin, "r2");
     assert_eq!(renamed.status, OpStatus::Succeeded, "{renamed:?}");
+    assert_eq!(renamed.code.as_deref(), Some("ops.restored"), "a restore says so (not a copy)");
     assert_eq!(renamed.created, Some(path("chapters/intro (2).typ")));
     assert_eq!(fx.read("chapters/intro.typ"), "a NEW intro", "the new file is untouched");
     assert_eq!(fx.read("chapters/intro (2).typ"), "intro\n", "both versions kept");
@@ -797,4 +799,45 @@ fn staging_leftovers_of_an_interrupted_copy_are_removed_by_tag() {
     let removed = fx.service.remove_staging_leftovers(&[fs::canonicalize(fx.file("figures")).unwrap()], "op9");
     assert_eq!(removed, 1);
     assert!(!staged.exists() && other.exists(), "only that operation's leftovers");
+}
+
+#[test]
+fn retained_artifacts_are_deletable_files_and_the_rest_of_app_data_stays_protected() {
+    let fx = fixture();
+    fs::write(fx.file(".exposition/artifacts/r1/output-2.png"), "not retained").unwrap();
+    let retained = |p: &WorkspacePath| p.as_str() == ".exposition/artifacts/r1/output-1.png";
+    let hooks = PlanHooks { retained_artifact: &retained };
+    let targets = [
+        path(".exposition/artifacts/r1/output-1.png"),
+        path(".exposition/artifacts/r1/output-2.png"),
+        path(".exposition/runs/r1.json"),
+        path(".exposition/graph.sqlite3"),
+    ];
+    for permanent in [false, true] {
+        let plan = fx.service.plan_paths_with(&delete(permanent), &targets, &OpActor::User, &hooks);
+        assert_eq!(plan.deleted, [wp(".exposition/artifacts/r1/output-1.png")], "{:?}", plan.refusals);
+        for refused in &targets[1..] {
+            assert_eq!(code_of(&plan, refused).as_deref(), Some("ops.protected"), "{refused:?}");
+        }
+        // The run's artifact folder itself stays the research service's (and
+        // a retained file selected with it shares the folder's refusal).
+        let folder = path(".exposition/artifacts/r1");
+        let plan = fx.service.plan_paths_with(
+            &delete(permanent),
+            &[folder.clone(), targets[0].clone()],
+            &OpActor::User,
+            &hooks,
+        );
+        assert_eq!(code_of(&plan, &folder).as_deref(), Some("ops.protected"));
+        assert_eq!(code_of(&plan, &targets[0]).as_deref(), Some("ops.protected"));
+    }
+    // Without the graph's word, a generated artifact is not a deletable file.
+    let plan = fx.service.plan_paths(&delete(false), &targets[..1], &OpActor::User);
+    assert_eq!(code_of(&plan, &targets[0]).as_deref(), Some("ops.protected"));
+    // Deleting the retained output removes exactly it.
+    let plan = fx.service.plan_paths_with(&delete(false), &targets[..1], &OpActor::User, &hooks);
+    let outcomes = apply(&fx, &plan, &FakeTrash::default(), &[]);
+    assert_eq!(outcomes[0].outcome.status, OpStatus::Succeeded);
+    assert!(!fx.exists(".exposition/artifacts/r1/output-1.png"));
+    assert!(fx.exists(".exposition/artifacts/r1/output-2.png") && fx.exists(".exposition/runs/r1.json"));
 }

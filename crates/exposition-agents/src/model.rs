@@ -576,6 +576,12 @@ pub enum AgentEvent {
 pub enum ReviewChangeKind {
     Edited,
     Created,
+    /// Moved to the Recycle Bin by the task (`delete_paths`); reverting
+    /// restores it when the item can be identified there.
+    Deleted,
+    /// Created as a copy by the task (`copy_paths`); reverting moves the copy
+    /// to the Recycle Bin while it is unchanged.
+    Copied,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

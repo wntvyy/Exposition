@@ -38,7 +38,7 @@ use exposition_core::path::WorkspacePath;
 use exposition_graph::{OperationId, OperationJournal, OperationKind, OperationRecord, OperationState};
 use exposition_workspace::WorkspaceService;
 use exposition_workspace::fsutil::{now_millis, sha256_hex};
-use exposition_workspace::ops::{ApplyOptions, OsTrash, PathOutcome, PathPlan, TrashBin, TrashedItem};
+use exposition_workspace::ops::{ApplyOptions, OsTrash, PathOutcome, PathPlan, PlanHooks, TrashBin, TrashedItem};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -66,6 +66,12 @@ pub trait DataSide {
     fn apply_data(&self, plan: &OpPlan, choices: &BTreeMap<String, String>) -> Vec<OpOutcome>;
     fn prepare_paths(&self, plan: &OpPlan, choices: &BTreeMap<String, String>) -> Vec<OpRefusal>;
     fn after_paths(&self, outcomes: &[OpOutcome]);
+    /// Restore an app-managed recoverable deletion by its `<kind>:<id>`
+    /// token; `None` when the token is not the data side's.
+    fn restore_data(&self, restore: &OpRestore) -> Option<OpOutcome>;
+    /// The project graph keeps `path` as a resource (a retained research
+    /// output under `.exposition/artifacts/` is then deletable as a file).
+    fn graph_resource(&self, path: &WorkspacePath) -> bool;
 }
 
 /// The application's data side.
@@ -86,6 +92,12 @@ impl DataSide for AppData<'_> {
     }
     fn after_paths(&self, outcomes: &[OpOutcome]) {
         project_data::after_paths(self.0, outcomes)
+    }
+    fn restore_data(&self, restore: &OpRestore) -> Option<OpOutcome> {
+        project_data::restore_data(self.0, restore)
+    }
+    fn graph_resource(&self, path: &WorkspacePath) -> bool {
+        self.0.graph.resource(path).ok().flatten().is_some()
     }
 }
 
@@ -192,7 +204,13 @@ impl ProjectOps {
             return Err(err("ops.invalidRequest", format!("At most {MAX_TARGETS} items can be changed at once.")));
         }
         let root = Self::root(ws)?;
-        let paths = ws.plan_paths(&request.kind, &request.targets, &request.actor);
+        let retained = |p: &WorkspacePath| data.graph_resource(p);
+        let paths = ws.plan_paths_with(
+            &request.kind,
+            &request.targets,
+            &request.actor,
+            &PlanHooks { retained_artifact: &retained },
+        );
         let consulted: &[WorkspacePath] =
             if matches!(request.kind, OpKind::Delete { .. }) { &paths.deleted } else { &paths.copied };
         let on_paths =
@@ -426,7 +444,8 @@ impl ProjectOps {
     }
 
     fn keep_restore(&self, root: &Path, path: WorkspacePath, item: TrashedItem) -> String {
-        let token = self.mint("restore");
+        // `trash-…`: never a data token (`<kind>:<id>`, no colon here).
+        let token = self.mint("trash");
         let mut restores = lock(&self.restores);
         let order = self.counter.fetch_add(1, Ordering::Relaxed);
         if restores.len() >= MAX_RESTORES
@@ -440,6 +459,10 @@ impl ProjectOps {
 
     /// `project_op_restore`.
     pub fn restore(&self, ws: &WorkspaceService, data: &dyn DataSide, restore: OpRestore) -> Result<OpResult, OpError> {
+        // App-managed recoverable deletions (`<kind>:<id>`) belong to the data side.
+        if let Some(outcome) = data.restore_data(&restore) {
+            return Ok(OpResult { plan: restore.restore, outcomes: vec![outcome], notices: Vec::new() });
+        }
         let (root, path, item) = {
             let restores = lock(&self.restores);
             let stored = restores.get(&restore.restore).ok_or_else(|| {
@@ -754,6 +777,8 @@ pub async fn storage_overview(app: AppHandle) -> Result<StorageOverview, OpError
 pub fn start(app: &AppHandle) {
     let data_dir = app.state::<AppState>().data_dir.clone();
     app.manage(ProjectOps::new(&data_dir, Arc::new(OsTrash)));
+    // Agent tools use the same orchestrator (their task as the actor).
+    let _ = app.state::<AppState>().agent_project_ops.set(Arc::new(AgentOps { app: app.clone() }));
     let mut rx = app.state::<AppState>().graph.subscribe();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -775,6 +800,44 @@ pub fn start(app: &AppHandle) {
             }
         }
     });
+}
+
+/// The orchestrator as agent tools use it (`delete_paths`, `copy_paths`, and
+/// reverting them from the review). The gate has checked scope and path
+/// policy; plans keep the request's actor (the agent task, or the user for a
+/// review revert); the data side refuses data targets for agents. Plans are
+/// applied with every choice's default, never a destructive one.
+struct AgentOps {
+    app: AppHandle,
+}
+
+impl exposition_agents::tools::services::ProjectOperations for AgentOps {
+    fn plan(&self, request: OpRequest) -> Result<OpPlan, OpError> {
+        let state = self.app.state::<AppState>();
+        let ops = self.app.state::<ProjectOps>();
+        ops.plan(&state.workspace, &AppData(&state), request)
+    }
+
+    fn apply(&self, plan: &OpPlan) -> Result<OpResult, OpError> {
+        let state = self.app.state::<AppState>();
+        let ops = self.app.state::<ProjectOps>();
+        let apply = OpApply { plan: plan.plan.clone(), plan_hash: plan.plan_hash.clone(), choices: BTreeMap::new() };
+        let result = ops.apply(&state.workspace, &AppData(&state), apply)?;
+        let _ = self.app.emit(PROJECT_OP_EVENT, &result);
+        Ok(result)
+    }
+
+    fn restore(&self, token: &str) -> Result<OpResult, OpError> {
+        let state = self.app.state::<AppState>();
+        let ops = self.app.state::<ProjectOps>();
+        let result = ops.restore(
+            &state.workspace,
+            &AppData(&state),
+            OpRestore { restore: token.to_owned(), on_collision: None },
+        )?;
+        let _ = self.app.emit(PROJECT_OP_EVENT, &result);
+        Ok(result)
+    }
 }
 
 #[cfg(test)]

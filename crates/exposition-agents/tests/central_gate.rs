@@ -22,7 +22,8 @@ use exposition_agents::graph::GraphEnv;
 use exposition_agents::store::Store;
 use exposition_agents::tools::exec::{self, Gate, ToolEnv};
 use exposition_agents::tools::services::{
-    BuildRequest, CommandRequest, LeanRequest, PythonRequest, ServiceError, ServiceKind, ToolServices,
+    BuildRequest, CommandRequest, LeanRequest, ProjectOperations, PythonRequest, ServiceError, ServiceKind,
+    ToolServices,
 };
 use exposition_agents::tools::{self, ToolCall};
 use exposition_agents::workspace::{LocalProjectFiles, ProjectFiles};
@@ -89,12 +90,12 @@ struct Call {
 /// Records every call; a restricted backend is available and the folder is
 /// trusted, so only the gate stands between a call and the service.
 struct Recorder {
-    calls: Mutex<Vec<Call>>,
+    calls: Arc<Mutex<Vec<Call>>>,
 }
 
 impl Recorder {
     fn new() -> Arc<Self> {
-        Arc::new(Self { calls: Mutex::new(Vec::new()) })
+        Arc::new(Self { calls: Arc::new(Mutex::new(Vec::new())) })
     }
     fn take(&self) -> Vec<Call> {
         std::mem::take(&mut *self.calls.lock().unwrap())
@@ -131,6 +132,80 @@ impl ToolServices for Recorder {
     fn research_artifact(&self, _run: &str, _artifact: &str) -> Result<ArtifactRecord, ServiceError> {
         Ok(artifact())
     }
+    fn project_operations(&self) -> Option<Arc<dyn ProjectOperations>> {
+        Some(Arc::new(RecordingOps { calls: Arc::clone(&self.calls) }))
+    }
+}
+
+/// Project operations that plan every named path (no consequences) and
+/// record each APPLY as a service call; nothing changes on disk.
+struct RecordingOps {
+    calls: Arc<Mutex<Vec<Call>>>,
+}
+
+impl ProjectOperations for RecordingOps {
+    fn plan(
+        &self,
+        request: exposition_core::ops::OpRequest,
+    ) -> Result<exposition_core::ops::OpPlan, exposition_core::ops::OpError> {
+        use exposition_core::ops::{OpEffect, OpKind, OpPlan, OpRecovery, OpTarget};
+        let effects = request
+            .targets
+            .iter()
+            .map(|t| {
+                let OpTarget::Path { path } = t else { panic!("agents name project paths") };
+                OpEffect {
+                    target: t.clone(),
+                    description: match &request.kind {
+                        OpKind::Delete { .. } => format!("Move {path} to the Recycle Bin"),
+                        _ => format!("Copy {path}"),
+                    },
+                    destination: None,
+                    recovery: OpRecovery::OsTrash,
+                }
+            })
+            .collect();
+        Ok(OpPlan {
+            plan: "plan-1".into(),
+            request,
+            effects,
+            refusals: Vec::new(),
+            impacts: Vec::new(),
+            needs_decision: false,
+            choices: Vec::new(),
+            plan_hash: "h".into(),
+            expires_at_ms: u64::MAX,
+        })
+    }
+    fn apply(
+        &self,
+        plan: &exposition_core::ops::OpPlan,
+    ) -> Result<exposition_core::ops::OpResult, exposition_core::ops::OpError> {
+        use exposition_core::ops::{OpOutcome, OpRecovery, OpResult, OpStatus};
+        self.calls.lock().unwrap().push(Call {
+            tool: "project_ops_apply",
+            policy: None,
+            request: format!("{:?}", plan.request),
+        });
+        let outcomes = plan
+            .request
+            .targets
+            .iter()
+            .map(|t| OpOutcome {
+                target: t.clone(),
+                status: OpStatus::Succeeded,
+                code: None,
+                message: None,
+                created: None,
+                recovery: OpRecovery::OsTrash,
+                restore: None,
+            })
+            .collect();
+        Ok(OpResult { plan: plan.plan.clone(), outcomes, notices: Vec::new() })
+    }
+    fn restore(&self, _token: &str) -> Result<exposition_core::ops::OpResult, exposition_core::ops::OpError> {
+        Err(exposition_core::ops::OpError::new("ops.restoreUnknown", "not in this test"))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +220,8 @@ enum Kind {
     Python,
     Lean,
     Command,
+    Delete,
+    Copy,
 }
 
 impl Kind {
@@ -169,6 +246,8 @@ impl Kind {
                 tools::RUN_COMMAND,
                 json!({"program": "python", "args": ["-c", "print('PAYLOAD-MARK')"], "working_directory": "notes"}),
             ),
+            Kind::Delete => (tools::DELETE_PATHS, json!({"paths": ["notes/a.typ"]})),
+            Kind::Copy => (tools::COPY_PATHS, json!({"paths": ["main.typ"], "destination": "notes"})),
         }
     }
 
@@ -181,6 +260,8 @@ impl Kind {
             Kind::Python | Kind::Command => "PAYLOAD-MARK",
             Kind::BuildLatex => "paper.tex",
             Kind::Lean => "Main.lean",
+            Kind::Delete => "notes/a.typ",
+            Kind::Copy => "main.typ",
             Kind::List | Kind::Read | Kind::BuildTypst => "",
         }
     }
@@ -191,6 +272,7 @@ impl Kind {
             Kind::Python => Some("run_python"),
             Kind::Lean => Some("check_lean"),
             Kind::Command => Some("run_command"),
+            Kind::Delete | Kind::Copy => Some("project_ops_apply"),
             _ => None,
         }
     }
@@ -241,7 +323,7 @@ fn expect(
     consent: ContextConsent,
 ) -> Expect {
     use Kind::*;
-    let changes = matches!(kind, Edit | Create | Insert);
+    let changes = matches!(kind, Edit | Create | Insert | Delete | Copy);
     let names_a_path = kind != Python;
     let scoped_content = matches!(kind, Read | BuildTypst);
     // Processes, TeX, and Lean can read beyond any scope.
@@ -579,7 +661,9 @@ async fn loop_matrix(kind: Kind) {
                         problems.push("a file the task may not read reached the result".to_owned());
                     }
                     for call in &o.calls {
-                        let process = call.tool != "build_document" || call.policy.is_some();
+                        // Project operations run in-process (no process, no policy).
+                        let process = call.tool != "project_ops_apply"
+                            && (call.tool != "build_document" || call.policy.is_some());
                         if process && (mode == ExecutionMode::Disabled || permission == PermissionProfile::ReadOnly) {
                             problems.push(format!("process started with execution disabled/read-only: {call:?}"));
                         }
@@ -672,6 +756,26 @@ async fn loop_matrix(kind: Kind) {
         }
     }
     assert!(failures.is_empty(), "{} of 54 combinations misbehaved:\n{}", failures.len(), failures.join("\n"));
+}
+
+#[test]
+fn gate_delete_paths() {
+    gate_matrix(Kind::Delete);
+}
+
+#[test]
+fn gate_copy_paths() {
+    gate_matrix(Kind::Copy);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_delete_paths() {
+    loop_matrix(Kind::Delete).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_copy_paths() {
+    loop_matrix(Kind::Copy).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

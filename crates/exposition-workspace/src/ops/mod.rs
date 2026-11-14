@@ -281,10 +281,30 @@ fn locate(root: &WorkspaceRoot, path: &WorkspacePath) -> Result<Located, (&'stat
     Ok(Located { path: normalized, abs, parent, parent_abs, info })
 }
 
+/// What the caller knows that the file engine cannot.
+pub struct PlanHooks<'a> {
+    /// A generated research artifact (`.exposition/artifacts/<run>/…`) that
+    /// the project graph keeps as a resource (a retained output): it can be
+    /// deleted as a file, with the data side's impacts. Other generated
+    /// artifacts stay with the research service.
+    pub retained_artifact: &'a dyn Fn(&WorkspacePath) -> bool,
+}
+
 impl WorkspaceService {
     /// Plan the file part of an operation (only `Path` and `External`
     /// targets are considered; others belong to the data side).
     pub fn plan_paths(&self, kind: &OpKind, targets: &[OpTarget], actor: &OpActor) -> PathPlan {
+        self.plan_paths_with(kind, targets, actor, &PlanHooks { retained_artifact: &|_| false })
+    }
+
+    /// [`Self::plan_paths`] with what the caller knows (see [`PlanHooks`]).
+    pub fn plan_paths_with(
+        &self,
+        kind: &OpKind,
+        targets: &[OpTarget],
+        actor: &OpActor,
+        hooks: &PlanHooks<'_>,
+    ) -> PathPlan {
         let mut plan = PathPlan { kind: Some(kind.clone()), ..PathPlan::default() };
         let root = match self.root() {
             Ok(root) => root,
@@ -394,7 +414,7 @@ impl WorkspaceService {
         for mut item in kept {
             match kind {
                 OpKind::Delete { permanent } => {
-                    if self.plan_delete(&mut plan, &mut item, *permanent) {
+                    if self.plan_delete(&mut plan, &mut item, *permanent, hooks) {
                         plan.items.push(item);
                     }
                 }
@@ -524,11 +544,17 @@ impl WorkspaceService {
     }
 
     /// Returns false when the item is refused.
-    fn plan_delete(&self, plan: &mut PathPlan, item: &mut Item, permanent: bool) -> bool {
+    fn plan_delete(&self, plan: &mut PathPlan, item: &mut Item, permanent: bool, hooks: &PlanHooks<'_>) -> bool {
         let Source::Project(path) = item.source.clone() else { return false };
         if let Some(message) = policy::refuse_change(&path) {
-            plan.refusals.push(refusal(&item.target, "ops.protected", message));
-            return false;
+            let retained = policy::classify(&path) == policy::Area::Artifacts
+                && item.kind == EntryKind::File
+                && (hooks.retained_artifact)(&path);
+            if !retained {
+                plan.refusals.push(refusal(&item.target, "ops.protected", message));
+                return false;
+            }
+            plan.fingerprint.push(format!("retained:{path}"));
         }
         if item.kind == EntryKind::Dir {
             let walk = fsops::walk(&item.abs);
@@ -1083,7 +1109,8 @@ impl WorkspaceService {
         let Some(restored) = published else {
             return fail("ops.nameUnavailable", format!("No free name was found to restore {original}."));
         };
-        let mut o = outcome(&target, OpStatus::Succeeded, None, None);
+        // Marked as a restore (the data side tells it apart from a copy).
+        let mut o = outcome(&target, OpStatus::Succeeded, Some("ops.restored"), None);
         if &restored == original {
             self.resume_documents_under(original);
         } else {
