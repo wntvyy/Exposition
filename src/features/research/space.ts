@@ -312,10 +312,13 @@ export async function setResultState(entity: EntityId, state: RetainState): Prom
     notify({
       tone: "info",
       title: `${outcome.result.label} ${state === "active" ? "kept" : state === "archived" ? "archived" : "discarded"}`,
+      // Archiving or discarding only changes the lifecycle; keeping needs no note.
       body:
         state === "discarded" && uses > 0
           ? `Still used by ${outcome.result.usedBy.map((u) => u.label).join(", ")}; those attachments are unchanged.`
-          : "Nothing was deleted.",
+          : state === "active"
+            ? undefined
+            : "Nothing was deleted.",
     });
     await refreshListing();
     return true;
@@ -371,7 +374,7 @@ export async function reconcilePromotion(operation: OperationId): Promise<void> 
       body: outcome.record.state.kind === "resolved" ? outcome.record.state.resolution : undefined,
     });
   } catch (e) {
-    notify({ tone: "danger", title: "Could not reconcile the promotion", body: errorMessage(e) });
+    notify({ tone: "danger", title: "Could not reconcile the insertion", body: errorMessage(e) });
   }
   await refreshPromotions();
   await refreshListing();

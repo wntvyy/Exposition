@@ -76,6 +76,8 @@ export function DeclarationEvidenceControls({
   const audited = Boolean(audit?.declarations.some((d) => d.name === name));
   const latest = evidence?.evidence[0];
   const formal = latest?.evidence.formal;
+  // A stale record's reason is shown once, in the history line below.
+  const fresh = latest ? freshnessStatus(latest.freshness) : null;
   const recordedForAudit =
     Boolean(audit && formal && formal.sourceDigest === audit.contentHash && formal.revision === audit.revision);
   const record = async () => {
@@ -95,10 +97,16 @@ export function DeclarationEvidenceControls({
         <div className="exp-lean__evidence-latest" data-testid="lean-evidence-latest" data-freshness={latest.freshness.kind}>
           <VerdictBadge verdict={formal.declarationVerdict ?? formal.fileVerdict} />
           <span className="ui-meta">
-            evidence of revision {formal.revision ?? "?"} · file {verdictView(formal.fileVerdict).label.toLowerCase()} ·{" "}
-            {formal.toolchain}
+            evidence of revision {formal.revision ?? "?"} · file: {verdictView(formal.fileVerdict).label} · {formal.toolchain}
           </span>
-          <StatusText {...freshnessStatus(latest.freshness)} wrap />
+          {fresh && (
+            <StatusText
+              status={fresh.status}
+              label={fresh.label}
+              detail={latest.freshness.kind === "stale" ? undefined : fresh.detail}
+              wrap
+            />
+          )}
           {evidence && evidence.evidence.length > 1 && <span className="ui-meta">{evidence.evidence.length - 1} older</span>}
           <span className="ui-meta">dependencies: {formal.dependencies.kind === "unavailable" ? "not reported by the audit" : formal.dependencies.names.join(", ")}</span>
         </div>
@@ -237,8 +245,8 @@ function AssociateDialog({
     >
       <div data-testid="lean-associate-dialog" data-name={name}>
         <p>
-          Record that you reviewed how the formal declaration <code>{name}</code> corresponds to an informal statement. This is a
-          correspondence assertion, not a machine proof that the two say the same thing; Lean&rsquo;s verdict stays a separate record.
+          Records that you reviewed how the formal declaration <code>{name}</code> corresponds to an informal statement. It is
+          not a machine proof that they are equivalent, and it does not change Lean&rsquo;s verdict.
         </p>
         {error && (
           <Banner tone="danger" title="Not recorded">

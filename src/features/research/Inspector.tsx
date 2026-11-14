@@ -72,7 +72,7 @@ function FileInspector({ path }: { path: string }) {
       valueProps: { "data-testid": "research-import-origin" },
       value: (
         <>
-          {origin.mode === "copy" ? "Copied" : "Referenced"} from <code className="ui-code">{origin.source}</code> on{" "}
+          {origin.mode === "copy" ? "Copied" : "Referenced"} from <code className="ui-code">{origin.source}</code> at{" "}
           {formatClock(origin.importedAtMs)} · sha256 <code className="ui-code">{origin.contentHash.slice(0, 12)}…</code>
         </>
       ),
@@ -182,11 +182,8 @@ function ResultInspector({ entity }: { entity: EntityId }) {
   const pill = lifecyclePill(result);
   const facts: KeyValueItem[] = [
     { key: "path", label: "Path", value: result.path, code: true },
-    {
-      key: "kind",
-      label: "Kind",
-      value: `${result.kind ?? "output"} · ${result.mediaType} · roles ${result.roles.join(" + ")}`,
-    },
+    { key: "kind", label: "Kind", value: `${result.kind ?? "output"} · ${result.mediaType}` },
+    { key: "roles", label: "Roles", value: result.roles.join(", ") || "—" },
   ];
   if (result.contentHash) {
     facts.push({
@@ -295,10 +292,7 @@ function ExperimentEditor({ entity }: { entity: EntityId | null }) {
     <div className="exp-rinspector" data-testid="research-inspector" data-kind="experiment" data-entity={entity ?? "new"}>
       <InspectorHeader title={entity ? "Experiment" : "New experiment"} />
       <div className="exp-rinspector__facts">
-        <p className="ui-meta">
-          An experiment records an objective and procedure, its declared inputs, and its retained outcomes. Past runs are
-          attempts, not experiments.
-        </p>
+        <p className="ui-meta">Runs of the procedure are recorded as attempts of this experiment.</p>
         <TextField label="Title" value={title} onChange={setTitle} />
         <TextField label="Objective" value={objective} onChange={setObjective} />
         <Select<string>
@@ -420,7 +414,7 @@ function ReferenceInspector({ entity }: { entity: EntityId }) {
             { key: "location", label: "Location", value: reference.origin.source, code: true },
             {
               key: "when",
-              label: "When referenced",
+              label: "Referenced",
               value: (
                 <>
                   {formatClock(reference.origin.importedAtMs)} · {formatBytes(reference.origin.sizeBytes)} · sha256{" "}
@@ -453,11 +447,18 @@ function RunInspector({ runId }: { runId: string }) {
   }, [runId]);
   return (
     <div className="exp-rinspector" data-testid="research-inspector" data-kind="run" data-run={runId}>
-      <InspectorHeader title={`Run ${runId}`} meta={manifest && <span>{manifest.record.outputs.length} outputs</span>} />
+      <InspectorHeader
+        title={`Run ${runId}`}
+        meta={
+          manifest && (
+            <span>
+              {manifest.record.outputs.length} output{manifest.record.outputs.length === 1 ? "" : "s"}
+            </span>
+          )
+        }
+      />
       <div className="exp-rinspector__facts">
-        <p className="ui-meta">
-          Runs are operational history: they stay inspectable here and become part of the graph only through results you keep.
-        </p>
+        <p className="ui-meta">Runs are not in the project graph; results you keep are.</p>
       </div>
       <InspectorBody>
         <RunSections runId={runId} />

@@ -17,7 +17,6 @@ export interface StatusView {
 }
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const list = (items: string[]) => items.map((a) => `\`${a}\``).join(", ");
 
 export function statusView(status: LeanStatus): StatusView {
   switch (status.kind) {
@@ -77,7 +76,7 @@ export function statusView(status: LeanStatus): StatusView {
   }
 }
 
-/** One-sentence explanation shown under the pill. */
+/** One-sentence explanation shown under the pill (the axioms themselves are listed below it). */
 export function statusSentence(status: LeanStatus): string {
   switch (status.kind) {
     case "notStarted":
@@ -94,15 +93,15 @@ export function statusSentence(status: LeanStatus): string {
         ? `Lean reported no errors in revision ${status.revision}; auditing the axioms its declarations depend on…`
         : `Lean is checking revision ${status.revision}.`;
     case "checked": {
-      const axioms = status.axioms.length ? `only the standard axioms ${list(status.axioms)}` : "no axioms";
+      const axioms = status.axioms.length ? "only the standard axioms" : "no axioms";
       return `Lean checked revision ${status.revision}: no errors, no sorry, and its declarations use ${axioms}${status.warnings ? ` (${plural(status.warnings, "warning")})` : ""}.`;
     }
     case "checkedWithSorry":
       return `Revision ${status.revision} has no errors, but ${plural(status.count, "declaration")} ${status.count === 1 ? "depends" : "depend"} on sorry: the proof is incomplete.`;
     case "checkedWithAxioms":
-      return `Revision ${status.revision} has no errors, but declarations depend on axioms beyond Lean's standard ones: ${list(status.axioms)}. The results hold only if those axioms do.`;
+      return `Revision ${status.revision} has no errors, but declarations depend on axioms beyond Lean's standard ones. The results hold only if those axioms do.`;
     case "reliesOnCompiledCode":
-      return `Revision ${status.revision} has no errors, but declarations trust compiled code instead of the kernel (native_decide or similar): ${list(status.axioms)}.`;
+      return `Revision ${status.revision} has no errors, but declarations trust compiled code instead of the kernel (native_decide or similar).`;
     case "partiallyChecked":
       return status.reason;
     case "unverified":

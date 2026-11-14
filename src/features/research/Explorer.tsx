@@ -164,7 +164,7 @@ export function ResearchExplorer() {
                 <MenuItem id="copy-sources" onAction={() => void importInto("sources", "copy")}>
                   Copy into Sources…
                 </MenuItem>
-                <MenuItem id="reference" onAction={() => void importInto("data", "reference")} description="Read-only; never copied, crawled, or run">
+                <MenuItem id="reference" onAction={() => void importInto("data", "reference")} description="Never copied, crawled, or run">
                   Reference a file (read-only)…
                 </MenuItem>
               </Menu>
@@ -245,7 +245,11 @@ export function ResearchExplorer() {
                 data-lifecycle={r.lifecycle}
                 trailing={
                   r.lifecycle === "active" ? (
-                    r.usedBy.length > 0 ? <span className="xp-tree-note">in {r.usedBy.length} doc</span> : undefined
+                    r.usedBy.length > 0 ? (
+                      <span className="xp-tree-note">
+                        in {r.usedBy.length} doc{r.usedBy.length === 1 ? "" : "s"}
+                      </span>
+                    ) : undefined
                   ) : (
                     <StatusText status="canceled" label={r.lifecycle === "archived" ? "Archived" : "Discarded"} />
                   )
