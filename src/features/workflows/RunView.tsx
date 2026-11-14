@@ -570,19 +570,22 @@ function AttemptView({
   );
 }
 
-/** Why a step did not run, in plain words (the runner's own reason first). */
+/**
+ * Why a step did not run, in plain words: the runner's own reason when it gave
+ * one (the step's state label — "Condition not met", "Skipped" — is shown
+ * beside it, so it is not repeated here).
+ */
 export function notRunReason(step: WorkflowRunStep, planStep: WorkflowPlanStep | undefined, plan: WorkflowRun["plan"]): string | null {
+  if (step.reason) return step.reason;
   if (step.state === "conditionNotMet") {
-    const own = step.reason ? ` ${step.reason}` : "";
+    // The runner's reason states the predicate and the value it read; without one, state the predicate.
     const c = planStep?.condition;
-    // The runner's reason states the predicate and the value it read; restate it only without one.
-    const cond = c && !step.reason
-      ? ` It runs only if ${describeTest(c.test, `“${plan.steps.find((x) => x.step === c.source.step)?.label ?? c.source.step} → ${c.source.port}”`, c.negate)}.`
-      : "";
-    return `Not run: its condition was not met.${own}${cond}`;
+    return c
+      ? `It runs only if ${describeTest(c.test, `“${plan.steps.find((x) => x.step === c.source.step)?.label ?? c.source.step} → ${c.source.port}”`, c.negate)}.`
+      : null;
   }
-  if (step.state === "skipped") return `Not run: an earlier step did not produce what it needs.${step.reason ? ` ${step.reason}` : ""}`;
-  return step.reason ?? null;
+  if (step.state === "skipped") return "An earlier step did not produce what it needs.";
+  return null;
 }
 
 function InstanceView({ run, step, instance, parameter, onRun }: { run: WorkflowRun; step: WorkflowRunStep; instance: WorkflowStepInstance; parameter?: string; onRun: (run: WorkflowRun) => void }) {
@@ -664,7 +667,8 @@ function StepView({ run, step, index, onRun }: { run: WorkflowRun; step: Workflo
         </div>
       )}
       {step.attempts.length === 0
-        ? instances.length === 0 && !reason && <p className="ui-meta">Not dispatched.</p>
+        ? // "Not reached" already says it for a pending step.
+          instances.length === 0 && !reason && step.state !== "pending" && <p className="ui-meta">Not dispatched.</p>
         : step.attempts.map((a) => <AttemptView key={a.attempt} run={run} step={step} attempt={a} onRun={onRun} />)}
     </li>
   );
@@ -753,9 +757,18 @@ function CauseView({ cause, run }: { cause: WorkflowRunCause | undefined; run: W
   );
 }
 
+type MonitorAction = "cancel" | "ack" | "manifest";
+
+/** The title of a failed action's banner: which action did not happen (the message says why). */
+const ACTION_FAILED: Record<MonitorAction, string> = {
+  cancel: "Run not canceled",
+  ack: "Not marked as reviewed",
+  manifest: "Manifest not exported",
+};
+
 export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: WorkflowRun) => void }) {
-  const [busy, setBusy] = useState<"cancel" | "ack" | "manifest" | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<MonitorAction | null>(null);
+  const [error, setError] = useState<{ action: MonitorAction; message: string } | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reproduceOpen, setReproduceOpen] = useState(false);
   const [manifest, setManifest] = useState<WorkflowManifestExport | null>(null);
@@ -777,7 +790,7 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
       notify({ tone: "success", title: "Run manifest exported", body: written.path });
     } catch (e) {
       // Dismissing the save dialog is not a failure.
-      if (!(isCommandError(e) && e.code === "workflow.exportCanceled")) setError(errorMessage(e));
+      if (!(isCommandError(e) && e.code === "workflow.exportCanceled")) setError({ action: "manifest", message: errorMessage(e) });
     } finally {
       setBusy(null);
     }
@@ -789,7 +802,7 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
     try {
       onRun(which === "cancel" ? await workflowRunCommands.cancel(run.id) : await workflowRunCommands.acknowledge(run.id));
     } catch (e) {
-      setError(errorMessage(e));
+      setError({ action: which, message: errorMessage(e) });
     } finally {
       setBusy(null);
     }
@@ -846,10 +859,9 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
               <CauseView cause={run.cause} run={run} />
               {manifest && (
                 <div data-testid="workflow-run-manifest" data-path={manifest.path}>
+                  {/* What the manifest holds is described in the Run manifest section below. */}
                   <Banner tone="info" title="Run manifest exported">
-                    <code>{manifest.path}</code> · {formatBytes(manifest.bytes)} · <FullHash hash={manifest.sha256} label="the manifest" />. It lists the
-                    revision, definition and approval hashes, input and output digests, each attempt's environment, budgets and usage, and the
-                    cause.
+                    <code>{manifest.path}</code> · {formatBytes(manifest.bytes)} · <FullHash hash={manifest.sha256} label="the manifest" />
                   </Banner>
                 </div>
               )}
@@ -889,8 +901,8 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
                 </div>
               )}
               {error && (
-                <Banner tone="danger" title="Not done" live>
-                  {error}
+                <Banner tone="danger" title={ACTION_FAILED[error.action]} live>
+                  {error.message}
                 </Banner>
               )}
             </div>
@@ -899,7 +911,8 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
               <Section
                 data-testid="workflow-run-concurrent"
                 data-count={running.length}
-                title={`Running now (${running.length}${maxParallel > 1 ? ` of at most ${maxParallel} at once` : ""})`}
+                title="Running now"
+                count={maxParallel > 1 ? `${running.length} of at most ${maxParallel}` : running.length}
               >
                 {running.length === 0 ? (
                   <p className="ui-meta">Nothing is in flight: the next step waits for its inputs or a free slot.</p>

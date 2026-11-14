@@ -290,7 +290,7 @@ describe("run monitor (M9)", () => {
     expect(screen.queryByTestId("workflow-run-export-manifest")).toBeNull();
     const now = screen.getByTestId("workflow-run-concurrent");
     expect(now.getAttribute("data-count")).toBe("2");
-    expect(now.textContent).toContain("Running now (2 of at most 3 at once)");
+    expect(now.textContent).toContain("Running now 2 of at most 3");
     expect(screen.getByTestId("workflow-running-comp/fit").textContent).toContain("Fit");
     expect(screen.getByTestId("workflow-running-sweep-1").textContent).toContain("seed = 2");
     expect(runModel.runningNow(run()).map((r) => [r.step, r.instance])).toEqual([
@@ -324,14 +324,14 @@ describe("run monitor (M9)", () => {
     const reason = screen.getByTestId("workflow-step-reason-review");
     expect(reason.getAttribute("data-state")).toBe("conditionNotMet");
     // The runner's reason says it; the predicate is restated only when the runner gave none.
-    expect(reason.textContent).toBe("Not run: its condition was not met. The verdict was “Errors”.");
+    expect(reason.textContent).toBe("The verdict was “Errors”.");
     const without = { ...run().steps.find((s) => s.step === "review")!, reason: null };
     expect(notRunReason(without, run().plan.steps.find((p) => p.step === "review"), run().plan)).toBe(
-      "Not run: its condition was not met. It runs only if the audit verdict of “Audit → evidence” is one of “Checked”.",
+      "It runs only if the audit verdict of “Audit → evidence” is one of “Checked”.",
     );
     const skipped = screen.getByTestId("workflow-step-reason-comp/plot");
     expect(skipped.getAttribute("data-state")).toBe("skipped");
-    expect(skipped.textContent).toBe("Not run: an earlier step did not produce what it needs. “Fit → figure” was not produced.");
+    expect(skipped.textContent).toBe("“Fit → figure” was not produced.");
     expect(screen.getByTestId("workflow-run-step-comp/plot").textContent).toContain("Skipped");
     expect(screen.getByTestId("workflow-run-step-comp/plot").textContent).toContain("Inside “Fit model”");
     expect(screen.getByTestId("workflow-outcome-reason-report").textContent).toBe("Review's condition was not met.");
@@ -401,7 +401,7 @@ describe("run monitor (M9)", () => {
     fireEvent.click(screen.getByTestId("workflow-run-export-manifest"));
     await waitFor(() => expect(runIpc.exportManifest).toHaveBeenCalledTimes(2));
     await waitFor(() => expect((screen.getByTestId("workflow-run-export-manifest") as HTMLButtonElement).disabled).toBe(false));
-    expect(screen.queryByText("Not done")).toBeNull();
+    expect(screen.queryByText("Manifest not exported")).toBeNull();
   });
 
   it("reproduces a run through a reviewed plan with drift notices, started with that plan's approval", async () => {
@@ -546,7 +546,7 @@ describe("triggers panel", () => {
     expect(active.textContent).toContain("Revision 2 (the workflow is now at revision 3)");
     expect(active.textContent).toMatch(/Waits for 30 s without further changes · at most 6 runs an hour and 24 a day/);
     expect(screen.getByTestId("trigger-last-fired-wtrg-1").textContent).toMatch(/^Last fired .* runs this hour 1 of 6, today 3 of 24/);
-    fireEvent.click(within(active).getByRole("button", { name: /Recent history \(3\)/ }));
+    fireEvent.click(within(active).getByRole("button", { name: /Recent history 3/ }));
     const history = screen.getByTestId("trigger-history-wtrg-1");
     expect([...history.querySelectorAll("li")].map((li) => li.getAttribute("data-event"))).toEqual(["rateLimited", "queued", "fired"]);
     expect(history.textContent).toContain("Started a run after 1 watched input changed");
@@ -666,7 +666,7 @@ describe("docs audit: triggers and verdicts", () => {
     const add = await screen.findByTestId("workflow-trigger-add");
     await waitFor(() => expect(add.textContent).toBe("Replace trigger…"));
     fireEvent.click(add);
-    expect((await screen.findByTestId("trigger-replaces")).textContent).toMatch(/This workflow already has a trigger \(active\)\. Enabling this one replaces it/);
+    expect((await screen.findByTestId("trigger-replaces")).textContent).toMatch(/A workflow has one trigger; its current one is active\./);
     fireEvent.click(within(screen.getByTestId("trigger-watch-data")).getByRole("checkbox"));
     fireEvent.click(screen.getByTestId("trigger-review"));
     await screen.findByTestId("trigger-standing");

@@ -165,7 +165,7 @@ function CompositeInfoView({ stepId, pinned, info }: { stepId: string; pinned: {
           )}
           {info?.error && (
             <Badge tone="danger" dashed title={info.error}>
-              Child not loaded
+              Revision {pinned.revision} not loaded
             </Badge>
           )}
         </div>
@@ -383,7 +383,8 @@ const NO_COMPOSITES: ReadonlyMap<string, CompositeInfo> = new Map();
 function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES, diagnostics, selection, onSelectionChange, onChange }: WorkflowCanvasProps) {
   const flow = useReactFlow();
   const [saved, setSaved] = useState<Record<string, Point>>(() => loadPositions(workflowId));
-  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  // `title` overrides the default banner title ("Changed" / "Not connected") when the outcome is neither.
+  const [message, setMessage] = useState<{ ok: boolean; title?: string; text: string } | null>(null);
   useEffect(() => setSaved(loadPositions(workflowId)), [workflowId]);
 
   const layout = useMemo(() => autoLayout(draft, contracts), [draft, contracts]);
@@ -521,7 +522,7 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
     setPicked(new Set(result.added));
     const first = parseNodeId(result.added[0]!);
     onSelectionChange(first ? { kind: first.kind, id: first.id } : null);
-    setMessage({ ok: result.dropped.length === 0, text: pasteMessage(result) });
+    setMessage(result.dropped.length === 0 ? { ok: true, text: pasteMessage(result) } : { ok: false, title: "Partly pasted", text: pasteMessage(result) });
   };
 
   const copyPicked = (): WorkflowFragment | null => copySubgraph(draft, workflowId, pickedNodes(), positionsNow());
@@ -552,6 +553,7 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
       if (!next) {
         setMessage({
           ok: false,
+          title: "Not removed",
           text: selection.id.startsWith("cond:")
             ? "A condition is changed or removed in the step's inspector (“Run this step only when a condition holds”)."
             : "An outcome link is changed by connecting another output to the outcome, or in the Form view.",
@@ -598,7 +600,11 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
           const fragment = copyPicked();
           if (!fragment) return;
           appClipboard.set({ kind: "workflowSubgraph", workflow: workflowId, fragment, steps: fragment.steps.length });
-          setMessage({ ok: true, text: `Copied ${fragment.steps.length} step${fragment.steps.length === 1 ? "" : "s"}${fragment.inputs.length ? ` and ${fragment.inputs.length} input${fragment.inputs.length === 1 ? "" : "s"}` : ""}. Paste into this or another workflow draft.` });
+          setMessage({
+            ok: true,
+            title: `Copied ${fragment.steps.length} step${fragment.steps.length === 1 ? "" : "s"}${fragment.inputs.length ? ` and ${fragment.inputs.length} input${fragment.inputs.length === 1 ? "" : "s"}` : ""}`,
+            text: "Paste into this or another workflow draft.",
+          });
         },
       },
       paste: {
@@ -667,7 +673,7 @@ function CanvasInner({ workflowId, draft, contracts, composites = NO_COMPOSITES,
       <div className="xp-wfc" data-testid="workflow-canvas">
         <div className="xp-wfc__message" role="status" aria-live="polite" data-testid="workflow-canvas-message" data-outcome={message ? (message.ok ? "accepted" : "refused") : undefined}>
           {message && (
-            <Banner tone={message.ok ? "info" : "warning"} title={message.ok ? "Changed" : "Not connected"}>
+            <Banner tone={message.ok ? "info" : "warning"} title={message.title ?? (message.ok ? "Changed" : "Not connected")}>
               {message.text}
             </Banner>
           )}

@@ -319,8 +319,7 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
         {replaces && (
           <div data-testid="trigger-replaces">
             <Banner tone="warning" title="This replaces the current trigger">
-              This workflow already has a trigger ({TRIGGER_STATE_VIEW[replaces.state.kind].label.toLowerCase()}). Enabling this one replaces it: a
-              workflow has one trigger.
+              A workflow has one trigger; its current one is {TRIGGER_STATE_VIEW[replaces.state.kind].label.toLowerCase()}.
             </Banner>
           </div>
         )}
@@ -642,7 +641,7 @@ function TriggerCard({
         </div>
       )}
       {history.length > 0 && (
-        <Section title={`Recent history (${history.length})`} collapsible defaultExpanded={false}>
+        <Section title="Recent history" count={history.length} collapsible defaultExpanded={false}>
           <ul className="xp-wf-history" data-testid={`trigger-history-${trigger.id}`}>
             {history.map((h, i) => {
               const event = h.event;
