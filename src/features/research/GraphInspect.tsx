@@ -11,7 +11,8 @@ import type { ImpactReport } from "../../bindings/ImpactReport";
 import type { Relation } from "../../bindings/Relation";
 import { errorMessage } from "../../lib/ipc";
 import { graphCommands } from "../../lib/graphIpc";
-import { Banner, Section, Spinner, StatusPill, type Status } from "../../ui/components";
+import { RelationStatus } from "../graph/RelationStatus";
+import { Banner, Section, Spinner, StatusText, type Status } from "../../ui/components";
 
 const READING: Record<string, string> = {
   contains: "contains",
@@ -28,11 +29,15 @@ const READING: Record<string, string> = {
   formalizes: "formalizes",
 };
 
-export function freshnessPill(f: Freshness | undefined): { status: Status; label: string; detail?: string } {
+/**
+ * Freshness of evidence as a quiet status. "Current" is neutral (it is the
+ * expected state, not an achievement); stale and unknown are never green.
+ */
+export function freshnessStatus(f: Freshness | undefined): { status: Status; label: string; detail?: string } {
   if (!f) return { status: "idle", label: "Freshness not computed" };
   switch (f.kind) {
     case "current":
-      return { status: "succeeded", label: "Current" };
+      return { status: "idle", label: "Current" };
     case "stale":
       return { status: "stale", label: "Stale (history)", detail: f.reasons[0] };
     case "unknown":
@@ -59,26 +64,28 @@ function outcomeText(e: Evidence): string {
 
 /** One evidence record: what it pins (inputs, outputs, environment) and its applicability. */
 export function EvidenceRecord({ evidence, freshness }: { evidence: Evidence; freshness?: Freshness }) {
-  const pill = freshnessPill(freshness);
+  const fresh = freshnessStatus(freshness);
   return (
     <li className="exp-graph__evidence" data-testid="graph-evidence" data-kind={evidence.kind} data-freshness={freshness?.kind ?? "none"}>
       <div className="exp-graph__evidence-head">
-        <StatusPill size="sm" status={pill.status} label={pill.label} />
+        <StatusText status={fresh.status} label={fresh.label} />
         <span>
           {evidence.kind === "computational" ? "Computational" : evidence.kind === "formalCheck" ? "Formal check" : evidence.kind} ·{" "}
-          {evidence.operation.kind} <code>{evidence.operation.id}</code> · {outcomeText(evidence)}
+          {evidence.operation.kind} <code className="ui-code">{evidence.operation.id}</code> · {outcomeText(evidence)}
         </span>
       </div>
-      {pill.detail && <p className="exp-muted">{pill.detail}</p>}
-      <ul className="exp-graph__pins">
+      {fresh.detail && <p className="ui-meta">{fresh.detail}</p>}
+      <ul className="exp-graph__pins ui-meta">
         {evidence.inputs.map((i) => (
           <li key={`in:${i.path}`}>
-            input <code>{i.path}</code>
+            input <code className="ui-code">{i.path}</code>
             {i.revision !== null && ` · revision ${i.revision}`}
             {i.contentHash && (
               <>
                 {" · "}
-                <code title={i.contentHash}>sha256 {i.contentHash.slice(0, 12)}…</code>
+                <code className="ui-code" title={i.contentHash}>
+                  sha256 {i.contentHash.slice(0, 12)}…
+                </code>
               </>
             )}
             {i.unsaved && " · unsaved buffer (digest only)"}
@@ -86,7 +93,10 @@ export function EvidenceRecord({ evidence, freshness }: { evidence: Evidence; fr
         ))}
         {evidence.outputs.map((o) => (
           <li key={`out:${o.path}`}>
-            output <code>{o.path}</code> · <code title={o.contentHash}>sha256 {o.contentHash.slice(0, 12)}…</code>
+            output <code className="ui-code">{o.path}</code> ·{" "}
+            <code className="ui-code" title={o.contentHash}>
+              sha256 {o.contentHash.slice(0, 12)}…
+            </code>
           </li>
         ))}
         {evidence.environment.length > 0 && <li>environment: {evidence.environment.map(([k, v]) => `${k} ${v}`).join(" · ")}</li>}
@@ -104,16 +114,16 @@ function RelationRow({ relation, detail, outgoing }: { relation: Relation; detai
     : `${other?.label ?? otherId} ${READING[relation.kind] ?? relation.kind} ${self}`;
   return (
     <li data-testid="graph-relation" data-kind={relation.kind} data-direction={outgoing ? "out" : "in"} data-status={relation.status}>
-      <span className="exp-graph__relation">{text}</span>
-      <span className="exp-graph__badge" data-status={relation.status}>
-        {relation.status}
-      </span>
-      {relation.note && <span className="exp-muted"> · {relation.note}</span>}
+      <span className="exp-graph__relation">{text}</span> <RelationStatus status={relation.status} />
+      {relation.note && <span className="ui-meta"> · {relation.note}</span>}
     </li>
   );
 }
 
-/** Relations, evidence, and impact of an entity (refreshes when `revision` changes). */
+/**
+ * Relations, evidence, and impact of an entity as inspector sections
+ * (refreshes when `revision` changes).
+ */
 export function GraphDependencies({ entity, revision }: { entity: EntityId; revision?: number | null }) {
   const [detail, setDetail] = useState<EntityDetail | null>(null);
   const [impact, setImpact] = useState<ImpactReport | null>(null);
@@ -135,20 +145,28 @@ export function GraphDependencies({ entity, revision }: { entity: EntityId; revi
   }, [entity, revision]);
   if (error) {
     return (
-      <Banner tone="warning" title="Graph unavailable">
-        {error}
-      </Banner>
+      <div className="exp-graph exp-graph--state">
+        <Banner tone="warning" title="Graph unavailable">
+          {error}
+        </Banner>
+      </div>
     );
   }
-  if (!detail) return <Spinner size="sm" aria-label="Loading graph dependencies" />;
+  if (!detail) {
+    return (
+      <div className="exp-graph exp-graph--state">
+        <Spinner size="sm" aria-label="Loading graph dependencies" />
+      </div>
+    );
+  }
   const freshness = new Map(detail.evidenceFreshness.map(([id, f]) => [id, f]));
   const outgoing = detail.outgoing.filter((r) => r.status !== "rejected");
   const incoming = detail.incoming.filter((r) => r.status !== "rejected");
   return (
     <div className="exp-graph" data-testid="graph-dependencies" data-entity={entity} data-graph-revision={detail.graphRevision}>
-      <Section title={`Relations (${outgoing.length + incoming.length})`}>
+      <Section title="Relations" count={outgoing.length + incoming.length}>
         {outgoing.length + incoming.length === 0 ? (
-          <p className="exp-muted">No relations yet.</p>
+          <p className="ui-meta">No relations yet.</p>
         ) : (
           <ul className="exp-graph__list">
             {outgoing.map((r) => (
@@ -160,9 +178,9 @@ export function GraphDependencies({ entity, revision }: { entity: EntityId; revi
           </ul>
         )}
       </Section>
-      <Section title={`Evidence (${detail.evidence.length})`}>
+      <Section title="Evidence" count={detail.evidence.length}>
         {detail.evidence.length === 0 ? (
-          <p className="exp-muted">No evidence recorded.</p>
+          <p className="ui-meta">No evidence recorded.</p>
         ) : (
           <ul className="exp-graph__list">
             {detail.evidence.map((e) => (
@@ -171,21 +189,21 @@ export function GraphDependencies({ entity, revision }: { entity: EntityId; revi
           </ul>
         )}
       </Section>
-      <Section title={`If this changes (${impact?.items.length ?? 0})`} collapsible defaultExpanded={false}>
+      <Section title="If this changes" count={impact?.items.length ?? 0} collapsible defaultExpanded={false}>
         {!impact || impact.items.length === 0 ? (
-          <p className="exp-muted">Nothing in the graph depends on it.</p>
+          <p className="ui-meta">Nothing in the graph depends on it.</p>
         ) : (
           <ul className="exp-graph__list" data-testid="graph-impact">
             {impact.items.map((i) => (
               <li key={i.entity.id} data-testid="graph-impact-item" data-action={i.action} data-entity={i.entity.id}>
-                <strong>{i.entity.label}</strong> <span className="exp-muted">{i.reason}</span>
+                <span className="exp-graph__name">{i.entity.label}</span> <span className="ui-meta">{i.reason}</span>
               </li>
             ))}
           </ul>
         )}
-        {impact && (impact.truncated || impact.workLimitReached) && <p className="exp-muted">Impact was cut off (bounded traversal).</p>}
+        {impact && (impact.truncated || impact.workLimitReached) && <p className="ui-meta">Impact was cut off (bounded traversal).</p>}
         {impact && impact.unknownCoverage.length > 0 && (
-          <p className="exp-muted">Extraction is incomplete for {impact.unknownCoverage.join(", ")}; impact through them is unknown.</p>
+          <p className="ui-meta">Extraction is incomplete for {impact.unknownCoverage.join(", ")}; impact through them is unknown.</p>
         )}
       </Section>
     </div>

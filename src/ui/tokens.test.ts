@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { contrastRatio, parseColor, readCustomProperties, resolveVar } from "./color";
-import { colorRoles, graphCategories, palettes, type ColorRole, type ThemeName } from "./tokens";
+import { colorRoles, densityPx, graphCategories, palettes, type ColorRole, type ThemeName } from "./tokens";
 
 // Vitest stubs CSS imports (even `?raw`), so read the stylesheet from disk.
 const nodeFs = "node:fs";
@@ -53,6 +53,14 @@ const textPairs: [ColorRole, ColorRole][] = [
   ),
   ["status-stale-text", "surface"],
   ["status-stale-text", "surface-sunken"],
+  // Quiet inline status (StatusText): colored icon + text on rows, including
+  // hovered and selected rows.
+  ...(["danger", "warning", "success", "info"] as const).flatMap((tone): [ColorRole, ColorRole][] =>
+    (["surface-hover", "surface-selected", "accent-subtle"] as const).map((bg): [ColorRole, ColorRole] => [`${tone}-text`, bg]),
+  ),
+  ...(["surface-raised", "surface-hover", "surface-selected", "accent-subtle"] as const).map(
+    (bg): [ColorRole, ColorRole] => ["status-stale-text", bg],
+  ),
   ["tooltip-text", "tooltip-bg"],
   ["kbd-text", "kbd-bg"],
   ["statusbar-text", "statusbar-bg"],
@@ -119,6 +127,25 @@ describe("design tokens", () => {
   });
 });
 
+describe("density tokens", () => {
+  it("densityPx mirrors tokens.css", () => {
+    const props = themeProperties("light");
+    const px = (name: string) => Number.parseFloat(resolveVar(props[name] ?? "", props));
+    expect({
+      controlSm: px("--control-height-sm"),
+      controlMd: px("--control-height-md"),
+      controlLg: px("--control-height-lg"),
+      rowTree: px("--row-height-tree"),
+      rowTable: px("--row-height-table"),
+      rowMenu: px("--row-height-menu"),
+      tab: px("--tab-height"),
+      paneHeader: px("--pane-header-height"),
+      pageBar: px("--page-bar-height"),
+      statusbar: px("--statusbar-height"),
+    }).toEqual(densityPx);
+  });
+});
+
 describe("contrast math", () => {
   it("matches WCAG reference values", () => {
     expect(contrastRatio("#000000", "#ffffff")).toBeCloseTo(21, 5);
@@ -129,5 +156,22 @@ describe("contrast math", () => {
   it("composites translucent foregrounds", () => {
     expect(contrastRatio("rgba(0, 0, 0, 0)", "#ffffff")).toBeCloseTo(1, 5);
     expect(contrastRatio("rgba(0, 0, 0, 1)", "#ffffff")).toBeCloseTo(21, 5);
+  });
+});
+
+describe("shared component insets", () => {
+  // jsdom does not resolve custom properties, so guard the rule shape instead:
+  // an element that pads itself with var(--section-inset) must not reset that
+  // variable on itself (content sections lost their inset once).
+  const componentsCss = readFileSync("src/ui/components/components.css", "utf8");
+  it("resets --section-inset only below a content section body, never on the body itself", () => {
+    const rules = [...componentsCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+    const resetting = rules.filter(([, , body]) => /--section-inset:\s*0/.test(body ?? ""));
+    expect(resetting.length).toBeGreaterThan(0);
+    for (const [, selectors] of resetting) {
+      for (const selector of (selectors ?? "").split(",").map((s) => s.replace(/\/\*[\s\S]*?\*\//g, "").trim())) {
+        expect(selector).not.toMatch(/\.ui-section__body$/);
+      }
+    }
   });
 });

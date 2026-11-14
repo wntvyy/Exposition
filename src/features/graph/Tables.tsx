@@ -5,18 +5,18 @@ import type { Entity } from "../../bindings/Entity";
 import type { Relation } from "../../bindings/Relation";
 import { Badge, DataTable, type DataTableColumn } from "../../ui/components";
 import type { CanvasBadge, CanvasNode } from "./canvas/types";
-import { RelationStatusBadge } from "./Inspector";
+import { RelationStatus } from "./Inspector";
 import { relationDisplay, type VocabularyIndex } from "./model";
 import type { Projection } from "./projection";
 
 type Row = Omit<CanvasNode, "position"> & { entity: Entity | undefined; relationCount: number };
 
 function Badges({ badges }: { badges: CanvasBadge[] }) {
-  if (!badges.length) return <span className="xp-muted">—</span>;
+  if (!badges.length) return <span className="ui-muted">—</span>;
   return (
-    <span className="xp-graph-badges">
+    <span className="xp-graph-inline">
       {badges.map((b) => (
-        <Badge key={b.label} tone={b.tone} dashed={b.dashed} title={b.title}>
+        <Badge key={b.label} tone={b.tone} icon={b.icon} dashed={b.dashed} title={b.title}>
           {b.label}
         </Badge>
       ))}
@@ -53,14 +53,14 @@ export function EntityTable({
         <span className="xp-graph-table__name">
           {r.typeIcon && <r.typeIcon size={14} aria-hidden />}
           {r.title}
-          {r.group?.collapsed ? <span className="xp-muted"> ({r.group.memberCount} inside, collapsed)</span> : null}
+          {r.group?.collapsed ? <span className="ui-muted"> ({r.group.memberCount} inside, collapsed)</span> : null}
         </span>
       ),
     },
     { id: "kind", title: "Kind", sortValue: (r) => r.typeLabel, render: (r) => r.typeLabel, width: "16%" },
     { id: "status", title: "Status", sortValue: (r) => r.badges.map((b) => b.label).join(), render: (r) => <Badges badges={r.badges} />, width: "22%" },
-    { id: "key", title: "Source or key", sortValue: (r) => r.entity?.key ?? "", render: (r) => (r.entity?.key ? <code className="xp-graph-path">{r.entity.key}</code> : <span className="xp-muted">—</span>), width: "24%" },
-    { id: "relations", title: "Relations", sortValue: (r) => r.relationCount, render: (r) => String(r.relationCount), width: "10%" },
+    { id: "key", title: "Source or key", sortValue: (r) => r.entity?.key ?? "", render: (r) => (r.entity?.key ? <span className="ui-code">{r.entity.key}</span> : <span className="ui-muted">—</span>), width: "24%" },
+    { id: "relations", title: "Relations", numeric: true, sortValue: (r) => r.relationCount, render: (r) => String(r.relationCount), width: "10%" },
   ];
   return (
     <DataTable
@@ -118,7 +118,7 @@ export function RelationTable({
     { id: "from", title: "From", isRowHeader: true, sortValue: (r) => r.from, render: (r) => r.from },
     { id: "relation", title: "Relationship", sortValue: (r) => r.reading, render: (r) => (r.count > 1 ? `${r.reading} (×${r.count}, collapsed)` : r.reading) },
     { id: "to", title: "To", sortValue: (r) => r.to, render: (r) => r.to },
-    { id: "status", title: "Status", sortValue: (r) => r.status, render: (r) => <RelationStatusBadge status={r.status} />, width: "14%" },
+    { id: "status", title: "Status", sortValue: (r) => r.status, render: (r) => <RelationStatus status={r.status} form="text" />, width: "14%" },
   ];
   return (
     <DataTable

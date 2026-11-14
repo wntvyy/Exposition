@@ -125,8 +125,8 @@ describe("Project graph table (keyboard alternative)", () => {
     fireEvent.keyUp(row, { key: " ", code: "Space" });
     const inspector = await screen.findByTestId("graph-entity-inspector");
     expect(inspector.getAttribute("data-entity-id")).toBe("thm");
-    // The observed reference is shown with its status and cannot be removed by hand.
-    const observed = await within(inspector).findByText("Observed");
+    // The observed reference is shown with its status (a settled fact: muted "· observed") and cannot be removed by hand.
+    const observed = await within(inspector).findByText("· observed");
     const item = observed.closest('[data-testid="graph-relation"]') as HTMLElement;
     expect(item.getAttribute("data-status")).toBe("observed");
     expect(within(item).queryByRole("button", { name: "Delete relationship" })).toBeNull();
@@ -211,6 +211,9 @@ describe("Project graph table (keyboard alternative)", () => {
     fireEvent.keyDown(row, { key: " ", code: "Space" });
     fireEvent.keyUp(row, { key: " ", code: "Space" });
     const inspector = await screen.findByTestId("graph-relation-inspector");
+    // The relationship's family reads in its edge color (shared category text role).
+    const family = inspector.querySelector(".ui-inspector-header .ui-category-text")!;
+    expect([family.textContent, family.getAttribute("data-category")]).toEqual(["Mathematical dependencies", "math"]);
     fireEvent.click(within(inspector).getByRole("button", { name: "Delete relationship" }));
     await waitFor(() => expect(opIpc.apply).toHaveBeenCalledWith({ plan: "p1", planHash: "h1", choices: {} }));
     expect(opIpc.plan).toHaveBeenCalledWith({ kind: { kind: "delete", permanent: false }, targets: [{ kind: "graphRelation", relation: "acc" }], actor: { kind: "user" } });

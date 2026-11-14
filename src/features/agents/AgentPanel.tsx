@@ -11,6 +11,7 @@ import { TaskList } from "./TaskList";
 import { TaskView } from "./TaskView";
 import "./agents.css";
 
+/** The provider actually selected, as a quiet status line (warning text when it cannot run tasks). */
 function ProviderLabel() {
   const status = useAgents((s) => s.status);
   if (!status) return null;
@@ -18,7 +19,7 @@ function ProviderLabel() {
   const { text, ready } = providerLabel(status);
   return (
     <span
-      className="agents-provider"
+      className="ui-meta agents-provider"
       data-scripted={scripted || undefined}
       data-ready={ready}
       data-testid="agents-provider-chip"
@@ -65,13 +66,13 @@ export function AgentPanel() {
         <ProviderLabel />
       </div>
       {error && (
-        <div data-testid="agents-error">
+        <div className="agents-error" data-testid="agents-error">
           <Banner tone="danger" title="Agent action failed" live actions={<Button size="sm" variant="ghost" onPress={() => agents.setError(null)}>Dismiss</Button>}>
             {error}
           </Banner>
         </div>
       )}
-      <div className="agents-content">
+      <div className="agents-content" data-view={view}>
         {view === "tasks" && <TaskList />}
         {view === "compose" && <TaskComposer />}
         {view === "task" && selected && <TaskView id={selected} />}

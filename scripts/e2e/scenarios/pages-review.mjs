@@ -51,14 +51,14 @@ async function showPage(page, id) {
   });
 }
 
-/** Regions F6 visits from the activity bar until it wraps (innermost regions only). */
+/** Regions F6 visits from the page bar until it wraps (innermost regions only). */
 async function f6Regions(page) {
   await page.locator('[data-page-button="editor"]').focus();
   const seen = [];
   for (let i = 0; i < 12; i++) {
     await page.keyboard.press("F6");
     const region = await page.evaluate(() => document.activeElement?.closest("[data-region]")?.getAttribute("data-region") ?? null);
-    if (region === "activitybar") break;
+    if (region === "pagebar") break;
     seen.push(region);
   }
   return seen;

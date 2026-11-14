@@ -19,7 +19,7 @@ import type { StepPayload } from "../../bindings/StepPayload";
 import type { WorkflowId } from "../../bindings/WorkflowId";
 import type { ReviewPlan, WorkflowPlanStep, WorkflowRun, WorkflowRunPlan } from "./contract";
 import { errorMessage, isCommandError } from "../../lib/ipc";
-import { Badge, Banner, Button, Dialog, ErrorState, IconButton, LoadingState } from "../../ui/components";
+import { Badge, Banner, Button, Dialog, ErrorState, IconButton, KeyValueList, LoadingState, SimpleTable, type KeyValueItem } from "../../ui/components";
 import { workflowRunCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
 import { DEFAULT_LIMITS, describeCondition, describeLimits, describeRepeat, paramText } from "./orchestration";
@@ -63,20 +63,29 @@ export function FullHash({ hash, label }: { hash: string; label: string }) {
   );
 }
 
+/** A step's position in its plan or run as a quiet badge (decorative: the list order says it). */
+export function StepIndex({ index }: { index: number }) {
+  return (
+    <span className="xp-wf-index" aria-hidden="true">
+      <Badge>{index + 1}</Badge>
+    </span>
+  );
+}
+
 function PayloadView({ step, payload }: { step: WorkflowPlanStep; payload: StepPayload }) {
   if (payload.kind === "code") {
     return (
-      <div className="xp-wf-plan__payload">
-        <div className="xp-wf-plan__label">
+      <div className="xp-wf__stack">
+        <p className="ui-meta">
           Code ({payload.language}, {payload.source.split("\n").length} lines) — runs exactly as shown
-        </div>
+        </p>
         <CodeListing text={payload.source} label={`Code of step ${step.label}`} testId={`plan-code-${step.step}`} />
       </div>
     );
   }
   return (
-    <div className="xp-wf-plan__payload">
-      <div className="xp-wf-plan__label">Instructions sent to the model provider — exactly as shown</div>
+    <div className="xp-wf__stack">
+      <p className="ui-meta">Instructions sent to the model provider — exactly as shown</p>
       <CodeListing text={payload.text} label={`Instructions of step ${step.label}`} testId={`plan-prompt-${step.step}`} />
     </div>
   );
@@ -99,9 +108,86 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
     return `${producer?.label ?? from.step} → ${from.port}`;
   };
   const params = Object.entries(step.parameters);
+  const facts: (KeyValueItem | false)[] = [
+    !!step.condition && {
+      key: "condition",
+      label: "Condition",
+      value: <span data-testid={`plan-condition-${step.step}`}>{step.condition && describeCondition(step.condition, (s, p) => planPortLabel(plan, s, p))}</span>,
+    },
+    !!step.repeat && {
+      key: "repeat",
+      label: "Repeats",
+      value: (
+        <span data-testid={`plan-repeat-${step.step}`}>
+          {step.repeat && describeRepeat(step.repeat, (port) => `its output “${port}”`, (name) => `“${name}”`)}
+        </span>
+      ),
+    },
+    {
+      key: "effects",
+      label: "Effects",
+      value: (
+        <ul className="xp-wf-bullets">
+          {step.effects.map((e) => (
+            <li key={e} data-effect={e}>
+              {EFFECT_LABELS[e]}
+            </li>
+          ))}
+        </ul>
+      ),
+    },
+    {
+      key: "reads",
+      label: "Reads",
+      value:
+        step.bindings.length === 0 ? (
+          "Nothing bound"
+        ) : (
+          <ul className="xp-wf-bullets">
+            {step.bindings.map((b, i) => (
+              <li key={i}>
+                <code>{b.port}</code> ← {sourceText(b.from)}
+              </li>
+            ))}
+          </ul>
+        ),
+    },
+    step.prerequisites.length > 0 && {
+      key: "after",
+      label: "Runs after",
+      value: `${step.prerequisites.map((p) => plan.steps.find((s) => s.step === p)?.label ?? p).join(", ")} (no data)`,
+    },
+    {
+      key: "parameters",
+      label: "Parameters",
+      value:
+        params.length === 0 ? (
+          "None"
+        ) : (
+          <span className="xp-wf-params">
+            {params.map(([name, value]) => (
+              <span key={name}>
+                <code>{name}</code> = <code>{paramText(value)}</code>
+              </span>
+            ))}
+          </span>
+        ),
+    },
+    {
+      key: "limits",
+      label: "Limits",
+      value: (
+        <span data-testid={`plan-limits-${step.step}`}>
+          At most {formatSeconds(step.timeLimitSeconds)} and {formatBytes(step.maxOutputBytes)} of output
+          {step.maxModelRequests ? `; up to ${step.maxModelRequests} model request${step.maxModelRequests === 1 ? "" : "s"}` : ""}
+          {(plan.maxParallel ?? 1) > 1 ? " — reserved from the run's budgets before the step starts, so steps running together cannot exceed them" : ""}
+        </span>
+      ),
+    },
+  ];
   return (
     <li
-      className="xp-wf-plan__step"
+      className="xp-wf-block xp-wf-block--numbered"
       data-testid={`plan-step-${step.step}`}
       data-containment={step.containment}
       data-available={String(step.available)}
@@ -109,91 +195,26 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
       data-conditional={step.condition ? "true" : undefined}
       data-repeat={step.repeat?.kind}
     >
-      <div className="xp-wf-plan__step-head">
-        <span className="xp-wf-plan__index" aria-hidden="true">
-          {index + 1}
-        </span>
-        <div className="xp-wf__grow">
-          <strong>{step.label}</strong>
-          <div className="xp-wf__muted">
+      <div className="xp-wf-block__head">
+        <StepIndex index={index} />
+        <div className="xp-wf-block__lead">
+          <span className="xp-wf-block__title">{step.label}</span>
+          <span className="ui-meta">
             {path.length > 0 && <>Inside {path.map((t) => `“${t}”`).join(" › ")} · </>}
             {step.operationTitle} ({step.operation.id} v{step.operation.version}) · runner: {step.runnerTitle}
-          </div>
+          </span>
         </div>
         <Badge tone={containment.tone} title={containment.detail}>
           {containment.label}
         </Badge>
       </div>
-      <p className="xp-wf__muted xp-wf-plan__containment">{containment.detail}</p>
+      <p className="ui-meta">{containment.detail}</p>
       {!step.available && (
         <Banner tone="warning" title="Runner not available">
           {step.availability}
         </Banner>
       )}
-      <dl className="xp-wf-facts">
-        {step.condition && (
-          <>
-            <dt>Condition</dt>
-            <dd data-testid={`plan-condition-${step.step}`}>{describeCondition(step.condition, (s, p) => planPortLabel(plan, s, p))}</dd>
-          </>
-        )}
-        {step.repeat && (
-          <>
-            <dt>Repeats</dt>
-            <dd data-testid={`plan-repeat-${step.step}`}>
-              {describeRepeat(step.repeat, (port) => `its output “${port}”`, (name) => `“${name}”`)}
-            </dd>
-          </>
-        )}
-        <dt>Effects</dt>
-        <dd>
-          <ul className="xp-wf-plan__effects">
-            {step.effects.map((e) => (
-              <li key={e} data-effect={e}>
-                {EFFECT_LABELS[e]}
-              </li>
-            ))}
-          </ul>
-        </dd>
-        <dt>Reads</dt>
-        <dd>
-          {step.bindings.length === 0 ? (
-            "Nothing bound"
-          ) : (
-            <ul className="xp-wf-plan__effects">
-              {step.bindings.map((b, i) => (
-                <li key={i}>
-                  <code>{b.port}</code> ← {sourceText(b.from)}
-                </li>
-              ))}
-            </ul>
-          )}
-        </dd>
-        {step.prerequisites.length > 0 && (
-          <>
-            <dt>Runs after</dt>
-            <dd>{step.prerequisites.map((p) => plan.steps.find((s) => s.step === p)?.label ?? p).join(", ")} (no data)</dd>
-          </>
-        )}
-        <dt>Parameters</dt>
-        <dd>
-          {params.length === 0
-            ? "None"
-            : params.map(([name, value]) => (
-                <span key={name} className="xp-wf-plan__param">
-                  <code>{name}</code> = <code>{paramText(value)}</code>
-                </span>
-              ))}
-        </dd>
-        <dt>Limits</dt>
-        <dd data-testid={`plan-limits-${step.step}`}>
-          At most {formatSeconds(step.timeLimitSeconds)} and {formatBytes(step.maxOutputBytes)} of output
-          {step.maxModelRequests
-            ? `; up to ${step.maxModelRequests} model request${step.maxModelRequests === 1 ? "" : "s"}`
-            : ""}
-          {(plan.maxParallel ?? 1) > 1 ? " — reserved from the run's budgets before the step starts, so steps running together cannot exceed them" : ""}
-        </dd>
-      </dl>
+      <KeyValueList items={facts.filter((f): f is KeyValueItem => f !== false)} />
       {step.payload && <PayloadView step={step} payload={step.payload} />}
       {step.bindings.map((b, i) => {
         if (b.from.kind !== "input") return null;
@@ -202,12 +223,12 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
         if (!input || input.text === null) return null;
         const lean = input.portType === "formalSource";
         return (
-          <div className="xp-wf-plan__payload" key={`script-${i}`}>
-            <div className="xp-wf-plan__label">
+          <div className="xp-wf__stack" key={`script-${i}`}>
+            <p className="ui-meta">
               {lean ? "Lean source" : "Code from"} <code>{input.path}</code> ({input.text.split("\n").length} lines,{" "}
               <FullHash hash={input.sha256} label={input.path} />) —{" "}
               {lean ? "the audit elaborates exactly this text (elaboration can run code)" : "runs exactly as shown"}
-            </div>
+            </p>
             <CodeListing text={input.text} label={`Code of step ${step.label} from ${input.path}`} testId={`plan-script-${step.step}`} />
           </div>
         );
@@ -230,6 +251,8 @@ export function groupByComposite(steps: WorkflowPlanStep[]): StepGroup[] {
   return groups;
 }
 
+type PlanInput = ReviewPlan["inputs"][number];
+
 /** The plan in full (also shown read-only in the run monitor as "the plan exactly as approved"). */
 export function PlanDetails({ plan }: { plan: ReviewPlan }) {
   const { execution, ceiling, budgets } = plan;
@@ -244,24 +267,35 @@ export function PlanDetails({ plan }: { plan: ReviewPlan }) {
   // Drift is also summarized in the plan's notices; show each fact once.
   const notices = plan.notices.filter((n) => !drift.some((d) => d.message === n));
   const stepNames = (ids: string[]) => ids.map((id) => `“${plan.steps.find((s) => s.step === id)?.label ?? id}”`).join(", ");
-  return (
-    <div className="xp-wf-plan" data-testid="workflow-plan-details" data-plan={plan.plan} data-approval={plan.approvalHash}>
-      <dl className="xp-wf-facts">
-        <dt>Project</dt>
-        <dd data-testid="plan-project">{plan.project}</dd>
-        <dt>Workflow</dt>
-        <dd>
-          {plan.title} · revision <span data-testid="plan-revision">{plan.revision}</span> · definition <FullHash hash={plan.definitionHash} label="the definition" />
-        </dd>
-        <dt>Most it may do</dt>
-        <dd>
+  const facts: (KeyValueItem | false)[] = [
+    { key: "project", label: "Project", value: <span data-testid="plan-project">{plan.project}</span> },
+    {
+      key: "workflow",
+      label: "Workflow",
+      value: (
+        <>
+          {plan.title} · revision <span data-testid="plan-revision">{plan.revision}</span> · definition{" "}
+          <FullHash hash={plan.definitionHash} label="the definition" />
+        </>
+      ),
+    },
+    {
+      key: "ceiling",
+      label: "Most it may do",
+      value: (
+        <>
           {EXECUTION_CEILING[ceiling.execution] ?? ceiling.execution}
           {ceiling.modelRequests ? "; may send declared inputs to the model provider" : "; no model requests"}
           {ceiling.retainResults ? "; may keep results and record evidence" : ""}
           {ceiling.proposeChanges ? "; may propose reviewable changes" : ""}
-        </dd>
-        <dt>Execution</dt>
-        <dd data-testid="plan-execution">
+        </>
+      ),
+    },
+    {
+      key: "execution",
+      label: "Execution",
+      value: (
+        <div data-testid="plan-execution">
           {execution.restrictedBackend
             ? `Restricted backend ${execution.restrictedBackend}${
                 defaultImageSteps ? (execution.restrictedImage ? ` with image ${execution.restrictedImage}` : " (no image configured)") : ""
@@ -278,7 +312,7 @@ export function PlanDetails({ plan }: { plan: ReviewPlan }) {
           {execution.nativeSteps.length > 0 && ` · runs natively with your account's privileges: ${stepNames(execution.nativeSteps)}`}
           {execution.modelSteps.length > 0 && ` · sends material to the model provider: ${stepNames(execution.modelSteps)}`}
           {execution.runnerImages && execution.runnerImages.length > 0 && (
-            <ul className="xp-wf-plan__effects" data-testid="plan-runner-images" aria-label="Images of the R and Julia runners">
+            <ul className="xp-wf-bullets" data-testid="plan-runner-images" aria-label="Images of the R and Julia runners">
               {execution.runnerImages.map((r) => (
                 <li key={r.runner} data-runner={r.runner}>
                   {runnerTitle(r.runner)} runs in{" "}
@@ -295,32 +329,55 @@ export function PlanDetails({ plan }: { plan: ReviewPlan }) {
               ))}
             </ul>
           )}
-        </dd>
-        <dt>Concurrency</dt>
-        <dd data-testid="plan-concurrency" data-max-parallel={maxParallel}>
+        </div>
+      ),
+    },
+    {
+      key: "concurrency",
+      label: "Concurrency",
+      value: (
+        <span data-testid="plan-concurrency" data-max-parallel={maxParallel}>
           {maxParallel === 1
             ? "One step at a time."
             : `Up to ${maxParallel} independent steps (or repeat instances) at the same time; a step starts only after everything it reads or runs after has finished.`}{" "}
           {describeLimits(limits)}
-        </dd>
-        <dt>Budgets</dt>
-        <dd data-testid="plan-budgets">
-          {budgets.maxSteps} steps · {formatSeconds(budgets.maxTotalSeconds)} in total · {formatBytes(budgets.maxOutputBytes)} of output · {budgets.maxModelRequests} model request
+        </span>
+      ),
+    },
+    {
+      key: "budgets",
+      label: "Budgets",
+      value: (
+        <span data-testid="plan-budgets">
+          {budgets.maxSteps} steps · {formatSeconds(budgets.maxTotalSeconds)} in total · {formatBytes(budgets.maxOutputBytes)} of output ·{" "}
+          {budgets.maxModelRequests} model request
           {budgets.maxModelRequests === 1 ? "" : "s"}
-        </dd>
-        <dt>Plan</dt>
-        <dd>
-          Made {formatTime(plan.createdAtMs)}; start it before {formatTime(plan.expiresAtMs)} · approval <FullHash hash={plan.approvalHash} label="the approval" />
-        </dd>
-        {plan.reproduces && (
-          <>
-            <dt>Reproduces</dt>
-            <dd data-testid="plan-reproduces">
-              Run <code>{plan.reproduces}</code>: every input is pinned to the content that run read. The new run records it as its cause.
-            </dd>
-          </>
-        )}
-      </dl>
+        </span>
+      ),
+    },
+    {
+      key: "plan",
+      label: "Plan",
+      value: (
+        <>
+          Made {formatTime(plan.createdAtMs)}; start it before {formatTime(plan.expiresAtMs)} · approval{" "}
+          <FullHash hash={plan.approvalHash} label="the approval" />
+        </>
+      ),
+    },
+    !!plan.reproduces && {
+      key: "reproduces",
+      label: "Reproduces",
+      value: (
+        <span data-testid="plan-reproduces">
+          Run <code>{plan.reproduces}</code>: every input is pinned to the content that run read. The new run records it as its cause.
+        </span>
+      ),
+    },
+  ];
+  return (
+    <div className="xp-wf-plan" data-testid="workflow-plan-details" data-plan={plan.plan} data-approval={plan.approvalHash}>
+      <KeyValueList items={facts.filter((f): f is KeyValueItem => f !== false)} />
 
       {drift.length > 0 && (
         <div data-testid="plan-drift" role="group" aria-label="Environment changes since the recorded run">
@@ -330,7 +387,7 @@ export function PlanDetails({ plan }: { plan: ReviewPlan }) {
                 <li key={i} data-aspect={d.aspect} data-step={d.step ?? undefined}>
                   {d.message}
                   {(d.recorded || d.current) && (
-                    <span className="xp-wf__muted">
+                    <span className="ui-meta">
                       {" "}
                       (recorded: <code>{d.recorded ?? "not recorded"}</code>; now: <code>{d.current ?? "unknown"}</code>)
                     </span>
@@ -344,67 +401,62 @@ export function PlanDetails({ plan }: { plan: ReviewPlan }) {
       )}
 
       {notices.length > 0 && (
-        <ul className="xp-wf-plan__notices" data-testid="plan-notices">
-          {notices.map((n, i) => (
-            <li key={i}>
-              <Banner tone="info" title="Note">
-                {n}
-              </Banner>
-            </li>
-          ))}
-        </ul>
+        <div data-testid="plan-notices">
+          <Banner tone="info" title={notices.length === 1 ? "Note" : "Notes"}>
+            <ul>
+              {notices.map((n, i) => (
+                <li key={i}>{n}</li>
+              ))}
+            </ul>
+          </Banner>
+        </div>
       )}
 
-      <h3 className="xp-wf-plan__heading">Inputs, exactly as the run will read them</h3>
+      <h3 className="ui-section-title">Inputs, exactly as the run will read them</h3>
       {plan.inputs.length === 0 ? (
-        <p className="xp-wf__muted">No external inputs.</p>
+        <p className="ui-meta">No external inputs.</p>
       ) : (
-        <table className="xp-wf-table" data-testid="plan-inputs">
-          <thead>
-            <tr>
-              <th scope="col">Input</th>
-              <th scope="col">Path</th>
-              <th scope="col">SHA-256</th>
-              <th scope="col">Size</th>
-              <th scope="col">Version</th>
-            </tr>
-          </thead>
-          <tbody>
-            {plan.inputs.map((input) => (
-              <tr key={input.id} data-testid={`plan-input-${input.id}`}>
-                <th scope="row">
-                  {input.label} <span className="xp-wf__muted">({PORT_TYPE_LABELS[input.portType]})</span>
-                </th>
-                <td>
-                  <code>{input.path}</code>
-                </td>
-                <td>
-                  <FullHash hash={input.sha256} label={input.path} />
-                </td>
-                <td>{formatBytes(input.bytes)}</td>
-                <td>{input.pinned ? "Pinned" : "Current at review"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div data-testid="plan-inputs">
+          <SimpleTable<PlanInput>
+            aria-label="Inputs, exactly as the run will read them"
+            rows={plan.inputs}
+            rowKey={(input) => input.id}
+            rowProps={(input) => ({ "data-testid": `plan-input-${input.id}` })}
+            columns={[
+              {
+                id: "input",
+                title: "Input",
+                render: (input) => (
+                  <>
+                    {input.label} <span className="ui-meta">({PORT_TYPE_LABELS[input.portType]})</span>
+                  </>
+                ),
+              },
+              { id: "path", title: "Path", render: (input) => <code className="ui-code">{input.path}</code> },
+              { id: "sha", title: "SHA-256", render: (input) => <FullHash hash={input.sha256} label={input.path} /> },
+              { id: "size", title: "Size", numeric: true, render: (input) => formatBytes(input.bytes) },
+              { id: "version", title: "Version", render: (input) => (input.pinned ? "Pinned" : "Current at review") },
+            ]}
+          />
+        </div>
       )}
 
-      <h3 className="xp-wf-plan__heading">
+      <h3 className="ui-section-title">
         {maxParallel === 1 ? "Steps, in the order they run (one at a time)" : `Steps, in dependency order (up to ${maxParallel} at a time)`}
       </h3>
-      <ol className="xp-wf-plan__steps">
+      <ol className="xp-wf-blocks">
         {groups.map((g) =>
           g.path.length === 0 ? (
             g.items.map(({ step, index }) => <PlanStepView key={step.step} plan={plan} step={step} index={index} />)
           ) : (
-            <li key={`group-${g.items[0]!.step.step}`} className="xp-wf-plan__group" data-testid={`plan-group-${g.prefix}`} data-composite-path={g.path.join(" › ")}>
-              <div className="xp-wf-plan__group-head">
+            <li key={`group-${g.items[0]!.step.step}`} className="xp-wf-group" data-testid={`plan-group-${g.prefix}`} data-composite-path={g.path.join(" › ")}>
+              <p className="xp-wf-group__label ui-group-label">
                 <Layers size={14} aria-hidden="true" />
                 <span>
                   Inside the workflow step {g.path.map((t) => `“${t}”`).join(" › ")} — {g.items.length} step{g.items.length === 1 ? "" : "s"}, shown in full
                 </span>
-              </div>
-              <ol className="xp-wf-plan__steps">
+              </p>
+              <ol className="xp-wf-blocks xp-wf-group__steps">
                 {g.items.map(({ step, index }) => (
                   <PlanStepView key={step.step} plan={plan} step={step} index={index} />
                 ))}
@@ -485,7 +537,8 @@ export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onS
   return (
     <Dialog
       title={plan ? `${heading} “${plan.title}”` : heading}
-      size="lg"
+      size="xl"
+      body="content"
       isOpen={isOpen}
       onOpenChange={onOpenChange}
       isDismissable={!starting}
@@ -493,7 +546,7 @@ export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onS
       footer={
         <>
           {startDisabledReason && plan && (
-            <span className="xp-wf__muted xp-wf-plan__reason" id={reasonId} data-testid="plan-start-reason">
+            <span className="ui-meta xp-wf-plan__reason" id={reasonId} data-testid="plan-start-reason">
               {startDisabledReason}
             </span>
           )}
@@ -515,17 +568,18 @@ export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onS
       }
     >
       <div className="xp-wf-plan-body" data-testid="workflow-plan-review" data-state={load.kind}>
-        {load.kind === "loading" && <LoadingState title="Resolving the plan…" />}
+        {load.kind === "loading" && <LoadingState title="Resolving the plan…" fill={false} />}
         {load.kind === "error" && (
           <ErrorState
             title="Could not make a run plan"
             description={load.message}
+            fill={false}
             actions={<Button onPress={() => void fetchPlan()}>Retry</Button>}
           />
         )}
         {plan && (
           <>
-            <p className="xp-wf__muted">
+            <p className="ui-meta">
               Starting approves exactly what is listed here: these inputs at these hashes, these steps with this code and these
               instructions, under these limits. If anything changes before the run starts, it is refused and you review again.
             </p>
@@ -552,14 +606,14 @@ export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onS
               </div>
             )}
             {blocked && (
-              <div className="xp-wf-plan__blockers" data-testid="plan-blockers" role="group" aria-label="Why this plan cannot start">
+              <div data-testid="plan-blockers" role="group" aria-label="Why this plan cannot start">
                 <Banner tone="danger" title={`Cannot start: ${plan.blockers.length} blocker${plan.blockers.length === 1 ? "" : "s"}`}>
                   <ul>
                     {plan.blockers.map((b, i) => (
                       <li key={i} data-code={b.code} data-step={b.step ?? undefined} data-input={b.input ?? undefined}>
                         {b.message}
-                        {b.step ? <span className="xp-wf__muted"> (step {plan.steps.find((s) => s.step === b.step)?.label ?? b.step})</span> : null}
-                        {b.input ? <span className="xp-wf__muted"> (input {plan.inputs.find((x) => x.id === b.input)?.label ?? b.input})</span> : null}
+                        {b.step ? <span className="ui-meta"> (step {plan.steps.find((s) => s.step === b.step)?.label ?? b.step})</span> : null}
+                        {b.input ? <span className="ui-meta"> (input {plan.inputs.find((x) => x.id === b.input)?.label ?? b.input})</span> : null}
                       </li>
                     ))}
                   </ul>

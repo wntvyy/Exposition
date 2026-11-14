@@ -80,9 +80,9 @@ async function showTask(panel) {
 async function visibleStates(panel) {
   return panel.evaluate((root) => ({
     task: root.querySelector("[data-testid=agents-task-status]")?.textContent ?? null,
-    draft: root.querySelector("[data-testid=agents-draft] .ui-status-pill")?.textContent ?? null,
+    draft: root.querySelector("[data-testid=agents-draft] .ui-status-text")?.textContent ?? null,
     tools: [...root.querySelectorAll("[data-testid=agents-tool-call]")].map(
-      (el) => `${el.dataset.tool}: ${el.querySelector("summary .ui-status-pill")?.textContent ?? ""}`,
+      (el) => `${el.dataset.tool}: ${el.querySelector("summary .ui-status-text")?.textContent ?? ""}`,
     ),
   }));
 }
@@ -131,7 +131,7 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     step("provider chip follows the selected provider (changed over IPC, not through the dialog)");
 
     // --- 1. Approval while the Agent view is hidden ---------------------------
-    await page.locator("body").click({ position: { x: 700, y: 400 } });
+    await page.locator("body").click({ position: { x: 700, y: 540 } });
     await page.keyboard.press("Control+Alt+B");
     await panel.waitFor({ state: "detached", timeout: 5000 }).catch(() => {});
     assert.ok(!(await panel.isVisible().catch(() => false)), "the Agent view is hidden");

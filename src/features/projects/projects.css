@@ -1,63 +1,44 @@
-/* New Project page and project-setup recovery. Tokens only (src/ui/tokens.css);
-   controls, pills, banners, and region states come from src/ui/components. */
+/* New Project page and project-setup recovery: document-like editor tabs
+   (shared PageHeader, reading width). Tokens only (src/ui/tokens.css); controls,
+   status, banners, and region states come from src/ui/components. */
 
 .xp-proj {
   container-type: inline-size;
+  display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
-  overflow-y: auto;
   background: var(--color-surface);
   color: var(--color-text);
   font-size: var(--font-size-md);
+}
+
+.xp-proj__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   user-select: text;
 }
 
 .xp-proj__page {
-  max-width: 920px;
-  padding: var(--space-6) var(--space-8) var(--space-10);
-}
-
-@container (max-width: 640px) {
-  .xp-proj__page {
-    padding: var(--space-4) var(--space-4) var(--space-8);
-  }
-}
-
-.xp-proj__header {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  gap: var(--space-4);
+  max-width: var(--content-max-width);
+  padding: var(--space-4) var(--pane-inset) var(--space-10);
+}
+
+/* One group per concern (structure, location, preview, files, choices),
+   separated by a divider; sentence-case section titles. */
+.xp-proj__group {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-2);
 }
 
-.xp-proj__title {
-  margin: 0;
-  font-size: var(--font-size-xl);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--line-height-tight);
-}
-
-.xp-proj__group {
-  margin-top: var(--space-6);
-}
-
-.xp-proj__group > .ui-banner {
-  margin: var(--space-2) 0;
-}
-
-.xp-proj__group-title {
-  margin: 0 0 var(--space-2);
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-semibold);
-}
-
-.xp-proj__subtitle {
-  margin: var(--space-3) 0 var(--space-1);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--color-text-muted);
+.xp-proj__group + .xp-proj__group {
+  padding-top: var(--space-4);
+  border-top: var(--border-width) solid var(--color-border-subtle);
 }
 
 .xp-proj__form {
@@ -77,6 +58,8 @@
   grid-column: 1 / -1;
 }
 
+/* A field with its Browse… button; the button lines up with the input
+   (above the field's description line). */
 .xp-proj__row {
   display: flex;
   align-items: flex-end;
@@ -92,25 +75,17 @@
   min-width: 0;
 }
 
-.xp-proj__textarea {
-  height: auto;
-  min-height: calc(var(--control-height-md) * 3);
-  padding: var(--space-1-5) var(--space-2);
-  line-height: var(--line-height-normal);
-  resize: vertical;
-  font-family: inherit;
-}
-
-.xp-proj__textarea:focus {
-  border-color: var(--color-focus-ring);
-  outline: var(--border-width) solid var(--color-focus-ring);
-  outline-offset: 0;
-}
-
 .xp-proj__preview {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-4);
+}
+
+.xp-proj__preview > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
 }
 
 @container (max-width: 720px) {
@@ -119,27 +94,30 @@
   }
 }
 
-.xp-proj__list,
-.xp-proj__files,
-.xp-proj__capabilities {
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.xp-proj__list {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  margin: 0;
+  padding-left: var(--space-4);
 }
 
-.xp-proj__list {
-  padding-left: var(--space-3);
-  list-style: disc;
+/* Flat rows with a divider (preview files, setup files, declared tools). */
+.xp-proj__files,
+.xp-proj__capabilities {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .xp-proj__files li {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
+  min-height: var(--row-height-tree);
   padding: var(--space-1) 0;
   border-bottom: var(--border-width) solid var(--color-border-subtle);
 }
@@ -165,32 +143,22 @@
 
 .xp-proj__guidance {
   grid-column: 1 / -1;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.xp-proj__muted {
-  margin: var(--space-1) 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-normal);
 }
 
 .xp-proj__error {
-  margin: var(--space-1) 0;
   color: var(--color-danger-text);
   font-size: var(--font-size-sm);
-}
-
-.xp-proj__footer {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-top: var(--space-4);
 }
 
 .xp-proj__checking {
   display: flex;
   align-items: center;
+  gap: var(--space-2);
+}
+
+.xp-proj__footer,
+.xp-proj__actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
 }

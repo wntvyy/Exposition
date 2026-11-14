@@ -3,11 +3,21 @@
 // canonical entities; their saved views keep layout only. Opening the page is
 // what starts graph reads; the rest of the app never needs it.
 import { FolderOpen, Network, RotateCcw, Sigma } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { registry } from "../../app/registry";
 import type { RecoveryOption } from "../../bindings/RecoveryOption";
-import { Banner, Button, confirm, EmptyState, ErrorState, LoadingState, SegmentedControl, UnavailableState } from "../../ui/components";
+import {
+  Banner,
+  Button,
+  confirm,
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  PageHeader,
+  SegmentedControl,
+  UnavailableState,
+} from "../../ui/components";
 import { useWorkspace } from "../workspace/store";
 import { errorText, graphApi } from "./api";
 import { Mathematics } from "./Mathematics";
@@ -16,6 +26,7 @@ import { ProjectGraph } from "./ProjectGraph";
 import { FreshnessPill } from "./status";
 import "./graph.css";
 import { canRead, graph, useGraph } from "./store";
+import { ToolbarSlot } from "./toolbar";
 import { createViewStore } from "./viewStore";
 
 export const projectViewStore = createViewStore("Project", { kind: "project" });
@@ -63,6 +74,8 @@ export function GraphPage() {
   const epoch = useGraph((s) => s.epoch);
   const section = useGraphPage((s) => s.section);
   const readable = canRead(status);
+  // The toolbar row the shown section fills with its tools (see ./toolbar).
+  const [toolbarSlot, setToolbarSlot] = useState<HTMLElement | null>(null);
 
   useEffect(() => graph.start(), []);
   // (Re)load saved views whenever the project graph changes.
@@ -82,6 +95,7 @@ export function GraphPage() {
   );
 
   let body;
+  let sectionShown = false;
   if (!folder) {
     body = (
       <EmptyState
@@ -120,32 +134,40 @@ export function GraphPage() {
   } else if (status.state.kind === "detached") {
     body = <LoadingState title="Attaching the project graph…" />;
   } else {
+    sectionShown = true;
     body = section === "project" ? <ProjectGraph store={projectViewStore} /> : <Mathematics store={mathViewStore} />;
   }
 
   return (
     <div className="xp-graph-page" data-testid="graph-page">
-      <header className="xp-graph-page__header" data-region="graph-header" aria-label="Graph page">
-        <h1 className="xp-graph-page__title">Graph</h1>
-        <SegmentedControl<GraphSection>
-          aria-label="Graph section"
-          value={section}
-          onChange={(next) => useGraphPage.setState({ section: next })}
-          options={[
-            { id: "project", label: "Project", icon: Network },
-            { id: "mathematics", label: "Mathematics", icon: Sigma },
-          ]}
-        />
-        <span className="xp-graph-toolbar__spacer" />
-        {status && readable && (
-          <>
-            <FreshnessPill freshness={status.freshness} />
-            <span className="xp-muted xp-graph-page__counts" data-testid="graph-counts">
-              {status.entities} items · {status.relations} relationships · revision {status.revision}
-            </span>
-          </>
-        )}
-      </header>
+      <PageHeader
+        level={1}
+        title="Graph"
+        region="graph-header"
+        views={
+          <SegmentedControl<GraphSection>
+            aria-label="Graph section"
+            value={section}
+            onChange={(next) => useGraphPage.setState({ section: next })}
+            options={[
+              { id: "project", label: "Project", icon: Network },
+              { id: "mathematics", label: "Mathematics", icon: Sigma },
+            ]}
+          />
+        }
+        status={
+          status && readable ? (
+            <>
+              <FreshnessPill freshness={status.freshness} />
+              <span data-testid="graph-counts">
+                {status.entities} items · {status.relations} relationships · revision {status.revision}
+              </span>
+            </>
+          ) : undefined
+        }
+        toolbar={sectionShown ? <div ref={setToolbarSlot} className="xp-graph-toolbar-slot" /> : undefined}
+        toolbarRegion="graph-toolbar"
+      />
       {status?.freshness.state === "pending" && readable && (
         <Banner
           tone={status.freshness.pending > 0 ? "stale" : "info"}
@@ -160,7 +182,9 @@ export function GraphPage() {
           Answers may not include the latest edits yet; answers from unsaved buffers are labelled as such.
         </Banner>
       )}
-      <div className="xp-graph-page__body">{body}</div>
+      <div className="xp-graph-page__body">
+        <ToolbarSlot.Provider value={toolbarSlot}>{body}</ToolbarSlot.Provider>
+      </div>
     </div>
   );
 }

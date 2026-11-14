@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { borderPoint, edgeGeometry, parallelOffset } from "./geometry";
-import { layeredLayout, placeUnpositioned } from "./layout";
+import { estimateNodeSize, layeredLayout, placeUnpositioned } from "./layout";
 import { DEFAULT_NODE_SIZE } from "./types";
 
 describe("edge geometry", () => {
@@ -121,5 +121,43 @@ describe("layered layout", () => {
     expect(placed.has("thm")).toBe(false);
     expect(placed.has("lemma")).toBe(false);
     for (const p of placed.values()) expect(p.x).toBeGreaterThan(500 + DEFAULT_NODE_SIZE.width);
+  });
+});
+
+describe("node size estimate (layout room for the card's content)", () => {
+  const icon = () => null;
+  it("grows with a second title line and with wrapping badge rows", () => {
+    const short = estimateNodeSize({ title: "Extreme value theorem", badges: [] });
+    const long = estimateNodeSize({ title: "Image of a compact set under a continuous map is compact", badges: [] });
+    expect(short.width).toBe(DEFAULT_NODE_SIZE.width);
+    expect(long.height).toBeGreaterThan(short.height);
+    const oneRow = estimateNodeSize({ title: "Key lemma", badges: [{ label: "No proof linked", tone: "warning", icon }] });
+    const threeRows = estimateNodeSize({
+      title: "Key lemma",
+      badges: [
+        { label: "Not verified", tone: "neutral", icon },
+        { label: "Freshness unknown", tone: "neutral", icon },
+        { label: "Proof suggested", tone: "accent", icon },
+      ],
+    });
+    expect(oneRow.height).toBeGreaterThan(short.height);
+    expect(threeRows.height - oneRow.height).toBe(40);
+  });
+
+  it("leaves room for a collapsed group's member count", () => {
+    const open = estimateNodeSize({ title: "Reading list", badges: [], group: { collapsed: false, memberCount: 3 } });
+    const folded = estimateNodeSize({ title: "Reading list", badges: [], group: { collapsed: true, memberCount: 3 } });
+    expect(folded.height).toBeGreaterThan(open.height);
+  });
+
+  it("estimated sizes keep tall nodes in one layer from overlapping", () => {
+    const tall = { title: "A long statement title that wraps onto two lines", badges: ["Checked with axioms", "Stale evidence", "No proof linked"].map((label) => ({ label, tone: "neutral" as const, icon })) };
+    const nodes = ["a", "b", "c"].map((id) => ({ id, size: estimateNodeSize(tall) }));
+    const positions = layeredLayout(nodes, [
+      { source: "a", target: "b" },
+      { source: "a", target: "c" },
+    ]);
+    const [b, c] = [positions.get("b")!, positions.get("c")!];
+    expect(Math.abs(b.y - c.y)).toBeGreaterThanOrEqual(estimateNodeSize(tall).height);
   });
 });

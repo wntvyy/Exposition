@@ -11,7 +11,9 @@ import {
   FileText,
   Folder,
   Hammer,
+  History,
   Italic,
+  Network,
   Play,
   RefreshCw,
   Save,
@@ -19,6 +21,7 @@ import {
   Sigma,
   Square,
   Trash2,
+  TriangleAlert,
   WrapText,
 } from "lucide-react";
 import { lazy, Suspense, useId, useState, type ReactNode } from "react";
@@ -29,6 +32,7 @@ import { notify } from "../../app/notifications";
 import { registry } from "../../app/registry";
 import { useRegistryVersion } from "../../app/shell/useRegistry";
 import {
+  Badge,
   Banner,
   Button,
   Checkbox,
@@ -39,14 +43,20 @@ import {
   EmptyState,
   ErrorState,
   IconButton,
+  InspectorBody,
+  InspectorHeader,
   Kbd,
   Keybinding,
+  KeyValueList,
+  ListRow,
   LoadingState,
   Menu,
   MenuItem,
   MenuSection,
   MenuSeparator,
   MenuTrigger,
+  NodeCard,
+  PageHeader,
   Panel,
   PanelBody,
   PanelHeader,
@@ -56,8 +66,11 @@ import {
   Section,
   SegmentedControl,
   Select,
+  SimpleTable,
   Spinner,
+  StateSizeProvider,
   StatusPill,
+  StatusText,
   SubmenuTrigger,
   Switch,
   Tab,
@@ -191,34 +204,35 @@ function ShortcutTable() {
   useRegistryVersion();
   const rows = registry.allCommands().filter((c) => c.keybinding);
   return (
-    <table className="ref-table">
-      <thead>
-        <tr>
-          <th scope="col">Command</th>
-          <th scope="col">Keys</th>
-          <th scope="col">Id</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((c) => (
-          <tr key={c.id}>
-            <td>{c.category ? `${c.category}: ${c.title}` : c.title}</td>
-            <td>
-              <Keybinding binding={c.keybinding!} />
-            </td>
-            <td>
-              <code>{c.id}</code>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <SimpleTable
+      aria-label="Keyboard shortcuts"
+      columns={[
+        { id: "command", title: "Command", render: (c: (typeof rows)[number]) => (c.category ? `${c.category}: ${c.title}` : c.title) },
+        { id: "keys", title: "Keys", render: (c: (typeof rows)[number]) => <Keybinding binding={c.keybinding!} /> },
+        { id: "id", title: "Id", render: (c: (typeof rows)[number]) => <span className="ui-code">{c.id}</span> },
+      ]}
+      rows={rows}
+      rowKey={(c) => c.id}
+    />
   );
 }
 
 const statuses: Status[] = ["idle", "running", "succeeded", "failed", "canceled", "stale", "unavailable", "warning"];
 
+interface SampleInput {
+  input: string;
+  path: string;
+  size: string;
+  version: string;
+}
+
+const sampleInputs: SampleInput[] = [
+  { input: "Observations (Dataset)", path: "data/obs.csv", size: "16 B", version: "Current at review" },
+  { input: "Parameters (Table)", path: "data/params.csv", size: "1.2 KiB", version: "Pinned revision 3" },
+];
+
 export function UiReference() {
+  const [section, setSection] = useState<"project" | "math">("project");
   const preference = useTheme((s) => s.preference);
   const [unsavedResult, setUnsavedResult] = useState<string | null>(null);
   const [wrap, setWrap] = useState(true);
@@ -470,6 +484,190 @@ export function UiReference() {
         </Specimen>
       </RefSection>
 
+      <RefSection
+        title="Page header"
+        description="One header for Research, Agents, Graph, the workflow editor, and Settings pages: title, view switch, actions, headline status. Optional toolbar row with the same inset."
+      >
+        <div className="ref-panel-frame ref-wide-frame">
+          <PageHeader
+            title="Graph"
+            views={
+              <SegmentedControl
+                aria-label="Sample graph section"
+                value={section}
+                onChange={setSection}
+                options={[
+                  { id: "project", label: "Project" },
+                  { id: "math", label: "Mathematics" },
+                ]}
+              />
+            }
+            status={
+              <>
+                <StatusPill status="succeeded" label="Synchronized" />
+                <span>15 items · 17 relationships</span>
+              </>
+            }
+            toolbar={
+              <>
+                <SearchField aria-label="Sample search" placeholder="Search items" />
+                <Button variant="ghost" size="sm" icon={RefreshCw}>
+                  Arrange
+                </Button>
+              </>
+            }
+          />
+        </div>
+      </RefSection>
+
+      <RefSection
+        title="Inspector"
+        description="Pane header (uppercase chrome label), item header, then content sections in sentence case with a count; key/value facts; quiet inline status; provisional facts as dashed outline badges. Region states inside are compact."
+      >
+        <div className="ref-panel-frame ref-inspector-frame">
+          <Panel aria-label="Sample inspector">
+            <PanelHeader title="Inspector" actions={<IconButton icon={Square} aria-label="Close inspector (sample)" size="sm" />} />
+            <InspectorHeader
+              type={
+                <span className="ref-type-math">
+                  <Sigma size={12} aria-hidden /> Theorem
+                </span>
+              }
+              title="Image of a compact set"
+              meta={<span>paper.tex · characters 389–522</span>}
+              actions={
+                <>
+                  <Button size="sm" icon={FileText}>
+                    Open source
+                  </Button>
+                  <Button size="sm" variant="ghost" icon={Network}>
+                    Relate to…
+                  </Button>
+                </>
+              }
+            />
+            <InspectorBody>
+              <Section title="Relationships" count={3}>
+                <ul className="ref-plain-list">
+                  <li>
+                    assumes <a className="ref-link">Hypothesis H</a> <span className="ref-muted">· accepted</span>
+                  </li>
+                  <li>
+                    depends on <a className="ref-link">Closed subsets of compacts</a> <span className="ref-muted">· observed</span>
+                  </li>
+                  <li>
+                    supports <a className="ref-link">Lemma 2</a> <Badge dashed tone="accent">Suggested</Badge>
+                  </li>
+                </ul>
+              </Section>
+              <Section title="Evidence" count={1}>
+                <KeyValueList
+                  items={[
+                    { key: "kind", label: "Kind", value: "Computational" },
+                    { key: "run", label: "Run", value: "run-5ca362b0e9c5", code: true },
+                    { key: "outcome", label: "Outcome", value: <StatusText status="succeeded" label="Run succeeded" /> },
+                    { key: "fresh", label: "Freshness", value: <StatusText status="idle" label="Current" /> },
+                  ]}
+                />
+              </Section>
+              <Section title="Formal verification" collapsible>
+                <EmptyState title="No formal declaration is associated." description="Associate a Lean declaration to record a reviewed correspondence." />
+              </Section>
+            </InspectorBody>
+          </Panel>
+        </div>
+      </RefSection>
+
+      <RefSection
+        title="Lists and tables"
+        description="List rows (tasks, runs, workflows, storage items) are flat rows with dividers, not cards. Static tables share DataTable's header, row height, and numeric alignment."
+      >
+        <Specimen label="List rows (one selected)" wide>
+          <div className="ref-list-frame" role="list" aria-label="Sample runs">
+            <ListRow
+              role="listitem"
+              icon={<Play size={14} aria-hidden />}
+              title="# Least-squares fit of T(n)"
+              codeTitle
+              meta={
+                <>
+                  <StatusText status="succeeded" label="Executed" detail="0.7 s" />
+                  <span>03:02 PM · figure · table</span>
+                </>
+              }
+              selected
+            />
+            <ListRow
+              role="listitem"
+              icon={<Play size={14} aria-hidden />}
+              title="df.assign(y2=df.y * 2)"
+              codeTitle
+              meta={
+                <>
+                  <StatusText status="failed" />
+                  <span>03:05 PM · NameError</span>
+                </>
+              }
+            />
+            <ListRow
+              role="listitem"
+              icon={<Play size={14} aria-hidden />}
+              title="Parameter sweep"
+              meta={<StatusText status="running" label="Running" detail="12 s" />}
+              trailing={<IconButton icon={Square} aria-label="Stop (sample)" size="sm" />}
+            />
+          </div>
+        </Specimen>
+        <Specimen label="Static table" wide>
+          <SimpleTable
+            aria-label="Sample inputs"
+            columns={[
+              { id: "input", title: "Input", render: (r: SampleInput) => <strong>{r.input}</strong> },
+              { id: "path", title: "Path", render: (r: SampleInput) => <span className="ui-code">{r.path}</span> },
+              { id: "size", title: "Size", numeric: true, render: (r: SampleInput) => r.size },
+              { id: "version", title: "Version", render: (r: SampleInput) => <StatusText status="idle" label={r.version} /> },
+            ]}
+            rows={sampleInputs}
+            rowKey={(r) => r.input}
+          />
+        </Specimen>
+      </RefSection>
+
+      <RefSection
+        title="Canvas nodes"
+        description="Neutral card with the type color only in the header band (icon + type label as text). Status as badges with icons; selection is an accent outline with lift, never a type color."
+      >
+        <div className="ref-canvas-frame">
+          <div className="ref-node">
+            <NodeCard title="Image of a compact set" typeLabel="Theorem" typeIcon={Sigma} category="math" selected />
+          </div>
+          <div className="ref-node">
+            <NodeCard
+              title="Closed subsets of compacts"
+              typeLabel="Lemma"
+              typeIcon={Sigma}
+              category="math"
+              badges={
+                <>
+                  <Badge tone="warning" icon={TriangleAlert}>
+                    No proof linked
+                  </Badge>
+                  <Badge tone="stale" icon={History}>
+                    Stale evidence
+                  </Badge>
+                </>
+              }
+            />
+          </div>
+          <div className="ref-node">
+            <NodeCard title="paper.tex" typeLabel="Manuscript" typeIcon={FileText} category="document" />
+          </div>
+          <div className="ref-node">
+            <NodeCard title="obs.csv" typeLabel="Dataset" typeIcon={File} category="data" inactive badges={<Badge dashed>Archived</Badge>} />
+          </div>
+        </div>
+      </RefSection>
+
       <RefSection title="Tree" description="react-aria Tree: arrows navigate, Right/Left expand/collapse, type-ahead. Sample data.">
         <div className="ref-tree-frame">
           <Tree aria-label="Sample project files" defaultExpandedKeys={["paper", "figures"]} selectionMode="single" defaultSelectedKeys={["main"]}>
@@ -494,6 +692,12 @@ export function UiReference() {
           ))}
           <StatusPill status="running" label="Building main.typ" detail="4s" />
           <StatusPill status="failed" label="Build failed" detail="3 errors" />
+        </Specimen>
+        <Specimen label="Quiet inline status (rows, tables, inspector lines)" wide>
+          {statuses.map((s) => (
+            <StatusText key={s} status={s} />
+          ))}
+          <StatusText status="succeeded" label="Executed" detail="0.7 s" />
         </Specimen>
         <Specimen label="Spinners">
           <Spinner size="sm" />
@@ -563,6 +767,20 @@ export function UiReference() {
             />
           </div>
         </div>
+        <p className="ref-muted">Compact (panels, sidebars, inspector sections):</p>
+        <StateSizeProvider value="compact">
+          <div className="ref-states">
+            <div className="ref-state-frame ref-state-frame--compact">
+              <EmptyState icon={FileText} title="No problems." description="Build and proof-checking diagnostics appear here." />
+            </div>
+            <div className="ref-state-frame ref-state-frame--compact">
+              <LoadingState title="Loading runs…" />
+            </div>
+            <div className="ref-state-frame ref-state-frame--compact">
+              <UnavailableState title="Graph unavailable." description="The graph database is locked by another window." actions={<Button size="sm">Retry</Button>} />
+            </div>
+          </div>
+        </StateSizeProvider>
         <div className="ref-stack">
           <Banner tone="stale" title="Showing output from an earlier revision" actions={<Button size="sm">Rebuild</Button>}>
             The source changed after this build. Page edits are disabled until the pages are current.

@@ -956,6 +956,32 @@ cannot undo it, and on macOS and Linux the file clipboard is not available
 (copies paste within Exposition only); neither platform is verified. Cut and
 move, rename, and copying a whole project are not offered.
 
+## Interface
+
+The interface follows one visual standard (UI rework of 14 November 2026):
+a page bar switches between the Editor, Research, Agents, and Graph pages
+(Mod+1–4), the activity rail belongs to the Editor page, and every page uses
+the same headers, sections, lists, tables, dialogs, and status treatments.
+
+| Area | Status |
+|---|---|
+| Light, dark, and follow-system themes | Supported; contrast of every text and boundary pair is tested in both themes |
+| Keyboard use: F6 region cycling, command palette, page and region shortcuts, focus-scoped project-operation keys, keyboard-resizable splitters, visible focus | Supported; exercised in the real app |
+| Reduced motion | Supported (transitions off; spinners slow down) |
+| Narrow windows (down to the 720×480 minimum) | Partial: side panels collapse below 1100 and 860 px; Graph and Research inspectors become drawers; long pages scroll |
+| Status wording | Generated drafts, successful builds, executed computations, and checked proofs carry distinct labels; Lean verdicts are shown exactly; "Current" freshness is neutral, never green |
+| High-contrast theme, Windows forced-colors mode | Not available (forced colors fall back to system defaults) |
+| Editor tab drag-and-drop, more than two editor groups | Not available |
+| Screen readers | Unverified: controls have accessible names and roles, but no NVDA/Narrator/VoiceOver pass has been done |
+| Display scaling other than 100 %, macOS and Linux rendering | Unverified |
+
+Graph canvases show colored rectangles whose type color sits only in a header
+band; relationship labels for mathematical, citation, evidence, and formal
+links appear at rest, structural ones on hover, focus, or selection, and a
+Legend explains line colors and styles. Canvas positions saved before the
+rework may overlap slightly because nodes became taller; Arrange lays them out
+again.
+
 ## Installation
 
 An NSIS installer installs per user without administrator rights. The

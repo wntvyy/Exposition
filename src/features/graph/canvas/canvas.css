@@ -30,32 +30,29 @@
   overflow: hidden;
 }
 
-/* ---------- Nodes ---------- */
+/* ---------- Nodes (NodeCard draws the card; selection is its accent outline) ---------- */
 
 .xp-graph-canvas .react-flow__node {
   border-radius: var(--radius-md);
   outline: none;
 }
+/* Keyboard focus: the focus ring 3px outside the card, apart from the selection outline. */
 .xp-graph-canvas .react-flow__node:focus-visible {
   outline: var(--focus-ring-width) solid var(--color-focus-ring);
-  outline-offset: 3px;
+  outline-offset: calc(var(--focus-ring-offset) + var(--space-0-5));
 }
+/* Width matches DEFAULT_NODE_SIZE; the height follows the content. */
 .xp-graph-node {
   position: relative;
   width: 208px;
-  min-height: 60px;
-}
-.xp-graph-node .ui-node-card {
-  min-height: 60px;
 }
 .xp-graph-node__toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 18px;
-  height: 18px;
-  margin: -2px -4px -2px 0;
+  width: calc(var(--icon-size-sm) + var(--space-1));
+  height: calc(var(--icon-size-sm) + var(--space-1));
   padding: 0;
   border: 0;
   border-radius: var(--radius-sm);
@@ -66,9 +63,10 @@
   background: var(--color-surface-hover);
   color: var(--color-text);
 }
+/* Inset ring: the card clips anything drawn outside its header band. */
 .xp-graph-node__toggle:focus-visible {
-  outline: var(--focus-ring-width) solid var(--color-focus-ring);
-  outline-offset: 0;
+  outline: none;
+  box-shadow: inset 0 0 0 var(--focus-ring-width) var(--color-focus-ring);
 }
 
 /* Drop target covering the node; only catches the pointer while a connection is drawn. */
@@ -95,8 +93,8 @@
 
 /* Connection handle: a small dot on the right edge. */
 .xp-graph-node .xp-graph-node__source.react-flow__handle {
-  width: 12px;
-  height: 12px;
+  width: var(--space-3);
+  height: var(--space-3);
   border: var(--border-width) solid var(--color-border-strong);
   border-radius: var(--radius-full);
   background: var(--color-surface);
@@ -116,9 +114,11 @@
   background: var(--color-accent);
 }
 
-/* ---------- Edges ---------- */
+/* ---------- Edges (the legend's samples share these rules) ---------- */
 
-.xp-graph-canvas .react-flow__edge-path {
+.xp-graph-canvas .react-flow__edge-path,
+.xp-graph-legend__line {
+  fill: none;
   stroke: var(--color-graph-edge);
   stroke-width: 1.5;
 }
@@ -152,25 +152,31 @@
 }
 
 /* Family: color (and arrowhead shape, see markers). */
-.xp-graph-canvas .xp-edge--math .react-flow__edge-path {
+.xp-graph-canvas .xp-edge--math .react-flow__edge-path,
+.xp-graph-legend__line[data-family="math"] {
   stroke: var(--color-graph-edge-math);
   stroke-width: 2;
 }
-.xp-graph-canvas .xp-edge--citation .react-flow__edge-path {
+.xp-graph-canvas .xp-edge--citation .react-flow__edge-path,
+.xp-graph-legend__line[data-family="citation"] {
   stroke: var(--color-graph-edge-reference);
 }
-.xp-graph-canvas .xp-edge--evidence .react-flow__edge-path {
+.xp-graph-canvas .xp-edge--evidence .react-flow__edge-path,
+.xp-graph-legend__line[data-family="evidence"] {
   stroke: var(--color-graph-edge-evidence);
 }
-.xp-graph-canvas .xp-edge--formal .react-flow__edge-path {
+.xp-graph-canvas .xp-edge--formal .react-flow__edge-path,
+.xp-graph-legend__line[data-family="formal"] {
   stroke: var(--color-graph-edge-formal);
   stroke-width: 2;
 }
 /* Status: dash pattern (accepted assertions are solid). */
-.xp-graph-canvas .xp-edge--suggested .react-flow__edge-path {
+.xp-graph-canvas .xp-edge--suggested .react-flow__edge-path,
+.xp-graph-legend__line[data-status="suggested"] {
   stroke-dasharray: 7 4;
 }
-.xp-graph-canvas .xp-edge--observed .react-flow__edge-path {
+.xp-graph-canvas .xp-edge--observed .react-flow__edge-path,
+.xp-graph-legend__line[data-status="observed"] {
   stroke-dasharray: 2 3;
 }
 .xp-graph-canvas .xp-edge--rejected .react-flow__edge-path {
@@ -183,20 +189,22 @@
   stroke-width: 2.5;
 }
 
+/* Label chip: Badge geometry; family tint; dashed only for a suggestion (provisional); status muted. */
 .xp-graph-edge-label {
   position: absolute;
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
   max-width: 200px;
-  height: 18px;
+  height: calc(var(--icon-size-sm) + var(--space-1));
   padding: 0 var(--space-1-5);
-  border: var(--border-width) solid var(--color-border);
+  border: var(--border-width) solid var(--color-status-neutral-border);
   border-radius: var(--radius-sm);
   background: var(--color-surface-raised);
   color: var(--color-text-muted);
   font: inherit;
   font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
   line-height: 1;
   white-space: nowrap;
   pointer-events: all;
@@ -204,34 +212,53 @@
 }
 .xp-graph-edge-label[data-family="math"] {
   border-color: var(--color-graph-math-border);
-  color: var(--color-graph-math-text);
   background: var(--color-graph-math-bg);
+  color: var(--color-graph-math-text);
 }
 .xp-graph-edge-label[data-family="citation"] {
   border-color: var(--color-graph-reference-border);
-  color: var(--color-graph-reference-text);
   background: var(--color-graph-reference-bg);
+  color: var(--color-graph-reference-text);
 }
-.xp-graph-edge-label[data-status="suggested"],
-.xp-graph-edge-label[data-status="observed"] {
+.xp-graph-edge-label[data-family="evidence"] {
+  border-color: var(--color-graph-data-border);
+  background: var(--color-graph-data-bg);
+  color: var(--color-graph-data-text);
+}
+.xp-graph-edge-label[data-family="formal"] {
+  border-color: var(--color-graph-formal-border);
+  background: var(--color-graph-formal-bg);
+  color: var(--color-graph-formal-text);
+}
+.xp-graph-edge-label[data-status="suggested"] {
   border-style: dashed;
 }
 .xp-graph-edge-label[data-selected] {
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 1px var(--color-accent);
+  box-shadow: 0 0 0 var(--border-width) var(--color-accent);
 }
-.xp-graph-edge-label__status {
-  font-weight: var(--font-weight-semibold);
-  text-transform: uppercase;
-  letter-spacing: var(--letter-spacing-label);
+.xp-graph-edge-label__reading {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .xp-graph-edge-label__count {
   font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+.xp-graph-edge-label__status {
+  flex: none;
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-regular);
 }
 
-/* ---------- Controls, overlays ---------- */
+/* ---------- Controls, legend, overlays ---------- */
 
 .xp-graph-controls.react-flow__panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-1);
   margin: var(--space-2);
 }
 .xp-graph-controls__toolbar {
@@ -244,15 +271,52 @@
   box-shadow: var(--shadow-1);
 }
 .xp-graph-controls__zoom {
-  min-width: 40px;
+  min-width: var(--space-10);
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
   font-variant-numeric: tabular-nums;
   text-align: center;
 }
+.xp-graph-legend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-1);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+.xp-graph-legend__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  margin: 0 0 var(--space-1);
+  padding: 0;
+  list-style: none;
+}
+.xp-graph-legend__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+.xp-graph-legend__sample {
+  flex: none;
+  overflow: visible;
+}
+.xp-graph-legend__detail {
+  color: var(--color-text-muted);
+}
 .xp-graph-canvas__empty.react-flow__panel {
   margin-top: var(--space-12);
   max-width: min(420px, 80%);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-1);
 }
 .xp-graph-canvas .react-flow__selection {
   background: var(--color-accent-subtle);

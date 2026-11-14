@@ -9,9 +9,9 @@ import type { ProposalState } from "../../bindings/ProposalState";
 import type { SyncState } from "../../bindings/SyncState";
 import type { TaskGraphInfo } from "../../bindings/TaskGraphInfo";
 import type { TaskProposal } from "../../bindings/TaskProposal";
-import type { AssertionStatus } from "../../bindings/AssertionStatus";
-import { Badge, Banner, DataTable, EmptyState, Section, StatusPill, type BadgeTone } from "../../ui/components";
-import { relationDisplay, STATUS_LABELS } from "../graph/model";
+import { Badge, Banner, DataTable, EmptyState, ListRow, Section, StatusText, type BadgeTone } from "../../ui/components";
+import { relationDisplay } from "../graph/model";
+import { RelationStatus } from "../graph/RelationStatus";
 import { CONSENT_LABELS, type PillState } from "./format";
 
 /** Graph synchronization in the shared status vocabulary. */
@@ -85,7 +85,6 @@ const EVIDENCE_KIND: Record<string, string> = {
 };
 
 /** Relation status tones shared with the Graph page (accepted solid; others dashed). */
-const STATUS_TONE: Record<AssertionStatus, BadgeTone> = { accepted: "neutral", suggested: "accent", observed: "info", rejected: "neutral" };
 
 /** Facts about an entity as badges (text always; dashed when provisional). */
 function EntityBadges({ entity }: { entity: ContextEntity }) {
@@ -103,14 +102,21 @@ function EntityBadges({ entity }: { entity: ContextEntity }) {
       dashed: e.freshness !== "current",
     });
   }
-  if (badges.length === 0) return <span className="agents-muted">—</span>;
+  if (badges.length === 0) return <span className="ui-meta">—</span>;
   return (
     <span className="agents-badges">
-      {badges.map((b, i) => (
-        <Badge key={i} tone={b.tone} dashed={b.dashed}>
-          {b.text}
-        </Badge>
-      ))}
+      {badges.map((b, i) =>
+        // A settled fact reads as plain muted text; provisional and stale facts keep their outline badge.
+        b.tone === "neutral" && !b.dashed ? (
+          <span key={i} className="ui-meta">
+            {b.text}
+          </span>
+        ) : (
+          <Badge key={i} tone={b.tone} dashed={b.dashed}>
+            {b.text}
+          </Badge>
+        ),
+      )}
     </span>
   );
 }
@@ -131,7 +137,7 @@ function ContextEntities({ context }: { context: GraphContext }) {
           sortValue: (e) => e.label ?? "",
           render: (e) =>
             e.label ?? (
-              <span className="agents-muted" data-testid="agents-graph-withheld">
+              <span className="ui-meta" data-testid="agents-graph-withheld">
                 label withheld (metadata only)
               </span>
             ),
@@ -141,7 +147,7 @@ function ContextEntities({ context }: { context: GraphContext }) {
           title: "File",
           width: "24%",
           sortValue: (e) => e.path ?? "",
-          render: (e) => (e.path ? <code className="agents-code">{e.path}</code> : <span className="agents-muted">—</span>),
+          render: (e) => (e.path ? <code className="ui-code">{e.path}</code> : <span className="ui-meta">—</span>),
         },
         { id: "state", title: "State", width: "28%", render: (e) => <EntityBadges entity={e} /> },
       ]}
@@ -151,26 +157,59 @@ function ContextEntities({ context }: { context: GraphContext }) {
 
 function ContextRelations({ context }: { context: GraphContext }) {
   const byId = new Map(context.entities.map((e) => [e.id, e]));
-  if (context.relations.length === 0) return <p className="agents-muted agents-small">No relations among these entities.</p>;
+  if (context.relations.length === 0) return <p className="ui-meta">No relations among these entities.</p>;
   return (
     <ul className="agents-list" aria-label="Relations in the task's graph context">
       {context.relations.map((r) => (
         <li key={r.id} data-testid="agents-graph-relation" data-status={r.status}>
           <span>{entityName(byId.get(r.from), r.from)}</span>{" "}
-          <span className="agents-muted" data-kind={r.kind}>
+          <span className="ui-meta" data-kind={r.kind}>
             {relationDisplay(null, r.kind).reading}
           </span>{" "}
           <span>{entityName(byId.get(r.to), r.to)}</span>{" "}
-          <Badge tone={STATUS_TONE[r.status]} dashed={r.status !== "accepted"}>
-            {STATUS_LABELS[r.status]}
-          </Badge>{" "}
-          <span className="agents-muted agents-small">
+          <RelationStatus status={r.status} form="text" />{" "}
+          <span className="ui-meta">
             by {r.origin}
             {r.note ? ` — ${r.note}` : ""}
           </span>
         </li>
       ))}
     </ul>
+  );
+}
+
+/** What the context withheld or summarized: one info banner, however many notes apply. */
+function ContextNotes({ context }: { context: GraphContext }) {
+  const notes: { title: string; text: string }[] = [];
+  if (context.consent === "metadataOnly") {
+    notes.push({
+      title: "Metadata only",
+      text: "The agent received paths, kinds, versions, states, and counts. Labels, notes, and reasons derived from file content were withheld.",
+    });
+  }
+  if (context.truncated) {
+    notes.push({
+      title: "Summarized",
+      text: "More of the graph is in scope than the context lists; the agent can read more with graph_query.",
+    });
+  }
+  const [first] = notes;
+  if (!first) return null;
+  if (notes.length === 1) {
+    return (
+      <Banner tone="info" title={first.title}>
+        {first.text}
+      </Banner>
+    );
+  }
+  return (
+    <Banner tone="info" title={notes.map((n) => n.title).join(" · ")}>
+      <ul>
+        {notes.map((n) => (
+          <li key={n.title}>{n.text}</li>
+        ))}
+      </ul>
+    </Banner>
   );
 }
 
@@ -191,62 +230,52 @@ export function GraphContextView({ graph }: { graph: TaskGraphInfo }) {
   const cov = context.coverage;
   return (
     <div className="agents-stack" data-testid="agents-graph-context" data-revision={context.revision} data-consent={context.consent}>
-      <div className="agents-row">
-        <StatusPill status={fresh.status} label={fresh.label} size="sm" />
-        <span className="agents-small">Graph revision {context.revision}</span>
-        <code className="agents-code agents-small" title={context.project}>
+      <div className="agents-row ui-meta">
+        <StatusText status={fresh.status} label={fresh.label} />
+        <span>Graph revision {context.revision}</span>
+        <code className="ui-code" title={context.project}>
           {shortId(context.project)}
         </code>
-        {context.temporary && <StatusPill status="warning" label="Temporary graph (read-only folder)" size="sm" />}
+        {context.temporary && <StatusText status="warning" label="Temporary graph (read-only folder)" />}
       </div>
-      <p className="agents-small agents-muted">
+      <p className="ui-meta">
         Scope: {context.scope} · {CONSENT_LABELS[context.consent]} · {graph.contexts}{" "}
         {graph.contexts === 1 ? "context" : "contexts"} attached (one per run)
         {context.pending > 0 ? ` · ${context.pending} file(s) pending reconciliation` : ""}
       </p>
-      {context.consent === "metadataOnly" && (
-        <Banner tone="info" title="Metadata only">
-          The agent received paths, kinds, versions, states, and counts. Labels, notes, and reasons derived from file content
-          were withheld.
-        </Banner>
-      )}
-      {context.truncated && (
-        <Banner tone="info" title="Summarized">
-          More of the graph is in scope than the context lists; the agent can read more with graph_query.
-        </Banner>
-      )}
-      <Section title={`Entities (${context.entities.length})`} collapsible defaultExpanded>
+      <ContextNotes context={context} />
+      <Section title="Entities" count={context.entities.length} collapsible defaultExpanded className="agents-section">
         <ContextEntities context={context} />
       </Section>
-      <Section title={`Relations (${context.relations.length})`} collapsible defaultExpanded>
+      <Section title="Relations" count={context.relations.length} collapsible defaultExpanded className="agents-section">
         <ContextRelations context={context} />
       </Section>
-      <Section title="In scope" collapsible defaultExpanded={false}>
-        <p className="agents-small">{counts || "No entities besides the project."}</p>
-        <p className="agents-small agents-muted">
+      <Section title="In scope" collapsible defaultExpanded={false} className="agents-section">
+        <p>{counts || "No entities besides the project."}</p>
+        <p className="ui-meta">
           Coverage: {cov.resources} files · {cov.complete} complete · {cov.partial} partial · {cov.unsupported} unsupported ·{" "}
           {cov.pending} pending · {cov.failed} failed · {cov.unresolvedBindings} unresolved bindings
         </p>
       </Section>
-      <Section title="Authorized operations" collapsible defaultExpanded={false}>
+      <Section title="Authorized operations" collapsible defaultExpanded={false} className="agents-section">
         <ul className="agents-list" aria-label="Operations this task may perform">
           {context.operations.map((op) => (
             <li key={op.tool} data-testid="agents-graph-operation" data-allowed={op.allowed}>
-              <code className="agents-code">{op.tool}</code>{" "}
-              <span className={op.allowed ? undefined : "agents-muted"}>{op.detail}</span>
+              <code className="ui-code">{op.tool}</code>{" "}
+              <span className={op.allowed ? undefined : "ui-meta"}>{op.detail}</span>
             </li>
           ))}
         </ul>
       </Section>
-      <Section title={`Files resolved to graph identities (${graph.targets.length})`} collapsible defaultExpanded>
+      <Section title="Files resolved to graph identities" count={graph.targets.length} collapsible defaultExpanded className="agents-section">
         {graph.targets.length === 0 ? (
-          <p className="agents-muted agents-small">The task has not acted on any project file yet.</p>
+          <p className="ui-meta">The task has not acted on any project file yet.</p>
         ) : (
           <ul className="agents-list" aria-label="Files the task acted on">
             {graph.targets.map((t) => (
               <li key={t.path} data-testid="agents-target" data-path={t.path} data-entity-id={t.entity ?? ""}>
-                <code className="agents-code">{t.path}</code> <span className="agents-small">{t.uses.join(", ")}</span>{" "}
-                <span className="agents-muted agents-small">
+                <code className="ui-code">{t.path}</code> <span>{t.uses.join(", ")}</span>{" "}
+                <span className="ui-meta">
                   {t.entity ? `→ ${shortId(t.entity)}` : t.note ?? "no graph identity"}
                 </span>
               </li>
@@ -261,35 +290,43 @@ export function GraphContextView({ graph }: { graph: TaskGraphInfo }) {
 function Proposal({ proposal }: { proposal: TaskProposal }) {
   const pill = proposalLabel(proposal.state);
   return (
-    <li className="agents-proposal agents-stack" data-testid="agents-proposal" data-state={proposal.state}>
-      <div className="agents-row">
-        <StatusPill status={pill.status} label={pill.label} size="sm" />
-        <span className="agents-small agents-muted">
+    <ListRow
+      role="listitem"
+      static
+      className="agents-proposal"
+      data-testid="agents-proposal"
+      data-state={proposal.state}
+      title={<StatusText status={pill.status} label={pill.label} />}
+      meta={
+        <span>
           based on graph revision {proposal.baseRevision}
           {proposal.revision !== null ? ` · applied at revision ${proposal.revision}` : ""}
         </span>
-      </div>
-      {proposal.summary && <p className="agents-small">{proposal.summary}</p>}
-      <ul className="agents-list" aria-label="Effects">
-        {proposal.effects.map((effect, i) => (
-          <li key={i}>{effect}</li>
-        ))}
-      </ul>
-      {proposal.diagnostics.length > 0 && (
-        <ul className="agents-list" aria-label="Diagnostics">
-          {proposal.diagnostics.map((d, i) => (
-            <li key={i} className="agents-small">
-              <code className="agents-code">{d.code}</code> {d.message}
-            </li>
+      }
+    >
+      <div className="agents-proposal__body">
+        {proposal.summary && <p>{proposal.summary}</p>}
+        <ul className="agents-list" aria-label="Effects">
+          {proposal.effects.map((effect, i) => (
+            <li key={i}>{effect}</li>
           ))}
         </ul>
-      )}
-      {proposal.message && <p className="agents-small agents-muted">{proposal.message}</p>}
-      <details className="agents-disclosure">
-        <summary>Operations (complete)</summary>
-        <pre className="agents-pre">{JSON.stringify(proposal.operations, null, 2)}</pre>
-      </details>
-    </li>
+        {proposal.diagnostics.length > 0 && (
+          <ul className="agents-list" aria-label="Diagnostics">
+            {proposal.diagnostics.map((d, i) => (
+              <li key={i}>
+                <code className="ui-code">{d.code}</code> {d.message}
+              </li>
+            ))}
+          </ul>
+        )}
+        {proposal.message && <p className="ui-meta">{proposal.message}</p>}
+        <details className="agents-disclosure">
+          <summary>Operations (complete)</summary>
+          <pre className="agents-pre">{JSON.stringify(proposal.operations, null, 2)}</pre>
+        </details>
+      </div>
+    </ListRow>
   );
 }
 
@@ -305,10 +342,10 @@ export function ProposalList({ proposals }: { proposals: TaskProposal[] }) {
     );
   }
   return (
-    <ul className="agents-proposals" aria-label="Graph changes proposed by the agent" data-testid="agents-proposals">
+    <div role="list" className="agents-rows" aria-label="Graph changes proposed by the agent" data-testid="agents-proposals">
       {[...proposals].reverse().map((p) => (
         <Proposal key={p.toolUseId} proposal={p} />
       ))}
-    </ul>
+    </div>
   );
 }

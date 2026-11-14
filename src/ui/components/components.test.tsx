@@ -8,9 +8,17 @@ import {
   ConfirmHost,
   DataTable,
   EditorTabList,
+  EmptyState,
   IconButton,
+  KeyValueList,
+  ListRow,
   NodeCard,
+  PageHeader,
+  Section,
+  SimpleTable,
+  StateSizeProvider,
   StatusPill,
+  StatusText,
   Tabs,
   type EditorTabItem,
 } from ".";
@@ -162,5 +170,80 @@ describe("Badge and NodeCard", () => {
     expect(card.getAttribute("data-category")).toBe("math");
     expect(screen.getByText("Theorem")).toBeTruthy();
     expect(screen.getByText("Stale").closest(".ui-badge")?.getAttribute("data-tone")).toBe("stale");
+  });
+});
+
+describe("UI rework shared components", () => {
+  it("StatusText pairs every status with visible text and no container", () => {
+    render(
+      <>
+        <StatusText status="succeeded" label="Executed" detail="0.7 s" />
+        <StatusText status="running" />
+      </>,
+    );
+    const executed = screen.getByText("Executed").closest(".ui-status-text");
+    expect(executed?.getAttribute("data-status")).toBe("succeeded");
+    expect(screen.getByText("0.7 s")).toBeTruthy();
+    expect(screen.getByText("Running")).toBeTruthy();
+  });
+
+  it("region states render compact inside a compact region and keep their title text", () => {
+    render(
+      <StateSizeProvider value="compact">
+        <EmptyState title="No problems" description="Diagnostics appear here." />
+      </StateSizeProvider>,
+    );
+    const title = screen.getByText("No problems");
+    expect(title.closest(".ui-state")?.getAttribute("data-size")).toBe("compact");
+    expect(screen.getByText("Diagnostics appear here.")).toBeTruthy();
+  });
+
+  it("an explicit size wins over the surrounding region", () => {
+    render(
+      <StateSizeProvider value="compact">
+        <EmptyState size="page" title="Select a task" />
+      </StateSizeProvider>,
+    );
+    expect(screen.getByText("Select a task").closest(".ui-state")?.getAttribute("data-size")).toBe("page");
+  });
+
+  it("SimpleTable is a semantic table with column headers and an empty row", () => {
+    const { rerender } = render(
+      <SimpleTable
+        aria-label="Inputs"
+        columns={[
+          { id: "name", title: "Input", render: (r: { name: string; size: number }) => r.name },
+          { id: "size", title: "Size", numeric: true, render: (r: { name: string; size: number }) => `${r.size} B` },
+        ]}
+        rows={[{ name: "obs.csv", size: 16 }]}
+        rowKey={(r) => r.name}
+      />,
+    );
+    expect(screen.getByRole("table", { name: "Inputs" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Size" }).getAttribute("data-numeric")).toBe("true");
+    expect(screen.getByRole("cell", { name: "16 B" })).toBeTruthy();
+    rerender(
+      <SimpleTable aria-label="Inputs" columns={[{ id: "name", title: "Input", render: () => null }]} rows={[]} rowKey={() => "x"} empty="Nothing retained." />,
+    );
+    expect(screen.getByText("Nothing retained.")).toBeTruthy();
+  });
+
+  it("PageHeader, Section, KeyValueList and ListRow expose their structure", () => {
+    render(
+      <>
+        <PageHeader title="Graph" region="graph-header" status={<StatusPill status="succeeded" label="Synchronized" />} />
+        <Section title="Relationships" count={3}>
+          <KeyValueList items={[{ key: "path", label: "Path", value: "data/obs.csv", code: true }]} />
+        </Section>
+        <ListRow title="Least-squares fit" meta={<StatusText status="failed" />} selected data-op-item="run-1" />
+      </>,
+    );
+    expect(screen.getByRole("heading", { name: "Graph" }).closest("[data-region]")?.getAttribute("data-region")).toBe("graph-header");
+    expect(screen.getByRole("heading", { name: "Relationships 3" })).toBeTruthy();
+    expect(screen.getByText("Path").tagName).toBe("DT");
+    expect(screen.getByText("data/obs.csv").getAttribute("data-code")).toBe("true");
+    const row = screen.getByText("Least-squares fit").closest(".ui-list-row");
+    expect(row?.getAttribute("data-selected")).toBe("true");
+    expect(row?.getAttribute("data-op-item")).toBe("run-1");
   });
 });

@@ -73,7 +73,7 @@ function DecisionBody({
       )}
       {groups.map((group) => (
         <section key={group.kind} className="xp-ops-decision__group" data-impact={group.kind} aria-label={group.heading}>
-          <h4 className="xp-ops-decision__heading">{group.heading}</h4>
+          <h4 className="ui-section-title">{group.heading}</h4>
           <ul className="xp-ops-decision__list">
             {group.impacts.map((impact, index) => (
               <li key={index} className="xp-ops-decision__impact" data-testid="op-impact" data-kind={impact.kind}>
@@ -102,6 +102,7 @@ function DecisionBody({
                 options={choice.options.map((o) => ({ id: o.value, label: o.label }))}
                 value={choices[choice.key] ?? choice.default}
                 onChange={(value) => choose(choice.key, value)}
+                wrapValue
               />
             </div>
           ))}
@@ -119,7 +120,7 @@ function DecisionBody({
         </Banner>
       )}
       {plan.effects.length > 0 && (
-        <Section title={`Details (${plan.effects.length})`} collapsible defaultExpanded={false} className="xp-ops-decision__details">
+        <Section title="Details" count={plan.effects.length} collapsible defaultExpanded={false} className="xp-ops-decision__details">
           <ul className="xp-ops-decision__list" data-testid="op-effects">
             {plan.effects.map((effect, i) => (
               <li key={i}>

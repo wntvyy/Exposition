@@ -7,15 +7,17 @@ import { useEffect, useState } from "react";
 import { notify } from "../../app/notifications";
 import type { AuditedDeclaration } from "../../bindings/AuditedDeclaration";
 import type { DeclarationEvidence } from "../../bindings/DeclarationEvidence";
+import type { DeclarationVerdict } from "../../bindings/DeclarationVerdict";
+import type { FormalVerdict } from "../../bindings/FormalVerdict";
 import type { Entity } from "../../bindings/Entity";
 import type { EntityKind } from "../../bindings/EntityKind";
 import type { LeanAuditRecord } from "../../bindings/LeanAuditRecord";
 import type { LeanDocumentState } from "../../bindings/LeanDocumentState";
 import { errorMessage } from "../../lib/ipc";
 import { graphCommands } from "../../lib/graphIpc";
-import { Banner, Button, Dialog, Section, Select, Spinner, StatusPill, TextField } from "../../ui/components";
-import { freshnessPill } from "../research/GraphInspect";
-import { associate, evidenceFor, leanEvidenceCommands, refreshEvidence, useLeanEvidence, verdictView } from "./evidence";
+import { Badge, Banner, Button, Dialog, Section, Select, Spinner, StatusText, TextField } from "../../ui/components";
+import { freshnessStatus } from "../research/GraphInspect";
+import { associate, evidenceFor, leanEvidenceCommands, refreshEvidence, useLeanEvidence, verdictTone, verdictView } from "./evidence";
 import { revealInEditor } from "./leanMonaco";
 
 const TARGET_KINDS: EntityKind[] = [
@@ -41,6 +43,11 @@ const KIND_TITLE: Record<string, string> = {
   assumption: "Assumption",
   mathObject: "Mathematical object",
 };
+
+/** The verifier's exact verdict as a toned badge (never color alone: the label is the verdict). */
+export function VerdictBadge({ verdict }: { verdict: FormalVerdict | DeclarationVerdict }) {
+  return <Badge tone={verdictTone(verdict)}>{verdictView(verdict).label}</Badge>;
+}
 
 /** Follow a document's audit record and evidence (refreshes when its status changes). */
 export function useDeclarationEvidence(state: LeanDocumentState) {
@@ -86,20 +93,20 @@ export function DeclarationEvidenceControls({
     <div className="exp-lean__evidence" data-testid="lean-decl-evidence" data-name={name} data-recorded={latest ? "true" : "false"}>
       {latest && formal ? (
         <div className="exp-lean__evidence-latest" data-testid="lean-evidence-latest" data-freshness={latest.freshness.kind}>
-          <StatusPill size="sm" {...verdictView(formal.declarationVerdict ?? formal.fileVerdict)} />
-          <span className="exp-muted">
+          <VerdictBadge verdict={formal.declarationVerdict ?? formal.fileVerdict} />
+          <span className="ui-meta">
             evidence of revision {formal.revision ?? "?"} · file {verdictView(formal.fileVerdict).label.toLowerCase()} ·{" "}
             {formal.toolchain}
           </span>
-          <StatusPill size="sm" {...freshnessPill(latest.freshness)} />
-          {evidence && evidence.evidence.length > 1 && <span className="exp-muted">{evidence.evidence.length - 1} older</span>}
-          <span className="exp-muted">dependencies: {formal.dependencies.kind === "unavailable" ? "not reported by the audit" : formal.dependencies.names.join(", ")}</span>
+          <StatusText {...freshnessStatus(latest.freshness)} wrap />
+          {evidence && evidence.evidence.length > 1 && <span className="ui-meta">{evidence.evidence.length - 1} older</span>}
+          <span className="ui-meta">dependencies: {formal.dependencies.kind === "unavailable" ? "not reported by the audit" : formal.dependencies.names.join(", ")}</span>
         </div>
       ) : (
-        <span className="exp-muted">No evidence recorded in the project graph.</span>
+        <span className="ui-meta">No evidence recorded in the project graph.</span>
       )}
       {latest?.freshness.kind === "stale" && (
-        <p className="exp-muted" data-testid="lean-evidence-history">
+        <p className="ui-meta" data-testid="lean-evidence-history">
           Historical: {latest.freshness.reasons[0]}
         </p>
       )}
@@ -265,9 +272,9 @@ function AssociateDialog({
 export function AuditedDeclarations({ state, audit, evidence }: { state: LeanDocumentState; audit: LeanAuditRecord; evidence: DeclarationEvidence[] | undefined }) {
   const written = audit.declarations.filter((d) => d.range);
   return (
-    <Section title={`Audited declarations (${audit.declarationCount})`}>
+    <Section title="Audited declarations" count={audit.declarationCount}>
       <div data-testid="lean-audited-declarations" data-revision={audit.revision}>
-        <p className="exp-muted exp-lean__note">
+        <p className="ui-meta">
           What the axiom audit reported for revision {audit.revision}
           {audit.revision !== state.revision ? ` (the file is now at revision ${state.revision})` : ""}. Each declaration&rsquo;s own
           verdict comes from the axioms it depends on; the file&rsquo;s verdict still applies to the whole file.
@@ -277,7 +284,7 @@ export function AuditedDeclarations({ state, audit, evidence }: { state: LeanDoc
             <AuditedRow key={d.name} state={state} d={d} audit={audit} evidence={evidenceFor(evidence, d.name)} />
           ))}
         </ul>
-        {audit.truncated && <p className="exp-muted">More declarations were audited than are listed; those have no evidence of their own.</p>}
+        {audit.truncated && <p className="ui-meta">More declarations were audited than are listed; those have no evidence of their own.</p>}
       </div>
     </Section>
   );
@@ -303,13 +310,13 @@ function AuditedRow({
         disabled={!range}
         onClick={() => range && void revealInEditor(state.path, { range })}
       >
-        <StatusPill size="sm" {...verdictView(d.verdict)} />
-        <span className="exp-lean__kind">{d.kind}</span>
-        {d.line != null && <span className="exp-lean__line">Ln {d.line + 1}</span>}
-        <code>{d.name}</code>
+        <VerdictBadge verdict={d.verdict} />
+        <span className="ui-meta">{d.kind}</span>
+        {d.line != null && <span className="ui-meta">Ln {d.line + 1}</span>}
+        <code className="ui-code">{d.name}</code>
       </button>
       <pre className="exp-lean__message">{d.statement}</pre>
-      <p className="exp-lean__decl-axioms exp-muted">{d.axioms.length ? `Axioms: ${d.axioms.join(", ")}` : "No axioms"}</p>
+      <p className="exp-lean__decl-axioms ui-meta">{d.axioms.length ? `Axioms: ${d.axioms.join(", ")}` : "No axioms"}</p>
       <DeclarationEvidenceControls state={state} name={d.name} audit={audit} evidence={evidence} />
     </li>
   );

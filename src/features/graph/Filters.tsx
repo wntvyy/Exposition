@@ -55,10 +55,10 @@ export function FiltersButton({
           Show archived items and rejected suggestions
         </Checkbox>
         <fieldset className="xp-graph-filters__group">
-          <legend>Item kinds</legend>
+          <legend className="ui-section-title">Item kinds</legend>
           {families.map((family) => (
             <div key={family} className="xp-graph-filters__family">
-              <span className="xp-graph-filters__family-title">{ENTITY_FAMILY_LABELS[family] ?? family}</span>
+              <span className="ui-group-label">{ENTITY_FAMILY_LABELS[family] ?? family}</span>
               {kinds
                 .filter((k) => k.family === family)
                 .map((k) => (
@@ -79,10 +79,10 @@ export function FiltersButton({
           )}
         </fieldset>
         <fieldset className="xp-graph-filters__group">
-          <legend>Relationships</legend>
+          <legend className="ui-section-title">Relationships</legend>
           {relationFamilies.map((family) => (
             <div key={family} className="xp-graph-filters__family">
-              <span className="xp-graph-filters__family-title">{FAMILY_LABELS[family]}</span>
+              <span className="ui-group-label">{FAMILY_LABELS[family]}</span>
               {relations
                 .filter((r) => r.family === family)
                 .map((r) => (

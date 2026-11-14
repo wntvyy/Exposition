@@ -17,13 +17,15 @@
   box-shadow: inset 0 0 0 var(--focus-ring-width) var(--color-focus-ring);
 }
 
+/* Directly under the editor group's tab strip: the active tab's surface
+   continues into this bar, one pane-header tall, with the pane inset. */
 .page-editor__toolbar {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: var(--pane-header-height);
-  padding: 0 var(--space-2);
-  border-bottom: 1px solid var(--color-border);
+  height: var(--pane-header-height);
+  padding: 0 var(--space-1) 0 var(--pane-inset);
+  border-bottom: var(--border-width) solid var(--color-border);
   background: var(--color-surface);
   flex: none;
 }
@@ -35,14 +37,7 @@
 }
 
 .page-editor__mode {
-  padding: 0 var(--space-1-5);
-  border-radius: var(--radius-full);
-  background: var(--color-accent-subtle);
-  color: var(--color-accent-text);
-  font-size: var(--font-size-xs);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  display: inline-flex;
 }
 
 .page-editor__zoom {
@@ -84,7 +79,7 @@
 }
 
 .page-editor--stale .page-editor__page {
-  outline: 1px dashed var(--color-status-stale-border);
+  outline: var(--border-width) dashed var(--color-status-stale-border);
   cursor: not-allowed;
 }
 
@@ -143,7 +138,7 @@
   margin: calc(-1 * var(--space-0-5));
   padding: var(--space-0-5);
   box-sizing: content-box;
-  border: 1px dashed var(--color-accent);
+  border: var(--border-width) dashed var(--color-accent);
   border-radius: var(--radius-sm);
   pointer-events: none;
 }
@@ -170,20 +165,11 @@
   gap: var(--space-1-5);
   min-height: var(--statusbar-height);
   padding: 0 var(--space-2);
-  border-top: 1px solid var(--color-border);
+  border-top: var(--border-width) solid var(--color-border);
   background: var(--color-surface);
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
   flex: none;
-}
-
-.page-editor__sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
 }
 
 .typst-split {

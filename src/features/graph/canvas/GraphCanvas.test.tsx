@@ -1,5 +1,7 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { History } from "lucide-react";
 
 import { GraphCanvas, toFlowEdges, type CanvasSelection } from "./GraphCanvas";
 import type { CanvasEdge, CanvasNode } from "./types";
@@ -27,9 +29,10 @@ beforeAll(() => {
 });
 
 afterEach(cleanup);
+beforeEach(() => localStorage.clear());
 
 const nodes: CanvasNode[] = [
-  { id: "thm", title: "Main theorem", typeLabel: "Theorem", category: "math", badges: [{ label: "Stale", tone: "stale" }], position: { x: 0, y: 0 } },
+  { id: "thm", title: "Main theorem", typeLabel: "Theorem", category: "math", badges: [{ label: "Stale", tone: "stale", icon: History }], position: { x: 0, y: 0 } },
   { id: "lem", title: "Key lemma", typeLabel: "Lemma", category: "math", badges: [], position: { x: 300, y: 0 } },
   { id: "src", title: "paper.tex", typeLabel: "Manuscript", category: "document", badges: [], position: { x: 0, y: 200 } },
 ];
@@ -63,6 +66,56 @@ describe("GraphCanvas", () => {
     expect(node.getAttribute("aria-label")).toBe("Theorem, Main theorem, Stale");
     expect(node.querySelector(".ui-node-card")?.getAttribute("data-category")).toBe("math");
     expect(screen.getByText("Key lemma")).toBeTruthy();
+    // Status badges keep their icon next to the text.
+    const badge = node.querySelector(".ui-badge")!;
+    expect(badge.textContent).toBe("Stale");
+    expect(badge.querySelector("svg")).not.toBeNull();
+  });
+
+  it("offers a keyboard-reachable legend for line color (family) and line style (status)", () => {
+    renderCanvas();
+    const controls = screen.getByRole("toolbar", { name: "Canvas view controls" });
+    const toggle = within(controls).getByRole("button", { name: "Legend" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("region", { name: "Legend" })).toBeNull();
+
+    act(() => toggle.focus());
+    fireEvent.click(toggle);
+    const legend = screen.getByRole("region", { name: "Legend" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.getAttribute("aria-controls")).toBe(legend.id);
+    const rows = [...legend.querySelectorAll("li")].map((li) => li.textContent);
+    expect(rows).toEqual([
+      "Mathematicaldepends on, assumes, is a proof of",
+      "Reference",
+      "Evidence",
+      "Formal association",
+      "Structurecontains, is declared in, imports",
+      "Acceptedsolid",
+      "Suggesteddashed",
+      "Observeddotted",
+    ]);
+    // Samples use the edges' own stroke rules and this canvas's arrowheads.
+    const math = legend.querySelector('.xp-graph-legend__line[data-family="math"]')!;
+    const marker = /url\(#(.+)\)/.exec(math.getAttribute("marker-end") ?? "")?.[1];
+    expect(marker && document.getElementById(marker)).toBeTruthy();
+    expect(legend.querySelector('.xp-graph-legend__line[data-status="suggested"]')).not.toBeNull();
+    expect(legend.querySelector('.xp-graph-legend__line[data-family="citation"]')!.getAttribute("marker-end")).toMatch(/-citation-open\)$/);
+    // The legend never counts as an edge.
+    expect(document.querySelectorAll(".xp-edge").length).toBe(0);
+
+    fireEvent.click(toggle);
+    expect(screen.queryByRole("region", { name: "Legend" })).toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("remembers whether the legend is open", () => {
+    renderCanvas();
+    fireEvent.click(screen.getByRole("button", { name: "Legend" }));
+    cleanup();
+    renderCanvas();
+    expect(screen.getByRole("region", { name: "Legend" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Legend" }).getAttribute("aria-expanded")).toBe("true");
   });
 
   it("never deletes on Delete or Backspace", () => {

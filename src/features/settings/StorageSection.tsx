@@ -6,7 +6,7 @@
 // are kept by default: they are never part of "Select all", and including one
 // leads to its impact decision. Nothing is removed automatically, and record
 // removal is not reported as reclaimed disk space.
-import { ArchiveRestore, RefreshCw, Trash2 } from "lucide-react";
+import { ArchiveRestore, Link2, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { OpTarget } from "../../bindings/OpTarget";
@@ -14,7 +14,17 @@ import type { StorageCategory } from "../../bindings/StorageCategory";
 import type { StorageItem } from "../../bindings/StorageItem";
 import type { StorageOverview } from "../../bindings/StorageOverview";
 import { errorMessage } from "../../lib/ipc";
-import { Badge, Banner, Button, Checkbox, EmptyState, ErrorState, LoadingState } from "../../ui/components";
+import {
+  Banner,
+  Button,
+  Checkbox,
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  SimpleTable,
+  StatusText,
+  type SimpleTableColumn,
+} from "../../ui/components";
 import { onProjectOp, restoreAndReport, runUserOperation } from "../operations/client";
 import { opCommands } from "../operations/ipc";
 import { formatBytes, targetKey } from "../operations/model";
@@ -80,6 +90,22 @@ function formatDate(ms: number | null): string {
   return ms === null ? "—" : new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
+/** Referenced/shared (kept by default; a settled fact) and active work (running). */
+function ItemState({ item }: { item: StorageItem }) {
+  if (!item.referenced && !item.active) return <span className="ui-meta">—</span>;
+  return (
+    <span className="exp-storage__state">
+      {item.referenced && (
+        <span className="exp-storage__referenced ui-meta" title="Kept by default; including it asks before anything is removed">
+          <Link2 size={14} aria-hidden />
+          Referenced
+        </span>
+      )}
+      {item.active && <StatusText status="running" label="Active" />}
+    </span>
+  );
+}
+
 function CategoryGroup({
   category,
   selected,
@@ -94,10 +120,65 @@ function CategoryGroup({
   const defaults = selectableByDefault(category);
   const allOn = defaults.length > 0 && defaults.every((k) => selected.has(k));
   const recoverable = category.id === "recoverableDeletions";
-  const title = `${category.label} (${category.items.length}${category.bytes !== null ? ` · ${formatBytes(category.bytes)}` : ""})`;
+  const columns: SimpleTableColumn<StorageItem>[] = [
+    {
+      id: "include",
+      title: "Include",
+      hideTitle: true,
+      width: "1%",
+      render: (item) => {
+        const key = rowKey(category.id, item);
+        return (
+          <Checkbox
+            aria-label={`Include ${item.label}${item.referenced ? " (referenced; you will be asked first)" : ""}`}
+            isSelected={selected.has(key)}
+            onChange={(on) => onToggle(key, on)}
+          />
+        );
+      },
+    },
+    { id: "item", title: "Item", isRowHeader: true, render: (item) => item.label },
+    {
+      id: "size",
+      title: "Size",
+      numeric: true,
+      width: "1%",
+      render: (item) => <span className="exp-storage__nowrap">{formatBytes(item.bytes)}</span>,
+    },
+    {
+      id: "created",
+      title: "Created",
+      width: "1%",
+      render: (item) => <span className="exp-storage__nowrap">{formatDate(item.createdAtMs)}</span>,
+    },
+    { id: "state", title: "State", width: "1%", render: (item) => <ItemState item={item} /> },
+  ];
+  if (recoverable) {
+    columns.push({
+      id: "actions",
+      title: "Actions",
+      hideTitle: true,
+      width: "1%",
+      render: (item) =>
+        item.target.kind === "recoverable" && (
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={ArchiveRestore}
+            data-testid="storage-restore"
+            onPress={() =>
+              void restoreAndReport([{ token: (item.target as { id: string }).id, target: item.target }], new Map([[targetKey(item.target), item.label]]))
+            }
+          >
+            Restore
+          </Button>
+        ),
+    });
+  }
   return (
     <SettingsGroup
-      title={title}
+      title={category.label}
+      count={`${category.items.length}${category.bytes !== null ? ` · ${formatBytes(category.bytes)}` : ""}`}
       description={category.note}
       testId={`storage-category-${category.id}`}
       actions={
@@ -109,77 +190,21 @@ function CategoryGroup({
       }
     >
       {category.items.length === 0 ? (
-        <p className="exp-settings__group-description">Nothing retained.</p>
+        <p className="ui-meta">Nothing retained.</p>
       ) : (
-        <table className="exp-settings__table" aria-label={category.label}>
-          <thead>
-            <tr>
-              <th scope="col" className="exp-settings__col-fit">
-                <span className="ui-visually-hidden">Include</span>
-              </th>
-              <th scope="col">Item</th>
-              <th scope="col" className="exp-settings__col-fit">
-                Size
-              </th>
-              <th scope="col" className="exp-settings__col-fit">
-                Created
-              </th>
-              <th scope="col" className="exp-settings__col-fit">
-                State
-              </th>
-              {recoverable && (
-                <th scope="col" className="exp-settings__col-fit">
-                  <span className="ui-visually-hidden">Actions</span>
-                </th>
-              )}
-            </tr>
-          </thead>
-          <tbody>
-            {category.items.map((item) => {
-              const key = rowKey(category.id, item);
-              return (
-                <tr key={key} data-testid="storage-item" data-key={key} data-referenced={item.referenced || undefined} data-active={item.active || undefined}>
-                  <td className="exp-settings__col-fit">
-                    <Checkbox
-                      aria-label={`Include ${item.label}${item.referenced ? " (referenced; you will be asked first)" : ""}`}
-                      isSelected={selected.has(key)}
-                      onChange={(on) => onToggle(key, on)}
-                    />
-                  </td>
-                  <th scope="row">{item.label}</th>
-                  <td className="exp-settings__col-fit">{formatBytes(item.bytes)}</td>
-                  <td className="exp-settings__col-fit">{formatDate(item.createdAtMs)}</td>
-                  <td className="exp-settings__col-fit">
-                    {item.referenced && (
-                      <Badge tone="info" title="Kept by default; including it asks before anything is removed">
-                        Referenced
-                      </Badge>
-                    )}
-                    {item.active && <Badge tone="warning">Active</Badge>}
-                    {!item.referenced && !item.active && <span className="xp-ops-hint">—</span>}
-                  </td>
-                  {recoverable && (
-                    <td className="exp-settings__actions">
-                      {item.target.kind === "recoverable" && (
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          icon={ArchiveRestore}
-                          data-testid="storage-restore"
-                          onPress={() =>
-                            void restoreAndReport([{ token: (item.target as { id: string }).id, target: item.target }], new Map([[targetKey(item.target), item.label]]))
-                          }
-                        >
-                          Restore
-                        </Button>
-                      )}
-                    </td>
-                  )}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <SimpleTable
+          aria-label={category.label}
+          className="exp-settings__table"
+          columns={columns}
+          rows={category.items}
+          rowKey={(item) => rowKey(category.id, item)}
+          rowProps={(item) => ({
+            "data-testid": "storage-item",
+            "data-key": rowKey(category.id, item),
+            "data-referenced": item.referenced || undefined,
+            "data-active": item.active || undefined,
+          })}
+        />
       )}
     </SettingsGroup>
   );
@@ -279,14 +304,14 @@ export function StorageSection() {
           <div className="exp-storage__scope" data-testid="storage-scope" data-count={scope.items.length}>
             <div className="exp-storage__scope-text" aria-live="polite">
               {scope.items.length === 0 ? (
-                <span className="xp-ops-hint">Select items to purge. Sizes are shown where they can be measured.</span>
+                <span className="ui-meta">Select items to purge. Sizes are shown where they can be measured.</span>
               ) : (
                 <>
-                  <strong>
+                  <strong className="exp-storage__scope-summary">
                     {scope.items.length} selected · {formatBytes(scope.bytes)} of files
                     {scope.unmeasured ? ` (+${scope.unmeasured} not measured)` : ""}
                   </strong>
-                  <span className="xp-ops-hint">
+                  <span className="ui-meta">
                     Purge removes the selected records and payloads permanently. Removing records frees database space only when the database is
                     compacted; the result says what was actually reclaimed.
                     {scope.referenced ? ` ${scope.referenced} referenced item${scope.referenced === 1 ? " is" : "s are"} included: you will see what depends on ${scope.referenced === 1 ? "it" : "them"} first.` : ""}
@@ -305,7 +330,7 @@ export function StorageSection() {
           ))}
           {overview.excluded.length > 0 && (
             <Banner tone="info" title="Not included here" className="exp-storage__excluded">
-              <ul className="exp-storage__excluded-list" data-testid="storage-excluded">
+              <ul data-testid="storage-excluded">
                 {overview.excluded.map((e) => (
                   <li key={e}>{e}</li>
                 ))}

@@ -3,7 +3,17 @@ import { useEffect } from "react";
 import { RefreshCw } from "lucide-react";
 
 import type { ToolchainInfo } from "../../bindings/ToolchainInfo";
-import { Button, ErrorState, LoadingState, StatusPill, Toolbar, type Status } from "../../ui/components";
+import {
+  Button,
+  ErrorState,
+  LoadingState,
+  Section,
+  SimpleTable,
+  StatusText,
+  Toolbar,
+  type SimpleTableColumn,
+  type Status,
+} from "../../ui/components";
 import { loadToolchains, useJobs } from "./store";
 import "./jobs.css";
 
@@ -23,6 +33,32 @@ const CATEGORY_LABEL: Record<string, string> = {
   vcs: "Version control",
 };
 
+const COLUMNS: SimpleTableColumn<ToolchainInfo>[] = [
+  { id: "tool", title: "Tool", width: "22%", isRowHeader: true, render: (tool) => tool.name },
+  {
+    id: "status",
+    title: "Status",
+    width: "13%",
+    render: (tool) => <StatusText status={STATUS[tool.status].status} label={STATUS[tool.status].label} />,
+  },
+  { id: "version", title: "Version", width: "27%", render: (tool) => <span data-testid="tool-version">{tool.version ?? "—"}</span> },
+  {
+    id: "location",
+    title: "Location / guidance",
+    render: (tool) => (
+      <>
+        {tool.path && <code className="ui-code exp-tools__path">{tool.path}</code>}
+        {tool.detail && <div className="ui-meta">{tool.detail}</div>}
+        {tool.guidance && (
+          <div className="exp-tools__guidance" data-testid="tool-guidance">
+            {tool.guidance}
+          </div>
+        )}
+      </>
+    ),
+  },
+];
+
 export function ToolchainsView() {
   const toolchains = useJobs((s) => s.toolchains);
   const loading = useJobs((s) => s.toolchainsLoading);
@@ -38,7 +74,11 @@ export function ToolchainsView() {
         <ErrorState
           title="Could not check toolchains"
           details={error}
-          actions={<Button onPress={() => void loadToolchains(true)}>Retry</Button>}
+          actions={
+            <Button size="sm" onPress={() => void loadToolchains(true)}>
+              Retry
+            </Button>
+          }
         />
       );
     }
@@ -51,43 +91,22 @@ export function ToolchainsView() {
   return (
     <div className="exp-tools" data-testid="toolchains-view" role="region" aria-label="Toolchains" aria-busy={loading}>
       <Toolbar aria-label="Toolchain actions" className="exp-jobs__toolbar">
-        <Button size="sm" icon={RefreshCw} isPending={loading} onPress={() => void loadToolchains(true)}>
+        <Button size="sm" variant="ghost" icon={RefreshCw} isPending={loading} onPress={() => void loadToolchains(true)}>
           {loading ? "Checking…" : "Refresh"}
         </Button>
-        <span className="exp-muted">Exposition finds tools on this computer; it never installs them.</span>
+        <span className="ui-meta">Exposition finds tools on this computer; it never installs them.</span>
       </Toolbar>
       {[...groups.entries()].map(([category, tools]) => (
-        <table key={category} className="exp-tools__table">
-          <caption>{CATEGORY_LABEL[category] ?? category}</caption>
-          <thead>
-            <tr>
-              <th scope="col">Tool</th>
-              <th scope="col">Status</th>
-              <th scope="col">Version</th>
-              <th scope="col">Location / guidance</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tools.map((tool) => (
-              <tr key={tool.id} data-tool-id={tool.id} data-status={tool.status}>
-                <th scope="row">{tool.name}</th>
-                <td>
-                  <StatusPill size="sm" status={STATUS[tool.status].status} label={STATUS[tool.status].label} />
-                </td>
-                <td data-testid="tool-version">{tool.version ?? "—"}</td>
-                <td>
-                  {tool.path && <code className="exp-tools__path">{tool.path}</code>}
-                  {tool.detail && <div className="exp-muted">{tool.detail}</div>}
-                  {tool.guidance && (
-                    <div className="exp-tools__guidance" data-testid="tool-guidance">
-                      {tool.guidance}
-                    </div>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <Section key={category} title={CATEGORY_LABEL[category] ?? category} count={tools.length}>
+          <SimpleTable
+            aria-label={CATEGORY_LABEL[category] ?? category}
+            className="exp-tools__table"
+            columns={COLUMNS}
+            rows={tools}
+            rowKey={(tool) => tool.id}
+            rowProps={(tool) => ({ "data-tool-id": tool.id, "data-status": tool.status })}
+          />
+        </Section>
       ))}
     </div>
   );

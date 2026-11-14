@@ -360,7 +360,8 @@ describe("run monitor (M9)", () => {
     const fit = screen.getByTestId("workflow-attempt-comp/fit-1");
     fireEvent.click(within(fit).getByRole("button", { name: "Environment" }));
     const view = screen.getByTestId("workflow-env-comp/fit-1");
-    const fact = (label: string) => view.querySelector(`[data-fact="${label}"]`)!.textContent;
+    // Each fact is one label/value row of the key/value list.
+    const fact = (label: string) => view.querySelector(`[data-fact="${label}"]`)!.closest(".ui-kv__row")!.textContent;
     expect(fact("Runner")).toContain("restricted-python (Restricted container)");
     expect(fact("System")).toBe("SystemLinux x86_64 · Exposition 0.1.0".replace("Linux", "linux"));
     expect(fact("Image")).toContain("python:3.13-slim");

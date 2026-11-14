@@ -217,7 +217,7 @@ export default async function reviewM5Agents({ launchApp, artifactsDir }) {
     });
 
     // --- 1. Approval while the Agent panel is hidden. ------------------------
-    await page.locator("body").click({ position: { x: 700, y: 400 } });
+    await page.locator("body").click({ position: { x: 700, y: 540 } });
     await page.keyboard.press("Control+Alt+B");
     await page.waitForTimeout(400);
     const panelHidden = !(await panel.isVisible().catch(() => false));

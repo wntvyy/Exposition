@@ -7,7 +7,7 @@ import type { TaskStatus } from "../../bindings/TaskStatus";
 import type { TaskSummary } from "../../bindings/TaskSummary";
 import type { TranscriptItem } from "../../bindings/TranscriptItem";
 import { commands } from "../../lib/ipc";
-import { Banner, Button, IconButton, LoadingState, ProgressBar, Section, StatusPill } from "../../ui/components";
+import { Banner, Button, IconButton, LoadingState, ProgressBar, Section, StatusPill, StatusText, TextArea } from "../../ui/components";
 import {
   activeToolLabel,
   budgetRows,
@@ -21,11 +21,10 @@ import {
 } from "./format";
 import { freshnessLabel, graphSummary } from "./GraphViews";
 import { agents, useAgents, type StreamDraft } from "./store";
-import { TextArea } from "./TaskComposer";
 
 function BudgetMeter({ task }: { task: TaskSummary }) {
   return (
-    <Section title="Budget" collapsible defaultExpanded>
+    <Section title="Budget" collapsible defaultExpanded className="agents-section">
       <div className="agents-grid agents-grid--wide" data-testid="agents-budget-meter">
         {budgetRows(task).map((row) => (
           <ProgressBar
@@ -116,12 +115,12 @@ function Approval({ approval }: { approval: ApprovalRequest }) {
     setBusy(false);
   }
   return (
-    <section className="agents-approval agents-stack" aria-label={`Approval needed: ${approval.title}`} data-testid="agents-approval">
+    <section className="agents-stack agents-approval" aria-label={`Approval needed: ${approval.title}`} data-testid="agents-approval">
       <Banner tone="warning" title={approval.title}>
         The agent is waiting for your decision. Nothing is applied until you approve. Below is the complete content of
         what will run or change; scroll to review all of it.
       </Banner>
-      <p className="agents-small agents-muted" data-testid="agents-approval-size">
+      <p className="ui-meta" data-testid="agents-approval-size">
         {payloadSize(approval.detail)} · complete, nothing omitted
       </p>
       <pre
@@ -151,14 +150,14 @@ function TranscriptEntry({ item }: { item: TranscriptItem }) {
     case "userText":
       return (
         <div className="agents-msg" data-role="user">
-          <span className="agents-msg__role">You</span>
+          <span className="ui-group-label">You</span>
           <p className="agents-msg__text">{item.text}</p>
         </div>
       );
     case "assistantText":
       return (
         <div className="agents-msg" data-role="assistant" data-testid="agents-assistant-text">
-          <span className="agents-msg__role">Agent</span>
+          <span className="ui-group-label">Agent</span>
           <p className="agents-msg__text">{item.text}</p>
         </div>
       );
@@ -166,7 +165,7 @@ function TranscriptEntry({ item }: { item: TranscriptItem }) {
       return (
         <details className="agents-disclosure">
           <summary>Reasoning summary</summary>
-          <p className="agents-msg__text agents-muted">{item.text}</p>
+          <p className="agents-msg__text ui-meta">{item.text}</p>
         </details>
       );
     case "toolCall": {
@@ -174,9 +173,9 @@ function TranscriptEntry({ item }: { item: TranscriptItem }) {
       return (
         <details className="agents-disclosure agents-tool" data-testid="agents-tool-call" data-tool={item.name}>
           <summary>
-            <code className="agents-code">{item.name}</code>
-            <span className="agents-muted agents-tool__summary">{toolSummary(item.name, item.input)}</span>
-            <StatusPill status={pill.status} label={pill.label} size="sm" />
+            <code className="ui-code">{item.name}</code>
+            <span className="ui-meta agents-tool__summary">{toolSummary(item.name, item.input)}</span>
+            <StatusText status={pill.status} label={pill.label} />
           </summary>
           <pre className="agents-pre">{JSON.stringify(item.input, null, 2)}</pre>
           {item.result && <pre className="agents-pre">{item.result}</pre>}
@@ -195,16 +194,16 @@ function TranscriptEntry({ item }: { item: TranscriptItem }) {
 function Draft({ draft }: { draft: StreamDraft }) {
   return (
     <div className="agents-msg" data-role="assistant" data-testid="agents-draft">
-      <span className="agents-msg__role">Agent</span>
+      <span className="ui-group-label">Agent</span>
       {draft.thinking && (
         <details className="agents-disclosure">
           <summary>Reasoning summary (streaming)</summary>
-          <p className="agents-msg__text agents-muted">{draft.thinking}</p>
+          <p className="agents-msg__text ui-meta">{draft.thinking}</p>
         </details>
       )}
       {draft.text && <p className="agents-msg__text">{draft.text}</p>}
-      {draft.activeTool && <StatusPill {...activeToolLabel(draft.activeTool, draft.activeToolStatus ?? "running")} size="sm" />}
-      {!draft.text && !draft.thinking && !draft.activeTool && <StatusPill status="running" label="Thinking" size="sm" />}
+      {draft.activeTool && <StatusText {...activeToolLabel(draft.activeTool, draft.activeToolStatus ?? "running")} />}
+      {!draft.text && !draft.thinking && !draft.activeTool && <StatusText status="running" label="Thinking" />}
     </div>
   );
 }
@@ -240,9 +239,9 @@ function GraphSummaryLine({ id, variant }: { id: TaskId; variant: "panel" | "pag
   if (!context) return null;
   const fresh = freshnessLabel(context.freshness);
   return (
-    <div className="agents-row agents-small" data-testid="agents-graph-summary" data-revision={context.revision}>
-      <StatusPill status={fresh.status} label={fresh.label} size="sm" />
-      <span className="agents-muted">{graphSummary(context)}</span>
+    <div className="agents-row ui-meta" data-testid="agents-graph-summary" data-revision={context.revision}>
+      <StatusText status={fresh.status} label={fresh.label} />
+      <span>{graphSummary(context)}</span>
       <Button
         size="sm"
         variant="ghost"
@@ -318,7 +317,7 @@ export function TaskView({ id, variant = "panel" }: { id: TaskId; variant?: "pan
           </Button>
         </div>
       )}
-      <p className="agents-muted agents-small">
+      <p className="ui-meta">
         {PERMISSION_LABELS[task.spec.permission]} · {EXECUTION_LABELS[task.spec.execution]} · {CONSENT_LABELS[task.spec.consent]} · {provider}
         {servedBy}
       </p>

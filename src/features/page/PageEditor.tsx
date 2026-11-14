@@ -14,6 +14,7 @@ import type { Motion } from "../../bindings/Motion";
 import type { PageRect } from "../../bindings/PageRect";
 import { commands, errorMessage } from "../../lib/ipc";
 import {
+  Badge,
   Banner,
   Button,
   ErrorState,
@@ -223,22 +224,20 @@ export function PageEditor({ resource, active }: EditorProps) {
 
   const pill =
     status === "building" ? (
-      <StatusPill status="running" label={`Building ${resource.title}`} size="sm" />
+      <StatusPill status="running" label={`Building ${resource.title}`} />
     ) : model.untrustedRoot ? (
-      <StatusPill status="unavailable" label="Not trusted" size="sm" />
+      <StatusPill status="unavailable" label="Not trusted" />
     ) : model.failed ? (
       <StatusPill
         status={problem ? "unavailable" : "failed"}
         label={problem ? "Not built" : "Build failed"}
         detail={problem ? undefined : errors}
-        size="sm"
       />
     ) : model.buildId ? (
       <StatusPill
         status="succeeded"
         label="Built"
         detail={model.latencyMs !== null ? `${Math.round(model.latencyMs)} ms` : undefined}
-        size="sm"
       />
     ) : null;
 
@@ -257,7 +256,7 @@ export function PageEditor({ resource, active }: EditorProps) {
         </span>
         {caret && (
           <span className="page-editor__mode" data-testid="page-mode">
-            {caret.mode === "math" ? "Math" : "Text"}
+            <Badge>{caret.mode === "math" ? "Math" : "Text"}</Badge>
           </span>
         )}
         <IconButton
@@ -458,7 +457,7 @@ export function PageEditor({ resource, active }: EditorProps) {
           </>
         )}
       </div>
-      <div id={`page-line-${resource.key}`} className="page-editor__sr-only" aria-live="polite" data-testid="page-line">
+      <div id={`page-line-${resource.key}`} className="ui-visually-hidden" aria-live="polite" data-testid="page-line">
         {caret ? caret.lineText : ""}
       </div>
     </div>

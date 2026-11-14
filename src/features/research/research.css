@@ -1,5 +1,9 @@
-/* Research panel. Tokens only (src/ui/tokens.css); shared components provide
-   buttons, pills, banners, fields, and region states. */
+/* Research page and panel: layout, plus the specialized content the shared
+   components do not draw (code input, run output log, figures, data tables,
+   promotion markup). Headers, rows, facts, sections, statuses, badges, and
+   region states come from src/ui/components. */
+
+/* ---- Panel and output pane --------------------------------------------------- */
 
 .exp-research {
   display: flex;
@@ -8,16 +12,18 @@
   min-height: 0;
 }
 
-.exp-research .exp-muted {
-  color: var(--color-text-muted);
+/* Session controls: the panel's bar, and the Research page header's toolbar row. */
+.exp-research__bar {
+  flex: 1;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
 }
 
-.exp-research__bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
+.exp-research > .exp-research__bar {
+  flex: none;
+  min-height: var(--pane-header-height);
+  padding: var(--space-1) var(--pane-inset);
   border-bottom: var(--border-width) solid var(--color-border);
 }
 
@@ -33,13 +39,22 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: right;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
 }
 
 .exp-research__root code {
-  font-family: var(--font-code);
   user-select: text;
+}
+
+.exp-research__banners {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--pane-inset) 0;
+}
+
+.exp-research__banners:empty {
+  display: none;
 }
 
 .exp-research__main {
@@ -58,20 +73,25 @@
 .exp-research__work {
   display: flex;
   flex-direction: column;
+  gap: var(--space-2);
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  gap: var(--space-2);
-  padding: var(--space-2);
+  padding: var(--space-2) var(--pane-inset);
 }
 
 .exp-research__guidance code {
-  font-family: var(--font-code);
   font-size: var(--font-size-sm);
   user-select: text;
   white-space: pre-wrap;
 }
 
+.exp-research__note {
+  margin: 0;
+  padding: var(--space-1) var(--pane-inset);
+}
+
+/* Code input (plain text; Ctrl+Enter runs). */
 .exp-research__input {
   display: flex;
   align-items: flex-start;
@@ -98,6 +118,8 @@
   outline-offset: var(--focus-ring-offset);
 }
 
+/* ---- Run output ------------------------------------------------------------------- */
+
 .exp-research__output {
   display: flex;
   flex-direction: column;
@@ -118,11 +140,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-code);
   font-size: var(--font-size-sm);
   color: var(--color-text-muted);
 }
 
+/* The output log: streams, results, errors, figures, and tables in order. */
 .exp-research__entries {
   display: flex;
   flex-direction: column;
@@ -136,6 +158,7 @@
 
 .exp-research__entries:focus-visible {
   outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .exp-research__stream,
@@ -149,27 +172,24 @@
   overflow-wrap: anywhere;
 }
 
+/* Standard error and errors: a bar at the left, no box inside the log. */
 .exp-research__stream[data-stream="stderr"] {
   padding-left: var(--space-1-5);
   border-left: 2px solid var(--color-warning-border);
 }
 
 .exp-research__error {
-  padding: var(--space-1-5) var(--space-2);
+  padding-left: var(--space-1-5);
+  border-left: 2px solid var(--color-danger-border);
   color: var(--color-danger-text);
-  background: var(--color-danger-bg);
-  border: var(--border-width) solid var(--color-danger-border);
-  border-radius: var(--radius-md);
 }
 
 .exp-research__error-title {
-  margin: 0 0 var(--space-1);
+  margin-bottom: var(--space-1);
   font-weight: var(--font-weight-semibold);
 }
 
 .exp-research__notice {
-  margin: 0;
-  font-size: var(--font-size-sm);
   font-style: italic;
 }
 
@@ -191,10 +211,10 @@
 }
 
 .exp-research__figure figcaption {
-  font-size: var(--font-size-sm);
   user-select: text;
 }
 
+/* Table output: the data's own grid (inert cells), numeric alignment. */
 .exp-research__grid-scroll {
   max-height: 320px;
   overflow: auto;
@@ -224,166 +244,71 @@
   color: var(--color-text-muted);
 }
 
-.exp-research__attach {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: var(--space-2);
-  margin-top: var(--space-1);
-}
-
+/* Retention and "Insert or update in document…" under a figure or table. */
+.exp-research__retain,
+.exp-research__attach,
 .exp-research__attach-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
 }
 
-.exp-research__facts {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--space-0-5) var(--space-3);
-  margin: 0;
-  font-size: var(--font-size-sm);
-  user-select: text;
+.exp-research__retain,
+.exp-research__attach {
+  margin-top: var(--space-1);
 }
 
-.exp-research__facts dt {
-  color: var(--color-text-muted);
+.exp-research__attach {
+  align-items: flex-end;
 }
 
-.exp-research__facts dd {
-  margin: 0;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.exp-research__facts code {
-  font-family: var(--font-code);
-}
-
+/* Run history column. */
 .exp-research__history {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: auto;
   border-left: var(--border-width) solid var(--color-border);
 }
 
-.exp-research__history-title {
-  margin: 0;
-  padding: var(--space-1-5) var(--space-2);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-label);
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-}
-
 .exp-research__runs {
-  list-style: none;
+  flex: 1;
+  min-height: 0;
   margin: 0;
   padding: 0;
+  overflow: auto;
+  list-style: none;
 }
 
-.exp-research__run {
-  border-bottom: var(--border-width) solid var(--color-border-subtle);
-}
-
-.exp-research__run:hover {
-  background: var(--color-surface-hover);
-}
-
-.exp-research__run[data-selected] {
-  background: var(--color-surface-selected);
-}
-
-.exp-research__run-select {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-0-5);
-  padding: var(--space-1-5) var(--space-2);
-  background: none;
-  border: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: default;
-}
-
-.exp-research__run-select:focus-visible {
-  outline: var(--focus-ring-width) solid var(--color-focus-ring);
-  outline-offset: calc(-1 * var(--focus-ring-width));
-}
-
-.exp-research__run-code {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-code);
-  font-size: var(--font-size-sm);
-}
-
-.exp-research__run-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1-5);
-  font-size: var(--font-size-sm);
-}
-
-/* ---- Retention, execution labels, promotion review -------------------------- */
-
-.exp-research__retain {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1);
-  margin-top: var(--space-1);
-}
-
-.exp-research__mode {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: 0 var(--space-2);
-  min-height: var(--control-height-sm);
-  border-radius: var(--radius-full);
-  background: var(--color-warning-bg);
-  color: var(--color-warning-text);
-  border: var(--border-width) solid var(--color-warning-border);
-  font-size: var(--font-size-sm);
-  white-space: nowrap;
+/* Execution policies (Research page explorer). */
+.exp-research__modes-section {
+  border-top: var(--border-width) solid var(--color-border);
 }
 
 .exp-research__modes {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-2);
-  border-top: var(--border-width) solid var(--color-border);
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
 }
 
 .exp-research__mode-row {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: var(--space-1);
 }
 
-.exp-promotion {
+/* ---- Promotion review (also shown by the workflow run monitor) ---------------- */
+
+.exp-promotion,
+.exp-promotion__edit {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
 
-.exp-promotion__where {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
+.exp-promotion__edit {
+  gap: var(--space-1);
 }
 
 .exp-promotion__markup {
@@ -406,71 +331,99 @@
   border-left-color: var(--color-danger-border);
 }
 
-/* ---- Graph inspection --------------------------------------------------------- */
+/* ---- Inspector -------------------------------------------------------------------- */
 
-.exp-graph {
+/* Facts, banners, and forms between the item header and its sections. */
+.exp-rinspector__facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 0 var(--pane-inset) var(--space-3);
+}
+
+.exp-rinspector__note {
+  padding: var(--space-2) var(--pane-inset);
+}
+
+.exp-rinspector__stack {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
 }
 
-.exp-graph__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.exp-rinspector__run,
+.exp-rinspector__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.exp-rinspector__group {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.exp-rinspector__group > legend {
+  margin-bottom: var(--space-1);
+  padding: 0;
+}
+
+/* Graph relations, evidence, and impact: a block of sections after the item's own. */
+.exp-graph {
+  border-top: var(--border-width) solid var(--color-border-subtle);
+}
+
+.exp-graph--state {
+  padding: var(--space-2) var(--pane-inset);
+}
+
+.exp-graph__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
   font-size: var(--font-size-sm);
   user-select: text;
 }
 
-.exp-graph__relation {
-  color: var(--color-text);
-}
-
-.exp-graph__badge {
-  margin-left: var(--space-1);
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-sm);
-  border: var(--border-width) solid var(--color-border-strong);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
-}
-
-.exp-graph__badge[data-status="suggested"] {
-  border-style: dashed;
+.exp-graph__name {
+  font-weight: var(--font-weight-medium);
 }
 
 .exp-graph__evidence {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  padding: var(--space-1) 0;
+  padding-bottom: var(--space-1);
   border-bottom: var(--border-width) solid var(--color-border-subtle);
+}
+
+.exp-graph__evidence:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 .exp-graph__evidence-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-1) var(--space-2);
 }
 
 .exp-graph__pins {
   margin: 0;
   padding-left: var(--space-4);
-  color: var(--color-text-muted);
 }
 
-.exp-graph code,
-.exp-promotion code,
-.exp-rinspector code {
-  font-family: var(--font-code);
-  user-select: text;
-}
-
-/* ---- Research page ---------------------------------------------------------------- */
+/* ---- Research page ------------------------------------------------------------------ */
 
 .exp-rpage {
   display: flex;
@@ -478,36 +431,6 @@
   height: 100%;
   min-height: 0;
   background: var(--color-surface);
-}
-
-.exp-rpage .exp-muted {
-  color: var(--color-text-muted);
-}
-
-.exp-rpage__header {
-  display: flex;
-  flex-direction: column;
-  border-bottom: var(--border-width) solid var(--color-border);
-  background: var(--color-surface-sunken);
-}
-
-.exp-rpage__heading {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3) 0;
-}
-
-.exp-rpage__title {
-  margin: 0;
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-semibold);
-}
-
-.exp-rpage__heading code {
-  font-family: var(--font-code);
-  font-size: var(--font-size-sm);
-  user-select: text;
 }
 
 .exp-rpage__body {
@@ -523,59 +446,46 @@
   flex-direction: column;
   min-height: 0;
 }
+
+.exp-rpage__explorer,
+.exp-rpage__inspector,
+.exp-rpage__drawer {
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface-sunken);
+}
+
+.exp-rpage__explorer,
+.exp-rpage__inspector {
+  height: 100%;
+}
+
+.exp-rpage__explorer {
+  overflow: auto;
+}
+
+.exp-rexplorer,
+.exp-rpage__enable {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+
 .exp-rpage__drawer {
   position: absolute;
   top: 0;
   right: 0;
   bottom: 0;
   z-index: var(--z-sticky);
-  display: flex;
-  flex-direction: column;
-  width: min(340px, 90%);
+  width: min(var(--inspector-width), 90%);
   border-left: var(--border-width) solid var(--color-border);
-  background: var(--color-surface-sunken);
   box-shadow: var(--shadow-2);
 }
-.exp-rpage__drawer-bar {
-  display: flex;
-  flex: none;
-  align-items: center;
-  justify-content: space-between;
-  height: var(--pane-header-height);
-  padding: 0 var(--space-1) 0 var(--space-3);
-  border-bottom: var(--border-width) solid var(--color-border);
-}
-.exp-rpage__drawer-title {
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-label);
-  text-transform: uppercase;
-}
-.exp-rpage__drawer > .exp-rpage__inspector {
+
+.exp-rpage__inspector-body {
   flex: 1;
   min-height: 0;
-}
-
-.exp-rpage__explorer,
-.exp-rpage__inspector {
-  height: 100%;
   overflow: auto;
-  background: var(--color-surface-sunken);
-}
-
-.exp-rpage__inspector {
-  padding: var(--space-2) var(--space-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.exp-rpage__inspector > * {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
 }
 
 .exp-rpage__work {
@@ -606,7 +516,6 @@
 }
 
 .exp-rpage__run {
-  display: flex;
   gap: var(--space-1);
   padding: 0 var(--space-2);
 }
@@ -625,53 +534,19 @@
   border-top: var(--border-width) solid var(--color-border);
 }
 
+.exp-rpage__pending {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding-left: var(--space-4);
+}
+
 .exp-rpage__note {
   display: flex;
+  flex: none;
   align-items: center;
   gap: var(--space-1);
-  padding: var(--space-1) var(--space-3);
-  margin: 0;
-  font-size: var(--font-size-sm);
-}
-
-.exp-rexplorer {
-  display: flex;
-  flex-direction: column;
-}
-
-.exp-rexplorer__toolbar {
-  display: flex;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  border-bottom: var(--border-width) solid var(--color-border);
-}
-
-.exp-rinspector__title {
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-semibold);
-  overflow-wrap: anywhere;
-}
-
-.exp-rinspector__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-}
-
-/* Files explorer subsection */
-.xp-files__research {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.xp-files__research-note {
-  margin: 0;
-  padding: 0 var(--space-2);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
+  padding: var(--space-1) var(--pane-inset);
+  border-top: var(--border-width) solid var(--color-border);
 }

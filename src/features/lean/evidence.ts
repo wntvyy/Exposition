@@ -20,7 +20,7 @@ import type { LeanAssociateRequest } from "../../bindings/LeanAssociateRequest";
 import type { LeanAssociation } from "../../bindings/LeanAssociation";
 import type { LeanAuditRecord } from "../../bindings/LeanAuditRecord";
 import { errorMessage } from "../../lib/ipc";
-import type { Status } from "../../ui/components";
+import type { BadgeTone, Status } from "../../ui/components";
 
 export const leanEvidenceCommands = {
   /** The audit of the last finished revision (declarations, statements, axioms, verdicts). */
@@ -52,9 +52,27 @@ export function verdictView(verdict: FormalVerdict | DeclarationVerdict): { stat
     case "partiallyChecked":
       return { status: "warning", label: "Partially checked" };
     case "notVerified":
-      return { status: "warning", label: "Not verified" };
+      return { status: "idle", label: "Not verified" };
     case "errors":
       return { status: "failed", label: "Errors" };
+  }
+}
+
+/**
+ * Badge tone of an exact verdict (as in the workflow run monitor): only
+ * "Checked" is success, "Errors" danger, "Not verified" neutral, and every
+ * other verdict a warning.
+ */
+export function verdictTone(verdict: FormalVerdict | DeclarationVerdict): BadgeTone {
+  switch (verdict) {
+    case "checked":
+      return "success";
+    case "errors":
+      return "danger";
+    case "notVerified":
+      return "neutral";
+    default:
+      return "warning";
   }
 }
 

@@ -1,5 +1,5 @@
 import { FolderOpen, Play } from "lucide-react";
-import { useId, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 
 import type { Budgets } from "../../bindings/Budgets";
 import type { ContextConsent } from "../../bindings/ContextConsent";
@@ -10,7 +10,7 @@ import type { TaskScope } from "../../bindings/TaskScope";
 import { editors } from "../../app/editors";
 import { registry } from "../../app/registry";
 import { commands } from "../../lib/ipc";
-import { Banner, Button, Section, Select, TextField } from "../../ui/components";
+import { Banner, Button, Section, Select, TextArea, TextField } from "../../ui/components";
 import { CONSENT_LABELS, EXECUTION_LABELS, PERMISSION_LABELS } from "./format";
 import { agents, useAgents } from "./store";
 
@@ -34,37 +34,6 @@ export function buildScope(kind: ScopeKind, files: string, document: string): Ta
     .map((p) => p.trim())
     .filter(Boolean);
   return paths.length ? { kind: "files", paths } : null;
-}
-
-/** Multi-line text input with a visible label (native textarea: IME safe). */
-export function TextArea(props: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  rows?: number;
-  placeholder?: string;
-  code?: boolean;
-  testId?: string;
-}) {
-  const id = useId();
-  return (
-    <div className="ui-field">
-      <label className="ui-field__label" htmlFor={id}>
-        {props.label}
-      </label>
-      <textarea
-        id={id}
-        className="ui-input agents-textarea"
-        rows={props.rows ?? 3}
-        value={props.value}
-        placeholder={props.placeholder}
-        spellCheck={!props.code}
-        data-code={props.code || undefined}
-        onChange={(e) => props.onChange(e.target.value)}
-        data-testid={props.testId}
-      />
-    </div>
-  );
 }
 
 function NumberField(props: { label: string; value: number; min: number; onChange: (v: number) => void }) {
@@ -146,9 +115,9 @@ export function TaskComposer({
         testId="agents-prompt"
       />
       {workspace ? (
-        <p className="agents-small" data-testid="agents-folder">
-          <span className="agents-muted">Project folder: </span>
-          <code className="agents-code">{workspace.root}</code>
+        <p className="ui-meta" data-testid="agents-folder">
+          <span>Project folder: </span>
+          <code className="ui-code agents-folder-path">{workspace.root}</code>
         </p>
       ) : (
         <Banner
@@ -187,7 +156,7 @@ export function TaskComposer({
       />
       <Select label="Commands and code" value={execution} onChange={setExecution} options={option(EXECUTION_LABELS)} />
       <Select label="Content sent to the model provider" value={consent} onChange={setConsent} options={option(CONSENT_LABELS)} />
-      <Section title="Budgets" collapsible defaultExpanded={false}>
+      <Section title="Budgets" collapsible defaultExpanded={false} className="agents-section">
         <div className="agents-grid">
           <NumberField label="Model turns" min={1} value={budgets.maxTurns} onChange={(v) => setBudgets({ ...budgets, maxTurns: v })} />
           <NumberField label="Tool calls" min={0} value={budgets.maxToolCalls} onChange={(v) => setBudgets({ ...budgets, maxToolCalls: v })} />

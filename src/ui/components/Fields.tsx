@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Minus, Search, X } from "lucide-react";
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import {
   Button as AriaButton,
   Checkbox as AriaCheckbox,
@@ -55,6 +55,54 @@ export function TextField({ label, description, errorMessage, placeholder, code,
   );
 }
 
+export interface TextAreaProps {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  rows?: number;
+  placeholder?: string;
+  description?: string;
+  /** Monospace, no spell check (code, paths one per line). */
+  code?: boolean;
+  disabled?: boolean;
+  testId?: string;
+  className?: string;
+}
+
+/**
+ * Multi-line text input with a visible label (native textarea: IME and
+ * composition safe), sharing the field look of TextField.
+ */
+export function TextArea({ label, value, onChange, rows = 3, placeholder, description, code, disabled, testId, className }: TextAreaProps) {
+  const id = useId();
+  const descriptionId = useId();
+  return (
+    <div className={cx("ui-field", className)}>
+      <label className="ui-field__label" htmlFor={id}>
+        {label}
+      </label>
+      <textarea
+        id={id}
+        className="ui-input ui-textarea"
+        rows={rows}
+        value={value}
+        placeholder={placeholder}
+        spellCheck={!code}
+        disabled={disabled}
+        data-code={code || undefined}
+        aria-describedby={description ? descriptionId : undefined}
+        onChange={(event) => onChange(event.target.value)}
+        data-testid={testId}
+      />
+      {description && (
+        <span className="ui-field__description" id={descriptionId}>
+          {description}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export interface SearchFieldProps extends Omit<AriaSearchFieldProps, "className" | "children">, FieldChrome {
   placeholder?: string;
 }
@@ -92,6 +140,8 @@ export interface SelectProps<K extends Key>
   value?: K | null;
   onChange?: (value: K) => void;
   placeholder?: string;
+  /** Let a long chosen value wrap onto several lines instead of truncating (decision choices). */
+  wrapValue?: boolean;
 }
 
 /** Choose one value from a short list (use a SearchField + list for long lists). */
@@ -104,12 +154,14 @@ export function Select<K extends Key>({
   onChange,
   className,
   placeholder,
+  wrapValue,
   ...props
 }: SelectProps<K>) {
   return (
     <AriaSelect
       {...props}
       placeholder={placeholder}
+      data-wrap-value={wrapValue || undefined}
       className={cx("ui-field ui-select", className)}
       value={value ?? null}
       onChange={(key) => {

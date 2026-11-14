@@ -57,7 +57,7 @@ export function statusView(status: LeanStatus): StatusView {
     case "partiallyChecked":
       return { kind: status.kind, status: "warning", label: "Partially checked", detail: `rev ${status.revision}` };
     case "unverified":
-      return { kind: status.kind, status: "warning", label: "Not verified", detail: `rev ${status.revision}` };
+      return { kind: status.kind, status: "idle", label: "Not verified", detail: `rev ${status.revision}` };
     case "errors":
       return {
         kind: status.kind,

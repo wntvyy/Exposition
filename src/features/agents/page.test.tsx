@@ -271,6 +271,67 @@ describe("graph context and proposals", () => {
     expect(items[1]!.textContent).toContain("addRelation");
     expect(proposalLabel("applied").label).toBe("Applied as suggestion");
   });
+
+  it("says what was withheld and what was summarized in one banner", () => {
+    render(<GraphContextView graph={{ ...graph, context: { ...context, truncated: true } }} />);
+    const view = screen.getByTestId("agents-graph-context");
+    const banners = view.querySelectorAll(".ui-banner");
+    expect(banners).toHaveLength(1);
+    expect(within(banners[0] as HTMLElement).getByText("Metadata only · Summarized")).toBeTruthy();
+    expect(banners[0]!.textContent).toContain("were withheld");
+    expect(banners[0]!.textContent).toContain("graph_query");
+  });
+});
+
+describe("task rows", () => {
+  it("open on click or Enter, add to the selection with Ctrl+click or Space, and keep the More button apart", async () => {
+    const second = summary({ id: "task-2", title: "Second task", status: { kind: "completed" } });
+    useAgents.setState({ tasks: [summary(), second] });
+    render(<AgentsPage />);
+    await act(async () => pages.show(AGENTS_PAGE_ID));
+    const [row1, row2] = screen.getAllByTestId("agents-page-task");
+    // Quiet inline state in rows (the task header keeps the one pill).
+    expect(row1!.querySelector(".ui-status-pill")).toBeNull();
+    expect(within(row1!).getByText("Waiting for approval")).toBeTruthy();
+    expect(row1!.getAttribute("tabindex")).toBe("0");
+
+    fireEvent.click(row1!);
+    expect(useAgents.getState().page.selected).toBe("task-1");
+    expect(row1!.getAttribute("aria-current")).toBe("true");
+    expect(row1!.hasAttribute("data-op-selected")).toBe(true);
+
+    // Ctrl+click adds to the operation selection without opening the task.
+    fireEvent.click(row2!, { ctrlKey: true });
+    expect(useAgents.getState().page.selected).toBe("task-1");
+    expect(row1!.hasAttribute("data-op-selected")).toBe(true);
+    expect(row2!.hasAttribute("data-op-selected")).toBe(true);
+
+    // Space selects the focused row alone; Enter opens it.
+    fireEvent.keyDown(row2!, { key: " " });
+    expect(row1!.hasAttribute("data-op-selected")).toBe(false);
+    expect(row2!.hasAttribute("data-op-selected")).toBe(true);
+    fireEvent.keyDown(row2!, { key: "Enter" });
+    expect(useAgents.getState().page.selected).toBe("task-2");
+
+    // The row's More actions button opens its menu, not the task.
+    fireEvent.click(within(row1!).getByTestId("op-more-task-1"));
+    expect(useAgents.getState().page.selected).toBe("task-2");
+  });
+
+  it("opens a task from the Agent view's list", () => {
+    useAgents.setState({ view: "tasks" });
+    render(<AgentPanel />);
+    fireEvent.click(screen.getByTestId("agents-task-item"));
+    expect(useAgents.getState()).toMatchObject({ view: "task", selected: "task-1" });
+  });
+
+  it("repeats New task in the Agent view's empty state as a small secondary button", () => {
+    useAgents.setState({ tasks: [], view: "tasks" });
+    render(<AgentPanel />);
+    const buttons = screen.getAllByRole("button", { name: "New task" });
+    expect(buttons.map((b) => b.getAttribute("data-variant"))).toEqual(["primary", "secondary"]);
+    expect(buttons[1]!.getAttribute("data-size")).toBe("sm");
+  });
 });
 
 describe("Editor ↔ Agents navigation keeps one task and its approval", () => {

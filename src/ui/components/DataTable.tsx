@@ -23,6 +23,8 @@ export interface DataTableColumn<T> {
   sortValue?: (row: T) => string | number;
   /** CSS width, e.g. "30%" or "120px". */
   width?: string;
+  /** Right-align with tabular figures (sizes, counts, durations). */
+  numeric?: boolean;
   render: (row: T) => ReactNode;
 }
 
@@ -109,6 +111,7 @@ export function DataTable<T>({
               isRowHeader={column.isRowHeader}
               allowsSorting={Boolean(column.sortValue)}
               className="ui-data-table__column"
+              data-numeric={column.numeric || undefined}
               style={column.width ? { width: column.width } : undefined}
             >
               {({ sortDirection, allowsSorting }) => (
@@ -133,7 +136,11 @@ export function DataTable<T>({
         >
           {(item) => (
             <Row id={item.id} columns={columns} className="ui-data-table__row" {...(rowProps?.(item.row) ?? {})}>
-              {(column) => <Cell className="ui-data-table__cell">{column.render(item.row)}</Cell>}
+              {(column) => (
+                <Cell className="ui-data-table__cell" data-numeric={column.numeric || undefined}>
+                  {column.render(item.row)}
+                </Cell>
+              )}
             </Row>
           )}
         </TableBody>

@@ -5,27 +5,28 @@ import type { CoverageSummary } from "../../bindings/CoverageSummary";
 import type { GraphFreshness } from "../../bindings/GraphFreshness";
 import { Badge, StatusPill } from "../../ui/components";
 
-export function FreshnessPill({ freshness }: { freshness: GraphFreshness }) {
+/** The headline synchronization state of a surface (its one StatusPill). */
+export function FreshnessPill({ freshness, size = "md" }: { freshness: GraphFreshness; size?: "sm" | "md" }) {
   const overlay = freshness.overlay.length;
   const pill = (() => {
     switch (freshness.state) {
       case "synchronized":
-        return <StatusPill size="sm" status="succeeded" label="Synchronized" />;
+        return <StatusPill size={size} status="succeeded" label="Graph synchronized" />;
       case "reconciling":
-        return <StatusPill size="sm" status="running" label="Reconciling" detail={freshness.pending ? `${freshness.pending} files` : undefined} />;
+        return <StatusPill size={size} status="running" label="Graph reconciling" detail={freshness.pending ? `${freshness.pending} files` : undefined} />;
       case "pending":
         // Same wording and treatment as the Agents page: answers may lag the sources (stale).
         return freshness.pending > 0 ? (
-          <StatusPill size="sm" status="stale" label="Reconciliation pending" detail={`${freshness.pending} files`} />
+          <StatusPill size={size} status="stale" label="Reconciliation pending" detail={`${freshness.pending} files`} />
         ) : (
-          <StatusPill size="sm" status="stale" label={freshness.checkpointMs === null ? "Not yet reconciled" : "Reconciliation pending"} />
+          <StatusPill size={size} status="stale" label={freshness.checkpointMs === null ? "Not yet reconciled" : "Reconciliation pending"} />
         );
       case "unavailable":
-        return <StatusPill size="sm" status="unavailable" label="Synchronization unavailable" />;
+        return <StatusPill size={size} status="unavailable" label="Synchronization unavailable" />;
     }
   })();
   return (
-    <span className="xp-graph-badges" data-testid="graph-freshness" data-state={freshness.state}>
+    <span className="xp-graph-inline" data-testid="graph-freshness" data-state={freshness.state}>
       {pill}
       {overlay > 0 && (
         <Badge tone="info" dashed title="Unsaved editor buffers are included in answers and labelled as unsaved">

@@ -1,6 +1,7 @@
-// Custom React Flow node: a freely movable colored rectangle (NodeCard) with
-// a connection handle for typed relationship authoring. The whole node is a
-// drop target while a connection is being drawn.
+// Custom React Flow node: a freely movable NodeCard (neutral card, type color
+// in its header band, status badges with icons) with a connection handle for
+// typed relationship authoring. The node sizes to its content (two-line title,
+// wrapping badges); the whole node is a drop target while a connection is drawn.
 import { Handle, Position, useConnection, type Node, type NodeProps } from "@xyflow/react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { memo } from "react";
@@ -51,7 +52,7 @@ function EntityNodeView({ id, data, selected }: NodeProps<EntityRFNode>) {
                 </Badge>
               )}
               {data.badges.map((badge) => (
-                <Badge key={badge.label} tone={badge.tone} dashed={badge.dashed} title={badge.title}>
+                <Badge key={badge.label} tone={badge.tone} icon={badge.icon} dashed={badge.dashed} title={badge.title}>
                   {badge.label}
                 </Badge>
               ))}

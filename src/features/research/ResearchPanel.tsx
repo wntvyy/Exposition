@@ -1,7 +1,7 @@
 // Research panel: environment and session controls, code input, streamed run
 // output (text, figures, inert tables), run history with provenance, and
 // insert/update of figures and tables into documents.
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   FlaskConical,
   FolderOpen,
@@ -25,13 +25,18 @@ import {
   Button,
   EmptyState,
   IconButton,
+  KeyValueList,
+  ListRow,
   LoadingState,
+  PanelHeader,
   Section,
   Select,
   Spinner,
   StatusPill,
+  StatusText,
   Toolbar,
   UnavailableState,
+  type KeyValueItem,
 } from "../../ui/components";
 import {
   EMPTY_RUN_OUTPUT,
@@ -69,7 +74,7 @@ import {
 import { parseHtmlTable, type Grid } from "./table";
 import "./research.css";
 
-function useNow(active: boolean): number {
+export function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
@@ -100,16 +105,18 @@ export function ResearchPanel() {
           title="No folder open"
           description="Open a project folder to run Python, R, or Julia next to your paper. Runs, figures, and tables are recorded in the project's .exposition folder."
           actions={
-            <Button variant="primary" icon={FolderOpen} onPress={() => void openProjectFolder()}>
+            <Button size="sm" icon={FolderOpen} onPress={() => void openProjectFolder()}>
               Open Folder…
             </Button>
           }
         />
-        {error && (
-          <Banner tone="danger" title="Research error">
-            {error}
-          </Banner>
-        )}
+        <div className="exp-research__banners">
+          {error && (
+            <Banner tone="danger" title="Research error">
+              {error}
+            </Banner>
+          )}
+        </div>
       </div>
     );
   }
@@ -117,41 +124,44 @@ export function ResearchPanel() {
   return (
     <div className="exp-research" data-testid="research-panel" role="region" aria-label="Research">
       <SessionBar />
-      {error && (
-        <Banner
-          tone="danger"
-          title="Research error"
-          actions={
-            <Button size="sm" variant="ghost" onPress={() => useResearch.setState({ error: null })}>
-              Dismiss
-            </Button>
-          }
-        >
-          <span data-testid="research-error">{error}</span>
-        </Banner>
-      )}
-      {!workspace.trusted && (
-        <Banner
-          tone="warning"
-          title="Workspace not trusted"
-          actions={
-            <Button size="sm" icon={ShieldCheck} onPress={() => void trustWorkspace()}>
-              Trust workspace…
-            </Button>
-          }
-        >
-          Research kernels run code with your account&rsquo;s permissions; trust this folder to start a session.
-        </Banner>
-      )}
+      <div className="exp-research__banners">
+        {error && (
+          <Banner
+            tone="danger"
+            title="Research error"
+            actions={
+              <Button size="sm" variant="ghost" onPress={() => useResearch.setState({ error: null })}>
+                Dismiss
+              </Button>
+            }
+          >
+            <span data-testid="research-error">{error}</span>
+          </Banner>
+        )}
+        {!workspace.trusted && (
+          <Banner
+            tone="warning"
+            title="Workspace not trusted"
+            actions={
+              <Button size="sm" icon={ShieldCheck} onPress={() => void trustWorkspace()}>
+                Trust workspace…
+              </Button>
+            }
+          >
+            Research kernels run code with your account&rsquo;s permissions; trust this folder to start a session.
+          </Banner>
+        )}
+        {!(environmentsLoading && !environments) && environmentsError && (
+          <Banner tone="danger" title="Could not discover research environments">
+            {environmentsError}
+          </Banner>
+        )}
+      </div>
       {environmentsLoading && !environments ? (
         <LoadingState title="Looking for Python, R, and Julia…" />
-      ) : environmentsError ? (
-        <Banner tone="danger" title="Could not discover research environments">
-          {environmentsError}
-        </Banner>
-      ) : (
+      ) : environmentsError ? null : (
         <div className="exp-research__main">
-          <div className="exp-research__work">
+          <div className="exp-research__work ui-inset-reset">
             <EnvironmentNotice />
             <CodeInput />
             <RunOutputView />
@@ -167,14 +177,34 @@ function environmentLabel(env: RuntimeEnvironment): string {
   return env.availability.kind === "available" ? env.displayName : `${env.displayName} — unavailable`;
 }
 
-export function SessionBar() {
+/** The research session's headline state (one per surface: the page header or the panel's session bar). */
+export function SessionStatus() {
+  const starting = useResearch((s) => s.starting);
+  const session = useResearch((s) => userSession(s));
+  const pill = sessionPill(session);
+  return (
+    <span data-testid="research-session-status" data-state={session?.state.kind ?? "none"}>
+      <StatusPill
+        status={starting ? "running" : pill.status}
+        label={starting ? "Starting kernel" : pill.label}
+        detail={session?.kernel ? `${session.kernel.language} ${session.kernel.languageVersion}` : undefined}
+      />
+    </span>
+  );
+}
+
+/**
+ * Environment and session controls, the execution-policy label, and the
+ * project folder. The Research page shows the session state in its header
+ * (`status={false}`); the panel shows it here.
+ */
+export function SessionBar({ status = true }: { status?: boolean }) {
   const workspace = useResearch((s) => s.workspace);
   const environments = useResearch((s) => s.environments);
   const selected = useResearch((s) => s.selectedEnvironment);
   const starting = useResearch((s) => s.starting);
   const environmentsLoading = useResearch((s) => s.environmentsLoading);
   const session = useResearch((s) => userSession(s));
-  const pill = sessionPill(session);
   const options = (environments?.runtimes ?? []).map((env) => ({ id: env.id, label: environmentLabel(env) }));
   const selectedEnv = environments?.runtimes.find((r) => r.id === selected);
   const detached = session?.state.kind === "detached";
@@ -201,17 +231,11 @@ export function SessionBar() {
         isDisabled={environmentsLoading}
         onPress={() => void loadEnvironments(true)}
       />
-      <span data-testid="research-session-status" data-state={session?.state.kind ?? "none"}>
-        <StatusPill
-          status={starting ? "running" : pill.status}
-          label={starting ? "Starting kernel" : pill.label}
-          detail={session?.kernel ? `${session.kernel.language} ${session.kernel.languageVersion}` : undefined}
-        />
-      </span>
+      {status && <SessionStatus />}
       {!live && (
         <Button
           size="sm"
-          variant="primary"
+          variant="ghost"
           icon={Play}
           isDisabled={!canStart}
           isPending={starting}
@@ -222,12 +246,12 @@ export function SessionBar() {
       )}
       {live && (
         <>
-          <Button size="sm" icon={Square} isDisabled={!busy} onPress={() => void interruptSession()}>
+          <Button size="sm" variant="ghost" icon={Square} isDisabled={!busy} onPress={() => void interruptSession()}>
             Interrupt
           </Button>
           <Button
             size="sm"
-            variant={crashed ? "primary" : "secondary"}
+            variant={crashed ? "primary" : "ghost"}
             icon={RotateCcw}
             isDisabled={live.state.kind === "starting" || live.state.kind === "restarting"}
             onPress={() => void restartSession()}
@@ -238,8 +262,8 @@ export function SessionBar() {
         </>
       )}
       <ExecutionLabel />
-      <span className="exp-research__root" title={workspace?.root}>
-        <code>{workspace?.root}</code>
+      <span className="exp-research__root ui-meta" title={workspace?.root}>
+        <code className="ui-code">{workspace?.root}</code>
       </span>
     </Toolbar>
   );
@@ -381,10 +405,10 @@ export function RunOutputView() {
         <span data-testid="research-run-status">
           <StatusPill status={pill.status} label={pill.label} detail={formatDuration(run, now)} />
         </span>
-        {run.executionCount !== null && <span className="exp-muted">In [{run.executionCount}]</span>}
+        {run.executionCount !== null && <span className="ui-meta">In [{run.executionCount}]</span>}
         <code className="exp-research__preview">{run.codePreview}</code>
         {isActiveRun(run) && (
-          <Button size="sm" icon={SquareX} onPress={() => void cancelRun(run.id)}>
+          <Button size="sm" variant="ghost" icon={SquareX} onPress={() => void cancelRun(run.id)}>
             Cancel run
           </Button>
         )}
@@ -400,7 +424,7 @@ export function RunOutputView() {
         </Banner>
       )}
       {output.truncated && (
-        <p className="exp-muted" data-testid="research-output-truncated">
+        <p className="ui-meta" data-testid="research-output-truncated">
           Older output was dropped (output limit).
         </p>
       )}
@@ -457,7 +481,7 @@ const OutputEntryView = memo(function OutputEntryView({ entry, run }: { entry: O
         </div>
       );
     case "notice":
-      return <p className="exp-research__notice exp-muted">{item.message}</p>;
+      return <p className="exp-research__notice ui-meta">{item.message}</p>;
     case "clearOutput":
       return null;
   }
@@ -487,7 +511,7 @@ function FigureView({ run, figure }: { run: RunSummary; figure: ArtifactRecord }
       ) : (
         <Spinner size="sm" aria-label="Loading figure" />
       )}
-      <figcaption className="exp-muted">
+      <figcaption className="ui-meta">
         {figure.path} · {figure.mediaType} · {formatBytes(figure.sizeBytes)}
       </figcaption>
       <RetainControls run={run} artifact={figure} />
@@ -518,7 +542,7 @@ function TableView({ run, table, html }: { run: RunSummary; table: ArtifactRecor
       ) : grid === undefined ? (
         <Spinner size="sm" aria-label="Loading table" />
       ) : grid === null ? (
-        <p className="exp-muted">The output contained no table.</p>
+        <p className="ui-meta">The output contained no table.</p>
       ) : (
         <div className="exp-research__grid-scroll" tabIndex={0} aria-label="Table output">
           <table className="exp-research__grid">
@@ -553,7 +577,7 @@ function TableView({ run, table, html }: { run: RunSummary; table: ArtifactRecor
               ))}
             </tbody>
           </table>
-          {grid.truncated && <p className="exp-muted">Showing 200 of {grid.totalRows} rows.</p>}
+          {grid.truncated && <p className="ui-meta">Showing 200 of {grid.totalRows} rows.</p>}
         </div>
       )}
       <RetainControls run={run} artifact={table} />
@@ -562,6 +586,61 @@ function TableView({ run, table, html }: { run: RunSummary; table: ArtifactRecor
   );
 }
 
+function codeOrigin(manifest: RunManifest): string {
+  const origin = manifest.code.origin;
+  return origin.kind === "input"
+    ? "Research input"
+    : origin.kind === "file"
+      ? `File ${origin.path}${origin.revision !== null ? ` (revision ${origin.revision})` : ""}`
+      : `Selection of ${origin.path ?? "an unsaved document"} (revision ${origin.revision})`;
+}
+
+function inputFact(manifest: RunManifest, input: RunManifest["record"]["inputs"][number]): KeyValueItem {
+  const origin = manifest.code.origin;
+  const unsaved = manifest.unsavedInputs.includes(input.path);
+  const code = manifest.code.text !== null && origin.kind !== "input" && "path" in origin && origin.path === input.path;
+  const hash = input.contentHash;
+  return {
+    key: `input:${input.path}`,
+    label: "Input",
+    valueProps: { "data-testid": "research-input", "data-path": input.path, "data-unsaved": unsaved ? "true" : "false" },
+    value: (
+      <>
+        <code className="ui-code">{input.path}</code>
+        {input.revision !== null && ` · revision ${input.revision}`}
+        {hash && (
+          <>
+            {" · "}
+            <code className="ui-code" title={hash}>
+              {hash.slice(0, 23)}…
+            </code>
+          </>
+        )}
+        {unsaved &&
+          (code
+            ? " · unsaved buffer (its exact text is kept in the run manifest)"
+            : " · unsaved buffer (only its digest is recorded)")}
+      </>
+    ),
+  };
+}
+
+function artifactFact(artifact: ArtifactRecord): KeyValueItem {
+  return {
+    key: `artifact:${artifact.id}`,
+    label: artifact.kind === "figure" ? "Figure" : artifact.kind === "table" ? "Table" : "Output",
+    value: (
+      <>
+        <code className="ui-code">{artifact.path}</code> · {formatBytes(artifact.sizeBytes)} ·{" "}
+        <code className="ui-code" title={artifact.contentHash}>
+          {artifact.contentHash.slice(0, 23)}…
+        </code>
+      </>
+    ),
+  };
+}
+
+/** The run's manifest: code, inputs, kernel, interpreter, versions, and outputs (collapsed section). */
 export function Provenance({ run }: { run: RunSummary }) {
   const [manifest, setManifest] = useState<RunManifest | null>(null);
   const finished = !isActiveRun(run);
@@ -577,103 +656,103 @@ export function Provenance({ run }: { run: RunSummary }) {
     };
   }, [run.id, finished]);
   if (!manifest) return null;
-  const origin = manifest.code.origin;
+  const { record, session } = manifest;
+  const items: KeyValueItem[] = [
+    { key: "manifest", label: "Manifest", value: `.exposition/runs/${record.id}.json`, code: true },
+    {
+      key: "code",
+      label: "Code",
+      value: (
+        <>
+          {codeOrigin(manifest)}
+          {" · "}
+          <code className="ui-code" title={manifest.code.sha256}>
+            sha256 {manifest.code.sha256.slice(0, 16)}…
+          </code>
+        </>
+      ),
+    },
+    ...record.inputs.map((input) => inputFact(manifest, input)),
+    {
+      key: "kernel",
+      label: "Kernel",
+      value: `${session.kernel.implementation} ${session.kernel.implementationVersion} · ${session.kernel.language} ${session.kernel.languageVersion} · session generation ${session.generation}`,
+    },
+    {
+      key: "interpreter",
+      label: "Interpreter",
+      value: (
+        <>
+          {session.interpreter.implementation} {session.interpreter.version} ·{" "}
+          <code className="ui-code">{session.interpreter.location}</code>
+        </>
+      ),
+    },
+    { key: "versions", label: "Versions", value: record.environment.map((t) => `${t.name} ${t.version}`).join(" · ") },
+    {
+      key: "started",
+      label: "Started",
+      value: `${formatClock(record.startedAtMs)}${record.finishedAtMs !== null ? ` · finished ${formatClock(record.finishedAtMs)}` : ""}`,
+    },
+    ...record.outputs.map(artifactFact),
+  ];
   return (
     <Section title="Provenance" collapsible defaultExpanded={false} className="exp-research__provenance">
-      <dl className="exp-research__facts" data-testid="research-provenance">
-        <dt>Manifest</dt>
-        <dd>
-          <code>.exposition/runs/{manifest.record.id}.json</code>
-        </dd>
-        <dt>Code</dt>
-        <dd>
-          {origin.kind === "input"
-            ? "Research input"
-            : origin.kind === "file"
-              ? `File ${origin.path}${origin.revision !== null ? ` (revision ${origin.revision})` : ""}`
-              : `Selection of ${origin.path ?? "an unsaved document"} (revision ${origin.revision})`}
-          {" · "}
-          <code title={manifest.code.sha256}>sha256 {manifest.code.sha256.slice(0, 16)}…</code>
-        </dd>
-        {manifest.record.inputs.map((input) => (
-          <InputFact
-            key={input.path}
-            path={input.path}
-            revision={input.revision}
-            hash={input.contentHash}
-            unsaved={manifest.unsavedInputs.includes(input.path)}
-            code={manifest.code.text !== null && origin.kind !== "input" && "path" in origin && origin.path === input.path}
-          />
-        ))}
-        <dt>Kernel</dt>
-        <dd>
-          {manifest.session.kernel.implementation} {manifest.session.kernel.implementationVersion} ·{" "}
-          {manifest.session.kernel.language} {manifest.session.kernel.languageVersion} · session generation{" "}
-          {manifest.session.generation}
-        </dd>
-        <dt>Interpreter</dt>
-        <dd>
-          {manifest.session.interpreter.implementation} {manifest.session.interpreter.version} ·{" "}
-          <code>{manifest.session.interpreter.location}</code>
-        </dd>
-        <dt>Versions</dt>
-        <dd>{manifest.record.environment.map((t) => `${t.name} ${t.version}`).join(" · ")}</dd>
-        <dt>Started</dt>
-        <dd>
-          {formatClock(manifest.record.startedAtMs)}
-          {manifest.record.finishedAtMs !== null && ` · finished ${formatClock(manifest.record.finishedAtMs)}`}
-        </dd>
-        {manifest.record.outputs.map((a) => (
-          <ArtifactFact key={a.id} artifact={a} />
-        ))}
-      </dl>
+      <div data-testid="research-provenance">
+        <KeyValueList items={items} />
+      </div>
     </Section>
   );
 }
 
-function InputFact({
-  path,
-  revision,
-  hash,
-  unsaved,
-  code,
+/** One run in a run list: its code (or `title`), quiet status, time, and outputs. Click or Enter/Space selects. */
+export function RunRow({
+  run,
+  now,
+  selected,
+  title,
+  onSelect,
 }: {
-  path: string;
-  revision: number | null;
-  hash: string | null;
-  unsaved: boolean;
-  code: boolean;
+  run: RunSummary;
+  now: number;
+  selected?: boolean;
+  /** Replaces the code preview as the row title (e.g. the start time of an attempt). */
+  title?: string;
+  onSelect: () => void;
 }) {
+  const pill = runPill(run);
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onSelect();
+  };
   return (
-    <>
-      <dt>Input</dt>
-      <dd data-testid="research-input" data-path={path} data-unsaved={unsaved ? "true" : "false"}>
-        <code>{path}</code>
-        {revision !== null && ` · revision ${revision}`}
-        {hash && (
+    <li>
+      <ListRow
+        className="exp-research__run"
+        role="button"
+        tabIndex={0}
+        selected={selected}
+        current={selected}
+        aria-current={selected || undefined}
+        data-run-id={run.id}
+        codeTitle={title === undefined}
+        title={title ?? (run.codePreview || "(empty)")}
+        meta={
           <>
-            {" · "}
-            <code title={hash}>{hash.slice(0, 23)}…</code>
+            <StatusText status={pill.status} label={pill.label} detail={formatDuration(run, now)} />
+            <span>
+              {title === undefined && formatClock(run.startedAtMs)}
+              {run.owner.kind === "agent" && " · agent"}
+              {run.outputs.some((a) => a.kind === "figure") && " · figure"}
+              {run.outputs.some((a) => a.kind === "table") && " · table"}
+            </span>
           </>
-        )}
-        {unsaved &&
-          (code
-            ? " · unsaved buffer (its exact text is kept in the run manifest)"
-            : " · unsaved buffer (only its digest is recorded)")}
-      </dd>
-    </>
-  );
-}
-
-function ArtifactFact({ artifact }: { artifact: ArtifactRecord }) {
-  return (
-    <>
-      <dt>{artifact.kind === "figure" ? "Figure" : artifact.kind === "table" ? "Table" : "Output"}</dt>
-      <dd>
-        <code>{artifact.path}</code> · {formatBytes(artifact.sizeBytes)} ·{" "}
-        <code title={artifact.contentHash}>{artifact.contentHash.slice(0, 23)}…</code>
-      </dd>
-    </>
+        }
+        onClick={onSelect}
+        onKeyDown={onKeyDown}
+      />
+    </li>
   );
 }
 
@@ -684,36 +763,14 @@ export function RunHistory() {
   const now = useNow(runs.some(isActiveRun));
   return (
     <div className="exp-research__history">
-      <h3 className="exp-research__history-title">Runs</h3>
+      <PanelHeader title="Runs" />
       {visible.length === 0 ? (
         <EmptyState fill={false} title="No runs yet" description="Every run is recorded with its inputs and versions." />
       ) : (
         <ul className="exp-research__runs" aria-label="Run history" data-testid="research-history">
-          {visible.map((run) => {
-            const pill = runPill(run);
-            return (
-              <li key={run.id} className="exp-research__run" data-selected={run.id === selected || undefined}>
-                <button
-                  type="button"
-                  className="exp-research__run-select"
-                  aria-current={run.id === selected || undefined}
-                  data-run-id={run.id}
-                  onClick={() => void selectRun(run.id)}
-                >
-                  <span className="exp-research__run-code">{run.codePreview || "(empty)"}</span>
-                  <span className="exp-research__run-meta">
-                    <StatusPill size="sm" status={pill.status} label={pill.label} detail={formatDuration(run, now)} />
-                    <span className="exp-muted">
-                      {formatClock(run.startedAtMs)}
-                      {run.owner.kind === "agent" && " · agent"}
-                      {run.outputs.some((a) => a.kind === "figure") && " · figure"}
-                      {run.outputs.some((a) => a.kind === "table") && " · table"}
-                    </span>
-                  </span>
-                </button>
-              </li>
-            );
-          })}
+          {visible.map((run) => (
+            <RunRow key={run.id} run={run} now={now} selected={run.id === selected} onSelect={() => void selectRun(run.id)} />
+          ))}
         </ul>
       )}
     </div>

@@ -98,7 +98,7 @@ export function AssociateDeclarationDialog({ target, declarations, onClose, onAs
           isInvalid={tooLong}
           errorMessage={tooLong ? "The note is longer than 500 characters." : undefined}
         />
-        <p className="xp-muted" data-testid="graph-associate-note">
+        <p className="ui-muted" data-testid="graph-associate-note">
           {CORRESPONDENCE_NOTE}
         </p>
         {error && (
@@ -130,7 +130,7 @@ export function AssociateDeclarationAction({
         Associate a Lean declaration…
       </Button>
       {none && (
-        <p className="xp-muted" data-testid="graph-associate-unavailable">
+        <p className="ui-muted" data-testid="graph-associate-unavailable">
           No formal declarations in this project yet. Check a Lean file and record its audited declarations to associate one.
         </p>
       )}

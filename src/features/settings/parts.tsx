@@ -1,10 +1,13 @@
-// Layout pieces shared by the settings sections (structure only; controls come
-// from src/ui/components).
+// Layout pieces shared by the settings sections (structure only; controls,
+// headers, sections, and text roles come from src/ui/components).
 import { useId, type ReactNode } from "react";
 
-import { cx } from "../../ui/components";
+import { PageHeader, Section } from "../../ui/components";
 
-/** One settings page: title, short description, then groups. */
+/**
+ * One settings page: the shared page header (title and page actions), then a
+ * scrolling body at the reading width with the short description and groups.
+ */
 export function SettingsPage({
   title,
   description,
@@ -21,48 +24,43 @@ export function SettingsPage({
   const id = useId();
   return (
     <section className="exp-settings__page" aria-labelledby={id} data-testid={testId}>
-      <header className="exp-settings__page-header">
-        <div className="exp-settings__page-heading">
-          <h2 id={id} className="exp-settings__page-title">
-            {title}
-          </h2>
-          {description && <p className="exp-settings__page-description">{description}</p>}
+      <PageHeader title={title} titleId={id} actions={actions} />
+      <div className="exp-settings__body">
+        <div className="exp-settings__content">
+          {description && <p className="exp-settings__description ui-meta">{description}</p>}
+          {children}
         </div>
-        {actions && <div className="exp-settings__page-actions">{actions}</div>}
-      </header>
-      {children}
+      </div>
     </section>
   );
 }
 
-/** A titled group of related settings within a page. */
+/**
+ * A titled group of related settings within a page: a content Section (the
+ * sentence-case section title, a muted count or fact, trailing actions) with
+ * an optional short description before its rows.
+ */
 export function SettingsGroup({
   title,
+  count,
   description,
   actions,
   children,
-  className,
   testId,
 }: {
   title: string;
+  /** Muted fact after the title, e.g. "(2 · 3.0 MiB)". */
+  count?: string;
   description?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
-  className?: string;
   testId?: string;
 }) {
-  const id = useId();
   return (
-    <section className={cx("exp-settings__group", className)} aria-labelledby={id} data-testid={testId}>
-      <div className="exp-settings__group-header">
-        <h3 id={id} className="exp-settings__group-title">
-          {title}
-        </h3>
-        {actions && <div className="exp-settings__group-actions">{actions}</div>}
-      </div>
-      {description && <p className="exp-settings__group-description">{description}</p>}
+    <Section title={title} count={count} actions={actions} data-testid={testId}>
+      {description && <p className="exp-settings__group-description ui-meta">{description}</p>}
       {children}
-    </section>
+    </Section>
   );
 }
 
@@ -98,7 +96,7 @@ export function SettingRow({
           {label}
         </div>
         {description && (
-          <div className="exp-settings__row-description" id={descriptionId}>
+          <div className="exp-settings__row-description ui-meta" id={descriptionId}>
             {description}
           </div>
         )}

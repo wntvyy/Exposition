@@ -12,12 +12,26 @@ import type { RunManifest } from "../../bindings/RunManifest";
 import type { SourceInspection } from "../../bindings/SourceInspection";
 import { graphCommands } from "../../lib/graphIpc";
 import { commands } from "../../lib/ipc";
-import { Banner, Button, Checkbox, EmptyState, Section, Select, StatusPill, TextField } from "../../ui/components";
+import {
+  Banner,
+  Button,
+  Checkbox,
+  EmptyState,
+  InspectorBody,
+  InspectorHeader,
+  KeyValueList,
+  Section,
+  Select,
+  StatusPill,
+  StatusText,
+  TextField,
+  type KeyValueItem,
+} from "../../ui/components";
 import { fileKey } from "../editor/documentClient";
 import { GraphDependencies } from "./GraphInspect";
-import { formatBytes, formatClock, runPill } from "./model";
+import { formatBytes, formatClock, isActiveRun, runPill } from "./model";
 import { PromotionControls, lifecyclePill } from "./Promotion";
-import { Provenance } from "./ResearchPanel";
+import { Provenance, RunRow, useNow } from "./ResearchPanel";
 import {
   loadExperiment,
   runExperiment,
@@ -45,52 +59,53 @@ function FileInspector({ path }: { path: string }) {
     [listing, path],
   );
   const script = /\.(py|r|jl|ipy)$/i.test(path);
+  const facts: KeyValueItem[] = [{ key: "path", label: "Path", value: path, code: true }];
+  if (file) {
+    facts.push({ key: "roles", label: "Roles", value: file.roles.join(", ") || "—" });
+    if (file.sizeBytes !== null) facts.push({ key: "size", label: "Size", value: formatBytes(file.sizeBytes) });
+  }
+  if (file?.origin) {
+    const origin = file.origin;
+    facts.push({
+      key: "imported",
+      label: "Imported",
+      valueProps: { "data-testid": "research-import-origin" },
+      value: (
+        <>
+          {origin.mode === "copy" ? "Copied" : "Referenced"} from <code className="ui-code">{origin.source}</code> on{" "}
+          {formatClock(origin.importedAtMs)} · sha256 <code className="ui-code">{origin.contentHash.slice(0, 12)}…</code>
+        </>
+      ),
+    });
+  }
   return (
-    <div data-testid="research-inspector" data-kind="file" data-path={path}>
-      <h3 className="exp-rinspector__title">{path.split("/").pop()}</h3>
-      <dl className="exp-research__facts">
-        <dt>Path</dt>
-        <dd>
-          <code>{path}</code>
-        </dd>
-        {file && (
+    <div className="exp-rinspector" data-testid="research-inspector" data-kind="file" data-path={path}>
+      <InspectorHeader
+        title={path.split("/").pop()}
+        actions={
           <>
-            <dt>Roles</dt>
-            <dd>{file.roles.join(", ") || "—"}</dd>
-            {file.sizeBytes !== null && (
-              <>
-                <dt>Size</dt>
-                <dd>{formatBytes(file.sizeBytes)}</dd>
-              </>
+            {script && (
+              <Button size="sm" icon={Play} onPress={() => void runFile(path)}>
+                Run file
+              </Button>
             )}
+            <Button size="sm" icon={ExternalLink} onPress={() => openInEditorPage(path)}>
+              Open in Editor
+            </Button>
           </>
-        )}
-        {file?.origin && (
-          <>
-            <dt>Imported</dt>
-            <dd data-testid="research-import-origin">
-              {file.origin.mode === "copy" ? "Copied" : "Referenced"} from <code>{file.origin.source}</code> on{" "}
-              {formatClock(file.origin.importedAtMs)} · sha256 <code>{file.origin.contentHash.slice(0, 12)}…</code>
-            </dd>
-          </>
-        )}
-      </dl>
-      <div className="exp-rinspector__actions">
-        {script && (
-          <Button size="sm" variant="primary" icon={Play} onPress={() => void runFile(path)}>
-            Run file
-          </Button>
-        )}
-        <Button size="sm" icon={ExternalLink} onPress={() => openInEditorPage(path)}>
-          Open in Editor
-        </Button>
+        }
+      />
+      <div className="exp-rinspector__facts">
+        <KeyValueList items={facts} />
       </div>
-      <DeclaredInFile path={path} revision={revision} />
-      {file?.entity ? (
-        <GraphDependencies entity={file.entity} revision={revision} />
-      ) : (
-        <p className="exp-muted">{listing?.graphUnavailable ?? "Not yet in the project graph."}</p>
-      )}
+      <InspectorBody>
+        <DeclaredInFile path={path} revision={revision} />
+        {file?.entity ? (
+          <GraphDependencies entity={file.entity} revision={revision} />
+        ) : (
+          <p className="ui-meta exp-rinspector__note">{listing?.graphUnavailable ?? "Not yet in the project graph."}</p>
+        )}
+      </InspectorBody>
     </div>
   );
 }
@@ -110,20 +125,21 @@ function DeclaredInFile({ path, revision }: { path: string; revision: number | n
   }, [path, revision]);
   if (!inspection) return null;
   return (
-    <Section title={`In this file (${inspection.entities.length})`} collapsible defaultExpanded={inspection.entities.length > 0}>
-      <div data-testid="research-in-file" data-coverage={inspection.coverage?.state ?? "unknown"}>
+    <Section title="In this file" count={inspection.entities.length} collapsible defaultExpanded={inspection.entities.length > 0}>
+      <div className="exp-rinspector__stack" data-testid="research-in-file" data-coverage={inspection.coverage?.state ?? "unknown"}>
         {inspection.entities.length === 0 ? (
-          <p className="exp-muted">No declarations or findings are bound to this file.</p>
+          <p className="ui-meta">No declarations or findings are bound to this file.</p>
         ) : (
           <ul className="exp-graph__list">
             {inspection.entities.map((e) => (
               <li key={e.entity.id}>
-                {e.entity.kind} <strong>{e.entity.label}</strong> <span className="exp-muted">({e.binding.state})</span>
+                {e.entity.kind} <span className="exp-graph__name">{e.entity.label}</span>{" "}
+                <span className="ui-meta">({e.binding.state})</span>
               </li>
             ))}
           </ul>
         )}
-        <p className="exp-muted">
+        <p className="ui-meta">
           Extraction: {inspection.coverage ? inspection.coverage.state : "not indexed yet (coverage unknown)"}
         </p>
       </div>
@@ -131,15 +147,27 @@ function DeclaredInFile({ path, revision }: { path: string; revision: number | n
   );
 }
 
-function RunFacts({ runId }: { runId: string }) {
+/** The run behind an item (its state and a way to show its output), then its provenance. */
+function RunSections({ runId }: { runId: string }) {
   const run = useResearch((s) => s.runs.find((r) => r.id === runId));
-  if (!run) return <p className="exp-muted">Run {runId} is not in the run history of this project.</p>;
+  if (!run) {
+    return (
+      <Section title="Run">
+        <p className="ui-meta">Run {runId} is not in the run history of this project.</p>
+      </Section>
+    );
+  }
   const pill = runPill(run);
   return (
     <>
-      <Button size="sm" variant="ghost" onPress={() => void selectRun(run.id)}>
-        <StatusPill size="sm" status={pill.status} label={pill.label} /> Show run output
-      </Button>
+      <Section title="Run">
+        <div className="exp-rinspector__run">
+          <StatusText status={pill.status} label={pill.label} />
+          <Button size="sm" variant="ghost" onPress={() => void selectRun(run.id)}>
+            Show run output
+          </Button>
+        </div>
+      </Section>
       <Provenance run={run} />
     </>
   );
@@ -152,64 +180,71 @@ function ResultInspector({ entity }: { entity: EntityId }) {
   const artifact = run?.outputs.find((a) => a.id === result?.artifactId);
   if (!result) return <EmptyState title="Result not found" description="It may have been removed from the project graph." />;
   const pill = lifecyclePill(result);
+  const facts: KeyValueItem[] = [
+    { key: "path", label: "Path", value: result.path, code: true },
+    {
+      key: "kind",
+      label: "Kind",
+      value: `${result.kind ?? "output"} · ${result.mediaType} · roles ${result.roles.join(" + ")}`,
+    },
+  ];
+  if (result.contentHash) {
+    facts.push({
+      key: "digest",
+      label: "Digest",
+      value: (
+        <code className="ui-code" title={result.contentHash}>
+          sha256 {result.contentHash.slice(0, 16)}…
+        </code>
+      ),
+    });
+  }
+  facts.push({
+    key: "usedBy",
+    label: "Used by",
+    valueProps: { "data-testid": "research-result-used-by" },
+    value: result.usedBy.length === 0 ? "no manuscript" : result.usedBy.map((u) => u.label).join(", "),
+  });
   return (
-    <div data-testid="research-inspector" data-kind="result" data-entity={entity} data-lifecycle={result.lifecycle}>
-      <h3 className="exp-rinspector__title">
-        {result.label} <StatusPill size="sm" status={pill.status} label={pill.label} />
-      </h3>
-      <dl className="exp-research__facts">
-        <dt>Path</dt>
-        <dd>
-          <code>{result.path}</code>
-        </dd>
-        <dt>Kind</dt>
-        <dd>
-          {result.kind ?? "output"} · {result.mediaType} · roles {result.roles.join(" + ")}
-        </dd>
-        {result.contentHash && (
+    <div className="exp-rinspector" data-testid="research-inspector" data-kind="result" data-entity={entity} data-lifecycle={result.lifecycle}>
+      <InspectorHeader
+        title={result.label}
+        meta={<StatusPill size="sm" status={pill.status} label={pill.label} />}
+        actions={
           <>
-            <dt>Digest</dt>
-            <dd>
-              <code title={result.contentHash}>sha256 {result.contentHash.slice(0, 16)}…</code>
-            </dd>
+            {result.lifecycle !== "active" && (
+              <Button size="sm" icon={BookmarkCheck} onPress={() => void setResultState(entity, "active")}>
+                Keep
+              </Button>
+            )}
+            {result.lifecycle !== "archived" && (
+              <Button size="sm" variant="ghost" icon={Archive} onPress={() => void setResultState(entity, "archived")}>
+                Archive
+              </Button>
+            )}
+            {result.lifecycle !== "discarded" && (
+              <Button size="sm" variant="ghost" icon={Trash2} onPress={() => void setResultState(entity, "discarded")}>
+                Discard
+              </Button>
+            )}
           </>
+        }
+      />
+      <div className="exp-rinspector__facts">
+        <KeyValueList items={facts} />
+        {result.lifecycle === "discarded" && result.usedBy.length > 0 && (
+          <Banner tone="info" title="Discarded, still attached">
+            Discarding never removes an attachment: {result.usedBy.map((u) => u.label).join(", ")} still uses this file.
+          </Banner>
         )}
-        <dt>Used by</dt>
-        <dd data-testid="research-result-used-by">
-          {result.usedBy.length === 0 ? "no manuscript" : result.usedBy.map((u) => u.label).join(", ")}
-        </dd>
-      </dl>
-      <div className="exp-rinspector__actions">
-        {result.lifecycle !== "active" && (
-          <Button size="sm" icon={BookmarkCheck} onPress={() => void setResultState(entity, "active")}>
-            Keep
-          </Button>
-        )}
-        {result.lifecycle !== "archived" && (
-          <Button size="sm" icon={Archive} onPress={() => void setResultState(entity, "archived")}>
-            Archive
-          </Button>
-        )}
-        {result.lifecycle !== "discarded" && (
-          <Button size="sm" icon={Trash2} onPress={() => void setResultState(entity, "discarded")}>
-            Discard
-          </Button>
+        {run && artifact && (artifact.kind === "figure" || artifact.kind === "table") && (
+          <PromotionControls run={run} artifact={artifact} />
         )}
       </div>
-      {result.lifecycle === "discarded" && result.usedBy.length > 0 && (
-        <Banner tone="info" title="Discarded, still attached">
-          Discarding never removes an attachment: {result.usedBy.map((u) => u.label).join(", ")} still uses this file.
-        </Banner>
-      )}
-      {run && artifact && (artifact.kind === "figure" || artifact.kind === "table") && (
-        <PromotionControls run={run} artifact={artifact} />
-      )}
-      {result.runId && (
-        <Section title="Run" collapsible defaultExpanded>
-          <RunFacts runId={result.runId} />
-        </Section>
-      )}
-      <GraphDependencies entity={entity} revision={listing?.graphRevision} />
+      <InspectorBody>
+        {result.runId && <RunSections runId={result.runId} />}
+        <GraphDependencies entity={entity} revision={listing?.graphRevision} />
+      </InspectorBody>
     </div>
   );
 }
@@ -226,6 +261,7 @@ function ExperimentEditor({ entity }: { entity: EntityId | null }) {
   const [saving, setSaving] = useState(false);
   // Attempts follow run history: reload when a run finishes.
   const finishedRuns = useResearch((s) => s.runs.filter((r) => r.status.kind !== "running").length);
+  const now = useNow(Boolean(detail?.attempts.some(isActiveRun)));
   useEffect(() => {
     if (entity) void loadExperiment(entity);
   }, [entity, finishedRuns]);
@@ -238,7 +274,7 @@ function ExperimentEditor({ entity }: { entity: EntityId | null }) {
     setOutcomes(detail?.outcomes.map((o) => o.entity) ?? []);
   }, [detail]);
 
-  if (entity && !detail) return <p className="exp-muted">Loading the experiment…</p>;
+  if (entity && !detail) return <p className="ui-meta exp-rinspector__note">Loading the experiment…</p>;
   const scripts = (listing?.sources ?? []).filter((f) => f.roles.includes("script"));
   const inputChoices = [...(listing?.data ?? []), ...(listing?.sources ?? []).filter((f) => !f.roles.includes("script"))];
   const toggle = (list: string[], value: string, on: boolean) => (on ? [...list, value] : list.filter((v) => v !== value));
@@ -256,75 +292,78 @@ function ExperimentEditor({ entity }: { entity: EntityId | null }) {
     setSaving(false);
   };
   return (
-    <div data-testid="research-inspector" data-kind="experiment" data-entity={entity ?? "new"}>
-      <h3 className="exp-rinspector__title">{entity ? "Experiment" : "New experiment"}</h3>
-      <p className="exp-muted">
-        An experiment records an objective and procedure, its declared inputs, and its retained outcomes. Past runs are
-        attempts, not experiments.
-      </p>
-      <TextField label="Title" value={title} onChange={setTitle} />
-      <TextField label="Objective" value={objective} onChange={setObjective} />
-      <Select<string>
-        label="Procedure (script)"
-        placeholder={scripts.length ? "Choose a script" : "Create a script in Sources first"}
-        options={scripts.map((s) => ({ id: s.path, label: s.name }))}
-        value={procedure}
-        onChange={setProcedure}
-      />
-      <Section title="Declared inputs">
-        {inputChoices.length === 0 ? (
-          <p className="exp-muted">No data in the research space yet.</p>
-        ) : (
-          inputChoices.map((f) => (
-            <Checkbox key={f.path} isSelected={inputs.includes(f.path)} onChange={(on) => setInputs((l) => toggle(l, f.path, on))}>
-              {f.name}
-            </Checkbox>
-          ))
-        )}
-      </Section>
-      <Section title="Outcomes (retained results)">
-        {(listing?.results ?? []).length === 0 ? (
-          <p className="exp-muted">Keep a figure or table from a run to add it here.</p>
-        ) : (
-          (listing?.results ?? []).map((r) => (
-            <Checkbox key={r.entity} isSelected={outcomes.includes(r.entity)} onChange={(on) => setOutcomes((l) => toggle(l, r.entity, on))}>
-              {r.label}
-            </Checkbox>
-          ))
-        )}
-      </Section>
-      <div className="exp-rinspector__actions">
-        <Button size="sm" variant="primary" icon={Save} isPending={saving} isDisabled={!title.trim()} onPress={() => void save()}>
-          Save experiment
-        </Button>
-        {detail?.procedure && (
-          <Button size="sm" icon={Play} onPress={() => void runExperiment(detail)}>
-            Run procedure
+    <div className="exp-rinspector" data-testid="research-inspector" data-kind="experiment" data-entity={entity ?? "new"}>
+      <InspectorHeader title={entity ? "Experiment" : "New experiment"} />
+      <div className="exp-rinspector__facts">
+        <p className="ui-meta">
+          An experiment records an objective and procedure, its declared inputs, and its retained outcomes. Past runs are
+          attempts, not experiments.
+        </p>
+        <TextField label="Title" value={title} onChange={setTitle} />
+        <TextField label="Objective" value={objective} onChange={setObjective} />
+        <Select<string>
+          label="Procedure (script)"
+          placeholder={scripts.length ? "Choose a script" : "Create a script in Sources first"}
+          options={scripts.map((s) => ({ id: s.path, label: s.name }))}
+          value={procedure}
+          onChange={setProcedure}
+        />
+        <fieldset className="exp-rinspector__group">
+          <legend className="ui-group-label">Declared inputs</legend>
+          {inputChoices.length === 0 ? (
+            <p className="ui-meta">No data in the research space yet.</p>
+          ) : (
+            inputChoices.map((f) => (
+              <Checkbox key={f.path} isSelected={inputs.includes(f.path)} onChange={(on) => setInputs((l) => toggle(l, f.path, on))}>
+                {f.name}
+              </Checkbox>
+            ))
+          )}
+        </fieldset>
+        <fieldset className="exp-rinspector__group">
+          <legend className="ui-group-label">Outcomes (retained results)</legend>
+          {(listing?.results ?? []).length === 0 ? (
+            <p className="ui-meta">Keep a figure or table from a run to add it here.</p>
+          ) : (
+            (listing?.results ?? []).map((r) => (
+              <Checkbox key={r.entity} isSelected={outcomes.includes(r.entity)} onChange={(on) => setOutcomes((l) => toggle(l, r.entity, on))}>
+                {r.label}
+              </Checkbox>
+            ))
+          )}
+        </fieldset>
+        <div className="exp-rinspector__actions">
+          <Button size="sm" variant="primary" icon={Save} isPending={saving} isDisabled={!title.trim()} onPress={() => void save()}>
+            Save experiment
           </Button>
-        )}
+          {detail?.procedure && (
+            <Button size="sm" icon={Play} onPress={() => void runExperiment(detail)}>
+              Run procedure
+            </Button>
+          )}
+        </div>
       </div>
       {detail && (
-        <>
-          <Section title={`Attempts (${detail.attempts.length})`}>
+        <InspectorBody>
+          <Section title="Attempts" count={detail.attempts.length}>
             {detail.attempts.length === 0 ? (
-              <p className="exp-muted">No run of the procedure yet.</p>
+              <p className="ui-meta">No run of the procedure yet.</p>
             ) : (
-              <ul className="exp-graph__list" data-testid="research-attempts">
-                {detail.attempts.map((run) => {
-                  const pill = runPill(run);
-                  return (
-                    <li key={run.id}>
-                      <Button size="sm" variant="ghost" onPress={() => selectItem({ kind: "run", runId: run.id })}>
-                        <StatusPill size="sm" status={pill.status} label={pill.label} /> {formatClock(run.startedAtMs)}
-                      </Button>
-                    </li>
-                  );
-                })}
+              <ul className="exp-research__runs" data-testid="research-attempts">
+                {detail.attempts.map((run) => (
+                  <RunRow
+                    key={run.id}
+                    run={run}
+                    now={now}
+                    title={formatClock(run.startedAtMs)}
+                    onSelect={() => selectItem({ kind: "run", runId: run.id })}
+                  />
+                ))}
               </ul>
             )}
           </Section>
           <GraphDependencies entity={detail.summary.entity} revision={detail.graphRevision} />
-        </>
+        </InspectorBody>
       )}
     </div>
   );
@@ -337,27 +376,33 @@ function WorkflowInspector({ entity }: { entity: EntityId }) {
   const resource = { key: `workflow:${entity}`, title: workflow?.label ?? "Workflow" };
   const editor = registry.editorFor(resource);
   return (
-    <div data-testid="research-inspector" data-kind="workflow" data-entity={entity}>
-      <h3 className="exp-rinspector__title">{workflow?.label ?? "Workflow"}</h3>
-      {editor ? (
-        <Button
-          size="sm"
-          variant="primary"
-          onPress={() => {
-            editors.open(resource);
-            pages.show(EDITOR_PAGE);
-          }}
-        >
-          Open in the workflow editor
-        </Button>
-      ) : (
+    <div className="exp-rinspector" data-testid="research-inspector" data-kind="workflow" data-entity={entity}>
+      <InspectorHeader
+        title={workflow?.label ?? "Workflow"}
+        actions={
+          editor && (
+            <Button
+              size="sm"
+              onPress={() => {
+                editors.open(resource);
+                pages.show(EDITOR_PAGE);
+              }}
+            >
+              Open in the workflow editor
+            </Button>
+          )
+        }
+      />
+      {!editor && (
         <EmptyState
           fill={false}
           title="The workflow editor is not available"
           description="Saved workflow definitions are listed here read-only."
         />
       )}
-      <GraphDependencies entity={entity} revision={listing?.graphRevision} />
+      <InspectorBody>
+        <GraphDependencies entity={entity} revision={listing?.graphRevision} />
+      </InspectorBody>
     </div>
   );
 }
@@ -367,21 +412,29 @@ function ReferenceInspector({ entity }: { entity: EntityId }) {
   const reference = listing?.references.find((r) => r.entity === entity);
   if (!reference) return <EmptyState title="Reference not found" />;
   return (
-    <div data-testid="research-inspector" data-kind="reference" data-entity={entity}>
-      <h3 className="exp-rinspector__title">{reference.label}</h3>
-      <dl className="exp-research__facts">
-        <dt>Location</dt>
-        <dd>
-          <code>{reference.origin.source}</code>
-        </dd>
-        <dt>When referenced</dt>
-        <dd>
-          {formatClock(reference.origin.importedAtMs)} · {formatBytes(reference.origin.sizeBytes)} · sha256{" "}
-          <code>{reference.origin.contentHash.slice(0, 12)}…</code>
-        </dd>
-      </dl>
-      <p className="exp-muted">A read-only reference: Exposition never copies, crawls, or runs it.</p>
-      <GraphDependencies entity={entity} revision={listing?.graphRevision} />
+    <div className="exp-rinspector" data-testid="research-inspector" data-kind="reference" data-entity={entity}>
+      <InspectorHeader title={reference.label} />
+      <div className="exp-rinspector__facts">
+        <KeyValueList
+          items={[
+            { key: "location", label: "Location", value: reference.origin.source, code: true },
+            {
+              key: "when",
+              label: "When referenced",
+              value: (
+                <>
+                  {formatClock(reference.origin.importedAtMs)} · {formatBytes(reference.origin.sizeBytes)} · sha256{" "}
+                  <code className="ui-code">{reference.origin.contentHash.slice(0, 12)}…</code>
+                </>
+              ),
+            },
+          ]}
+        />
+        <p className="ui-meta">A read-only reference: Exposition never copies, crawls, or runs it.</p>
+      </div>
+      <InspectorBody>
+        <GraphDependencies entity={entity} revision={listing?.graphRevision} />
+      </InspectorBody>
     </div>
   );
 }
@@ -399,13 +452,16 @@ function RunInspector({ runId }: { runId: string }) {
     };
   }, [runId]);
   return (
-    <div data-testid="research-inspector" data-kind="run" data-run={runId}>
-      <h3 className="exp-rinspector__title">Run {runId}</h3>
-      <p className="exp-muted">
-        Runs are operational history: they stay inspectable here and become part of the graph only through results you keep.
-      </p>
-      {manifest && <p>{manifest.record.outputs.length} outputs</p>}
-      <RunFacts runId={runId} />
+    <div className="exp-rinspector" data-testid="research-inspector" data-kind="run" data-run={runId}>
+      <InspectorHeader title={`Run ${runId}`} meta={manifest && <span>{manifest.record.outputs.length} outputs</span>} />
+      <div className="exp-rinspector__facts">
+        <p className="ui-meta">
+          Runs are operational history: they stay inspectable here and become part of the graph only through results you keep.
+        </p>
+      </div>
+      <InspectorBody>
+        <RunSections runId={runId} />
+      </InspectorBody>
     </div>
   );
 }

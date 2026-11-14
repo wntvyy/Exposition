@@ -202,7 +202,7 @@ export async function revokeTrust(root: TrustedRoot): Promise<boolean> {
     title: "Revoke trust for this folder?",
     message: (
       <div className="exp-settings__confirm" data-testid="revoke-dialog">
-        <code className="exp-settings__path">{root.path}</code>
+        <code className="ui-code exp-settings__path">{root.path}</code>
         <p>
           Builds, kernels, Lean servers, and commands running in this folder are stopped now. Nothing in it runs again
           until you trust it again (Exposition asks when an action needs it).
@@ -213,7 +213,7 @@ export async function revokeTrust(root: TrustedRoot): Promise<boolean> {
             <ul className="exp-settings__locations">
               {nested.map((p) => (
                 <li key={p}>
-                  <code className="exp-settings__path">{p}</code>
+                  <code className="ui-code exp-settings__path">{p}</code>
                 </li>
               ))}
             </ul>

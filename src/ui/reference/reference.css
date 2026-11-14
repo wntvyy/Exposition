@@ -55,7 +55,7 @@
 .ref-section__body > * {
   min-width: 0;
 }
-.ref-section__body > :is(.ref-swatch-groups, .ref-type, .ref-states, .ref-stack, .ref-table, .ref-split, .ref-tree-frame, .ref-monaco, .ui-state) {
+.ref-section__body > :is(.ref-swatch-groups, .ref-type, .ref-states, .ref-stack, .ref-table, .ref-split, .ref-tree-frame, .ref-monaco, .ui-state, .ui-simple-table, .ref-wide-frame, .ref-canvas-frame) {
   grid-column: 1 / -1;
 }
 
@@ -254,25 +254,6 @@
   border-collapse: collapse;
   font-size: var(--font-size-md);
 }
-.ref-table th,
-.ref-table td {
-  padding: var(--space-1-5) var(--space-2);
-  border-bottom: var(--border-width) solid var(--color-border-subtle);
-  text-align: left;
-}
-.ref-table th {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-label);
-  text-transform: uppercase;
-}
-.ref-table code {
-  color: var(--color-text-subtle);
-  font-size: var(--font-size-sm);
-  overflow-wrap: anywhere;
-}
-
 .ref-split {
   height: 120px;
   border: var(--border-width) solid var(--color-border);
@@ -293,4 +274,57 @@
   border: var(--border-width) solid var(--color-border);
   border-radius: var(--radius-md);
   overflow: hidden;
+}
+
+/* UI rework specimens */
+.ref-panel-frame.ref-wide-frame {
+  width: 100%;
+  height: auto;
+}
+.ref-inspector-frame {
+  width: 340px;
+  max-width: 100%;
+  height: auto;
+}
+.ref-type-math {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-graph-math-text);
+}
+.ref-plain-list {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ref-link {
+  color: var(--color-accent-text);
+}
+.ref-list-frame {
+  width: 100%;
+  max-width: 520px;
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--color-surface);
+}
+.ref-canvas-frame {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-graph-canvas);
+  background-image: radial-gradient(var(--color-graph-grid) 1px, transparent 1.5px);
+  background-size: 16px 16px;
+}
+.ref-node {
+  width: 208px;
+  min-height: 64px;
+}
+.ref-state-frame--compact {
+  min-height: 0;
 }

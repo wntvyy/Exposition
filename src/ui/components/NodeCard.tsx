@@ -12,7 +12,7 @@ export interface NodeCardProps {
   typeIcon?: IconComponent;
   /** Color category (tokens `--color-graph-<category>-*`). */
   category: GraphCategory;
-  /** Status badges, separate from the type (`Badge` / `StatusPill size="sm"`). */
+  /** Status badges, separate from the type (`Badge` with an icon). */
   badges?: ReactNode;
   /** Trailing control in the header (e.g. a collapse toggle). */
   action?: ReactNode;
@@ -22,13 +22,17 @@ export interface NodeCardProps {
   /** Archived/inactive item: dashed outline. */
   inactive?: boolean;
   className?: string;
+  /** Extra rows below the body that reach the card edges (e.g. workflow port rows with handles). */
+  children?: ReactNode;
 }
 
 /**
- * The colored rectangle used for items on canvases (project graph, Mathematics
- * dependencies, later workflow steps): a type stripe and label in the
- * category's color, a concise title, and separate status badges. Purely
- * presentational; canvases own positioning, selection, and focus.
+ * The rectangle used for items on canvases (project graph, Mathematics
+ * dependencies, workflow steps): a neutral card whose type header band
+ * carries the category color (icon + type label as text), a concise title,
+ * and separate status badges. Type color never colors the body, the outline,
+ * or the selection, so statuses and selection stay distinct from types.
+ * Purely presentational; canvases own positioning, selection, and focus.
  */
 export function NodeCard({
   title,
@@ -41,6 +45,7 @@ export function NodeCard({
   dimmed,
   inactive,
   className,
+  children,
 }: NodeCardProps) {
   return (
     <div
@@ -49,6 +54,7 @@ export function NodeCard({
       data-selected={selected || undefined}
       data-dimmed={dimmed || undefined}
       data-inactive={inactive || undefined}
+      data-has-extra={children ? true : undefined}
     >
       <div className="ui-node-card__header">
         <span className="ui-node-card__type">
@@ -57,10 +63,13 @@ export function NodeCard({
         </span>
         {action}
       </div>
-      <p className="ui-node-card__title" title={title}>
-        {title}
-      </p>
-      {badges && <div className="ui-node-card__badges">{badges}</div>}
+      <div className="ui-node-card__body">
+        <p className="ui-node-card__title" title={title}>
+          {title}
+        </p>
+        {badges && <div className="ui-node-card__badges">{badges}</div>}
+      </div>
+      {children && <div className="ui-node-card__extra">{children}</div>}
     </div>
   );
 }

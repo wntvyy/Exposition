@@ -1,5 +1,6 @@
-// The workbench shell: activity rail, sidebar, editor area, bottom panel,
-// auxiliary panel, status bar, command palette, notifications, and dialogs.
+// The workbench shell: page bar, activity rail (Editor page), sidebar, editor
+// area, bottom panel, auxiliary panel, status bar, command palette,
+// notifications, and dialogs.
 // Regions render whatever features registered in `registry`; the shell never
 // imports feature internals.
 import "./shell/workbench.css";
@@ -15,6 +16,7 @@ import { layout, SIZE_LIMITS, useLayout, useVisibility, type Region } from "./la
 import { EDITOR_PAGE, registerPageCommands, usePages } from "./pages";
 import { registry } from "./registry";
 import { ActivityRail } from "./shell/ActivityRail";
+import { PageBar } from "./shell/PageBar";
 import { registerBuiltins } from "./shell/builtins";
 import { CommandPalette } from "./shell/CommandPalette";
 import { EditorArea } from "./shell/EditorArea";
@@ -145,6 +147,7 @@ export function Workbench() {
 
   return (
     <div className="wb" data-testid="workbench">
+      <PageBar />
       <div className="wb-main">
         <ActivityRail />
         <Pages editor={editorLayout} />

@@ -5,7 +5,7 @@
 // no installs, nothing sent to a model (the objective path's agent task
 // follows the provider settings and the permission chosen here).
 import { FolderOpen, FolderPlus, Sparkles } from "lucide-react";
-import { useEffect, useId } from "react";
+import { useEffect } from "react";
 
 import type { BlueprintDiagnostic } from "../../bindings/BlueprintDiagnostic";
 import type { CapabilityStatus } from "../../bindings/CapabilityStatus";
@@ -16,10 +16,12 @@ import {
   Checkbox,
   ErrorState,
   LoadingState,
+  PageHeader,
   SegmentedControl,
   Select,
   Spinner,
-  StatusPill,
+  StatusText,
+  TextArea,
   TextField,
 } from "../../ui/components";
 import { EXECUTION_LABELS, PERMISSION_LABELS } from "../agents/format";
@@ -36,33 +38,13 @@ import {
   type NewProjectMode,
 } from "./store";
 
-function TextArea(props: { label: string; value: string; onChange: (v: string) => void; rows?: number; testId?: string; placeholder?: string }) {
-  const id = useId();
-  return (
-    <div className="ui-field">
-      <label className="ui-field__label" htmlFor={id}>
-        {props.label}
-      </label>
-      <textarea
-        id={id}
-        className="ui-input xp-proj__textarea"
-        rows={props.rows ?? 4}
-        value={props.value}
-        placeholder={props.placeholder}
-        onChange={(e) => props.onChange(e.target.value)}
-        data-testid={props.testId}
-      />
-    </div>
-  );
-}
-
 function CapabilityRow({ status }: { status: CapabilityStatus }) {
   return (
     <li className="xp-proj__capability" data-capability={status.capability} data-available={status.available}>
       <span className="xp-proj__capability-name">{status.title}</span>
-      <StatusPill status={status.available ? "succeeded" : "unavailable"} label={status.available ? "Available" : "Not available"} />
-      <span className="xp-proj__muted">{status.detail}</span>
-      {!status.available && status.guidance && <span className="xp-proj__guidance">{status.guidance}</span>}
+      <StatusText status={status.available ? "succeeded" : "unavailable"} label={status.available ? "Available" : "Not available"} />
+      <span className="ui-meta">{status.detail}</span>
+      {!status.available && status.guidance && <span className="ui-meta xp-proj__guidance">{status.guidance}</span>}
     </li>
   );
 }
@@ -89,7 +71,7 @@ function Location() {
   const acceptTrusted = useProjects((s) => s.acceptTrusted);
   return (
     <section className="xp-proj__group" aria-label="Location">
-      <h3 className="xp-proj__group-title">Location</h3>
+      <h3 className="ui-section-title">Location</h3>
       <div className="xp-proj__row">
         <TextField
           className="xp-proj__grow"
@@ -106,7 +88,7 @@ function Location() {
       </div>
       {destination && (
         <p
-          className={destination.ok ? "xp-proj__muted" : "xp-proj__error"}
+          className={destination.ok ? "ui-meta" : "xp-proj__error"}
           data-testid="project-destination-status"
           data-ok={destination.ok}
           role={destination.ok ? undefined : "alert"}
@@ -146,17 +128,17 @@ function Preview() {
   const declares = (blueprint?.capabilities.length ?? 0) > 0;
   return (
     <section className="xp-proj__group" aria-label="What will be created" data-testid="project-preview" data-valid={preview.valid}>
-      <h3 className="xp-proj__group-title">What will be created</h3>
+      <h3 className="ui-section-title">What will be created</h3>
       <Diagnostics items={preview.diagnostics} />
       {s && (
         <div className="xp-proj__preview">
           <div>
-            <h4 className="xp-proj__subtitle">Files</h4>
+            <h4 className="ui-group-label">Files</h4>
             <ul className="xp-proj__files" data-testid="project-preview-files">
               {s.files.map((f) => (
                 <li key={f.path}>
                   <code>{f.path}</code>
-                  <span className="xp-proj__muted">
+                  <span className="ui-meta">
                     {f.bytes} B{f.roles.length ? ` · ${f.roles.join(", ")}` : " · not a project resource"}
                   </span>
                 </li>
@@ -164,26 +146,26 @@ function Preview() {
               {s.folders.map((f) => (
                 <li key={`d:${f}`}>
                   <code>{f}/</code>
-                  <span className="xp-proj__muted">folder</span>
+                  <span className="ui-meta">folder</span>
                 </li>
               ))}
-              {s.files.length === 0 && s.folders.length === 0 && <li className="xp-proj__muted">No files: an empty project.</li>}
+              {s.files.length === 0 && s.folders.length === 0 && <li className="ui-meta">No files: an empty project.</li>}
             </ul>
           </div>
           <div>
-            <h4 className="xp-proj__subtitle">Project structure</h4>
+            <h4 className="ui-group-label">Project structure</h4>
             <ul className="xp-proj__list" data-testid="project-preview-entities">
               {s.research && <li>Research space “{s.research}”</li>}
               {s.entities.map((e, i) => (
                 <li key={i}>
-                  {e.label} <span className="xp-proj__muted">({e.kind}{e.source ? ` in ${e.source}` : ""})</span>
+                  {e.label} <span className="ui-meta">({e.kind}{e.source ? ` in ${e.source}` : ""})</span>
                 </li>
               ))}
               {s.collections.map((c) => (
                 <li key={c}>Collection {c}</li>
               ))}
               {s.relations.map((r) => (
-                <li key={r} className="xp-proj__muted">
+                <li key={r} className="ui-meta">
                   {r}
                 </li>
               ))}
@@ -193,10 +175,10 @@ function Preview() {
                 </li>
               ))}
               {!s.research && s.entities.length === 0 && s.workflows.length === 0 && (
-                <li className="xp-proj__muted">Only the project itself.</li>
+                <li className="ui-meta">Only the project itself.</li>
               )}
             </ul>
-            <p className="xp-proj__muted">
+            <p className="ui-meta">
               {s.hasManuscript ? "Opens the manuscript in the Editor." : s.entry.kind === "research" ? "Research-only: opens the Research page." : "Opens the project's files."}
             </p>
           </div>
@@ -204,7 +186,7 @@ function Preview() {
       )}
       {declares && (
         <>
-          <h4 className="xp-proj__subtitle">Required tools (declared, never installed or run)</h4>
+          <h4 className="ui-group-label">Required tools (declared, never installed or run)</h4>
           {capabilities ? (
             <ul className="xp-proj__capabilities" data-testid="project-capabilities">
               {capabilities.map((c) => (
@@ -214,7 +196,7 @@ function Preview() {
           ) : reportError ? (
             <p className="xp-proj__error">Could not check installed tools: {reportError}</p>
           ) : (
-            <p className="xp-proj__muted xp-proj__checking" data-testid="project-capabilities-checking">
+            <p className="ui-meta xp-proj__checking" data-testid="project-capabilities-checking">
               <Spinner size="sm" aria-label="Checking" /> Checking which tools are installed…
             </p>
           )}
@@ -242,7 +224,7 @@ function PresetForm() {
   const runtimes = report?.runtimes ?? (["python", "r", "julia"] as const).map((runtime) => ({ runtime, available: false, detail: "Checking…" }));
   return (
     <section className="xp-proj__group" aria-label="Starting structure">
-      <h3 className="xp-proj__group-title">Starting structure</h3>
+      <h3 className="ui-section-title">Starting structure</h3>
       <div className="xp-proj__form">
         <Select
           label="Preset"
@@ -251,7 +233,7 @@ function PresetForm() {
           options={catalog.presets.map((p) => ({ id: p.id, label: p.title, description: p.description }))}
           data-testid="preset-select"
         />
-        <p className="xp-proj__muted xp-proj__wide">{preset.description}</p>
+        <p className="ui-meta xp-proj__wide">{preset.description}</p>
         <TextField label="Title" value={title} placeholder={preset.title} onChange={(v) => setOptions({ title: v })} data-testid="project-title" />
         {preset.manuscript && (
           <Select
@@ -301,7 +283,7 @@ function ObjectiveForm() {
   const execution = useProjects((s) => s.execution);
   return (
     <section className="xp-proj__group" aria-label="Objective">
-      <h3 className="xp-proj__group-title">Objective</h3>
+      <h3 className="ui-section-title">Objective</h3>
       <div className="xp-proj__form">
         <div className="xp-proj__wide">
           <TextArea
@@ -351,10 +333,9 @@ export function NewProjectView(_props: EditorProps) {
   const canCreate = mode === "preset" ? ready && Boolean(preview?.valid) : ready && objective.trim().length > 0;
   return (
     <div className="xp-proj" data-testid="new-project" data-mode={mode}>
-      <div className="xp-proj__page">
-        <header className="xp-proj__header">
-          <h2 className="xp-proj__title">New project</h2>
-          <p className="xp-proj__muted">Start from a preset, or describe an objective and let an agent organize the project. A project can be research-only — a manuscript is optional.</p>
+      <PageHeader
+        title="New project"
+        views={
           <SegmentedControl<NewProjectMode>
             aria-label="How to start"
             value={mode}
@@ -365,29 +346,34 @@ export function NewProjectView(_props: EditorProps) {
             ]}
             data-testid="new-project-mode"
           />
-        </header>
-        {mode === "preset" ? <PresetForm /> : <ObjectiveForm />}
-        <Location />
-        {mode === "preset" && <Preview />}
-        {error && (
-          <Banner tone="danger" title="The project was not created" live>
-            {error}
-          </Banner>
-        )}
-        <p className="xp-proj__muted" data-testid="project-authorization">
-          Creating a project writes only its starting files and records its structure. It does not grant trust, run any code, install anything, or send anything to a model provider.
-        </p>
-        <footer className="xp-proj__footer">
-          {mode === "preset" ? (
-            <Button variant="primary" icon={FolderPlus} isPending={creating} isDisabled={!canCreate || creating} onPress={() => void createFromPreset()} data-testid="project-create">
-              Create Project
-            </Button>
-          ) : (
-            <Button variant="primary" icon={Sparkles} isPending={creating} isDisabled={!canCreate || creating} onPress={() => void createFromObjective()} data-testid="objective-create">
-              Create and Start Agent
-            </Button>
+        }
+      />
+      <div className="xp-proj__scroll">
+        <div className="xp-proj__page">
+          <p className="ui-meta">Start from a preset, or describe an objective and let an agent organize the project. A project can be research-only — a manuscript is optional.</p>
+          {mode === "preset" ? <PresetForm /> : <ObjectiveForm />}
+          <Location />
+          {mode === "preset" && <Preview />}
+          {error && (
+            <Banner tone="danger" title="The project was not created" live>
+              {error}
+            </Banner>
           )}
-        </footer>
+          <p className="ui-meta" data-testid="project-authorization">
+            Creating a project writes only its starting files and records its structure. It does not grant trust, run any code, install anything, or send anything to a model provider.
+          </p>
+          <footer className="xp-proj__footer">
+            {mode === "preset" ? (
+              <Button variant="primary" icon={FolderPlus} isPending={creating} isDisabled={!canCreate || creating} onPress={() => void createFromPreset()} data-testid="project-create">
+                Create Project
+              </Button>
+            ) : (
+              <Button variant="primary" icon={Sparkles} isPending={creating} isDisabled={!canCreate || creating} onPress={() => void createFromObjective()} data-testid="objective-create">
+                Create and Start Agent
+              </Button>
+            )}
+          </footer>
+        </div>
       </div>
     </div>
   );

@@ -17,8 +17,10 @@ import {
   ErrorState,
   LoadingState,
   Select,
+  SimpleTable,
   Switch,
   TextField,
+  type SimpleTableColumn,
 } from "../../ui/components";
 import { loadAppSettings, updateAppSettings, useAppSettings } from "../editor/settings";
 import { useWorkspace } from "../workspace/store";
@@ -37,6 +39,8 @@ import {
   type TargetDraft,
 } from "./project";
 import { loadProjectSettings, saveProjectSettings, useSettings } from "./store";
+
+type LatexTarget = ReturnType<typeof latexTargets>[number];
 
 function StartupGroup() {
   const loaded = useAppSettings((s) => s.loaded);
@@ -170,9 +174,14 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
     return (
       <SettingsGroup title="LaTeX targets">
         <ErrorState
+          size="compact"
           title="Could not read the project settings"
           details={error}
-          actions={<Button onPress={() => void loadProjectSettings(root)}>Retry</Button>}
+          actions={
+            <Button size="sm" onPress={() => void loadProjectSettings(root)}>
+              Retry
+            </Button>
+          }
         />
       </SettingsGroup>
     );
@@ -180,7 +189,7 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
   if (!project) {
     return (
       <SettingsGroup title="LaTeX targets">
-        <LoadingState title="Loading project settings…" />
+        <LoadingState size="compact" title="Loading project settings…" />
       </SettingsGroup>
     );
   }
@@ -201,13 +210,86 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
     setDialog({ editing: null, initial: { name: uniqueName(stem, settings.targets), entry, engine: "pdfLatex" } });
   }
 
+  const columns: SimpleTableColumn<LatexTarget>[] = [
+    {
+      id: "name",
+      title: "Name",
+      width: "24%",
+      isRowHeader: true,
+      render: (target) => (
+        <>
+          <div>{target.name}</div>
+          {settings.defaultTarget === target.name && <div className="ui-meta">Default</div>}
+        </>
+      ),
+    },
+    { id: "entry", title: "Main file", render: (target) => <code className="ui-code exp-settings__path">{target.entry}</code> },
+    {
+      id: "engine",
+      title: "Engine",
+      width: "1%",
+      render: (target) => (
+        <Select
+          aria-label={`Engine of ${target.name}`}
+          value={target.engine as LatexEngine}
+          options={LATEX_ENGINES}
+          isDisabled={saving}
+          onChange={(engine) => {
+            if (engine !== target.engine) {
+              void save({
+                ...settings,
+                targets: settings.targets.map((t) => (t === target ? { ...t, engine } : t)),
+              });
+            }
+          }}
+          className="exp-settings__engine"
+        />
+      ),
+    },
+    {
+      id: "actions",
+      title: "Actions",
+      hideTitle: true,
+      width: "1%",
+      render: (target) => (
+        <div className="exp-settings__actions">
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={Pencil}
+            aria-label={`Edit target ${target.name}`}
+            isDisabled={saving}
+            onPress={() =>
+              setDialog({
+                editing: target.name,
+                initial: { name: target.name, entry: target.entry, engine: target.engine as LatexEngine },
+              })
+            }
+          >
+            Edit…
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={Trash2}
+            aria-label={`Remove target ${target.name}`}
+            isDisabled={saving}
+            onPress={() => void save(removeTarget(settings, target.name))}
+          >
+            Remove
+          </Button>
+        </div>
+      ),
+    },
+  ];
+
   return (
     <SettingsGroup
       title="LaTeX targets"
       testId="latex-targets"
       description={
         <>
-          How each .tex file of {name} is built, saved in <code className="exp-settings__path">.exposition/project.json</code>.
+          How each .tex file of {name} is built, saved in <code className="ui-code">.exposition/project.json</code>.
           A file without a target builds with pdfLaTeX.
         </>
       }
@@ -218,12 +300,12 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
       }
     >
       {project.warning && (
-        <Banner tone="warning" title="Invalid project settings were reset">
+        <Banner tone="warning" title="Invalid project settings were reset" className="exp-settings__notice">
           {project.warning}
         </Banner>
       )}
       {saveError && (
-        <div data-testid="project-save-error">
+        <div className="exp-settings__notice" data-testid="project-save-error">
           <Banner tone="danger" title="Could not save the project settings" live>
             {saveError}
           </Banner>
@@ -231,7 +313,7 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
       )}
       {targets.length === 0 ? (
         <EmptyState
-          fill={false}
+          size="compact"
           title="No LaTeX targets"
           description="Every .tex file builds with pdfLaTeX. Add a target to build a file with LuaLaTeX or to make it the project's default."
           actions={
@@ -241,79 +323,15 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
           }
         />
       ) : (
-        <table className="exp-settings__table exp-settings__table--targets" aria-busy={saving}>
-          <thead>
-            <tr>
-              <th scope="col" className="exp-settings__col-name">
-                Name
-              </th>
-              <th scope="col">Main file</th>
-              <th scope="col" className="exp-settings__col-fit">
-                Engine
-              </th>
-              <th scope="col" className="exp-settings__col-fit">
-                <span className="exp-settings__sr-only">Actions</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {targets.map((target) => (
-              <tr key={target.name} data-testid="latex-target" data-name={target.name} data-engine={target.engine}>
-                <th scope="row">
-                  {target.name}
-                  {settings.defaultTarget === target.name && <div className="exp-settings__muted">Default</div>}
-                </th>
-                <td>
-                  <code className="exp-settings__path">{target.entry}</code>
-                </td>
-                <td>
-                  <Select
-                    aria-label={`Engine of ${target.name}`}
-                    value={target.engine as LatexEngine}
-                    options={LATEX_ENGINES}
-                    isDisabled={saving}
-                    onChange={(engine) => {
-                      if (engine !== target.engine) {
-                        void save({
-                          ...settings,
-                          targets: settings.targets.map((t) => (t === target ? { ...t, engine } : t)),
-                        });
-                      }
-                    }}
-                    className="exp-settings__engine"
-                  />
-                </td>
-                <td className="exp-settings__actions">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    icon={Pencil}
-                    aria-label={`Edit target ${target.name}`}
-                    isDisabled={saving}
-                    onPress={() =>
-                      setDialog({
-                        editing: target.name,
-                        initial: { name: target.name, entry: target.entry, engine: target.engine as LatexEngine },
-                      })
-                    }
-                  >
-                    Edit…
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    icon={Trash2}
-                    aria-label={`Remove target ${target.name}`}
-                    isDisabled={saving}
-                    onPress={() => void save(removeTarget(settings, target.name))}
-                  >
-                    Remove
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <SimpleTable
+          aria-label="LaTeX targets"
+          aria-busy={saving}
+          className="exp-settings__table"
+          columns={columns}
+          rows={targets}
+          rowKey={(target) => target.name}
+          rowProps={(target) => ({ "data-testid": "latex-target", "data-name": target.name, "data-engine": target.engine })}
+        />
       )}
       {settings.targets.length > 0 && (
         <SettingRow
@@ -340,7 +358,7 @@ function TargetsGroup({ root, name }: { root: string; name: string }) {
         </SettingRow>
       )}
       {others > 0 && (
-        <p className="exp-settings__muted">
+        <p className="exp-settings__footnote ui-meta">
           {others} other target{others === 1 ? "" : "s"} (Typst or Markdown) in this file are kept unchanged.
         </p>
       )}
@@ -366,8 +384,8 @@ export function ProjectSection() {
       ) : (
         <SettingsGroup title="LaTeX targets">
           <EmptyState
-            fill={false}
-            icon={FolderOpen}
+            size="compact"
+              icon={FolderOpen}
             title="No folder open"
             description="Open a project folder to choose how its LaTeX files are built."
           />
