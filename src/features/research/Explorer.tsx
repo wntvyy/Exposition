@@ -28,8 +28,9 @@ import {
   MenuItem,
   Menu,
   MenuTrigger,
+  PanelHeader,
   Select,
-  StatusPill,
+  StatusText,
   TextField,
   Toolbar,
   Tree,
@@ -149,24 +150,29 @@ export function ResearchExplorer() {
   };
   return (
     <div className="exp-rexplorer" data-testid="research-explorer">
-      <Toolbar aria-label="Research space actions" className="exp-rexplorer__toolbar">
-        <IconButton icon={FilePlus2} size="sm" aria-label="New research file…" onPress={() => setCreating(true)} />
-        <MenuTrigger>
-          <IconButton icon={FileInput} size="sm" aria-label="Import a file…" />
-          <Menu aria-label="Import a file">
-            <MenuItem id="copy-data" onAction={() => void importInto("data", "copy")} description="The copy is a project file; its origin is recorded">
-              Copy into Data…
-            </MenuItem>
-            <MenuItem id="copy-sources" onAction={() => void importInto("sources", "copy")}>
-              Copy into Sources…
-            </MenuItem>
-            <MenuItem id="reference" onAction={() => void importInto("data", "reference")} description="Read-only; never copied, crawled, or run">
-              Reference a file (read-only)…
-            </MenuItem>
-          </Menu>
-        </MenuTrigger>
-        <IconButton icon={Plus} size="sm" aria-label="New experiment" onPress={() => selectItem({ kind: "experiment", entity: null })} />
-      </Toolbar>
+      <PanelHeader
+        title="Explorer"
+        actions={
+          <Toolbar aria-label="Research space actions">
+            <IconButton icon={FilePlus2} size="sm" aria-label="New research file…" onPress={() => setCreating(true)} />
+            <MenuTrigger>
+              <IconButton icon={FileInput} size="sm" aria-label="Import a file…" />
+              <Menu aria-label="Import a file">
+                <MenuItem id="copy-data" onAction={() => void importInto("data", "copy")} description="The copy is a project file; its origin is recorded">
+                  Copy into Data…
+                </MenuItem>
+                <MenuItem id="copy-sources" onAction={() => void importInto("sources", "copy")}>
+                  Copy into Sources…
+                </MenuItem>
+                <MenuItem id="reference" onAction={() => void importInto("data", "reference")} description="Read-only; never copied, crawled, or run">
+                  Reference a file (read-only)…
+                </MenuItem>
+              </Menu>
+            </MenuTrigger>
+            <IconButton icon={Plus} size="sm" aria-label="New experiment" onPress={() => selectItem({ kind: "experiment", entity: null })} />
+          </Toolbar>
+        }
+      />
       {creating && <NewFileDialog onClose={() => setCreating(false)} />}
       <div ref={ref} className="xp-ops-surface" onClickCapture={onClickCapture} onContextMenu={onContextMenu} data-testid="research-surface">
       <Tree
@@ -241,7 +247,7 @@ export function ResearchExplorer() {
                   r.lifecycle === "active" ? (
                     r.usedBy.length > 0 ? <span className="xp-tree-note">in {r.usedBy.length} doc</span> : undefined
                   ) : (
-                    <StatusPill size="sm" status="canceled" label={r.lifecycle === "archived" ? "Archived" : "Discarded"} />
+                    <StatusText status="canceled" label={r.lifecycle === "archived" ? "Archived" : "Discarded"} />
                   )
                 }
               />
@@ -260,7 +266,7 @@ export function ResearchExplorer() {
       </Tree>
       {menu.position && <OpContextMenu controller={menu} label="Research actions" actions={actions()} testId="research-context-menu" />}
       </div>
-      {listing.truncated && <p className="exp-muted">Some files are not listed (too many).</p>}
+      {listing.truncated && <p className="ui-meta exp-research__note">Some files are not listed (too many).</p>}
     </div>
   );
 }

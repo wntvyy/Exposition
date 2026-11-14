@@ -38,7 +38,7 @@ export function requestWorkspaceTrust(root: string): Promise<boolean> {
               privileges. They can read and change your files and can start other programs, including ones that keep
               running after Exposition stops the job. Trust only folders whose contents you trust.
             </p>
-            <p className="exp-muted">
+            <p className="ui-meta">
               Without trust you can still open and edit files. Restricted (container) execution stays available when it
               is configured.
             </p>

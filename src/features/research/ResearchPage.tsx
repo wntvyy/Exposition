@@ -7,7 +7,7 @@
 // graph dependencies). Enabling Research launches nothing; research works
 // without any manuscript.
 import { FlaskConical, FolderOpen, Play, PlayCircle, TextSelect, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Group, Panel as ResizablePanel } from "react-resizable-panels";
 
 import { useLayout } from "../../app/layout";
@@ -20,7 +20,10 @@ import {
   EmptyState,
   IconButton,
   LoadingState,
+  PageHeader,
+  PanelHeader,
   ResizeHandle,
+  StateSizeProvider,
   TabPanel,
   Tabs,
   Toolbar,
@@ -29,7 +32,7 @@ import { SourceEditor, handleForPath, type DocumentHandle } from "../editor";
 import { ExecutionModes } from "./ExecutionLabel";
 import { ResearchExplorer } from "./Explorer";
 import { ResearchInspector } from "./Inspector";
-import { CodeInput, EnvironmentNotice, RunHistory, RunOutputView, SessionBar } from "./ResearchPanel";
+import { CodeInput, EnvironmentNotice, RunHistory, RunOutputView, SessionBar, SessionStatus } from "./ResearchPanel";
 import {
   closeSource,
   enableResearch,
@@ -85,12 +88,12 @@ function SourceArea() {
   if (open.length === 0 || !active) {
     return (
       <div className="exp-rpage__sources" data-region="research-sources" aria-label="Research sources">
-      <EmptyState
-        fill
-        icon={FlaskConical}
-        title="No source open"
-        description="Select a source or data file in the research explorer to edit it here. Files open in the same document model as the Editor page."
-      />
+        <EmptyState
+          fill
+          icon={FlaskConical}
+          title="No source open"
+          description="Select a source or data file in the research explorer to edit it here. Files open in the same document model as the Editor page."
+        />
       </div>
     );
   }
@@ -115,7 +118,7 @@ function SourceArea() {
             <Button size="sm" variant="primary" icon={Play} isDisabled={!script} onPress={() => void runFile(active)}>
               Run file
             </Button>
-            <Button size="sm" icon={TextSelect} isDisabled={!script} onPress={() => void runSourceSelection(active)}>
+            <Button size="sm" variant="ghost" icon={TextSelect} isDisabled={!script} onPress={() => void runSourceSelection(active)}>
               Run selection
             </Button>
           </Toolbar>
@@ -137,11 +140,11 @@ function PendingPromotions() {
   return (
     <div data-testid="research-pending-promotions" data-count={pending.length}>
       <Banner tone="warning" title={`${pending.length} promotion${pending.length === 1 ? "" : "s"} need reconciliation`}>
-        <ul className="exp-graph__list">
+        <ul className="exp-rpage__pending">
           {pending.map((r) => (
             <li key={r.id} data-operation={r.id}>
               {r.description} —{" "}
-              <span className="exp-muted">
+              <span className="ui-meta">
                 {r.state.kind === "needsReconciliation" ? r.state.message : "interrupted before it finished"}
               </span>{" "}
               <Button size="sm" onPress={() => void reconcilePromotion(r.id)}>
@@ -158,6 +161,20 @@ function PendingPromotions() {
 /** Below this window width the inspector is an overlay drawer instead of a column (as on the Graph page). */
 const NARROW_WIDTH = 1100;
 
+/** The inspector pane's content: chrome header, then the selected item (states inside are compact). */
+function InspectorPane({ selected, actions }: { selected: ReturnType<typeof useSpace.getState>["selected"]; actions?: ReactNode }) {
+  return (
+    <>
+      <PanelHeader title="Inspector" actions={actions} />
+      <div className="exp-rpage__inspector-body">
+        <StateSizeProvider value="compact">
+          <ResearchInspector item={selected} />
+        </StateSizeProvider>
+      </div>
+    </>
+  );
+}
+
 /** Narrow windows: the inspector opens over the work area when something is selected; it can be closed. */
 function InspectorDrawer({ selected }: { selected: ReturnType<typeof useSpace.getState>["selected"] }) {
   const [open, setOpen] = useState(Boolean(selected));
@@ -165,14 +182,23 @@ function InspectorDrawer({ selected }: { selected: ReturnType<typeof useSpace.ge
   if (!open || !selected) return null;
   return (
     <aside className="exp-rpage__drawer" aria-label="Inspector" data-region="research-inspector" data-testid="research-inspector-drawer">
-      <header className="exp-rpage__drawer-bar">
-        <h2 className="exp-rpage__drawer-title">Inspector</h2>
-        <IconButton icon={X} size="sm" aria-label="Close inspector" onPress={() => setOpen(false)} />
-      </header>
-      <div className="exp-rpage__inspector">
-        <ResearchInspector item={selected} />
-      </div>
+      <InspectorPane
+        selected={selected}
+        actions={<IconButton icon={X} size="sm" aria-label="Close inspector" onPress={() => setOpen(false)} />}
+      />
     </aside>
+  );
+}
+
+/** Header subtitle: the open source (else the research space folder); the project folder is the tooltip. */
+function PageSubtitle() {
+  const active = useSpace((s) => s.activeSource);
+  const space = useSpace((s) => s.listing?.space?.root);
+  if (!active && !space) return null;
+  return (
+    <span className="ui-code">
+      {active ?? <span data-testid="research-space-root">{space}</span>}
+    </span>
   );
 }
 
@@ -217,50 +243,55 @@ export function ResearchPage() {
   const enabled = Boolean(listing?.space);
   return (
     <div className="exp-rpage" data-testid="research-page" data-state={enabled ? "enabled" : "disabled"}>
-      <header className="exp-rpage__header" data-region="research-header" aria-label="Research session">
-        <div className="exp-rpage__heading">
-          <h2 className="exp-rpage__title">Research</h2>
-          {listing?.space && (
-            <code className="exp-muted" data-testid="research-space-root">
-              {listing.space.root}
-            </code>
-          )}
-        </div>
-        <SessionBar />
-      </header>
-      {error && (
-        <Banner tone="danger" title="Research error">
-          <span data-testid="research-space-error">{error}</span>
-        </Banner>
-      )}
-      {listing?.graphUnavailable && (
-        <Banner tone="warning" title="The project graph is unavailable">
-          {listing.graphUnavailable} Files can still be edited and run; nothing is recorded in the graph until it is available.
-        </Banner>
-      )}
-      <PendingPromotions />
+      {/* One F6 stop for the title row and its session toolbar (as before the shared header). */}
+      <div className="exp-rpage__head" data-region="research-header">
+        <PageHeader
+          title="Research"
+          subtitle={<PageSubtitle />}
+          status={<SessionStatus />}
+          toolbar={<SessionBar status={false} />}
+        />
+      </div>
+      <div className="exp-research__banners">
+        {error && (
+          <Banner tone="danger" title="Research error">
+            <span data-testid="research-space-error">{error}</span>
+          </Banner>
+        )}
+        {listing?.graphUnavailable && (
+          <Banner tone="warning" title="The project graph is unavailable">
+            {listing.graphUnavailable} Files can still be edited and run; nothing is recorded in the graph until it is available.
+          </Banner>
+        )}
+        <PendingPromotions />
+      </div>
       <div className="exp-rpage__main">
         <Group orientation="horizontal" className="exp-rpage__body">
           <ResizablePanel id="rp-explorer" defaultSize="20%" minSize="12%">
             <div className="exp-rpage__explorer" data-region="research-explorer" aria-label="Research explorer">
-              {enabled ? (
-                <ResearchExplorer />
-              ) : (
-                <div data-testid="research-enable">
-                  <EmptyState
-                    fill={false}
-                    icon={FlaskConical}
-                    title="Research is not enabled"
-                    description="Enabling creates one research space for this project — Sources, Data, and Notes folders under .exposition/research — and starts nothing. No manuscript is needed."
-                    actions={
-                      <Button variant="primary" isPending={enabling} onPress={() => void enableResearch()}>
-                        Enable Research
-                      </Button>
-                    }
-                  />
-                </div>
-              )}
-              <ExecutionModes />
+              <StateSizeProvider value="compact">
+                {enabled ? (
+                  <ResearchExplorer />
+                ) : (
+                  <>
+                    <PanelHeader title="Explorer" />
+                    <div className="exp-rpage__enable" data-testid="research-enable">
+                      <EmptyState
+                        fill={false}
+                        icon={FlaskConical}
+                        title="Research is not enabled"
+                        description="Enabling creates one research space for this project — Sources, Data, and Notes folders under .exposition/research — and starts nothing. No manuscript is needed."
+                        actions={
+                          <Button size="sm" variant="primary" isPending={enabling} onPress={() => void enableResearch()}>
+                            Enable Research
+                          </Button>
+                        }
+                      />
+                    </div>
+                  </>
+                )}
+                <ExecutionModes />
+              </StateSizeProvider>
             </div>
           </ResizablePanel>
           <ResizeHandle aria-label="Resize research explorer" onRegionKey={focusNextRegion} />
@@ -272,14 +303,16 @@ export function ResearchPage() {
               <ResizeHandle aria-label="Resize source and output" orientation="horizontal" onRegionKey={focusNextRegion} />
               <ResizablePanel id="rp-output" defaultSize="50%" minSize="15%">
                 <div className="exp-research exp-rpage__output" role="region" aria-label="Research output" data-region="research-output">
-                  <EnvironmentNotice />
-                  <div className="exp-research__main">
-                    <div className="exp-research__work">
-                      <CodeInput />
-                      <RunOutputView />
+                  <StateSizeProvider value="compact">
+                    <div className="exp-research__main">
+                      <div className="exp-research__work">
+                        <EnvironmentNotice />
+                        <CodeInput />
+                        <RunOutputView />
+                      </div>
+                      <RunHistory />
                     </div>
-                    <RunHistory />
-                  </div>
+                  </StateSizeProvider>
                 </div>
               </ResizablePanel>
             </Group>
@@ -289,7 +322,7 @@ export function ResearchPage() {
               <ResizeHandle aria-label="Resize inspector" onRegionKey={focusNextRegion} />
               <ResizablePanel id="rp-inspector" defaultSize="30%" minSize="15%">
                 <aside className="exp-rpage__inspector" aria-label="Inspector" data-region="research-inspector">
-                  <ResearchInspector item={selected} />
+                  <InspectorPane selected={selected} />
                 </aside>
               </ResizablePanel>
             </>
@@ -297,7 +330,11 @@ export function ResearchPage() {
         </Group>
         {narrow && <InspectorDrawer selected={selected} />}
       </div>
-      {!enabled && <p className="exp-muted exp-rpage__note"><PlayCircle size={12} aria-hidden /> Runs work without enabling Research.</p>}
+      {!enabled && (
+        <p className="ui-meta exp-rpage__note">
+          <PlayCircle size={14} aria-hidden /> Runs work without enabling Research.
+        </p>
+      )}
     </div>
   );
 }
