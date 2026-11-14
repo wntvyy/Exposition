@@ -66,6 +66,7 @@ import type { RunManifest } from "../bindings/RunManifest";
 import type { RunOutputPage } from "../bindings/RunOutputPage";
 import type { RunSummary } from "../bindings/RunSummary";
 import type { SaveAllOutcome } from "../bindings/SaveAllOutcome";
+import type { SavedCopy } from "../bindings/SavedCopy";
 import type { SelectionGeometry } from "../bindings/SelectionGeometry";
 import type { SessionInfo } from "../bindings/SessionInfo";
 import type { TaskDetail } from "../bindings/TaskDetail";
@@ -117,6 +118,13 @@ export const commands = {
   documentSave: (document: DocumentId, overwrite = false) =>
     invoke<DocumentInfo>("document_save", { document, overwrite }),
   documentSaveAll: () => invoke<SaveAllOutcome>("document_save_all"),
+  /**
+   * Save a copy of the document's current text to a new file (`destination`
+   * null: the backend's save dialog; `document.saveCanceled` when dismissed).
+   * Never replaces an existing file; the document itself is unchanged.
+   */
+  documentSaveCopy: (document: DocumentId, destination: string | null = null) =>
+    invoke<SavedCopy>("document_save_copy", { document, destination }),
   /** Replace the buffer with the file on disk (undoable `external` transaction). */
   documentReload: (document: DocumentId) => invoke<DocumentInfo>("document_reload", { document }),
   /** Resolve a disk conflict by keeping the buffer (the next save overwrites disk). */

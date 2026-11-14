@@ -596,6 +596,24 @@ export async function reloadDocument(handle: DocumentHandle): Promise<void> {
   }
 }
 
+/**
+ * Save a copy of the buffer's current text to a new file chosen in the save
+ * dialog (e.g. the unsaved text of a file that was deleted). Never replaces a
+ * file; the document is unchanged. A dismissed dialog is quiet.
+ */
+export async function saveCopy(handle: DocumentHandle): Promise<boolean> {
+  await handle.sync.idle();
+  try {
+    const copy = await commands.documentSaveCopy(handle.id, null);
+    notify({ tone: "success", title: `Saved a copy of ${handle.name}`, body: copy.path ?? copy.location });
+    return true;
+  } catch (error) {
+    if (isCommandError(error) && error.code === "document.saveCanceled") return false;
+    notify({ tone: "danger", title: `Could not save a copy of ${handle.name}`, body: errorMessage(error) });
+    return false;
+  }
+}
+
 export async function keepBuffer(handle: DocumentHandle): Promise<void> {
   try {
     await commands.documentKeepBuffer(handle.id);

@@ -14,6 +14,7 @@ import {
   handleForPath,
   openHandles,
   saveAll,
+  saveCopy,
   saveDocument,
   type DocumentHandle,
 } from "./documentClient";
@@ -79,6 +80,17 @@ registry.registerCommand({
   run: async () => {
     const handle = activeHandle();
     if (handle) await saveDocument(handle);
+  },
+});
+
+registry.registerCommand({
+  id: "file.saveCopy",
+  title: "Save a Copy…",
+  category: "File",
+  enabled: () => Boolean(activeHandle()),
+  run: async () => {
+    const handle = activeHandle();
+    if (handle) await saveCopy(handle);
   },
 });
 

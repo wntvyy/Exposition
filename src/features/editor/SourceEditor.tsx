@@ -18,6 +18,7 @@ import {
   normalizeLineEndings,
   openDocument,
   reloadDocument,
+  saveCopy,
   saveDocument,
   type DocumentHandle,
 } from "./documentClient";
@@ -230,6 +231,11 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
                     Reload from Disk
                   </Button>
                 )}
+                {conflict.kind === "deleted" && (
+                  <Button size="sm" onPress={() => void saveCopy(handle)} data-testid="save-copy">
+                    Save a Copy…
+                  </Button>
+                )}
                 <Button size="sm" variant="primary" onPress={() => void keepBuffer(handle)}>
                   {conflict.kind === "deleted" ? "Keep in Editor" : "Keep My Changes"}
                 </Button>
@@ -251,6 +257,9 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
               <>
                 <Button size="sm" onPress={() => handle.setSaveError(null)}>
                   Dismiss
+                </Button>
+                <Button size="sm" onPress={() => void saveCopy(handle)} data-testid="save-error-copy">
+                  Save a Copy…
                 </Button>
                 <Button size="sm" variant="primary" onPress={() => void saveDocument(handle)}>
                   Retry

@@ -264,6 +264,7 @@ export interface ResultSummary {
 /** What the person can do about a failure code, when the message does not say it already. */
 const CODE_HINTS: Record<string, string> = {
   "ops.inUse": "Close the program that is using it, then try again.",
+  "ops.permissionDenied": "Check the item's permissions (or whether it is read-only), then try again.",
   "ops.interrupted": "The operation was interrupted; check the item before trying again.",
 };
 

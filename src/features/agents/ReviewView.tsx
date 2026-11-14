@@ -22,6 +22,43 @@ const STATES: Record<FileReview["state"], { status: Status; label: string }> = {
   undone: { status: "canceled", label: "Undone in editor" },
 };
 
+/** What the agent did to a file, in the list. */
+function changeText(file: FileReview): string {
+  switch (file.kind) {
+    case "created":
+      return "created by the agent";
+    case "deleted":
+      return "deleted by the agent (moved to the Recycle Bin)";
+    case "copied":
+      return "copied by the agent";
+    default:
+      return `${file.changeCount} change${file.changeCount === 1 ? "" : "s"}`;
+  }
+}
+
+/** The revert action's wording per kind (deleting and copying are file operations, not text edits). */
+function revertLabel(file: FileReview): string {
+  return file.kind === "deleted" ? "Restore" : file.kind === "copied" ? "Remove Copy" : "Revert";
+}
+
+/** A file operation the agent performed: there is no text diff, so say what happened and what Keep/Revert do. */
+function OperationSummary({ file }: { file: FileReview }) {
+  const deleted = file.kind === "deleted";
+  return (
+    <section aria-label={`What happened to ${file.path}`} className="agents-stack" data-testid="agents-review-operation" data-kind={file.kind}>
+      <p>
+        <code className="agents-code">{file.path}</code>{" "}
+        {deleted ? "was deleted by the agent and moved to the Recycle Bin." : "is a copy the agent made (saved bytes; a new, separate file)."}
+      </p>
+      <p className="agents-muted agents-small">
+        {deleted
+          ? "Keep accepts the deletion. Restore brings it back from the Recycle Bin; if something is at this path again, nothing is overwritten."
+          : "Keep leaves the copy. Remove Copy moves it to the Recycle Bin, only while it is unchanged and nothing uses it."}
+      </p>
+    </section>
+  );
+}
+
 function FileRow(props: {
   file: FileReview;
   selected: boolean;
@@ -38,7 +75,7 @@ function FileRow(props: {
       <button type="button" className="agents-review-file__name" aria-pressed={props.selected} onClick={props.onSelect}>
         <code className="agents-code">{file.path}</code>
         <span className="agents-muted agents-small">
-          {file.kind === "created" ? "created by the agent" : `${file.changeCount} change${file.changeCount === 1 ? "" : "s"}`}
+          {changeText(file)}
           {editedSince ? " · edited since" : ""}
         </span>
       </button>
@@ -58,7 +95,7 @@ function FileRow(props: {
           onPress={() => props.onAction("revert")}
           data-testid="agents-revert-file"
         >
-          Revert
+          {revertLabel(file)}
         </Button>
       </span>
       {file.message && <p className="agents-muted agents-small agents-review-file__message">{file.message}</p>}
@@ -97,8 +134,12 @@ export function ReviewView({
     };
   }, [id, version]);
 
+  const selectedFile = review?.files.find((f) => f.path === selected) ?? null;
+  const operation = selectedFile !== null && (selectedFile.kind === "deleted" || selectedFile.kind === "copied");
+
   useEffect(() => {
-    if (!selected) return setDiff(null);
+    // Deletions and copies have no text diff; the summary below says what happened.
+    if (!selected || operation) return setDiff(null);
     let live = true;
     void agents.run(() => commands.agentsReviewDiff(id, selected)).then((d) => {
       if (live && d) setDiff(d);
@@ -106,7 +147,7 @@ export function ReviewView({
     return () => {
       live = false;
     };
-  }, [id, selected, version]);
+  }, [id, selected, version, operation]);
 
   const running = task ? isActive(task.status) : false;
 
@@ -193,7 +234,8 @@ export function ReviewView({
           ))}
         </ul>
       )}
-      {diff && (
+      {operation && selectedFile && <OperationSummary file={selectedFile} />}
+      {diff && !operation && (
         <section aria-label={`Diff of ${diff.path}`} className="agents-stack agents-diff-section">
           <p className="agents-muted agents-small">
             Left: {diff.path} without this task's changes · Right: after the task's latest change

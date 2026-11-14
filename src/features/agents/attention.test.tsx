@@ -205,6 +205,32 @@ describe("review follows content", () => {
       expect(screen.getByRole("button", { name }).hasAttribute("disabled")).toBe(true);
     }
   });
+
+  it("P1: a deletion and a copy by the agent say what happened, with Restore / Remove Copy instead of an empty diff", async () => {
+    useAgents.setState({ tasks: [summary({ status: { kind: "completed" }, changedFiles: 2 })] });
+    const file = (path: string, kind: "deleted" | "copied") => ({
+      path,
+      kind,
+      state: "pending",
+      changeCount: 1,
+      entangled: false,
+      tipRevision: null,
+      currentRevision: null,
+      message: null,
+    });
+    ipc.agentsReview.mockResolvedValue({ taskId: "task-1", checkpoint: null, files: [file("old.md", "deleted"), file("data/copy.csv", "copied")] });
+    ipc.agentsReviewDiff.mockReset();
+    render(<ReviewView id="task-1" />);
+    expect(await screen.findByText("deleted by the agent (moved to the Recycle Bin)")).toBeTruthy();
+    expect(screen.getByText("copied by the agent")).toBeTruthy();
+    expect(screen.queryByText(/1 change/)).toBeNull();
+    const summaryPanel = await screen.findByTestId("agents-review-operation");
+    expect(summaryPanel.getAttribute("data-kind")).toBe("deleted");
+    expect(summaryPanel.textContent).toMatch(/Restore brings it back from the Recycle Bin/);
+    expect(screen.getByRole("button", { name: "Restore" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove Copy" })).toBeTruthy();
+    expect(ipc.agentsReviewDiff).not.toHaveBeenCalled();
+  });
 });
 
 describe("provider settings", () => {
