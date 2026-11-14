@@ -1,11 +1,16 @@
 // R-m9 (independent review of M9) against the built app: real IPC, real
 // workspace watcher, real trigger engine, real Lean server (v4.35.0).
 //
-// A. A trigger may watch a Lean source (FormalSource) input. Lean elaboration
-//    runs `#eval` IO natively, so a saved change to the watched file runs
-//    arbitrary code with the user's privileges, unattended, although the
-//    standing plan never showed that code (R-m9 F2: DEFECT when the marker
-//    file the edited Lean source writes appears outside the project).
+// A. R-m9 F2 (fixed in the lane C fix round): a trigger could watch a Lean
+//    source (FormalSource) input; Lean elaboration runs `#eval` IO natively,
+//    so a saved change ran arbitrary code with the user's privileges,
+//    unattended, although the standing plan never showed that code. Now a
+//    Lean source is code: watching it is refused (trigger.codeInputWatched),
+//    the plan shows its complete text, and a change to it (saved outside the
+//    editor) suspends the trigger without running anything (DEFECT when the
+//    marker file the edited Lean source writes appears outside the project).
+//    The run sections B and C use then fires through a watched data input,
+//    over the reviewed Lean text.
 // B. The run-manifest export takes a destination path from the webview and
 //    writes new .json files into the app data folder and the project's
 //    `.exposition` records, which the bundle export refuses (R-m9 F3).
@@ -35,6 +40,8 @@ const TOOLCHAIN_DIR = "leanprover--lean4---v4.35.0";
 const WATCHED = "LeanBasic/Watched.lean";
 const CLEAN = "namespace Watched\n\ntheorem two : 2 = 2 := rfl\n\nend Watched\n";
 
+const WATCHED_DATA = "data/watch.csv";
+
 function workflow() {
   return {
     schema: "exposition.workflow/1",
@@ -43,6 +50,7 @@ function workflow() {
     preset: null,
     inputs: [
       { id: "proof", label: "Proof file", portType: "formalSource", source: { kind: "resource", path: WATCHED, version: { kind: "atRunStart" } } },
+      { id: "notes", label: "Notes", portType: "dataset", source: { kind: "resource", path: WATCHED_DATA, version: { kind: "atRunStart" } } },
     ],
     steps: [{ id: "audit", label: "Audit the proof", operation: { id: "lean.audit", version: 1 }, parameters: {}, payload: null }],
     connections: [{ kind: "data", from: { kind: "input", input: "proof" }, to: { step: "audit", port: "source" } }],
@@ -67,6 +75,8 @@ export default async function reviewM9({ launchApp, artifactsDir, assert, fixtur
     filter: (src) => !/[\\/]\.lake([\\/]|$)/.test(src) && !src.endsWith("lake-manifest.json"),
   });
   await writeFile(join(root, ...WATCHED.split("/")), CLEAN);
+  await mkdir(join(root, "data"), { recursive: true });
+  await writeFile(join(root, ...WATCHED_DATA.split("/")), "note\nfirst\n");
   await mkdir(dataDir, { recursive: true });
   // Outside the project: what the edited Lean source writes when it is elaborated.
   const marker = join(base, "outside", "written-by-watched-lean.txt");
@@ -118,37 +128,62 @@ export default async function reviewM9({ launchApp, artifactsDir, assert, fixtur
     saved = await call("workflow_save", { request: { id: null, expectedRevision: null, definition: workflow() } });
     assert.equal(saved.validation.state, "wellFormed", JSON.stringify(saved.validation.diagnostics));
 
-    // ---- A. a watched Lean source runs its code natively, unreviewed ----------------
-    const review = await call("workflow_trigger_plan", { request: { workflow: saved.id, kind: { kind: "inputsChanged", inputs: ["proof"] } } });
+    // ---- A. a Lean source is code: never watched, a change suspends -----------------
+    const settingsA = { debounceSeconds: 2, maxRunsPerHour: 12, maxRunsPerDay: 100, allowNative: true, maxModelRequestsPerDay: 0 };
+    const watchLean = await invokeError(page, "workflow_trigger_plan", {
+      request: { workflow: saved.id, kind: { kind: "inputsChanged", inputs: ["proof"] } },
+    });
+    note("A-watching-a-lean-source-is-refused", watchLean.error?.code === "trigger.codeInputWatched", watchLean.error ?? "accepted", true);
+    const review = await call("workflow_trigger_plan", { request: { workflow: saved.id, kind: { kind: "inputsChanged", inputs: ["notes"] } } });
     const leanInput = review.plan.inputs.find((i) => i.id === "proof");
-    note("A-standing-plan-accepts-a-watched-lean-source", review.blockers.length === 0, { mayChange: review.mayChange, nativeSteps: review.nativeSteps });
-    const warns = [...review.mayChange, ...review.notices].some((t) => /#eval|executes? (its|the) (code|source)|arbitrary|metaprogram/i.test(t));
+    note("A-standing-plan-accepts-a-watched-data-input", review.blockers.length === 0, { mayChange: review.mayChange, nativeSteps: review.nativeSteps });
+    note("A-standing-plan-shows-the-lean-source-in-full", leanInput?.text === CLEAN, { leanText: leanInput?.text ?? null }, true);
     note(
-      "A-standing-plan-says-the-watched-lean-file-is-executable-code",
-      warns,
-      { mayChange: review.mayChange, notices: review.notices, leanTextShown: leanInput?.text !== null && leanInput?.text !== undefined },
+      "A-standing-plan-says-a-lean-change-suspends",
+      review.suspendsOn.some((t) => t.includes("code in “Proof file”")),
+      { suspendsOn: review.suspendsOn },
       true,
     );
     trigger = await call("workflow_trigger_enable", {
-      request: {
-        plan: review.plan.plan,
-        standingHash: review.standingHash,
-        settings: { debounceSeconds: 10, maxRunsPerHour: 12, maxRunsPerDay: 100, allowNative: true, maxModelRequestsPerDay: 0 },
-      },
+      request: { plan: review.plan.plan, standingHash: review.standingHash, settings: settingsA },
     });
-    await waitFor(async () => (await call("workflow_trigger_list", { workflow: saved.id }))[0]?.listening, {
-      timeout: 60_000,
-      message: "the trigger listens (project indexed)",
-    });
+    const listening = () =>
+      waitFor(async () => (await call("workflow_trigger_list", { workflow: saved.id }))[0]?.listening, {
+        timeout: 60_000,
+        message: "the trigger listens (project indexed)",
+      });
+    await listening();
     note("A-trigger-enabled-and-listening", true, { id: trigger.id });
     const markerPath = marker.replace(/\\/g, "/");
-    const smuggled = `${CLEAN}\n#eval IO.FS.writeFile "${markerPath}" "written by a watched Lean file, never reviewed"\n`;
+    const smuggled = `${CLEAN}\n#eval IO.FS.writeFile "${markerPath}" "written by a Lean file the trigger never showed"\n`;
     // Saved outside the editor (an external editor, a sync tool, git pull): the
     // file is not open in the app, so the live Lean server never sees it.
     await writeFile(join(root, ...WATCHED.split("/")), smuggled);
+    const suspended = await waitFor(async () => {
+      const t = (await call("workflow_trigger_list", { workflow: saved.id }))[0];
+      return t?.state.kind === "suspended" && t;
+    }, { timeout: 30_000, interval: 250, message: "the trigger is suspended" }).catch((e) => ({ state: { kind: String(e) } }));
+    note("A-a-changed-lean-source-suspends-the-trigger", suspended.state.kind === "suspended", suspended.state, true);
     await page.waitForTimeout(5000);
-    note("A-control-nothing-elaborated-the-change-before-the-trigger-fired", !existsSync(marker), { markerBeforeFire: existsSync(marker) });
-    assert.ok(!existsSync(marker), "the marker appeared before the trigger fired; the attribution would be wrong");
+    const runsAfterChange = await call("workflow_runs", { workflow: saved.id });
+    const written = existsSync(marker) ? await readFile(marker, "utf8") : null;
+    note(
+      "A-a-saved-change-to-a-lean-file-ran-no-unreviewed-code",
+      written === null && runsAfterChange.length === 0,
+      written === null
+        ? { marker: "none", runs: runsAfterChange.length }
+        : `the edited Lean source wrote ${marker} (outside the project) without review: "${written}"`,
+      true,
+    );
+    // The reviewed text again, re-approved; a saved change to the watched data
+    // fires a run over exactly that text (sections B and C use it).
+    await writeFile(join(root, ...WATCHED.split("/")), CLEAN);
+    const again = await call("workflow_trigger_plan", { request: { workflow: saved.id, kind: { kind: "inputsChanged", inputs: ["notes"] } } });
+    trigger = await call("workflow_trigger_enable", {
+      request: { plan: again.plan.plan, standingHash: again.standingHash, settings: settingsA },
+    });
+    await listening();
+    await saveThroughApp(WATCHED_DATA, "note\nfirst\nsecond\n");
     const runs = await waitFor(async () => {
       const list = await call("workflow_runs", { workflow: saved.id });
       return list.length > 0 && list;
@@ -159,18 +194,10 @@ export default async function reviewM9({ launchApp, artifactsDir, assert, fixtur
       state: firedRun.state,
       code: firedRun.code,
       cause: firedRun.cause?.kind,
-      leanTextInPlan: planInput?.text ?? null,
       verdict: firedRun.steps[0]?.attempts.at(-1)?.outputs[0]?.value?.verdict,
     });
-    const written = existsSync(marker) ? await readFile(marker, "utf8") : null;
-    note(
-      "A-a-saved-change-to-a-watched-lean-file-ran-no-unreviewed-code",
-      written === null,
-      written === null
-        ? "no marker"
-        : `the edited Lean source wrote ${marker} (outside the project) during the unattended triggered audit: "${written}"`,
-      true,
-    );
+    note("A-the-triggered-run-read-the-reviewed-lean-text", planInput?.text === CLEAN, { leanTextInPlan: planInput?.text ?? null }, true);
+    note("A-control-no-marker-after-the-reviewed-run", !existsSync(marker), { marker: existsSync(marker) });
     await call("workflow_trigger_disable", { trigger: trigger.id });
 
     // ---- B. manifest export as a webview write primitive -----------------------------
@@ -255,7 +282,8 @@ export default async function reviewM9({ launchApp, artifactsDir, assert, fixtur
     const diskText = await readFile(join(root, ...BUFFERED.split("/")), "utf8");
     note("D-buffer-edit-left-the-saved-file-unchanged", !diskText.includes("#eval"), diskText.length);
     const planD = await call("workflow_run_plan", { id: savedD.id, revision: null });
-    note("D-plan-binds-the-saved-file", planD.blockers.length === 0 && planD.inputs.find((i) => i.id === "proof")?.text === null, planD.blockers);
+    // The plan shows (and binds) exactly the saved text, not the buffer.
+    note("D-plan-binds-the-saved-file", planD.blockers.length === 0 && planD.inputs.find((i) => i.id === "proof")?.text === diskText, planD.blockers);
     const startedD = await call("workflow_run_start", { request: { plan: planD.plan, approvalHash: planD.approvalHash } });
     const runD = await finish(startedD.id);
     const attemptD = runD.steps[0]?.attempts.at(-1);

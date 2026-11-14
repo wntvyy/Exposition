@@ -313,6 +313,10 @@ pub struct WorkflowTrigger {
     pub model_requests_last_day: u32,
     /// Bounded, oldest first.
     pub history: Vec<TriggerHistoryEntry>,
+    /// The trigger store could not be saved (or read): changes shown here
+    /// may not survive a restart until it can.
+    #[serde(default)]
+    pub store_problem: Option<String>,
 }
 
 /// Emitted on `workflow-trigger` whenever a trigger changes.

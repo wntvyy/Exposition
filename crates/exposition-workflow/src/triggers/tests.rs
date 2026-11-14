@@ -22,7 +22,9 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::adapters::agent::{AgentReviewAdapter, AgentReviewer, ReviewOutcome, ReviewRequest};
+use crate::adapters::associate::AssociateAdapter;
 use crate::adapters::batch::BatchAdapter;
+use crate::adapters::lean::{LeanAuditAdapter, LeanAuditor};
 use crate::adapters::{Adapters, StepFailure, runner_ids, sha256_hex};
 use crate::model::{WorkflowRunCause, WorkflowRunError, WorkflowRunPlan, WorkflowRunState};
 use crate::service::{WorkflowHost, WorkflowRunConfig, WorkflowRunService};
@@ -124,6 +126,31 @@ impl AgentReviewer for FakeReviewer {
     }
 }
 
+/// A Lean auditor that is available (plans only; these tests never audit).
+struct FakeLean;
+
+impl LeanAuditor for FakeLean {
+    fn availability(&self, _root: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn audit(
+        &self,
+        _path: &WorkspacePath,
+        _timeout: Duration,
+        _canceled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<exposition_lean::types::LeanAuditRecord, StepFailure> {
+        Err(StepFailure::new("lean.test", "the trigger tests never audit"))
+    }
+    fn record_evidence(
+        &self,
+        _path: &WorkspacePath,
+        _content_hash: &str,
+        _names: &[String],
+    ) -> Result<Vec<exposition_graph::EvidenceId>, WorkflowRunError> {
+        Ok(Vec::new())
+    }
+}
+
 struct ManualClock(AtomicU64);
 
 impl TriggerClock for ManualClock {
@@ -140,18 +167,41 @@ struct TestStarter {
     active: AtomicBool,
     started: Mutex<Vec<(WorkflowRunPlan, WorkflowRunCause)>>,
     plans: AtomicUsize,
+    /// Other workflows hold every run slot: plans carry `workflow.activeRun`.
+    cap: AtomicBool,
+    /// How often the engine asked whether the workflow can start now.
+    busy_checks: AtomicUsize,
+}
+
+impl TestStarter {
+    fn capped(&self, mut plan: WorkflowRunPlan) -> WorkflowRunPlan {
+        if self.cap.load(Ordering::SeqCst) {
+            plan.blockers.push(crate::model::WorkflowPlanBlocker {
+                code: "workflow.activeRun".into(),
+                message: "3 workflow runs are active (at most 3 at once).".into(),
+                step: None,
+                input: None,
+            });
+        }
+        plan
+    }
 }
 
 impl TriggerRunStarter for TestStarter {
     fn project_root(&self) -> Option<PathBuf> {
         self.real.project_root()
     }
-    fn plan(&self, workflow: &WorkflowId) -> Result<WorkflowRunPlan, WorkflowRunError> {
+    fn preview(&self, workflow: &WorkflowId) -> Result<WorkflowRunPlan, WorkflowRunError> {
         self.plans.fetch_add(1, Ordering::SeqCst);
-        self.real.plan(workflow)
+        self.real.preview(workflow).map(|p| self.capped(p))
     }
-    fn workflow_active(&self, workflow: &WorkflowId) -> bool {
-        self.active.load(Ordering::SeqCst) || self.real.workflow_active(workflow)
+    fn plan_to_start(&self, workflow: &WorkflowId) -> Result<WorkflowRunPlan, WorkflowRunError> {
+        self.plans.fetch_add(1, Ordering::SeqCst);
+        self.real.plan_to_start(workflow).map(|p| self.capped(p))
+    }
+    fn busy(&self, workflow: &WorkflowId) -> bool {
+        self.busy_checks.fetch_add(1, Ordering::SeqCst);
+        self.active.load(Ordering::SeqCst) || self.real.busy(workflow)
     }
     fn start(&self, plan: &WorkflowRunPlan, cause: WorkflowRunCause) -> Result<WorkflowRunId, WorkflowRunError> {
         self.started.lock().unwrap().push((plan.clone(), cause.clone()));
@@ -211,6 +261,8 @@ fn fixture() -> Fx {
         runner_ids::READ_ONLY_AGENT.into(),
         Arc::new(AgentReviewAdapter { reviewer: Some(Arc::new(FakeReviewer)) }),
     );
+    adapters.insert(runner_ids::LEAN_AUDIT.into(), Arc::new(LeanAuditAdapter { auditor: Some(Arc::new(FakeLean)) }));
+    adapters.insert(runner_ids::GRAPH_PROPOSAL.into(), Arc::new(AssociateAdapter));
     let h: Arc<dyn WorkflowHost> = host.clone();
     let runs = WorkflowRunService::new(WorkflowRunConfig {
         database: Some(data.path().join("workflow-runs.sqlite3")),
@@ -226,6 +278,8 @@ fn fixture() -> Fx {
         active: AtomicBool::new(false),
         started: Mutex::new(Vec::new()),
         plans: AtomicUsize::new(0),
+        cap: AtomicBool::new(false),
+        busy_checks: AtomicUsize::new(0),
     });
     let clock = Arc::new(ManualClock(AtomicU64::new(crate::now_ms())));
     let store = data.path().join(store::STORE_FILE);
@@ -518,7 +572,9 @@ fn an_active_run_queues_one_follow_up_and_the_latest_content_wins() {
     assert!(f.started().is_empty());
     let queued = f.trigger(&t.id).history.iter().filter(|h| h.event == TriggerHistoryEvent::Queued).count();
     assert_eq!(queued, 1, "at most one queued follow-up");
+    // The run ends (the app reports it): the follow-up starts at once.
     f.starter.active.store(false, Ordering::SeqCst);
+    f.triggers.runs_changed();
     f.advance(SECOND);
     let started = f.started();
     assert_eq!(started.len(), 1, "exactly one follow-up");
@@ -1063,4 +1119,251 @@ fn real_run_records_the_trigger_cause() {
         _ => None,
     });
     assert_eq!(fired, Some(run.id));
+}
+
+// ------------------------------------------------- fix round (docs audit) ---
+
+/// Finding 1: a queued follow-up whose watched content returned to what the
+/// trigger last saw is dropped (it used to poll every second forever).
+#[test]
+fn a_queued_follow_up_with_nothing_left_to_run_is_dropped() {
+    let f = fixture();
+    let id = f.save(definition(false, false));
+    f.open_ready();
+    let t = f.enable(&id, watch(&["data"]));
+    f.starter.active.store(true, Ordering::SeqCst);
+    f.save_file("data/obs.csv", "x\nA\n");
+    f.advance(3 * SECOND);
+    assert!(f.trigger(&t.id).queued);
+    f.save_file("data/obs.csv", "x\n1\n2\n"); // back to the baseline
+    f.advance(3 * SECOND);
+    f.starter.active.store(false, Ordering::SeqCst);
+    f.advance(SECOND);
+    let plans = f.starter.plans.load(Ordering::SeqCst);
+    for _ in 0..60 {
+        f.advance(SECOND);
+    }
+    assert!(!f.trigger(&t.id).queued, "the follow-up stayed queued with nothing to run");
+    let polled = f.starter.plans.load(Ordering::SeqCst) - plans;
+    assert!(polled <= 1, "planned {polled} times in a minute for a follow-up with nothing to run");
+    assert!(f.started().is_empty());
+}
+
+/// Finding 1: trigger checks never use the run service's plan cache, so a
+/// busy trigger cannot evict the plan the user is reviewing.
+#[test]
+fn trigger_checks_never_evict_a_plan_the_user_is_reviewing() {
+    let f = fixture();
+    let id = f.save(definition(false, false));
+    // The user reviews a workflow that reads other data.
+    std::fs::write(f.root.join("data/other.csv"), "z\n1\n").unwrap();
+    let mut unrelated = definition(false, false);
+    unrelated["inputs"][1]["source"]["path"] = json!("data/other.csv");
+    let other = f.save(unrelated);
+    f.open_ready();
+    f.enable(&id, watch(&["data"]));
+    let reviewing = f.runs.plan(&other, None).unwrap();
+    assert!(reviewing.blockers.is_empty(), "{:?}", reviewing.blockers);
+    // Other workflows hold every run slot: the trigger waits (queued).
+    f.starter.cap.store(true, Ordering::SeqCst);
+    f.save_file("data/obs.csv", "x\nA\n");
+    // More checks than the run service keeps plans (32), over 45 minutes.
+    let plans = f.starter.plans.load(Ordering::SeqCst);
+    for _ in 0..45 {
+        f.advance(MINUTE);
+    }
+    let checks = f.starter.plans.load(Ordering::SeqCst) - plans;
+    assert!(checks > 32, "only {checks} checks; the test needs more than the plan cache holds");
+    assert!(f.started().is_empty());
+    let started = f.runs.start(&crate::model::StartWorkflowRunRequest {
+        plan: reviewing.plan.clone(),
+        approval_hash: reviewing.approval_hash.clone(),
+    });
+    assert!(started.is_ok(), "the user's reviewed plan was evicted: {:?}", started.err());
+    assert!(f.runs.wait_idle(Duration::from_secs(20)));
+}
+
+/// Finding 1: while a run of the workflow (or the run cap) blocks it, the
+/// queued follow-up checks with a bounded back-off, not every second.
+#[test]
+fn a_blocked_follow_up_backs_off() {
+    let f = fixture();
+    let id = f.save(definition(false, false));
+    f.open_ready();
+    let t = f.enable(&id, watch(&["data"]));
+    // Its own workflow's run is active.
+    f.starter.active.store(true, Ordering::SeqCst);
+    f.save_file("data/obs.csv", "x\nA\n");
+    f.advance(3 * SECOND);
+    assert!(f.trigger(&t.id).queued);
+    let checks = f.starter.busy_checks.load(Ordering::SeqCst);
+    for _ in 0..300 {
+        f.advance(SECOND);
+    }
+    let polled = f.starter.busy_checks.load(Ordering::SeqCst) - checks;
+    assert!(polled <= 15, "checked {polled} times in 5 minutes");
+    // The run cap held by other workflows backs off the same way.
+    f.starter.active.store(false, Ordering::SeqCst);
+    f.starter.cap.store(true, Ordering::SeqCst);
+    let plans = f.starter.plans.load(Ordering::SeqCst);
+    for _ in 0..300 {
+        f.advance(SECOND);
+    }
+    let planned = f.starter.plans.load(Ordering::SeqCst) - plans;
+    assert!(planned <= 15, "planned {planned} times in 5 minutes while the run cap was full");
+    assert!(f.trigger(&t.id).queued);
+    // Once free, the follow-up runs within the longest back-off.
+    f.starter.cap.store(false, Ordering::SeqCst);
+    f.advance(61 * SECOND);
+    assert_eq!(f.started().len(), 1);
+    assert!(!f.trigger(&t.id).queued);
+}
+
+/// Finding 2: settings refused at enable leave the review usable.
+#[test]
+fn refused_settings_do_not_use_up_the_review() {
+    let f = fixture();
+    let id = f.save(definition(false, false));
+    f.open_ready();
+    let review = f.review(&id, watch(&["data"]));
+    let bad = WorkflowTriggerSettings { max_runs_per_hour: 12, max_runs_per_day: 5, ..settings() };
+    assert_eq!(f.triggers.enable(&f.request(&review, bad)).unwrap_err().code, "trigger.invalidSettings");
+    let enabled = f.triggers.enable(&f.request(&review, settings()));
+    assert!(enabled.is_ok(), "the corrected settings were refused: {:?}", enabled.err());
+}
+
+/// Finding 3: trust revocation suspends every trigger of the folder, so
+/// every standing plan says so (not only native ones).
+#[test]
+fn every_standing_plan_says_trust_revocation_suspends() {
+    let f = fixture();
+    let restricted = f.save(definition(false, false));
+    let native = f.save(definition(true, false));
+    f.open_ready();
+    for id in [restricted, native] {
+        let review = f.review(&id, watch(&["data"]));
+        assert!(review.suspends_on.iter().any(|s| s.contains("Trust being revoked")), "{:?}", review.suspends_on);
+    }
+}
+
+/// Finding 4: a store that cannot be read is never overwritten; once it can
+/// be read again its triggers are kept.
+#[cfg(windows)]
+#[test]
+fn an_unreadable_store_is_never_overwritten() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = fixture();
+    let first = f.save(definition(false, false));
+    let second = f.save(definition(false, false));
+    f.open_ready();
+    let t1 = f.enable(&first, watch(&["data"]));
+    let original = std::fs::read(&f.store).unwrap();
+    // Another process holds the store exclusively while the app starts.
+    let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&f.store).unwrap();
+    let restarted = TriggerService::new(TriggerConfig {
+        store: Some(f.store.clone()),
+        starter: f.starter.clone(),
+        clock: f.clock.clone(),
+    });
+    let request = WorkflowTriggerPlanRequest { workflow: second.clone(), kind: watch(&["data"]) };
+    let review = restarted.plan(&request).unwrap();
+    let refused = restarted.enable(&f.request(&review, settings())).unwrap_err();
+    assert_eq!(refused.code, "trigger.storeUnavailable", "{}", refused.message);
+    assert_eq!(restarted.list(None).unwrap_err().code, "trigger.storeUnavailable", "shown, not an empty list");
+    drop(lock);
+    assert_eq!(std::fs::read(&f.store).unwrap(), original, "the unreadable store was changed");
+    // Readable again: enabling keeps the trigger that was already there.
+    let review = restarted.plan(&request).unwrap();
+    let t2 = restarted.enable(&f.request(&review, settings())).unwrap();
+    let text = std::fs::read_to_string(&f.store).unwrap();
+    assert!(text.contains(t1.id.as_str()), "the earlier trigger was overwritten");
+    assert!(text.contains(t2.id.as_str()));
+    assert_eq!(restarted.list(None).unwrap().len(), 2);
+}
+
+/// Finding 4: a change that could not be saved is not applied, and saving
+/// problems of background changes are visible.
+#[cfg(windows)]
+#[test]
+fn unsaved_changes_are_rolled_back_or_surfaced() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = fixture();
+    let id = f.save(definition(false, false));
+    f.open_ready();
+    let t = f.enable(&id, watch(&["data"]));
+    let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&f.store).unwrap();
+    let refused = f.triggers.disable(&t.id).unwrap_err();
+    assert_eq!(refused.code, "trigger.storeFailed");
+    assert_eq!(f.trigger(&t.id).state, TriggerState::Active, "a disable that was not saved took effect");
+    // A suspension cannot wait for the store: it applies, and the problem shows.
+    f.save_file("experiment.py", "print('changed')\n");
+    f.advance(3 * SECOND);
+    let view = f.trigger(&t.id);
+    assert!(matches!(view.state, TriggerState::Suspended { .. }));
+    assert!(view.store_problem.is_some(), "the failed save was not surfaced");
+    drop(lock);
+    f.triggers.disable(&t.id).unwrap();
+    assert_eq!(f.trigger(&t.id).store_problem, None, "a later save clears the problem");
+}
+
+// ------------------------------------------- R-m9 F2: Lean source is code ---
+
+const LEAN: &str = "theorem main_theorem : 1 + 1 = 2 := rfl\n";
+
+fn formal_audit(f: &Fx) -> WorkflowId {
+    std::fs::create_dir_all(f.root.join("Proofs")).unwrap();
+    std::fs::write(f.root.join("Proofs/Main.lean"), LEAN).unwrap();
+    let def = exposition_graph::workflow::presets::draft(&exposition_graph::workflow::presets::WorkflowPresetRequest {
+        preset: exposition_graph::workflow::presets::FORMAL_AUDIT.into(),
+        lean_file: Some(path("Proofs/Main.lean")),
+        ..Default::default()
+    })
+    .unwrap();
+    f.save(serde_json::to_value(def).unwrap())
+}
+
+/// A Lean source is elaborated natively by Lean (`#eval` runs code), so it
+/// is code: it cannot be watched, and the review shows its complete text.
+#[test]
+fn lean_sources_are_code_never_watched_and_shown_in_full() {
+    let f = fixture();
+    let id = formal_audit(&f);
+    f.open_ready();
+    let err = plan_err(&f, &id, watch(&["leanFile"]));
+    assert_eq!(err.code, "trigger.codeInputWatched", "{}", err.message);
+    let err = plan_err(&f, &id, TriggerKind::Interval { minutes: 30, inputs: vec!["leanFile".into()] });
+    assert_eq!(err.code, "trigger.codeInputWatched");
+    let review = f.review(&id, TriggerKind::Interval { minutes: 30, inputs: vec![] });
+    assert!(review.blockers.is_empty(), "{:?}", review.blockers);
+    let lean = review.plan.inputs.iter().find(|i| i.id == "leanFile").unwrap();
+    assert_eq!(lean.text.as_deref(), Some(LEAN), "the Lean source is shown in full");
+    assert!(
+        review.suspends_on.iter().any(|s| s.contains("code in “Lean file” (Proofs/Main.lean)")),
+        "{:?}",
+        review.suspends_on
+    );
+    // Lean source that cannot be reviewed in full blocks the plan, like a script.
+    std::fs::write(f.root.join("Proofs/Main.lean"), [0xff_u8, 0xfe, 0x00, 0x41]).unwrap();
+    let plan = f.runs.plan(&id, None).unwrap();
+    assert!(plan.blockers.iter().any(|b| b.code == "workflow.codeNotText"), "{:?}", plan.blockers);
+}
+
+/// Any change to a Lean source suspends the trigger (it is never watched).
+#[test]
+fn a_lean_source_change_suspends() {
+    let f = fixture();
+    let id = formal_audit(&f);
+    f.open_ready();
+    let t = f.enable_with(
+        &id,
+        TriggerKind::Interval { minutes: 15, inputs: vec![] },
+        WorkflowTriggerSettings { allow_native: true, ..settings() },
+    );
+    f.save_file("Proofs/Main.lean", "#eval IO.FS.writeFile \"../outside.txt\" \"x\"\ntheorem t : True := trivial\n");
+    f.advance(3 * SECOND);
+    let (code, message) = f.suspended(&t.id);
+    assert_eq!(code, "trigger.planChanged");
+    assert!(message.contains("“Lean file” (Proofs/Main.lean) changed"), "{message}");
+    f.advance(HOUR_MS);
+    assert!(f.started().is_empty(), "a run started from a changed Lean source");
 }

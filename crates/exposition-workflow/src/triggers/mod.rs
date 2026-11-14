@@ -62,8 +62,11 @@ use crate::plan::{self, project_key};
 
 const HOUR_MS: u64 = 3_600_000;
 const DAY_MS: u64 = 24 * HOUR_MS;
-/// While a follow-up is queued, check this often whether the active run ended.
+/// A queued follow-up first checks this soon whether it can start ...
 const QUEUE_POLL_MS: u64 = 1000;
+/// ... then backs off (doubling) to at most this while other runs block it.
+/// A run ending makes it check at once ([`TriggerService::runs_changed`]).
+const MAX_QUEUE_POLL_MS: u64 = 60_000;
 /// Consecutive start refusals before the trigger is suspended.
 const MAX_START_REFUSALS: u32 = 3;
 /// Unconsumed standing-plan reviews kept.
@@ -112,10 +115,15 @@ struct Runtime {
     check_due: Option<u64>,
     /// A follow-up waits for the active run of the workflow.
     queued: bool,
+    /// When the queued follow-up next checks whether it can start, and the
+    /// current back-off.
+    poll_at: Option<u64>,
+    backoff_ms: u64,
     /// The current rate-limit deferral is already in the history.
     rate_noted: bool,
 }
 
+#[derive(Clone)]
 struct Entry {
     stored: StoredTrigger,
     rt: Runtime,
@@ -124,6 +132,7 @@ struct Entry {
     version: u64,
 }
 
+#[derive(Clone)]
 struct CachedReview {
     review: WorkflowTriggerPlan,
     key: String,
@@ -135,6 +144,12 @@ struct Engine {
     session: Option<Session>,
     reviews: HashMap<WorkflowPlanId, CachedReview>,
     epoch: u64,
+    /// The store was read (or there is none). Until it is, nothing is written.
+    loaded: bool,
+    /// Why the store cannot be read or was not saved (shown on every trigger).
+    store_problem: Option<String>,
+    /// Stored records this version cannot read (written back unchanged).
+    unreadable: Vec<serde_json::Value>,
 }
 
 struct Shared {
@@ -176,8 +191,11 @@ struct Job {
 }
 
 enum Outcome {
-    /// Nothing to do (no change, a temporary problem, or still busy).
+    /// Nothing to do (no change or a temporary problem). A queued follow-up
+    /// with nothing to run is dropped.
     Nothing,
+    /// A queued follow-up is still blocked by other runs (back off).
+    StillBusy,
     Suspend {
         code: String,
         message: String,
@@ -296,6 +314,7 @@ impl Engine {
         view.runs_last_day = fires.iter().filter(|f| within(now, f.at_ms, DAY_MS)).count() as u32;
         view.model_requests_last_day =
             fires.iter().filter(|f| within(now, f.at_ms, DAY_MS)).map(|f| f.model_requests).sum();
+        view.store_problem = self.store_problem.clone();
         view
     }
 
@@ -333,18 +352,55 @@ fn suspend(entry: &mut Entry, now: u64, code: &str, message: String) {
     record(entry, now, TriggerHistoryEvent::Suspended { code: code.to_owned(), message });
 }
 
+fn loaded_entry(mut stored: StoredTrigger) -> Entry {
+    stored.trigger.queued = false;
+    stored.trigger.listening = false;
+    stored.trigger.next_check_ms = None;
+    stored.trigger.store_problem = None;
+    Entry { stored, rt: Runtime::default(), version: 0 }
+}
+
+/// The watched inputs' digests in `plan` and those that differ from `baseline`.
+fn changes(
+    watched: &[String],
+    baseline: &BTreeMap<String, Option<String>>,
+    plan: &WorkflowRunPlan,
+) -> (BTreeMap<String, Option<String>>, Vec<ChangedInput>) {
+    let current: BTreeMap<String, Option<String>> = watched
+        .iter()
+        .map(|id| (id.clone(), plan.inputs.iter().find(|i| &i.id == id).map(|i| i.sha256.clone())))
+        .collect();
+    let changed = current
+        .iter()
+        .filter(|(id, after)| baseline.get(*id).cloned().flatten() != **after)
+        .map(|(id, after)| ChangedInput {
+            input: id.clone(),
+            before: baseline.get(id).cloned().flatten(),
+            after: after.clone(),
+        })
+        .collect();
+    (current, changed)
+}
+
 impl TriggerService {
     /// Load the stored triggers (nothing is listening until a project opens
-    /// and finishes indexing).
+    /// and finishes indexing). A store that cannot be read is not written
+    /// until it can be ([`Self::ensure_store`]).
     pub fn new(config: TriggerConfig) -> Self {
-        let mut entries: Vec<Entry> = Vec::new();
-        if let Some(path) = &config.store {
-            for mut stored in store::load(path) {
-                stored.trigger.queued = false;
-                stored.trigger.listening = false;
-                stored.trigger.next_check_ms = None;
-                entries.push(Entry { stored, rt: Runtime::default(), version: 0 });
-            }
+        let mut engine = Engine::default();
+        match &config.store {
+            None => engine.loaded = true,
+            Some(path) => match store::load(path) {
+                Ok(loaded) => {
+                    engine.entries = loaded.triggers.into_iter().map(loaded_entry).collect();
+                    engine.unreadable = loaded.unreadable;
+                    engine.loaded = true;
+                }
+                Err(problem) => {
+                    tracing::warn!("{problem}");
+                    engine.store_problem = Some(problem);
+                }
+            },
         }
         let (events, _) = broadcast::channel(256);
         Self {
@@ -352,7 +408,7 @@ impl TriggerService {
                 starter: config.starter,
                 clock: config.clock,
                 store: config.store,
-                engine: Mutex::new(Engine { entries, ..Default::default() }),
+                engine: Mutex::new(engine),
                 ticking: Mutex::new(()),
                 events,
                 signal: Mutex::new(false),
@@ -374,13 +430,86 @@ impl TriggerService {
         let _ = self.shared.events.send(event);
     }
 
-    fn persist(&self, engine: &Engine) -> Result<(), WorkflowRunError> {
+    /// Write the records. A store that could not be read is never written
+    /// (`trigger.storeUnavailable`); a failed write is remembered and shown on
+    /// every trigger until a later save succeeds.
+    fn persist(&self, engine: &mut Engine) -> Result<(), WorkflowRunError> {
         let Some(path) = &self.shared.store else { return Ok(()) };
+        if !engine.loaded {
+            let problem = engine.store_problem.clone().unwrap_or_else(|| "The trigger store cannot be read.".into());
+            return Err(WorkflowRunError::new("trigger.storeUnavailable", problem));
+        }
         let records: Vec<&StoredTrigger> = engine.entries.iter().map(|e| &e.stored).collect();
-        store::save(path, &records).map_err(|e| {
-            tracing::warn!("workflow triggers could not be saved: {e}");
-            WorkflowRunError::new("trigger.storeFailed", format!("The triggers could not be saved: {e}"))
-        })
+        match store::save(path, &records, &engine.unreadable) {
+            Ok(()) => {
+                engine.store_problem = None;
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!("workflow triggers could not be saved: {e}");
+                let message = format!(
+                    "The triggers could not be saved ({e}); changes since the last save may not survive a restart."
+                );
+                engine.store_problem = Some(message.clone());
+                Err(WorkflowRunError::new("trigger.storeFailed", message))
+            }
+        }
+    }
+
+    /// Save a change the engine made on its own (a suspension, a run). It
+    /// applies whether or not it could be saved; a failure is shown.
+    fn persist_background(&self, engine: &mut Engine) {
+        if let Err(e) = self.persist(engine) {
+            tracing::warn!("workflow trigger change not saved: {}", e.message);
+        }
+    }
+
+    /// Read the store now if it could not be read before. Until it can be,
+    /// the user's changes are refused (`trigger.storeUnavailable`) and nothing
+    /// is written over it.
+    fn ensure_store(&self, engine: &mut Engine) -> Result<(), WorkflowRunError> {
+        if engine.loaded {
+            return Ok(());
+        }
+        let Some(path) = &self.shared.store else {
+            engine.loaded = true;
+            return Ok(());
+        };
+        match store::load(path) {
+            Ok(loaded) => {
+                // Nothing was added meanwhile: every change waits for the store.
+                engine.entries = loaded.triggers.into_iter().map(loaded_entry).collect();
+                engine.unreadable = loaded.unreadable;
+                engine.loaded = true;
+                engine.store_problem = None;
+                // An open project re-reads the baselines of what was loaded.
+                if let Some(session) = engine.session.as_mut()
+                    && session.indexed
+                {
+                    session.ready_at = None;
+                }
+                Ok(())
+            }
+            Err(problem) => {
+                engine.store_problem = Some(problem.clone());
+                Err(WorkflowRunError::new("trigger.storeUnavailable", problem))
+            }
+        }
+    }
+
+    /// A run ended: queued follow-ups check at once whether they can start.
+    pub fn runs_changed(&self) {
+        let now = self.now();
+        let mut engine = lock(&self.shared.engine);
+        let mut any = false;
+        for entry in engine.entries.iter_mut().filter(|e| e.rt.queued) {
+            entry.rt.poll_at = Some(now);
+            any = true;
+        }
+        drop(engine);
+        if any {
+            self.wake();
+        }
     }
 
     /// Wake the driver (a change arrived or a run ended).
@@ -397,7 +526,7 @@ impl TriggerService {
     /// shorter than 15 minutes).
     pub fn plan(&self, request: &WorkflowTriggerPlanRequest) -> Result<WorkflowTriggerPlan, WorkflowRunError> {
         let root = self.shared.starter.project_root().ok_or_else(no_project)?;
-        let plan = self.shared.starter.plan(&request.workflow)?;
+        let plan = self.shared.starter.preview(&request.workflow)?;
         let watched = standing::watched_inputs(&plan, &request.kind)?;
         let ids: Vec<String> = watched.iter().map(|w| w.input.clone()).collect();
         let review = WorkflowTriggerPlan {
@@ -437,25 +566,43 @@ impl TriggerService {
     /// history, and rate-limit window.
     pub fn enable(&self, request: &EnableWorkflowTriggerRequest) -> Result<WorkflowTrigger, WorkflowRunError> {
         let now = self.now();
-        let cached = lock(&self.shared.engine).reviews.remove(&request.plan);
-        let Some(cached) = cached else {
-            return Err(stale("This standing plan is unknown or was already used; review it again."));
+        // Refused settings and an unreadable store leave the review usable
+        // for a corrected attempt; a wrong or expired approval uses it up.
+        let cached = {
+            let mut engine = lock(&self.shared.engine);
+            let check = engine.reviews.get(&request.plan).map(|c| {
+                if c.review.expires_at_ms <= crate::now_ms() {
+                    Err(stale("This standing plan expired; review it again."))
+                } else if request.standing_hash != c.review.standing_hash {
+                    Err(stale("The approval does not match the standing plan that was reviewed; review it again."))
+                } else {
+                    Ok(standing::check_settings(&request.settings, &c.review.plan, &c.review.kind))
+                }
+            });
+            match check {
+                None => return Err(stale("This standing plan is unknown or was already used; review it again.")),
+                Some(Err(e)) => {
+                    engine.reviews.remove(&request.plan);
+                    return Err(e);
+                }
+                Some(Ok(Err(e))) => return Err(e),
+                Some(Ok(Ok(()))) => {}
+            }
+            self.ensure_store(&mut engine)?;
+            match engine.reviews.remove(&request.plan) {
+                Some(cached) => cached,
+                None => return Err(stale("This standing plan was already used; review it again.")),
+            }
         };
+        let kept = cached.clone();
         let review = cached.review;
-        if review.expires_at_ms <= crate::now_ms() {
-            return Err(stale("This standing plan expired; review it again."));
-        }
-        if request.standing_hash != review.standing_hash {
-            return Err(stale("The approval does not match the standing plan that was reviewed; review it again."));
-        }
-        standing::check_settings(&request.settings, &review.plan, &review.kind)?;
         let root = self.shared.starter.project_root().ok_or_else(no_project)?;
         let key = project_key(&root);
         if key != cached.key {
             return Err(stale("The open project changed since the standing plan was made; review it again."));
         }
         let ids: Vec<String> = review.watched.iter().map(|w| w.input.clone()).collect();
-        let fresh = self.shared.starter.plan(&review.plan.workflow)?;
+        let fresh = self.shared.starter.preview(&review.plan.workflow)?;
         if standing::standing_hash(&fresh, &root, &ids) != review.standing_hash {
             return Err(stale(standing::describe(&review.plan, &fresh, &ids).replace(
                 "The trigger is suspended until you review and enable it again.",
@@ -476,6 +623,8 @@ impl TriggerService {
         let settings = &request.settings;
 
         let mut engine = lock(&self.shared.engine);
+        self.ensure_store(&mut engine)?;
+        let before = engine.entries.clone();
         let existing = engine
             .entries
             .iter()
@@ -542,6 +691,7 @@ impl TriggerService {
             runs_last_day: 0,
             model_requests_last_day: 0,
             history,
+            store_problem: None,
         };
         let mut entry = Entry {
             stored: StoredTrigger {
@@ -573,11 +723,11 @@ impl TriggerService {
                 engine.entries.len() - 1
             }
         };
-        let persisted = self.persist(&engine);
-        if let Err(e) = persisted {
-            // Never leave an enabled trigger that was not saved.
-            engine.entries[index].stored.trigger.state = TriggerState::Disabled;
-            engine.entries[index].rt = Runtime::default();
+        if let Err(e) = self.persist(&mut engine) {
+            // Never leave an enabled trigger that was not saved: undo it, and
+            // keep the review for another attempt.
+            engine.entries = before;
+            engine.reviews.insert(request.plan.clone(), kept);
             return Err(e);
         }
         let view = engine.view(&engine.entries[index], now);
@@ -592,16 +742,22 @@ impl TriggerService {
     pub fn disable(&self, id: &WorkflowTriggerId) -> Result<WorkflowTrigger, WorkflowRunError> {
         let now = self.now();
         let mut engine = lock(&self.shared.engine);
+        self.ensure_store(&mut engine)?;
         let Some(i) = engine.find(id) else {
             return Err(WorkflowRunError::new("trigger.unknown", "That trigger does not exist."));
         };
-        let entry = &mut engine.entries[i];
-        if entry.stored.trigger.state != TriggerState::Disabled {
+        if engine.entries[i].stored.trigger.state != TriggerState::Disabled {
+            let before = engine.entries[i].clone();
+            let entry = &mut engine.entries[i];
             entry.stored.trigger.state = TriggerState::Disabled;
             entry.rt = Runtime::default();
             entry.version += 1;
             record(entry, now, TriggerHistoryEvent::Disabled);
-            self.persist(&engine)?;
+            if let Err(e) = self.persist(&mut engine) {
+                // Not saved: not applied.
+                engine.entries[i] = before;
+                return Err(e);
+            }
         }
         let view = engine.view(&engine.entries[i], now);
         let event = engine.event(&engine.entries[i], None);
@@ -615,7 +771,9 @@ impl TriggerService {
         let root = self.shared.starter.project_root().ok_or_else(no_project)?;
         let key = project_key(&root);
         let now = self.now();
-        let engine = lock(&self.shared.engine);
+        let mut engine = lock(&self.shared.engine);
+        // A store that cannot be read is shown as such, not as no triggers.
+        self.ensure_store(&mut engine)?;
         Ok(engine
             .entries
             .iter()
@@ -740,7 +898,7 @@ impl TriggerService {
         if changed.is_empty() {
             return;
         }
-        let _ = self.persist(&engine);
+        self.persist_background(&mut engine);
         let events: Vec<_> = changed.iter().map(|&i| engine.event(&engine.entries[i], None)).collect();
         drop(engine);
         for event in events {
@@ -818,7 +976,7 @@ impl TriggerService {
             session.ready_at = Some(now);
         }
         if rebased {
-            let _ = self.persist(&engine);
+            self.persist_background(&mut engine);
         }
         let events: Vec<_> = engine
             .entries
@@ -851,7 +1009,8 @@ impl TriggerService {
             } else if entry.rt.check_due.is_some_and(|t| t <= now) {
                 entry.rt.check_due = None;
                 (false, false)
-            } else if entry.rt.queued && entry.rt.fire_due.is_none() {
+            } else if entry.rt.queued && entry.rt.fire_due.is_none() && entry.rt.poll_at.is_some_and(|t| t <= now) {
+                entry.rt.poll_at = None;
                 (true, true)
             } else {
                 continue;
@@ -876,72 +1035,84 @@ impl TriggerService {
         jobs
     }
 
-    /// Recompute the plan and decide (outside the engine lock).
+    /// Why the plan no longer fits the standing plan, if it does not.
+    fn standing_problem(&self, job: &Job, plan: &WorkflowRunPlan, root: &Path) -> Option<Outcome> {
+        let watched = job.kind.watched();
+        if standing::standing_hash(plan, root, watched) != job.standing_hash {
+            return Some(Outcome::Suspend {
+                code: "trigger.planChanged".into(),
+                message: standing::describe(&job.standing_plan, plan, watched),
+            });
+        }
+        if !plan.execution.native_steps.is_empty() && !job.settings.allow_native {
+            return Some(Outcome::Suspend {
+                code: "trigger.nativeNotAllowed".into(),
+                message: "The plan has native steps, which this trigger was not allowed to start.".into(),
+            });
+        }
+        plan.blockers.iter().find(|b| !starter::is_busy(&b.code)).map(|blocker| Outcome::Suspend {
+            code: blocker.code.clone(),
+            message: format!("{} The trigger is suspended until you review and enable it again.", blocker.message),
+        })
+    }
+
+    /// Recompute the plan and decide (outside the engine lock). Checks use a
+    /// preview the run service does not keep; a startable plan is made only
+    /// when a run starts now, and it is checked against the standing plan
+    /// once more.
     fn check(&self, job: &Job) -> Outcome {
         let starter = &self.shared.starter;
-        if job.poll && starter.workflow_active(&job.workflow) {
-            return Outcome::Nothing;
+        if job.poll && starter.busy(&job.workflow) {
+            return Outcome::StillBusy;
         }
         let Some(root) = starter.project_root().filter(|r| project_key(r) == job.key) else {
             return Outcome::Nothing;
         };
-        let plan = match starter.plan(&job.workflow) {
-            Ok(plan) => plan,
-            Err(e) if TRANSIENT.contains(&e.code.as_str()) => return Outcome::Nothing,
-            Err(e) => {
-                return Outcome::Suspend {
-                    code: e.code,
-                    message: format!(
-                        "The workflow could not be planned: {} The trigger is suspended until you review and enable it again.",
-                        e.message
-                    ),
-                };
-            }
+        let planned = |plan: Result<WorkflowRunPlan, WorkflowRunError>| match plan {
+            Ok(plan) => Ok(plan),
+            Err(e) if TRANSIENT.contains(&e.code.as_str()) => Err(Outcome::Nothing),
+            Err(e) => Err(Outcome::Suspend {
+                code: e.code,
+                message: format!(
+                    "The workflow could not be planned: {} The trigger is suspended until you review and enable it again.",
+                    e.message
+                ),
+            }),
         };
+        let plan = match planned(starter.preview(&job.workflow)) {
+            Ok(plan) => plan,
+            Err(outcome) => return outcome,
+        };
+        if let Some(problem) = self.standing_problem(job, &plan, &root) {
+            return problem;
+        }
         let watched = job.kind.watched();
-        if standing::standing_hash(&plan, &root, watched) != job.standing_hash {
-            return Outcome::Suspend {
-                code: "trigger.planChanged".into(),
-                message: standing::describe(&job.standing_plan, &plan, watched),
-            };
-        }
-        if !plan.execution.native_steps.is_empty() && !job.settings.allow_native {
-            return Outcome::Suspend {
-                code: "trigger.nativeNotAllowed".into(),
-                message: "The plan has native steps, which this trigger was not allowed to start.".into(),
-            };
-        }
-        if let Some(blocker) = plan.blockers.iter().find(|b| !starter::is_busy(&b.code)) {
-            return Outcome::Suspend {
-                code: blocker.code.clone(),
-                message: format!("{} The trigger is suspended until you review and enable it again.", blocker.message),
-            };
-        }
-        let current: BTreeMap<String, Option<String>> = watched
-            .iter()
-            .map(|id| (id.clone(), plan.inputs.iter().find(|i| &i.id == id).map(|i| i.sha256.clone())))
-            .collect();
-        let changed: Vec<ChangedInput> = current
-            .iter()
-            .filter(|(id, after)| job.baseline.get(*id).cloned().flatten() != **after)
-            .map(|(id, after)| ChangedInput {
-                input: id.clone(),
-                before: job.baseline.get(id).cloned().flatten(),
-                after: after.clone(),
-            })
-            .collect();
+        let (_, changed) = changes(watched, &job.baseline, &plan);
         if !job.fire {
             return Outcome::Nothing;
         }
         if matches!(job.kind, TriggerKind::InputsChanged { .. }) && changed.is_empty() {
             return Outcome::Nothing;
         }
-        if plan.blockers.iter().any(|b| starter::is_busy(&b.code)) || starter.workflow_active(&job.workflow) {
+        if plan.blockers.iter().any(|b| starter::is_busy(&b.code)) || starter.busy(&job.workflow) {
             return Outcome::Queue;
         }
         let model_requests = plan.budgets.max_model_requests;
         if let Some(until) = rate_limited(&job.fires, self.now(), &job.settings, model_requests) {
             return Outcome::RateLimited { until };
+        }
+        // Start now: a startable plan, checked against the standing plan again
+        // (the run reads exactly what it records as changed).
+        let plan = match planned(starter.plan_to_start(&job.workflow)) {
+            Ok(plan) => plan,
+            Err(outcome) => return outcome,
+        };
+        if let Some(problem) = self.standing_problem(job, &plan, &root) {
+            return problem;
+        }
+        let (current, changed) = changes(watched, &job.baseline, &plan);
+        if matches!(job.kind, TriggerKind::InputsChanged { .. }) && changed.is_empty() {
+            return Outcome::Nothing;
         }
         let cause = WorkflowRunCause::Trigger { trigger: job.id.to_string(), changed: changed.clone() };
         match starter.start(&plan, cause) {
@@ -973,19 +1144,35 @@ impl TriggerService {
         let mut durable = false;
         let mut announce = false;
         match outcome {
-            Outcome::Nothing => {}
+            Outcome::Nothing => {
+                // A follow-up with nothing (left) to run is dropped.
+                if job.fire && entry.rt.queued {
+                    entry.rt.queued = false;
+                    entry.rt.poll_at = None;
+                    entry.rt.backoff_ms = 0;
+                    announce = true;
+                }
+            }
+            Outcome::StillBusy => {
+                entry.rt.backoff_ms = (entry.rt.backoff_ms * 2).clamp(QUEUE_POLL_MS, MAX_QUEUE_POLL_MS);
+                entry.rt.poll_at = Some(now + entry.rt.backoff_ms);
+            }
             Outcome::Suspend { code, message } => {
                 suspend(entry, now, &code, message);
                 durable = true;
                 announce = true;
             }
             Outcome::Queue => {
-                if !entry.rt.queued {
+                if entry.rt.queued {
+                    entry.rt.backoff_ms = (entry.rt.backoff_ms * 2).clamp(QUEUE_POLL_MS, MAX_QUEUE_POLL_MS);
+                } else {
                     entry.rt.queued = true;
+                    entry.rt.backoff_ms = QUEUE_POLL_MS;
                     record(entry, now, TriggerHistoryEvent::Queued);
                     durable = true;
                     announce = true;
                 }
+                entry.rt.poll_at = Some(now + entry.rt.backoff_ms);
             }
             Outcome::RateLimited { until } => {
                 entry.rt.fire_due = Some(entry.rt.fire_due.map_or(until, |t| t.max(until)));
@@ -1004,6 +1191,8 @@ impl TriggerService {
                 stored.baseline.extend(digests);
                 stored.start_refusals = 0;
                 entry.rt.queued = false;
+                entry.rt.poll_at = None;
+                entry.rt.backoff_ms = 0;
                 entry.rt.rate_noted = false;
                 record(entry, now, TriggerHistoryEvent::Fired { run: id.clone(), changed });
                 run = Some(id);
@@ -1032,7 +1221,7 @@ impl TriggerService {
             entry.rt.fire_due = Some(now + every);
         }
         if durable {
-            let _ = self.persist(&engine);
+            self.persist_background(&mut engine);
         }
         if announce {
             let event = engine.event(&engine.entries[i], run);
@@ -1053,7 +1242,7 @@ impl TriggerService {
             .iter()
             .filter(|e| e.stored.project_key == session.key && e.stored.trigger.state == TriggerState::Active)
             .flat_map(|e| {
-                let poll = (e.rt.queued && e.rt.fire_due.is_none()).then_some(now + QUEUE_POLL_MS);
+                let poll = if e.rt.queued && e.rt.fire_due.is_none() { e.rt.poll_at } else { None };
                 [e.rt.fire_due, e.rt.check_due, poll]
             })
             .flatten()

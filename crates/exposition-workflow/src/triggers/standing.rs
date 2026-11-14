@@ -49,6 +49,13 @@ pub fn describe(approved: &WorkflowRunPlan, now: &WorkflowRunPlan, watched: &[St
     )
 }
 
+/// Inputs that are code: scripts, and Lean sources (elaborated natively by
+/// Lean, where `#eval` runs code). They are never watched, the review shows
+/// them in full, and any change to one suspends the trigger.
+pub fn is_code(port_type: PortType) -> bool {
+    matches!(port_type, PortType::CodeSource | PortType::FormalSource)
+}
+
 fn refuse(code: &str, message: impl Into<String>) -> WorkflowRunError {
     WorkflowRunError::new(code, message)
 }
@@ -90,12 +97,18 @@ pub fn watched_inputs(
                 ),
             ));
         };
-        if input.port_type == PortType::CodeSource {
+        if is_code(input.port_type) {
             return Err(refuse(
                 "trigger.codeInputWatched",
                 format!(
-                    "“{}” ({}) is code. Code never runs without your review: a change to it suspends the trigger instead of starting a run, so it cannot be watched.",
-                    input.label, input.path
+                    "“{}” ({}) is code{}. Code never runs without your review: a change to it suspends the trigger instead of starting a run, so it cannot be watched.",
+                    input.label,
+                    input.path,
+                    if input.port_type == PortType::FormalSource {
+                        " (Lean elaborates it natively, and `#eval` runs code)"
+                    } else {
+                        ""
+                    }
                 ),
             ));
         }
@@ -209,7 +222,7 @@ pub fn suspends_on(plan: &WorkflowRunPlan, watched: &[String]) -> Vec<String> {
     let mut list =
         vec![format!("A new revision of “{}” (this trigger runs revision {} only).", plan.title, plan.revision)];
     for input in plan.inputs.iter().filter(|i| !watched.contains(&i.id)) {
-        list.push(if input.port_type == PortType::CodeSource {
+        list.push(if is_code(input.port_type) {
             format!("Any change to the code in “{}” ({}).", input.label, input.path)
         } else {
             format!("Any change to “{}” ({}).", input.label, input.path)
@@ -232,10 +245,11 @@ pub fn suspends_on(plan: &WorkflowRunPlan, watched: &[String]) -> Vec<String> {
     }
     if !plan.execution.native_steps.is_empty() {
         list.push(
-            "The project folder's trust (native steps need a trusted folder); revoking trust suspends the trigger."
+            "The project folder's trust: native steps run with your account's privileges and need a trusted folder."
                 .into(),
         );
     }
+    list.push("Trust being revoked for the project folder: every trigger of the folder is suspended.".into());
     list.push("Any step's runner becoming unavailable (or available), and any step, budget, or limit changing.".into());
     list
 }

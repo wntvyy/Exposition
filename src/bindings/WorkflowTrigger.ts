@@ -38,4 +38,9 @@ listening: boolean, runsLastHour: number, runsLastDay: number, modelRequestsLast
 /**
  * Bounded, oldest first.
  */
-history: Array<TriggerHistoryEntry>, };
+history: Array<TriggerHistoryEntry>, 
+/**
+ * The trigger store could not be saved (or read): changes shown here
+ * may not survive a restart until it can.
+ */
+storeProblem: string | null, };
