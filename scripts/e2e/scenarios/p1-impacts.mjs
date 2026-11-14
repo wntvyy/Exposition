@@ -200,13 +200,17 @@ export default async function p1Impacts({ launchApp, artifactsDir, assert, fixtu
     await page.keyboard.press("Delete");
     await decision(page).waitFor({ timeout: 15_000 });
     assert.match(await decision(page).textContent(), /Fit observations/, "names the workflow that requires it");
+    assert.ok((await decision(page).locator('[data-testid="op-impact"][data-kind="workflowInput"]').count()) >= 1, "a required-workflow-input impact");
+    await shot(page, "p1-workflow-input-decision-light");
     await decision(page).getByRole("button", { name: /^Delete$/ }).click();
     await waitFor(async () => !existsSync(join(root, "data", "obs.csv")), { message: "input deleted" });
     const after = await invoke(page, "workflow_get", { id: saved.id, revision: null });
     assert.deepEqual(after.definition.inputs, workflow().inputs, "the workflow is unchanged (still names its input)");
     const summary = (await invoke(page, "workflow_list")).find((w) => w.id === saved.id);
     assert.ok(summary, "the workflow still exists");
+    assert.equal(summary.runnable, false, "the workflow cannot run without its input");
     const plan = await invoke(page, "workflow_run_plan", { id: saved.id, revision: null }).catch((e) => e);
+    assert.ok(!(plan instanceof Error) && plan.blockers.some((b) => b.code === "workflow.inputMissing" && b.input === "data"), "the plan shows the input missing");
     evidence.notes.push(`workflow after its input was deleted: runnable=${summary.runnable}; plan=${plan instanceof Error ? plan.message.slice(0, 160) : JSON.stringify(plan.blockers ?? plan).slice(0, 160)}`);
     await dismissNotifications(page);
 

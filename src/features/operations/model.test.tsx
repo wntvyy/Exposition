@@ -67,6 +67,16 @@ describe("result wording", () => {
     expect(s.restoreTokens).toHaveLength(1);
   });
 
+  it("a target kept on purpose (left running) is not reported as a failure", () => {
+    const s = summarizeResult(
+      { kind: "delete", permanent: false },
+      { plan: "p", outcomes: [{ target: path("data/slow.csv"), status: "skipped", code: "ops.activeWork", message: "It is still running; it was left running and kept.", created: null, recovery: { kind: "none" }, restore: null }], notices: [] },
+    );
+    expect(s.tone).toBe("warning");
+    expect(s.title).toBe("Nothing was deleted");
+    expect(s.lines).toEqual(["“data/slow.csv”: not changed — It is still running; it was left running and kept."]);
+  });
+
   it("permanent deletion promises nothing", () => {
     const s = summarizeResult(
       { kind: "delete", permanent: true },

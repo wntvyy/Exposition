@@ -326,7 +326,11 @@ export function summarizeResult(
   const lines: string[] = [];
   const where = kind.kind === "paste" ? ` into ${destinationLabel(kind.destination)}` : "";
   const toTrash = verb === "Moved" ? ` to ${trash}` : "";
-  if (succeeded.length === 0) {
+  if (succeeded.length === 0 && failed.length === 0 && skipped.length > 0) {
+    // Everything was kept on purpose (e.g. "leave it running and keep it"): not a failure.
+    const past = kind.kind === "delete" ? "deleted" : kind.kind === "duplicate" ? "duplicated" : "pasted";
+    title = `Nothing was ${past}`;
+  } else if (succeeded.length === 0) {
     const name = total === 1 ? quoted(targetName(outcomes[0]!.target, labels)) : countText(total);
     title = `Could not ${verbOf(kind).toLowerCase()} ${name}`;
   } else if (succeeded.length === total) {
@@ -381,7 +385,7 @@ export function summarizeResult(
     lines.push(`${trash.charAt(0).toUpperCase()}${trash.slice(1)} is unavailable, so nothing was deleted permanently. Use Delete Permanently to remove ${trashUnavailable.length === 1 ? "it" : "them"} without recovery.`);
   }
 
-  const tone: Tone = succeeded.length === 0 ? "danger" : failed.length || skipped.length ? "warning" : "info";
+  const tone: Tone = succeeded.length === 0 && failed.length > 0 ? "danger" : failed.length || skipped.length ? "warning" : "info";
   return { tone, title, lines, succeeded, failed, skipped, restoreTokens, trashUnavailable };
 }
 
