@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-op-restore"
+description = "Enables the project_op_restore command without any pre-configured scope."
+commands.allow = ["project_op_restore"]
+
+[[permission]]
+identifier = "deny-project-op-restore"
+description = "Denies the project_op_restore command without any pre-configured scope."
+commands.deny = ["project_op_restore"]

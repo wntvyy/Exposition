@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-op-apply"
+description = "Enables the project_op_apply command without any pre-configured scope."
+commands.allow = ["project_op_apply"]
+
+[[permission]]
+identifier = "deny-project-op-apply"
+description = "Denies the project_op_apply command without any pre-configured scope."
+commands.deny = ["project_op_apply"]

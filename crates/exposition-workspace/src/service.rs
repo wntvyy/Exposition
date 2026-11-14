@@ -192,6 +192,10 @@ struct OpenWorkspace {
     /// Physical identity of each document's file (unifies hard links).
     identities: HashMap<DocumentId, FileIdentity>,
     conflicts: HashMap<DocumentId, Conflict>,
+    /// Documents whose file a project operation deleted while the user chose
+    /// to keep the unsaved text in the editor: never journaled for recovery
+    /// and never saved back to that path (no resurrection).
+    suspended: HashSet<DocumentId>,
     _watcher: Option<RecommendedWatcher>,
 }
 
@@ -281,6 +285,11 @@ impl WorkspaceService {
         &self.documents
     }
 
+    /// The application data folder (never a project, never a copy source).
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<WorkspaceEvent> {
         self.events.subscribe()
     }
@@ -293,7 +302,7 @@ impl WorkspaceService {
         TransactionId(format!("workspace-{kind}-{}", self.counter.fetch_add(1, Ordering::Relaxed)))
     }
 
-    fn root(&self) -> WorkspaceResult<WorkspaceRoot> {
+    pub(crate) fn root(&self) -> WorkspaceResult<WorkspaceRoot> {
         lock(&self.state).open.as_ref().map(|o| o.root.clone()).ok_or_else(WorkspaceError::no_workspace)
     }
 
@@ -363,6 +372,7 @@ impl WorkspaceService {
                 disk: HashMap::new(),
                 identities: HashMap::new(),
                 conflicts: HashMap::new(),
+                suspended: HashSet::new(),
                 _watcher: watcher,
             });
         }
@@ -539,6 +549,7 @@ impl WorkspaceService {
                 open.disk.remove(id);
                 open.identities.remove(id);
                 open.conflicts.remove(id);
+                open.suspended.remove(id);
                 open.recovery.clone()
             })
         };
@@ -547,6 +558,63 @@ impl WorkspaceService {
             let _ = store.remove_live(&path);
         }
         Ok(())
+    }
+
+    // ----- project operations support ------------------------------------------
+
+    /// Open documents backed by `path` or by a file inside the folder `path`
+    /// (compared case-insensitively on Windows).
+    pub fn documents_under(&self, path: &WorkspacePath) -> Vec<DocumentInfo> {
+        let fold = |s: &str| if cfg!(windows) { s.to_lowercase() } else { s.to_owned() };
+        let target = fold(path.as_str());
+        let prefix = format!("{target}/");
+        self.documents
+            .list()
+            .into_iter()
+            .filter(|info| {
+                info.path.as_ref().is_some_and(|p| {
+                    let p = fold(p.as_str());
+                    p == target || p.starts_with(&prefix)
+                })
+            })
+            .collect()
+    }
+
+    /// Keep a document's unsaved text in the editor while its file is deleted:
+    /// its recovery journal is removed and it is no longer journaled or saved
+    /// to that path, so neither a restart nor a save brings the file back.
+    pub fn suspend_document(&self, id: &DocumentId) -> WorkspaceResult<()> {
+        let info = self.documents.info(id)?;
+        let _io = lock(&self.io);
+        let store = {
+            let mut state = lock(&self.state);
+            let open = state.open.as_mut().ok_or_else(WorkspaceError::no_workspace)?;
+            open.suspended.insert(id.clone());
+            open.recovery.clone()
+        };
+        if let Some(path) = info.path {
+            let _ = store.remove_live(&path);
+        }
+        Ok(())
+    }
+
+    /// Whether a document's file was deleted while its text was kept.
+    pub fn is_suspended(&self, id: &DocumentId) -> bool {
+        lock(&self.state).open.as_ref().is_some_and(|o| o.suspended.contains(id))
+    }
+
+    /// The deleted file is back (restored by the app): documents at or under
+    /// `path` are journaled and saved normally again.
+    pub fn resume_documents_under(&self, path: &WorkspacePath) {
+        let ids: Vec<DocumentId> = self.documents_under(path).into_iter().map(|i| i.id).collect();
+        let resumed: HashSet<DocumentId> = {
+            let mut state = lock(&self.state);
+            let Some(open) = state.open.as_mut() else { return };
+            ids.into_iter().filter(|id| open.suspended.remove(id)).collect()
+        };
+        if !resumed.is_empty() {
+            self.journal_documents(&resumed);
+        }
     }
 
     /// Save a document to its file.
@@ -562,6 +630,14 @@ impl WorkspaceService {
             .path
             .clone()
             .ok_or_else(|| WorkspaceError::new("document.noPath", "This document has no file to save to."))?;
+        if self.is_suspended(id) {
+            return Err(WorkspaceError::new(
+                "document.fileDeleted",
+                format!(
+                    "{path} was deleted, and its unsaved text is kept in the editor only. Saving would bring the deleted file back, so it was not saved; copy the text elsewhere to keep it."
+                ),
+            ));
+        }
         let root = self.root()?;
         let base = self.disk_base(id).unwrap_or(None);
         let target = root.resolve_for_write(&path)?;
@@ -729,12 +805,19 @@ impl WorkspaceService {
                 self.set_disk_base(id, None);
                 // The buffer is now the only copy: mark it unsaved so closing asks first.
                 let _ = self.documents.mark_saved(id, 0);
+                let message = if self.is_suspended(id) {
+                    format!(
+                        "{path} was deleted. Its unsaved text is kept in the editor only and is not saved back to that file."
+                    )
+                } else {
+                    format!("{path} was deleted or moved on disk. Saving will recreate it.")
+                };
                 self.set_conflict(Conflict {
                     public: DiskConflict {
                         document: id.clone(),
                         path: path.clone(),
                         kind: ConflictKind::Deleted,
-                        message: format!("{path} was deleted or moved on disk. Saving will recreate it."),
+                        message,
                     },
                     disk_hash: None,
                 });
@@ -831,6 +914,11 @@ impl WorkspaceService {
             let Ok(state) = self.documents.state(id) else { continue };
             let Some(path) = state.info.path.clone() else { continue };
             let Some(base) = self.disk_base(id) else { continue };
+            if self.is_suspended(id) {
+                // Its file was deleted on purpose: a journal would offer to
+                // bring it back after a restart.
+                continue;
+            }
             let result = if state.info.saved_revision == Some(state.info.revision) {
                 store.remove_live(&path)
             } else {
