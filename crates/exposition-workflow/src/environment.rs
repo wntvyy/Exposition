@@ -15,7 +15,9 @@
 //! - Lean audits: the audit record's toolchain and `lean --version`, the
 //!   `lean-toolchain` pin, and the `lake-manifest.json` digest and dependency
 //!   revisions (files read, nothing run);
-//! - agent reviews: the task's provider and the model that served it.
+//! - agent reviews: the task's provider, configured model, and the model
+//!   id the provider reported serving (recorded; only the configured model is
+//!   compared for drift).
 //!
 //! Nothing here reads environment variables or records absolute paths, so
 //! secrets and user folders never reach an environment (or a manifest).

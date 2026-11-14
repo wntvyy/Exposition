@@ -145,7 +145,9 @@ pub async fn workflow_run_manifest_export(
                 .ok_or_else(|| CommandError::new("workflow.exportCanceled", "The export was canceled."))?,
         };
         let target = export_target(&raw, s)?;
-        manifest::write_manifest_file(&target, &json).map_err(CommandError::from)
+        let written = manifest::write_manifest_file(&target, &json).map_err(CommandError::from)?;
+        // The location as the person chose it (as bundle exports report it).
+        Ok(WorkflowManifestExport { path: raw, ..written })
     })
     .await
 }
