@@ -261,10 +261,18 @@ export interface ResultSummary {
   trashUnavailable: OpTarget[];
 }
 
+/** What the person can do about a failure code, when the message does not say it already. */
+const CODE_HINTS: Record<string, string> = {
+  "ops.inUse": "Close the program that is using it, then try again.",
+  "ops.interrupted": "The operation was interrupted; check the item before trying again.",
+};
+
 function failureLine(outcome: OpOutcome, labels: TargetLabels, skipped: boolean): string {
   const name = quoted(targetDetail(outcome.target, labels));
   const reason = outcome.message ?? outcome.code ?? (skipped ? "not attempted" : "failed");
-  return `${name}: ${skipped ? "not changed — " : ""}${reason}`;
+  const hint = outcome.code ? CODE_HINTS[outcome.code] : undefined;
+  const tail = hint && !reason.toLowerCase().includes(hint.split(" ")[0]!.toLowerCase()) ? ` ${hint}` : "";
+  return `${name}: ${skipped ? "not changed — " : ""}${reason}${tail}`;
 }
 
 function successVerb(kind: OpKind, succeeded: OpOutcome[]): string {
