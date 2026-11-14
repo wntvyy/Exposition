@@ -44,6 +44,12 @@ export interface RunOptions {
   review?: boolean;
   /** Leave the result notification to the caller. */
   quiet?: boolean;
+  /**
+   * Follow-up actions for refused or skipped targets (e.g. "Copy Text" when a
+   * source-anchored item cannot be duplicated, "Delete Source File" for a
+   * file-backed item), offered in the notification.
+   */
+  onRefused?: (refusals: { code: string | null; target: OpTarget }[]) => NotificationAction[];
 }
 
 export interface OperationOutcome {
@@ -174,9 +180,16 @@ async function planOrReport(request: OpRequest): Promise<OpPlan | null> {
   }
 }
 
-function reportNothingToDo(plan: OpPlan, labels: TargetLabels): void {
+function reportNothingToDo(plan: OpPlan, labels: TargetLabels, options: RunOptions): void {
   const summary = summarizeResult(plan.request.kind, { plan: plan.plan, outcomes: [], notices: [] }, labels, plan.refusals);
-  notify({ tone: "warning", title: `Nothing to ${verbOf(plan.request.kind).toLowerCase()}`, body: summary.lines.join("\n"), timeoutMs: null });
+  const actions = options.onRefused?.(plan.refusals.map((r) => ({ code: r.code, target: r.target }))) ?? [];
+  notify({
+    tone: "warning",
+    title: `Nothing to ${verbOf(plan.request.kind).toLowerCase()}`,
+    body: summary.lines.join("\n"),
+    actions: actions.length ? actions : undefined,
+    timeoutMs: null,
+  });
 }
 
 /**
@@ -202,7 +215,7 @@ async function runUnguarded(request: OpRequest, options: RunOptions): Promise<Op
     const plan = await planOrReport(request);
     if (!plan) return null;
     if (plan.effects.length === 0) {
-      reportNothingToDo(plan, labels);
+      reportNothingToDo(plan, labels, options);
       return null;
     }
     let choices: Record<string, string> = { ...(options.presetChoices ?? {}) };
@@ -228,17 +241,19 @@ async function runUnguarded(request: OpRequest, options: RunOptions): Promise<Op
       return null;
     }
     fanOut(result);
-    if (!options.quiet) report(plan, result, labels);
+    if (!options.quiet) report(plan, result, labels, options);
     return { plan, result };
   }
   notify({ tone: "warning", title: "Nothing was changed", body: "The items kept changing while this was being planned. Try again." });
   return null;
 }
 
-function report(plan: OpPlan, result: OpResult, labels: TargetLabels): void {
+function report(plan: OpPlan, result: OpResult, labels: TargetLabels, options: RunOptions): void {
   const kind = plan.request.kind;
   const summary = summarizeResult(kind, result, labels, plan.refusals);
   const actions: NotificationAction[] = [];
+  const notDone = [...summary.failed, ...summary.skipped].map((o) => ({ code: o.code, target: o.target }));
+  const followUps = notDone.length && options.onRefused ? options.onRefused(notDone) : [];
   if (summary.restoreTokens.length > 0) {
     const entry: HistoryEntry = { title: summary.title, restores: summary.restoreTokens, labels };
     record(entry);
@@ -251,6 +266,7 @@ function report(plan: OpPlan, result: OpResult, labels: TargetLabels): void {
       run: () => void runOperation({ kind: { kind: "delete", permanent: true }, targets, actor: { kind: "user" } }, { labels }),
     });
   }
+  actions.push(...followUps);
   notify({
     tone: summary.tone,
     title: summary.title,

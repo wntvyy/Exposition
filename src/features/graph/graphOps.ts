@@ -13,7 +13,7 @@
 // Copies never carry verification status; the backend decides each copy contract.
 import { ClipboardCopy, EyeOff, Quote } from "lucide-react";
 
-import { notify } from "../../app/notifications";
+import { notify, type NotificationAction } from "../../app/notifications";
 import type { Entity } from "../../bindings/Entity";
 import type { OpTarget } from "../../bindings/OpTarget";
 import type { Relation } from "../../bindings/Relation";
@@ -170,6 +170,27 @@ export function graphActions(selection: GraphSelection, options: GraphActionOpti
 
   const targets: OpTarget[] = [...entityTargets, ...relations.map((r): OpTarget => ({ kind: "graphRelation", relation: r.id }))];
   const deleteEnabled = count > 0 && !blockedDelete && !readOnly;
+
+  // The backend's guidance as actions: a source-anchored item offers Copy Reference / Copy Text;
+  // a file-backed item refused as an entity offers its source file's deletion.
+  const followUps = (refused: { code: string | null; target: OpTarget }[]): NotificationAction[] => {
+    const entityOf = (t: OpTarget) => (t.kind === "graphEntity" ? entities.find((e) => e.id === t.entity) : undefined);
+    const actions: NotificationAction[] = [];
+    const anchored = refused.map((r) => (r.code === "ops.sourceAnchored" ? entityOf(r.target) : undefined)).find(Boolean);
+    if (anchored) {
+      actions.push({ label: "Copy Reference", run: () => copyReference(anchored) });
+      actions.push({ label: "Copy Text", run: () => copyText(anchored) });
+    }
+    const file = refused.map((r) => (r.code === "ops.useSourceFile" ? entityOf(r.target) : undefined)).find((e) => e?.key);
+    if (file?.key) {
+      const path = file.key;
+      actions.push({
+        label: "Delete Source File",
+        run: () => void runUserOperation({ kind: "delete", permanent: false }, [{ kind: "path", path }], { labels: new Map([[targetKey({ kind: "path", path }), file.label]]) }),
+      });
+    }
+    return actions;
+  };
   const files = classes.filter((c) => c === "fileBacked" || c === "folder").length;
   const deleteDescription = files ? `Source ${plural(files, "file moves", "files move")} to ${trashName()}` : undefined;
 
@@ -183,7 +204,7 @@ export function graphActions(selection: GraphSelection, options: GraphActionOpti
     label: permanent ? "Delete Permanently" : deleteLabel(classes, relations.length),
     description: permanent ? "Cannot be restored" : deleteDescription,
     run: async () => {
-      await runUserOperation({ kind: "delete", permanent }, targets, { labels });
+      await runUserOperation({ kind: "delete", permanent }, targets, { labels, onRefused: followUps });
     },
   });
 
@@ -222,7 +243,7 @@ export function graphActions(selection: GraphSelection, options: GraphActionOpti
       reason: count === 0 ? none : (readOnly ?? blockedDuplicate ?? undefined),
       description: files ? "Duplicates the source file with a new identity" : "A new item; verification is not copied",
       run: async () => {
-        const created = createdEntities(await runUserOperation({ kind: "duplicate" }, targets, { labels }));
+        const created = createdEntities(await runUserOperation({ kind: "duplicate" }, targets, { labels, onRefused: followUps }));
         if (created.length) options.afterCreate?.(created);
       },
     },

@@ -171,6 +171,20 @@ describe("routine operations", () => {
     expect(titles).toContain("Saved version copied");
   });
 
+  it("a refusal with guidance offers the follow-up action (e.g. Copy Text for a source-anchored item)", async () => {
+    const request: OpRequest = { kind: { kind: "duplicate" }, targets: [{ kind: "graphEntity", entity: "ent-thm" }], actor: { kind: "user" } };
+    ipc.plan.mockResolvedValue(
+      plan(request, { effects: [], refusals: [{ target: request.targets[0]!, code: "ops.sourceAnchored", message: "Theorem 2 is anchored in its source; use Copy Reference or Copy Text instead." }] }),
+    );
+    const copyText = vi.fn();
+    await runOperation(request, { onRefused: (refused) => (refused.some((r) => r.code === "ops.sourceAnchored") ? [{ label: "Copy Text", run: copyText }] : []) });
+    const note = lastNotification();
+    expect(note.title).toBe("Nothing to duplicate");
+    expect(note.body).toContain("anchored in its source");
+    expect(note.actions.map((a: { label: string }) => a.label)).toEqual(["Copy Text"]);
+    expect(ipc.apply).not.toHaveBeenCalled();
+  });
+
   it("a second invocation while one is in flight is ignored (held key, double click)", async () => {
     const request = del(["a.txt"]);
     let release!: (p: OpPlan) => void;
