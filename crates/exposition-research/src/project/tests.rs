@@ -717,3 +717,61 @@ fn retained_batch_output_evidence_names_the_actual_execution_mode() {
         .map(|(_, v)| v.clone());
     assert_eq!(label.as_deref(), Some("trusted native (user account privileges)"));
 }
+
+/// P1: a research run record is deleted recoverably (hidden, restorable),
+/// its generated outputs are removed only as their own scope (kept outputs
+/// stay), a permanent deletion removes the record (manifest + transcript),
+/// and an active run is never removed.
+#[test]
+fn run_records_delete_restore_purge_and_outputs_are_a_separate_scope() {
+    let f = fixture();
+    let (one, two) = ("run-aaaa000000000001", "run-aaaa000000000002");
+    record_run(&f.root, one, vec![script_input()], vec![]);
+    record_run(&f.root, two, vec![], vec![]);
+    std::fs::write(f.root.join(".exposition/artifacts").join(one).join("transcript.json"), b"[]").unwrap();
+    let research = &f.project.research;
+    let records = research.run_records().unwrap();
+    assert_eq!(records.len(), 2);
+    let first = records.iter().find(|r| r.id == one).unwrap();
+    assert_eq!(first.outputs.len(), 2, "transcript is part of the record, not an output");
+    assert!(first.record_bytes > 0);
+    assert_eq!(first.inputs, vec![path("analysis/fit.py")]);
+
+    research.delete_run_record(one, false).unwrap();
+    assert!(research.runs().unwrap().iter().all(|r| r.id.0 != one), "hidden from the history");
+    assert!(research.run_records().unwrap().iter().all(|r| r.id != one));
+    assert_eq!(research.deleted_run_records().unwrap().len(), 1);
+    assert!(f.root.join(".exposition/artifacts").join(one).join("output-1.png").is_file(), "outputs untouched");
+    research.restore_run_record(one).unwrap();
+    assert!(research.runs().unwrap().iter().any(|r| r.id.0 == one));
+
+    // Outputs: only what nothing keeps.
+    let kept = path(&format!(".exposition/artifacts/{one}/output-1.png"));
+    let removed = research.remove_run_outputs(one, &|p| p == &kept).unwrap();
+    assert_eq!(removed.removed, vec![path(&format!(".exposition/artifacts/{one}/output-2.csv"))]);
+    assert_eq!(removed.kept, vec![kept.clone()]);
+    assert_eq!(removed.bytes, CSV.len() as u64);
+    assert!(research.runs().unwrap().iter().any(|r| r.id.0 == one), "the record stays");
+
+    // Permanent: the record goes, the kept output stays.
+    research.delete_run_record(one, true).unwrap();
+    assert!(!f.root.join(".exposition/runs").join(format!("{one}.json")).exists());
+    assert!(!f.root.join(".exposition/artifacts").join(one).join("transcript.json").exists());
+    assert!(f.root.join(".exposition/artifacts").join(one).join("output-1.png").is_file());
+    assert_eq!(research.delete_run_record(one, true).unwrap_err().code(), "research.unknownRun");
+
+    // An active run (a workflow batch executing now) is never removed.
+    research.set_batch_live(two, true);
+    assert_eq!(research.delete_run_record(two, false).unwrap_err().code(), "research.runActive");
+    assert_eq!(research.remove_run_outputs(two, &|_| false).unwrap_err().code(), "research.runActive");
+    assert!(f.root.join(".exposition/runs").join(format!("{two}.json")).is_file());
+    research.set_batch_live(two, false);
+    research.delete_run_record(two, false).unwrap();
+    // Restore never replaces a record that exists again.
+    std::fs::copy(
+        f.root.join(".exposition/runs/deleted").join(format!("{two}.json")),
+        f.root.join(".exposition/runs").join(format!("{two}.json")),
+    )
+    .unwrap();
+    assert_eq!(research.restore_run_record(two).unwrap_err().code(), "research.invalidRequest");
+}

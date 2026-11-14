@@ -68,6 +68,18 @@ impl From<StoreError> for GraphError {
     }
 }
 
+impl From<rusqlite::Error> for GraphError {
+    fn from(e: rusqlite::Error) -> Self {
+        StoreError::from(e).into()
+    }
+}
+
+impl From<serde_json::Error> for GraphError {
+    fn from(e: serde_json::Error) -> Self {
+        StoreError::from(e).into()
+    }
+}
+
 pub type GraphResult<T> = Result<T, GraphError>;
 
 /// Folder inside a project that holds the graph.

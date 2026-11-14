@@ -6,7 +6,7 @@
 //! its patches and inverse patches. Schema versions are tracked with
 //! `PRAGMA user_version` and applied in order.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use exposition_core::document::TextPatch;
@@ -21,7 +21,7 @@ use crate::model::{
 };
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (
@@ -135,6 +135,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
     );
     "#,
     ),
+    // P1 project operations: app-managed recoverable deletion of a task
+    // (hidden from the task list until restored or purged).
+    (
+        3,
+        r#"
+    ALTER TABLE tasks ADD COLUMN deleted_at INTEGER;
+    "#,
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -225,6 +233,8 @@ pub struct ChangeRow {
 
 pub struct Store {
     conn: Mutex<Connection>,
+    /// The database file (`None`: in memory).
+    path: Option<PathBuf>,
 }
 
 pub fn now_ms() -> u64 {
@@ -254,18 +264,18 @@ impl Store {
         }
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        Self::init(conn)
+        Self::init(conn, Some(path.to_path_buf()))
     }
 
     pub fn open_in_memory() -> StoreResult<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, None)
     }
 
-    fn init(conn: Connection) -> StoreResult<Self> {
+    fn init(conn: Connection, path: Option<PathBuf>) -> StoreResult<Self> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&conn)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self { conn: Mutex::new(conn), path })
     }
 
     fn lock(&self) -> MutexGuard<'_, Connection> {
@@ -326,7 +336,7 @@ impl Store {
         let conn = self.lock();
         let raw = conn
             .query_row(
-                "SELECT id, title, created_at, updated_at, spec, status, usage FROM tasks WHERE id = ?1",
+                "SELECT id, title, created_at, updated_at, spec, status, usage FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
                 [&id.0],
                 raw_task,
             )
@@ -338,10 +348,107 @@ impl Store {
     pub fn tasks(&self) -> StoreResult<Vec<TaskRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, title, created_at, updated_at, spec, status, usage FROM tasks ORDER BY created_at DESC, id",
+            "SELECT id, title, created_at, updated_at, spec, status, usage FROM tasks WHERE deleted_at IS NULL
+             ORDER BY created_at DESC, id",
         )?;
         let raws = stmt.query_map([], raw_task)?.collect::<Result<Vec<_>, _>>()?;
         raws.into_iter().map(parse_task).collect()
+    }
+
+    // ---- P1 project operations: recoverable deletion, purge, sizes
+
+    /// A task, deleted or not, with when it was deleted.
+    pub fn task_any(&self, id: &TaskId) -> StoreResult<Option<(TaskRow, Option<u64>)>> {
+        let conn = self.lock();
+        let raw = conn
+            .query_row(
+                "SELECT id, title, created_at, updated_at, spec, status, usage, deleted_at FROM tasks WHERE id = ?1",
+                [&id.0],
+                |r| Ok((raw_task(r)?, r.get::<_, Option<i64>>(7)?)),
+            )
+            .optional()?;
+        raw.map(|(raw, deleted)| Ok((parse_task(raw)?, deleted.map(u)))).transpose()
+    }
+
+    /// Hide a task (`Some(at)`) or bring it back (`None`); whether it changed.
+    pub fn set_task_deleted(&self, id: &TaskId, at: Option<u64>) -> StoreResult<bool> {
+        Ok(self.lock().execute("UPDATE tasks SET deleted_at = ?2 WHERE id = ?1", params![id.0, at.map(i)])? > 0)
+    }
+
+    /// Recoverably deleted tasks, newest deletion first.
+    pub fn deleted_tasks(&self) -> StoreResult<Vec<(TaskRow, u64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, created_at, updated_at, spec, status, usage, deleted_at FROM tasks
+             WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id",
+        )?;
+        let raws = stmt.query_map([], |r| Ok((raw_task(r)?, r.get::<_, i64>(7)?)))?.collect::<Result<Vec<_>, _>>()?;
+        raws.into_iter().map(|(raw, at)| Ok((parse_task(raw)?, u(at)))).collect()
+    }
+
+    /// Remove a task and everything recorded for it (transcript, tool calls,
+    /// checkpoints, change records, graph context) for good.
+    pub fn purge_task(&self, id: &TaskId) -> StoreResult<bool> {
+        Ok(self.lock().execute("DELETE FROM tasks WHERE id = ?1", [&id.0])? > 0)
+    }
+
+    /// Stored bytes of each task's records (every table that belongs to it).
+    pub fn task_bytes(&self, id: &TaskId) -> StoreResult<u64> {
+        let conn = self.lock();
+        let sum = |sql: &str| -> StoreResult<i64> {
+            Ok(conn.query_row(sql, [&id.0], |r| r.get::<_, Option<i64>>(0))?.unwrap_or(0))
+        };
+        let total = sum(
+            "SELECT length(title) + length(spec) + length(status) + length(usage) FROM tasks WHERE id = ?1",
+        )? + sum("SELECT sum(length(content)) FROM transcript WHERE task_id = ?1")?
+            + sum("SELECT sum(length(input) + coalesce(length(result), 0)) FROM tool_calls WHERE task_id = ?1")?
+            + sum("SELECT sum(length(documents)) FROM checkpoints WHERE task_id = ?1")?
+            + sum(
+                "SELECT sum(length(checkpoint_text) + length(baseline_text) + length(tip_text)) FROM task_files WHERE task_id = ?1",
+            )?
+            + sum("SELECT sum(length(patches) + length(inverse)) FROM changes WHERE task_id = ?1")?
+            + sum("SELECT sum(length(context)) FROM task_graph_contexts WHERE task_id = ?1")?
+            + sum("SELECT sum(length(record)) FROM task_targets WHERE task_id = ?1")?
+            + sum("SELECT sum(length(record)) FROM task_proposals WHERE task_id = ?1")?;
+        Ok(u(total))
+    }
+
+    /// Project files a task changed or resolved as targets.
+    pub fn task_paths(&self, id: &TaskId) -> StoreResult<Vec<WorkspacePath>> {
+        let conn = self.lock();
+        let mut out: Vec<WorkspacePath> = Vec::new();
+        for sql in
+            ["SELECT path FROM task_files WHERE task_id = ?1", "SELECT path FROM task_targets WHERE task_id = ?1"]
+        {
+            let mut stmt = conn.prepare(sql)?;
+            for path in stmt.query_map([&id.0], |r| r.get::<_, String>(0))? {
+                if let Ok(p) = WorkspacePath::parse(&path?)
+                    && !out.contains(&p)
+                {
+                    out.push(p);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Bytes the database occupies on disk now (with its write-ahead log).
+    pub fn file_bytes(&self) -> Option<u64> {
+        let path = self.path.as_ref()?;
+        let size = |p: PathBuf| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        Some(size(path.clone()) + size(PathBuf::from(format!("{}-wal", path.display()))))
+    }
+
+    /// Give removed records' space back (VACUUM, truncate the log); returns
+    /// the on-disk size before and after.
+    pub fn compact(&self) -> StoreResult<(Option<u64>, Option<u64>)> {
+        let before = self.file_bytes();
+        {
+            let conn = self.lock();
+            conn.execute_batch("VACUUM;")?;
+            let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        }
+        Ok((before, self.file_bytes()))
     }
 
     /// Mark tasks left active by a previous process as interrupted.
@@ -886,6 +993,56 @@ mod tests {
         assert_eq!(messages[1].1[0]["signature"], "abc");
         let transcript = store.transcript(&id).unwrap();
         assert_eq!(transcript.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    /// P1: a schema-2 task database keeps its tasks when it gains
+    /// `deleted_at`; deleted tasks leave the list and lookups until restored,
+    /// and a purge removes every record of the task.
+    #[test]
+    fn version_2_tasks_survive_and_deletion_is_recoverable_then_purgeable() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("agents.sqlite3");
+        let id = TaskId::new();
+        {
+            let conn = Connection::open(&db).unwrap();
+            for (version, sql) in &MIGRATIONS[..2] {
+                conn.execute_batch(&format!("BEGIN; {sql} PRAGMA user_version = {version}; COMMIT;")).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO tasks (id, created_at, updated_at, title, spec, status, usage) VALUES (?1, 1, 1, 'Old', ?2, ?3, ?4)",
+                params![
+                    id.0,
+                    serde_json::to_string(&spec()).unwrap(),
+                    serde_json::to_string(&TaskStatus::Completed).unwrap(),
+                    serde_json::to_string(&TaskUsage::default()).unwrap()
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transcript (task_id, seq, created_at, kind, content) VALUES (?1, 1, 1, 'notice', '{}')",
+                [&id.0],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&db).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.tasks().unwrap().len(), 1, "existing tasks stay loadable");
+        assert!(store.task_bytes(&id).unwrap() > 0);
+
+        assert!(store.set_task_deleted(&id, Some(10)).unwrap());
+        assert!(store.tasks().unwrap().is_empty());
+        assert!(store.task(&id).unwrap().is_none());
+        assert_eq!(store.deleted_tasks().unwrap().len(), 1);
+        assert_eq!(store.task_any(&id).unwrap().unwrap().1, Some(10));
+        assert!(store.set_task_deleted(&id, None).unwrap());
+        assert_eq!(store.tasks().unwrap().len(), 1, "restored");
+
+        assert!(store.purge_task(&id).unwrap());
+        assert!(store.task_any(&id).unwrap().is_none());
+        let left: i64 = store.lock().query_row("SELECT count(*) FROM transcript", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0, "the purge removes the task's transcript too");
+        let (before, after) = store.compact().unwrap();
+        assert!(before.is_some() && after.is_some());
     }
 
     #[test]

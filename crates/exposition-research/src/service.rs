@@ -611,6 +611,28 @@ impl ResearchService {
         session.cancel(run_id).await
     }
 
+    /// Whether a run executes now: an unfinished interactive run, or a
+    /// workflow batch (P1: never deleted while active).
+    pub fn run_active(&self, run_id: &str) -> bool {
+        lock(&self.shared.batches).contains(run_id) || lock(&self.shared.runs).get(run_id).is_some_and(|r| !r.finished)
+    }
+
+    /// Runs executing now in the open project (interactive and batch).
+    pub fn active_run_ids(&self) -> Vec<String> {
+        let root = self.workspace_root();
+        let mut ids: Vec<String> = lock(&self.shared.runs)
+            .values()
+            .filter(|r| !r.finished && Some(&r.root) == root.as_ref())
+            .map(|r| r.id().to_owned())
+            .collect();
+        for id in lock(&self.shared.batches).iter() {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
     /// Run history for the current workspace, newest first.
     pub fn runs(&self) -> Result<Vec<RunSummary>, ResearchError> {
         let workspace = self.current_workspace()?;

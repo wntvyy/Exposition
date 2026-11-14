@@ -162,7 +162,16 @@ fn load_row(conn: &Connection, id: &WorkflowId, revision: Option<u64>) -> Result
     raw.map(|(rev, hash, state, body, saved)| decode_row(rev, hash, state, body, saved)).transpose()
 }
 
-fn revisions(conn: &Connection, id: &WorkflowId) -> Result<Vec<WorkflowRevisionInfo>, StoreError> {
+/// One stored revision's definition, hash, and state (strictly decoded).
+pub(crate) fn stored_revision(
+    conn: &Connection,
+    id: &WorkflowId,
+    revision: Option<u64>,
+) -> Result<Option<(u64, String, DraftState, WorkflowDefinition)>, StoreError> {
+    Ok(load_row(conn, id, revision)?.map(|r| (r.revision, r.hash, r.state, r.body.definition)))
+}
+
+pub(crate) fn revisions(conn: &Connection, id: &WorkflowId) -> Result<Vec<WorkflowRevisionInfo>, StoreError> {
     let mut stmt = conn.prepare_cached(
         "SELECT revision, hash, state, saved_at FROM workflows WHERE id = ?1 ORDER BY revision DESC LIMIT 1000",
     )?;
@@ -180,6 +189,13 @@ fn revisions(conn: &Connection, id: &WorkflowId) -> Result<Vec<WorkflowRevisionI
         });
     }
     Ok(out)
+}
+
+/// Whether a saved workflow was removed from active use (P1 project
+/// operations): it is not listed, planned, triggered, or revised; its pinned
+/// revisions stay readable for the composites that run them.
+pub(crate) fn is_retired(conn: &Connection, id: &WorkflowId) -> Result<bool, StoreError> {
+    Ok(conn.query_row("SELECT 1 FROM retired_workflows WHERE id = ?1", [id.as_str()], |_| Ok(())).optional()?.is_some())
 }
 
 fn workflow_entity(store_entities: Vec<Entity>) -> Option<Entity> {
@@ -273,6 +289,9 @@ impl GraphService {
         let (saved, delta) = self.with_store(|store| {
             let (id, revision, previous) = match &request.id {
                 Some(id) => {
+                    if is_retired(store.connection(), id)? {
+                        return Err(GraphError::new("workflow.unknown", "That workflow was deleted from this project."));
+                    }
                     let Some((latest, latest_hash)) = latest_revision(store.connection(), id)? else {
                         return Err(GraphError::new("workflow.unknown", "That workflow does not exist in this project."));
                     };
@@ -389,6 +408,9 @@ impl GraphService {
     /// One saved revision (the latest when `revision` is none).
     pub fn workflow(&self, id: &WorkflowId, revision: Option<u64>) -> GraphResult<SavedWorkflow> {
         self.with_store(|store| {
+            if is_retired(store.connection(), id)? {
+                return Err(GraphError::new("workflow.unknown", "That workflow was deleted from this project."));
+            }
             let row = load_row(store.connection(), id, revision)?
                 .ok_or_else(|| GraphError::new("workflow.unknown", "That workflow (revision) does not exist."))?;
             let entity = workflow_entity(store.entities_by_key(EntityKind::Workflow, id.as_str())?).map(|e| e.id);
@@ -421,6 +443,7 @@ impl GraphService {
                 .prepare_cached(
                     "SELECT w.id, w.revision, w.hash, w.state, w.body, w.saved_at FROM workflows w
                      WHERE w.revision = (SELECT MAX(revision) FROM workflows v WHERE v.id = w.id)
+                     AND w.id NOT IN (SELECT id FROM retired_workflows)
                      ORDER BY w.saved_at DESC, w.id LIMIT ?1",
                 )
                 .map_err(StoreError::from)?;
