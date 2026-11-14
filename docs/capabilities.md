@@ -249,12 +249,16 @@ files and applies the rest) or Keep as Is. An interrupted creation is never
 replayed automatically or reported complete.
 
 Workflow drafts describe a computation as typed steps: inputs, steps from
-eight registered operations (Python batch run, native Python, Lean audit,
-evidence association, agent review, keeping a result, requesting a
-promotion, running another saved workflow), connections, outcomes, and a
-ceiling on what the workflow may run.
-**TODO(lane F):** add the R and Julia batch operations (restricted and
-trusted native) to this list and its count. Two presets exist, Numerical experiment (Python; without a script it
+twelve registered operations (Python, R, and Julia batch runs in the
+restricted container; native Python, R, and Julia; Lean audit, evidence
+association, agent review, keeping a result, requesting a promotion,
+running another saved workflow), connections, outcomes, and a ceiling on
+what the workflow may run. Code is inline in the step's language or a
+script file of that language (`.py`, `.R`/`.r`, `.jl`); a script of another
+language is refused when the workflow is validated, also when it reaches
+the step through a composite. A batch step may also take a one-line text
+`value` (at most 1000 bytes) that its code receives as
+`EXPOSITION_PARAM_VALUE`. Two presets exist, Numerical experiment (Python; without a script it
 starts with an editable inline code template) and Formal audit (Lean).
 Drafts are edited in a form or on a canvas, validated by the application
 against a strict contract (typed connections, no cycles, every step
@@ -318,17 +322,20 @@ not change, and a `/1` definition that names one is refused.
   above) on one of its own outputs holds; if it never does, the step fails
   or uses the last iteration's outputs, as the definition says. Every
   instance is recorded and counts as one step against the run's step
-  budget. A composite step runs once.
-  **TODO(lane F):** the Python batch's only parameter is its time limit and
-  every instance of a batch gets the same `EXPOSITION_SEED`, so batch code
-  cannot yet tell its instances apart; document `EXPOSITION_ITERATION`,
-  `EXPOSITION_PARAM_*`, the batch parameter, and per-instance seeds once
-  lane F merges.
+  budget. A composite step runs once. Batch code (Python, R, or Julia)
+  sees which instance it is: `EXPOSITION_ITERATION` is the 0-based
+  instance number, each parameter set on the step (the for-each value
+  included) arrives as `EXPOSITION_PARAM_<NAME>` (`value` →
+  `EXPOSITION_PARAM_VALUE`, `timeoutSeconds` →
+  `EXPOSITION_PARAM_TIMEOUT_SECONDS`), and every instance gets its own
+  `EXPOSITION_SEED`. Batch parameter values must be one line of text; one
+  that looks like a secret is refused before the batch runs.
 
 Agents' workflow proposals stay `exposition.workflow/1`: an agent cannot
-propose parallel steps, composites, conditions, or repeats, and a new
-revision an agent proposes for a `/2` workflow is a `/1` definition without
-them (its approval shows the complete definition).
+propose parallel steps, composites, conditions, or repeats, and it cannot
+revise a workflow that uses any of them (the proposal is refused and
+nothing is saved, because saving it would remove them; an agent can still
+propose a new workflow).
 
 ### Workflow runs
 
@@ -338,8 +345,9 @@ revision (never from unsaved edits), or from a trigger under a standing
 plan you approved (see Triggers). The review shows
 the complete plan: every input file with the SHA-256 of the content the run
 will read and whether that version is pinned, every step in the order it
-will run with its complete code (inline, or the full text of the script
-file it runs) or model instructions, parameters, runner, containment,
+will run with its complete code (inline, the full text of the script file
+it runs, or the full text of the Lean file it audits, since elaborating
+Lean can run code) or model instructions, parameters, runner, containment,
 effects, and limits, the run's budgets, the restricted image (by name and
 by its exact image identity) and folder trust it relies on, how many steps
 may run at the same time and the application-wide limits, each composite's
@@ -401,8 +409,9 @@ run records why it started: by you from a reviewed plan, by a trigger
 
 | Step | Where it runs | What it produces |
 |---|---|---|
-| Research Python batch (restricted) | A Docker container (below) | The files it writes for its declared outputs, as research run artifacts |
-| Trusted native Python | A new Python process with your account's privileges, in a trusted folder; not a sandbox | Same as the restricted batch |
+| Research Python batch (restricted) | A Docker container (below) from the configured container image | The files it writes for its declared outputs, as research run artifacts |
+| Research R batch / Research Julia batch (restricted) | The same Docker container, from the configured R image or Julia image (`Rscript --vanilla`, `julia --startup-file=no --history-file=no`); refused when that image is not configured or not present locally, never run natively or in another language's image instead | Same as the Python batch |
+| Trusted native Python / R / Julia | A new process of the discovered Python, `Rscript`, or `julia` with your account's privileges, in a trusted folder; not a sandbox | Same as the restricted batch |
 | Lean audit | The Lean service with the project's toolchain, natively, in a trusted folder | The audit's own per-declaration verdicts, statements, and axioms for exactly the audited text |
 | Associate audited declarations | Exposition | A proposal you accept or reject per declaration; only accepted declarations get Lean evidence recorded |
 | Read-only agent review | A read-only agent task with commands off, scoped to the declared material, which it sends to the model provider; a tool that would write or run is refused and the review continues; up to 2 reviews run at once, each its own task, sharing the run's model-request budget | A review report (prose, never evidence); a later step can take several reports |
@@ -410,11 +419,12 @@ run records why it started: by you from a reviewed plan, by a trigger
 | Request reviewed promotion | Research | A prepared insertion at the end of the manuscript that you review and approve in the run view |
 | Run a saved workflow (composite) | Each of the child's steps through its own runner, as listed here | The child's outcomes, as this step's outputs |
 
-**TODO(lane F):** rows for the R and Julia batch steps (restricted in a
-configured per-language local image, refused when absent and never run
-natively instead; trusted native through the discovered `Rscript`/`julia`).
+Each restricted runner's image is bound by its exact identity in the plan
+you approve (the review lists the R and Julia runners' images), checked
+again before each restricted step, and the container is started from that
+identity.
 
-**Restricted Python batches.** Only the declared input files and the code
+**Restricted batches** (Python, R, Julia). Only the declared input files and the code
 are copied, each verified against its SHA-256, into a working copy that the
 container sees read-only; the project folder itself is never mounted, so an
 undeclared file is simply absent and an import of it fails visibly.
@@ -431,18 +441,19 @@ each; links, folders, hard links, and other entries are refused and nothing
 they point to is copied. A batch that writes far more than its output
 budget is stopped. Kept files become artifacts of a research run that
 records the container image, user, and limits it ran with. SVG and HTML
-are stored as text and never rendered as active content. Python batches
-(restricted and native) also receive `EXPOSITION_SEED` (see
-Reproducibility).
+are stored as text and never rendered as active content. Batches
+(restricted and native, every language) also receive `EXPOSITION_SEED`
+(see Reproducibility) and, when set, their parameters and instance number
+(see Repeats above).
 
-**Limitations.** Workflow code steps are Python only; there are no R or
-Julia steps.
-**TODO(lane F):** replace with the R/Julia facts (per-language restricted
-image binding; restricted R/Julia packages are only what the image has).
-The container image must provide `python3` and every package
-the code needs: Exposition never pulls images and the container has no
-network. The trusted native Python step and the Lean audit run with your
-account's privileges and are not contained. The Lean audit step has a
+**Limitations.** Each image must provide its interpreter (`python3`,
+`Rscript`, or `julia` on its standard path) and every package the code
+needs: Exposition never pulls images or installs packages, and the
+container has no network. Restricted R and Julia batches run only in their
+own configured image (Settings › Execution › R image / Julia image); there
+is no default R or Julia image. The trusted native Python, R, and Julia
+steps and the Lean audit run with your account's privileges and are not
+contained. The Lean audit step has a
 10-minute limit, the most the Lean service allows for one check; if the
 Lean file is open with unsaved changes that differ from the reviewed file,
 the step fails rather than audit other text. A promotion is always
@@ -451,8 +462,9 @@ one that can no longer be approved (its 30-minute window passed, or
 Exposition restarted) reads Expired. A step that waits for a free slot or
 for its budget reservation also holds back the steps after it in the same
 run, and the wait counts against the run's time budget. JSON conditions
-compare numbers as floating-point values, so very large integers or very
-long decimals compare approximately.
+compare numbers exactly, as decimals; a number in the JSON file that has a
+fraction or lies outside the 64-bit integer range is first read as the
+nearest double-precision value.
 
 ### Triggers
 
@@ -461,12 +473,14 @@ you approve. Triggers are off by default, and only you can turn one on,
 from the **Triggers** section of the workflow editor: agents have no tool
 for them (naming a trigger command is refused as an unknown tool), and
 imported workflows, bundles, project files, and generated drafts never
-carry one. A workflow has at most one trigger; enabling a new one replaces
-the old one's kind and settings (its history is kept).
+carry one. A workflow has at most one trigger; when it already has one, the
+dialog says so and **Replace trigger** replaces its kind and settings (its
+history is kept).
 
 - **When watched inputs change:** the saved content of chosen input files
-  (at most 16). Code inputs cannot be watched (changed code always needs a
-  new review), nor inputs the workflow pins to one version. Changes by any
+  (at most 16). Code inputs and Lean sources cannot be watched (changed
+  code, and Lean, whose elaboration can run code, always need a new
+  review), nor inputs the workflow pins to one version. Changes by any
   program count, not only saves in the editor.
 - **On a fixed interval:** every 15 minutes to one week while the project
   is open, whether or not anything changed, optionally with inputs whose
@@ -483,8 +497,9 @@ long, and each change starts it again), at most 1–12
 runs an hour and 1–100 a day, and, when the plan has agent review steps,
 model requests per day (at least one run's budget, at most 1000; each run
 counts its full budget). A plan with native steps can be enabled only if
-you explicitly allow them to run without asking; they then run with your
-account's privileges on every fire. The suggested settings are 10 seconds,
+you explicitly allow them to run without asking, and every review, a
+re-review included, starts with that permission off; they then run with
+your account's privileges on every fire. The suggested settings are 10 seconds,
 4 an hour, 24 a day, native steps not allowed, and four runs' model
 requests.
 
@@ -497,23 +512,30 @@ standing plan in everything except the watched content, the run starts
 through the normal start check and records its cause: the trigger and each
 changed input with its SHA-256 before and after. If a run of the workflow
 is active (or three runs are), one follow-up is queued and starts after it
-with whatever content is saved then. When the hourly, daily, or
-model-request limit is reached, the run waits until the limit allows it.
+with whatever content is saved then; if the watched content is back to what
+the last triggered run read, the follow-up is dropped. While it waits,
+Exposition checks again after 1 second, then less and less often (up to
+once a minute), and at once when a run ends; these checks plan without
+keeping a plan, so they never displace a plan you are reviewing. When the
+hourly, daily, or model-request limit is reached, the run waits until the
+limit allows it.
 
 **Suspension.** Any other difference suspends the trigger until you review
-and enable it again: a new revision, a change to a code input or to an
-unwatched input, folder trust (for a plan with native steps), the
-restricted image name now naming a
-different image, a runner becoming unavailable or available (for example
-Docker not running when it fires), or any step, budget, or limit. The card
-and a notification ("Workflow trigger suspended") give the reason.
-Revoking trust for the folder suspends all of its triggers. Closing or
-switching the project stops listening and drops pending and queued fires;
-the trigger stays on and listens again the next time the project is open
-and indexed. Triggers are stored in the application data folder, never in
-the project, a workflow definition, or a bundle; they stay on across
+and enable it again: a new revision, a change to a code input, a Lean
+source, or another unwatched input, folder trust (for a plan with native
+steps), a restricted image name now naming a different image, a runner
+becoming unavailable or available (for example Docker not running when it
+fires), or any step, budget, or limit. The card and a notification
+("Workflow trigger: suspended: …") give the reason. Revoking trust for the
+folder suspends all of its triggers, as every standing plan says. Closing
+or switching the project stops listening and drops pending and queued
+fires; the trigger stays on and listens again the next time the project is
+open and indexed. Triggers are stored in the application data folder, never
+in the project, a workflow definition, or a bundle; they stay on across
 restarts, and a restarted Exposition does not catch up on missed intervals
-or changes.
+or changes. If that file cannot be read, it is never overwritten: triggers
+cannot be enabled or turned off until it can, and the cards say why; an
+unparsable file is set aside and Exposition starts with no triggers.
 
 ### Reproducibility
 
@@ -527,37 +549,45 @@ it pins, the model provider and the model the provider reported serving,
 and the seed given to the step. Nothing extra runs natively to find this
 out:
 
-- A restricted batch lists the Python distributions installed in its image
-  the first time a batch uses that image identity: a separate container
-  started from the same identity, with the same restrictions (no network,
-  no project files, no credentials) and a 30-second limit, as part of the
-  approved batch. The list is cached per image identity in the application
-  data folder; if it cannot be made, the attempt notes why and the batch
-  runs anyway.
+- A restricted Python batch lists the Python distributions installed in
+  its image the first time a batch uses that image identity: a separate
+  container started from the same identity, with the same restrictions (no
+  network, no project files, no credentials) and a 30-second limit, as part
+  of the approved batch. The list is cached per image identity in the
+  application data folder; if it cannot be made, the attempt notes why and
+  the batch runs anyway.
+- A restricted R or Julia batch records its image's name and identity
+  only: no interpreter version and no package list (the attempt says so);
+  the identity names the image's exact content.
 - A native Python step records what research environment discovery
   already reports: the interpreter's version and the nine packages
   discovery checks (jupyter_client, ipykernel, pyzmq, NumPy, pandas,
-  Matplotlib, SciPy, SymPy, Polars), not every installed package.
+  Matplotlib, SciPy, SymPy, Polars), not every installed package. A native
+  R or Julia step records the discovered runtime's version (and IRkernel's
+  for R).
 - The Lean audit records the exact toolchain it used and reads
   `lean-toolchain` and `lake-manifest.json`.
-- An agent review records the model the provider reported serving (the
-  configured model when none was reported).
-- Each Python batch receives `EXPOSITION_SEED`, a number derived from the
-  run and the step, and records it; a reproduction receives the original
-  run's seeds. Lean, review, and other steps get no seed.
+- An agent review records the configured model and, when the provider
+  reports it, the model it actually served.
+- Each batch (Python, R, Julia) receives `EXPOSITION_SEED`, a number
+  derived from the run, the step, and the instance, and records it; a
+  reproduction receives the original run's seeds. Lean, review, and other
+  steps get no seed.
 
 **Run manifest.** **Export manifest…** in the run view writes the run's
 manifest (`exposition.workflowRunManifest/1`, JSON) to a file you choose in
 the save dialog: the revision, definition and approval hashes, every input
-and output with its SHA-256, the budgets and usage, the cause, and each
-step's attempts with their environment. It contains no logs, no code or
-review text (only their digests), and no local paths: the project, the
-application data folder, and your home folder read `<project>`,
-`<app data>`, and `~`, other absolute paths `<path>`, and secrets are
-redacted. Keys are sorted, so the same run always gives the same bytes. An
-existing file is replaced only if it is an earlier run manifest.
-Limitation: the attempts of repeated steps' instances (for each, until) are
-not in the manifest yet.
+and output with its SHA-256, the budgets and usage, the cause, the images
+the restricted steps were approved with, and each step's attempts (and each
+instance of a repeated step) with their environment. It contains no logs,
+no code or review text (only the SHA-256 of the exact text), and no local
+paths: the project, the application data folder, and your home folder read
+`<project>`, `<app data>`, and `~`, other absolute paths `<path>`, and
+secrets are redacted. Keys are sorted, so the same run always gives the
+same bytes. The destination follows the bundle rules: a `.json` file
+outside the project's `.exposition` folder and the application data
+folder, and an existing file is replaced only if it is an earlier run
+manifest.
 
 **Reproduce.** **Reproduce…** on a run that has ended builds a new plan of
 the same revision with every input pinned to the SHA-256 that run read. A
@@ -566,8 +596,9 @@ revision whose content no longer matches cannot be reproduced. Before you
 approve it, the review shows the differences from the recorded
 environment that can be seen without running anything (image identity,
 platform, interpreter and toolchain versions, Lake manifest, package
-lists, model, Exposition version) and the seeds the batches will receive;
-differences do not block the run. It starts like any plan, and the new
+lists, configured model, Exposition version), compared for every instance
+of a repeated step, and the seeds the batches and their instances will
+receive; differences do not block the run. It starts like any plan, and the new
 run records which run it reproduces and links to it.
 
 ### Workflow bundles
@@ -603,6 +634,13 @@ they resolve against this project's own workflows.
 | Interrupt | Yes | No — IRkernel ignores interrupts on Windows; Cancel restarts the kernel | Yes (IJulia; a kernel without message-mode interrupts reports it as unsupported, and Cancel restarts it) |
 | Figures and tables captured as artifacts with provenance | Yes | Yes | Yes |
 | Insert and update a figure/table in a Typst, LaTeX, or Markdown document | Yes | Yes | Yes |
+| Workflow batch steps: restricted container / trusted native | Yes / Yes | Yes (its own configured R image) / Yes (`Rscript`) | Yes (its own configured Julia image) / Yes (`julia`) |
+
+The restricted R and Julia batches are covered by Docker tests that run
+only on request (`EXPOSITION_DOCKER_TESTS=1 cargo test … -- --ignored`
+with the local images `r-base:4.6.2` and `julia:1.13`), not by the default
+suite; the native ones by tests that skip when R or Julia is not
+installed.
 
 Sessions belong to one project folder and require it to be trusted; switching
 or closing the folder, or revoking trust, detaches them. Agent runs use
@@ -611,8 +649,8 @@ separate sessions. Exposition never installs runtimes or packages.
 Interactive research sessions run natively with your account's privileges
 ("Trusted native"); the research space and per-owner sessions organize work
 but do not contain it. Restricted research execution exists only as the
-workflow's Python batch step (see Workflow runs; **TODO(lane F):** and the
-R/Julia batch steps), and the Research page
+workflow's Python, R, and Julia batch steps (see Workflow runs), and the
+Research page
 shows whether it is available for the project; nothing moves between the
 two modes silently. Computational evidence names the mode a run actually ran
 in. Enabling Research creates one research space (`.exposition/research/<id>/`
@@ -763,16 +801,18 @@ otherwise. A third, `npm run e2e -- live-graph`, has the model read the project 
   to native execution. An agent's container stops when Exposition exits or
   crashes and when its time limit passes; leftovers are removed at the next
   start when an image is configured, or else before the next restricted run.
-- Workflow restricted Python steps use the same Docker backend and settings,
+- Workflow restricted Python, R, and Julia steps use the same Docker
+  backend and settings (R and Julia with their own configured images),
   with a working copy of only their declared inputs instead of the project
-  folder, and likewise never fall back to native execution. Workflow native
-  Python and Lean audit steps run with your account's privileges and need a
-  trusted folder.
+  folder, and likewise never fall back to native execution or to another
+  image. Workflow native Python, R, and Julia steps and Lean audit steps
+  run with your account's privileges and need a trusted folder.
 - Workflow triggers start runs without asking only under a standing plan
   you approved, and only you can enable one; agents, imports, and project
   files cannot. Trigger records live in the application data folder, never
   in the project. A native step runs from a trigger only if you allowed it
-  explicitly for that trigger.
+  explicitly for that trigger, and a change to code or a Lean source never
+  starts a triggered run: it suspends the trigger.
 - TeX can read any file your account can read, which is why LaTeX builds
   require trust. R and Julia kernels talk to Exposition over local loopback
   TCP with signed but unencrypted messages; Python kernels use CurveZMQ when
