@@ -73,9 +73,9 @@ async fn a_language_without_its_image_is_refused_even_when_the_default_image_is_
         assert!(matches!(result.outcome, JobOutcome::FailedToStart { .. }), "{:?}", result.outcome);
         let (code, message) = refusal(&f, &id);
         assert_eq!(code, RefusalCode::RestrictedBackendUnavailable, "{message}");
-        assert!(message.contains(language.setting()) && message.contains("not run natively"), "{message}");
+        assert!(message.contains(language.settings_label()) && message.contains("not run natively"), "{message}");
         let reason = f.service.restricted_preflight_for(Some(language)).unwrap_err();
-        assert!(reason.contains(language.setting()) && reason.contains("never pulls"), "{reason}");
+        assert!(reason.contains(language.settings_label()) && reason.contains("never pulls"), "{reason}");
     }
 }
 

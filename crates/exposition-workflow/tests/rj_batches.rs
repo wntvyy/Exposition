@@ -420,6 +420,21 @@ fn restricted_steps_bind_their_language_image_in_the_plan() {
             .unwrap_err();
         assert!(err.message.contains("is now a different image"), "{}", err.message);
 
+        // Cleared after the plan, or configured only after it: said so.
+        let request = |p: &WorkflowRunPlan| StartWorkflowRunRequest {
+            plan: p.plan.clone(),
+            approval_hash: p.approval_hash.clone(),
+        };
+        let bound = plan(&service, &id);
+        *fake.image.lock().unwrap() = Err("no R image is configured.".into());
+        let err = service.start(&request(&bound)).unwrap_err();
+        assert!(err.message.contains("r-or-julia:local is no longer configured"), "{}", err.message);
+        let unbound = plan(&service, &id);
+        assert_eq!(unbound.execution.runner_images, None);
+        *fake.image.lock().unwrap() = Ok(("r-or-julia:local".into(), Some(IMAGE_A.into())));
+        let err = service.start(&request(&unbound)).unwrap_err();
+        assert!(err.message.contains("r-or-julia:local (sha256:aaaaaaaaaaaa) is now configured"), "{}", err.message);
+
         // Changed after the start, before dispatch: refused, nothing runs.
         *fake.image.lock().unwrap() = Ok(("r-or-julia:local".into(), Some(IMAGE_B.into())));
         let next = plan(&service, &id);
@@ -659,6 +674,25 @@ fn native_r_and_julia_workflows_produce_a_dataset_and_a_figure() {
     }
     if ran == 0 {
         eprintln!("SKIPPED: neither R nor Julia is installed");
+    }
+}
+
+/// A missing R/Julia image blocks the plan with one message that names the
+/// Settings label and says nothing runs natively (never a nested message).
+#[test]
+fn a_missing_language_image_blocks_the_plan_with_one_clear_message() {
+    let r = real((None, None, None), false);
+    let (service, _) = service(&r.project, Some(r.execution.clone()), r.runner.clone(), (None, None));
+    for (operation, language, label) in [
+        (RESEARCH_R_BATCH, "r", "R image (Settings → Execution)"),
+        (RESEARCH_JULIA_BATCH, "julia", "Julia image (Settings → Execution)"),
+    ] {
+        let plan = plan(&service, &save(&r.project, definition(operation, language, Some("1\n"), None)));
+        let blocker = plan.blockers.iter().find(|b| b.code == "workflow.restrictedUnavailable").expect("blocked");
+        let m = &blocker.message;
+        assert_eq!(m.matches("Restricted execution is unavailable").count(), 1, "{m}");
+        assert!(m.contains(label) && m.contains("never falls back to native execution"), "{m}");
+        assert!(!m.contains("unavailable (") && !m.contains("Nothing was run"), "{m}");
     }
 }
 

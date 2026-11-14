@@ -313,7 +313,12 @@ pub fn apply_lean(
         env.note("The Lake project has no lake-manifest.json.");
     }
     if let Some(error) = &provenance.manifest_error {
-        env.note(format!("lake-manifest.json: {error}"));
+        // The error may already name the file.
+        if error.starts_with("lake-manifest.json") {
+            env.note(error.clone());
+        } else {
+            env.note(format!("lake-manifest.json: {error}"));
+        }
     }
     if !provenance.packages.is_empty() {
         env.set_packages(
@@ -660,6 +665,25 @@ mod tests {
             env.interpreter,
             Some(WorkflowEnvironmentInterpreter { name: "python".into(), version: Some("3.14.0".into()) })
         );
+    }
+
+    /// A lake-manifest.json problem is noted once, named once.
+    #[test]
+    fn a_lake_manifest_problem_is_named_once() {
+        for (error, note) in [
+            ("lake-manifest.json is not a regular file", "lake-manifest.json is not a regular file"),
+            ("not valid JSON (line 1)", "lake-manifest.json: not valid JSON (line 1)"),
+        ] {
+            let provenance = exposition_lean::provenance::LeanProvenance {
+                lake_project: true,
+                manifest_error: Some(error.into()),
+                ..Default::default()
+            };
+            let mut env = WorkflowEnvironment::base("leanAudit", Containment::NativeAccount);
+            apply_lean(&mut env, None, &provenance);
+            assert!(env.notes.iter().any(|n| n == note), "{:?}", env.notes);
+            assert!(env.notes.iter().all(|n| !n.contains("lake-manifest.json: lake-manifest.json")), "{:?}", env.notes);
+        }
     }
 
     #[test]

@@ -69,11 +69,11 @@ impl RestrictedLanguage {
         }
     }
 
-    /// The settings key naming this language's image.
-    pub fn setting(self) -> &'static str {
+    /// Where the user chooses this language's image (its Settings label).
+    pub fn settings_label(self) -> &'static str {
         match self {
-            RestrictedLanguage::R => "execution.docker.rImage",
-            RestrictedLanguage::Julia => "execution.docker.juliaImage",
+            RestrictedLanguage::R => "R image (Settings → Execution)",
+            RestrictedLanguage::Julia => "Julia image (Settings → Execution)",
         }
     }
 
@@ -107,10 +107,10 @@ impl DockerSettings {
         match language {
             None => "no container image is configured. Set execution.docker.image to an image present locally (`docker image ls`).".into(),
             Some(l) => format!(
-                "no restricted {} image is configured. Set {} to a local image that provides {} (`docker image ls`); Exposition never pulls images.",
+                "no {} image is configured: choose a local image that provides {} as the {}. Exposition never pulls images.",
                 l.title(),
-                l.setting(),
-                l.requirement()
+                l.requirement(),
+                l.settings_label()
             ),
         }
     }
@@ -683,6 +683,6 @@ mod tests {
         assert!(reloaded.any_image());
         assert!(!DockerSettings::default().any_image());
         let missing = DockerSettings::missing_image_message(Some(RestrictedLanguage::Julia));
-        assert!(missing.contains("execution.docker.juliaImage") && missing.contains("never pulls"), "{missing}");
+        assert!(missing.contains("Julia image (Settings → Execution)") && missing.contains("never pulls"), "{missing}");
     }
 }

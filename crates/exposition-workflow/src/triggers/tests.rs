@@ -1367,3 +1367,28 @@ fn a_lean_source_change_suspends() {
     f.advance(HOUR_MS);
     assert!(f.started().is_empty(), "a run started from a changed Lean source");
 }
+
+/// Every suspension message ends by saying what to do, exactly once (also a
+/// stale plan's own advice and the repeated start refusals).
+#[test]
+fn suspension_messages_say_what_to_do_once() {
+    let suffix = "The trigger is suspended until you review and enable it again.";
+    for reason in [
+        "The plan has native steps, which this trigger was not allowed to start.",
+        "The plan is out of date: the workflow was saved again (revision 1 → 2). Review the new plan before starting.",
+        "Already suspended. The trigger is suspended until you review and enable it again.",
+    ] {
+        let message = super::suspended_message(reason);
+        assert!(message.ends_with(suffix), "{message}");
+        assert_eq!(message.matches(suffix).count(), 1, "{message}");
+        assert!(!message.contains("Review the new plan before starting"), "{message}");
+    }
+    let refused = super::suspended_message(&format!(
+        "The run could not start {} times in a row: the input changed.",
+        super::MAX_START_REFUSALS
+    ));
+    assert_eq!(
+        refused,
+        "The run could not start 3 times in a row: the input changed. The trigger is suspended until you review and enable it again."
+    );
+}

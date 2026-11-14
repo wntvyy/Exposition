@@ -42,11 +42,30 @@ fn op_text(op: CompareOp) -> &'static str {
 
 /// The test in plain language (for reasons shown to the user).
 pub fn describe(test: &ConditionTest) -> String {
+    describe_as(test, false)
+}
+
+/// The opposite comparison (`not <` is `≥`, …).
+fn negated(op: CompareOp) -> CompareOp {
+    match op {
+        CompareOp::Eq => CompareOp::Ne,
+        CompareOp::Ne => CompareOp::Eq,
+        CompareOp::Lt => CompareOp::Ge,
+        CompareOp::Le => CompareOp::Gt,
+        CompareOp::Gt => CompareOp::Le,
+        CompareOp::Ge => CompareOp::Lt,
+    }
+}
+
+/// The test, or (`negate`) its negation, in plain language: "the output is
+/// not produced", "the verdict is not one of …", "the value at /x ≥ 3".
+pub fn describe_as(test: &ConditionTest, negate: bool) -> String {
+    let not = if negate { "not " } else { "" };
     match test {
-        ConditionTest::OutputPresent => "the output is produced".to_owned(),
+        ConditionTest::OutputPresent => format!("the output is {not}produced"),
         ConditionTest::VerdictIn { verdicts } => {
             format!(
-                "the verdict is one of {}",
+                "the verdict is {not}one of {}",
                 verdicts.iter().map(|v| format!("“{v}”")).collect::<Vec<_>>().join(", ")
             )
         }
@@ -56,7 +75,8 @@ pub fn describe(test: &ConditionTest) -> String {
                 ConditionValue::Text(t) => format!("“{t}”"),
                 ConditionValue::Boolean(b) => b.to_string(),
             };
-            format!("the value at {pointer} {} {value}", op_text(*op))
+            let op = if negate { negated(*op) } else { *op };
+            format!("the value at {pointer} {} {value}", op_text(op))
         }
     }
 }
@@ -191,5 +211,30 @@ mod tests {
         assert!(!evaluate(root, &ConditionTest::OutputPresent, false, None, "x").unwrap().0);
         assert!(evaluate(root, &ConditionTest::OutputPresent, true, None, "x").unwrap().0);
         assert_eq!(describe(&test), "the verdict is one of “Checked”");
+    }
+
+    /// Negated tests read as natural sentences, never "… does not hold".
+    #[test]
+    fn negations_read_naturally() {
+        let verdict = ConditionTest::VerdictIn { verdicts: vec!["Checked".into(), "Incomplete".into()] };
+        assert_eq!(describe_as(&verdict, true), "the verdict is not one of “Checked”, “Incomplete”");
+        assert_eq!(describe_as(&ConditionTest::OutputPresent, true), "the output is not produced");
+        assert_eq!(describe_as(&ConditionTest::OutputPresent, false), "the output is produced");
+        let compare = |op, value| ConditionTest::JsonCompare { pointer: "/score".into(), op, value };
+        let n = |s: &str| ConditionValue::Number(s.into());
+        for (op, negated) in [
+            (CompareOp::Eq, "≠"),
+            (CompareOp::Ne, "="),
+            (CompareOp::Lt, "≥"),
+            (CompareOp::Le, ">"),
+            (CompareOp::Gt, "≤"),
+            (CompareOp::Ge, "<"),
+        ] {
+            assert_eq!(describe_as(&compare(op, n("0.5")), true), format!("the value at /score {negated} 0.5"));
+        }
+        assert_eq!(
+            describe_as(&compare(CompareOp::Eq, ConditionValue::Text("ok".into())), true),
+            "the value at /score ≠ “ok”"
+        );
     }
 }

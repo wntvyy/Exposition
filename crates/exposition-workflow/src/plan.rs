@@ -92,9 +92,10 @@ pub fn runner_availability(
     }
     adapter.availability(root).map_err(|reason| {
         if containment == Some(Containment::RestrictedContainer) {
+            let detail = reason.strip_prefix("Restricted execution is unavailable: ").unwrap_or(&reason).trim_end();
             (
                 "workflow.restrictedUnavailable",
-                format!("Restricted execution is unavailable ({reason}); it never falls back to native execution."),
+                format!("Restricted execution is unavailable: {detail} It never falls back to native execution."),
             )
         } else {
             ("workflow.runnerUnavailable", reason)
@@ -644,10 +645,9 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
     for s in &steps {
         if let Some(c) = &s.condition {
             notices.push(format!(
-                "“{}” runs only when {}{} (output “{}” of “{}”); otherwise it does not run (condition not met), and the steps that need it are skipped.",
+                "“{}” runs only when {} (output “{}” of “{}”); otherwise it does not run (condition not met), and the steps that need it are skipped.",
                 s.label,
-                crate::condition::describe(&c.test),
-                if c.negate { " does not hold" } else { "" },
+                crate::condition::describe_as(&c.test, c.negate),
                 c.source.port,
                 label_of(&c.source.step)
             ));
@@ -659,10 +659,9 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
                 values.len()
             )),
             Some(StepRepeat::Until { port, test, negate, max_iterations, on_exhausted }) => notices.push(format!(
-                "“{}” runs again, at most {max_iterations} times, until {}{} for its output “{port}”; if that never happens, {}.",
+                "“{}” runs again, at most {max_iterations} times, until {} for its output “{port}”; if that never happens, {}.",
                 s.label,
-                if *negate { "it is not the case that " } else { "" },
-                crate::condition::describe(test),
+                crate::condition::describe_as(test, *negate),
                 match on_exhausted {
                     exposition_graph::workflow::Exhausted::Fail => "the step fails",
                     exposition_graph::workflow::Exhausted::UseLast => "the last iteration's outputs are used",
@@ -811,7 +810,7 @@ pub fn describe_changes(approved: &WorkflowRunPlan, now: &WorkflowRunPlan) -> St
     let images = |p: &WorkflowRunPlan| p.execution.runner_images.clone().unwrap_or_default();
     for bound in images(approved) {
         match images(now).iter().find(|n| n.runner == bound.runner) {
-            None => changes.push(format!("the restricted image {} is no longer used", bound.image)),
+            None => changes.push(format!("the restricted image {} is no longer configured", bound.image)),
             Some(n) if n.image != bound.image => {
                 changes.push(format!("the restricted image changed ({} → {})", bound.image, n.image))
             }
@@ -823,6 +822,13 @@ pub fn describe_changes(approved: &WorkflowRunPlan, now: &WorkflowRunPlan) -> St
             )),
             Some(_) => {}
         }
+    }
+    for added in images(now).iter().filter(|n| !images(approved).iter().any(|b| b.runner == n.runner)) {
+        changes.push(format!(
+            "the restricted image {} ({}) is now configured",
+            added.image,
+            short_id(added.image_id.as_deref())
+        ));
     }
     for step in &approved.steps {
         if let Some(current) = now.steps.iter().find(|s| s.step == step.step)

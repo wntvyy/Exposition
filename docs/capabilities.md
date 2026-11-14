@@ -575,7 +575,7 @@ out:
   steps get no seed.
 
 **Run manifest.** **Export manifest…** in the run view writes the run's
-manifest (`exposition.workflowRunManifest/1`, JSON) to a file you choose in
+manifest (`exposition.workflowRunManifest/2`, JSON) to a file you choose in
 the save dialog: the revision, definition and approval hashes, every input
 and output with its SHA-256, the budgets and usage, the cause, the images
 the restricted steps were approved with, and each step's attempts (and each

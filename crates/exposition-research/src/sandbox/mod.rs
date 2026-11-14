@@ -184,10 +184,14 @@ impl ScopedBatchRunner {
         let image = language::restricted_language(language);
         self.execution.restricted_preflight_for(image).map_err(|reason| ResearchError::EnvironmentUnavailable {
             reason: format!("Restricted execution is unavailable: {reason}"),
-            guidance: format!(
-                "Nothing was run, and nothing runs natively instead. Configure {} (a local image) under Settings → Execution and start Docker.",
-                language::image_setting(language)
-            ),
+            // R and Julia: the reason names the image setting already.
+            guidance: match language {
+                BatchLanguage::Python => format!(
+                    "Nothing was run, and nothing runs natively instead. Configure {} (a local image) under Settings → Execution and start Docker.",
+                    language::image_setting(language)
+                ),
+                _ => "Nothing was run, and nothing runs natively instead.".to_owned(),
+            },
         })
     }
 
@@ -939,7 +943,12 @@ impl BatchRunner for ScopedBatchRunner {
 
     fn language_availability(&self, root: &Path, language: BatchLanguage, mode: BatchMode) -> Result<(), String> {
         let root = self.current_project(root).map_err(|e| e.to_string())?;
-        self.target(&root, mode, language).map(|_| ()).map_err(|e| e.to_string())
+        self.target(&root, mode, language).map(|_| ()).map_err(|e| match (mode, e) {
+            // Why restricted execution is unavailable, once (whoever shows it
+            // says that nothing runs natively instead).
+            (BatchMode::Restricted, ResearchError::EnvironmentUnavailable { reason, .. }) => reason,
+            (_, e) => e.to_string(),
+        })
     }
 
     fn run_language(

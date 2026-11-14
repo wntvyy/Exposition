@@ -427,6 +427,20 @@ pub(super) fn check_conditions_and_repeats(
             continue;
         }
         let Some(contract) = contracts.get(&step.id) else { continue };
+        // Association proposals are reviewed and decided once per step; the
+        // instances of a repeated step could never be decided.
+        if contract.id == super::registry::FORMAL_ASSOCIATE {
+            d.error(
+                "workflow.repeatInvalid",
+                None,
+                format!(
+                    "step “{}” proposes evidence associations, which are reviewed and decided once per step, so it cannot repeat",
+                    step.label
+                ),
+            )
+            .step(&step.id);
+            continue;
+        }
         let problem = match repeat {
             StepRepeat::ForEach { parameter, values } => match contract.parameter(parameter) {
                 None => {

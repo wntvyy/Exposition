@@ -107,7 +107,7 @@ fn json_conditions_run_or_skip_steps_and_skips_propagate() {
     assert_eq!(state_of(&run, "good"), WorkflowStepState::Succeeded);
     assert_eq!(state_of(&run, "refit"), WorkflowStepState::ConditionNotMet);
     let reason = step_of(&run, "refit").reason.clone().unwrap();
-    assert!(reason.contains("/r2") && reason.contains("0.95") && reason.contains("does not hold"), "{reason}");
+    assert!(reason.contains("runs only when the value at /r2 < 0.9") && reason.contains("0.95"), "{reason}");
     assert!(step_of(&run, "refit").attempts.is_empty(), "never dispatched");
     assert_eq!(state_of(&run, "after"), WorkflowStepState::Skipped);
     assert!(step_of(&run, "after").reason.as_deref().unwrap().contains("“Python refit”"));
@@ -652,7 +652,8 @@ fn the_plan_states_conditions_and_repeats_in_plain_words() {
     let plan = f.service.plan(&f.save(v2(def, 2)), None).unwrap();
     assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
     let text = plan.notices.join("\n");
-    assert!(text.contains("“Python next” runs only when the value at /r2 ≥ 0.9 does not hold"), "{text}");
+    assert!(text.contains("“Python next” runs only when the value at /r2 < 0.9 (output"), "{text}");
+    assert!(!text.contains("does not hold"), "negations read naturally: {text}");
     assert!(text.contains("“Python fit” runs again, at most 4 times, until the value at /r2 ≥ 0.9"), "{text}");
     assert!(text.contains("the last iteration's outputs are used"), "{text}");
 }
@@ -723,7 +724,8 @@ fn plan_and_run_wording_is_accurate() {
     let plan = f.service.plan(&id, None).unwrap();
     let notice = plan.notices.iter().find(|n| n.starts_with("“Python refit” runs only")).unwrap();
     assert!(!notice.contains("unless"), "{notice}");
-    assert!(notice.contains("does not hold") && notice.contains("condition not met"), "{notice}");
+    assert!(notice.contains("when the value at /r2 < 0.9") && notice.contains("condition not met"), "{notice}");
+    assert!(!notice.contains("does not hold"), "{notice}");
     assert!(!notice.contains("it is skipped"), "{notice}");
     // A dependent that only waits for the step (a prerequisite) is not told
     // it needed that step's output.

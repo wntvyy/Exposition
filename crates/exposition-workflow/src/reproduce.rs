@@ -91,7 +91,6 @@ pub fn reproduction_drift(original: &WorkflowRun, current: &CurrentEnvironment<'
     for planned in &original.plan.steps {
         let Some(step) = original.steps.iter().find(|s| s.step == planned.step) else { continue };
         let recorded = environment::recorded_all(step);
-        let ran = !step.attempts.is_empty() || step.instances.iter().any(|i| !i.attempts.is_empty());
         let item = |aspect: &str, message: &str| WorkflowEnvironmentDrift {
             step: Some(planned.step.clone()),
             aspect: aspect.into(),
@@ -99,10 +98,30 @@ pub fn reproduction_drift(original: &WorkflowRun, current: &CurrentEnvironment<'
             current: None,
             message: message.into(),
         };
-        if recorded.is_empty() {
-            if ran {
-                out.push(item("unrecorded", "no environment was recorded (the run predates environment capture)"));
+        // What ran without recording an environment, and why (per instance
+        // of a repeated step, so a partly recorded step says which).
+        let mut unrecorded: Vec<(&'static str, Vec<u32>)> = Vec::new();
+        let mut note = |why: &'static str, instance: Option<u32>| match unrecorded.iter_mut().find(|(w, _)| *w == why) {
+            Some((_, list)) => list.extend(instance),
+            None => unrecorded.push((why, instance.into_iter().collect())),
+        };
+        if !step.attempts.is_empty() && environment::recorded(step).is_none() {
+            note(unrecorded_reason(&step.attempts), None);
+        }
+        for instance in &step.instances {
+            if !instance.attempts.is_empty() && environment::recorded_in(&instance.attempts).is_none() {
+                note(unrecorded_reason(&instance.attempts), Some(instance.index));
             }
+        }
+        for (why, instances) in &unrecorded {
+            let which = if instances.is_empty() || recorded.is_empty() {
+                String::new()
+            } else {
+                format!(" for {}", instance_list(instances))
+            };
+            out.push(item("unrecorded", &format!("no environment was recorded{which} ({why})")));
+        }
+        if recorded.is_empty() {
             continue;
         }
         let now = match current(&original.plan, planned) {
@@ -131,13 +150,31 @@ pub fn reproduction_drift(original: &WorkflowRun, current: &CurrentEnvironment<'
         let repeated = recorded.iter().filter(|(i, _)| i.is_some()).count();
         for (mut d, instances) in groups {
             if repeated > 0 && instances.len() < repeated {
-                let list = instances.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
-                d.message = format!("{} (instance{} {list})", d.message, if instances.len() == 1 { "" } else { "s" });
+                d.message = format!("{} ({})", d.message, instance_list(&instances));
             }
             out.push(d);
         }
     }
     out
+}
+
+/// `instance 2` / `instances 1, 3`: 0-based indexes shown 1-based.
+fn instance_list(indexes: &[u32]) -> String {
+    let list = indexes.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(", ");
+    format!("instance{} {list}", if indexes.len() == 1 { "" } else { "s" })
+}
+
+/// Why attempts that exist recorded no environment.
+fn unrecorded_reason(attempts: &[crate::model::WorkflowStepAttempt]) -> &'static str {
+    use crate::model::WorkflowAttemptState as S;
+    let last = attempts.last().expect("attempts exist");
+    if last.state == S::Interrupted {
+        "the application stopped while it ran (interrupted)"
+    } else if attempts.iter().all(|a| a.operation.is_none() && a.dispatched_at_ms.is_none()) {
+        "it was never dispatched"
+    } else {
+        "the run predates environment capture"
+    }
 }
 
 /// The notices a reproduction of `original` shows: what it reproduces, the
@@ -167,7 +204,8 @@ pub fn reproduction_notices(original: &WorkflowRun, drift: &[WorkflowEnvironment
             any_recorded = true;
             if let Some(seed) = env.seed {
                 seeds.push(match instance {
-                    Some(k) => format!("“{}” #{k} {seed}", planned.label),
+                    // Instances are numbered from 1 wherever they are shown.
+                    Some(k) => format!("“{}” #{} {seed}", planned.label, k + 1),
                     None => format!("“{}” {seed}", planned.label),
                 });
             }

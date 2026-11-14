@@ -358,7 +358,8 @@ fn run_analysis(f: &Fixture, language: BatchLanguage, mode: BatchMode, image_id:
 #[test]
 fn restricted_r_and_julia_without_their_image_are_refused() {
     let f = fixture_with(Images { python: Some(PYTHON_IMAGE), r: None, julia: None }, true);
-    for (language, setting) in [(R, "execution.docker.rImage"), (JULIA, "execution.docker.juliaImage")] {
+    for (language, setting) in [(R, "R image (Settings → Execution)"), (JULIA, "Julia image (Settings → Execution)")]
+    {
         let reason = f.runner.language_availability(&f.root, language, BatchMode::Restricted).unwrap_err();
         assert!(reason.contains(setting), "{reason}");
         let err = f.runner.restricted_image(language).unwrap_err();

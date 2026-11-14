@@ -69,6 +69,17 @@ const QUEUE_POLL_MS: u64 = 1000;
 const MAX_QUEUE_POLL_MS: u64 = 60_000;
 /// Consecutive start refusals before the trigger is suspended.
 const MAX_START_REFUSALS: u32 = 3;
+/// What every suspension message ends with.
+const SUSPENDED: &str = "The trigger is suspended until you review and enable it again.";
+
+/// `reason`, then what to do (once; a stale plan's own "review the new plan"
+/// advice is replaced by it).
+fn suspended_message(reason: &str) -> String {
+    let reason = reason.trim_end();
+    let reason = reason.strip_suffix("Review the new plan before starting.").unwrap_or(reason).trim_end();
+    let reason = reason.strip_suffix(SUSPENDED).unwrap_or(reason).trim_end();
+    format!("{reason} {SUSPENDED}")
+}
 /// Unconsumed standing-plan reviews kept.
 const MAX_REVIEWS: usize = 16;
 /// Plan errors that are temporary (the trigger stays enabled).
@@ -1047,7 +1058,7 @@ impl TriggerService {
         if !plan.execution.native_steps.is_empty() && !job.settings.allow_native {
             return Some(Outcome::Suspend {
                 code: "trigger.nativeNotAllowed".into(),
-                message: "The plan has native steps, which this trigger was not allowed to start.".into(),
+                message: suspended_message("The plan has native steps, which this trigger was not allowed to start."),
             });
         }
         plan.blockers.iter().find(|b| !starter::is_busy(&b.code)).map(|blocker| Outcome::Suspend {
@@ -1202,6 +1213,9 @@ impl TriggerService {
             Outcome::StartRefused { code, message } => {
                 entry.stored.start_refusals += 1;
                 if entry.stored.start_refusals >= MAX_START_REFUSALS {
+                    let message = suspended_message(&format!(
+                        "The run could not start {MAX_START_REFUSALS} times in a row: {message}"
+                    ));
                     suspend(entry, now, &code, message);
                 } else {
                     record(entry, now, TriggerHistoryEvent::StartRefused { code, message });

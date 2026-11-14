@@ -367,9 +367,8 @@ impl Ctx<'_> {
                             }
                             Ok((false, seen)) => {
                                 let reason = format!(
-                                    "Its condition did not hold: it runs only when {}{}, and {seen}.",
-                                    crate::condition::describe(&condition.test),
-                                    if condition.negate { " does not hold" } else { "" }
+                                    "Its condition did not hold: it runs only when {}, and {seen}.",
+                                    crate::condition::describe_as(&condition.test, condition.negate)
                                 );
                                 self.not_run(i, WorkflowStepState::ConditionNotMet, reason);
                                 continue;
