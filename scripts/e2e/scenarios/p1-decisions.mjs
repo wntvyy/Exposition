@@ -120,6 +120,7 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
   await writeFile(join(root, "slow.py"), SLOW);
   await writeFile(join(root, "fast.py"), FAST);
   const evidence = { real: [], notes: [], skipped: [] };
+  const defects = [];
   const shots = [];
   const app = await launchApp({ dataDir });
   const { page } = app;
@@ -176,11 +177,22 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
       assert.equal(await decision(page).locator('[data-choice="activeWork"]').getAttribute("data-value"), "stop");
       const replansA = await confirm(page);
       evidence.notes.push(`ActiveWork stop: re-planned ${replansA} time(s) before applying (the running work changed the plan)`);
-      await waitFor(async () => !existsSync(join(root, "data", "slow.csv")), { timeout: 30_000, message: "deleted after stopping" });
-      const stopped = await waitFor(async () => {
+      const deleted = await waitFor(async () => !existsSync(join(root, "data", "slow.csv")), { timeout: 30_000, message: "deleted after stopping" }).then(
+        () => true,
+        () => false,
+      );
+      if (!deleted) {
+        // Record the product defect with what the person was told, clean up, and go on with B–D.
+        const told = await page.locator('[data-testid="notification"]').evaluateAll((items) => items.map((n) => n.textContent).join(" | "));
+        defects.push(`ActiveWork "stop, then delete" did not delete data/slow.csv: ${told}`);
+        await shot("p1-active-work-stop-refused-light");
+        await call("workflow_run_cancel", { run: run.id }).catch(() => {});
+      }
+      const stopped = !deleted ? null : await waitFor(async () => {
         const r = await call("workflow_run_get", { run: run.id });
         return r.state !== "running" ? r : null;
       }, { timeout: 30_000, message: "the run stopped" });
+      if (stopped) {
       const deletedAt = Date.now();
       assert.notEqual(stopped.state, "succeeded", `the run was stopped (${stopped.state})`);
       assert.ok(recycleBinItemsFrom(join(root, "data")).some((i) => i.name.startsWith("slow")), "slow.csv is in the real Recycle Bin");
@@ -190,6 +202,7 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
       assert.deepEqual(outputs, [], "nothing was written by the stopped worker");
       assert.ok(!existsSync(join(root, "data", "slow.csv")), "no resurrection");
       evidence.real.push(`ActiveWork: a running restricted Docker batch was stopped (${stopped.state}) before data/slow.csv went to the Recycle Bin; no output in the ${Math.round((Date.now() - deletedAt) / 1000)} s after`);
+      }
       await dismissNotifications(page);
     } else {
       evidence.skipped.push(`A ActiveWork: Docker image ${IMAGE} not available`);
@@ -312,8 +325,9 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
     assert.equal((await call("graph_entity", { entity: thm.id })).entity.lifecycle, "active", "the theorem is unchanged");
 
     assert.deepEqual(consoleErrors(app), [], "no console errors");
+    assert.deepEqual(defects, [], "product defects found");
   } finally {
-    await writeFile(join(artifactsDir, "evidence.json"), JSON.stringify(evidence, null, 2)).catch(() => {});
+    await writeFile(join(artifactsDir, "evidence.json"), JSON.stringify({ ...evidence, defects }, null, 2)).catch(() => {});
     await app.close();
   }
   await publishShots(shots);
