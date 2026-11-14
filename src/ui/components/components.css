@@ -1424,7 +1424,9 @@
 /* Whatever sits in a content section body is already inset: nested sections,
    list rows, and compact states align with it. Containers that pad their own
    content can set the same two variables to 0. */
-.ui-section[data-variant="content"] > .ui-section__body,
+/* (Set on the body's children, not the body: the body's own padding reads
+   --section-inset.) */
+.ui-section[data-variant="content"] > .ui-section__body > *,
 .ui-inset-reset {
   --list-inset: 0px;
   --section-inset: 0px;
