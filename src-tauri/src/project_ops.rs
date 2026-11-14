@@ -143,6 +143,11 @@ struct Intent {
     deleted: Vec<WorkspacePath>,
     /// Folders copies are staged in.
     staging: Vec<PathBuf>,
+    /// For a restore: the original project path. Its staging leftover is the
+    /// only copy of the item (already out of the trash): an interrupted
+    /// restore is completed, never cleaned up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restore_of: Option<WorkspacePath>,
 }
 
 /// One target's actual outcome as journaled.
@@ -163,7 +168,12 @@ pub struct ProjectOps {
     session_started_ms: u64,
     reconciled: Mutex<HashSet<PathBuf>>,
     counter: AtomicU64,
+    /// Where reconciliation results are announced (the app: `project-op`).
+    events: Mutex<Option<EventSink>>,
 }
+
+/// Receives results the interface should hear about without asking.
+pub type EventSink = Arc<dyn Fn(&OpResult) + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|p| p.into_inner())
@@ -199,7 +209,13 @@ impl ProjectOps {
             session_started_ms: now_millis(),
             reconciled: Mutex::new(HashSet::new()),
             counter: AtomicU64::new(0),
+            events: Mutex::new(None),
         }
+    }
+
+    /// Announce reconciliation results (whichever call triggers it).
+    pub fn set_event_sink(&self, sink: EventSink) {
+        *lock(&self.events) = Some(sink);
     }
 
     fn mint(&self, prefix: &str) -> String {
@@ -348,6 +364,7 @@ impl ProjectOps {
             targets: plan.request.targets.clone(),
             deleted: paths.deleted.clone(),
             staging: paths.staging_folders(),
+            restore_of: None,
         };
         let record = self.begin(root, plan, &intent)?;
 
@@ -575,8 +592,9 @@ impl ProjectOps {
         if let Some(outcome) = data.restore_data(&restore) {
             return Ok(OpResult { plan: restore.restore, outcomes: vec![outcome], notices: Vec::new() });
         }
+        let bin = self.trash.name();
         let unknown =
-            || err("ops.restoreUnknown", "Exposition can no longer restore this item; look for it in the Recycle Bin.");
+            || err("ops.restoreUnknown", format!("Exposition can no longer restore this item; look for it in {bin}."));
         let in_memory = lock(&self.restores)
             .get(&restore.restore)
             .map(|stored| (stored.root.clone(), stored.path.clone(), stored.item.clone(), stored.record.clone()));
@@ -628,6 +646,7 @@ impl ProjectOps {
             targets: vec![target.clone()],
             deleted: Vec::new(),
             staging: vec![absolute(&root, path.parent().as_ref())],
+            restore_of: Some(path.clone()),
         };
         let _ = self.journal.record_step(
             &root,
@@ -640,9 +659,14 @@ impl ProjectOps {
         // The item is re-identified in the trash before anything moves.
         let outcome = ws.restore_trashed(&path, &item, restore.on_collision.as_deref(), self.trash.as_ref(), &tag);
         let _ = self.record_done(&root, &record.id, &[Done { outcome: outcome.clone(), path: Some(path.clone()) }]);
-        let spent = outcome.status == OpStatus::Succeeded || outcome.code.as_deref() == Some("ops.restoreUnavailable");
+        // Used, gone from the trash, out of it for good, or refused for a
+        // reason that will not change: never offered again.
+        let spent = outcome.status == OpStatus::Succeeded
+            || matches!(
+                outcome.code.as_deref(),
+                Some("ops.restoreUnavailable" | "ops.restoreIncomplete" | "ops.protected" | "ops.outsideProject")
+            );
         if spent {
-            // Used, or gone from the trash: never offered again.
             match kept_in {
                 Some(kept_in) => self.mark_spent(&root, vec![(kept_in, restore.restore.clone())]),
                 None => {
@@ -676,6 +700,12 @@ impl ProjectOps {
             }
             if let Some(result) = self.reconcile_record(ws, data, &root, &record) {
                 results.push(result);
+            }
+        }
+        let sink = lock(&self.events).clone();
+        if let Some(sink) = sink {
+            for result in &results {
+                sink(result);
             }
         }
         results
@@ -732,7 +762,28 @@ impl ProjectOps {
                 });
             }
         }
-        let removed = ws.remove_staging_leftovers(&intent.staging, &intent.tag);
+        // A restore left at its staging name is the only copy of the item:
+        // complete it (never clean it up). Records of earlier builds have no
+        // `restore_of`; their restores are recognized by kind and tag.
+        let restore_of = intent.restore_of.clone().or_else(|| match (&intent.kind, intent.targets.first()) {
+            (
+                OpKind::Paste { destination: exposition_core::ops::OpDestination::Project },
+                Some(OpTarget::Path { path }),
+            ) if intent.tag.starts_with("rs") => Some(path.clone()),
+            _ => None,
+        });
+        let mut removed = 0;
+        match &restore_of {
+            Some(original) => {
+                for folder in &intent.staging {
+                    for outcome in ws.recover_restore_leftovers(folder, &intent.tag, original, self.trash.as_ref()) {
+                        done.retain(|d| d.path.as_ref() != Some(original));
+                        done.push(Done { outcome, path: Some(original.clone()) });
+                    }
+                }
+            }
+            None => removed = ws.remove_staging_leftovers(&intent.staging, &intent.tag),
+        }
         let actual: Vec<OpOutcome> = done.iter().map(normalized_done).collect();
         data.after_paths(&actual);
         let succeeded = actual.iter().filter(|o| o.status == OpStatus::Succeeded).count();
@@ -909,6 +960,12 @@ pub async fn storage_overview(app: AppHandle) -> Result<StorageOverview, OpError
 pub fn start(app: &AppHandle) {
     let data_dir = app.state::<AppState>().data_dir.clone();
     app.manage(ProjectOps::new(&data_dir, Arc::new(OsTrash)));
+    // Reconciliation results reach the interface whichever call triggered it
+    // (the graph attaching, or the first plan of a session).
+    let emitter = app.clone();
+    app.state::<ProjectOps>().set_event_sink(Arc::new(move |result: &OpResult| {
+        let _ = emitter.emit(PROJECT_OP_EVENT, result);
+    }));
     // Agent tools use the same orchestrator (their task as the actor).
     let _ = app.state::<AppState>().agent_project_ops.set(Arc::new(AgentOps { app: app.clone() }));
     let mut rx = app.state::<AppState>().graph.subscribe();
@@ -921,9 +978,8 @@ pub fn start(app: &AppHandle) {
                     let _ = tauri::async_runtime::spawn_blocking(move || {
                         let state = app.state::<AppState>();
                         let ops = app.state::<ProjectOps>();
-                        for result in ops.reconcile_interrupted(&state.workspace, &AppData(&state)) {
-                            let _ = app.emit(PROJECT_OP_EVENT, &result);
-                        }
+                        // Announced through the event sink.
+                        ops.reconcile_interrupted(&state.workspace, &AppData(&state));
                     })
                     .await;
                 }

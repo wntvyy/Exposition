@@ -4,13 +4,11 @@
 //! existing entry.
 //!
 //! Publication never uses a plain rename onto the final name: on Windows,
-//! `std::fs::rename` of a folder replaces an existing FILE or empty folder of
-//! that name. Instead a name is taken atomically first:
-//! - a file is published with a hard link (fails if the name exists), or,
-//!   where hard links are unsupported, by reserving the name with create-new
-//!   and renaming over that reservation;
-//! - a folder is published by reserving the name with `create_dir` (fails if
-//!   it exists) and renaming the staged folder over that empty reservation.
+//! `std::fs::rename` replaces an existing file, and a folder rename even
+//! replaces an existing FILE or empty folder of that name. Files and folders
+//! are published with [`crate::fsutil::move_no_replace`] (Windows:
+//! `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`), which takes the name
+//! atomically or fails when anything exists there.
 //!
 //! Staging names contain [`TEMP_MARKER`], so the file tree, the watcher and
 //! builds ignore them while a copy is in progress.
@@ -212,82 +210,22 @@ fn set_readonly(path: &Path, readonly: bool) -> io::Result<()> {
 /// Publish the staged file `staged` as `target` without replacing anything.
 /// On success `staged` no longer exists.
 pub fn publish_file(staged: &Path, target: &Path) -> Result<(), PublishError> {
-    let readonly = fs::metadata(staged).map(|m| m.permissions().readonly()).map_err(PublishError::Io)?;
-    if readonly {
-        set_readonly(staged, false).map_err(PublishError::Io)?;
-    }
-    let restore_flag = |path: &Path| {
-        if readonly {
-            let _ = set_readonly(path, true);
-        }
-    };
-    match fs::hard_link(staged, target) {
-        Ok(()) => {
-            // Two names for one file now; drop the staging name.
-            if let Err(e) = fs::remove_file(staged) {
-                let _ = fs::remove_file(target);
-                restore_flag(staged);
-                return Err(PublishError::Io(e));
-            }
-            restore_flag(target);
-            Ok(())
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            restore_flag(staged);
-            Err(PublishError::Exists)
-        }
-        Err(_) => {
-            // No hard links here (e.g. FAT): reserve the name, then replace
-            // only that reservation.
-            match fs::OpenOptions::new().write(true).create_new(true).open(target) {
-                Ok(file) => drop(file),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    restore_flag(staged);
-                    return Err(PublishError::Exists);
-                }
-                Err(e) => {
-                    restore_flag(staged);
-                    return Err(PublishError::Io(e));
-                }
-            }
-            if let Err(e) = fs::rename(staged, target) {
-                let _ = fs::remove_file(target);
-                restore_flag(staged);
-                return Err(PublishError::Io(e));
-            }
-            restore_flag(target);
-            Ok(())
-        }
-    }
+    publish(staged, target)
 }
 
 /// Publish the staged folder `staged` as `target` without replacing or
 /// merging anything. On success `staged` no longer exists.
 pub fn publish_dir(staged: &Path, target: &Path) -> Result<(), PublishError> {
-    match fs::create_dir(target) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(PublishError::Exists),
-        Err(e) => return Err(PublishError::Io(e)),
-    }
-    // `target` is our own empty reservation: replace exactly it.
-    match fs::rename(staged, target) {
+    publish(staged, target)
+}
+
+/// One no-replace move (see [`crate::fsutil::move_no_replace`]): the name is
+/// taken atomically or not at all, whatever exists there.
+fn publish(staged: &Path, target: &Path) -> Result<(), PublishError> {
+    match crate::fsutil::move_no_replace(staged, target) {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {
-            // Something was written into the reservation meanwhile: leave it.
-            Err(PublishError::Exists)
-        }
-        Err(first) => {
-            // A file system that cannot replace an empty folder by rename:
-            // drop the (still empty) reservation and move into the free name.
-            if fs::remove_dir(target).is_err() {
-                return Err(PublishError::Exists);
-            }
-            match fs::symlink_metadata(target) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                _ => return Err(PublishError::Exists),
-            }
-            fs::rename(staged, target).map_err(|_| PublishError::Io(first))
-        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(PublishError::Exists),
+        Err(e) => Err(PublishError::Io(e)),
     }
 }
 

@@ -143,6 +143,52 @@ pub fn write_atomic(target: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
+/// Move `from` to `to` (on the same volume) without ever replacing an entry
+/// at `to`: fails with [`io::ErrorKind::AlreadyExists`] when `to` exists
+/// (a file, a folder, or a link), whatever `from` is, and then nothing moved.
+///
+/// `std::fs::rename` is not this: on Windows it replaces an existing file
+/// and even an existing empty folder. Windows: `MoveFileExW` without
+/// `MOVEFILE_REPLACE_EXISTING`. Elsewhere files move by hard link + unlink
+/// (atomic no-replace) and folders by a checked rename (a concurrent
+/// creation between the check and the rename could still be replaced).
+pub fn move_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    let result = move_no_replace_imp(from, to);
+    match result {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists && fs::symlink_metadata(to).is_ok() => {
+            // Refused because something is there (reported as access denied
+            // for some combinations): nothing moved.
+            Err(io::Error::new(io::ErrorKind::AlreadyExists, e))
+        }
+        other => other,
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn move_no_replace_imp(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(std::iter::once(0)).collect() };
+    let (from, to) = (wide(from), wide(to));
+    // SAFETY: both arguments are NUL-terminated UTF-16 strings that outlive
+    // the call; flags 0 = no replace, no copy across volumes.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+#[cfg(not(windows))]
+fn move_no_replace_imp(from: &Path, to: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(from)?.is_dir() {
+        if fs::symlink_metadata(to).is_ok() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "the destination exists"));
+        }
+        fs::rename(from, to)
+    } else {
+        fs::hard_link(from, to)?;
+        fs::remove_file(from)
+    }
+}
+
 /// True if the file exists and carries the OS read-only attribute/permission.
 pub fn is_read_only(path: &Path) -> bool {
     fs::metadata(path).map(|m| m.permissions().readonly()).unwrap_or(false)
@@ -200,6 +246,35 @@ mod tests {
         let target = dir.path().join("missing").join("a.txt");
         assert!(write_atomic(&target, b"x").is_err());
         assert!(!dir.path().join("missing").exists());
+    }
+
+    #[test]
+    fn moves_never_replace_or_merge_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = |n: &str| dir.path().join(n);
+        fs::write(d("new.txt"), "new").unwrap();
+        fs::write(d("taken.txt"), "keep").unwrap();
+        fs::create_dir(d("empty")).unwrap();
+        fs::create_dir(d("folder")).unwrap();
+        fs::write(d("folder/inner.txt"), "inner").unwrap();
+        // A file onto a file, a folder onto a file, a folder onto an empty
+        // folder: refused, both sides untouched (std::fs::rename replaces
+        // the first and last on Windows).
+        for (from, to) in [("new.txt", "taken.txt"), ("folder", "taken.txt"), ("folder", "empty"), ("new.txt", "empty")]
+        {
+            let e = move_no_replace(&d(from), &d(to)).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{from} -> {to}: {e}");
+        }
+        assert_eq!(fs::read_to_string(d("taken.txt")).unwrap(), "keep");
+        assert!(fs::read_dir(d("empty")).unwrap().next().is_none());
+        assert_eq!(fs::read_to_string(d("new.txt")).unwrap(), "new");
+        assert_eq!(fs::read_to_string(d("folder/inner.txt")).unwrap(), "inner");
+        // Free names: moved.
+        move_no_replace(&d("new.txt"), &d("moved.txt")).unwrap();
+        move_no_replace(&d("folder"), &d("moved-folder")).unwrap();
+        assert_eq!(fs::read_to_string(d("moved.txt")).unwrap(), "new");
+        assert_eq!(fs::read_to_string(d("moved-folder/inner.txt")).unwrap(), "inner");
+        assert!(!d("new.txt").exists() && !d("folder").exists());
     }
 
     #[test]
