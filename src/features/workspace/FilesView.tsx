@@ -147,7 +147,7 @@ function RecoveryItem({ entry }: { entry: RecoveryEntry }) {
               Copy Location
             </Button>
           )}
-          <Button size="sm" variant="secondary" onPress={() => void discardRecovery(entry)}>
+          <Button size="sm" variant="ghost" onPress={() => void discardRecovery(entry)}>
             Discard
           </Button>
         </span>
@@ -163,10 +163,10 @@ function RecoveryItem({ entry }: { entry: RecoveryEntry }) {
         {entry.disk === "missing" && " · file no longer exists"}
       </span>
       <span className="xp-recovery__actions">
-        <Button size="sm" variant="primary" onPress={() => void restoreRecovery(entry)}>
+        <Button size="sm" variant="secondary" onPress={() => void restoreRecovery(entry)}>
           Restore
         </Button>
-        <Button size="sm" variant="secondary" onPress={() => void discardRecovery(entry)}>
+        <Button size="sm" variant="ghost" onPress={() => void discardRecovery(entry)}>
           Discard
         </Button>
       </span>
