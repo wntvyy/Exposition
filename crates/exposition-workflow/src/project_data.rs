@@ -16,9 +16,11 @@
 //! - An enabled trigger is turned off before what it watches or runs is
 //!   deleted (`triggers`: `disable`, the default, or `skip`); nothing turns a
 //!   trigger back on (a restored workflow's triggers stay off).
-//! - Outputs of runs are a separate, explicit scope (`outputs`: `keep` the
-//!   default, `delete` with the record, `only` without it); outputs something
-//!   keeps (retained, attached) are never removed here.
+//! - A run's generated outputs are their own target (`RunOutputs`): deleting
+//!   a run record never deletes its outputs, and "record and outputs" is both
+//!   targets in one request (one combined decision). Outputs the project keeps
+//!   as resources (retained, attached) are never removed here; they are
+//!   deleted as files.
 //! - Agents keep their grants: data targets are refused for agent actors, and
 //!   an agent cannot stop the user's work or turn off a trigger.
 
@@ -46,13 +48,14 @@ use crate::triggers::{TriggerService, TriggerState, WorkflowTriggerId};
 /// Choice keys and values.
 pub const CHOICE_ACTIVE_WORK: &str = "activeWork";
 pub const CHOICE_TRIGGERS: &str = "triggers";
-pub const CHOICE_OUTPUTS: &str = "outputs";
 pub const CHOICE_PINNED: &str = "pinnedRevisions";
 
 /// Recoverable kinds kept outside the graph.
 pub const RECOVERABLE_WORKFLOW_RUN: &str = "workflowRun";
 pub const RECOVERABLE_RESEARCH_RUN: &str = "researchRun";
 pub const RECOVERABLE_AGENT_TASK: &str = "agentTask";
+/// Recoverable outputs: `runOutputs:<research run>[,<research run>…]`.
+pub const RECOVERABLE_RUN_OUTPUTS: &str = "runOutputs";
 /// Storage item: unreferenced tombstones (metadata of removed files).
 pub const TOMBSTONES: &str = "tombstones:unreferenced";
 
@@ -74,7 +77,7 @@ pub struct DataPlan {
 // ------------------------------------------------------------ services ----
 
 /// A research run record (interactive run or workflow batch).
-pub use exposition_research::records::{OutputsRemoved, RunRecordInfo as ResearchRecord};
+pub use exposition_research::records::{DeletedOutputs, OutputFile, OutputsRemoved, RunRecordInfo as ResearchRecord};
 
 /// Research run records as the data side uses them.
 pub trait ResearchRecords: Send + Sync {
@@ -83,7 +86,18 @@ pub trait ResearchRecords: Send + Sync {
     fn record(&self, id: &str) -> Result<ResearchRecord, OpError>;
     fn delete(&self, id: &str, permanent: bool) -> Result<(), OpError>;
     fn restore(&self, id: &str) -> Result<(), OpError>;
+    /// Remove a run's outputs that `keep` does not keep, for good.
     fn remove_outputs(&self, id: &str, keep: &dyn Fn(&WorkspacePath) -> bool) -> Result<OutputsRemoved, OpError>;
+    /// A run's generated output files on disk now.
+    fn output_files(&self, id: &str) -> Result<Vec<OutputFile>, OpError>;
+    /// Move a run's outputs that `keep` does not keep aside (restorable).
+    fn trash_outputs(&self, id: &str, keep: &dyn Fn(&WorkspacePath) -> bool) -> Result<OutputsRemoved, OpError>;
+    /// Bring outputs moved aside back (`rename`: a taken name gets a fresh one).
+    fn restore_outputs(&self, id: &str, rename: bool) -> Result<Vec<WorkspacePath>, OpError>;
+    /// Remove outputs moved aside for good; the bytes removed.
+    fn purge_deleted_outputs(&self, id: &str) -> Result<u64, OpError>;
+    /// Outputs held for recovery, per run.
+    fn deleted_outputs(&self) -> Result<Vec<DeletedOutputs>, OpError>;
     /// Cancel an active run and wait (bounded) until it ended.
     fn stop(&self, id: &str) -> bool;
 }
@@ -133,6 +147,21 @@ impl ResearchRecords for ResearchServiceRecords {
     }
     fn remove_outputs(&self, id: &str, keep: &dyn Fn(&WorkspacePath) -> bool) -> Result<OutputsRemoved, OpError> {
         self.service.remove_run_outputs(id, keep).map_err(research_error)
+    }
+    fn output_files(&self, id: &str) -> Result<Vec<OutputFile>, OpError> {
+        self.service.run_output_files(id).map_err(research_error)
+    }
+    fn trash_outputs(&self, id: &str, keep: &dyn Fn(&WorkspacePath) -> bool) -> Result<OutputsRemoved, OpError> {
+        self.service.trash_run_outputs(id, keep).map_err(research_error)
+    }
+    fn restore_outputs(&self, id: &str, rename: bool) -> Result<Vec<WorkspacePath>, OpError> {
+        self.service.restore_run_outputs(id, rename).map_err(research_error)
+    }
+    fn purge_deleted_outputs(&self, id: &str) -> Result<u64, OpError> {
+        self.service.purge_deleted_outputs(id).map_err(research_error)
+    }
+    fn deleted_outputs(&self) -> Result<Vec<DeletedOutputs>, OpError> {
+        self.service.deleted_run_outputs().map_err(research_error)
     }
     fn stop(&self, id: &str) -> bool {
         if !self.service.run_active(id) {
@@ -239,19 +268,6 @@ fn triggers_choice() -> OpChoice {
             option("skip", "Keep the triggers and these items"),
         ],
         default: "disable".into(),
-    }
-}
-
-fn outputs_choice() -> OpChoice {
-    OpChoice {
-        key: CHOICE_OUTPUTS.into(),
-        label: "Generated outputs".into(),
-        options: vec![
-            option("keep", "Keep the outputs (delete the record only)"),
-            option("delete", "Delete the record and the outputs nothing keeps"),
-            option("only", "Delete only the outputs nothing keeps (keep the record)"),
-        ],
-        default: "keep".into(),
     }
 }
 
@@ -811,11 +827,7 @@ fn plan_delete(cx: &DataContext<'_>, target: &OpTarget, permanent: bool, plan: &
             }
             let description = if permanent {
                 plan.impacts.push(recovery_loss(target, &format!("The run record of {}", quoted(&record.title))));
-                push_choice(&mut plan.choices, outputs_choice());
-                format!(
-                    "Delete the run record of {} permanently (outputs: as chosen; outputs something keeps are never removed)",
-                    quoted(&record.title)
-                )
+                format!("Delete the run record of {} permanently; its outputs stay", quoted(&record.title))
             } else {
                 format!("Delete the run record of {} ({restorable}); its outputs stay", quoted(&record.title))
             };
@@ -862,13 +874,7 @@ fn plan_delete(cx: &DataContext<'_>, target: &OpTarget, permanent: bool, plan: &
                         message: "Retained evidence was recorded from this run; without its record (code, transcript) the evidence cannot be reproduced. The evidence and its recorded results stay as history.".into(),
                     });
                 }
-                if !record.outputs.is_empty() {
-                    push_choice(&mut plan.choices, outputs_choice());
-                }
-                format!(
-                    "Delete the run record {} permanently (outputs: as chosen; outputs something keeps are never removed)",
-                    quoted(&record.label)
-                )
+                format!("Delete the run record {} permanently; its outputs stay", quoted(&record.label))
             } else {
                 format!("Delete the run record {} ({restorable}); its outputs stay", quoted(&record.label))
             };
@@ -985,9 +991,167 @@ fn plan_delete(cx: &DataContext<'_>, target: &OpTarget, permanent: bool, plan: &
             }
             plan_purge(cx, target, id, plan)?;
         }
-        OpTarget::Path { .. } | OpTarget::External { .. } | OpTarget::RunOutputs { .. } => {}
+        OpTarget::RunOutputs { run } => plan_outputs(cx, target, run, permanent, plan)?,
+        OpTarget::Path { .. } | OpTarget::External { .. } => {}
     }
     Ok(())
+}
+
+/// The research runs whose files make up `run`'s outputs (a workflow run's
+/// batches, or the research run itself), whether it is active now, and how
+/// to name it.
+fn output_runs(cx: &DataContext<'_>, run: &str) -> Result<(Vec<String>, bool, String), OpError> {
+    let research = cx.research.ok_or_else(|| OpError::new("ops.notSupported", "Research is not available."))?;
+    if run.starts_with("wrun-") {
+        let id = workflow_run_id(run)?;
+        let (record, _) = cx.runs.run_any(&id).map_err(run_error)?;
+        let (research_runs, _) = crate::service::records::run_outputs(&record);
+        Ok((research_runs, cx.runs.is_active(&id), format!("the run of {}", quoted(&record.title))))
+    } else {
+        let (active, label) = match research.record(run) {
+            Ok(r) => (r.active, quoted(&r.label)),
+            // The record may be gone; its files are still its outputs.
+            Err(_) => (false, quoted(run)),
+        };
+        Ok((vec![run.to_owned()], active, format!("the run {label}")))
+    }
+}
+
+/// A run's output files split into what deleting removes and what the
+/// project keeps (live resources), plus what is already held for recovery.
+struct OutputScope {
+    research_runs: Vec<String>,
+    removable: Vec<OutputFile>,
+    kept: Vec<OutputFile>,
+    held_bytes: u64,
+    held_files: usize,
+    active: bool,
+    label: String,
+}
+
+fn output_scope(cx: &DataContext<'_>, run: &str) -> Result<OutputScope, OpError> {
+    let research = cx.research.ok_or_else(|| OpError::new("ops.notSupported", "Research is not available."))?;
+    let (research_runs, active, label) = output_runs(cx, run)?;
+    let keep = kept_by_graph(cx.graph);
+    let held = research.deleted_outputs().unwrap_or_default();
+    let mut scope = OutputScope {
+        research_runs: research_runs.clone(),
+        removable: Vec::new(),
+        kept: Vec::new(),
+        held_bytes: 0,
+        held_files: 0,
+        active,
+        label,
+    };
+    for r in &research_runs {
+        for f in research.output_files(r).unwrap_or_default() {
+            if keep(&f.path) { scope.kept.push(f) } else { scope.removable.push(f) }
+        }
+        for h in held.iter().filter(|h| &h.run == r) {
+            scope.held_files += h.files.len();
+            scope.held_bytes += h.files.iter().map(|f| f.bytes).sum::<u64>();
+        }
+    }
+    Ok(scope)
+}
+
+fn plan_outputs(
+    cx: &DataContext<'_>,
+    target: &OpTarget,
+    run: &str,
+    permanent: bool,
+    plan: &mut DataPlan,
+) -> Result<(), OpError> {
+    let scope = output_scope(cx, run)?;
+    if scope.active {
+        plan.impacts.push(OpImpact {
+            kind: ImpactKind::ActiveWork,
+            target: target.clone(),
+            consumers: vec![consumer("run", run, &scope.label)],
+            message: format!(
+                "{} is active and may still write outputs; it is stopped before its outputs are deleted.",
+                upper_first(&scope.label)
+            ),
+        });
+        push_choice(&mut plan.choices, active_work_choice());
+    }
+    // Consumers of the outputs that would go (kept files stay, so they are not consequences).
+    let paths: Vec<WorkspacePath> = scope.removable.iter().map(|f| f.path.clone()).collect();
+    if !paths.is_empty() {
+        let mut by_kind: BTreeMap<ImpactKind, OpImpact> = BTreeMap::new();
+        for impact in cx.graph.path_impacts(&paths)? {
+            let entry = by_kind.entry(impact.kind).or_insert_with(|| OpImpact {
+                kind: impact.kind,
+                target: target.clone(),
+                consumers: Vec::new(),
+                message: impact.message.clone(),
+            });
+            for c in impact.consumers {
+                if !entry.consumers.contains(&c) {
+                    entry.consumers.push(c);
+                }
+            }
+        }
+        plan.impacts.extend(by_kind.into_values());
+    }
+    let bytes: u64 = scope.removable.iter().map(|f| f.bytes).sum();
+    let gone = scope.removable.len() + if permanent { scope.held_files } else { 0 };
+    if permanent && gone > 0 {
+        plan.impacts.push(recovery_loss(target, &format!("The outputs of {}", scope.label)));
+    }
+    let mut description = if scope.removable.is_empty() {
+        format!("Nothing to delete among the outputs of {}", scope.label)
+    } else if permanent {
+        format!(
+            "Delete {} output file(s) of {} permanently ({})",
+            scope.removable.len(),
+            scope.label,
+            human_bytes(bytes)
+        )
+    } else {
+        format!(
+            "Delete {} output file(s) of {} ({}; restorable in Settings → Storage & History, kept on disk until purged)",
+            scope.removable.len(),
+            scope.label,
+            human_bytes(bytes)
+        )
+    };
+    if permanent && scope.held_files > 0 {
+        description.push_str(&format!(
+            "; also purges {} earlier deleted output(s) ({})",
+            scope.held_files,
+            human_bytes(scope.held_bytes)
+        ));
+    }
+    if !scope.kept.is_empty() {
+        description.push_str(&format!(
+            "; {} output(s) the project keeps stay (delete those files themselves to remove them)",
+            scope.kept.len()
+        ));
+    }
+    plan.effects.push(effect(
+        target,
+        description,
+        if permanent || scope.removable.is_empty() { OpRecovery::None } else { OpRecovery::AppManaged },
+    ));
+    let mut fp: Vec<&str> = scope.removable.iter().map(|f| f.path.as_str()).collect();
+    fp.sort();
+    plan.fingerprint.push(format!(
+        "out:{run}:{}:{}:{}:{}",
+        scope.active,
+        scope.research_runs.join(","),
+        fp.join(","),
+        scope.held_files
+    ));
+    Ok(())
+}
+
+fn upper_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
 }
 
 fn plan_purge(cx: &DataContext<'_>, target: &OpTarget, id: &str, plan: &mut DataPlan) -> Result<(), OpError> {
@@ -1043,7 +1207,6 @@ fn plan_purge(cx: &DataContext<'_>, target: &OpTarget, id: &str, plan: &mut Data
                 return Err(OpError::new("ops.notFound", "That run is not in recoverable deletions."));
             }
             plan.impacts.push(recovery_loss(target, &format!("The run record of {}", quoted(&record.title))));
-            push_choice(&mut plan.choices, outputs_choice());
             plan.effects.push(effect(
                 target,
                 format!("Purge the run record of {}", quoted(&record.title)),
@@ -1058,11 +1221,26 @@ fn plan_purge(cx: &DataContext<'_>, target: &OpTarget, id: &str, plan: &mut Data
                 return Err(OpError::new("ops.notFound", "That run is not in recoverable deletions."));
             }
             plan.impacts.push(recovery_loss(target, &format!("The run record {}", quoted(&r.label))));
-            if !r.outputs.is_empty() {
-                push_choice(&mut plan.choices, outputs_choice());
-            }
             plan.effects.push(effect(target, format!("Purge the run record {}", quoted(&r.label)), OpRecovery::None));
             plan.fingerprint.push(format!("rec:{id}"));
+        }
+        RECOVERABLE_RUN_OUTPUTS => {
+            let research = cx.research.ok_or_else(|| OpError::new("ops.notSupported", "Research is not available."))?;
+            let runs: Vec<&str> = record.split(',').collect();
+            let held: Vec<DeletedOutputs> =
+                research.deleted_outputs()?.into_iter().filter(|h| runs.contains(&h.run.as_str())).collect();
+            if held.is_empty() {
+                return Err(OpError::new("ops.notFound", "Those outputs are no longer held for recovery."));
+            }
+            let files: usize = held.iter().map(|h| h.files.len()).sum();
+            let bytes: u64 = held.iter().flat_map(|h| h.files.iter()).map(|f| f.bytes).sum();
+            plan.impacts.push(recovery_loss(target, &format!("{files} deleted output file(s)")));
+            plan.effects.push(effect(
+                target,
+                format!("Purge {files} deleted output file(s) ({})", human_bytes(bytes)),
+                OpRecovery::None,
+            ));
+            plan.fingerprint.push(format!("rec:{id}:{files}:{bytes}"));
         }
         RECOVERABLE_AGENT_TASK => {
             let tasks = cx.tasks.ok_or_else(|| OpError::new("ops.notSupported", "Agent tasks are not available."))?;
@@ -1144,7 +1322,13 @@ fn plan_copy(cx: &DataContext<'_>, target: &OpTarget, plan: &mut DataPlan) -> Re
         OpTarget::Recoverable { .. } => {
             return Err(OpError::new("ops.notSupported", "Restore a deleted item before copying it."));
         }
-        OpTarget::Path { .. } | OpTarget::External { .. } | OpTarget::RunOutputs { .. } => {}
+        OpTarget::RunOutputs { .. } => {
+            return Err(OpError::new(
+                "ops.notSupported",
+                "Outputs are copied as files: copy the output files themselves.",
+            ));
+        }
+        OpTarget::Path { .. } | OpTarget::External { .. } => {}
     }
     Ok(())
 }
@@ -1157,7 +1341,11 @@ pub fn apply_data(cx: &DataContext<'_>, plan: &OpPlan, choices: &BTreeMap<String
     let origin = origin_of(&plan.request.actor);
     let mut outcomes = Vec::new();
     let mut entity_copies: Vec<(OpTarget, EntityId)> = Vec::new();
-    for target in plan.request.targets.iter().filter(|t| is_data_target(t)) {
+    // Outputs first: a workflow run's outputs are found through its record,
+    // which the same request may delete.
+    let mut ordered: Vec<&OpTarget> = plan.request.targets.iter().filter(|t| is_data_target(t)).collect();
+    ordered.sort_by_key(|t| !matches!(t, OpTarget::RunOutputs { .. }));
+    for target in ordered {
         if let Some(r) = plan.refusals.iter().find(|r| &r.target == target) {
             outcomes.push(skipped(target, &r.code, r.message.clone()));
             continue;
@@ -1306,7 +1494,7 @@ fn apply_delete(
             {
                 return Ok(o);
             }
-            delete_workflow_run(cx, plan, choices, &id, permanent, target)
+            delete_workflow_run(cx, &id, permanent, target)
         }
         OpTarget::ResearchRun { run } => {
             let research = cx.research.ok_or_else(|| OpError::new("ops.notSupported", "Research is not available."))?;
@@ -1314,7 +1502,7 @@ fn apply_delete(
             if let Some(o) = coordinate(plan, choices, target, || research.stop(run), active) {
                 return Ok(o);
             }
-            delete_research_run(cx, plan, choices, run, permanent, target)
+            delete_research_run(cx, run, permanent, target)
         }
         OpTarget::AgentTask { task } => {
             let tasks = cx.tasks.ok_or_else(|| OpError::new("ops.notSupported", "Agent tasks are not available."))?;
@@ -1344,9 +1532,22 @@ fn apply_delete(
             Ok(done(cx.graph.delete_view_recoverable(&id, permanent)?, None))
         }
         OpTarget::Recoverable { id } => purge(cx, plan, choices, origin, target, id),
-        OpTarget::Path { .. } | OpTarget::External { .. } | OpTarget::RunOutputs { .. } => {
-            Ok(outcome(target, OpStatus::Skipped))
+        OpTarget::RunOutputs { run } => {
+            let research = cx.research.ok_or_else(|| OpError::new("ops.notSupported", "Research is not available."))?;
+            let (_, active, _) = output_runs(cx, run)?;
+            let stop = || {
+                if run.starts_with("wrun-") {
+                    WorkflowRunId::parse(run).is_ok_and(|id| cx.runs.stop_and_wait(&id, STOP_TIMEOUT))
+                } else {
+                    research.stop(run)
+                }
+            };
+            if let Some(o) = coordinate(plan, choices, target, stop, active) {
+                return Ok(o);
+            }
+            delete_outputs(cx, research, target, run, permanent)
         }
+        OpTarget::Path { .. } | OpTarget::External { .. } => Ok(outcome(target, OpStatus::Skipped)),
     }
 }
 
@@ -1357,48 +1558,17 @@ fn kept_by_graph(graph: &GraphService) -> impl Fn(&WorkspacePath) -> bool + '_ {
 
 fn delete_workflow_run(
     cx: &DataContext<'_>,
-    plan: &OpPlan,
-    choices: &BTreeMap<String, String>,
     id: &WorkflowRunId,
     permanent: bool,
     target: &OpTarget,
 ) -> Result<OpOutcome, OpError> {
-    let outputs = if permanent { choice(plan, choices, CHOICE_OUTPUTS, "keep") } else { "keep".into() };
-    let mut notes = Vec::new();
-    if outputs != "keep" {
-        let (run, _) = cx.runs.run_any(id).map_err(run_error)?;
-        let (research_runs, _) = crate::service::records::run_outputs(&run);
-        let mut removed = OutputsRemoved::default();
-        if let Some(research) = cx.research {
-            let keep = kept_by_graph(cx.graph);
-            for r in &research_runs {
-                if let Ok(done) = research.remove_outputs(r, &keep) {
-                    removed.bytes += done.bytes;
-                    removed.removed.extend(done.removed);
-                    removed.kept.extend(done.kept);
-                }
-            }
-        }
-        notes.push(format!(
-            "Removed {} output file(s) ({}){}.",
-            removed.removed.len(),
-            human_bytes(removed.bytes),
-            if removed.kept.is_empty() {
-                String::new()
-            } else {
-                format!("; {} output(s) are kept because the project keeps or uses them", removed.kept.len())
-            }
-        ));
-    }
-    if outputs == "only" {
-        return Ok(OpOutcome { message: Some(notes.join(" ")), ..outcome(target, OpStatus::Succeeded) });
-    }
     cx.runs.delete_run(id, permanent).map_err(run_error)?;
     if permanent {
-        if let Ok((before, after)) = cx.runs.compact_history() {
-            notes.push(reclaimed(before, after));
-        }
-        return Ok(OpOutcome { message: Some(notes.join(" ")), ..outcome(target, OpStatus::Succeeded) });
+        let message = match cx.runs.compact_history() {
+            Ok((before, after)) => format!("{} Its outputs stay.", reclaimed(before, after)),
+            Err(_) => "The record was removed. Its outputs stay.".to_owned(),
+        };
+        return Ok(OpOutcome { message: Some(message), ..outcome(target, OpStatus::Succeeded) });
     }
     Ok(OpOutcome {
         recovery: OpRecovery::AppManaged,
@@ -1409,39 +1579,78 @@ fn delete_workflow_run(
 
 fn delete_research_run(
     cx: &DataContext<'_>,
-    plan: &OpPlan,
-    choices: &BTreeMap<String, String>,
     run: &str,
     permanent: bool,
     target: &OpTarget,
 ) -> Result<OpOutcome, OpError> {
     let research = cx.research.ok_or_else(|| OpError::new("ops.notSupported", "Research is not available."))?;
-    let outputs = if permanent { choice(plan, choices, CHOICE_OUTPUTS, "keep") } else { "keep".into() };
-    let mut notes = Vec::new();
-    if outputs != "keep" {
-        let done = research.remove_outputs(run, &kept_by_graph(cx.graph))?;
-        notes.push(format!(
-            "Removed {} output file(s) ({}){}.",
-            done.removed.len(),
-            human_bytes(done.bytes),
-            if done.kept.is_empty() {
-                String::new()
-            } else {
-                format!("; {} output(s) are kept because the project keeps or uses them", done.kept.len())
-            }
-        ));
-    }
-    if outputs == "only" {
-        return Ok(OpOutcome { message: Some(notes.join(" ")), ..outcome(target, OpStatus::Succeeded) });
-    }
     research.delete(run, permanent)?;
     if permanent {
-        notes.push("The run record (manifest and transcript) was removed from the project.".into());
-        return Ok(OpOutcome { message: Some(notes.join(" ")), ..outcome(target, OpStatus::Succeeded) });
+        return Ok(OpOutcome {
+            message: Some(
+                "The run record (manifest and transcript) was removed from the project. Its outputs stay.".into(),
+            ),
+            ..outcome(target, OpStatus::Succeeded)
+        });
     }
     Ok(OpOutcome {
         recovery: OpRecovery::AppManaged,
         restore: Some(recoverable_id(RECOVERABLE_RESEARCH_RUN, run)),
+        ..outcome(target, OpStatus::Succeeded)
+    })
+}
+
+/// Delete the outputs of `run` that nothing keeps: moved aside (restorable)
+/// or removed for good (with any held earlier).
+fn delete_outputs(
+    cx: &DataContext<'_>,
+    research: &dyn ResearchRecords,
+    target: &OpTarget,
+    run: &str,
+    permanent: bool,
+) -> Result<OpOutcome, OpError> {
+    let (research_runs, _, _) = output_runs(cx, run)?;
+    let keep = kept_by_graph(cx.graph);
+    let mut done = OutputsRemoved::default();
+    let mut purged = 0u64;
+    let mut moved: Vec<String> = Vec::new();
+    for r in &research_runs {
+        let part = if permanent { research.remove_outputs(r, &keep)? } else { research.trash_outputs(r, &keep)? };
+        if !part.removed.is_empty() {
+            moved.push(r.clone());
+        }
+        done.bytes += part.bytes;
+        done.removed.extend(part.removed);
+        done.kept.extend(part.kept);
+        if permanent {
+            purged += research.purge_deleted_outputs(r)?;
+        }
+    }
+    let kept = if done.kept.is_empty() {
+        String::new()
+    } else {
+        format!(" {} output(s) the project keeps stay.", done.kept.len())
+    };
+    let message = if done.removed.is_empty() && purged == 0 {
+        format!("Nothing was deleted.{kept}")
+    } else if permanent {
+        format!(
+            "Removed {} output file(s); {} given back to the file system.{kept}",
+            done.removed.len(),
+            human_bytes(done.bytes + purged)
+        )
+    } else {
+        format!(
+            "Moved {} output file(s) ({}) aside; they stay on disk until purged in Settings → Storage & History.{kept}",
+            done.removed.len(),
+            human_bytes(done.bytes)
+        )
+    };
+    let restore = (!permanent && !moved.is_empty()).then(|| recoverable_id(RECOVERABLE_RUN_OUTPUTS, &moved.join(",")));
+    Ok(OpOutcome {
+        recovery: if restore.is_some() { OpRecovery::AppManaged } else { OpRecovery::None },
+        restore,
+        message: Some(message),
         ..outcome(target, OpStatus::Succeeded)
     })
 }
@@ -1484,9 +1693,17 @@ fn purge(
         }
         RECOVERABLE_WORKFLOW_RUN => {
             let run = workflow_run_id(record)?;
-            delete_workflow_run(cx, plan, choices, &run, true, target)
+            delete_workflow_run(cx, &run, true, target)
         }
-        RECOVERABLE_RESEARCH_RUN => delete_research_run(cx, plan, choices, record, true, target),
+        RECOVERABLE_RESEARCH_RUN => delete_research_run(cx, record, true, target),
+        RECOVERABLE_RUN_OUTPUTS => {
+            let research = cx.research.ok_or_else(|| OpError::new("ops.notSupported", "Research is not available."))?;
+            let mut bytes = 0;
+            for r in record.split(',') {
+                bytes += research.purge_deleted_outputs(r)?;
+            }
+            Ok(ok(Some(format!("Purged; {} given back to the file system.", human_bytes(bytes)))))
+        }
         RECOVERABLE_AGENT_TASK => {
             let tasks = cx.tasks.ok_or_else(|| OpError::new("ops.notSupported", "Agent tasks are not available."))?;
             tasks.delete(record, true)?;
@@ -1554,6 +1771,28 @@ pub fn restore_data(cx: &DataContext<'_>, restore: &OpRestore) -> Option<OpOutco
         RECOVERABLE_AGENT_TASK => match cx.tasks {
             Some(t) => t.restore(record).map(|()| OpTarget::AgentTask { task: record.to_owned() }),
             None => Err(OpError::new("ops.notSupported", "Agent tasks are not available.")),
+        },
+        RECOVERABLE_RUN_OUTPUTS => match cx.research {
+            Some(r) => {
+                let rename = restore.on_collision.as_deref() != Some("cancel");
+                let runs: Vec<&str> = record.split(',').collect();
+                let mut restored = 0usize;
+                let mut result = Ok(());
+                for run in &runs {
+                    match r.restore_outputs(run, rename) {
+                        Ok(paths) => restored += paths.len(),
+                        Err(e) => {
+                            result = Err(e);
+                            break;
+                        }
+                    }
+                }
+                result.map(|()| {
+                    notes.push(format!("Restored {restored} output file(s); a name taken meanwhile got a fresh one."));
+                    OpTarget::RunOutputs { run: runs[0].to_owned() }
+                })
+            }
+            None => Err(OpError::new("ops.notSupported", "Research is not available.")),
         },
         _ => return None,
     };
@@ -1633,7 +1872,7 @@ pub fn storage_overview(cx: &DataContext<'_>) -> StorageOverview {
         categories.push(category(
             "workflowRuns",
             "Workflow run records",
-            "Deleting removes the run record only (restorable); its outputs stay unless you include them when deleting permanently.",
+            "Deleting removes the run record only (restorable); its outputs stay (select them under Generated outputs to delete them too).",
             items,
         ));
     }
@@ -1668,27 +1907,49 @@ pub fn storage_overview(cx: &DataContext<'_>) -> StorageOverview {
             categories.push(category(
                 "researchRuns",
                 "Research run records",
-                "Deleting removes the record (code, transcript) only (restorable); generated outputs are a separate choice. Records retained evidence came from are marked.",
+                "Deleting removes the record (code, transcript) only (restorable); its outputs stay (they are listed under Generated outputs). Records retained evidence came from are marked.",
                 runs,
             ));
-            let outputs = records
-                .iter()
+            let mut with_outputs: Vec<&ResearchRecord> = records.iter().collect();
+            let deleted_records = research.deleted().unwrap_or_default();
+            with_outputs.extend(deleted_records.iter());
+            let outputs = with_outputs
+                .into_iter()
                 .filter(|r| !r.outputs.is_empty())
-                .map(|r| StorageItem {
-                    target: OpTarget::ResearchRun { run: r.id.clone() },
-                    label: format!("Outputs of {} ({} file(s))", r.label, r.outputs.len()),
-                    bytes: Some(r.outputs.iter().map(|o| o.bytes).sum()),
-                    created_at_ms: Some(r.started_at_ms),
-                    referenced: r.outputs.iter().any(|o| kept(&o.path)),
-                    active: r.active,
+                .map(|r| {
+                    let kept_files = r.outputs.iter().filter(|o| kept(&o.path)).count();
+                    StorageItem {
+                        target: OpTarget::RunOutputs { run: r.id.clone() },
+                        label: format!(
+                            "Outputs of {} ({} file(s){})",
+                            r.label,
+                            r.outputs.len(),
+                            if kept_files > 0 { format!(", {kept_files} kept by the project") } else { String::new() }
+                        ),
+                        // What deleting would remove (kept files stay).
+                        bytes: Some(r.outputs.iter().filter(|o| !kept(&o.path)).map(|o| o.bytes).sum()),
+                        created_at_ms: Some(r.started_at_ms),
+                        referenced: kept_files > 0,
+                        active: r.active,
+                    }
                 })
                 .collect();
             categories.push(category(
                 "generatedOutputs",
                 "Generated outputs",
-                "Delete with the outputs choice “only”: the files nothing keeps are removed and the record stays. Outputs that are retained or attached to a manuscript are never removed here.",
+                "Files runs produced. Deleting removes the files nothing keeps (restorable until purged); the run record stays. Outputs retained or attached to a manuscript are kept and not counted; delete those files themselves.",
                 outputs,
             ));
+        }
+        if let Ok(held) = research.deleted_outputs() {
+            recoverable.extend(held.iter().map(|h| StorageItem {
+                target: OpTarget::Recoverable { id: recoverable_id(RECOVERABLE_RUN_OUTPUTS, &h.run) },
+                label: format!("{} output file(s) of run {}", h.files.len(), h.run),
+                bytes: Some(h.files.iter().map(|f| f.bytes).sum()),
+                created_at_ms: Some(h.deleted_at_ms),
+                referenced: false,
+                active: false,
+            }));
         }
         if let Ok(deleted) = research.deleted() {
             recoverable.extend(deleted.iter().map(|r| StorageItem {

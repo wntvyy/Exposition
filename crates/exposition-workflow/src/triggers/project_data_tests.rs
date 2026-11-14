@@ -11,7 +11,7 @@ use exposition_core::ops::{
     ImpactKind, OpActor, OpError, OpKind, OpOutcome, OpPlan, OpRequest, OpRestore, OpStatus, OpTarget,
 };
 use exposition_core::path::WorkspacePath;
-use exposition_research::records::OutputFile;
+use exposition_research::records::{DeletedOutputs, OutputFile};
 
 use super::*;
 use crate::model::StartWorkflowRunRequest;
@@ -24,6 +24,33 @@ struct Research {
     records: Mutex<Vec<ResearchRecord>>,
     removed_outputs: Mutex<Vec<String>>,
     stopped: Mutex<Vec<String>>,
+    /// Outputs moved aside for recovery, per run.
+    held: Mutex<BTreeMap<String, Vec<OutputFile>>>,
+}
+
+impl Research {
+    fn take_outputs(&self, id: &str, keep: &dyn Fn(&WorkspacePath) -> bool) -> (OutputsRemoved, Vec<OutputFile>) {
+        let mut done = OutputsRemoved::default();
+        let mut taken = Vec::new();
+        let mut records = self.records.lock().unwrap();
+        if let Some(r) = records.iter_mut().find(|r| r.id == id) {
+            for o in std::mem::take(&mut r.outputs) {
+                if keep(&o.path) {
+                    done.kept.push(o.path.clone());
+                    r.outputs.push(o);
+                } else {
+                    done.bytes += o.bytes;
+                    done.removed.push(o.path.clone());
+                    taken.push(o);
+                }
+            }
+        }
+        (done, taken)
+    }
+
+    fn outputs_of(&self, id: &str) -> Vec<OutputFile> {
+        self.records.lock().unwrap().iter().find(|r| r.id == id).map(|r| r.outputs.clone()).unwrap_or_default()
+    }
 }
 
 impl ResearchRecords for Research {
@@ -63,20 +90,40 @@ impl ResearchRecords for Research {
     }
     fn remove_outputs(&self, id: &str, keep: &dyn Fn(&WorkspacePath) -> bool) -> Result<OutputsRemoved, OpError> {
         self.removed_outputs.lock().unwrap().push(id.to_owned());
-        let mut done = OutputsRemoved::default();
-        let mut records = self.records.lock().unwrap();
-        if let Some(r) = records.iter_mut().find(|r| r.id == id) {
-            for o in std::mem::take(&mut r.outputs) {
-                if keep(&o.path) {
-                    done.kept.push(o.path.clone());
-                    r.outputs.push(o);
-                } else {
-                    done.bytes += o.bytes;
-                    done.removed.push(o.path);
-                }
-            }
+        Ok(self.take_outputs(id, keep).0)
+    }
+    fn output_files(&self, id: &str) -> Result<Vec<OutputFile>, OpError> {
+        Ok(self.outputs_of(id))
+    }
+    fn trash_outputs(&self, id: &str, keep: &dyn Fn(&WorkspacePath) -> bool) -> Result<OutputsRemoved, OpError> {
+        if self.records.lock().unwrap().iter().any(|r| r.id == id && r.active) {
+            return Err(OpError::new("research.runActive", "active"));
+        }
+        let (done, taken) = self.take_outputs(id, keep);
+        if !taken.is_empty() {
+            self.held.lock().unwrap().entry(id.to_owned()).or_default().extend(taken);
         }
         Ok(done)
+    }
+    fn restore_outputs(&self, id: &str, _rename: bool) -> Result<Vec<WorkspacePath>, OpError> {
+        let files = self.held.lock().unwrap().remove(id).ok_or_else(|| OpError::new("research.unknownOutputs", "x"))?;
+        let paths = files.iter().map(|f| f.path.clone()).collect();
+        if let Some(r) = self.records.lock().unwrap().iter_mut().find(|r| r.id == id) {
+            r.outputs.extend(files);
+        }
+        Ok(paths)
+    }
+    fn purge_deleted_outputs(&self, id: &str) -> Result<u64, OpError> {
+        Ok(self.held.lock().unwrap().remove(id).map(|f| f.iter().map(|o| o.bytes).sum()).unwrap_or(0))
+    }
+    fn deleted_outputs(&self) -> Result<Vec<DeletedOutputs>, OpError> {
+        Ok(self
+            .held
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(run, files)| DeletedOutputs { run: run.clone(), files: files.clone(), deleted_at_ms: 1 })
+            .collect())
     }
     fn stop(&self, id: &str) -> bool {
         if let Some(r) = self.records.lock().unwrap().iter_mut().find(|r| r.id == id && r.active) {
@@ -533,9 +580,10 @@ fn duplicating_a_workflow_carries_no_triggers_runs_or_approvals() {
 
 // ---------------------------------------------------------------- runs ----
 
-#[test]
-fn run_records_are_deleted_recoverably_restored_and_purged_with_outputs_as_their_own_scope() {
-    let e = env();
+/// Finish a run of a new workflow; returns it and the research run its
+/// batch produced (registered with the fake research records, with one
+/// output file).
+fn finished_run(e: &Env) -> (WorkflowRunId, String) {
     let id = e.workflow();
     let plan = e.fx.runs.plan(&id, None).unwrap();
     let run = e.fx.runs.start(&StartWorkflowRunRequest { plan: plan.plan, approval_hash: plan.approval_hash }).unwrap();
@@ -543,40 +591,187 @@ fn run_records_are_deleted_recoverably_restored_and_purged_with_outputs_as_their
     let finished = e.fx.runs.get(&run.id).unwrap();
     let (research_runs, _) = crate::service::records::run_outputs(&finished);
     assert_eq!(research_runs.len(), 1, "the batch run produced outputs");
+    let rid = research_runs[0].clone();
     e.research.records.lock().unwrap().push(research_run(
-        &research_runs[0],
+        &rid,
         false,
         &[],
-        &[&format!(".exposition/artifacts/{}/dataset.csv", research_runs[0])],
+        &[&format!(".exposition/artifacts/{rid}/dataset.csv")],
     ));
-    let target = OpTarget::WorkflowRun { run: run.id.to_string() };
+    (run.id, rid)
+}
 
-    // Routine: no decision; recoverable.
+#[test]
+fn deleting_a_run_record_never_deletes_its_outputs() {
+    let e = env();
+    let (run, rid) = finished_run(&e);
+    let target = OpTarget::WorkflowRun { run: run.to_string() };
+
+    // Routine: no decision; recoverable; outputs untouched.
     let plan = e.plan(e.request(delete(false), vec![target.clone()]));
     assert!(!plan.needs_decision, "{:?}", plan.impacts);
+    assert!(plan.choices.is_empty(), "no outputs choice: outputs are their own target");
     let outcomes = e.apply(&plan, &[]);
     let token = outcomes[0].restore.clone().expect("restorable");
-    assert!(e.fx.runs.runs(None).unwrap().iter().all(|r| r.id != run.id));
+    assert!(e.fx.runs.runs(None).unwrap().iter().all(|r| r.id != run));
     let overview = storage_overview(&e.cx());
     let recent = overview.categories.iter().find(|c| c.id == "recoverableDeletions").unwrap();
     assert!(recent.items.iter().any(|i| i.target == OpTarget::Recoverable { id: token.clone() }));
-    assert!(e.research.removed_outputs.lock().unwrap().is_empty(), "outputs untouched");
     restore_data(&e.cx(), &OpRestore { restore: token, on_collision: None }).unwrap();
-    assert!(e.fx.runs.runs(None).unwrap().iter().any(|r| r.id == run.id));
+    assert!(e.fx.runs.runs(None).unwrap().iter().any(|r| r.id == run));
 
-    // Permanent: one decision (loss of recovery), outputs only when chosen.
-    let plan = e.plan(e.request(delete(true), vec![target.clone()]));
+    // Permanent: one decision (loss of recovery); the record goes, outputs stay.
+    let plan = e.plan(e.request(delete(true), vec![target]));
     assert_eq!(kinds(&plan), vec![ImpactKind::RecoveryLoss]);
-    assert!(plan.choices.iter().any(|c| c.key == CHOICE_OUTPUTS && c.default == "keep"));
-    let only = e.apply(&plan, &[(CHOICE_OUTPUTS, "only")]);
-    assert_eq!(only[0].status, OpStatus::Succeeded);
-    assert!(e.fx.runs.get(&run.id).is_ok(), "the record stays when only outputs are removed");
-    assert_eq!(e.research.removed_outputs.lock().unwrap().as_slice(), [research_runs[0].clone()]);
-    let gone = e.apply(&plan, &[(CHOICE_OUTPUTS, "keep")]);
+    assert!(plan.choices.is_empty());
+    let gone = e.apply(&plan, &[]);
     assert_eq!(gone[0].status, OpStatus::Succeeded);
-    assert!(e.fx.runs.run_any(&run.id).is_err(), "purged");
+    assert!(e.fx.runs.run_any(&run).is_err(), "purged");
     let message = gone[0].message.clone().unwrap_or_default();
     assert!(message.contains("gave back") || message.contains("did not shrink"), "{message}");
+    assert!(e.research.removed_outputs.lock().unwrap().is_empty(), "outputs are never deleted with a record");
+    assert_eq!(e.research.outputs_of(&rid).len(), 1);
+    assert!(e.research.held.lock().unwrap().is_empty());
+}
+
+#[test]
+fn one_plan_covers_records_and_outputs_with_one_decision_and_an_outcome_per_target() {
+    let e = env();
+    let (run, rid) = finished_run(&e);
+    e.research.records.lock().unwrap().push(research_run(
+        "run-r2",
+        false,
+        &[],
+        &[".exposition/artifacts/run-r2/a.csv", ".exposition/artifacts/run-r2/b.csv"],
+    ));
+    let targets = vec![
+        OpTarget::WorkflowRun { run: run.to_string() },
+        OpTarget::RunOutputs { run: run.to_string() },
+        OpTarget::ResearchRun { run: "run-r2".into() },
+        OpTarget::RunOutputs { run: "run-r2".into() },
+    ];
+    let plan = e.plan(e.request(delete(true), targets.clone()));
+    assert!(plan.refusals.is_empty(), "{:?}", plan.refusals);
+    assert!(plan.needs_decision);
+    assert!(plan.choices.is_empty(), "{:?}", plan.choices);
+    assert_eq!(
+        kinds(&plan),
+        vec![ImpactKind::RecoveryLoss, ImpactKind::RecoveryLoss, ImpactKind::RecoveryLoss, ImpactKind::RecoveryLoss]
+    );
+    assert_eq!(plan.effects.len(), 4);
+    let outputs_effect = plan.effects.iter().find(|f| f.target == targets[3]).unwrap();
+    assert!(outputs_effect.description.contains("2 output file(s)"), "{}", outputs_effect.description);
+    assert!(outputs_effect.description.contains("20 bytes"), "{}", outputs_effect.description);
+    let outcomes = e.apply(&plan, &[]);
+    assert_eq!(
+        outcomes.iter().map(|o| o.target.clone()).collect::<Vec<_>>(),
+        targets,
+        "one outcome per target, in order"
+    );
+    assert!(outcomes.iter().all(|o| o.status == OpStatus::Succeeded), "{outcomes:?}");
+    assert!(e.fx.runs.run_any(&run).is_err());
+    assert!(e.research.record("run-r2").is_err());
+    assert!(e.research.outputs_of(&rid).is_empty() && e.research.held.lock().unwrap().is_empty());
+    let mut removed = e.research.removed_outputs.lock().unwrap().clone();
+    removed.sort();
+    let mut want = vec![rid.clone(), "run-r2".to_owned()];
+    want.sort();
+    assert_eq!(removed, want);
+    let freed = outcomes[3].message.clone().unwrap_or_default();
+    assert!(freed.contains("20 bytes"), "{freed}");
+}
+
+#[test]
+fn outputs_still_used_need_a_decision_and_kept_resources_stay() {
+    let e = env();
+    let used = ".exposition/artifacts/run-e/a.csv";
+    let kept = ".exposition/artifacts/run-e/fig.png";
+    e.research.records.lock().unwrap().push(research_run("run-e", false, &[], &[used, kept]));
+    // A retained figure (a project resource) and evidence of a kept result
+    // that read the other output.
+    std::fs::create_dir_all(e.fx.root.join(".exposition/artifacts/run-e")).unwrap();
+    std::fs::write(e.fx.root.join(kept), b"png").unwrap();
+    std::fs::write(e.fx.root.join(used), b"x\n").unwrap();
+    e.fx.graph.ensure_resource(&path(kept), None, true, "research").unwrap();
+    let subject = e.fx.graph.resource(&path("data/obs.csv")).unwrap().unwrap();
+    let evidence = exposition_graph::Evidence {
+        id: exposition_graph::EvidenceId::mint(),
+        kind: exposition_graph::EvidenceKind::Computational,
+        subject: Some(subject.id.clone()),
+        operation: exposition_graph::OperationRef { kind: "researchRun".into(), id: "run-later".into() },
+        inputs: vec![exposition_graph::VersionedInput {
+            path: path(used),
+            content_hash: None,
+            revision: None,
+            unsaved: false,
+        }],
+        outcome: exposition_graph::EvidenceOutcome::Succeeded,
+        environment: vec![],
+        outputs: vec![],
+        formal: None,
+        recorded_by: Origin::Service { service: "research".into() },
+        recorded_at_ms: 1,
+    };
+    e.fx.graph.register_evidence(&Origin::Service { service: "research".into() }, evidence).unwrap();
+
+    let target = OpTarget::RunOutputs { run: "run-e".into() };
+    let plan = e.plan(e.request(delete(false), vec![target.clone()]));
+    assert_eq!(kinds(&plan), vec![ImpactKind::RetainedEvidence]);
+    assert_eq!(plan.impacts[0].target, target, "the impact names the outputs target");
+    assert!(
+        plan.effects[0].description.contains("1 output(s) the project keeps stay"),
+        "{}",
+        plan.effects[0].description
+    );
+    let outcome = e.apply(&plan, &[]).remove(0);
+    assert_eq!(outcome.status, OpStatus::Succeeded, "{outcome:?}");
+    assert_eq!(outcome.recovery, exposition_core::ops::OpRecovery::AppManaged);
+    let token = outcome.restore.clone().expect("restorable");
+    assert_eq!(token, "runOutputs:run-e");
+    assert_eq!(e.research.outputs_of("run-e").iter().map(|o| o.path.clone()).collect::<Vec<_>>(), vec![path(kept)]);
+    assert!(e.research.removed_outputs.lock().unwrap().is_empty(), "moved aside, not removed");
+    // Storage & History lists the held outputs; restore brings them back.
+    let overview = storage_overview(&e.cx());
+    let recent = overview.categories.iter().find(|c| c.id == "recoverableDeletions").unwrap();
+    let held = recent.items.iter().find(|i| i.target == OpTarget::Recoverable { id: token.clone() }).unwrap();
+    assert_eq!(held.bytes, Some(10));
+    let restored = restore_data(&e.cx(), &OpRestore { restore: token, on_collision: None }).unwrap();
+    assert_eq!(restored.status, OpStatus::Succeeded);
+    assert_eq!(e.research.outputs_of("run-e").len(), 2);
+    // Copying outputs is not an operation of their own.
+    let copy = e.plan(e.request(OpKind::Duplicate, vec![target]));
+    assert_eq!(copy.refusals[0].code, "ops.notSupported");
+}
+
+#[test]
+fn outputs_of_an_active_run_are_never_deleted_under_its_worker() {
+    let e = env();
+    let id = e.workflow();
+    let (run, release) = e.hold_run(&id);
+    e.research.records.lock().unwrap().push(research_run(
+        "run-live",
+        true,
+        &[],
+        &[".exposition/artifacts/run-live/x.csv"],
+    ));
+    for target in [OpTarget::RunOutputs { run: run.to_string() }, OpTarget::RunOutputs { run: "run-live".into() }] {
+        let plan = e.plan(e.request(delete(false), vec![target.clone()]));
+        assert_eq!(kinds(&plan), vec![ImpactKind::ActiveWork], "{target:?}");
+        assert!(plan.choices.iter().any(|c| c.key == CHOICE_ACTIVE_WORK && c.default == "skip"));
+        let kept = e.apply(&plan, &[]).remove(0);
+        assert_eq!((kept.status, kept.code.as_deref()), (OpStatus::Skipped, Some("ops.activeWork")));
+    }
+    assert!(e.fx.runs.is_active(&run));
+    assert_eq!(e.research.outputs_of("run-live").len(), 1);
+    let plan = e.plan(e.request(delete(false), vec![OpTarget::RunOutputs { run: "run-live".into() }]));
+    let done = e.apply(&plan, &[(CHOICE_ACTIVE_WORK, "stop")]).remove(0);
+    assert_eq!(done.status, OpStatus::Succeeded, "{done:?}");
+    assert_eq!(e.research.stopped.lock().unwrap().as_slice(), ["run-live"]);
+    assert!(e.research.outputs_of("run-live").is_empty());
+    let plan = e.plan(e.request(delete(false), vec![OpTarget::RunOutputs { run: run.to_string() }]));
+    assert_eq!(e.apply(&plan, &[(CHOICE_ACTIVE_WORK, "stop")])[0].status, OpStatus::Succeeded);
+    assert!(!e.fx.runs.is_active(&run));
+    release.store(true, Ordering::SeqCst);
 }
 
 #[test]
@@ -678,7 +873,9 @@ fn storage_overview_lists_categories_with_sizes_references_and_exclusions() {
     assert!(runs.items[0].bytes.unwrap_or(0) > 0 && runs.bytes.unwrap_or(0) > 0);
     assert!(runs.note.contains("record only"));
     let outputs = overview.categories.iter().find(|c| c.id == "generatedOutputs").unwrap();
-    assert!(outputs.items[0].referenced, "an output the project keeps (a live resource) is marked");
+    let item = outputs.items.iter().find(|i| i.target == OpTarget::RunOutputs { run: "run-o".into() }).unwrap();
+    assert!(item.referenced, "an output the project keeps (a live resource) is marked");
+    assert_eq!(item.bytes, Some(10), "only what deleting would remove is counted");
     assert!(overview.excluded.iter().any(|x| x.contains("graph backups")), "{:?}", overview.excluded);
 }
 

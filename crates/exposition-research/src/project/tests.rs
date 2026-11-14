@@ -775,3 +775,45 @@ fn run_records_delete_restore_purge_and_outputs_are_a_separate_scope() {
     .unwrap();
     assert_eq!(research.restore_run_record(two).unwrap_err().code(), "research.invalidRequest");
 }
+
+/// P1: a run's generated outputs are their own target: deleted recoverably
+/// (moved aside, restorable, never over a file that exists again), purged
+/// for good, outputs the project keeps untouched, an active run refused.
+#[test]
+fn run_outputs_are_deleted_recoverably_restored_without_overwriting_and_purged() {
+    let f = fixture();
+    let one = "run-bbbb000000000001";
+    record_run(&f.root, one, vec![], vec![]);
+    let research = &f.project.research;
+    let dir = f.root.join(".exposition/artifacts").join(one);
+    let kept = path(&format!(".exposition/artifacts/{one}/output-1.png"));
+    let trashed = research.trash_run_outputs(one, &|p| p == &kept).unwrap();
+    assert_eq!(trashed.removed, vec![path(&format!(".exposition/artifacts/{one}/output-2.csv"))]);
+    assert_eq!(trashed.kept, vec![kept.clone()]);
+    assert_eq!(trashed.bytes, CSV.len() as u64);
+    assert!(dir.join("output-1.png").is_file(), "the kept output is untouched");
+    assert!(!dir.join("output-2.csv").exists());
+    assert!(research.runs().unwrap().iter().any(|r| r.id.0 == one), "the record stays");
+    let held = research.deleted_run_outputs().unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!((held[0].run.as_str(), held[0].files.len(), held[0].files[0].bytes), (one, 1, CSV.len() as u64));
+    // A file with the same name exists again: never overwritten.
+    std::fs::write(dir.join("output-2.csv"), "new\n").unwrap();
+    assert_eq!(research.restore_run_outputs(one, false).unwrap_err().code(), "research.restoreConflict");
+    assert_eq!(std::fs::read_to_string(dir.join("output-2.csv")).unwrap(), "new\n");
+    let restored = research.restore_run_outputs(one, true).unwrap();
+    assert_eq!(restored, vec![path(&format!(".exposition/artifacts/{one}/output-2 (2).csv"))]);
+    assert_eq!(std::fs::read_to_string(dir.join("output-2 (2).csv")).unwrap(), CSV, "both versions kept");
+    assert!(research.deleted_run_outputs().unwrap().is_empty());
+    // Purge: really removed.
+    research.trash_run_outputs(one, &|p| p == &kept).unwrap();
+    let bytes = research.purge_deleted_outputs(one).unwrap();
+    assert_eq!(bytes, CSV.len() as u64 + 4);
+    assert!(research.deleted_run_outputs().unwrap().is_empty());
+    assert!(!f.root.join(".exposition/artifacts/deleted").join(one).exists());
+    assert!(dir.join("output-1.png").is_file());
+    // Active: refused.
+    research.set_batch_live(one, true);
+    assert_eq!(research.trash_run_outputs(one, &|_| false).unwrap_err().code(), "research.runActive");
+    research.set_batch_live(one, false);
+}
