@@ -32,8 +32,7 @@ import {
   recycleBinItemsFrom,
   selectFiles,
   setTheme,
-  waitForNotification,
-} from "../p1-helpers.mjs";
+  waitForNotification, settle } from "../p1-helpers.mjs";
 import { focusEditor, invoke, monacoState, openInEditor, waitFor } from "../workspace-helpers.mjs";
 
 const OBS = "x,y\n0,1\n1,3\n";
@@ -91,6 +90,7 @@ export default async function p1Impacts({ launchApp, artifactsDir, assert, fixtu
   const shots = [];
   const shot = async (page, name) => {
     const path = join(artifactsDir, `${name}.png`);
+    await settle(page);
     await page.screenshot({ path });
     shots.push(path);
   };

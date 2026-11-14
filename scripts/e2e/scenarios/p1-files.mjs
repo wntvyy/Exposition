@@ -33,8 +33,7 @@ import {
   selectFiles,
   setOsClipboardFiles,
   setOsClipboardText,
-  waitForNotification,
-} from "../p1-helpers.mjs";
+  waitForNotification, settle } from "../p1-helpers.mjs";
 import { editorLocator, focusEditor, invoke, makeProject, openInEditor, openWorkspace, waitFor } from "../workspace-helpers.mjs";
 
 export default async function p1Files({ launchApp, artifactsDir, assert, fixture }) {
@@ -51,6 +50,7 @@ export default async function p1Files({ launchApp, artifactsDir, assert, fixture
   const shots = [];
   const shot = async (page, name) => {
     const path = join(artifactsDir, `${name}.png`);
+    await settle(page);
     await page.screenshot({ path });
     shots.push(path);
   };

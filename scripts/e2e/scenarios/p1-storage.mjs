@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runCommand } from "../palette.mjs";
-import { consoleErrors, decision, dismissNotifications, expectNoDialog, notifications, publishShots, waitForNotification } from "../p1-helpers.mjs";
+import { consoleErrors, decision, dismissNotifications, expectNoDialog, notifications, publishShots, waitForNotification, settle } from "../p1-helpers.mjs";
 import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const IMAGE = "python:3.13-slim";
@@ -68,6 +68,7 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
   const shots = [];
   const shot = async (page, name) => {
     const path = join(artifactsDir, `${name}.png`);
+    await settle(page);
     await page.screenshot({ path });
     shots.push(path);
   };
@@ -96,7 +97,7 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
       await runCommand(page, "Open Agents Page", /Agent: Open Agents Page/);
       const card = page.locator(`[data-op-item="${task.id}"]`);
       await card.waitFor({ timeout: 15_000 });
-      await page.getByTestId(`op-more-${task.id}`).click();
+      await page.getByTestId("agents-page-tasks").getByTestId(`op-more-${task.id}`).click();
       await page.getByRole("menuitem", { name: /Delete Task Record/ }).click();
       await expectNoDialog(page, assert, 600, "a finished task record is deleted at once");
       await waitFor(async () => !(await invoke(page, "agents_task_list")).some((t) => t.id === task.id), { timeout: 15_000, message: "task record removed" });
@@ -125,7 +126,7 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
         await runCommand(page, "Show Workflows", /Workflow: Show Workflows/);
         const item = page.getByTestId(`workflow-run-item-${run.id}`);
         await item.waitFor({ timeout: 15_000 });
-        await page.getByTestId(`op-more-${run.id}`).click();
+        await item.getByTestId(`op-more-${run.id}`).click();
         await page.getByRole("menuitem", { name: /Delete Run and Its Outputs Permanently/ }).click();
         const d = decision(page);
         await d.waitFor({ timeout: 15_000 });

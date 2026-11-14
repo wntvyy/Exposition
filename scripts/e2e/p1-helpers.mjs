@@ -161,3 +161,11 @@ export async function setTheme(page, theme) {
     document.documentElement.dataset.theme = t;
   }, theme);
 }
+
+/** Wait until overlays finished their enter/exit transitions (for reference screenshots). */
+export async function settle(page) {
+  await page
+    .waitForFunction(() => !document.querySelector("[data-entering], [data-exiting]"), null, { timeout: 3000 })
+    .catch(() => {});
+  await page.waitForTimeout(200);
+}

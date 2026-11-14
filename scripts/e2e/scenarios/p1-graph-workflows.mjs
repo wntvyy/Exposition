@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runCommand } from "../palette.mjs";
-import { consoleErrors, dismissNotifications, expectNoDialog, publishShots, recycleBinItemsFrom, waitForNotification } from "../p1-helpers.mjs";
+import { consoleErrors, dismissNotifications, expectNoDialog, publishShots, recycleBinItemsFrom, waitForNotification, settle } from "../p1-helpers.mjs";
 import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const create = (tempId, kind, label) => ({ op: "createEntity", tempId, kind, roles: [], label, key: null, attributes: {}, binding: null });
@@ -70,6 +70,7 @@ export default async function p1GraphWorkflows({ launchApp, artifactsDir, assert
   const shots = [];
   const shot = async (page, name) => {
     const path = join(artifactsDir, `${name}.png`);
+    await settle(page);
     await page.screenshot({ path });
     shots.push(path);
   };
@@ -200,8 +201,10 @@ export default async function p1GraphWorkflows({ launchApp, artifactsDir, assert
     await page.getByTestId(`workflow-open-${parent.id}`).click();
     const canvas = page.getByTestId("workflow-canvas");
     await canvas.waitFor({ timeout: 15_000 });
-    await page.getByTestId("wfc-step-prep").click();
-    await page.getByTestId("wfc-step-sub").click({ modifiers: ["Control"] });
+    // Click the node titles (not buttons inside a node, which keep their own action).
+    await page.getByTestId("wfc-step-prep").getByText("Prepare", { exact: true }).click();
+    await page.getByTestId("wfc-step-sub").getByText("Run child", { exact: true }).click({ modifiers: ["Control"] });
+    await waitFor(async () => (await canvas.locator(".react-flow__node.selected").count()) === 2, { message: "two steps picked" });
     await page.keyboard.press("Control+C");
     await canvas.locator(".react-flow__pane").click({ position: { x: 20, y: 20 } });
     await page.keyboard.press("Control+V");
