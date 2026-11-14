@@ -49,7 +49,7 @@ describe("research selection", () => {
 
   it("groups are paste destinations, not deletable; workflows are changed elsewhere", () => {
     const group = researchActions(resolveResearchKeys(["group:sources"], listing), { root: "C:/p" });
-    expect(group.paste).toMatchObject({ enabled: true, label: "Paste into .exposition/research/s1/sources/" });
+    expect(group.paste).toMatchObject({ enabled: true, label: "Paste into Sources" });
     expect(group.delete?.enabled).toBe(false);
     expect(group.delete?.reason).toMatch(/managed folders/);
     const wf = researchActions(resolveResearchKeys(["workflow:ent-wf"], listing), { root: "C:/p" });
@@ -64,7 +64,7 @@ describe("research selection", () => {
     expect(actions.copy?.enabled).toBe(false);
     expect(actions.paste?.enabled).toBe(false);
     const one = researchActions(resolveResearchKeys(["file:.exposition/research/s1/sources/fit.py"], listing), { root: "C:/p" });
-    expect(one.paste?.label).toBe("Paste into .exposition/research/s1/sources/");
+    expect(one.paste?.label).toBe("Paste into Sources");
     expect(one.copy?.enabled).toBe(true);
   });
 });

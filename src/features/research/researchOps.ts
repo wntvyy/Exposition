@@ -60,6 +60,14 @@ function target(item: ResearchSelectionItem): OpTarget | null {
   return null;
 }
 
+const GROUP_TITLES: Record<string, string> = { sources: "Sources", data: "Data", notes: "Notes" };
+
+/** "Data" for `<space root>/data` (the research space's managed group folders). */
+function groupTitle(folder: string | null | undefined): string | null {
+  const name = folder?.split("/").pop() ?? "";
+  return folder && /^\.exposition\/research\/[^/]+\/(sources|data|notes)$/.test(folder) ? (GROUP_TITLES[name] ?? null) : null;
+}
+
 /** The operation actions for a Research explorer selection. */
 export function researchActions(
   items: ResearchSelectionItem[],
@@ -110,7 +118,7 @@ export function researchActions(
     paste: {
       enabled: pasteFolder !== undefined,
       reason: "Select Sources, Data, Notes, or one file to paste beside it",
-      label: pasteFolder === undefined ? "Paste" : `Paste into ${folderLabel(pasteFolder ?? null)}`,
+      label: pasteFolder === undefined ? "Paste" : `Paste into ${groupTitle(pasteFolder) ?? folderLabel(pasteFolder ?? null)}`,
       run: async () => {
         if (pasteFolder === undefined) return;
         const created = createdPaths(await pasteInto(pasteFolder, options.root));
