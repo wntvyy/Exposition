@@ -12,6 +12,11 @@
 //   page proposes a typed change to the backend.
 // - Nothing on the canvas itself deletes anything: the page binds the focus-
 //   scoped operation commands and reports context menus (`onItemContextMenu`).
+// - Edge labels: mathematical, reference, evidence, and formal relationships
+//   are labelled at rest (above 60 edges only near the selection); structure
+//   and resource relationships only when the edge or one of its nodes is
+//   hovered, focused, or selected (`edgeLabelVisible`). The Legend control
+//   explains line color (family) and line style (status).
 //
 // The component is controlled through plain props (nodes, edges, viewport,
 // selection) and knows nothing about IPC or binding shapes.
@@ -32,13 +37,27 @@ import {
   type OnConnect,
   type Viewport,
 } from "@xyflow/react";
-import { Focus, Maximize, Minus, Plus, ScanSearch } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { Focus, Maximize, Minus, Plus, ScanSearch, SwatchBook } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type FocusEvent,
+  type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 
 import { IconButton, Toolbar } from "../../../ui/components";
+import { readStored, writeStored } from "../../../ui/storage";
 import { CanvasContext, type CanvasContextValue } from "./context";
 import { EntityNode, type EntityRFNode } from "./EntityNode";
 import { parallelOffset } from "./geometry";
+import { clearInterest, createInterestStore, type CanvasItemRef } from "./interaction";
+import { CanvasLegend } from "./Legend";
 import { RelationEdge, type RelationRFEdge } from "./RelationEdge";
 import type { CanvasEdge, CanvasNode, CanvasViewport, Point, RelationFamily } from "./types";
 
@@ -84,6 +103,7 @@ export interface GraphCanvasProps {
 const nodeTypes = { entity: EntityNode };
 const edgeTypes = { relation: RelationEdge };
 const FAMILIES: RelationFamily[] = ["structure", "resource", "math", "citation", "evidence", "formal", "execution"];
+const LEGEND_KEY = "exposition.graph.legend";
 const reducedMotion = () => globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 const duration = () => (reducedMotion() ? 0 : 160);
 
@@ -181,9 +201,15 @@ function Markers({ prefix }: { prefix: string }) {
   );
 }
 
-function CanvasControls({ selection, extra }: { selection: string[]; extra?: ReactNode }) {
+function CanvasControls({ selection, extra, markerPrefix }: { selection: string[]; extra?: ReactNode; markerPrefix: string }) {
   const flow = useReactFlow();
   const { zoom } = useViewport();
+  const legendId = useId();
+  const [legend, setLegend] = useState(() => readStored(LEGEND_KEY) === "open");
+  const toggleLegend = () => {
+    setLegend(!legend);
+    writeStored(LEGEND_KEY, legend ? "closed" : "open");
+  };
   return (
     <Panel position="top-right" className="xp-graph-controls">
       <Toolbar aria-label="Canvas view controls" className="xp-graph-controls__toolbar">
@@ -214,8 +240,17 @@ function CanvasControls({ selection, extra }: { selection: string[]; extra?: Rea
           keybinding="0"
           onPress={() => void flow.setViewport({ x: 0, y: 0, zoom: 1 }, { duration: duration() })}
         />
+        <IconButton
+          icon={SwatchBook}
+          size="sm"
+          aria-label="Legend"
+          aria-expanded={legend}
+          aria-controls={legend ? legendId : undefined}
+          onPress={toggleLegend}
+        />
         {extra}
       </Toolbar>
+      {legend && <CanvasLegend id={legendId} markerPrefix={markerPrefix} />}
     </Panel>
   );
 }
@@ -265,6 +300,21 @@ function CanvasInner(props: GraphCanvasProps) {
   );
 
   const selectedNodes = useMemo(() => new Set(selection.nodes), [selection.nodes]);
+  // Hovered and focused items: edges touching them show their labels.
+  const [interest] = useState(createInterestStore);
+  const hoverHandlers = useMemo(() => {
+    const enter = (kind: CanvasItemRef["kind"]) => (_: unknown, item: { id: string }) => interest.setState({ hovered: { kind, id: item.id } });
+    const leave = (kind: CanvasItemRef["kind"]) => (_: unknown, item: { id: string }) => clearInterest(interest, "hovered", { kind, id: item.id });
+    return { onNodeMouseEnter: enter("node"), onNodeMouseLeave: leave("node"), onEdgeMouseEnter: enter("edge"), onEdgeMouseLeave: leave("edge") };
+  }, [interest]);
+  const onFocus = (event: FocusEvent<HTMLDivElement>) => {
+    const item = event.target instanceof Element ? event.target.closest(".react-flow__node[data-id], .react-flow__edge[data-id]") : null;
+    const id = item?.getAttribute("data-id");
+    interest.setState({ focused: item && id ? { kind: item.classList.contains("react-flow__node") ? "node" : "edge", id } : null });
+  };
+  const onBlur = (event: FocusEvent<HTMLDivElement>) => {
+    if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) interest.setState({ focused: null });
+  };
   const [flowNodes, setFlowNodes] = useState<EntityRFNode[]>(() => nodes.map((n) => toFlowNode(n, undefined, selectedNodes.has(n.id))));
   useEffect(() => {
     setFlowNodes((previous) => {
@@ -367,10 +417,11 @@ function CanvasInner(props: GraphCanvasProps) {
       connectable: Boolean(onConnect),
       labels,
       selectedNodes,
+      interest,
       onToggleGroup,
       onSelectEdge: (id: string) => emitSelection({ nodes: [], edge: id }),
     }),
-    [markerPrefix, onConnect, labels, selectedNodes, onToggleGroup, emitSelection],
+    [markerPrefix, onConnect, labels, selectedNodes, interest, onToggleGroup, emitSelection],
   );
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -393,6 +444,8 @@ function CanvasInner(props: GraphCanvasProps) {
         className={`xp-graph-canvas ${props.className ?? ""}`}
         data-testid={props["data-testid"]}
         onKeyDown={onKeyDown}
+        onFocus={onFocus}
+        onBlur={onBlur}
         role="group"
         aria-roledescription="canvas"
         aria-label={props["aria-label"]}
@@ -407,6 +460,7 @@ function CanvasInner(props: GraphCanvasProps) {
           onEdgesChange={onEdgesChange}
           onConnect={handleConnect}
           onNodeDoubleClick={(_, node) => onActivateNode?.(node.id)}
+          {...hoverHandlers}
           onNodeContextMenu={props.onItemContextMenu ? (event, node) => props.onItemContextMenu?.(event, { kind: "node", id: node.id }) : undefined}
           onEdgeContextMenu={props.onItemContextMenu ? (event, edge) => props.onItemContextMenu?.(event, { kind: "edge", id: edge.id }) : undefined}
           onPaneContextMenu={props.onItemContextMenu ? (event) => props.onItemContextMenu?.(event as ReactMouseEvent, null) : undefined}
@@ -444,7 +498,7 @@ function CanvasInner(props: GraphCanvasProps) {
             "handle.ariaLabel": "Connection handle: drag to another item to propose a relationship",
           }}
         >
-          <CanvasControls selection={selection.nodes} extra={props.controls} />
+          <CanvasControls selection={selection.nodes} extra={props.controls} markerPrefix={markerPrefix} />
           {nodes.length === 0 && props.empty && (
             <Panel position="top-center" className="xp-graph-canvas__empty">
               {props.empty}

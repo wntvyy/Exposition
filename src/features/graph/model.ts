@@ -287,6 +287,9 @@ export function endpointAllowed(relation: RelationKindDisplay, from: EntityKind,
   return relation.endpoints.has(`${from}>${to}`);
 }
 
+/** Order of relationship groups: mathematics first, references kept separate, structure last. */
+export const FAMILY_ORDER: RelationFamily[] = ["math", "citation", "formal", "evidence", "structure", "resource", "execution"];
+
 export const FAMILY_LABELS: Record<RelationFamily, string> = {
   structure: "Structure",
   resource: "Resource use",
@@ -295,6 +298,17 @@ export const FAMILY_LABELS: Record<RelationFamily, string> = {
   evidence: "Evidence and provenance",
   formal: "Formal association",
   execution: "Execution",
+};
+
+/** Edge color of each relation family, as a type color for relationship headers. */
+export const RELATION_FAMILY_CATEGORY: Record<RelationFamily, GraphCategory> = {
+  structure: "structure",
+  resource: "structure",
+  math: "math",
+  citation: "reference",
+  evidence: "data",
+  formal: "formal",
+  execution: "structure",
 };
 
 export const STATUS_LABELS: Record<AssertionStatus, string> = {
@@ -324,6 +338,8 @@ export function originLabel(origin: Origin): string {
 /**
  * Exact verifier verdict labels (the Lean status vocabulary of
  * `src/features/lean/status.ts`); only a clean result is ever "Checked".
+ * Tones: Checked succeeded, Errors failed, Not verified neutral, the
+ * qualified results warning ("No formal evidence" is neutral too).
  */
 export const VERDICT_VIEW: Record<FormalVerdict, { label: string; status: Status; sentence: string }> = {
   checked: { label: "Checked", status: "succeeded", sentence: "Checked by Lean's kernel with only the standard axioms." },
@@ -339,7 +355,7 @@ export const VERDICT_VIEW: Record<FormalVerdict, { label: string; status: Status
     sentence: "Checked by trusting compiled code (native_decide or similar) instead of the kernel.",
   },
   partiallyChecked: { label: "Partially checked", status: "warning", sentence: "Only part of the file could be checked." },
-  notVerified: { label: "Not verified", status: "warning", sentence: "The audit could not verify this result." },
+  notVerified: { label: "Not verified", status: "idle", sentence: "The audit could not verify this result." },
   errors: { label: "Errors", status: "failed", sentence: "Lean reported errors." },
 };
 

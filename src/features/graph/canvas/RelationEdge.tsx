@@ -2,13 +2,16 @@
 // as either node moves), bows apart from parallel relations, and ends in an
 // arrowhead (filled for assertions, open for citations). Family sets the
 // color and arrowhead; assertion status sets the dash pattern; the label
-// names the relation and is always text.
+// names the relation and is always text. Which labels show follows
+// `edgeLabelVisible` (content families at rest, structure on interest).
 import { BaseEdge, EdgeLabelRenderer, useInternalNode, type Edge, type EdgeProps, type InternalNode } from "@xyflow/react";
 import { memo } from "react";
+import { useStore } from "zustand";
 
 import { useCanvasContext } from "./context";
 import { edgeGeometry, type Rect } from "./geometry";
-import { DEFAULT_NODE_SIZE, type CanvasEdge } from "./types";
+import { clearInterest, edgeLabelVisible, touches } from "./interaction";
+import { DEFAULT_NODE_SIZE, type AssertionStatus, type CanvasEdge } from "./types";
 
 export interface RelationEdgeData extends Omit<CanvasEdge, "id" | "source" | "target"> {
   /** Perpendicular bow (px) when several relations join the same two nodes. */
@@ -29,22 +32,37 @@ function rectOf(node: InternalNode): Rect {
   };
 }
 
-const STATUS_TEXT: Record<CanvasEdge["status"], string> = {
+/** Status suffix after the reading ("depends on · suggested"); accepted assertions read plainly. */
+const STATUS_SUFFIX: Record<AssertionStatus, string> = {
   accepted: "",
-  suggested: "Suggested",
-  observed: "Observed",
-  rejected: "Rejected",
+  suggested: "suggested",
+  observed: "observed",
+  rejected: "rejected",
 };
 
+/** The chip text: reading, folded count, then the muted status. */
+export function EdgeLabelContent({ label, count, status }: { label: string; count?: number; status: AssertionStatus }) {
+  const suffix = STATUS_SUFFIX[status];
+  return (
+    <>
+      <span className="xp-graph-edge-label__reading">{label}</span>
+      {count !== undefined && count > 1 && <span className="xp-graph-edge-label__count">×{count}</span>}
+      {suffix && <span className="xp-graph-edge-label__status">· {suffix}</span>}
+    </>
+  );
+}
+
 function RelationEdgeView({ id, source, target, data, selected }: EdgeProps<RelationRFEdge>) {
-  const { markerPrefix, labels, selectedNodes, onSelectEdge } = useCanvasContext();
+  const { markerPrefix, labels, selectedNodes, interest, onSelectEdge } = useCanvasContext();
+  const ends = { id, source, target };
+  const interested = useStore(interest, (s) => touches(s.hovered, ends) || touches(s.focused, ends));
   const from = useInternalNode(source);
   const to = useInternalNode(target);
   if (!from || !to || !data) return null;
   const geometry = edgeGeometry(rectOf(from), rectOf(to), data.bow, data.forward);
   const marker = selected ? "selected" : data.family;
-  const showLabel = labels === "all" || selected || selectedNodes.has(source) || selectedNodes.has(target);
-  const status = STATUS_TEXT[data.status];
+  const showLabel = edgeLabelVisible({ ...ends, family: data.family, selected: Boolean(selected), labels, selectedNodes, interested });
+  const self = { kind: "edge" as const, id };
   return (
     <>
       <BaseEdge
@@ -65,11 +83,11 @@ function RelationEdgeView({ id, source, target, data, selected }: EdgeProps<Rela
             data-selected={selected || undefined}
             style={{ transform: `translate(-50%, -50%) translate(${geometry.label.x}px, ${geometry.label.y}px)` }}
             onClick={() => onSelectEdge(id)}
+            onMouseEnter={() => interest.setState({ hovered: self })}
+            onMouseLeave={() => clearInterest(interest, "hovered", self)}
             aria-label={data.description}
           >
-            {status && <span className="xp-graph-edge-label__status">{status}</span>}
-            {data.label}
-            {data.count !== undefined && data.count > 1 && <span className="xp-graph-edge-label__count">×{data.count}</span>}
+            <EdgeLabelContent label={data.label} count={data.count} status={data.status} />
           </button>
         </EdgeLabelRenderer>
       )}
