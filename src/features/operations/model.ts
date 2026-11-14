@@ -34,6 +34,7 @@ export function targetKey(target: OpTarget): string {
       return `workflowRevision:${target.workflow}@${target.revision}`;
     case "workflowRun":
     case "researchRun":
+    case "runOutputs":
       return `${target.kind}:${target.run}`;
     case "agentTask":
       return `agentTask:${target.task}`;
@@ -80,6 +81,8 @@ export function targetName(target: OpTarget, labels: TargetLabels = NO_LABELS): 
       return `run ${target.run}`;
     case "researchRun":
       return `research run ${target.run}`;
+    case "runOutputs":
+      return `outputs of run ${target.run}`;
     case "agentTask":
       return `agent task ${target.task}`;
     case "graphEntity":

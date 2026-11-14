@@ -47,6 +47,11 @@ pub enum OpTarget {
     WorkflowRun { run: String },
     /// A research run record.
     ResearchRun { run: String },
+    /// The generated outputs of a workflow run (`wrun-…`) or research run —
+    /// a scope separate from the run record (deleting a record keeps its
+    /// outputs unless this target is selected too). Never source inputs or
+    /// manuscript consumers; files the project keeps as resources stay.
+    RunOutputs { run: String },
     /// An agent task record.
     AgentTask { task: String },
     /// A graph entity (file-backed entities delegate to their source file).

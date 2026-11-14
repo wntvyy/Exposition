@@ -4,4 +4,4 @@ import type { WorkspacePath } from "./WorkspacePath";
 /**
  * What an operation acts on.
  */
-export type OpTarget = { "kind": "path", path: WorkspacePath, } | { "kind": "external", path: string, } | { "kind": "workflow", workflow: string, } | { "kind": "workflowRevision", workflow: string, revision: number, } | { "kind": "workflowRun", run: string, } | { "kind": "researchRun", run: string, } | { "kind": "agentTask", task: string, } | { "kind": "graphEntity", entity: string, } | { "kind": "graphRelation", relation: string, } | { "kind": "graphView", view: string, } | { "kind": "recoverable", id: string, };
+export type OpTarget = { "kind": "path", path: WorkspacePath, } | { "kind": "external", path: string, } | { "kind": "workflow", workflow: string, } | { "kind": "workflowRevision", workflow: string, revision: number, } | { "kind": "workflowRun", run: string, } | { "kind": "researchRun", run: string, } | { "kind": "runOutputs", run: string, } | { "kind": "agentTask", task: string, } | { "kind": "graphEntity", entity: string, } | { "kind": "graphRelation", relation: string, } | { "kind": "graphView", view: string, } | { "kind": "recoverable", id: string, };

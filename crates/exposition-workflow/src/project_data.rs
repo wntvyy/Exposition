@@ -985,7 +985,7 @@ fn plan_delete(cx: &DataContext<'_>, target: &OpTarget, permanent: bool, plan: &
             }
             plan_purge(cx, target, id, plan)?;
         }
-        OpTarget::Path { .. } | OpTarget::External { .. } => {}
+        OpTarget::Path { .. } | OpTarget::External { .. } | OpTarget::RunOutputs { .. } => {}
     }
     Ok(())
 }
@@ -1144,7 +1144,7 @@ fn plan_copy(cx: &DataContext<'_>, target: &OpTarget, plan: &mut DataPlan) -> Re
         OpTarget::Recoverable { .. } => {
             return Err(OpError::new("ops.notSupported", "Restore a deleted item before copying it."));
         }
-        OpTarget::Path { .. } | OpTarget::External { .. } => {}
+        OpTarget::Path { .. } | OpTarget::External { .. } | OpTarget::RunOutputs { .. } => {}
     }
     Ok(())
 }
@@ -1344,7 +1344,9 @@ fn apply_delete(
             Ok(done(cx.graph.delete_view_recoverable(&id, permanent)?, None))
         }
         OpTarget::Recoverable { id } => purge(cx, plan, choices, origin, target, id),
-        OpTarget::Path { .. } | OpTarget::External { .. } => Ok(outcome(target, OpStatus::Skipped)),
+        OpTarget::Path { .. } | OpTarget::External { .. } | OpTarget::RunOutputs { .. } => {
+            Ok(outcome(target, OpStatus::Skipped))
+        }
     }
 }
 
