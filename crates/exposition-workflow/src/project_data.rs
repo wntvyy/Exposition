@@ -1207,24 +1207,25 @@ pub fn apply_data(cx: &DataContext<'_>, plan: &OpPlan, choices: &BTreeMap<String
     outcomes
 }
 
-/// Stop active work on a data target first when the user chose so.
+/// Stop active work on a data target first when the user chose so. `Some`:
+/// the target is not deleted (left running, or it could not be stopped).
 fn coordinate(
     plan: &OpPlan,
     choices: &BTreeMap<String, String>,
     target: &OpTarget,
     stop: impl FnOnce() -> bool,
     active: bool,
-) -> Result<(), OpOutcome> {
+) -> Option<OpOutcome> {
     if !active {
-        return Ok(());
+        return None;
     }
     if choice(plan, choices, CHOICE_ACTIVE_WORK, "skip") != "stop" {
-        return Err(skipped(target, "ops.activeWork", "It is still running; it was left running and kept."));
+        return Some(skipped(target, "ops.activeWork", "It is still running; it was left running and kept."));
     }
     if !stop() {
-        return Err(failed(target, OpError::new("ops.activeWork", "It could not be stopped, so it was kept.")));
+        return Some(failed(target, OpError::new("ops.activeWork", "It could not be stopped, so it was kept.")));
     }
-    Ok(())
+    None
 }
 
 fn apply_delete(
@@ -1245,7 +1246,7 @@ fn apply_delete(
     match target {
         OpTarget::Workflow { workflow } => {
             let id = workflow_id(workflow)?;
-            if let Err(o) = coordinate(
+            if let Some(o) = coordinate(
                 plan,
                 choices,
                 target,
@@ -1300,7 +1301,7 @@ fn apply_delete(
         }
         OpTarget::WorkflowRun { run } => {
             let id = workflow_run_id(run)?;
-            if let Err(o) =
+            if let Some(o) =
                 coordinate(plan, choices, target, || cx.runs.stop_and_wait(&id, STOP_TIMEOUT), cx.runs.is_active(&id))
             {
                 return Ok(o);
@@ -1310,7 +1311,7 @@ fn apply_delete(
         OpTarget::ResearchRun { run } => {
             let research = cx.research.ok_or_else(|| OpError::new("ops.notSupported", "Research is not available."))?;
             let active = research.record(run)?.active;
-            if let Err(o) = coordinate(plan, choices, target, || research.stop(run), active) {
+            if let Some(o) = coordinate(plan, choices, target, || research.stop(run), active) {
                 return Ok(o);
             }
             delete_research_run(cx, plan, choices, run, permanent, target)
@@ -1318,7 +1319,7 @@ fn apply_delete(
         OpTarget::AgentTask { task } => {
             let tasks = cx.tasks.ok_or_else(|| OpError::new("ops.notSupported", "Agent tasks are not available."))?;
             let active = tasks.record(task)?.active;
-            if let Err(o) = coordinate(plan, choices, target, || tasks.stop(task), active) {
+            if let Some(o) = coordinate(plan, choices, target, || tasks.stop(task), active) {
                 return Ok(o);
             }
             tasks.delete(task, permanent)?;
@@ -1777,7 +1778,7 @@ pub fn storage_overview(cx: &DataContext<'_>) -> StorageOverview {
             active: false,
         }));
     }
-    recoverable.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    recoverable.sort_by_key(|i| std::cmp::Reverse(i.created_at_ms));
     categories.push(category(
         "recoverableDeletions",
         "Recently deleted",
