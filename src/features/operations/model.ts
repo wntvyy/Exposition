@@ -371,6 +371,9 @@ export function summarizeResult(
         );
       }
       if (none.length) lines.push(`${countText(none.length)} cannot be restored.`);
+      if (managed.some((o) => o.target.kind === "runOutputs")) {
+        lines.push("Held outputs keep their disk space until you purge them in Settings › Storage & History.");
+      }
     }
   }
   if ((kind.kind === "duplicate" || kind.kind === "paste") && succeeded.length > 1) {

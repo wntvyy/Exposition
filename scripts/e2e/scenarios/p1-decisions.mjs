@@ -271,8 +271,13 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
     const pin = decision(page).locator('[data-testid="op-impact"][data-kind="pinnedRevision"]');
     assert.ok((await pin.count()) >= 1, "the pinning composite is named");
     assert.match(await pin.first().textContent(), /Pipeline/);
-    assert.equal(await decision(page).locator('[data-choice="pinnedRevisions"]').getAttribute("data-value"), "keep", "default keeps pinned revisions");
-    await choose(page, "pinnedRevisions", /Delete them too/);
+    // An explicitly selected pinned revision is purged after this decision; a
+    // pinnedRevisions choice appears only when deleting a whole workflow.
+    if (await decision(page).locator('[data-choice="pinnedRevisions"]').count()) {
+      assert.equal(await decision(page).locator('[data-choice="pinnedRevisions"]').getAttribute("data-value"), "keep", "default keeps pinned revisions");
+      await choose(page, "pinnedRevisions", /Delete them too/);
+    }
+    assert.match(await decision(page).textContent(), /cannot be restored|Cannot be restored|permanent/i, "the loss of recovery is stated");
     await shot("p1-pinned-revision-decision-light");
     const replansC = await confirm(page);
     if (replansC) evidence.notes.push(`PinnedRevision: re-planned ${replansC} time(s)`);

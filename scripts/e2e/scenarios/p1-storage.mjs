@@ -11,7 +11,7 @@
 //     selects referenced items; Purge removes exactly the displayed scope;
 //     the reported space is honest (no claim beyond what the result says).
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -127,16 +127,38 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
         const item = page.getByTestId(`workflow-run-item-${run.id}`);
         await item.waitFor({ timeout: 15_000 });
         await item.getByTestId(`op-more-${run.id}`).click();
-        await page.getByRole("menuitem", { name: /Delete Run and Its Outputs Permanently/ }).click();
-        const d = decision(page);
-        await d.waitFor({ timeout: 15_000 });
-        assert.equal(await d.locator('[data-choice="outputs"]').getAttribute("data-value"), "delete", "outputs scope preset and reviewed");
-        await shot(page, "p1-run-outputs-decision-light");
-        await d.locator(".ui-dialog__footer button").last().click();
+        // Record and outputs: two targets in ONE request (one decision if any); outputs are held for restore.
+        await page.getByRole("menuitem", { name: "Delete Run and Its Outputs", exact: true }).click();
+        if (await decision(page).waitFor({ timeout: 2500 }).then(() => true, () => false)) {
+          evidence.notes.push(`record + outputs decision: ${(await decision(page).textContent()).slice(0, 200)}`);
+          await decision(page).locator(".ui-dialog__footer button").last().click();
+        }
+        const held = await waitForNotification(page, /run of Count observations|outputs of Count observations|2 items/);
+        evidence.notes.push(`record + outputs result: ${held.title} — ${held.body}`);
+        assert.match(held.body, /Held outputs keep their disk space until you purge them/);
         await waitFor(async () => !(await invoke(page, "workflow_runs", { workflow: null })).some((r) => r.id === run.id), { timeout: 15_000, message: "run record removed" });
-        for (const p of outputs) assert.ok(!existsSync(join(root, ...p.split("/"))), `output ${p} removed`);
+        for (const p of outputs) assert.ok(!existsSync(join(root, ...p.split("/"))), `output ${p} left its place (held for restore)`);
         assert.equal(await readFile(join(root, "data", "obs.csv"), "utf8"), "x,y\n0,1\n1,3\n", "the input is never deleted");
         assert.ok(existsSync(join(root, "experiment.py")), "the script input stays");
+        await dismissNotifications(page);
+
+        // The held outputs are listed under recoverable deletions; purging them is one decision and frees their files.
+        await runCommand(page, "Storage and History", /Preferences: Storage and History/);
+        const heldRow = page.locator('[data-testid="storage-item"][data-key^="recoverableDeletions|recoverable:runOutputs:"]').first();
+        await heldRow.waitFor({ timeout: 15_000 });
+        await shot(page, "p1-storage-held-outputs-light");
+        await heldRow.locator("label").first().click();
+        await waitFor(async () => (await page.getByTestId("storage-scope").getAttribute("data-count")) === "1", { message: "held outputs selected" });
+        await page.getByTestId("storage-purge").click();
+        await decision(page).waitFor({ timeout: 15_000 });
+        assert.equal(await page.getByRole("alertdialog").count(), 1, "one decision for the purge");
+        await shot(page, "p1-run-outputs-decision-light");
+        await decision(page).locator(".ui-dialog__footer button").last().click();
+        await waitFor(async () => (await heldRow.count()) === 0, { timeout: 20_000, message: "held outputs purged" });
+        const deletedArea = join(root, ".exposition", "artifacts", "deleted");
+        const leftover = existsSync(deletedArea) ? (await readdir(deletedArea, { recursive: true })).filter((n) => /dataset\.csv$/.test(n)) : [];
+        assert.deepEqual(leftover, [], "the held output files are gone after the purge");
+        evidence.real.push("restricted Docker run's outputs: held for restore with the record deletion, then purged from Storage & History (files removed from .exposition/artifacts/deleted)");
         await dismissNotifications(page);
       } else {
         evidence.notes.push(`run step skipped: plan blockers ${JSON.stringify(plan.blockers)}`);
