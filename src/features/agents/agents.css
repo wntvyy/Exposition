@@ -212,8 +212,9 @@
 
 /* The complete payload of an approval: taller than other code blocks, and
    keyboard-scrollable (it is focusable when it scrolls). */
+/* 50vh keeps Approve/Decline on screen at 900 px with the balanced density. */
 .agents-approval__payload {
-  max-height: min(60vh, 560px);
+  max-height: min(50vh, 520px);
 }
 
 .agents-notice {
