@@ -374,4 +374,35 @@ describe("WorkflowEditor", () => {
     await waitFor(() => expect(editorsMock.setDirty).toHaveBeenLastCalledWith("workflow:wf-1", true));
     localStorage.removeItem("exposition.workflows.view");
   });
+
+  it("P1: Ctrl+C / Ctrl+V on the canvas pastes a copy of the step with a new id into the draft; nothing is saved or run", async () => {
+    const { installKeybindings } = await import("../../app/keybindings");
+    const { registry } = await import("../../app/registry");
+    const { operationCommands, resetSurfacesForTests } = await import("../operations/surfaces");
+    const disposers = operationCommands().map((c) => registry.registerCommand(c));
+    const uninstall = installKeybindings(window, "windows");
+    try {
+      render(<WorkflowEditor resource={{ key: "workflow:wf-1", title: "Formal audit" }} mode="source" active />);
+      await screen.findByTestId("workflow-status");
+      fireEvent.click(screen.getByRole("radio", { name: "Canvas" }));
+      const canvas = await screen.findByTestId("workflow-canvas");
+      fireEvent.click(within(canvas).getByTestId("wfc-step-associate"));
+      const node = within(canvas).getByTestId("wfc-step-associate").closest(".react-flow__node") as HTMLElement;
+      act(() => node.focus());
+      fireEvent.keyDown(node, { key: "c", code: "KeyC", ctrlKey: true });
+      await waitFor(() => expect(screen.getByTestId("workflow-canvas-message").textContent).toMatch(/Copied 1 step/));
+      fireEvent.keyDown(node, { key: "v", code: "KeyV", ctrlKey: true });
+      await waitFor(() => expect(within(canvas).getByTestId("wfc-step-associate-copy")).toBeTruthy());
+      expect(screen.getByTestId("workflow-canvas-message").textContent).toMatch(/Pasted 1 step with new ids, offset slightly\. Nothing runs/);
+      expect(within(canvas).getByTestId("wfc-step-associate")).toBeTruthy();
+      expect(wfIpc.save).not.toHaveBeenCalled();
+      expect(runIpc.start).not.toHaveBeenCalled();
+      await waitFor(() => expect(editorsMock.setDirty).toHaveBeenLastCalledWith("workflow:wf-1", true));
+    } finally {
+      uninstall();
+      for (const d of disposers) d();
+      resetSurfacesForTests();
+      localStorage.removeItem("exposition.workflows.view");
+    }
+  });
 });
