@@ -25,7 +25,6 @@ function EditorHost({ editor, groupActive }: { editor: OpenEditor; groupActive: 
       <UnavailableState
         icon={FileQuestion}
         title={`No editor for ${editor.resource.title}`}
-        description="No editor that can open this kind of resource is available yet."
       />
     );
   }
@@ -88,7 +87,7 @@ function EmptyGroup({ id }: { id: EditorGroupId }) {
       <EmptyState
         icon={Files}
         title="No editor open"
-        description="Editors for project files open here. Every action is available from the command palette."
+        description="Open a file from the Files view. Every action is also in the command palette."
         actions={
           <Button variant="secondary" icon={CommandIcon} onPress={() => void registry.runCommand("workbench.action.showCommands")}>
             Show all commands
