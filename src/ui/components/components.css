@@ -53,6 +53,30 @@
   font-size: var(--font-size-sm);
 }
 
+/* Graph type label color (node header bands, inspector item types, legends):
+   the category's text role, never used for status. */
+.ui-category-text {
+  color: var(--color-graph-structure-text);
+}
+.ui-category-text[data-category="document"] {
+  color: var(--color-graph-document-text);
+}
+.ui-category-text[data-category="data"] {
+  color: var(--color-graph-data-text);
+}
+.ui-category-text[data-category="math"] {
+  color: var(--color-graph-math-text);
+}
+.ui-category-text[data-category="formal"] {
+  color: var(--color-graph-formal-text);
+}
+.ui-category-text[data-category="reference"] {
+  color: var(--color-graph-reference-text);
+}
+.ui-category-text[data-category="workflow"] {
+  color: var(--color-graph-workflow-text);
+}
+
 /* Shared focus ring for react-aria controls (keyboard focus only). */
 .ui-button[data-focus-visible],
 .ui-icon-button[data-focus-visible],
@@ -211,6 +235,11 @@
 .ui-icon-button[data-variant="secondary"] {
   border-color: var(--color-border-strong);
   background: var(--color-surface-raised);
+}
+/* Disclosure toggles (aria-expanded) show their open state. */
+.ui-icon-button[aria-expanded="true"] {
+  background: var(--color-surface-selected);
+  color: var(--color-text);
 }
 .ui-icon-button[data-hovered] {
   background: var(--color-surface-hover);
@@ -1349,7 +1378,7 @@
 }
 .ui-section[data-variant="content"] > .ui-section__header {
   min-height: var(--space-8);
-  padding: var(--space-1) var(--space-1) 0 var(--pane-inset);
+  padding: var(--space-1) var(--space-1) 0 var(--section-inset, var(--pane-inset));
 }
 .ui-section[data-variant="content"] > .ui-section__header .ui-section__toggle {
   flex: 0 1 auto;
@@ -1390,8 +1419,15 @@
   padding: var(--space-1) 0 var(--space-2);
 }
 .ui-section[data-variant="content"] > .ui-section__body {
+  padding: var(--space-1) var(--section-inset, var(--pane-inset)) var(--space-3);
+}
+/* Whatever sits in a content section body is already inset: nested sections,
+   list rows, and compact states align with it. Containers that pad their own
+   content can set the same two variables to 0. */
+.ui-section[data-variant="content"] > .ui-section__body,
+.ui-inset-reset {
   --list-inset: 0px;
-  padding: var(--space-1) var(--pane-inset) var(--space-3);
+  --section-inset: 0px;
 }
 
 .ui-toolbar {
@@ -2071,8 +2107,8 @@ th.ui-data-table__cell {
 .ui-list-row[data-current] {
   box-shadow: inset 2px 0 0 var(--color-accent);
 }
-:focus-within > .ui-list-row[data-selected],
-:focus-within > .ui-list-row[data-op-selected],
+:is([role="list"], [role="listbox"], [role="grid"], ul, ol):focus-within .ui-list-row:is([data-selected], [data-op-selected]),
+:focus-within > .ui-list-row:is([data-selected], [data-op-selected]),
 .ui-list-row[data-selected]:focus-within {
   background: var(--color-accent-subtle);
 }

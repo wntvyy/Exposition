@@ -127,6 +127,7 @@ export interface StatusTextProps {
   /** Sentence-length label: wraps, regular weight (e.g. "No R image: restricted R batches are refused"). */
   wrap?: boolean;
   className?: string;
+  "data-testid"?: string;
 }
 
 /**
@@ -134,10 +135,15 @@ export interface StatusTextProps {
  * and label in the status color, no container. A surface's one headline state
  * uses StatusPill instead.
  */
-export function StatusText({ status, label, detail, wrap, className }: StatusTextProps) {
+export function StatusText({ status, label, detail, wrap, className, ...rest }: StatusTextProps) {
   const Icon = status === "running" ? null : statusIcons[status];
   return (
-    <span className={cx("ui-status-text", className)} data-status={status} data-wrap={wrap || undefined}>
+    <span
+      className={cx("ui-status-text", className)}
+      data-status={status}
+      data-wrap={wrap || undefined}
+      data-testid={rest["data-testid"]}
+    >
       {Icon ? <Icon size={14} aria-hidden /> : <Spinner size="sm" aria-hidden />}
       <span className="ui-status-text__label">{label ?? statusLabels[status]}</span>
       {detail && <span className="ui-status-text__detail">{detail}</span>}

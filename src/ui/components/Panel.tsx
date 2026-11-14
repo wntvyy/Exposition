@@ -162,7 +162,10 @@ export interface PageHeaderProps {
   level?: 1 | 2;
   /** Id of the title heading (for aria-labelledby on the page). */
   titleId?: string;
-  /** `data-region` for F6 cycling (e.g. "graph-header"). */
+  /**
+   * `data-region` for F6 cycling (e.g. "graph-header"). With a toolbar row and
+   * no `toolbarRegion`, the region covers the header and its toolbar together.
+   */
   region?: string;
   /** Test id passthrough. */
   "data-testid"?: string;
@@ -194,9 +197,15 @@ export function PageHeader({
   ...rest
 }: PageHeaderProps) {
   const Heading = level === 1 ? "h1" : "h2";
-  return (
+  // One region for header + toolbar unless the toolbar has its own region.
+  const grouped = Boolean(toolbar) && !toolbarRegion && Boolean(region);
+  const content = (
     <>
-      <header className={cx("ui-page-header", className)} data-region={region} data-testid={rest["data-testid"]}>
+      <header
+        className={cx("ui-page-header", className)}
+        data-region={grouped ? undefined : region}
+        data-testid={rest["data-testid"]}
+      >
         <div className="ui-page-header__lead">
           <Heading className="ui-page-header__title" id={titleId}>
             {title}
@@ -213,6 +222,13 @@ export function PageHeader({
         </div>
       )}
     </>
+  );
+  return grouped ? (
+    <div className="ui-page-header-group" data-region={region}>
+      {content}
+    </div>
+  ) : (
+    content
   );
 }
 

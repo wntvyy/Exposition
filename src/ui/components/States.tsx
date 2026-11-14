@@ -144,16 +144,17 @@ export interface BannerProps {
   className?: string;
   /** Announce politely when it appears (e.g. output became stale while the user was working). */
   live?: boolean;
+  "data-testid"?: string;
 }
 
 /**
  * Inline status message attached to a region: stale output, canceled run,
  * recoverable warnings. Does not block the content beneath it.
  */
-export function Banner({ tone, title, children, actions, className, live }: BannerProps) {
+export function Banner({ tone, title, children, actions, className, live, ...rest }: BannerProps) {
   const Icon = bannerIcons[tone];
   return (
-    <div className={cx("ui-banner", className)} data-tone={tone} role={live ? "status" : undefined}>
+    <div className={cx("ui-banner", className)} data-tone={tone} role={live ? "status" : undefined} data-testid={rest["data-testid"]}>
       <Icon className="ui-banner__icon" size={16} aria-hidden />
       <div className="ui-banner__body">
         <p className="ui-banner__title">{title}</p>
