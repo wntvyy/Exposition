@@ -159,7 +159,7 @@ function ContextRelations({ context }: { context: GraphContext }) {
   const byId = new Map(context.entities.map((e) => [e.id, e]));
   if (context.relations.length === 0) return <p className="ui-meta">No relations among these entities.</p>;
   return (
-    <ul className="agents-list" aria-label="Relations in the task's graph context">
+    <ul className="agents-list" aria-label="Relationships in the task's graph context">
       {context.relations.map((r) => (
         <li key={r.id} data-testid="agents-graph-relation" data-status={r.status}>
           <span>{entityName(byId.get(r.from), r.from)}</span>{" "}
@@ -247,7 +247,7 @@ export function GraphContextView({ graph }: { graph: TaskGraphInfo }) {
       <Section title="Entities" count={context.entities.length} collapsible defaultExpanded className="agents-section">
         <ContextEntities context={context} />
       </Section>
-      <Section title="Relations" count={context.relations.length} collapsible defaultExpanded className="agents-section">
+      <Section title="Relationships" count={context.relations.length} collapsible defaultExpanded className="agents-section">
         <ContextRelations context={context} />
       </Section>
       <Section title="In scope" collapsible defaultExpanded={false} className="agents-section">

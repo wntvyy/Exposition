@@ -707,6 +707,10 @@
   letter-spacing: var(--letter-spacing-label);
   text-transform: uppercase;
 }
+.ui-tab__count {
+  color: var(--color-text-subtle);
+  font-weight: var(--font-weight-regular);
+}
 .ui-tab[data-hovered] {
   color: var(--color-text);
 }

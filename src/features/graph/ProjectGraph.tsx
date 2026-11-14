@@ -367,8 +367,12 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
           ) : (
             <Tabs selectedKey={tableTab} onSelectionChange={(k) => setTableTab(k as "entities" | "relations")} className="xp-graph-tables">
               <TabList aria-label="Tables">
-                <Tab id="entities">Items ({projection.nodes.length})</Tab>
-                <Tab id="relations">Relationships ({projection.edges.length})</Tab>
+                <Tab id="entities" count={projection.nodes.length}>
+                  Items
+                </Tab>
+                <Tab id="relations" count={projection.edges.length}>
+                  Relationships
+                </Tab>
               </TabList>
               <TabPanel id="entities" className="xp-graph-tables__panel">
                 <EntityTable

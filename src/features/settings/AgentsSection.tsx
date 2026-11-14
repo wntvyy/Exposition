@@ -10,7 +10,7 @@ import { SettingRow, SettingsGroup, SettingsPage } from "./parts";
 
 const PROVIDER_LABELS: Record<string, string> = {
   anthropic: "Anthropic Claude",
-  scripted: "Scripted provider (development only)",
+  scripted: "Scripted provider — development only",
 };
 
 export function AgentsSection() {

@@ -227,8 +227,12 @@ function TaskDetailSections({ id, kept, onKept }: { id: TaskId; kept: boolean; o
           <Tab id="graph" icon={Network}>
             Graph context
           </Tab>
-          <Tab id="proposals">{`Proposals (${proposals.length}${waiting ? `, ${waiting} waiting` : ""})`}</Tab>
-          <Tab id="changes">{`Changes (${task.changedFiles})`}</Tab>
+          <Tab id="proposals" count={waiting ? `${proposals.length} · ${waiting} waiting` : proposals.length}>
+            Proposals
+          </Tab>
+          <Tab id="changes" count={task.changedFiles}>
+            Changes
+          </Tab>
         </TabList>
         <TabPanel id="run" className="agents-page__panel">
           <TaskView id={id} variant="page" />
