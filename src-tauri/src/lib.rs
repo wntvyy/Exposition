@@ -10,6 +10,7 @@ mod execution;
 mod graph;
 mod lean;
 mod page;
+mod project_data;
 mod projects;
 mod research;
 mod settings;
