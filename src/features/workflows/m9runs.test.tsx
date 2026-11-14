@@ -52,7 +52,7 @@ vi.mock("../research/ipc", () => ({ researchCommands: {} }));
 vi.mock("../research/Promotion", () => ({ PreviewView: () => null }));
 
 const { PlanReviewDialog, groupByComposite } = await import("./PlanReview");
-const { RunMonitor, RunHistory } = await import("./RunView");
+const { RunMonitor, RunHistory, notRunReason } = await import("./RunView");
 const { TriggersSection, settingsProblems, suspensionTitle } = await import("./TriggersPanel");
 const runModel = await import("./runModel");
 
@@ -317,7 +317,12 @@ describe("run monitor (M9)", () => {
     expect(review.textContent).toContain("Condition not met");
     const reason = screen.getByTestId("workflow-step-reason-review");
     expect(reason.getAttribute("data-state")).toBe("conditionNotMet");
-    expect(reason.textContent).toBe("Not run: its condition was not met. The verdict was “Errors”. It runs only if the audit verdict of “Audit → evidence” is one of “Checked”.");
+    // The runner's reason says it; the predicate is restated only when the runner gave none.
+    expect(reason.textContent).toBe("Not run: its condition was not met. The verdict was “Errors”.");
+    const without = { ...run().steps.find((s) => s.step === "review")!, reason: null };
+    expect(notRunReason(without, run().plan.steps.find((p) => p.step === "review"), run().plan)).toBe(
+      "Not run: its condition was not met. It runs only if the audit verdict of “Audit → evidence” is one of “Checked”.",
+    );
     const skipped = screen.getByTestId("workflow-step-reason-comp/plot");
     expect(skipped.getAttribute("data-state")).toBe("skipped");
     expect(skipped.textContent).toBe("Not run: an earlier step did not produce what it needs. “Fit → figure” was not produced.");

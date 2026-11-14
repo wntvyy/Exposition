@@ -572,7 +572,8 @@ export function notRunReason(step: WorkflowRunStep, planStep: WorkflowPlanStep |
   if (step.state === "conditionNotMet") {
     const own = step.reason ? ` ${step.reason}` : "";
     const c = planStep?.condition;
-    const cond = c
+    // The runner's reason states the predicate and the value it read; restate it only without one.
+    const cond = c && !step.reason
       ? ` It runs only if ${describeTest(c.test, `“${plan.steps.find((x) => x.step === c.source.step)?.label ?? c.source.step} → ${c.source.port}”`, c.negate)}.`
       : "";
     return `Not run: its condition was not met.${own}${cond}`;
