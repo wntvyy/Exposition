@@ -328,6 +328,8 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
 
     // Dark theme.
     await runCommand(page, "color theme dark", /Color Theme: Dark/);
+    // The theme applies on the next render: wait for it rather than reading at once (raced once).
+    await page.waitForFunction(() => document.documentElement.dataset.theme === "dark", null, { timeout: 5000 }).catch(() => {});
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), "dark");
     const monacoBg = await page
       .locator("[data-testid=monaco-sample] .monaco-editor-background")
