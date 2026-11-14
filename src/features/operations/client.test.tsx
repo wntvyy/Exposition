@@ -319,6 +319,32 @@ describe("undo, redo and restore", () => {
     expect(ipc.plan).toHaveBeenLastCalledWith(del(["a (2).txt"]));
   });
 
+  it("the project's Undo list survives a restart (tokens and names only); another project has its own", async () => {
+    localStorage.clear();
+    opHistory.setScope("C:/proj");
+    const request = del(["notes.md"]);
+    ipc.plan.mockResolvedValue(plan(request));
+    ipc.apply.mockResolvedValue(result([outcome("notes.md", { restore: "trash-1" })]));
+    await runOperation(request);
+    // Restart: the in-memory history is gone; opening the same project brings it back.
+    opHistory.clear();
+    expect(opHistory.canUndo()).toBe(false);
+    opHistory.setScope("C:/other");
+    expect(opHistory.canUndo()).toBe(false);
+    opHistory.setScope("C:/proj");
+    expect(opHistory.canUndo()).toBe(true);
+    expect(localStorage.getItem("exposition.operations.undo:C:/proj")).not.toMatch(/content|text/);
+    ipc.restore.mockResolvedValueOnce({ ...outcome("notes.md"), code: "ops.restored" });
+    await act(async () => {
+      await undoLast();
+    });
+    expect(ipc.restore).toHaveBeenCalledWith({ restore: "trash-1", onCollision: "cancel" });
+    expect(lastNotification().title).toBe("Restored “notes.md”");
+    opHistory.setScope(null);
+    opHistory.setScope("C:/proj");
+    expect(opHistory.canUndo()).toBe(false);
+  });
+
   it("leaving it deleted restores nothing", async () => {
     const request = del(["a.txt"]);
     ipc.plan.mockResolvedValue(plan(request));

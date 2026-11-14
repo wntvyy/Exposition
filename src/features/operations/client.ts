@@ -20,6 +20,7 @@ import type { OpResult } from "../../bindings/OpResult";
 import type { OpTarget } from "../../bindings/OpTarget";
 import { errorMessage } from "../../lib/ipc";
 import { confirm } from "../../ui/components";
+import { parseJson, readStored, writeStored } from "../../ui/storage";
 import { requestDecision } from "./decision";
 import { opCommands, opEvents } from "./ipc";
 import {
@@ -137,16 +138,57 @@ interface RedoEntry {
 const undoStack: HistoryEntry[] = [];
 const redoStack: RedoEntry[] = [];
 const MAX_HISTORY = 20;
+const HISTORY_KEY = "exposition.operations.undo";
+/** The open project (its absolute root): the undo history is kept per project. */
+let historyScope: string | null = null;
+
+/**
+ * Keep the Undo list of the open project across restarts (the backend keeps
+ * restore tokens across restarts and re-identifies the items before restoring;
+ * a spent token reports that it can no longer restore). Only tokens, targets
+ * and names are stored — never content.
+ */
+function persistHistory(): void {
+  if (!historyScope) return;
+  const entries = undoStack.map((e) => ({ title: e.title, restores: e.restores, labels: [...e.labels] }));
+  writeStored(`${HISTORY_KEY}:${historyScope}`, JSON.stringify(entries));
+}
+
+function loadHistory(scope: string): HistoryEntry[] {
+  const parsed = parseJson(readStored(`${HISTORY_KEY}:${scope}`));
+  if (!Array.isArray(parsed)) return [];
+  const entries: HistoryEntry[] = [];
+  for (const raw of parsed.slice(-MAX_HISTORY)) {
+    const e = raw as { title?: unknown; restores?: unknown; labels?: unknown };
+    if (typeof e.title !== "string" || !Array.isArray(e.restores) || !Array.isArray(e.labels)) continue;
+    const restores = e.restores.filter(
+      (r): r is { token: string; target: OpTarget } =>
+        typeof r === "object" && r !== null && typeof (r as { token?: unknown }).token === "string" && typeof (r as { target?: unknown }).target === "object",
+    );
+    const labels = new Map(e.labels.filter((l): l is [string, string] => Array.isArray(l) && l.length === 2 && l.every((x) => typeof x === "string")));
+    if (restores.length) entries.push({ title: e.title, restores, labels });
+  }
+  return entries;
+}
 
 export const opHistory = {
   canUndo: () => undoStack.length > 0,
   canRedo: () => redoStack.length > 0,
   undoTitle: () => undoStack.at(-1)?.title ?? null,
   redoTitle: () => redoStack.at(-1)?.title ?? null,
+  /** Switch to the open project's history (`null`: no project). */
+  setScope(scope: string | null): void {
+    if (scope === historyScope) return;
+    historyScope = scope;
+    undoStack.length = 0;
+    redoStack.length = 0;
+    if (scope) undoStack.push(...loadHistory(scope));
+  },
   /** Test helper. */
   clear: () => {
     undoStack.length = 0;
     redoStack.length = 0;
+    historyScope = null;
   },
 };
 
@@ -154,6 +196,7 @@ function record(entry: HistoryEntry): void {
   undoStack.push(entry);
   if (undoStack.length > MAX_HISTORY) undoStack.shift();
   redoStack.length = 0;
+  persistHistory();
 }
 
 // ----- busy guard -------------------------------------------------------------------------
@@ -369,6 +412,7 @@ function reportRestore(results: { target: OpTarget; outcome: OpOutcome }[], labe
 async function undoEntry(entry: HistoryEntry): Promise<void> {
   const index = undoStack.indexOf(entry);
   if (index >= 0) undoStack.splice(index, 1);
+  persistHistory();
   inFlight += 1;
   try {
     const results = await restore(entry.restores, entry.labels);

@@ -6,7 +6,10 @@
 //  2. Copy a source, select the Data group, Paste: a copy lands in Data with
 //     the same bytes; the source is unchanged; the menu named the destination.
 //  3. Duplicate (Ctrl+D) a source beside itself.
+//  4. Delete the duplicate, restart the app, Ctrl+Z in the explorer: it comes back
+//     from the Recycle Bin (restore tokens and the Undo list survive a restart).
 // Nothing runs: no research session is started by any of this.
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,8 +28,8 @@ export default async function p1Research({ launchApp, artifactsDir, assert }) {
   await writeFile(join(root, "main.typ"), "= Notes\n");
   const evidence = { real: [], notes: [] };
   const shots = [];
-  const app = await launchApp({ dataDir });
-  const { page } = app;
+  let app = await launchApp({ dataDir });
+  let page = app.page;
   const shot = async (name) => {
     const path = join(artifactsDir, `${name}.png`);
     await settle(page);
@@ -107,6 +110,41 @@ export default async function p1Research({ launchApp, artifactsDir, assert }) {
     const sourcesDir = join(root, ...space.root.split("/"), "sources");
     await waitFor(async () => (await readdir(sourcesDir)).filter((n) => /^fit.*\.py$/.test(n)).length === 2, { message: "duplicate beside the source" });
     evidence.notes.push(`sources after duplicate: ${(await readdir(sourcesDir)).join(", ")}`);
+    await dismissNotifications(page);
+
+    // --- 4. Undo after a restart ------------------------------------------------------------
+    const copyName = (await readdir(sourcesDir)).find((n) => n !== "fit.py" && /^fit.*.py$/.test(n));
+    const copyPath = `${space.root}/sources/${copyName}`;
+    await row(copyPath).waitFor({ timeout: 15_000 });
+    await selectOnly([copyPath]);
+    await page.keyboard.press("Delete");
+    const gone = await waitForNotification(page, /^Moved “fit.*.py” to the (Recycle Bin|Trash)$/);
+    await waitFor(async () => !existsSync(join(sourcesDir, copyName)), { message: "duplicate deleted" });
+    if (gone.actions.includes("Undo")) {
+      // A graceful close (the Undo list is kept per project in the webview profile).
+      const exited = new Promise((resolve) => (app.child.exitCode !== null ? resolve() : app.child.once("exit", resolve)));
+      try {
+        execFileSync("taskkill", ["/PID", String(app.child.pid)], { stdio: "ignore" });
+      } catch {}
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 15_000))]);
+      await app.close();
+      app = await launchApp({ dataDir });
+      page = app.page;
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await invoke(page, "workspace_open", { path: root });
+      await page.locator('[data-testid="file-tree"] [data-path="main.typ"]').waitFor({ timeout: 15_000 });
+      await runCommand(page, "Show Research", /View: Show Research/);
+      const tree2 = page.getByTestId("research-tree");
+      const fitRow = tree2.locator(`[data-path="${files["fit.py"]}"]`).first();
+      await fitRow.waitFor({ timeout: 15_000 });
+      await fitRow.focus();
+      await page.keyboard.press("Control+Z");
+      await waitFor(async () => existsSync(join(sourcesDir, copyName)), { timeout: 15_000, message: "Undo after a restart restored the file" });
+      await waitForNotification(page, /^Restored “fit.*.py”/);
+      evidence.real.push("Undo (Ctrl+Z) after an app restart restored the deleted file from the Recycle Bin");
+    } else {
+      evidence.notes.push(`no Undo offered for the duplicate's deletion: ${gone.body}`);
+    }
 
     assert.equal((await invoke(page, "research_sessions")).length, sessionsBefore, "no research session was started");
     assert.deepEqual(consoleErrors(app), [], "no console errors");

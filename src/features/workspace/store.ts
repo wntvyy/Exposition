@@ -17,7 +17,7 @@ import { commands, errorMessage, events } from "../../lib/ipc";
 import type { KeyValueStorage } from "../../ui/storage";
 import { readStored, writeStored } from "../../ui/storage";
 import { disposeAllHandles, fileKey } from "../editor/documentClient";
-import { onProjectOp, touchedPaths } from "../operations/client";
+import { onProjectOp, opHistory, touchedPaths } from "../operations/client";
 import { loadAppSettings, useAppSettings } from "../editor/settings";
 import { reportSettingsWarning } from "../settings/warnings";
 
@@ -111,6 +111,8 @@ function setWindowTitle(name: string | null) {
 }
 
 function applyInfo(info: WorkspaceInfo) {
+  // Undo of project operations is kept per project (across restarts).
+  opHistory.setScope(info.root);
   useWorkspace.setState({
     info,
     dirs: {},
@@ -328,6 +330,7 @@ export function startWorkspaceEvents() {
         // The service closed the folder's documents (unsaved ones keep their
         // recovery journals); tabs of its files no longer refer to anything.
         dropFileTabs();
+        opHistory.setScope(null);
         useWorkspace.setState({ info: null, dirs: {}, expanded: new Set(), recovery: [] });
         setWindowTitle(null);
         break;
