@@ -194,7 +194,27 @@ export default async function p1GraphWorkflows({ launchApp, artifactsDir, assert
     evidence.notes.push(`duplicate: ${dup.title} ${dup.id}; steps ${dupFull.definition.steps.map((s) => s.id).join(",")} (original ${parentDef.steps.map((s) => s.id).join(",")})`);
     await dismissNotifications(page);
 
+    // --- 6. workflow canvas: subgraph copy/paste ----------------------------------------
+    await page.evaluate(() => localStorage.setItem("exposition.workflows.view", "canvas"));
+    await runCommand(page, "Show Workflows", /Workflow: Show Workflows/);
+    await page.getByTestId(`workflow-open-${parent.id}`).click();
+    const canvas = page.getByTestId("workflow-canvas");
+    await canvas.waitFor({ timeout: 15_000 });
+    await page.getByTestId("wfc-step-prep").click();
+    await page.getByTestId("wfc-step-sub").click({ modifiers: ["Control"] });
+    await page.keyboard.press("Control+C");
+    await canvas.locator(".react-flow__pane").click({ position: { x: 20, y: 20 } });
+    await page.keyboard.press("Control+V");
+    await page.getByTestId("wfc-step-prep-copy").waitFor({ timeout: 10_000 });
+    await page.getByTestId("wfc-step-sub-copy").waitFor();
+    assert.match(await page.getByTestId("workflow-canvas-message").textContent(), /Pasted 2 steps with new ids/);
+    await shot(page, "p1-workflow-canvas-paste-light");
+    assert.deepEqual(await invoke(page, "workflow_runs", { workflow: parent.id }), [], "nothing ran");
+    const savedParent = await invoke(page, "workflow_get", { id: parent.id, revision: null });
+    assert.equal(savedParent.definition.steps.length, 2, "the saved revision is unchanged until Save");
+
     // Delete the duplicate (unused) at once, restore it from Storage & History.
+    await runCommand(page, "Show Workflows", /Workflow: Show Workflows/);
     const dupCard = page.locator(`[data-workflow="${dup.id}"]`);
     await dupCard.waitFor();
     await dupCard.click({ button: "right" });
@@ -216,25 +236,6 @@ export default async function p1GraphWorkflows({ launchApp, artifactsDir, assert
       evidence.notes.push("Storage & History lists no recoverable deletions category");
     }
     await shot(page, "p1-storage-light");
-
-    // --- 6. workflow canvas: subgraph copy/paste ----------------------------------------
-    await page.evaluate(() => localStorage.setItem("exposition.workflows.view", "canvas"));
-    await runCommand(page, "Show Workflows", /Workflow: Show Workflows/);
-    await page.getByTestId(`workflow-open-${parent.id}`).click();
-    const canvas = page.getByTestId("workflow-canvas");
-    await canvas.waitFor({ timeout: 15_000 });
-    await page.getByTestId("wfc-step-prep").click();
-    await page.getByTestId("wfc-step-sub").click({ modifiers: ["Control"] });
-    await page.keyboard.press("Control+C");
-    await canvas.locator(".react-flow__pane").click({ position: { x: 20, y: 20 } });
-    await page.keyboard.press("Control+V");
-    await page.getByTestId("wfc-step-prep-copy").waitFor({ timeout: 10_000 });
-    await page.getByTestId("wfc-step-sub-copy").waitFor();
-    assert.match(await page.getByTestId("workflow-canvas-message").textContent(), /Pasted 2 steps with new ids/);
-    await shot(page, "p1-workflow-canvas-paste-light");
-    assert.deepEqual(await invoke(page, "workflow_runs", { workflow: parent.id }), [], "nothing ran");
-    const savedParent = await invoke(page, "workflow_get", { id: parent.id, revision: null });
-    assert.equal(savedParent.definition.steps.length, 2, "the saved revision is unchanged until Save");
 
     assert.deepEqual(consoleErrors(app), [], "no console errors");
   } finally {
