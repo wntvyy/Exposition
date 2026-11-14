@@ -500,7 +500,16 @@ impl AgentService {
                 continue;
             }
             let workspace = self.inner.workspace.as_deref();
-            results.push(review::revert_file(&self.inner.store, id, &self.inner.documents, workspace, &files, file)?);
+            let ops = self.inner.services.project_operations();
+            results.push(review::revert_file(
+                &self.inner.store,
+                id,
+                &self.inner.documents,
+                workspace,
+                &files,
+                ops.as_deref(),
+                file,
+            )?);
         }
         if results.is_empty() && path.is_some() {
             return Err(AgentError::new("agents.notFound", "The task did not change that file."));

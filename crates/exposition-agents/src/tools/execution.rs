@@ -68,6 +68,9 @@ pub struct AppToolServices {
     /// Research ↔ project graph integration (retained artifacts, promotions).
     research_project: Option<Arc<exposition_research::ResearchProject>>,
     lean: Option<LeanService>,
+    /// The application's project-operations orchestrator, installed once the
+    /// application has built it (it depends on this service's owner).
+    project_ops: Option<Arc<std::sync::OnceLock<Arc<dyn super::services::ProjectOperations>>>>,
 }
 
 /// Former name, kept for callers that only need command execution.
@@ -83,7 +86,18 @@ impl AppToolServices {
             research: None,
             research_project: None,
             lean: None,
+            project_ops: None,
         }
+    }
+
+    /// Project operations (delete/copy tools), filled in by the application
+    /// after start-up; until then the tools report the service unavailable.
+    pub fn with_project_ops(
+        mut self,
+        slot: Arc<std::sync::OnceLock<Arc<dyn super::services::ProjectOperations>>>,
+    ) -> Self {
+        self.project_ops = Some(slot);
+        self
     }
 
     pub fn with_workspace(mut self, workspace: Arc<WorkspaceService>) -> Self {
@@ -525,7 +539,12 @@ impl ToolServices for AppToolServices {
             ServiceKind::Execution | ServiceKind::Research => true,
             ServiceKind::Typesetting => self.typesetting.is_some() || self.tex.is_some(),
             ServiceKind::Lean => self.lean.is_some(),
+            ServiceKind::ProjectOps => self.project_operations().is_some(),
         }
+    }
+
+    fn project_operations(&self) -> Option<Arc<dyn super::services::ProjectOperations>> {
+        self.project_ops.as_ref().and_then(|slot| slot.get().cloned())
     }
 
     fn restricted_backend(&self) -> Option<String> {

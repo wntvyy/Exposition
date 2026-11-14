@@ -31,6 +31,7 @@ use exposition_workspace::{DocumentService, WorkspaceService};
 use crate::model::{FileDiff, FileReview, ReviewActionResult, ReviewChangeKind, ReviewState, TaskId};
 use crate::patch;
 use crate::store::{ChangeRow, Store, StoreResult, TaskFileRow, now_ms};
+use crate::tools::services::ProjectOperations;
 use crate::workspace::{self, FileError, ProjectFiles};
 
 pub struct EditRecord<'a> {
@@ -55,6 +56,7 @@ pub fn record_edit(store: &Store, task: &TaskId, rec: &EditRecord<'_>) -> StoreR
             TaskFileRow {
                 path: rec.path.clone(),
                 kind: ReviewChangeKind::Edited,
+                op_ref: None,
                 document: Some(rec.document.0.clone()),
                 checkpoint_text: before.clone(),
                 baseline_text: before.clone(),
@@ -127,6 +129,7 @@ pub fn record_create(
     let row = TaskFileRow {
         path: path.clone(),
         kind: ReviewChangeKind::Created,
+        op_ref: None,
         document: document.map(|(id, _)| id.0.clone()),
         checkpoint_text: String::new(),
         baseline_text: String::new(),
@@ -248,6 +251,13 @@ pub fn effective_state(row: &TaskFileRow, current: &Current) -> (ReviewState, Op
         (ReviewChangeKind::Created, ReviewState::Pending) if matches!(current, Current::Missing) => {
             (ReviewState::Undone, Some("The file the agent created no longer exists.".into()))
         }
+        (ReviewChangeKind::Copied, ReviewState::Pending) if matches!(current, Current::Missing) => {
+            (ReviewState::Undone, Some("The copy the agent made no longer exists.".into()))
+        }
+        (ReviewChangeKind::Deleted, ReviewState::Pending) if !matches!(current, Current::Missing) => (
+            ReviewState::Undone,
+            Some("Something is at this path again (restored or recreated); there is nothing to revert.".into()),
+        ),
         _ => (row.state, row.message.clone()),
     }
 }
@@ -327,6 +337,7 @@ pub fn revert_file(
     documents: &DocumentService,
     workspace: Option<&WorkspaceService>,
     files: &dyn ProjectFiles,
+    ops: Option<&dyn ProjectOperations>,
     row: TaskFileRow,
 ) -> StoreResult<ReviewActionResult> {
     let now = current(&row.path, documents, files);
@@ -338,6 +349,8 @@ pub fn revert_file(
             let message = match row.kind {
                 ReviewChangeKind::Edited => "Nothing to revert: the agent's changes were already undone.",
                 ReviewChangeKind::Created => "Nothing to revert: the file the agent created no longer exists.",
+                ReviewChangeKind::Copied => "Nothing to revert: the copy the agent made no longer exists.",
+                ReviewChangeKind::Deleted => "Nothing to revert: something is at this path again.",
             };
             return Ok(ReviewActionResult { path: row.path, ok: true, message: message.into() });
         }
@@ -346,6 +359,8 @@ pub fn revert_file(
         ReviewState::Pending | ReviewState::Accepted => match row.kind {
             ReviewChangeKind::Created => revert_created(store, task, documents, workspace, files, &row),
             ReviewChangeKind::Edited => revert_edited(store, task, documents, workspace, files, &row),
+            ReviewChangeKind::Deleted => revert_deleted(ops, &row),
+            ReviewChangeKind::Copied => revert_copied(ops, files, &row),
         },
     };
     let mut row = row;
@@ -541,4 +556,139 @@ fn revert_created(
     files.remove_file(&row.path).map_err(|e| format!("The file could not be deleted: {e}"))?;
     store.insert_change(task, &marker(row, "delete")).map_err(|e| e.to_string())?;
     Ok("Deleted the file the agent created.".into())
+}
+
+// ----- agent deletions and copies (P1) ---------------------------------------
+
+/// Record an entry the task moved to the Recycle Bin (`restore`: its
+/// restore token, when the item can be identified there).
+pub fn record_delete(
+    store: &Store,
+    task: &TaskId,
+    tool_use_id: &str,
+    path: &WorkspacePath,
+    restore: Option<String>,
+) -> StoreResult<()> {
+    record_operation(store, task, tool_use_id, path, ReviewChangeKind::Deleted, restore, "delete")
+}
+
+/// Record a copy the task made at `path` (`digest`: the copy's content then).
+pub fn record_copy(
+    store: &Store,
+    task: &TaskId,
+    tool_use_id: &str,
+    path: &WorkspacePath,
+    digest: Option<String>,
+) -> StoreResult<()> {
+    record_operation(store, task, tool_use_id, path, ReviewChangeKind::Copied, digest, "copy")
+}
+
+fn record_operation(
+    store: &Store,
+    task: &TaskId,
+    tool_use_id: &str,
+    path: &WorkspacePath,
+    kind: ReviewChangeKind,
+    op_ref: Option<String>,
+    change: &str,
+) -> StoreResult<()> {
+    let row = TaskFileRow {
+        path: path.clone(),
+        kind,
+        document: None,
+        checkpoint_text: String::new(),
+        baseline_text: String::new(),
+        tip_text: String::new(),
+        tip_revision: None,
+        entangled: false,
+        state: ReviewState::Pending,
+        change_count: 1,
+        message: None,
+        op_ref,
+    };
+    store.upsert_task_file(task, &row)?;
+    store.insert_change(
+        task,
+        &ChangeRow {
+            id: 0,
+            tool_use_id: Some(tool_use_id.to_owned()),
+            path: path.clone(),
+            document: None,
+            kind: change.into(),
+            previous_revision: None,
+            revision: None,
+            patches: Vec::new(),
+            inverse: Vec::new(),
+            created_at_ms: now_ms(),
+        },
+    )?;
+    Ok(())
+}
+
+/// The content digest of a project entry (a file's bytes; a folder's
+/// entries with sizes and times), to tell later whether a copy changed.
+pub fn entry_digest(files: &dyn ProjectFiles, path: &WorkspacePath) -> Option<String> {
+    let mut abs = files.root().to_path_buf();
+    abs.extend(path.components());
+    let meta = std::fs::symlink_metadata(&abs).ok()?;
+    if meta.is_dir() {
+        Some(format!("dir:{}", exposition_workspace::ops::fsops::walk(&abs).digest))
+    } else if meta.is_file() {
+        exposition_workspace::fsutil::hash_file(&abs).ok().map(|h| format!("file:{h}"))
+    } else {
+        None
+    }
+}
+
+fn revert_deleted(ops: Option<&dyn ProjectOperations>, row: &TaskFileRow) -> Result<String, String> {
+    let Some(token) = row.op_ref.as_deref() else {
+        return Err("Exposition cannot identify this item in the Recycle Bin; restore it from there.".into());
+    };
+    let Some(ops) = ops else { return Err("Project operations are not available in this build.".into()) };
+    let result = ops.restore(token).map_err(|e| e.message)?;
+    let outcome = result.outcomes.into_iter().next().ok_or("Nothing was restored.")?;
+    match outcome.status {
+        exposition_core::ops::OpStatus::Succeeded => {
+            Ok(outcome.message.unwrap_or_else(|| "Restored from the Recycle Bin.".into()))
+        }
+        _ => Err(outcome.message.unwrap_or_else(|| "It could not be restored.".into())),
+    }
+}
+
+fn revert_copied(
+    ops: Option<&dyn ProjectOperations>,
+    files: &dyn ProjectFiles,
+    row: &TaskFileRow,
+) -> Result<String, String> {
+    let Some(ops) = ops else { return Err("Project operations are not available in this build.".into()) };
+    if row.op_ref.is_none() || entry_digest(files, &row.path) != row.op_ref {
+        return Err("The copy changed after the agent made it, so it was not removed; delete it yourself if you no longer need it.".into());
+    }
+    // The person's own Delete (to the Recycle Bin), with its consequences:
+    // a copy that something now depends on is left for the person to decide.
+    let plan = ops
+        .plan(exposition_core::ops::OpRequest {
+            kind: exposition_core::ops::OpKind::Delete { permanent: false },
+            targets: vec![exposition_core::ops::OpTarget::Path { path: row.path.clone() }],
+            actor: exposition_core::ops::OpActor::User,
+        })
+        .map_err(|e| e.message)?;
+    if let Some(r) = plan.refusals.first() {
+        return Err(r.message.clone());
+    }
+    if plan.needs_decision {
+        let what: Vec<&str> = plan.impacts.iter().map(|i| i.message.as_str()).collect();
+        return Err(format!(
+            "The copy is in use now ({}); delete it yourself if you no longer need it.",
+            what.join(" ")
+        ));
+    }
+    let result = ops.apply(&plan).map_err(|e| e.message)?;
+    match result.outcomes.into_iter().next() {
+        Some(o) if o.status == exposition_core::ops::OpStatus::Succeeded => {
+            Ok("Moved the copy the agent made to the Recycle Bin.".into())
+        }
+        Some(o) => Err(o.message.unwrap_or_else(|| "The copy could not be removed.".into())),
+        None => Err("The copy could not be removed.".into()),
+    }
 }

@@ -37,7 +37,7 @@ use exposition_core::path::WorkspacePath;
 use crate::root::{WorkspaceRoot, display_path};
 use crate::service::WorkspaceService;
 use fsops::{EntryKind, PublishError};
-pub use trash::{OsTrash, TrashBin, TrashedItem};
+pub use trash::{OsTrash, TrashBin, TrashFailure, TrashFailureKind, TrashedItem};
 
 /// Choice key for open documents with unsaved changes in deleted paths.
 pub const CHOICE_UNSAVED: &str = "unsavedBuffers";
@@ -197,7 +197,7 @@ fn list_some(items: &[String], max: usize) -> String {
 }
 
 /// Is `path` equal to `ancestor` or inside it (component-wise, case-insensitive on Windows)?
-fn within(path: &Path, ancestor: &Path) -> bool {
+pub(crate) fn within(path: &Path, ancestor: &Path) -> bool {
     let key = |p: &Path| -> Vec<String> {
         Path::new(&display_path(p))
             .components()
@@ -281,10 +281,30 @@ fn locate(root: &WorkspaceRoot, path: &WorkspacePath) -> Result<Located, (&'stat
     Ok(Located { path: normalized, abs, parent, parent_abs, info })
 }
 
+/// What the caller knows that the file engine cannot.
+pub struct PlanHooks<'a> {
+    /// A generated research artifact (`.exposition/artifacts/<run>/…`) that
+    /// the project graph keeps as a resource (a retained output): it can be
+    /// deleted as a file, with the data side's impacts. Other generated
+    /// artifacts stay with the research service.
+    pub retained_artifact: &'a dyn Fn(&WorkspacePath) -> bool,
+}
+
 impl WorkspaceService {
     /// Plan the file part of an operation (only `Path` and `External`
     /// targets are considered; others belong to the data side).
     pub fn plan_paths(&self, kind: &OpKind, targets: &[OpTarget], actor: &OpActor) -> PathPlan {
+        self.plan_paths_with(kind, targets, actor, &PlanHooks { retained_artifact: &|_| false })
+    }
+
+    /// [`Self::plan_paths`] with what the caller knows (see [`PlanHooks`]).
+    pub fn plan_paths_with(
+        &self,
+        kind: &OpKind,
+        targets: &[OpTarget],
+        actor: &OpActor,
+        hooks: &PlanHooks<'_>,
+    ) -> PathPlan {
         let mut plan = PathPlan { kind: Some(kind.clone()), ..PathPlan::default() };
         let root = match self.root() {
             Ok(root) => root,
@@ -394,7 +414,7 @@ impl WorkspaceService {
         for mut item in kept {
             match kind {
                 OpKind::Delete { permanent } => {
-                    if self.plan_delete(&mut plan, &mut item, *permanent) {
+                    if self.plan_delete(&mut plan, &mut item, *permanent, hooks) {
                         plan.items.push(item);
                     }
                 }
@@ -524,11 +544,17 @@ impl WorkspaceService {
     }
 
     /// Returns false when the item is refused.
-    fn plan_delete(&self, plan: &mut PathPlan, item: &mut Item, permanent: bool) -> bool {
+    fn plan_delete(&self, plan: &mut PathPlan, item: &mut Item, permanent: bool, hooks: &PlanHooks<'_>) -> bool {
         let Source::Project(path) = item.source.clone() else { return false };
         if let Some(message) = policy::refuse_change(&path) {
-            plan.refusals.push(refusal(&item.target, "ops.protected", message));
-            return false;
+            let retained = policy::classify(&path) == policy::Area::Artifacts
+                && item.kind == EntryKind::File
+                && (hooks.retained_artifact)(&path);
+            if !retained {
+                plan.refusals.push(refusal(&item.target, "ops.protected", message));
+                return false;
+            }
+            plan.fingerprint.push(format!("retained:{path}"));
         }
         if item.kind == EntryKind::Dir {
             let walk = fsops::walk(&item.abs);
@@ -880,7 +906,8 @@ impl WorkspaceService {
                 .trash
                 .delete(&paths)
                 .into_iter()
-                .map(|r| r.map_err(|reason| ("ops.trashUnavailable".to_owned(), reason)))
+                .zip(ready.iter())
+                .map(|(r, item)| r.map_err(|f| (f.code().to_owned(), trash_message(&f, &item.shown(), bin))))
                 .collect()
         };
         for (item, result) in ready.iter().zip(results) {
@@ -897,26 +924,19 @@ impl WorkspaceService {
                     }
                     trashed = found;
                 }
-                Err((code, reason)) if !permanent && gone => {
+                Err((code, _)) if !permanent && gone => {
                     // The shell reported a problem, but the entry left the project.
                     o.recovery = OpRecovery::OsTrash;
                     o.code = Some(code);
                     o.message = Some(format!(
-                        "{bin} reported a problem ({reason}), but {} is no longer in the project; look for it in {bin}.",
+                        "{bin} reported a problem, but {} is no longer in the project; look for it in {bin}.",
                         item.shown()
                     ));
                 }
-                Err((code, reason)) => {
+                Err((code, message)) => {
                     o.status = OpStatus::Failed;
-                    o.message = Some(if permanent {
-                        reason
-                    } else {
-                        format!(
-                            "{} could not be moved to {bin} ({reason}). Nothing was deleted permanently; use Delete Permanently to remove it without {bin}.",
-                            item.shown()
-                        )
-                    });
                     o.code = Some(code);
+                    o.message = Some(message);
                 }
             }
             if o.status == OpStatus::Succeeded {
@@ -1089,7 +1109,8 @@ impl WorkspaceService {
         let Some(restored) = published else {
             return fail("ops.nameUnavailable", format!("No free name was found to restore {original}."));
         };
-        let mut o = outcome(&target, OpStatus::Succeeded, None, None);
+        // Marked as a restore (the data side tells it apart from a copy).
+        let mut o = outcome(&target, OpStatus::Succeeded, Some("ops.restored"), None);
         if &restored == original {
             self.resume_documents_under(original);
         } else {
@@ -1117,6 +1138,26 @@ impl WorkspaceService {
             }
         }
         removed
+    }
+}
+
+/// What a failed move to the trash means for the person (only an
+/// unavailable trash suggests deleting permanently).
+fn trash_message(failure: &trash::TrashFailure, shown: &str, bin: &str) -> String {
+    let reason = &failure.reason;
+    match failure.kind {
+        trash::TrashFailureKind::InUse => format!(
+            "{shown} is open in another program ({reason}), so it was not moved to {bin}. Close it there and try again; nothing was deleted."
+        ),
+        trash::TrashFailureKind::PermissionDenied => {
+            format!("{shown} could not be moved to {bin}: access was denied ({reason}). Nothing was deleted.")
+        }
+        trash::TrashFailureKind::Unavailable => format!(
+            "{bin} cannot take {shown} ({reason}). Nothing was deleted permanently; use Delete Permanently to remove it without {bin}."
+        ),
+        trash::TrashFailureKind::Other => {
+            format!("{shown} could not be moved to {bin} ({reason}). Nothing was deleted.")
+        }
     }
 }
 

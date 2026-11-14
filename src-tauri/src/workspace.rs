@@ -13,10 +13,11 @@ use exposition_workspace::WorkspaceError;
 use exposition_workspace::WorkspaceService;
 use exposition_workspace::settings::{AppSettings, ProjectSettings};
 use exposition_workspace::types::{
-    DocumentOpened, FileEntry, RecentProject, RecoveryEntry, RestoreOutcome, SaveAllOutcome, WorkspaceInfo,
+    DocumentOpened, FileEntry, RecentProject, RecoveryEntry, RestoreOutcome, SaveAllOutcome, SavedCopy, WorkspaceInfo,
 };
 use exposition_workspace::{AppSettingsState, ProjectSettingsState};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::CommandError;
@@ -214,6 +215,38 @@ pub async fn project_settings_update(
     let tex = state.tex.clone();
     let _ = tauri::async_runtime::spawn_blocking(move || tex.rebuild_watched()).await;
     Ok(saved)
+}
+
+/// Save a copy of a document's CURRENT text (unsaved edits included) to a
+/// NEW file: `destination` (a project path, or an absolute path), or a file
+/// chosen in the native save dialog when it is `None` (`document.saveCanceled`
+/// when dismissed). Never replaces anything (`document.exists`); the document
+/// itself stays as it is, also when its file was deleted and its text kept.
+#[tauri::command]
+pub async fn document_save_copy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    document: DocumentId,
+    destination: Option<String>,
+) -> Result<SavedCopy, CommandError> {
+    blocking(&state, move |ws| {
+        let raw = match destination {
+            Some(path) => path,
+            None => {
+                let (folder, name) = ws.copy_suggestion(&document)?;
+                app.dialog()
+                    .file()
+                    .set_title("Save a copy")
+                    .set_directory(folder)
+                    .set_file_name(name)
+                    .blocking_save_file()
+                    .and_then(|picked| picked.as_path().map(|p| p.display().to_string()))
+                    .ok_or_else(|| WorkspaceError::new("document.saveCanceled", "Saving a copy was canceled."))?
+            }
+        };
+        ws.save_document_copy(&document, &raw)
+    })
+    .await
 }
 
 /// Start the workspace background loop (journals, watcher) and forward

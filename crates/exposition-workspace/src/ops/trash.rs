@@ -28,6 +28,77 @@ pub struct TrashedItem {
     pub deleted_at: i64,
 }
 
+/// Why the trash did not take an entry. Only [`TrashFailureKind::Unavailable`]
+/// means the trash itself cannot take it (where Delete Permanently is the
+/// alternative); the others say why this entry could not be moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrashFailureKind {
+    /// The entry is open or locked by another program (`ops.inUse`).
+    InUse,
+    /// Access to move the entry was refused (`ops.permissionDenied`).
+    PermissionDenied,
+    /// No trash on that volume, the trash is disabled or too small, the item
+    /// is too large or deep for it, or the platform has none (`ops.trashUnavailable`).
+    Unavailable,
+    /// Anything else (`ops.failed`).
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrashFailure {
+    pub kind: TrashFailureKind,
+    /// The OS's reason, for the message.
+    pub reason: String,
+}
+
+impl TrashFailure {
+    pub fn new(kind: TrashFailureKind, reason: impl Into<String>) -> Self {
+        Self { kind, reason: reason.into() }
+    }
+
+    /// The outcome code for this failure.
+    pub fn code(&self) -> &'static str {
+        match self.kind {
+            TrashFailureKind::InUse => "ops.inUse",
+            TrashFailureKind::PermissionDenied => "ops.permissionDenied",
+            TrashFailureKind::Unavailable => "ops.trashUnavailable",
+            TrashFailureKind::Other => "ops.failed",
+        }
+    }
+}
+
+impl std::fmt::Display for TrashFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code(), self.reason)
+    }
+}
+
+/// What a failed shell file operation (an HRESULT) means for the trash.
+pub fn classify_hresult(code: i32) -> TrashFailureKind {
+    match code as u32 {
+        // COPYENGINE_E_SHARING_VIOLATION_SRC/_DEST; ERROR_SHARING_VIOLATION
+        // and ERROR_LOCK_VIOLATION as HRESULTs.
+        0x8027_0027 | 0x8027_0028 | 0x8007_0020 | 0x8007_0021 => TrashFailureKind::InUse,
+        // E_ACCESSDENIED; COPYENGINE_E_ACCESS_DENIED_SRC/_DEST,
+        // _ACCESSDENIED_READONLY, _REQUIRES_ELEVATION.
+        0x8007_0005 | 0x8027_0021 | 0x8027_0022 | 0x8027_003F | 0x8027_0002 => TrashFailureKind::PermissionDenied,
+        // COPYENGINE_E_RECYCLE_UNKNOWN_ERROR, _FORCE_NUKE (no Recycle Bin on
+        // the drive or it is disabled), _SIZE_TOO_BIG, _PATH_TOO_LONG,
+        // _BIN_NOT_FOUND.
+        0x8027_0035 | 0x8027_0036 | 0x8027_0037 | 0x8027_0038 | 0x8027_003A => TrashFailureKind::Unavailable,
+        _ => TrashFailureKind::Other,
+    }
+}
+
+fn failure(error: &trash::Error) -> TrashFailure {
+    let kind = match error {
+        trash::Error::Os { code, .. } if cfg!(windows) => classify_hresult(*code),
+        trash::Error::Os { .. } => TrashFailureKind::Other,
+        _ => TrashFailureKind::Other,
+    };
+    TrashFailure::new(kind, describe(error))
+}
+
 /// The trash as project operations use it (a real one, or a test double).
 pub trait TrashBin: Send + Sync {
     /// Human name for messages ("the Recycle Bin").
@@ -35,7 +106,7 @@ pub trait TrashBin: Send + Sync {
     /// Move these absolute paths (each with a canonical parent) to the trash,
     /// one by one. Returns, per path, whether it was moved and, when it can
     /// be identified reliably, the trashed item.
-    fn delete(&self, paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, String>>;
+    fn delete(&self, paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, TrashFailure>>;
     /// Is the item still in the trash (same identity and deletion time)?
     fn contains(&self, item: &TrashedItem) -> Result<bool, String>;
     /// Move a trashed item to `parent/name` (the caller guarantees that name
@@ -109,12 +180,12 @@ impl TrashBin for OsTrash {
         if cfg!(windows) { "the Recycle Bin" } else { "the Trash" }
     }
 
-    fn delete(&self, paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, String>> {
+    fn delete(&self, paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, TrashFailure>> {
         let paths = paths.to_vec();
         let count = paths.len();
         match on_fresh_thread(move || delete_and_match(&paths)) {
             Ok(results) => results,
-            Err(e) => (0..count).map(|_| Err(e.clone())).collect(),
+            Err(e) => (0..count).map(|_| Err(TrashFailure::new(TrashFailureKind::Other, e.clone()))).collect(),
         }
     }
 
@@ -168,12 +239,13 @@ impl TrashBin for OsTrash {
 }
 
 /// Move each path to the trash and identify the item each one became.
-fn delete_and_match(paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, String>> {
+fn delete_and_match(paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, TrashFailure>> {
     #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
     let before: Option<std::collections::HashSet<String>> =
         listing::list().ok().map(|items| items.iter().map(|i| i.id.to_string_lossy().into_owned()).collect());
     let started = now_secs();
-    let moved: Vec<Result<(), String>> = paths.iter().map(|p| trash::delete(p).map_err(|e| describe(&e))).collect();
+    let moved: Vec<Result<(), TrashFailure>> =
+        paths.iter().map(|p| trash::delete(p).map_err(|e| failure(&e))).collect();
     let finished = now_secs();
     #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
     {
@@ -207,4 +279,34 @@ fn delete_and_match(paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, String
 
 fn now_secs() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_failures_are_told_apart() {
+        for (code, kind) in [
+            (0x8027_0027u32, TrashFailureKind::InUse),
+            (0x8007_0020, TrashFailureKind::InUse),
+            (0x8007_0021, TrashFailureKind::InUse),
+            (0x8007_0005, TrashFailureKind::PermissionDenied),
+            (0x8027_0021, TrashFailureKind::PermissionDenied),
+            (0x8027_003F, TrashFailureKind::PermissionDenied),
+            (0x8027_0002, TrashFailureKind::PermissionDenied),
+            (0x8027_0036, TrashFailureKind::Unavailable),
+            (0x8027_0037, TrashFailureKind::Unavailable),
+            (0x8027_0038, TrashFailureKind::Unavailable),
+            (0x8027_003A, TrashFailureKind::Unavailable),
+            (0x8027_0023, TrashFailureKind::Other),
+            (0x8000_4005, TrashFailureKind::Other),
+        ] {
+            assert_eq!(classify_hresult(code as i32), kind, "{code:#x}");
+        }
+        assert_eq!(TrashFailure::new(TrashFailureKind::InUse, "x").code(), "ops.inUse");
+        assert_eq!(TrashFailure::new(TrashFailureKind::PermissionDenied, "x").code(), "ops.permissionDenied");
+        assert_eq!(TrashFailure::new(TrashFailureKind::Unavailable, "x").code(), "ops.trashUnavailable");
+        assert_eq!(TrashFailure::new(TrashFailureKind::Other, "x").code(), "ops.failed");
+    }
 }

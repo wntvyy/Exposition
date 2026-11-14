@@ -233,6 +233,7 @@ pub fn run() {
             project_ops::clipboard_files_read,
             project_ops::clipboard_files_write,
             project_ops::storage_overview,
+            workspace::document_save_copy,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

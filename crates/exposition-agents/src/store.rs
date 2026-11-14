@@ -21,7 +21,7 @@ use crate::model::{
 };
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (
@@ -143,6 +143,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ALTER TABLE tasks ADD COLUMN deleted_at INTEGER;
     "#,
     ),
+    // P1 agent project operations: what reverting an agent's deletion or copy
+    // needs (the restore token of a trashed item, the digest of a copy).
+    (
+        4,
+        r#"
+    ALTER TABLE task_files ADD COLUMN op_ref TEXT;
+    "#,
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -214,6 +222,9 @@ pub struct TaskFileRow {
     pub state: ReviewState,
     pub change_count: u32,
     pub message: Option<String>,
+    /// Deleted: the restore token of the trashed item (`None`: it cannot be
+    /// identified in the Recycle Bin). Copied: the copy's content digest.
+    pub op_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -635,12 +646,12 @@ impl Store {
     pub fn upsert_task_file(&self, task: &TaskId, row: &TaskFileRow) -> StoreResult<()> {
         self.lock().execute(
             "INSERT INTO task_files (task_id, path, kind, document, checkpoint_text, baseline_text, tip_text, tip_revision,
-                entangled, state, change_count, message, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                entangled, state, change_count, message, updated_at, op_ref)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(task_id, path) DO UPDATE SET kind = excluded.kind, document = excluded.document,
                baseline_text = excluded.baseline_text, tip_text = excluded.tip_text, tip_revision = excluded.tip_revision,
                entangled = excluded.entangled, state = excluded.state, change_count = excluded.change_count,
-               message = excluded.message, updated_at = excluded.updated_at",
+               message = excluded.message, updated_at = excluded.updated_at, op_ref = excluded.op_ref",
             params![
                 task.0,
                 row.path.as_str(),
@@ -654,7 +665,8 @@ impl Store {
                 to_json(&row.state)?,
                 row.change_count,
                 row.message,
-                i(now_ms())
+                i(now_ms()),
+                row.op_ref
             ],
         )?;
         Ok(())
@@ -668,10 +680,22 @@ impl Store {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT path, kind, document, checkpoint_text, baseline_text, tip_text, tip_revision, entangled, state,
-                change_count, message FROM task_files WHERE task_id = ?1 ORDER BY path",
+                change_count, message, op_ref FROM task_files WHERE task_id = ?1 ORDER BY path",
         )?;
-        type Raw =
-            (String, String, Option<String>, String, String, String, Option<i64>, bool, String, u32, Option<String>);
+        type Raw = (
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<i64>,
+            bool,
+            String,
+            u32,
+            Option<String>,
+            Option<String>,
+        );
         let raws: Vec<Raw> = stmt
             .query_map([&task.0], |r| {
                 Ok((
@@ -686,25 +710,42 @@ impl Store {
                     r.get(8)?,
                     r.get(9)?,
                     r.get(10)?,
+                    r.get(11)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         raws.into_iter()
-            .map(|(path, kind, document, checkpoint, baseline, tip, tip_rev, entangled, state, count, message)| {
-                Ok(TaskFileRow {
-                    path: WorkspacePath::parse(&path).map_err(|e| StoreError(e.to_string()))?,
-                    kind: from_json(&kind)?,
+            .map(
+                |(
+                    path,
+                    kind,
                     document,
-                    checkpoint_text: checkpoint,
-                    baseline_text: baseline,
-                    tip_text: tip,
-                    tip_revision: tip_rev.map(u),
+                    checkpoint,
+                    baseline,
+                    tip,
+                    tip_rev,
                     entangled,
-                    state: from_json(&state)?,
-                    change_count: count,
+                    state,
+                    count,
                     message,
-                })
-            })
+                    op_ref,
+                )| {
+                    Ok(TaskFileRow {
+                        path: WorkspacePath::parse(&path).map_err(|e| StoreError(e.to_string()))?,
+                        kind: from_json(&kind)?,
+                        document,
+                        checkpoint_text: checkpoint,
+                        baseline_text: baseline,
+                        tip_text: tip,
+                        tip_revision: tip_rev.map(u),
+                        entangled,
+                        state: from_json(&state)?,
+                        change_count: count,
+                        message,
+                        op_ref,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -1025,7 +1066,7 @@ mod tests {
             .unwrap();
         }
         let store = Store::open(&db).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(store.tasks().unwrap().len(), 1, "existing tasks stay loadable");
         assert!(store.task_bytes(&id).unwrap() > 0);
 
