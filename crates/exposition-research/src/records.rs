@@ -112,24 +112,10 @@ fn deleted_record_marker(root: &Path, id: &str) -> PathBuf {
 }
 
 /// Move a file to `to` only if nothing is there: never replaces (a plain
-/// rename replaces an existing file on Windows). A hard link is created
-/// first (fails if `to` exists), then the source is removed; where links are
-/// not supported the file is copied into a newly created file instead.
+/// rename replaces an existing file on Windows). The workspace's shared
+/// create-new move (`AlreadyExists` when anything is at `to`).
 pub(crate) fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
-    match std::fs::hard_link(from, to) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
-        Err(_) => {
-            let mut source = std::fs::File::open(from)?;
-            let mut target = std::fs::OpenOptions::new().write(true).create_new(true).open(to)?;
-            if let Err(e) = std::io::copy(&mut source, &mut target).and_then(|_| target.sync_all()) {
-                drop(target);
-                let _ = std::fs::remove_file(to);
-                return Err(e);
-            }
-        }
-    }
-    std::fs::remove_file(from)
+    exposition_workspace::fsutil::move_no_replace(from, to)
 }
 
 fn modified_ms(path: &Path) -> u64 {
