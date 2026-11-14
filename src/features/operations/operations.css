@@ -52,19 +52,6 @@
   gap: var(--space-2);
 }
 
-/* Choice labels from the plan can be long: the select grows instead of overflowing. */
-.xp-ops-decision__choices .ui-select__button {
-  height: auto;
-  min-height: var(--control-height-md);
-  padding-top: var(--space-1);
-  padding-bottom: var(--space-1);
-}
-
-.xp-ops-decision__choices .ui-select__value {
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
 /* The collapsible Details section spans the pane inset like any content
    section: its title lines up with the group titles, the chevron hangs left. */
 .xp-ops-decision__details {

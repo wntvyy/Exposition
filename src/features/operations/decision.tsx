@@ -102,6 +102,7 @@ function DecisionBody({
                 options={choice.options.map((o) => ({ id: o.value, label: o.label }))}
                 value={choices[choice.key] ?? choice.default}
                 onChange={(value) => choose(choice.key, value)}
+                wrapValue
               />
             </div>
           ))}

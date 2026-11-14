@@ -551,6 +551,16 @@
   color: var(--color-text);
   text-align: left;
 }
+.ui-select[data-wrap-value] .ui-select__button {
+  height: auto;
+  min-height: var(--control-height-md);
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
+}
+.ui-select[data-wrap-value] .ui-select__value {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .ui-select__button[data-hovered] {
   background: var(--color-surface-hover);
 }

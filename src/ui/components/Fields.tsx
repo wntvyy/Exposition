@@ -140,6 +140,8 @@ export interface SelectProps<K extends Key>
   value?: K | null;
   onChange?: (value: K) => void;
   placeholder?: string;
+  /** Let a long chosen value wrap onto several lines instead of truncating (decision choices). */
+  wrapValue?: boolean;
 }
 
 /** Choose one value from a short list (use a SearchField + list for long lists). */
@@ -152,12 +154,14 @@ export function Select<K extends Key>({
   onChange,
   className,
   placeholder,
+  wrapValue,
   ...props
 }: SelectProps<K>) {
   return (
     <AriaSelect
       {...props}
       placeholder={placeholder}
+      data-wrap-value={wrapValue || undefined}
       className={cx("ui-field ui-select", className)}
       value={value ?? null}
       onChange={(key) => {
