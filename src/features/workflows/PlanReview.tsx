@@ -200,11 +200,13 @@ function PlanStepView({ plan, step, index }: { plan: WorkflowRunPlan; step: Work
         const inputId = b.from.input;
         const input = plan.inputs.find((x) => x.id === inputId);
         if (!input || input.text === null) return null;
+        const lean = input.portType === "formalSource";
         return (
           <div className="xp-wf-plan__payload" key={`script-${i}`}>
             <div className="xp-wf-plan__label">
-              Code from <code>{input.path}</code> ({input.text.split("\n").length} lines, <FullHash hash={input.sha256} label={input.path} />) — runs exactly as
-              shown
+              {lean ? "Lean source" : "Code from"} <code>{input.path}</code> ({input.text.split("\n").length} lines,{" "}
+              <FullHash hash={input.sha256} label={input.path} />) —{" "}
+              {lean ? "the audit elaborates exactly this text (elaboration can run code)" : "runs exactly as shown"}
             </div>
             <CodeListing text={input.text} label={`Code of step ${step.label} from ${input.path}`} testId={`plan-script-${step.step}`} />
           </div>

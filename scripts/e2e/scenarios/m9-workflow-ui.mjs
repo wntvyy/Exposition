@@ -263,19 +263,21 @@ export default async function m9WorkflowUi({ launchApp, artifactsDir, assert }) 
     // ---- B. plan review ---------------------------------------------------------------------
     await section("plan-review", async () => {
       await page.getByTestId("workflow-review-run").first().click();
-      const details = page.getByTestId("workflow-plan-details");
+      // Scoped to the open review dialog (run monitors also hold the approved plan, collapsed).
+      const dialog = page.getByTestId("workflow-plan-review");
+      const details = dialog.getByTestId("workflow-plan-details");
       await details.waitFor({ timeout: 30_000 });
       const plan = await invoke(page, "workflow_run_plan", { id: parent.id, revision: null });
       const expanded = plan.steps.filter((s) => s.step.includes("/"));
-      const groups = await page.locator('[data-testid^="plan-group-"]').count();
-      const groupText = groups ? await page.locator('[data-testid^="plan-group-"]').first().innerText() : "";
+      const groups = await dialog.locator('[data-testid^="plan-group-"]').count();
+      const groupText = groups ? await dialog.locator('[data-testid^="plan-group-"]').first().innerText() : "";
       note("plan-groups-composite-children-with-code", groups >= 1 && expanded.length >= 1 && /Inside the workflow step/.test(groupText) && groupText.includes("EXPOSITION_OUTPUT_DIR"), {
         expanded: expanded.map((s) => [s.step, s.compositePath]),
         groupText: groupText.slice(0, 300),
       });
-      const condition = await page.getByTestId("plan-condition-flagged").innerText().catch(() => "");
-      const repeat = await page.getByTestId("plan-repeat-sweep").innerText().catch(() => "");
-      const concurrency = page.getByTestId("plan-concurrency");
+      const condition = await dialog.getByTestId("plan-condition-flagged").innerText().catch(() => "");
+      const repeat = await dialog.getByTestId("plan-repeat-sweep").innerText().catch(() => "");
+      const concurrency = dialog.getByTestId("plan-concurrency");
       note("plan-states-condition-and-iterations", /Runs only if/.test(condition) && /2 values/.test(repeat), { condition, repeat });
       note(
         "plan-states-max-parallel-and-global-limits",
@@ -283,7 +285,7 @@ export default async function m9WorkflowUi({ launchApp, artifactsDir, assert }) 
         await concurrency.innerText(),
       );
       await shot("m9-plan-review", { themes: ["light", "dark"] });
-      await page.getByTestId("plan-group-" + (expanded[0]?.step.split("/")[0] ?? "x")).scrollIntoViewIfNeeded().catch(() => {});
+      await dialog.getByTestId("plan-group-" + (expanded[0]?.step.split("/")[0] ?? "x")).scrollIntoViewIfNeeded().catch(() => {});
       await shot("m9-plan-review-composite");
       const runsBefore = (await invoke(page, "workflow_runs", { workflow: parent.id })).length;
       note("nothing-started-before-start-run", runsBefore === 0, runsBefore);
@@ -370,9 +372,11 @@ export default async function m9WorkflowUi({ launchApp, artifactsDir, assert }) 
 
       // Reproduce: a reviewed plan pinned to the recorded inputs; the new run's cause.
       await visible("workflow-run-reproduce").click();
-      await page.getByTestId("workflow-plan-details").waitFor({ timeout: 30_000 });
-      const reproduces = await page.getByTestId("plan-reproduces").innerText().catch(() => "");
-      const drift = await page.getByTestId("plan-drift").innerText().catch(() => null);
+      // The Reproduce dialog's plan, not the approved plan held (collapsed) by the run monitor.
+      const reproDialog = page.getByTestId("workflow-plan-review");
+      await reproDialog.getByTestId("workflow-plan-details").waitFor({ timeout: 30_000 });
+      const reproduces = await reproDialog.getByTestId("plan-reproduces").innerText().catch(() => "");
+      const drift = await reproDialog.getByTestId("plan-drift").innerText().catch(() => null);
       note("reproduce-plan-reviewed", reproduces.includes(firstRunId), { reproduces, drift });
       await shot("m9-reproduce-plan", { themes: ["light", "dark"] });
       await page.getByTestId("workflow-start-run").click();
