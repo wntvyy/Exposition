@@ -34,3 +34,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 ts-rs.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# P1 native file clipboard (CF_HDROP).
+windows-sys.workspace = true

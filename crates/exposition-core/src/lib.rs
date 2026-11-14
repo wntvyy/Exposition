@@ -11,6 +11,7 @@ pub mod build;
 pub mod document;
 pub mod identity;
 pub mod job;
+pub mod ops;
 pub mod path;
 pub mod roots;
 pub mod text;

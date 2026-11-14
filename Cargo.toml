@@ -53,7 +53,14 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
+  # P1 native file clipboard (CF_HDROP file lists).
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  "Win32_UI_Shell",
 ] }
+# P1 project operations: OS Trash / Recycle Bin (delete + restore).
+trash = "5"
 # PDF rendering and glyph-level interpretation (TeX page mapping).
 hayro = "0.9"
 flate2 = "1"

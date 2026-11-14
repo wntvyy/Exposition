@@ -16,6 +16,9 @@ ts-rs.workspace = true
 sha2.workspace = true
 notify.workspace = true
 
+# P1: deletion goes to the OS Trash / Recycle Bin (never a silent permanent fallback).
+trash.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 # File identity (volume serial + file index) to unify hard links.
 winapi-util.workspace = true
