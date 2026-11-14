@@ -68,8 +68,11 @@ export function PanelBody({ className, children }: { className?: string; childre
 export interface SectionProps {
   title: ReactNode;
   children: ReactNode;
-  /** Count shown after the title in muted text ("Relationships 3"). */
-  count?: number;
+  /** Count or short fact shown after the title in muted text ("Relationships 3", "2 · 3.0 MiB"). */
+  count?: number | string;
+  /** Id of the heading (for aria-labelledby). */
+  headingId?: string;
+  "data-testid"?: string;
   /** Collapsible sections remember nothing; persist expansion in the owning view if needed. */
   collapsible?: boolean;
   defaultExpanded?: boolean;
@@ -94,11 +97,13 @@ export function Section({
   actions,
   className,
   variant = "content",
+  headingId,
+  ...rest
 }: SectionProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const bodyId = useId();
   const heading = (
-    <h3 className={cx("ui-section__title", variant === "chrome" ? "ui-chrome-label" : "ui-section-title")}>
+    <h3 className={cx("ui-section__title", variant === "chrome" ? "ui-chrome-label" : "ui-section-title")} id={headingId}>
       {title}
       {count !== undefined && (
         <>
@@ -109,7 +114,12 @@ export function Section({
     </h3>
   );
   return (
-    <section className={cx("ui-section", className)} data-variant={variant} data-expanded={expanded || undefined}>
+    <section
+      className={cx("ui-section", className)}
+      data-variant={variant}
+      data-expanded={expanded || undefined}
+      data-testid={rest["data-testid"]}
+    >
       <div className="ui-section__header">
         {collapsible ? (
           <button
@@ -150,6 +160,8 @@ export interface PageHeaderProps {
   status?: ReactNode;
   /** Heading level of the title (default 2). */
   level?: 1 | 2;
+  /** Id of the title heading (for aria-labelledby on the page). */
+  titleId?: string;
   /** `data-region` for F6 cycling (e.g. "graph-header"). */
   region?: string;
   /** Test id passthrough. */
@@ -174,6 +186,7 @@ export function PageHeader({
   actions,
   status,
   level = 2,
+  titleId,
   region,
   className,
   toolbar,
@@ -185,7 +198,9 @@ export function PageHeader({
     <>
       <header className={cx("ui-page-header", className)} data-region={region} data-testid={rest["data-testid"]}>
         <div className="ui-page-header__lead">
-          <Heading className="ui-page-header__title">{title}</Heading>
+          <Heading className="ui-page-header__title" id={titleId}>
+            {title}
+          </Heading>
           {subtitle && <span className="ui-page-header__subtitle">{subtitle}</span>}
         </div>
         {views && <div className="ui-page-header__views">{views}</div>}

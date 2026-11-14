@@ -11,6 +11,8 @@ export interface SimpleTableColumn<T> {
   numeric?: boolean;
   /** Visually hidden header text (e.g. a checkbox column); still read by screen readers. */
   hideTitle?: boolean;
+  /** This column names the row: cells render as `<th scope="row">`. */
+  isRowHeader?: boolean;
   render: (row: T) => ReactNode;
 }
 
@@ -25,6 +27,9 @@ export interface SimpleTableProps<T> {
   /** Extra attributes for a row (`data-*` for tests and P1 operations). */
   rowProps?: (row: T) => Record<string, string | boolean | undefined>;
   className?: string;
+  "data-testid"?: string;
+  /** Set while the rows are being (re)loaded. */
+  "aria-busy"?: boolean;
 }
 
 /**
@@ -36,8 +41,8 @@ export interface SimpleTableProps<T> {
  */
 export function SimpleTable<T>({ columns, rows, rowKey, empty, rowProps, className, ...aria }: SimpleTableProps<T>) {
   return (
-    <div className={cx("ui-data-table", "ui-simple-table", className)}>
-      <table className="ui-data-table__table" aria-label={aria["aria-label"]}>
+    <div className={cx("ui-data-table", "ui-simple-table", className)} data-testid={aria["data-testid"]}>
+      <table className="ui-data-table__table" aria-label={aria["aria-label"]} aria-busy={aria["aria-busy"] || undefined}>
         <thead>
           <tr>
             {columns.map((column) => (
@@ -63,11 +68,17 @@ export function SimpleTable<T>({ columns, rows, rowKey, empty, rowProps, classNa
           ) : (
             rows.map((row) => (
               <tr key={rowKey(row)} className="ui-data-table__row" {...(rowProps?.(row) ?? {})}>
-                {columns.map((column) => (
-                  <td key={column.id} className="ui-data-table__cell" data-numeric={column.numeric || undefined}>
-                    {column.render(row)}
-                  </td>
-                ))}
+                {columns.map((column) =>
+                  column.isRowHeader ? (
+                    <th key={column.id} scope="row" className="ui-data-table__cell" data-numeric={column.numeric || undefined}>
+                      {column.render(row)}
+                    </th>
+                  ) : (
+                    <td key={column.id} className="ui-data-table__cell" data-numeric={column.numeric || undefined}>
+                      {column.render(row)}
+                    </td>
+                  ),
+                )}
               </tr>
             ))
           )}

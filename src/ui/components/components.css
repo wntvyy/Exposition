@@ -1057,6 +1057,14 @@
 .ui-status-text > .ui-spinner {
   flex: none;
 }
+.ui-status-text[data-wrap] {
+  align-items: flex-start;
+  font-weight: var(--font-weight-regular);
+  white-space: normal;
+}
+.ui-status-text[data-wrap] > svg {
+  margin-top: 2px;
+}
 .ui-status-text__detail {
   color: var(--color-text-muted);
   font-weight: var(--font-weight-regular);
@@ -1126,7 +1134,7 @@
 .ui-state[data-size="compact"] {
   align-items: stretch;
   gap: var(--space-1-5);
-  padding: var(--space-2) var(--pane-inset);
+  padding: var(--space-2) var(--list-inset, var(--pane-inset));
   text-align: start;
 }
 .ui-state__line {
@@ -1713,6 +1721,10 @@
   text-align: end;
   font-variant-numeric: tabular-nums;
 }
+th.ui-data-table__cell {
+  font-weight: var(--font-weight-medium);
+  text-align: start;
+}
 .ui-data-table__cell {
   height: var(--row-height-table);
   padding: var(--space-0-5) var(--space-2);
@@ -2019,7 +2031,8 @@
   align-items: flex-start;
   gap: var(--space-2);
   min-height: var(--row-height-tree);
-  padding: var(--space-1-5) var(--space-2) var(--space-1-5) var(--pane-inset);
+  /* --list-inset: set to 0 on a container that already pads its content. */
+  padding: var(--space-1-5) var(--space-2) var(--space-1-5) var(--list-inset, var(--pane-inset));
   border-bottom: var(--border-width) solid var(--color-border-subtle);
   color: var(--color-text);
   outline: none;
