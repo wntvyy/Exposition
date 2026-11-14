@@ -136,6 +136,26 @@ describe("Project graph table (keyboard alternative)", () => {
     expect(screen.getByText("Related item", { selector: ".ui-field__label" })).toBeTruthy();
   });
 
+  it("P1: the inspector's operation items show no key hints (the keys act on the canvas/table selection, not in the inspector)", async () => {
+    localStorage.setItem("exposition.graph.mode.project", "table");
+    graph.start();
+    await waitFor(() => expect(useGraph.getState().vocabulary).not.toBeNull());
+    const store = createViewStore("Project", { kind: "project" }, { saveDelayMs: 5 });
+    await store.load();
+    render(<ProjectGraph store={store} />);
+    const grid = await screen.findByRole("grid", { name: "Entities" });
+    const row = within(grid).getByRole("rowheader", { name: "Reading list" }).closest('[role="row"]') as HTMLElement;
+    act(() => row.focus());
+    fireEvent.keyDown(row, { key: " ", code: "Space" });
+    fireEvent.keyUp(row, { key: " ", code: "Space" });
+    const inspector = await screen.findByTestId("graph-entity-inspector");
+    fireEvent.click(within(inspector).getByRole("button", { name: "More actions" }));
+    const menu = await screen.findByRole("menu", { name: "More actions" });
+    const del = within(menu).getByRole("menuitem", { name: /Delete Entity/ });
+    expect(del.querySelector(".ui-menu-item__keys")).toBeNull();
+    expect(menu.querySelectorAll(".ui-menu-item__keys").length).toBe(0);
+  });
+
   it("hides an item from the view without changing the graph", async () => {
     localStorage.setItem("exposition.graph.mode.project", "table");
     graph.start();

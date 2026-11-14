@@ -4,6 +4,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../operations/ipc", () => ({ opCommands: {}, opEvents: { projectOp: vi.fn(async () => () => {}) } }));
+const notifications = vi.hoisted(() => ({ notify: vi.fn(), dismiss: vi.fn() }));
+vi.mock("../../app/notifications", () => notifications);
 vi.mock("../workspace/fileOps", () => ({ copySelection: vi.fn(), createdPaths: () => [], pasteInto: vi.fn() }));
 vi.mock("./space", () => ({
   parseItemKey: (key: string) => {
@@ -32,6 +34,15 @@ const listing = {
   graphRevision: 1,
   graphUnavailable: null,
 } as unknown as ResearchListing;
+
+describe("experiment Copy", () => {
+  it("copies the experiment for Paste in the graph and says so", async () => {
+    const actions = researchActions(resolveResearchKeys(["experiment:ent-exp"], listing), { root: "C:/p" });
+    expect(actions.copy?.enabled).toBe(true);
+    await actions.copy!.run();
+    expect(notifications.notify).toHaveBeenLastCalledWith(expect.objectContaining({ tone: "info", title: "Copied experiment “Exp A”" }));
+  });
+});
 
 describe("research selection", () => {
   it("resolves files, results, experiments, groups; a deleted file no longer resolves", () => {

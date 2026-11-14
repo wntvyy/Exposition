@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runCommand } from "../palette.mjs";
-import { consoleErrors, decision, dismissNotifications, expectNoDialog, notifications, publishShots, waitForNotification, settle } from "../p1-helpers.mjs";
+import { consoleErrors, decision, dismissNotifications, expectNoDialog, notifications, publishShots, waitForNotification, settle, platformSkip } from "../p1-helpers.mjs";
 import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const IMAGE = "python:3.13-slim";
@@ -56,6 +56,11 @@ function workflow() {
 }
 
 export default async function p1Storage({ launchApp, artifactsDir, assert }) {
+  const skip = platformSkip();
+  if (skip) {
+    console.log(`SKIPPED: p1-storage ${skip}`);
+    return;
+  }
   const base = await mkdtemp(join(tmpdir(), "xp-p1-storage-"));
   const root = join(base, "project");
   const dataDir = join(base, "data");
@@ -143,7 +148,7 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
         await dismissNotifications(page);
 
         // The held outputs are listed under recoverable deletions; purging them is one decision and frees their files.
-        await runCommand(page, "Storage and History", /Preferences: Storage and History/);
+        await runCommand(page, "Storage & History", /Preferences: Storage & History/);
         const heldRow = page.locator('[data-testid="storage-item"][data-key^="recoverableDeletions|recoverable:runOutputs:"]').first();
         await heldRow.waitFor({ timeout: 15_000 });
         await shot(page, "p1-storage-held-outputs-light");
@@ -168,7 +173,7 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
     }
 
     // --- 3. Storage & History ------------------------------------------------------------
-    await runCommand(page, "Storage and History", /Preferences: Storage and History/);
+    await runCommand(page, "Storage & History", /Preferences: Storage & History/);
     const storage = page.getByTestId("settings-storage");
     await storage.waitFor({ timeout: 15_000 });
     await page.waitForFunction(() => document.querySelector('[data-testid="storage-scope"]') || document.querySelector('[data-testid="settings-storage"] .ui-state'), null, { timeout: 15_000 });

@@ -241,11 +241,11 @@ export function recoveryText(recovery: OpRecovery): string {
   }
 }
 
-/** Codes of a restore refused because the original location is occupied. */
-export const COLLISION_CODES = new Set(["ops.occupied", "ops.collision", "ops.exists", "ops.restoreCollision"]);
+/** The backend's code for a restore refused because the original location is occupied (with `onCollision: "cancel"`). */
+export const RESTORE_COLLISION = "ops.restoreCollision";
 
 export function isCollision(outcome: OpOutcome): boolean {
-  return outcome.status !== "succeeded" && outcome.code !== null && COLLISION_CODES.has(outcome.code);
+  return outcome.status !== "succeeded" && outcome.code === RESTORE_COLLISION;
 }
 
 export const TRASH_UNAVAILABLE = "ops.trashUnavailable";

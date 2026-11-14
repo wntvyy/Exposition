@@ -169,3 +169,14 @@ export async function settle(page) {
     .catch(() => {});
   await page.waitForTimeout(200);
 }
+
+/**
+ * Why a P1 scenario cannot run on this platform (`null`: it can). They read
+ * the Windows Recycle Bin, the CF_HDROP clipboard, junctions and sharing
+ * violations back through PowerShell, and drive WebView2 over CDP.
+ */
+export function platformSkip(platform = process.platform) {
+  return platform === "win32"
+    ? null
+    : `needs Windows (the Recycle Bin, the CF_HDROP clipboard, junctions and sharing violations are read back through PowerShell; the app is driven over WebView2/CDP); this host is ${platform}`;
+}

@@ -4,6 +4,7 @@
 // through the plan's decision (stop first, or cancel). Tasks are not
 // duplicated: a historical task is never replayed as a new success; start a
 // new task to reuse its instructions.
+import { notify } from "../../app/notifications";
 import type { OpTarget } from "../../bindings/OpTarget";
 import type { TaskSummary } from "../../bindings/TaskSummary";
 import { runUserOperation } from "../operations/client";
@@ -24,7 +25,12 @@ export function taskActions(selected: TaskSummary[]): { actions: SurfaceActions 
         reason: none,
         description: "Copies the task title as text",
         run: async () => {
-          await writeText(selected.map((t) => t.title).join("\n"));
+          const copied = await writeText(selected.map((t) => t.title).join("\n"));
+          notify(
+            copied
+              ? { tone: "info", title: selected.length === 1 ? `Copied the title of “${selected[0]!.title}”` : `Copied ${selected.length} task titles` }
+              : { tone: "warning", title: "Could not copy to the clipboard" },
+          );
         },
       },
       duplicate: {

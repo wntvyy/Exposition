@@ -49,7 +49,6 @@ import {
 import { runUserOperation } from "../operations/client";
 import { targetKey, trashName } from "../operations/model";
 import { opMenuItems, runMenuKey } from "../operations/OpMenu";
-import { keybindingFor } from "../operations/surfaces";
 import { errorText, graphApi } from "./api";
 import { runChange } from "./changes";
 import { graphActions } from "./graphOps";
@@ -205,7 +204,6 @@ export function RelationActions({ relation, description }: { relation: Relation;
         icon={Trash2}
         size="sm"
         aria-label="Delete relationship"
-        keybinding={keybindingFor("delete")}
         onPress={() => void deleteRelationship(relation, description)}
       />
     </Toolbar>
@@ -459,7 +457,7 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
               )
             ) : null}
             <MenuSeparator />
-            {opMenuItems({ duplicate: ops.actions.duplicate, delete: ops.actions.delete, deletePermanently: ops.actions.deletePermanently }, ops.extras)}
+            {opMenuItems({ duplicate: ops.actions.duplicate, delete: ops.actions.delete, deletePermanently: ops.actions.deletePermanently }, ops.extras, { keys: false })}
           </Menu>
         </MenuTrigger>
       </Toolbar>

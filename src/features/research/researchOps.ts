@@ -3,6 +3,7 @@
 // operations, with impact handling for evidence and manuscript use);
 // experiments and external references are graph items; group folders are
 // managed and saved workflows are changed in the Workflows tab.
+import { notify } from "../../app/notifications";
 import type { OpTarget } from "../../bindings/OpTarget";
 import type { ResearchListing } from "../../bindings/ResearchListing";
 import { runUserOperation } from "../operations/client";
@@ -112,7 +113,14 @@ export function researchActions(
       reason: items.length === 0 ? none : "Copy files and experiments separately; references and groups are not copied",
       run: async () => {
         if (copyable) await copySelection(fileItems);
-        else appClipboard.set({ kind: "graph", entities: experiments.map((e) => ({ id: (e as { entity: string }).entity, label: e.name })) });
+        else {
+          appClipboard.set({ kind: "graph", entities: experiments.map((e) => ({ id: (e as { entity: string }).entity, label: e.name })) });
+          notify({
+            tone: "info",
+            title: experiments.length === 1 ? `Copied experiment “${experiments[0]!.name}”` : `Copied ${experiments.length} experiments`,
+            body: "Paste in the project graph makes a separate copy.",
+          });
+        }
       },
     },
     paste: {

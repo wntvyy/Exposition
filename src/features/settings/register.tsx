@@ -53,7 +53,7 @@ registry.registerCommand({
 
 registry.registerCommand({
   id: "settings.storage",
-  title: "Storage and History",
+  title: "Storage & History",
   category: "Preferences",
   run: () => openSettings("storage"),
 });

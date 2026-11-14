@@ -255,7 +255,7 @@ export function graphActions(selection: GraphSelection, options: GraphActionOpti
   if (options.onHide && entities.length > 0) {
     extras.push({
       id: "hide",
-      label: "Hide from View",
+      label: "Hide from view",
       icon: EyeOff,
       description: "This view only; nothing is deleted",
       run: () => options.onHide?.(entities.map((e) => e.id)),
