@@ -135,22 +135,6 @@
   overflow-wrap: anywhere;
 }
 
-/* Native textarea (no shared multi-line field yet) styled as .ui-input. */
-.agents-textarea {
-  height: auto;
-  min-height: calc(var(--control-height-md) * 2);
-  padding: var(--space-1-5) var(--space-2);
-  line-height: var(--line-height-normal);
-  resize: vertical;
-  font-family: inherit;
-}
-
-.agents-textarea:focus {
-  border-color: var(--color-focus-ring);
-  outline: var(--border-width) solid var(--color-focus-ring);
-  outline-offset: 0;
-}
-
 /* ---------- Task rows ---------- */
 
 /* The meta line's parts stay flex items of the ListRow meta line. */

@@ -75,22 +75,6 @@
   min-width: 0;
 }
 
-/* Native textarea (no shared multi-line field yet) styled as .ui-input. */
-.xp-proj__textarea {
-  height: auto;
-  min-height: calc(var(--control-height-md) * 3);
-  padding: var(--space-1-5) var(--space-2);
-  line-height: var(--line-height-normal);
-  resize: vertical;
-  font-family: inherit;
-}
-
-.xp-proj__textarea:focus {
-  border-color: var(--color-focus-ring);
-  outline: var(--border-width) solid var(--color-focus-ring);
-  outline-offset: 0;
-}
-
 .xp-proj__preview {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

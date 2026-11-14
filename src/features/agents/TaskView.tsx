@@ -7,7 +7,7 @@ import type { TaskStatus } from "../../bindings/TaskStatus";
 import type { TaskSummary } from "../../bindings/TaskSummary";
 import type { TranscriptItem } from "../../bindings/TranscriptItem";
 import { commands } from "../../lib/ipc";
-import { Banner, Button, IconButton, LoadingState, ProgressBar, Section, StatusPill, StatusText } from "../../ui/components";
+import { Banner, Button, IconButton, LoadingState, ProgressBar, Section, StatusPill, StatusText, TextArea } from "../../ui/components";
 import {
   activeToolLabel,
   budgetRows,
@@ -21,7 +21,6 @@ import {
 } from "./format";
 import { freshnessLabel, graphSummary } from "./GraphViews";
 import { agents, useAgents, type StreamDraft } from "./store";
-import { TextArea } from "./TaskComposer";
 
 function BudgetMeter({ task }: { task: TaskSummary }) {
   return (

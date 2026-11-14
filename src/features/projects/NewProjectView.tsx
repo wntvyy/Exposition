@@ -5,7 +5,7 @@
 // no installs, nothing sent to a model (the objective path's agent task
 // follows the provider settings and the permission chosen here).
 import { FolderOpen, FolderPlus, Sparkles } from "lucide-react";
-import { useEffect, useId } from "react";
+import { useEffect } from "react";
 
 import type { BlueprintDiagnostic } from "../../bindings/BlueprintDiagnostic";
 import type { CapabilityStatus } from "../../bindings/CapabilityStatus";
@@ -21,6 +21,7 @@ import {
   Select,
   Spinner,
   StatusText,
+  TextArea,
   TextField,
 } from "../../ui/components";
 import { EXECUTION_LABELS, PERMISSION_LABELS } from "../agents/format";
@@ -36,26 +37,6 @@ import {
   useProjects,
   type NewProjectMode,
 } from "./store";
-
-function TextArea(props: { label: string; value: string; onChange: (v: string) => void; rows?: number; testId?: string; placeholder?: string }) {
-  const id = useId();
-  return (
-    <div className="ui-field">
-      <label className="ui-field__label" htmlFor={id}>
-        {props.label}
-      </label>
-      <textarea
-        id={id}
-        className="ui-input xp-proj__textarea"
-        rows={props.rows ?? 4}
-        value={props.value}
-        placeholder={props.placeholder}
-        onChange={(e) => props.onChange(e.target.value)}
-        data-testid={props.testId}
-      />
-    </div>
-  );
-}
 
 function CapabilityRow({ status }: { status: CapabilityStatus }) {
   return (
