@@ -161,6 +161,13 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
       assert.equal((await call("workflow_run_get", { run: run.id })).state, "running", "kept: the run keeps running");
       await dismissNotifications(page);
 
+      // Diagnostic: is the plan of the same request stable while the run works?
+      const probe = { kind: { kind: "delete", permanent: false }, targets: [{ kind: "path", path: "data/slow.csv" }], actor: { kind: "user" } };
+      const first = await call("project_op_plan", { request: probe });
+      await page.waitForTimeout(2000);
+      const second = await call("project_op_plan", { request: probe });
+      const brief = (pl) => JSON.stringify({ impacts: pl.impacts.map((i) => [i.kind, i.message, i.consumers.map((c) => c.id)]), effects: pl.effects.map((e) => e.description) });
+      evidence.notes.push(`plan hash stable over 2 s while the run works: ${first.planHash === second.planHash}${first.planHash === second.planHash ? "" : ` (first ${brief(first)}; second ${brief(second)})`}`);
       // Stop, then delete.
       await selectFiles(page, ["data/slow.csv"]);
       await page.keyboard.press("Delete");
