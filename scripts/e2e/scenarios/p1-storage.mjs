@@ -132,7 +132,7 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
         await d.waitFor({ timeout: 15_000 });
         assert.equal(await d.locator('[data-choice="outputs"]').getAttribute("data-value"), "delete", "outputs scope preset and reviewed");
         await shot(page, "p1-run-outputs-decision-light");
-        await d.getByRole("button", { name: /^Delete/ }).click();
+        await d.locator(".ui-dialog__footer button").last().click();
         await waitFor(async () => !(await invoke(page, "workflow_runs", { workflow: null })).some((r) => r.id === run.id), { timeout: 15_000, message: "run record removed" });
         for (const p of outputs) assert.ok(!existsSync(join(root, ...p.split("/"))), `output ${p} removed`);
         assert.equal(await readFile(join(root, "data", "obs.csv"), "utf8"), "x,y\n0,1\n1,3\n", "the input is never deleted");
@@ -165,7 +165,7 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
       await page.getByTestId("storage-purge").click();
       if (await decision(page).count()) {
         await shot(page, "p1-storage-purge-decision-light");
-        await decision(page).getByRole("button", { name: /^Delete/ }).click();
+        await decision(page).locator(".ui-dialog__footer button").last().click();
       }
       const rowKeys = (o) => new Set(o.categories.flatMap((c) => c.items.map((i) => `${c.id}|${JSON.stringify(i.target)}`)));
       const before = rowKeys(overview);
