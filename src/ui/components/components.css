@@ -845,6 +845,10 @@
 .ui-modal[data-size="lg"] {
   width: min(720px, calc(100vw - var(--space-8)));
 }
+.ui-modal[data-size="xl"] {
+  width: min(var(--content-max-width), calc(100vw - var(--space-8)));
+  max-height: 86vh;
+}
 .ui-dialog {
   display: flex;
   flex-direction: column;
@@ -1183,10 +1187,6 @@
 .ui-state[data-size="compact"]:not(:has(.ui-state__inline-icon, .ui-spinner)) .ui-state__actions {
   padding-left: 0;
 }
-/* Inside a content section the body already carries the pane inset. */
-.ui-section[data-variant="content"] > .ui-section__body > .ui-state[data-size="compact"] {
-  padding-inline: 0;
-}
 .ui-state__description {
   max-width: 360px;
   font-size: var(--font-size-md);
@@ -1370,7 +1370,7 @@
   color: var(--color-text-muted);
   transition: transform var(--duration-fast) var(--ease-standard);
 }
-.ui-section[data-expanded] .ui-section__chevron {
+.ui-section[data-expanded] > .ui-section__header .ui-section__chevron {
   transform: rotate(90deg);
 }
 .ui-section__title {
@@ -1390,6 +1390,7 @@
   padding: var(--space-1) 0 var(--space-2);
 }
 .ui-section[data-variant="content"] > .ui-section__body {
+  --list-inset: 0px;
   padding: var(--space-1) var(--pane-inset) var(--space-3);
 }
 
@@ -1832,6 +1833,16 @@ th.ui-data-table__cell {
   padding: 0 var(--space-1) 0 var(--space-2);
   border-bottom: var(--border-width) solid var(--node-border);
   background: var(--node-bg);
+}
+.ui-node-card[data-has-extra] {
+  height: auto;
+  overflow: visible;
+}
+.ui-node-card[data-has-extra] > .ui-node-card__header {
+  border-radius: calc(var(--radius-md) - var(--border-width)) calc(var(--radius-md) - var(--border-width)) 0 0;
+}
+.ui-node-card__extra {
+  min-width: 0;
 }
 .ui-node-card__body {
   display: flex;

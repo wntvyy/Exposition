@@ -23,7 +23,8 @@ export interface DialogProps {
   footer?: ReactNode;
   /** `alertdialog` for interruptions that need a decision (unsaved changes, destructive actions). */
   role?: "dialog" | "alertdialog";
-  size?: "sm" | "md" | "lg";
+  /** `xl`: the content reading width (long reviews such as a workflow plan). */
+  size?: "sm" | "md" | "lg" | "xl";
   /** Dismiss by clicking the backdrop (default true for `dialog`, false for `alertdialog`). */
   isDismissable?: boolean;
   isOpen?: ModalOverlayProps["isOpen"];

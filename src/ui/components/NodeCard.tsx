@@ -22,6 +22,8 @@ export interface NodeCardProps {
   /** Archived/inactive item: dashed outline. */
   inactive?: boolean;
   className?: string;
+  /** Extra rows below the body that reach the card edges (e.g. workflow port rows with handles). */
+  children?: ReactNode;
 }
 
 /**
@@ -43,6 +45,7 @@ export function NodeCard({
   dimmed,
   inactive,
   className,
+  children,
 }: NodeCardProps) {
   return (
     <div
@@ -51,6 +54,7 @@ export function NodeCard({
       data-selected={selected || undefined}
       data-dimmed={dimmed || undefined}
       data-inactive={inactive || undefined}
+      data-has-extra={children ? true : undefined}
     >
       <div className="ui-node-card__header">
         <span className="ui-node-card__type">
@@ -65,6 +69,7 @@ export function NodeCard({
         </p>
         {badges && <div className="ui-node-card__badges">{badges}</div>}
       </div>
+      {children && <div className="ui-node-card__extra">{children}</div>}
     </div>
   );
 }

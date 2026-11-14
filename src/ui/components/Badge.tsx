@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 
 import type { IconComponent } from "./Button";
 import { cx } from "./cx";
@@ -10,7 +10,7 @@ import { cx } from "./cx";
  */
 export type BadgeTone = "neutral" | "info" | "success" | "warning" | "danger" | "stale" | "accent";
 
-export interface BadgeProps {
+export interface BadgeProps extends Omit<HTMLAttributes<HTMLSpanElement>, "children" | "title" | "className"> {
   tone?: BadgeTone;
   icon?: IconComponent;
   /** Dashed outline: a provisional or uncertain fact (suggested, unknown, unresolved). */
@@ -27,9 +27,9 @@ export interface BadgeProps {
  * with an icon; never color alone. Lifecycle status of builds/runs/checks uses
  * `StatusPill` instead.
  */
-export function Badge({ tone = "neutral", icon: Icon, dashed, children, className, title }: BadgeProps) {
+export function Badge({ tone = "neutral", icon: Icon, dashed, children, className, title, ...rest }: BadgeProps) {
   return (
-    <span className={cx("ui-badge", className)} data-tone={tone} data-dashed={dashed || undefined} title={title}>
+    <span {...rest} className={cx("ui-badge", className)} data-tone={tone} data-dashed={dashed || undefined} title={title}>
       {Icon && <Icon size={12} aria-hidden />}
       <span className="ui-badge__label">{children}</span>
     </span>

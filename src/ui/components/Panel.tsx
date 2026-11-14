@@ -258,6 +258,8 @@ export interface KeyValueItem {
   value: ReactNode;
   /** Monospace value (paths, hashes, ids). */
   code?: boolean;
+  /** Extra attributes on the value element (`data-*` for tests). */
+  valueProps?: Record<string, string | undefined>;
 }
 
 /** Label/value facts (Path, Kind, Digest…): one grid layout for every inspector and dialog. */
@@ -267,7 +269,7 @@ export function KeyValueList({ items, className }: { items: KeyValueItem[]; clas
       {items.map((item) => (
         <div className="ui-kv__row" key={item.key}>
           <dt className="ui-kv__label">{item.label}</dt>
-          <dd className="ui-kv__value" data-code={item.code || undefined}>
+          <dd className="ui-kv__value" data-code={item.code || undefined} {...(item.valueProps ?? {})}>
             {item.value}
           </dd>
         </div>
