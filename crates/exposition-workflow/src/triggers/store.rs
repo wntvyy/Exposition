@@ -3,9 +3,10 @@
 //! Triggers are the user's standing approvals, so they live with the
 //! application's data — never in the project folder, a workflow definition,
 //! a project graph, or a bundle — and are written atomically (a temporary
-//! file, then a rename). A record that cannot be read is dropped (logged),
-//! and an unreadable file is set aside: nothing fires from data the
-//! application cannot verify.
+//! file, then a rename). Nothing fires from data the application cannot
+//! verify, and nothing it cannot read is overwritten: an unreadable record is
+//! kept as it is, a file in an unknown format is set aside, and a store that
+//! cannot be read at all is not written until it can be.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -51,40 +52,68 @@ struct File<T> {
     triggers: Vec<T>,
 }
 
-/// Load the records at `path` (none if it does not exist).
-pub fn load(path: &Path) -> Vec<StoredTrigger> {
+/// What [`load`] read.
+#[derive(Debug, Default)]
+pub struct Loaded {
+    pub triggers: Vec<StoredTrigger>,
+    /// Records this version cannot read: kept as they are and written back
+    /// unchanged (never fired from, never dropped).
+    pub unreadable: Vec<serde_json::Value>,
+}
+
+/// Load the records at `path` (none if it does not exist). `Err`: the store
+/// exists but cannot be read now (and could not be set aside): it must not
+/// be written until it can be read.
+pub fn load(path: &Path) -> Result<Loaded, String> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Loaded::default()),
         Err(e) => {
-            tracing::warn!("workflow triggers could not be read ({e}); none are active");
-            return Vec::new();
+            return Err(format!(
+                "The trigger store ({}) cannot be read ({e}); triggers cannot be changed until it can be, and it is never overwritten.",
+                path.display()
+            ));
         }
     };
     let file = match serde_json::from_slice::<File<serde_json::Value>>(&bytes) {
         Ok(file) if file.schema == SCHEMA => file,
         _ => {
+            // Not a trigger store this version understands: kept aside, never
+            // overwritten, and nothing fires from it.
             let aside = path.with_extension(format!("json.bad-{}", crate::now_ms()));
-            tracing::warn!("workflow triggers file is not readable; set aside as {}", aside.display());
-            let _ = std::fs::rename(path, aside);
-            return Vec::new();
+            return match std::fs::rename(path, &aside) {
+                Ok(()) => {
+                    tracing::warn!("workflow triggers file is not readable; set aside as {}", aside.display());
+                    Ok(Loaded::default())
+                }
+                Err(e) => Err(format!(
+                    "The trigger store ({}) is not readable and could not be set aside ({e}); triggers cannot be changed until it is, and it is never overwritten.",
+                    path.display()
+                )),
+            };
         }
     };
-    file.triggers
-        .into_iter()
-        .filter_map(|value| match serde_json::from_value::<StoredTrigger>(value) {
-            Ok(stored) => Some(stored),
+    let mut loaded = Loaded::default();
+    for value in file.triggers {
+        match serde_json::from_value::<StoredTrigger>(value.clone()) {
+            Ok(stored) => loaded.triggers.push(stored),
             Err(e) => {
-                tracing::warn!("a workflow trigger record could not be read ({e}); it was dropped");
-                None
+                tracing::warn!("a workflow trigger record could not be read ({e}); it is kept but never fires");
+                loaded.unreadable.push(value);
             }
-        })
-        .collect()
+        }
+    }
+    Ok(loaded)
 }
 
-/// Write the records atomically.
-pub fn save(path: &Path, triggers: &[&StoredTrigger]) -> Result<(), String> {
-    let file = File { schema: SCHEMA.to_owned(), triggers: triggers.to_vec() };
+/// Write the records (and the unreadable ones, unchanged) atomically.
+pub fn save(path: &Path, triggers: &[&StoredTrigger], unreadable: &[serde_json::Value]) -> Result<(), String> {
+    let mut records = Vec::with_capacity(triggers.len() + unreadable.len());
+    for stored in triggers {
+        records.push(serde_json::to_value(stored).map_err(|e| e.to_string())?);
+    }
+    records.extend(unreadable.iter().cloned());
+    let file = File { schema: SCHEMA.to_owned(), triggers: records };
     let bytes = serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;

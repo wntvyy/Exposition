@@ -232,10 +232,11 @@ pub fn suspends_on(plan: &WorkflowRunPlan, watched: &[String]) -> Vec<String> {
     }
     if !plan.execution.native_steps.is_empty() {
         list.push(
-            "The project folder's trust (native steps need a trusted folder); revoking trust suspends the trigger."
+            "The project folder's trust: native steps run with your account's privileges and need a trusted folder."
                 .into(),
         );
     }
+    list.push("Trust being revoked for the project folder: every trigger of the folder is suspended.".into());
     list.push("Any step's runner becoming unavailable (or available), and any step, budget, or limit changing.".into());
     list
 }

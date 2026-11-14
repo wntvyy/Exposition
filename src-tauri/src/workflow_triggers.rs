@@ -174,7 +174,7 @@ pub fn start(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             match runs.recv().await {
-                Ok(event) if event.state.is_terminal() => t.wake(),
+                Ok(event) if event.state.is_terminal() => t.runs_changed(),
                 Ok(_) | Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => break,
             }
