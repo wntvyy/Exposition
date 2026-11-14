@@ -42,7 +42,9 @@ describe("Lean status vocabulary", () => {
     // Only the clean result is "Checked"; every other finished status says why it is not.
     const checkedLabels = cases.filter(([s]) => statusView(s).label === "Checked").map(([s]) => s.kind);
     expect(checkedLabels).toEqual(["checked"]);
-    expect(statusSentence(cases[0]![0])).toContain("only the standard axioms `propext`");
+    // The axioms themselves are listed below the sentence (Axioms fact); the sentence keeps the distinction.
+    expect(statusSentence(cases[0]![0])).toContain("only the standard axioms");
+    expect(statusSentence(cases[5]![0])).toContain("beyond Lean's standard ones");
   });
 });
 
