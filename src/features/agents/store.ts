@@ -15,6 +15,7 @@ import type { Notification } from "../../app/notifications";
 import { dismiss, notify } from "../../app/notifications";
 import { registry } from "../../app/registry";
 import { commands, errorMessage, events } from "../../lib/ipc";
+import { onProjectOp } from "../operations/client";
 import { isActive, statusLabel } from "./format";
 
 /** The Agent view (auxiliary region). */
@@ -432,6 +433,22 @@ export const agents = {
         if (event.kind === "closed") useAgents.setState({ workspace: null });
       });
       await events.documents(handleDocumentEvent);
+      // Deleted or restored task records (Agents lists, Storage & History).
+      onProjectOp((result) => {
+        if (!result.outcomes.some((o) => o.target.kind === "agentTask" || o.created?.kind === "agentTask")) return;
+        void commands.agentsTaskList().then(
+          (tasks) => {
+            const ids = new Set(tasks.map((t) => t.id));
+            useAgents.setState((state) => ({
+              tasks,
+              selected: state.selected && !ids.has(state.selected) ? null : state.selected,
+              view: state.selected && !ids.has(state.selected) && (state.view === "task" || state.view === "review") ? "tasks" : state.view,
+              page: state.page.selected && !ids.has(state.page.selected) ? { ...state.page, selected: null } : state.page,
+            }));
+          },
+          () => {},
+        );
+      });
       await resync();
     })().catch((e: unknown) => {
       initialized = null;

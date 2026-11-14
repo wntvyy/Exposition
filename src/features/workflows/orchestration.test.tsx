@@ -519,7 +519,9 @@ describe("WorkflowsView (M9)", () => {
     const row = async (id: string) => (await screen.findByTestId("workflow-drafts")).querySelector(`[data-workflow="${id}"]`)!;
     await waitFor(async () => expect((await row("wf-a")).textContent).toContain("Trigger on"));
     expect((await row("wf-b")).textContent).toContain("Trigger suspended");
-    expect((await row("wf-c")).textContent).not.toMatch(/Trigger/);
+    // P1: a disabled trigger (e.g. after a restore, which never re-enables one) says so; it never reads as on.
+    expect((await row("wf-c")).textContent).toContain("Trigger off");
+    expect((await row("wf-c")).textContent).not.toMatch(/Trigger on|Trigger suspended/);
   });
 });
 

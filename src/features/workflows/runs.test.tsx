@@ -570,7 +570,7 @@ describe("run monitor", () => {
     const ids = [...list.querySelectorAll("li")].map((li) => li.getAttribute("data-testid"));
     expect(ids).toEqual(["workflow-run-item-new", "workflow-run-item-old"]);
     expect(screen.getByTestId("workflow-run-item-new").textContent).toContain("Needs review");
-    fireEvent.click(within(screen.getByTestId("workflow-run-item-new")).getByRole("button"));
+    fireEvent.click(within(screen.getByTestId("workflow-run-item-new")).getByRole("button", { name: /^Open run of/ }));
     expect(editorsMock.open).toHaveBeenCalledWith({ key: "workflow-run:new", title: "Run: A" });
   });
 });

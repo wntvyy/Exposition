@@ -1,7 +1,7 @@
 // Workflows of the open project (editor tab `workflows:`): saved drafts, new
 // drafts from the workflow presets, strict imports, and recent runs. Nothing
 // here starts a run: a run starts only from a reviewed plan in the editor.
-import { Bell, BellOff, FileUp, Plus } from "lucide-react";
+import { Bell, BellOff, BellRing, FileUp, Plus } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import { editors } from "../../app/editors";
@@ -10,12 +10,15 @@ import type { WorkflowPresetInfo } from "../../bindings/WorkflowPresetInfo";
 import type { WorkflowSummary } from "../../bindings/WorkflowSummary";
 import { errorMessage } from "../../lib/ipc";
 import { Badge, Banner, Button, EmptyState, ErrorState, StatusPill } from "../../ui/components";
+import { onProjectOp } from "../operations/client";
+import { useOpList } from "../operations/useOpList";
 import { useWorkspace } from "../workspace/store";
 import type { WorkflowTrigger } from "./contract";
 import { workflowCommands, workflowTriggerCommands } from "./ipc";
 import { workflowKey } from "./model";
 import { importBundle, importDraft, newDraftFromPreset } from "./actions";
 import { RunHistory } from "./RunView";
+import { workflowActions } from "./workflowOps";
 
 export function WorkflowsView(_props: EditorProps) {
   const [drafts, setDrafts] = useState<WorkflowSummary[] | null>(null);
@@ -42,6 +45,15 @@ export function WorkflowsView(_props: EditorProps) {
   useEffect(() => {
     void refresh();
   }, [root]);
+  // Deletions, copies and restores (here, in Storage & History, or by an agent).
+  useEffect(() => onProjectOp(() => void refresh()), []);
+  const list = useOpList({
+    id: "workflows",
+    label: "Workflow actions",
+    items: drafts ?? [],
+    keyOf: (d) => d.id,
+    actionsFor: (selected) => workflowActions(selected),
+  });
 
   if (error) return <ErrorState title="Workflow drafts are unavailable" description={error} actions={<Button onPress={() => void refresh()}>Retry</Button>} />;
   return (
@@ -75,9 +87,10 @@ export function WorkflowsView(_props: EditorProps) {
         <section className="xp-wf__group" aria-label="Saved drafts">
           <h3 className="xp-wf__group-title">Saved drafts</h3>
           {drafts && drafts.length === 0 && <EmptyState fill={false} title="No workflow drafts yet" description="Create one from a preset above, or import a definition." />}
-          <ul className="xp-wf__cards" data-testid="workflow-drafts">
+          <div ref={list.ref} className="xp-ops-surface">
+          <ul className="xp-wf__cards" data-testid="workflow-drafts" aria-label="Saved drafts (select with click or Space; Ctrl+click adds)">
             {drafts?.map((d) => (
-              <li key={d.id} className="xp-wf__card xp-wf__row" data-workflow={d.id}>
+              <li key={d.id} {...list.itemProps(d.id)} className="xp-wf__card xp-wf__row xp-ops-item" data-workflow={d.id} aria-label={d.title}>
                 <div className="xp-wf__grow">
                   <strong>{d.title}</strong>
                   <p className="xp-wf__muted">
@@ -89,10 +102,14 @@ export function WorkflowsView(_props: EditorProps) {
                   <Badge tone="warning" icon={BellOff} title="A trigger of this workflow is suspended until you review its standing plan again">
                     Trigger suspended
                   </Badge>
+                ) : triggers.some((t) => t.workflow === d.id && t.state.kind === "active") ? (
+                  <Badge tone="info" icon={Bell} title="Runs start by themselves under an approved standing plan">
+                    Trigger on
+                  </Badge>
                 ) : (
-                  triggers.some((t) => t.workflow === d.id && t.state.kind === "active") && (
-                    <Badge tone="info" icon={Bell} title="Runs start by themselves under an approved standing plan">
-                      Trigger on
+                  triggers.some((t) => t.workflow === d.id && t.state.kind === "disabled") && (
+                    <Badge icon={BellRing} dashed title="Triggers stay off until you enable one again in the workflow's Triggers section" data-testid={`workflow-trigger-off-${d.id}`}>
+                      Trigger off
                     </Badge>
                   )
                 )}
@@ -105,9 +122,12 @@ export function WorkflowsView(_props: EditorProps) {
                 <Button onPress={() => editors.open({ key: workflowKey(d.id), title: d.title })} data-testid={`workflow-open-${d.id}`}>
                   Open
                 </Button>
+                {list.moreButton(d.id, d.title)}
               </li>
             ))}
           </ul>
+          {list.contextMenu}
+          </div>
         </section>
         <RunHistory workflow={null} title="Recent runs" />
         <section className="xp-wf__group" aria-label="Import">

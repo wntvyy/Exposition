@@ -29,10 +29,12 @@ import {
 } from "../../ui/components";
 import { isActive, relativeTime, statusLabel } from "./format";
 import { agentGraph } from "./graphIpc";
+import { useOpList } from "../operations/useOpList";
 import { GraphContextView, kindTitle, ProposalList } from "./GraphViews";
 import { ReviewView } from "./ReviewView";
 import { AGENT_VIEW_ID, AGENTS_PAGE_ID, agents, type PageTab, type TaskFilter, useAgents } from "./store";
 import { TaskComposer } from "./TaskComposer";
+import { taskActions } from "./taskOps";
 import { TaskView } from "./TaskView";
 import "./agents.css";
 
@@ -71,6 +73,7 @@ function PageTaskList({ kept }: { kept: ReadonlySet<string> }) {
   const tasks = useAgents((s) => s.tasks);
   const page = useAgents((s) => s.page);
   const shown = tasks.filter((t) => taskMatches(t, page.filter, kept));
+  const list = useOpList({ id: "agent-tasks-page", label: "Task actions", items: shown, keyOf: (t) => t.id, actionsFor: taskActions });
   return (
     <div className="agents-stack">
       <SegmentedControl
@@ -82,12 +85,23 @@ function PageTaskList({ kept }: { kept: ReadonlySet<string> }) {
       {shown.length === 0 ? (
         <p className="agents-muted agents-small">{tasks.length === 0 ? "No agent tasks yet." : "No tasks match this filter."}</p>
       ) : (
+        <div ref={list.ref} className="xp-ops-surface">
         <ul className="agents-task-list" aria-label="Agent tasks" data-testid="agents-page-tasks">
           {shown.map((task) => {
             const pill = statusLabel(task.status);
             const selected = page.selected === task.id && !page.composing;
+            const op = list.itemProps(task.id);
             return (
-              <li key={task.id}>
+              <li
+                key={task.id}
+                data-op-item={op["data-op-item"]}
+                data-op-selected={op["data-op-selected"]}
+                className="agents-task-row"
+                onMouseDown={op.onMouseDown}
+                onClick={op.onClick}
+                onFocus={op.onFocus}
+                onContextMenu={op.onContextMenu}
+              >
                 <button
                   type="button"
                   className="agents-task-item"
@@ -107,10 +121,13 @@ function PageTaskList({ kept }: { kept: ReadonlySet<string> }) {
                     <span className="agents-muted">{relativeTime(task.updatedAtMs)}</span>
                   </span>
                 </button>
+                {list.moreButton(task.id, task.title)}
               </li>
             );
           })}
         </ul>
+        {list.contextMenu}
+        </div>
       )}
     </div>
   );

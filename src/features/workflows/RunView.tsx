@@ -50,12 +50,15 @@ import {
   Spinner,
   StatusPill,
 } from "../../ui/components";
+import { onProjectOp } from "../operations/client";
+import { useOpList } from "../operations/useOpList";
 import { researchCommands } from "../research/ipc";
 import { PreviewView } from "../research/Promotion";
 import { workflowEvents, workflowRunCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
 import { describeRepeat, describeTest } from "./orchestration";
 import { FullHash, PlanDetails, PlanReviewDialog } from "./PlanReview";
+import { runActions } from "./workflowOps";
 import {
   ATTEMPT_STATE_VIEW,
   auditedDeclarations,
@@ -1081,6 +1084,15 @@ export function RunHistory({ workflow, title = "Runs" }: { workflow: string | nu
       unlisten?.();
     };
   }, [workflow, refresh]);
+  // Deleted or restored run records (here, in Storage & History, or by an agent).
+  useEffect(() => onProjectOp(() => void refresh()), [refresh]);
+  const list = useOpList({
+    id: workflow ? `workflow-runs:${workflow}` : "workflow-runs",
+    label: "Run actions",
+    items: runs ?? [],
+    keyOf: (r) => r.id,
+    actionsFor: (selected) => runActions(selected),
+  });
 
   return (
     <section className="xp-wf__group" aria-label={title}>
@@ -1092,11 +1104,19 @@ export function RunHistory({ workflow, title = "Runs" }: { workflow: string | nu
       )}
       {runs && runs.length === 0 && <EmptyState fill={false} title="No runs yet" description="Review and run a saved, well-formed revision to see its runs here." />}
       {runs && runs.length > 0 && (
+        <div ref={list.ref} className="xp-ops-surface">
         <ul className="xp-wf__cards" data-testid="workflow-runs">
           {runs.map((r) => {
             const view = RUN_STATE_VIEW[r.state];
             return (
-              <li key={r.id} className="xp-wf__card xp-wf__row" data-testid={`workflow-run-item-${r.id}`} data-state={r.state}>
+              <li
+                key={r.id}
+                {...list.itemProps(r.id)}
+                className="xp-wf__card xp-wf__row xp-ops-item"
+                data-testid={`workflow-run-item-${r.id}`}
+                data-state={r.state}
+                aria-label={`Run of ${r.title}, ${view.label}, started ${formatTime(r.startedAtMs)}`}
+              >
                 <div className="xp-wf__grow">
                   <strong>{r.title}</strong>
                   <p className="xp-wf__muted">
@@ -1122,10 +1142,13 @@ export function RunHistory({ workflow, title = "Runs" }: { workflow: string | nu
                 <Button size="sm" onPress={() => openRun(r)} aria-label={`Open run of ${r.title} started ${formatTime(r.startedAtMs)}`}>
                   Open
                 </Button>
+                {list.moreButton(r.id, `the run of ${r.title}`)}
               </li>
             );
           })}
         </ul>
+        {list.contextMenu}
+        </div>
       )}
     </section>
   );

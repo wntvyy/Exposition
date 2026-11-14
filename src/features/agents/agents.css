@@ -463,3 +463,19 @@
     border-bottom: var(--border-width) solid var(--color-border);
   }
 }
+
+/* P1: a task row holds the task button and its "More actions" menu. */
+.agents-task-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.agents-task-row > .agents-task-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.agents-task-row[data-op-selected] > .agents-task-item {
+  border-color: var(--color-accent);
+}
