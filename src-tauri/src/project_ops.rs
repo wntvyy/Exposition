@@ -325,6 +325,9 @@ impl ProjectOps {
             paths,
             &ApplyOptions { choices, trash: self.trash.as_ref(), skip: &skip, tag: &tag },
             &mut |o: &PathOutcome| {
+                if o.covered {
+                    return;
+                }
                 pending.push(Done { outcome: o.outcome.clone(), path: o.path.clone() });
                 if pending.len() >= JOURNAL_BATCH
                     && let Err(e) = self.record_done(root, &record, &std::mem::take(&mut pending))
@@ -342,7 +345,8 @@ impl ProjectOps {
         let _ = self.journal.record_step(root, &record, "data", BTreeMap::new(), true, None);
 
         // 4. Project data follows what actually happened on disk.
-        let actual: Vec<OpOutcome> = path_outcomes.iter().map(normalized).collect();
+        // Targets covered by a selected folder were not acted on separately.
+        let actual: Vec<OpOutcome> = path_outcomes.iter().filter(|o| !o.covered).map(normalized).collect();
         data.after_paths(&actual);
         let _ = self.journal.record_step(root, &record, "graph", BTreeMap::new(), true, None);
         let _ = self.journal.complete(root, &record);

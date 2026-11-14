@@ -135,6 +135,9 @@ pub struct PathOutcome {
     pub trashed: Option<TrashedItem>,
     /// The project path the outcome concerns (normalized), when it is one.
     pub path: Option<WorkspacePath>,
+    /// A target inside another selected folder: it shares that folder's
+    /// outcome and was not acted on separately.
+    pub covered: bool,
 }
 
 pub struct ApplyOptions<'a> {
@@ -776,6 +779,7 @@ impl WorkspaceService {
                     outcome: outcome(&item.target, OpStatus::Skipped, Some(&r.code), Some(r.message.clone())),
                     trashed: None,
                     path: project_path(item),
+                    covered: false,
                 };
                 on_outcome(&o);
                 out.push(o);
@@ -816,6 +820,7 @@ impl WorkspaceService {
                 },
                 trashed: None,
                 path: None,
+                covered: true,
             };
             on_outcome(&o);
             out.push(o);
@@ -845,6 +850,7 @@ impl WorkspaceService {
                     ),
                     trashed: None,
                     path: project_path(item),
+                    covered: false,
                 };
                 on_outcome(&o);
                 out.push(o);
@@ -935,7 +941,7 @@ impl WorkspaceService {
                     self.resume_documents_under(path);
                 }
             }
-            let po = PathOutcome { outcome: o, trashed, path: project_path(item) };
+            let po = PathOutcome { outcome: o, trashed, path: project_path(item), covered: false };
             on_outcome(&po);
             out.push(po);
         }
@@ -978,7 +984,7 @@ impl WorkspaceService {
                     o.message = Some(message);
                 }
             }
-            let po = PathOutcome { outcome: o, trashed: None, path: project_path(item) };
+            let po = PathOutcome { outcome: o, trashed: None, path: project_path(item), covered: false };
             on_outcome(&po);
             out.push(po);
         }

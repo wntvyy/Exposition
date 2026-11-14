@@ -242,11 +242,14 @@ fn routine_deletion_needs_no_decision_and_reports_what_happened() {
     let fx = fixture();
     let ops = fx.ops(FakeTrash::default());
     let data = FakeData::default();
-    let plan = ops.plan(&fx.ws, &data, request(OpKind::Delete { permanent: false }, &["a.txt", "notes"])).unwrap();
+    let plan = ops
+        .plan(&fx.ws, &data, request(OpKind::Delete { permanent: false }, &["a.txt", "notes", "notes/n1.md"]))
+        .unwrap();
     assert!(!plan.needs_decision, "graph membership alone is never a reason: {:?}", plan.impacts);
     assert!(plan.choices.is_empty() && plan.refusals.is_empty());
     let result = apply_plan(&ops, &fx, &data, &plan).unwrap();
-    assert_eq!(result.outcomes.len(), 2);
+    assert_eq!(result.outcomes.len(), 3, "one outcome per selected target");
+    assert_eq!(result.outcomes[2].message.as_deref(), Some("Included in notes."));
     assert!(result.outcomes.iter().all(|o| o.status == OpStatus::Succeeded), "{:?}", result.outcomes);
     assert_eq!(result.outcomes[0].target, path("a.txt"), "request order");
     assert!(!fx.exists("a.txt") && !fx.exists("notes"));
