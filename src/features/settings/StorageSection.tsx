@@ -304,7 +304,7 @@ export function StorageSection() {
           <div className="exp-storage__scope" data-testid="storage-scope" data-count={scope.items.length}>
             <div className="exp-storage__scope-text" aria-live="polite">
               {scope.items.length === 0 ? (
-                <span className="ui-meta">Select items to purge. Sizes are shown where they can be measured.</span>
+                <span className="ui-meta">Select items to purge.</span>
               ) : (
                 <>
                   <strong className="exp-storage__scope-summary">
@@ -312,10 +312,10 @@ export function StorageSection() {
                     {scope.unmeasured ? ` (+${scope.unmeasured} not measured)` : ""}
                   </strong>
                   <span className="ui-meta">
-                    Purge removes the selected records and payloads permanently. Removing records frees database space only when the database is
-                    compacted; the result says what was actually reclaimed.
+                    Purge permanently deletes the selected items. Removing records frees database space only when the database is compacted;
+                    the result says what was actually reclaimed.
                     {scope.referenced ? ` ${scope.referenced} referenced item${scope.referenced === 1 ? " is" : "s are"} included: you will see what depends on ${scope.referenced === 1 ? "it" : "them"} first.` : ""}
-                    {scope.active ? ` ${scope.active} active item${scope.active === 1 ? " is" : "s are"} included: work is stopped only if you choose so.` : ""}
+                    {scope.active ? ` ${scope.active} active item${scope.active === 1 ? " is" : "s are"} included: work is stopped only if you choose to.` : ""}
                   </span>
                 </>
               )}
@@ -335,7 +335,6 @@ export function StorageSection() {
                   <li key={e}>{e}</li>
                 ))}
               </ul>
-              These retained copies and backups are kept by their own services and are not purged from this page.
             </Banner>
           )}
         </>

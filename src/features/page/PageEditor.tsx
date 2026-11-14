@@ -224,7 +224,7 @@ export function PageEditor({ resource, active }: EditorProps) {
 
   const pill =
     status === "building" ? (
-      <StatusPill status="running" label={`Building ${resource.title}`} />
+      <StatusPill status="running" label="Building" />
     ) : model.untrustedRoot ? (
       <StatusPill status="unavailable" label="Not trusted" />
     ) : model.failed ? (
@@ -294,7 +294,7 @@ export function PageEditor({ resource, active }: EditorProps) {
             }
           >
             {model.readOnly === MIXED_EOL_REASON
-              ? "This file mixes line endings, so it cannot be edited here, in source, or by agents until they are normalized. They are never changed silently."
+              ? "Read-only in every view, and for agents, until you normalize them. They are never changed silently."
               : model.readOnly}
           </Banner>
         </div>
@@ -384,7 +384,7 @@ export function PageEditor({ resource, active }: EditorProps) {
           (model.untrustedRoot ? (
             <UnavailableState
               title="Workspace not trusted"
-              description="Pages of this document are built by running its compiler, which runs with your account's permissions. Trust the workspace to build and edit its pages."
+              description="Building its pages runs the compiler with your account's permissions. Trust the workspace to build and edit them."
               actions={
                 <Button variant="primary" size="sm" onPress={() => void session.trust()}>
                   Trust workspace…

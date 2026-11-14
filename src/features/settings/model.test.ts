@@ -142,6 +142,8 @@ describe("docker", () => {
     expect(options[0]!.description).toBe("Not present locally");
     expect(options[2]!.description).toBe("178MB · 6 days ago");
     expect(imageOptions(null, null)).toEqual([]);
+    // Not listed yet (or the list failed): the configured image is not called missing.
+    expect(imageOptions(null, "python:3.13-slim")).toEqual([{ id: "python:3.13-slim", label: "python:3.13-slim", description: undefined }]);
   });
 
   it("describes enforcement with the configured limits", () => {

@@ -243,7 +243,8 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
             }
           >
             {conflict.message}
-            {conflict.kind === "modified" && " Reloading keeps your version in undo history."}
+            {conflict.kind === "modified" && " Reload from Disk keeps your version in undo history."}
+            {conflict.kind !== "deleted" && " Keep My Changes overwrites the file on disk when you next save."}
           </Banner>
         </div>
       )}
@@ -287,7 +288,7 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
               </>
             }
           >
-            This file mixes line endings, so it is read-only here and they are never changed silently.
+            Read-only in every view, and for agents, until you normalize them. They are never changed silently.
           </Banner>
         </div>
       )}

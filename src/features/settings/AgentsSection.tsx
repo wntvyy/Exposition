@@ -23,7 +23,6 @@ export function AgentsSection() {
     <SettingsPage
       title="Agents"
       testId="settings-agents"
-      description="Agent tasks use the model provider configured here. The API key lives only in the operating system's credential store and is never shown."
       actions={
         <Button
           size="sm"
@@ -50,8 +49,8 @@ export function AgentsSection() {
             label="API key"
             description={
               status.configured
-                ? `Stored in ${status.credentialStore}.`
-                : `Set it in Provider settings; it is kept in ${status.credentialStore}.`
+                ? `Stored only in ${status.credentialStore}; never shown.`
+                : `Set it in Provider settings; it is stored only in ${status.credentialStore}.`
             }
             testId="agents-key"
           >
