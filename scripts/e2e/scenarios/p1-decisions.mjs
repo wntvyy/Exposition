@@ -299,6 +299,13 @@ export default async function p1Decisions({ launchApp, artifactsDir, assert, fix
     const cannotRun = validated.runnable === false || Boolean(validated.error) || Boolean(planAfter.error) || (planAfter.blockers?.length ?? 0) > 0;
     if (!cannotRun) defects.push(`PinnedRevision: after purging ${child1.id}@${child1.revision} the composite still validates/plans as runnable (${describe(planAfter)})`);
     else evidence.real.push(`PinnedRevision: the purged child revision leaves the composite unable to run (${describe(planAfter.error || planAfter.blockers?.length ? planAfter : validated)})`);
+    // The stored state follows too: workflow_get and the Workflows list read it as incomplete (workflow.compositeMissing).
+    const listed = (await call("workflow_list")).find((w) => w.id === parent.id);
+    if (parentAfter.validation?.runnable !== false || !codes(parentAfter.validation).includes("workflow.compositeMissing") || listed?.state !== "incomplete" || listed?.runnable !== false) {
+      defects.push(`PinnedRevision: the stored state of the composite was not updated (workflow_get runnable=${parentAfter.validation?.runnable} [${codes(parentAfter.validation).join(",")}], list state=${listed?.state} runnable=${listed?.runnable})`);
+    } else {
+      evidence.real.push("PinnedRevision: workflow_get and the Workflows list read the composite as incomplete (workflow.compositeMissing)");
+    }
     await dismissNotifications(page);
 
     // --- D. Copy Text / Copy Reference ------------------------------------------------------------
