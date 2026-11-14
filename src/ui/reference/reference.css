@@ -55,7 +55,7 @@
 .ref-section__body > * {
   min-width: 0;
 }
-.ref-section__body > :is(.ref-swatch-groups, .ref-type, .ref-states, .ref-stack, .ref-table, .ref-split, .ref-tree-frame, .ref-monaco, .ui-state) {
+.ref-section__body > :is(.ref-swatch-groups, .ref-type, .ref-states, .ref-stack, .ref-table, .ref-split, .ref-tree-frame, .ref-monaco, .ui-state, .ui-simple-table, .ref-wide-frame, .ref-canvas-frame) {
   grid-column: 1 / -1;
 }
 
@@ -277,8 +277,9 @@
 }
 
 /* UI rework specimens */
-.ref-wide-frame {
+.ref-panel-frame.ref-wide-frame {
   width: 100%;
+  height: auto;
 }
 .ref-inspector-frame {
   width: 340px;
@@ -322,7 +323,7 @@
 }
 .ref-node {
   width: 208px;
-  height: 92px;
+  min-height: 64px;
 }
 .ref-state-frame--compact {
   min-height: 0;

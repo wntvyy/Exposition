@@ -266,6 +266,7 @@
   display: inline-flex;
   gap: var(--space-0-5);
   align-items: center;
+  white-space: nowrap;
 }
 
 .ui-kbd {
@@ -1144,6 +1145,10 @@
 .ui-state[data-size="compact"]:not(:has(.ui-state__inline-icon, .ui-spinner)) .ui-state__actions {
   padding-left: 0;
 }
+/* Inside a content section the body already carries the pane inset. */
+.ui-section[data-variant="content"] > .ui-section__body > .ui-state[data-size="compact"] {
+  padding-inline: 0;
+}
 .ui-state__description {
   max-width: 360px;
   font-size: var(--font-size-md);
@@ -1711,6 +1716,9 @@
 
 /* ---------- Node cards (canvas rectangles) ---------- */
 
+.ui-simple-table {
+  width: 100%;
+}
 .ui-node-card {
   --node-bg: var(--color-graph-structure-bg);
   --node-border: var(--color-graph-structure-border);
