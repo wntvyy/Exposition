@@ -19,7 +19,7 @@ vi.mock("../workspace/store", async () => {
 
 import { ConfirmHost } from "../../ui/components";
 import { useWorkspace } from "../workspace/store";
-import { StorageSection, storageScope } from "./StorageSection";
+import { purgeGroups, StorageSection, storageScope } from "./StorageSection";
 
 const overview: StorageOverview = {
   categories: [
@@ -57,8 +57,25 @@ afterEach(() => {
 
 describe("storage scope", () => {
   it("sums measurable sizes and counts what is not measured, referenced, or active", () => {
-    const scope = storageScope(overview, new Set(["workflowRun:wrun-1", "workflowRun:wrun-2", "workflowRevision:wf-1@1"]));
+    const scope = storageScope(overview, new Set(["workflowRuns|workflowRun:wrun-1", "workflowRuns|workflowRun:wrun-2", "workflowRevisions|workflowRevision:wf-1@1"]));
     expect(scope).toMatchObject({ bytes: 2 * 1024 * 1024, unmeasured: 2, referenced: 1, active: 1 });
+  });
+
+  it("purges records, records with their outputs, and outputs alone as separate plans (the outputs choice is per plan)", () => {
+    const run = (id: string) => ({ kind: "workflowRun" as const, run: id });
+    const item = (id: string) => ({ target: run(id), label: id, bytes: null, createdAtMs: null, referenced: false, active: false });
+    expect(
+      purgeGroups([
+        { category: "workflowRuns", item: item("a") },
+        { category: "workflowRuns", item: item("b") },
+        { category: "generatedOutputs", item: item("b") },
+        { category: "generatedOutputs", item: item("c") },
+      ]),
+    ).toEqual([
+      { targets: [run("a")] },
+      { targets: [run("b")], outputs: "delete" },
+      { targets: [run("c")], outputs: "only" },
+    ]);
   });
 });
 

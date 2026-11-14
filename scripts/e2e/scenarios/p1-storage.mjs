@@ -166,12 +166,18 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
         await shot(page, "p1-storage-purge-decision-light");
         await decision(page).getByRole("button", { name: /^Delete/ }).click();
       }
+      const rowKeys = (o) => new Set(o.categories.flatMap((c) => c.items.map((i) => `${c.id}|${JSON.stringify(i.target)}`)));
+      const before = rowKeys(overview);
       await waitFor(async () => {
-        const next = await invoke(page, "storage_overview");
-        const keys = new Set(next.categories.flatMap((c) => c.items.map((i) => JSON.stringify(i.target))));
-        return expected.every((i) => !keys.has(JSON.stringify(i.target)));
+        const keys = rowKeys(await invoke(page, "storage_overview"));
+        return expected.every((i) => !keys.has(`${withItems.id}|${JSON.stringify(i.target)}`));
       }, { timeout: 20_000, message: "purged exactly the selected items" });
       const after = await invoke(page, "storage_overview");
+      const keysAfterRows = rowKeys(after);
+      const untouched = [...before].filter((k) => !k.startsWith(`${withItems.id}|`));
+      for (const k of untouched) {
+        if (!keysAfterRows.has(k)) evidence.notes.push(`row outside the purged category changed: ${k}`);
+      }
       const referencedBefore = withItems.items.filter((i) => i.referenced).map((i) => JSON.stringify(i.target));
       const keysAfter = new Set(after.categories.flatMap((c) => c.items.map((i) => JSON.stringify(i.target))));
       for (const k of referencedBefore) assert.ok(keysAfter.has(k), "referenced items were kept");
