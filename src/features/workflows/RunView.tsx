@@ -445,8 +445,9 @@ export function EnvironmentView({ env, testId }: { env: WorkflowEnvironment; tes
         items={environmentFacts(env).map((f) => ({
           key: f.label,
           label: f.label,
+          valueProps: { "data-fact": f.label },
           value: (
-            <span data-fact={f.label}>
+            <>
               {f.value}
               {f.hash && (
                 <>
@@ -454,7 +455,7 @@ export function EnvironmentView({ env, testId }: { env: WorkflowEnvironment; tes
                   <FullHash hash={f.hash} label={`${f.label.toLowerCase()} of this attempt`} />
                 </>
               )}
-            </span>
+            </>
           ),
         }))}
       />
@@ -799,7 +800,7 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
   }`;
 
   return (
-    <div className="xp-wf xp-wf-run" data-testid="workflow-run" data-run={run.id} data-state={run.state} data-acknowledged={String(run.acknowledged)}>
+    <div className="xp-wf" data-testid="workflow-run" data-run={run.id} data-state={run.state} data-acknowledged={String(run.acknowledged)}>
       <PageHeader
         title={run.title}
         subtitle={<span title={times}>{times}</span>}

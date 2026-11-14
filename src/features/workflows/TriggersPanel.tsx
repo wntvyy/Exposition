@@ -274,7 +274,7 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
   return (
     <Dialog
       title={standing ? "Review the standing plan" : "New trigger"}
-      size="lg"
+      size="xl"
       isOpen={isOpen}
       onOpenChange={onOpenChange}
       isDismissable={!enabling}
@@ -729,8 +729,8 @@ export function TriggersSection({
     });
 
   return (
-    <div data-testid="workflow-triggers">
-      <Section title="Triggers">
+    <>
+      <Section title="Triggers" data-testid="workflow-triggers">
         <div className="xp-wf__stack">
           <p className="ui-meta">
             Off by default. A trigger starts runs by itself only under a standing plan you approve here; agents and imported workflows
@@ -777,6 +777,6 @@ export function TriggersSection({
         onOpenChange={(open) => setDialog((d) => ({ ...d, open }))}
         onEnabled={() => void refresh()}
       />
-    </div>
+    </>
   );
 }

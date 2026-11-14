@@ -50,6 +50,7 @@ import {
   StateSizeProvider,
   StatusPill,
   StatusText,
+  TextArea,
   TextField,
   UnavailableState,
 } from "../../ui/components";
@@ -124,18 +125,6 @@ function Diagnostics({ items, testId }: { items: WorkflowDiagnostic[]; testId?: 
         </li>
       ))}
     </ul>
-  );
-}
-
-function TextArea(props: { label: string; value: string; onChange: (v: string) => void; testId?: string }) {
-  const id = useId();
-  return (
-    <div className="ui-field">
-      <label className="ui-field__label" htmlFor={id}>
-        {props.label}
-      </label>
-      <textarea id={id} className="ui-input xp-wf__textarea" rows={4} value={props.value} onChange={(e) => props.onChange(e.target.value)} data-testid={props.testId} />
-    </div>
   );
 }
 
@@ -330,6 +319,7 @@ function StepCard({
               label="Instructions for the agent (read-only review; it cannot run code or change files)"
               value={step.payload?.kind === "prompt" ? step.payload.text : ""}
               onChange={(text) => onChange(updateStep(draft, step.id, { payload: { kind: "prompt", text } }))}
+              rows={4}
               testId={`prompt-${step.id}`}
             />
           )}
@@ -954,7 +944,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
                       data-testid="workflow-max-parallel"
                     />
                     <div className="xp-wf__wide">
-                      <TextArea label="Description" value={draft.description} onChange={(description) => setDraft({ ...draft, description })} />
+                      <TextArea label="Description" rows={4} value={draft.description} onChange={(description) => setDraft({ ...draft, description })} />
                     </div>
                     <div className="xp-wf__inline xp-wf__wide">
                       <Checkbox isSelected={draft.ceiling.modelRequests} onChange={(v) => setDraft({ ...draft, ceiling: { ...draft.ceiling, modelRequests: v } })}>
