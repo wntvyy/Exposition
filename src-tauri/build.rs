@@ -199,6 +199,10 @@ const DEV_COMMANDS: &[&str] = &[
 ];
 
 fn main() {
+    // The executable's icon resource and the default window icon are compiled
+    // from `icons/`; without this, replacing the icon files does not rebuild
+    // them (tauri-build only watches its own inputs).
+    println!("cargo:rerun-if-changed=icons");
     let debug = std::env::var("PROFILE").as_deref() == Ok("debug");
     let commands: Vec<&str> = COMMANDS.iter().chain(if debug { DEV_COMMANDS } else { &[] }).copied().collect();
     // `AppManifest::commands` needs a `'static` slice.
