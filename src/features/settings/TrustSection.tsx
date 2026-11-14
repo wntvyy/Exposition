@@ -72,7 +72,6 @@ export function TrustSection() {
             {trust.roots.length === 0 ? (
               <EmptyState
                 size="compact"
-                className="exp-settings__bleed"
                 title="No trusted folders"
                 description="When a build, kernel, or command needs to run on this computer, Exposition asks first. Folders you trust appear here."
               />

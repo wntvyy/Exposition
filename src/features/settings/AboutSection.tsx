@@ -17,7 +17,7 @@ const CAPABILITY_STATUS: Record<CapabilityState, { status: Status; label: string
 };
 
 const CAPABILITY_COLUMNS: SimpleTableColumn<Capability>[] = [
-  { id: "capability", title: "Capability", width: "28%", render: (c) => <span className="exp-settings__cell-title">{c.label}</span> },
+  { id: "capability", title: "Capability", width: "28%", isRowHeader: true, render: (c) => c.label },
   {
     id: "status",
     title: "Status",

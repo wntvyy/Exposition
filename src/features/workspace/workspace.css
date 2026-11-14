@@ -35,10 +35,10 @@
   color: var(--color-text-subtle);
 }
 
-/* Recent projects: list rows (pane inset of their own) inside the Recent
-   section; the open button's hit area covers its row. */
+/* Recent projects: list rows inside the Recent section (whose body already
+   pads them); the open button's hit area covers its row. */
 .xp-recent {
-  margin-inline: calc(-1 * var(--pane-inset));
+  --list-inset: 0;
 }
 
 .xp-recent__row {

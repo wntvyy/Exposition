@@ -50,10 +50,10 @@ function ImageStateText({
 }) {
   if (image.kind === "missing" && !showMissing) return null;
   return (
-    <span className="exp-settings__image-state" data-testid={testId}>
-      {image.kind === "notConfigured" && <StatusText status="unavailable" label={notConfigured} />}
+    <span data-testid={testId}>
+      {image.kind === "notConfigured" && <StatusText status="unavailable" label={notConfigured} wrap />}
       {image.kind === "present" && (
-        <StatusText status="succeeded" label={`${image.image} is present locally (${image.local.id}, ${image.local.size}).`} />
+        <StatusText status="succeeded" label={`${image.image} is present locally (${image.local.id}, ${image.local.size}).`} wrap />
       )}
       {(image.kind === "unverified" || image.kind === "missing") && <span className="ui-meta">Configured: {image.image}</span>}
     </span>
@@ -293,9 +293,10 @@ function toolColumns(
     {
       id: "tool",
       title: "Tool",
+      isRowHeader: true,
       render: (tool) => (
         <>
-          <div className="exp-settings__cell-title">{tool.name}</div>
+          <div>{tool.name}</div>
           {tool.version && (
             <div className="ui-meta" data-testid="tool-version">
               {tool.version}
@@ -404,16 +405,15 @@ function ToolsGroup() {
           {resetError}
         </Banner>
       )}
-      <div aria-busy={loading}>
-        <SimpleTable
-          aria-label="Tool locations"
-          className="exp-settings__table"
-          columns={toolColumns(setEditing, resetting, (tool) => void reset(tool))}
-          rows={rows}
-          rowKey={(tool) => tool.id}
-          rowProps={(tool) => ({ "data-tool-id": tool.id, "data-status": tool.status, "data-source": tool.source ?? undefined })}
-        />
-      </div>
+      <SimpleTable
+        aria-label="Tool locations"
+        aria-busy={loading}
+        className="exp-settings__table"
+        columns={toolColumns(setEditing, resetting, (tool) => void reset(tool))}
+        rows={rows}
+        rowKey={(tool) => tool.id}
+        rowProps={(tool) => ({ "data-tool-id": tool.id, "data-status": tool.status, "data-source": tool.source ?? undefined })}
+      />
       {editing && <ToolPathDialog tool={editing} onClose={() => setEditing(null)} />}
     </SettingsGroup>
   );
@@ -442,7 +442,7 @@ export function ExecutionSection() {
       ) : (
         <>
           {execution.warning && (
-            <div className="exp-settings__notice" data-testid="execution-settings-warning">
+            <div className="exp-settings__notice exp-settings__inset" data-testid="execution-settings-warning">
               <Banner tone="warning" title="Invalid execution settings were reset">
                 {execution.warning}
               </Banner>
