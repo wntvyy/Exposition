@@ -17,7 +17,6 @@ fn compare(pointer: &str, op: CompareOp, number: &str) -> ConditionTest {
 /// converts both sides to f64. Integers above 2^53 (counts, nanosecond
 /// timestamps, 64-bit ids) and long decimals compare equal when they differ.
 #[test]
-#[ignore = "R-m9 F5: JSON number comparisons go through f64, so distinct large integers/decimals compare equal"]
 fn review_m9_f5_number_comparison_is_exact() {
     let doc = json!({ "count": 9_007_199_254_740_993u64, "ns": 1_700_000_000_000_000_001u64 });
     let eq = |pointer: &str, n: &str| {

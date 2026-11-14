@@ -372,9 +372,8 @@ pub(super) fn test_problem(test: &ConditionTest) -> Option<String> {
             }
             let ordering = matches!(op, CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge);
             match value {
-                ConditionValue::Number(n) => {
-                    (!number_ok(n)).then(|| format!("{:?} is not a decimal number", truncate(n, 40)))
-                }
+                ConditionValue::Number(n) => (!number_ok(n) || Decimal::parse(n).is_none())
+                    .then(|| format!("{:?} is not a decimal number (exponents of at most 6 digits)", truncate(n, 40))),
                 ConditionValue::Text(t) => {
                     if ordering {
                         Some("text can only be compared for equality".into())
@@ -440,7 +439,9 @@ pub(super) fn check_conditions_and_repeats(
                     Some(format!("repeat over 1–{MAX_FOR_EACH_VALUES} values (it has {})", values.len()))
                 }
                 Some(spec) => values.iter().enumerate().find_map(|(i, v)| {
-                    super::parameter_problem(&spec.kind, v).map(|p| format!("value {} of “{}” {p}", i + 1, spec.label))
+                    super::parameter_problem(&spec.kind, v)
+                        .or_else(|| super::registry::code_parameter_problem(contract, v))
+                        .map(|p| format!("value {} of “{}” {p}", i + 1, spec.label))
                 }),
             },
             StepRepeat::Until { port, test, max_iterations, .. } => match contract.output(port) {
@@ -556,9 +557,13 @@ fn compare(found: &serde_json::Value, op: CompareOp, value: &ConditionValue) -> 
     use std::cmp::Ordering;
     let ordering = match (found, value) {
         (serde_json::Value::Number(n), ConditionValue::Number(want)) => {
-            let have = n.as_f64().ok_or("the number cannot be compared")?;
-            let want: f64 = want.parse().map_err(|_| "the constant is not a number".to_owned())?;
-            have.partial_cmp(&want).ok_or("the numbers cannot be compared")?
+            // Exactly, as decimals: never through a float (integers above
+            // 2^53 and long decimals keep every digit). The document's
+            // integers are exact; a fractional document number is compared
+            // as the shortest decimal that reads back as its parsed value.
+            let have = Decimal::parse(&n.to_string()).ok_or("the number cannot be compared")?;
+            let want = Decimal::parse(want).ok_or("the constant is not a number (or is out of range)")?;
+            have.cmp(&want)
         }
         (serde_json::Value::String(s), ConditionValue::Text(want)) => {
             if s == want {
@@ -596,6 +601,86 @@ fn compare(found: &serde_json::Value, op: CompareOp, value: &ConditionValue) -> 
         CompareOp::Gt => ordering == Ordering::Greater,
         CompareOp::Ge => ordering != Ordering::Less,
     })
+}
+
+/// A decimal number held exactly: `±digits × 10^exponent`, with no leading
+/// or trailing zero digits (zero has no digits and is never negative).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Decimal {
+    negative: bool,
+    digits: Vec<u8>,
+    exponent: i64,
+}
+
+impl Decimal {
+    /// `-?digits[.digits][(e|E)[+-]digits]`; `None` otherwise or when the
+    /// exponent is out of range.
+    pub(super) fn parse(text: &str) -> Option<Decimal> {
+        let (negative, rest) = match text.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, text),
+        };
+        let (mantissa, exponent) = match rest.find(['e', 'E']) {
+            Some(i) => {
+                let e = &rest[i + 1..];
+                let digits = e.strip_prefix(['+', '-']).unwrap_or(e);
+                if digits.is_empty() || digits.len() > 6 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                (&rest[..i], e.parse::<i64>().ok()?)
+            }
+            None => (rest, 0),
+        };
+        let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        if int.is_empty() || !int.bytes().all(|b| b.is_ascii_digit()) || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if mantissa.contains('.') && frac.is_empty() {
+            return None;
+        }
+        let mut digits: Vec<u8> = int.bytes().chain(frac.bytes()).map(|b| b - b'0').collect();
+        let mut exponent = exponent - frac.len() as i64;
+        let leading = digits.iter().take_while(|d| **d == 0).count();
+        digits.drain(..leading);
+        while digits.last() == Some(&0) {
+            digits.pop();
+            exponent += 1;
+        }
+        if digits.is_empty() {
+            return Some(Decimal { negative: false, digits, exponent: 0 });
+        }
+        Some(Decimal { negative, digits, exponent })
+    }
+
+    fn sign(&self) -> i8 {
+        match (self.digits.is_empty(), self.negative) {
+            (true, _) => 0,
+            (false, true) => -1,
+            (false, false) => 1,
+        }
+    }
+}
+
+impl Ord for Decimal {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match self.sign().cmp(&other.sign()) {
+            Ordering::Equal if self.sign() == 0 => return Ordering::Equal,
+            Ordering::Equal => {}
+            unequal => return unequal,
+        }
+        // Magnitudes: the place of the leading digit, then the digits (a
+        // shorter digit string is a prefix padded with zeros).
+        let top = |d: &Decimal| d.digits.len() as i64 + d.exponent;
+        let magnitude = top(self).cmp(&top(other)).then_with(|| self.digits.cmp(&other.digits));
+        if self.sign() < 0 { magnitude.reverse() } else { magnitude }
+    }
+}
+
+impl PartialOrd for Decimal {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 // ---------------------------------------------------------------- expansion

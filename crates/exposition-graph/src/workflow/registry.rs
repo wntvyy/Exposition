@@ -728,6 +728,24 @@ pub fn script_extensions(language: CodeLanguage) -> &'static [&'static str] {
     }
 }
 
+/// Longest parameter value an operation's code receives (as one
+/// `EXPOSITION_PARAM_<NAME>` environment line).
+pub const MAX_CODE_PARAMETER_BYTES: usize = 4096;
+
+/// Why `value` cannot reach `contract`'s code as a parameter, if it cannot:
+/// batch parameters become one environment line each, so text must be one
+/// line (no line break or NUL) of at most [`MAX_CODE_PARAMETER_BYTES`]. The
+/// batch runner applies the same rule (and refuses secrets) before running.
+pub fn code_parameter_problem(contract: &OperationContract, value: &super::ParamValue) -> Option<String> {
+    code_language(contract)?;
+    let super::ParamValue::Text(text) = value else { return None };
+    if text.chars().any(|c| matches!(c, '\n' | '\r' | '\0')) {
+        return Some("is passed to the code as one line, so it cannot contain a line break".into());
+    }
+    (text.len() > MAX_CODE_PARAMETER_BYTES)
+        .then(|| format!("is passed to the code, which receives at most {MAX_CODE_PARAMETER_BYTES} bytes"))
+}
+
 /// The language of the code an operation runs (its code payload's language).
 pub fn code_language(contract: &OperationContract) -> Option<CodeLanguage> {
     match &contract.payload {
