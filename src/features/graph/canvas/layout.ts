@@ -8,9 +8,36 @@
 // per component, break cycles by reversing DFS back edges; assign layers by
 // longest path from the sources; order nodes within layers by a few
 // barycenter sweeps; assign coordinates; stack components.
-import { DEFAULT_NODE_SIZE, type Point, type Size } from "./types";
+import { DEFAULT_NODE_SIZE, type CanvasNode, type Point, type Size } from "./types";
 
 export type LayoutDirection = "LR" | "TB";
+
+/**
+ * The box a NodeCard will take, estimated before it is measured so layouts
+ * leave room for its content: the type band, one or two title lines, and
+ * the badge rows (badges wrap inside the 208px card). Rounded up; a slight
+ * overestimate only adds space.
+ */
+export function estimateNodeSize(node: Pick<CanvasNode, "title" | "badges" | "group">): Size {
+  const inner = DEFAULT_NODE_SIZE.width - 16;
+  const titleLines = node.title.length > 28 ? 2 : 1;
+  const labels = node.badges.map((b) => ({ text: b.label, icon: Boolean(b.icon) }));
+  if (node.group?.collapsed) labels.unshift({ text: `${node.group.memberCount} inside`, icon: false });
+  let rows = 0;
+  let used = Infinity;
+  for (const { text, icon } of labels) {
+    const width = 14 + (icon ? 14 : 0) + text.length * 6;
+    if (used + 2 + width > inner) {
+      rows += 1;
+      used = width;
+    } else {
+      used += 2 + width;
+    }
+  }
+  // Border 2, band 22, gap 4, body padding 6 + 8, title lines of 16.25px, badge rows of 18px (+2 between, +4 above).
+  const height = 2 + 22 + 4 + 14 + titleLines * 16.25 + (rows ? 4 + rows * 18 + (rows - 1) * 2 : 0);
+  return { width: DEFAULT_NODE_SIZE.width, height: Math.ceil(height) };
+}
 
 export interface LayoutNode {
   id: string;

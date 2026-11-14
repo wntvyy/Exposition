@@ -19,6 +19,8 @@ export type AssertionStatus = "accepted" | "suggested" | "observed" | "rejected"
 export interface CanvasBadge {
   label: string;
   tone: BadgeTone;
+  /** Status icon shown before the label (the label stays the meaning). */
+  icon?: IconComponent;
   dashed?: boolean;
   /** Longer explanation (tooltip and accessible description). */
   title?: string;
@@ -77,5 +79,8 @@ export interface CanvasViewport {
   zoom: number;
 }
 
-/** Default node box used for layout before a node is measured. */
-export const DEFAULT_NODE_SIZE: Size = { width: 208, height: 76 };
+/**
+ * Default node box used for layout before a node is measured: the card with
+ * its type band, a two-line title, and one row of badges.
+ */
+export const DEFAULT_NODE_SIZE: Size = { width: 208, height: 96 };

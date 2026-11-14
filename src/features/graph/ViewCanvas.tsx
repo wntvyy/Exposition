@@ -6,8 +6,8 @@ import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "r
 
 import { notify } from "../../app/notifications";
 import { GraphCanvas, type CanvasSelection } from "./canvas/GraphCanvas";
-import { layeredLayout, placeUnpositioned } from "./canvas/layout";
-import { DEFAULT_NODE_SIZE, type CanvasNode, type Point } from "./canvas/types";
+import { estimateNodeSize, layeredLayout, placeUnpositioned } from "./canvas/layout";
+import type { CanvasNode, Point } from "./canvas/types";
 import type { Projection } from "./projection";
 import type { ViewStore } from "./viewStore";
 
@@ -36,8 +36,8 @@ export function ViewCanvas(props: ViewCanvasProps) {
     if (!positions) return new Map<string, Point>();
     const positioned = projection.nodes
       .filter((n) => positions[n.id])
-      .map((n) => ({ id: n.id, position: positions[n.id]!, size: sizeOf(positions[n.id]) }));
-    const missing = projection.nodes.filter((n) => !positions[n.id]).map((n) => ({ id: n.id }));
+      .map((n) => ({ id: n.id, position: positions[n.id]!, size: sizeOf(positions[n.id]) ?? estimateNodeSize(n) }));
+    const missing = projection.nodes.filter((n) => !positions[n.id]).map((n) => ({ id: n.id, size: estimateNodeSize(n) }));
     return placeUnpositioned(positioned, missing, projection.edges);
   }, [projection, positions]);
 
@@ -94,7 +94,7 @@ export function arrange(store: ViewStore, projection: Projection, onArranged: ()
     if (p) previous.set(n.id, { x: p.x, y: p.y });
   }
   const next = layeredLayout(
-    projection.nodes.map((n) => ({ id: n.id, size: sizeOf(view.positions[n.id]) ?? DEFAULT_NODE_SIZE })),
+    projection.nodes.map((n) => ({ id: n.id, size: sizeOf(view.positions[n.id]) ?? estimateNodeSize(n) })),
     projection.edges,
   );
   store.placeNodes(next, { replace: true });
