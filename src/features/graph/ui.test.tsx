@@ -125,8 +125,8 @@ describe("Project graph table (keyboard alternative)", () => {
     fireEvent.keyUp(row, { key: " ", code: "Space" });
     const inspector = await screen.findByTestId("graph-entity-inspector");
     expect(inspector.getAttribute("data-entity-id")).toBe("thm");
-    // The observed reference is shown with its status and cannot be removed by hand.
-    const observed = await within(inspector).findByText("Observed");
+    // The observed reference is shown with its status (a settled fact: muted "· observed") and cannot be removed by hand.
+    const observed = await within(inspector).findByText("· observed");
     const item = observed.closest('[data-testid="graph-relation"]') as HTMLElement;
     expect(item.getAttribute("data-status")).toBe("observed");
     expect(within(item).queryByRole("button", { name: "Delete relationship" })).toBeNull();

@@ -5,7 +5,20 @@
 // verdict, and freshness are separate columns; stale or unknown is never
 // shown as success, and a reviewed association is a correspondence, not a
 // machine proof of equivalence.
-import { FileSearch, LayoutGrid, Plus, Table2, Waypoints } from "lucide-react";
+import {
+  CircleCheck,
+  CircleDashed,
+  CircleHelp,
+  CircleX,
+  FileSearch,
+  History,
+  LayoutGrid,
+  Plus,
+  Sigma,
+  Table2,
+  TriangleAlert,
+  Waypoints,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { Entity } from "../../bindings/Entity";
@@ -19,20 +32,23 @@ import {
   Banner,
   Button,
   DataTable,
+  EmptyState,
   ErrorState,
   LoadingState,
   SearchField,
   SegmentedControl,
   Section,
-  StatusPill,
+  StatusText,
   type BadgeTone,
   type DataTableColumn,
+  type IconComponent,
+  type Status,
 } from "../../ui/components";
 import { graphApi } from "./api";
 import type { CanvasBadge } from "./canvas/types";
 import type { CanvasSelection } from "./canvas/GraphCanvas";
 import { FiltersButton } from "./Filters";
-import { EntityInspector, FormalEvidenceBody, InspectorEmpty, RelationInspector, RelationStatusBadge, type InspectorActions } from "./Inspector";
+import { EntityInspector, FormalEvidenceBody, InspectorEmpty, RelationInspector, RelationStatus, type InspectorActions } from "./Inspector";
 import { entityDisplay, freshnessView, kindDisplay, VERDICT_VIEW, type VocabularyIndex } from "./model";
 import { GraphDialogs, InspectorPanel, useInspectorOpen, type DialogState } from "./ProjectGraph";
 import { project } from "./projection";
@@ -41,6 +57,7 @@ import { SaveIndicator } from "./SaveIndicator";
 import { takeRequest, useGraphNavigation } from "./navigation";
 import { coverageSentence } from "./status";
 import { canWrite, useGraph } from "./store";
+import { SectionToolbar } from "./toolbar";
 import { useGraphLoad } from "./useGraphData";
 import { useGraphOps } from "./useGraphOps";
 import { arrange, ViewCanvas } from "./ViewCanvas";
@@ -50,35 +67,52 @@ import type { ViewStore } from "./viewStore";
 type MathMode = "dependencies" | "verification";
 type Quick = "all" | "noProof" | "noFormal" | "notCurrent";
 
-const INFORMAL: Record<MathRow["informal"], { label: string; tone: BadgeTone; dashed?: boolean } | null> = {
+/**
+ * Informal proof state. A missing proof is a warning, a linked proof a
+ * settled fact (neutral), a suggested proof provisional (dashed accent badge).
+ */
+const INFORMAL: Record<
+  MathRow["informal"],
+  { label: string; status: Status; tone: BadgeTone; icon: IconComponent; provisional?: boolean } | null
+> = {
   notApplicable: null,
-  noProof: { label: "No proof linked", tone: "warning", dashed: true },
-  proofLinked: { label: "Proof linked", tone: "neutral" },
-  proofSuggested: { label: "Proof suggested", tone: "accent", dashed: true },
+  noProof: { label: "No proof linked", status: "warning", tone: "warning", icon: TriangleAlert },
+  proofLinked: { label: "Proof linked", status: "idle", tone: "neutral", icon: CircleCheck },
+  proofSuggested: { label: "Proof suggested", status: "idle", tone: "accent", icon: CircleDashed, provisional: true },
 };
 
-const FORMAL: Record<MathRow["formalAssociation"], { label: string; tone: BadgeTone; dashed?: boolean }> = {
-  none: { label: "None", tone: "neutral", dashed: true },
-  suggested: { label: "Suggested association", tone: "accent", dashed: true },
-  reviewed: { label: "Reviewed association", tone: "neutral" },
+/** Verdict status → node badge tone and icon (the icons StatusText uses for the same status). */
+const VERDICT_BADGE: Partial<Record<Status, { tone: BadgeTone; icon: IconComponent }>> = {
+  succeeded: { tone: "success", icon: CircleCheck },
+  warning: { tone: "warning", icon: TriangleAlert },
+  failed: { tone: "danger", icon: CircleX },
+  idle: { tone: "neutral", icon: CircleDashed },
 };
 
-const VERDICT_TONE = { succeeded: "success", warning: "warning", failed: "danger" } as const;
-
-/** Node badges in the dependency view: verdict, freshness, missing proof — as text. */
+/** Node badges in the dependency view: verdict, freshness, missing proof — text with icons. */
 export function mathBadges(row: MathRow | undefined): CanvasBadge[] {
   if (!row) return [];
   const badges: CanvasBadge[] = [];
   if (row.verdict) {
     const v = VERDICT_VIEW[row.verdict];
-    badges.push({ label: v.label, tone: VERDICT_TONE[v.status as keyof typeof VERDICT_TONE] ?? "neutral", title: v.sentence });
+    const look = VERDICT_BADGE[v.status] ?? VERDICT_BADGE.idle!;
+    badges.push({ label: v.label, tone: look.tone, icon: look.icon, title: v.sentence });
   }
   if (row.freshness && row.freshness.kind !== "current") {
     const f = freshnessView(row.freshness);
-    badges.push({ label: f.label === "Stale" ? "Stale evidence" : "Freshness unknown", tone: row.freshness.kind === "stale" ? "stale" : "neutral", dashed: true, title: f.detail });
+    const stale = row.freshness.kind === "stale";
+    badges.push({
+      label: stale ? "Stale evidence" : "Freshness unknown",
+      tone: stale ? "stale" : "neutral",
+      icon: stale ? History : CircleHelp,
+      dashed: true,
+      title: f.detail,
+    });
   }
   const informal = INFORMAL[row.informal];
-  if (informal && row.informal !== "proofLinked") badges.push({ label: informal.label, tone: informal.tone, dashed: informal.dashed });
+  if (informal && row.informal !== "proofLinked") {
+    badges.push({ label: informal.label, tone: informal.tone, icon: informal.icon, dashed: informal.provisional });
+  }
   return badges;
 }
 
@@ -94,6 +128,8 @@ function matchesQuick(row: MathRow, quick: Quick): boolean {
       return row.freshness !== null && row.freshness.kind !== "current";
   }
 }
+
+const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 export function VerificationTable({
   rows,
@@ -114,7 +150,7 @@ export function VerificationTable({
       sortValue: (r) => r.entity.label,
       render: (r) => (
         <span className="xp-graph-table__name">
-          <strong>{r.entity.label}</strong> <span className="xp-muted">{entityDisplay(vocabulary, r.entity).typeLabel}</span>
+          <span className="xp-graph-table__title">{r.entity.label}</span> <span className="xp-muted">{entityDisplay(vocabulary, r.entity).typeLabel}</span>
         </span>
       ),
     },
@@ -124,12 +160,13 @@ export function VerificationTable({
       sortValue: (r) => r.informal,
       render: (r) => {
         const v = INFORMAL[r.informal];
-        return v ? (
-          <Badge tone={v.tone} dashed={v.dashed}>
+        if (!v) return <span className="xp-muted">Not applicable</span>;
+        return v.provisional ? (
+          <Badge tone={v.tone} dashed>
             {v.label}
           </Badge>
         ) : (
-          <span className="xp-muted">Not applicable</span>
+          <StatusText status={v.status} label={v.label} />
         );
       },
     },
@@ -137,15 +174,22 @@ export function VerificationTable({
       id: "formal",
       title: "Formal association",
       sortValue: (r) => r.formalAssociation,
-      render: (r) =>
-        r.entity.kind === "formalDeclaration" ? (
-          <span className="xp-muted">Is a formal declaration</span>
-        ) : (
-          <Badge tone={FORMAL[r.formalAssociation].tone} dashed={FORMAL[r.formalAssociation].dashed}>
-            {FORMAL[r.formalAssociation].label}
-            {r.formalDeclarations.length ? ` (${r.formalDeclarations.length})` : ""}
-          </Badge>
-        ),
+      render: (r) => {
+        if (r.entity.kind === "formalDeclaration") return <span className="xp-muted">Is a formal declaration</span>;
+        const count = r.formalDeclarations.length ? ` (${r.formalDeclarations.length})` : "";
+        switch (r.formalAssociation) {
+          case "none":
+            return <span className="xp-muted">None</span>;
+          case "suggested":
+            return (
+              <Badge tone="accent" dashed>
+                Suggested association{count}
+              </Badge>
+            );
+          case "reviewed":
+            return <span>Reviewed association{count}</span>;
+        }
+      },
     },
     {
       id: "verdict",
@@ -153,9 +197,9 @@ export function VerificationTable({
       sortValue: (r) => (r.verdict ? VERDICT_VIEW[r.verdict].label : "~"),
       render: (r) =>
         r.verdict ? (
-          <StatusPill size="sm" status={VERDICT_VIEW[r.verdict].status} label={VERDICT_VIEW[r.verdict].label} />
+          <StatusText status={VERDICT_VIEW[r.verdict].status} label={VERDICT_VIEW[r.verdict].label} />
         ) : (
-          <span className="xp-muted">No formal evidence</span>
+          <StatusText status="idle" label="No formal evidence" />
         ),
     },
     {
@@ -165,7 +209,7 @@ export function VerificationTable({
       render: (r) => {
         if (!r.freshness) return <span className="xp-muted">—</span>;
         const f = freshnessView(r.freshness);
-        return <StatusPill size="sm" status={f.status} label={f.label} />;
+        return <StatusText status={f.status} label={f.label} />;
       },
     },
     {
@@ -174,11 +218,11 @@ export function VerificationTable({
       sortValue: (r) => r.binding?.path ?? "~",
       render: (r) =>
         r.binding ? (
-          <span className="xp-graph-badges">
-            <code className="xp-graph-path">{r.binding.path}</code>
+          <span className="xp-graph-inline">
+            <span className="ui-code">{r.binding.path}</span>
             {r.binding.state !== "resolved" && (
               <Badge tone="warning" dashed>
-                {r.binding.state}
+                {capitalize(r.binding.state)}
               </Badge>
             )}
           </span>
@@ -217,22 +261,31 @@ function DependsOnSection({ entityId, vocabulary, onSelectEntity }: { entityId: 
   const others = (loaded.data?.entities ?? []).filter((e) => e.id !== entityId);
   const assumptions = others.filter((e) => e.kind === "assumption" || e.kind === "conjecture");
   const results = others.filter((e) => !assumptions.includes(e));
-  const list = (items: Entity[]) => (
-    <ul className="xp-graph-list">
-      {items.map((e) => (
-        <li key={e.id} className="xp-graph-list__item" data-testid="graph-depends-on" data-entity-id={e.id}>
-          <p className="xp-graph-list__line">
-            <button type="button" className="xp-link" onClick={() => onSelectEntity(e.id)}>
-              {e.label}
-            </button>
-            <span className="xp-muted"> ({kindDisplay(vocabulary, e.kind).title})</span>
-          </p>
-        </li>
-      ))}
-    </ul>
+  const group = (title: string, items: Entity[]) => (
+    <div className="xp-graph-group">
+      <h4 className="ui-group-label">
+        {title} <span className="xp-graph-count">{items.length}</span>
+      </h4>
+      {items.length ? (
+        <ul className="xp-graph-rows">
+          {items.map((e) => (
+            <li key={e.id} className="xp-graph-row" data-testid="graph-depends-on" data-entity-id={e.id}>
+              <p className="xp-graph-row__line xp-graph-row__main">
+                <button type="button" className="xp-link" onClick={() => onSelectEntity(e.id)}>
+                  {e.label}
+                </button>
+                <span className="xp-muted"> ({kindDisplay(vocabulary, e.kind).title})</span>
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="xp-muted">None recorded.</p>
+      )}
+    </div>
   );
   return (
-    <Section title="Depends on">
+    <Section title="Depends on" count={loaded.data && !loaded.error ? others.length : undefined}>
       {loaded.loading && !loaded.data ? (
         <p className="xp-muted">Tracing dependencies…</p>
       ) : loaded.error ? (
@@ -241,11 +294,9 @@ function DependsOnSection({ entityId, vocabulary, onSelectEntity }: { entityId: 
         <p className="xp-muted">No recorded dependencies or assumptions (through “depends on” and “assumes”).</p>
       ) : (
         <>
-          <h4 className="xp-graph-family__title">Assumptions ({assumptions.length})</h4>
-          {assumptions.length ? list(assumptions) : <p className="xp-muted">None recorded.</p>}
-          <h4 className="xp-graph-family__title">Results and definitions ({results.length})</h4>
-          {results.length ? list(results) : <p className="xp-muted">None recorded.</p>}
-          {loaded.data?.truncated && <p className="xp-muted">Showing the first {others.length}; the dependency closure is larger.</p>}
+          {group("Assumptions", assumptions)}
+          {group("Results and definitions", results)}
+          {loaded.data?.truncated && <p className="ui-meta">Showing the first {others.length}; the dependency closure is larger.</p>}
         </>
       )}
     </Section>
@@ -274,16 +325,16 @@ function MathSections({
   const formalizations = detail.incoming.filter((r) => r.kind === "formalizes");
   const isStatement = kindDisplay(vocabulary, detail.entity.kind).statement;
   const relationList = (relations: Relation[], pick: (r: Relation) => string, testId: string) => (
-    <ul className="xp-graph-list">
+    <ul className="xp-graph-rows">
       {relations.map((r) => {
         const other = neighbors.get(pick(r));
         return (
-          <li key={r.id} className="xp-graph-list__item" data-testid={testId} data-entity-id={pick(r)}>
-            <p className="xp-graph-list__line">
+          <li key={r.id} className="xp-graph-row" data-testid={testId} data-entity-id={pick(r)}>
+            <p className="xp-graph-row__line xp-graph-row__main">
               <button type="button" className="xp-link" onClick={() => onSelectEntity(pick(r))}>
                 {other?.label ?? pick(r)}
               </button>{" "}
-              <RelationStatusBadge status={r.status} />
+              <RelationStatus status={r.status} />
             </p>
           </li>
         );
@@ -294,17 +345,17 @@ function MathSections({
     <>
       <DependsOnSection entityId={detail.entity.id} vocabulary={vocabulary} onSelectEntity={onSelectEntity} />
       {isStatement && (
-        <Section title={`Proofs targeting this (${proofs.length})`}>
+        <Section title="Proofs targeting this" count={proofs.length}>
           {proofs.length ? relationList(proofs, (r) => r.from, "graph-proof") : <p className="xp-muted">No proof is linked to this statement.</p>}
         </Section>
       )}
       {detail.entity.kind === "proof" && (
-        <Section title="Proves">
+        <Section title="Proves" count={targets.length}>
           {targets.length ? relationList(targets, (r) => r.to, "graph-proof-target") : <p className="xp-muted">This proof targets no statement yet.</p>}
         </Section>
       )}
       <Section title="Formal verification">
-        <div data-testid="graph-formal-section">
+        <div className="xp-graph-stack" data-testid="graph-formal-section">
           {detail.entity.kind !== "formalDeclaration" &&
             (formalizations.length ? (
               <>
@@ -323,7 +374,7 @@ function MathSections({
           )}
           {row?.verdict ? (
             <p>
-              Verifier verdict: <StatusPill size="sm" status={VERDICT_VIEW[row.verdict].status} label={VERDICT_VIEW[row.verdict].label} />{" "}
+              Verifier verdict: <StatusText status={VERDICT_VIEW[row.verdict].status} label={VERDICT_VIEW[row.verdict].label} />{" "}
               <span className="xp-muted">{VERDICT_VIEW[row.verdict].sentence}</span>
             </p>
           ) : (
@@ -331,7 +382,7 @@ function MathSections({
           )}
           {row?.freshness && (
             <p>
-              Freshness: <StatusPill size="sm" status={freshnessView(row.freshness).status} label={freshnessView(row.freshness).label} />{" "}
+              Freshness: <StatusText status={freshnessView(row.freshness).status} label={freshnessView(row.freshness).label} />{" "}
               <span className="xp-muted">{freshnessView(row.freshness).detail}</span>
             </p>
           )}
@@ -443,7 +494,7 @@ export function Mathematics({ store }: { store: ViewStore }) {
 
   return (
     <div className="xp-graph-section" data-testid="graph-mathematics">
-      <div className="xp-graph-toolbar" data-region="graph-toolbar" role="toolbar" aria-label="Mathematics tools">
+      <SectionToolbar label="Mathematics tools">
         <SegmentedControl<MathMode>
           aria-label="Mathematics view"
           value={mode}
@@ -486,8 +537,8 @@ export function Mathematics({ store }: { store: ViewStore }) {
             Inspector
           </Button>
         )}
-      </div>
-      <p className="xp-graph-coverage xp-muted" data-testid="graph-math-coverage">
+      </SectionToolbar>
+      <p className="xp-graph-coverage ui-meta" data-testid="graph-math-coverage">
         Extraction coverage: {coverageSentence(data.coverage)} Unknown coverage is not verified.
         {formalUnavailable ? " Formal dependency edges are unavailable where the checker evidence does not expose them." : ""}
       </p>
@@ -518,10 +569,13 @@ export function Mathematics({ store }: { store: ViewStore }) {
               }
               fitRequest={fitRequest}
               empty={
-                <div className="xp-graph-empty">
-                  <p className="xp-graph-empty__title">No mathematical items{quick !== "all" ? " match" : " yet"}</p>
-                  <p className="xp-muted">Definitions, statements, proofs, and formal declarations appear here as they are extracted from sources or created with New.</p>
-                </div>
+                <EmptyState
+                  size="page"
+                  fill={false}
+                  icon={Sigma}
+                  title={`No mathematical items${quick !== "all" ? " match" : " yet"}`}
+                  description="Definitions, statements, proofs, and formal declarations appear here as they are extracted from sources or created with New."
+                />
               }
             />
           ) : (

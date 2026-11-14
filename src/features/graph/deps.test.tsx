@@ -47,7 +47,7 @@ describe("Dependency inspector", () => {
     expect(families).toEqual(["math", "citation"]);
     expect(within(item).getByText("Mathematical dependencies")).toBeTruthy();
     expect(within(item).getByText("References")).toBeTruthy();
-    expect(within(item).getByText("Observed")).toBeTruthy();
+    expect(within(item).getByText("· observed")).toBeTruthy();
     expect(screen.getByTestId("deps-coverage").textContent).toMatch(/Partial \(latex\/1\)/);
     expect(screen.getByTestId("deps-resource").textContent).toMatch(/paper\.tex/);
 

@@ -1,8 +1,8 @@
 // Project subsection of the Graph page: the project's saved view as a canvas
 // or as tables, with search, filters, local neighborhood focus, typed
 // relationship authoring, and the inspector.
-import { Eye, FolderPlus, LayoutGrid, Plus, Rows3, Waypoints, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Eye, FolderPlus, LayoutGrid, Network, Plus, Rows3, Waypoints, X } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { useLayout } from "../../app/layout";
 import type { Entity } from "../../bindings/Entity";
@@ -12,12 +12,14 @@ import type { Relation } from "../../bindings/Relation";
 import {
   Banner,
   Button,
+  EmptyState,
   ErrorState,
   IconButton,
   LoadingState,
   Menu,
   MenuItem,
   MenuTrigger,
+  PanelHeader,
   SearchField,
   SegmentedControl,
   Select,
@@ -42,6 +44,7 @@ import { useGraphOps } from "./useGraphOps";
 import { arrange, ViewCanvas } from "./ViewCanvas";
 import { SaveIndicator } from "./SaveIndicator";
 import { takeRequest, useGraphNavigation } from "./navigation";
+import { SectionToolbar } from "./toolbar";
 import type { ViewStore } from "./viewStore";
 
 export type DialogState =
@@ -65,17 +68,19 @@ export function useDisplayMode(key: string) {
   ] as const;
 }
 
-/** The inspector column: docked when the window is wide, an overlay drawer when narrow. */
+/**
+ * The inspector column: docked when the window is wide, an overlay drawer when
+ * narrow. Its content is an inspector (InspectorHeader + InspectorBody) or a
+ * compact state.
+ */
 export function InspectorPanel({ open, onClose, children }: { open: boolean; onClose: () => void; children: ReactNode }) {
   const narrow = useLayout((s) => s.viewportWidth < NARROW_WIDTH);
+  const titleId = useId();
   if (!open) return null;
   return (
-    <aside className="xp-graph-inspector" data-region="graph-inspector" data-narrow={narrow || undefined} aria-label="Inspector">
-      <header className="xp-graph-inspector__bar">
-        <h2 className="xp-graph-inspector__bar-title">Inspector</h2>
-        <IconButton icon={X} size="sm" aria-label="Close inspector" onPress={onClose} />
-      </header>
-      <div className="xp-graph-inspector__scroll">{children}</div>
+    <aside className="xp-graph-inspector" data-region="graph-inspector" data-narrow={narrow || undefined} aria-labelledby={titleId}>
+      <PanelHeader id={titleId} title="Inspector" actions={<IconButton icon={X} size="sm" aria-label="Close inspector" onPress={onClose} />} />
+      {children}
     </aside>
   );
 }
@@ -225,7 +230,7 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
 
   return (
     <div className="xp-graph-section" data-testid="graph-project">
-      <div className="xp-graph-toolbar" data-region="graph-toolbar" role="toolbar" aria-label="Project graph tools">
+      <SectionToolbar label="Project graph tools">
         <SegmentedControl<"canvas" | "table">
           aria-label="Display"
           value={mode}
@@ -274,7 +279,7 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
             Inspector
           </Button>
         )}
-      </div>
+      </SectionToolbar>
 
       {focus && (
         <Banner
@@ -405,13 +410,18 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
 
 function EmptyCanvas({ filtered, total }: { filtered: number; total: number }) {
   return (
-    <div className="xp-graph-empty" data-testid="graph-empty">
-      <p className="xp-graph-empty__title">{total === 0 ? "The project graph has no items yet" : "No items match this view"}</p>
-      <p className="xp-muted">
-        {total === 0
-          ? "Resources appear as the project is indexed. You can also create claims, theorems, questions, and collections with New."
-          : `${filtered} items are hidden or filtered out. Change the filters, clear the search, or show hidden items.`}
-      </p>
+    <div data-testid="graph-empty">
+      <EmptyState
+        size="page"
+        fill={false}
+        icon={Network}
+        title={total === 0 ? "The project graph has no items yet" : "No items match this view"}
+        description={
+          total === 0
+            ? "Resources appear as the project is indexed. You can also create claims, theorems, questions, and collections with New."
+            : `${filtered} items are hidden or filtered out. Change the filters, clear the search, or show hidden items.`
+        }
+      />
     </div>
   );
 }
