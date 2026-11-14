@@ -686,6 +686,133 @@ impl AgentService {
     }
 }
 
+// ---- P1 project operations: task records
+
+/// A task record as Storage & History lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskRecord {
+    pub id: TaskId,
+    pub title: String,
+    pub created_at_ms: u64,
+    /// The project folder the task worked in.
+    pub workspace_root: String,
+    /// Stored size of everything recorded for the task.
+    pub bytes: u64,
+    /// The task loop runs now (it is stopped before anything is removed).
+    pub active: bool,
+    /// Files whose changes still await accept/revert.
+    pub pending_review: u32,
+    /// When it was recoverably deleted.
+    pub deleted_at_ms: Option<u64>,
+}
+
+impl AgentService {
+    fn record_of(&self, row: &TaskRow, deleted_at_ms: Option<u64>) -> Result<TaskRecord> {
+        let summary = self.inner.summary_of(row)?;
+        Ok(TaskRecord {
+            id: row.id.clone(),
+            title: row.title.clone(),
+            created_at_ms: row.created_at_ms,
+            workspace_root: row.spec.workspace_root.clone(),
+            bytes: self.inner.store.task_bytes(&row.id)?,
+            active: self.is_running(&row.id) || row.status.is_active(),
+            pending_review: summary.pending_review,
+            deleted_at_ms,
+        })
+    }
+
+    /// Task records (not deleted), newest first.
+    pub fn task_records(&self) -> Result<Vec<TaskRecord>> {
+        let rows = self.inner.store.tasks()?;
+        rows.iter().map(|row| self.record_of(row, None)).collect()
+    }
+
+    /// Recoverably deleted tasks, newest deletion first.
+    pub fn deleted_task_records(&self) -> Result<Vec<TaskRecord>> {
+        let rows = self.inner.store.deleted_tasks()?;
+        rows.iter().map(|(row, at)| self.record_of(row, Some(*at))).collect()
+    }
+
+    /// A task record, deleted or not.
+    pub fn task_record(&self, id: &TaskId) -> Result<TaskRecord> {
+        let (row, deleted) = self.inner.store.task_any(id)?.ok_or_else(|| not_found(id))?;
+        self.record_of(&row, deleted)
+    }
+
+    /// The project files a task may write or has touched: its explicit scope
+    /// paths, the files it changed, and the targets it resolved. A
+    /// whole-project scope is not listed (only what it actually touched).
+    pub fn task_paths(&self, id: &TaskId) -> Result<Vec<WorkspacePath>> {
+        let (row, _) = self.inner.store.task_any(id)?.ok_or_else(|| not_found(id))?;
+        let mut out = match &row.spec.scope {
+            TaskScope::Workspace => Vec::new(),
+            TaskScope::Files { paths } => paths.clone(),
+            TaskScope::Document { path } | TaskScope::Selection { path, .. } => vec![path.clone()],
+        };
+        for p in self.inner.store.task_paths(id)? {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Delete a task's record: recoverably (hidden from the task list,
+    /// restorable) or `permanent`ly (with its transcript, tool calls and
+    /// change records — its changes can then no longer be reverted from the
+    /// task). An active task is refused: stop it first.
+    pub fn delete_task(&self, id: &TaskId, permanent: bool) -> Result<()> {
+        let (row, deleted) = self.inner.store.task_any(id)?.ok_or_else(|| not_found(id))?;
+        if self.is_running(id) || row.status.is_active() {
+            return Err(AgentError::new("agents.taskActive", "The task is still running; stop it first."));
+        }
+        if permanent {
+            self.inner.store.purge_task(id)?;
+        } else if deleted.is_some() {
+            return Err(AgentError::new("agents.alreadyDeleted", "The task is already deleted."));
+        } else {
+            self.inner.store.set_task_deleted(id, Some(now_ms()))?;
+        }
+        Ok(())
+    }
+
+    /// Bring a recoverably deleted task back. Nothing is re-run.
+    pub fn restore_task(&self, id: &TaskId) -> Result<TaskSummary> {
+        let (_, deleted) = self.inner.store.task_any(id)?.ok_or_else(|| not_found(id))?;
+        if deleted.is_none() {
+            return Err(AgentError::new("agents.notDeleted", "The task is not deleted."));
+        }
+        self.inner.store.set_task_deleted(id, None)?;
+        self.inner.summary(id)
+    }
+
+    /// Cancel a running task and wait (bounded) until its loop has ended.
+    pub fn stop_and_wait(&self, id: &TaskId, timeout: Duration) -> bool {
+        if !self.is_running(id) {
+            return true;
+        }
+        let _ = self.cancel_task(id);
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !self.is_running(id) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        !self.is_running(id)
+    }
+
+    /// Bytes the task database occupies on disk (with its log), if on disk.
+    pub fn task_history_bytes(&self) -> Option<u64> {
+        self.inner.store.file_bytes()
+    }
+
+    /// Compact the task database after removals; (before, after) sizes.
+    pub fn compact_tasks(&self) -> Result<(Option<u64>, Option<u64>)> {
+        Ok(self.inner.store.compact()?)
+    }
+}
+
 fn not_found(id: &TaskId) -> AgentError {
     AgentError::new("agents.notFound", format!("Unknown task {id}."))
 }

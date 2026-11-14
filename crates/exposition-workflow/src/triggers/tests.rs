@@ -69,6 +69,8 @@ impl WorkflowHost for Host {
 struct FakeBatch {
     available: Mutex<Result<(), String>>,
     runs: AtomicUsize,
+    /// While set, a batch holds (active) until released or canceled.
+    gate: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl BatchRunner for FakeBatch {
@@ -83,6 +85,24 @@ impl BatchRunner for FakeBatch {
     ) -> Result<BatchResult, ResearchError> {
         let run = format!("run-{}", self.runs.fetch_add(1, Ordering::SeqCst) + 1);
         (control.on_dispatched)(&run);
+        let gate = self.gate.lock().unwrap().clone();
+        if let Some(release) = gate {
+            while !release.load(Ordering::SeqCst) && !(control.canceled)() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if (control.canceled)() {
+                return Ok(BatchResult {
+                    research_run: run,
+                    status: RunStatus::Canceled,
+                    exit_code: None,
+                    ports: Vec::new(),
+                    extra: Vec::new(),
+                    rejected: Vec::new(),
+                    log: "canceled".into(),
+                    environment: Vec::new(),
+                });
+            }
+        }
         let rel = format!(".exposition/artifacts/{run}/dataset.csv");
         std::fs::create_dir_all(root.join(format!(".exposition/artifacts/{run}"))).unwrap();
         std::fs::write(root.join(&rel), b"x\n1\n").unwrap();
@@ -248,7 +268,8 @@ fn fixture() -> Fx {
         image_id: Mutex::new(Some(IMAGE_A.into())),
         graph: graph.clone(),
     });
-    let batch = Arc::new(FakeBatch { available: Mutex::new(Ok(())), runs: AtomicUsize::new(0) });
+    let batch =
+        Arc::new(FakeBatch { available: Mutex::new(Ok(())), runs: AtomicUsize::new(0), gate: Mutex::new(None) });
     let mut adapters: Adapters = BTreeMap::new();
     let runner: Arc<dyn BatchRunner> = batch.clone();
     adapters.insert(
@@ -1392,3 +1413,7 @@ fn suspension_messages_say_what_to_do_once() {
         "The run could not start 3 times in a row: the input changed. The trigger is suspended until you review and enable it again."
     );
 }
+
+/// P1 project operations (the data side) against this fixture.
+#[path = "project_data_tests.rs"]
+mod project_data;

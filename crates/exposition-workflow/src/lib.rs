@@ -8,6 +8,7 @@ pub mod environment;
 pub mod manifest;
 pub mod model;
 pub mod plan;
+pub mod project_data;
 pub mod reproduce;
 pub mod runner;
 pub mod service;

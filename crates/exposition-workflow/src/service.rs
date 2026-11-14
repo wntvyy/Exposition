@@ -25,6 +25,9 @@ use crate::runner::{self, CancelToken};
 use crate::slots::{SlotCounts, Slots};
 use crate::store::{self, RunStore};
 
+#[path = "run_records.rs"]
+pub mod records;
+
 /// At most this many unstarted plans are kept.
 const MAX_PLANS: usize = 32;
 /// Code and message of a run canceled because its project closed.

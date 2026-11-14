@@ -26,6 +26,7 @@ pub mod helper;
 pub mod launcher;
 pub mod project;
 pub mod protocol;
+pub mod records;
 mod runs;
 pub mod sandbox;
 mod service;

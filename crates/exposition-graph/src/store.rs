@@ -30,7 +30,7 @@ use crate::query::{GraphView, GraphViewSummary, ViewScope};
 use crate::vocabulary::{EntityKind, EvidenceKind, RelationKind, ResourceRole, VOCABULARY_VERSION};
 
 /// Current schema version (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// File name of the graph database inside `.exposition/`.
 pub const DATABASE_FILE: &str = "graph.sqlite3";
@@ -163,6 +163,23 @@ const MIGRATIONS: &[(u32, &str)] = &[
     CREATE TABLE evidence_seals (id TEXT PRIMARY KEY, mac TEXT NOT NULL);
     "#,
     ),
+    (
+        // Project operations (P1): app-managed recoverable deletions of
+        // graph-held records (a snapshot to restore or purge), and saved
+        // workflows removed from active use whose pinned revisions are kept
+        // for the composites that run them.
+        4,
+        r#"
+    CREATE TABLE recoverable (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        label TEXT NOT NULL,
+        body TEXT NOT NULL,
+        deleted_at INTEGER NOT NULL
+    );
+    CREATE TABLE retired_workflows (id TEXT PRIMARY KEY, retired_at INTEGER NOT NULL);
+    "#,
+    ),
 ];
 
 /// Every schema object a valid database of `version` has (type, name).
@@ -189,6 +206,10 @@ fn expected_objects(version: u32) -> Vec<(&'static str, &'static str)> {
     }
     if version >= 3 {
         objects.push(("table", "evidence_seals"));
+    }
+    if version >= 4 {
+        objects.push(("table", "recoverable"));
+        objects.push(("table", "retired_workflows"));
     }
     objects
 }
@@ -267,6 +288,10 @@ fn expected_columns(version: u32) -> Vec<(&'static str, Vec<&'static str>)> {
     if version >= 3 {
         tables.push(("evidence_seals", vec!["id", "mac"]));
     }
+    if version >= 4 {
+        tables.push(("recoverable", vec!["id", "kind", "label", "body", "deleted_at"]));
+        tables.push(("retired_workflows", vec!["id", "retired_at"]));
+    }
     tables
 }
 
@@ -283,6 +308,8 @@ const ROW_LIMITS: &[(&str, i64)] = &[
     ("coverage", 500_000),
     ("source_index", 500_000),
     ("evidence_seals", 200_000),
+    ("recoverable", 100_000),
+    ("retired_workflows", 100_000),
 ];
 
 /// Upper bounds on what one read returns.
@@ -601,6 +628,24 @@ impl GraphStore {
             )?;
             if n > 0 {
                 return Err(untrusted("workflow record"));
+            }
+        }
+        {
+            // Recoverable snapshots are decoded strictly when used; here only
+            // their bounds and kinds are checked.
+            let n: i64 = self.conn.query_row(
+                "SELECT count(*) FROM recoverable WHERE length(id) > ?2 OR length(label) > ?2
+                 OR length(body) > ?1 OR kind NOT IN ('entity', 'relation', 'view', 'workflow')",
+                params![16 * MAX_FIELD as i64, MAX_SHORT_FIELD as i64],
+                |r| r.get(0),
+            )?;
+            let m: i64 = self.conn.query_row(
+                "SELECT count(*) FROM retired_workflows WHERE length(id) > ?1",
+                [MAX_SHORT_FIELD as i64],
+                |r| r.get(0),
+            )?;
+            if n > 0 || m > 0 {
+                return Err(untrusted("recoverable record"));
             }
         }
         Ok(())
@@ -2075,5 +2120,58 @@ mod tests {
         let old = Connection::open(dir.path().join(crate::backup::BACKUP_DIR).join(&backups[0].name)).unwrap();
         let v: u32 = old.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
         assert_eq!(v, 1);
+    }
+
+    /// P1: a schema-3 graph with records keeps them all when it gains the
+    /// recoverable-deletion tables (after a premigration backup).
+    #[test]
+    fn a_version_3_graph_keeps_its_records_when_upgraded_to_version_4() {
+        let (dir, path) = temp_db();
+        {
+            let conn = Connection::open(&path).unwrap();
+            for (_, sql) in &MIGRATIONS[..3] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 3).unwrap();
+            conn.execute_batch(
+                "INSERT INTO meta (key, value) VALUES ('project_id', 'prj-old'), ('revision', '4'), ('vocabulary_version', '1');
+                 INSERT INTO entities (id, kind, roles, label, key, lifecycle, tombstone_reason, revision, origin, attributes, created_at, updated_at)
+                 VALUES ('ent-00000000000000000000000000000001', 'claim', '[]', 'A claim', NULL, 'active', NULL, 1, '{\"kind\":\"user\"}', '{}', 0, 0);
+                 INSERT INTO workflows (id, revision, hash, state, body, saved_at)
+                 VALUES ('wf-00000000000000000000000000000001', 1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'incomplete', '{}', 0);",
+            )
+            .unwrap();
+        }
+        let store = GraphStore::open(&path, false).unwrap();
+        let version: u32 = store.connection().pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, 4);
+        assert_eq!(store.revision().unwrap(), 4);
+        let claim = EntityId::parse("ent-00000000000000000000000000000001").unwrap();
+        assert_eq!(store.entity(&claim).unwrap().unwrap().label, "A claim");
+        let rows: i64 = store.connection().query_row("SELECT count(*) FROM workflows", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "workflow revisions survive");
+        let empty: i64 = store.connection().query_row("SELECT count(*) FROM recoverable", [], |r| r.get(0)).unwrap();
+        assert_eq!(empty, 0);
+        let backups = crate::backup::list(&dir.path().join(crate::backup::BACKUP_DIR));
+        assert!(backups.iter().any(|b| b.reason == "premigration"), "{backups:?}");
+        drop(store);
+        // Re-opening the upgraded file validates it like any other.
+        GraphStore::open(&path, false).unwrap();
+    }
+
+    #[test]
+    fn a_planted_recoverable_kind_is_refused() {
+        let (_dir, path) = temp_db();
+        {
+            let store = GraphStore::open(&path, true).unwrap();
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO recoverable (id, kind, label, body, deleted_at) VALUES ('x', 'program', 'x', '{}', 0)",
+                    [],
+                )
+                .unwrap();
+        }
+        assert!(matches!(GraphStore::open(&path, false), Err(StoreError::Untrusted(_))));
     }
 }
