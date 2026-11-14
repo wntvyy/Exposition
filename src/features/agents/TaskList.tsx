@@ -53,6 +53,7 @@ export function TaskRow({
       {...op}
       className={cx("agents-task-row", op.className)}
       selected={selected}
+      current={selected}
       aria-current={selected ? "true" : undefined}
       aria-label={task.title}
       aria-describedby={metaId}

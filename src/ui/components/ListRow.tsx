@@ -13,6 +13,14 @@ export interface ListRowProps extends Omit<HTMLAttributes<HTMLDivElement>, "titl
   trailing?: ReactNode;
   /** Selected (accent tint while its list has focus, neutral otherwise). */
   selected?: boolean;
+  /**
+   * The item currently shown elsewhere (e.g. the task open in the detail
+   * view): an accent bar at the leading edge, so it stays distinguishable
+   * from a multi-item operation selection ([data-op-selected]).
+   */
+  current?: boolean;
+  /** Not interactive (no hover fill), e.g. read-only proposal rows. */
+  static?: boolean;
   /** Monospace title (code snippets, paths). */
   codeTitle?: boolean;
 }
@@ -25,11 +33,18 @@ export interface ListRowProps extends Omit<HTMLAttributes<HTMLDivElement>, "titl
  * through as ordinary attributes.
  */
 export const ListRow = forwardRef<HTMLDivElement, ListRowProps>(function ListRow(
-  { icon, title, meta, trailing, selected, codeTitle, className, children, ...rest },
+  { icon, title, meta, trailing, selected, current, static: isStatic, codeTitle, className, children, ...rest },
   ref,
 ) {
   return (
-    <div ref={ref} className={cx("ui-list-row", className)} data-selected={selected || undefined} {...rest}>
+    <div
+      ref={ref}
+      className={cx("ui-list-row", className)}
+      data-selected={selected || undefined}
+      data-current={current || undefined}
+      data-static={isStatic || undefined}
+      {...rest}
+    >
       {icon && <span className="ui-list-row__icon">{icon}</span>}
       <div className="ui-list-row__main">
         <div className="ui-list-row__title" data-code={codeTitle || undefined}>

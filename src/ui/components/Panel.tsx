@@ -119,8 +119,11 @@ export function Section({
             aria-controls={bodyId}
             onClick={() => setExpanded((e) => !e)}
           >
-            <ChevronRight className="ui-section__chevron" size={14} aria-hidden />
+            {/* Chrome sections hang the chevron before the label; content sections keep the
+                title aligned with their content and put the chevron after it. */}
+            {variant === "chrome" && <ChevronRight className="ui-section__chevron" size={14} aria-hidden />}
             {heading}
+            {variant === "content" && <ChevronRight className="ui-section__chevron" size={14} aria-hidden />}
           </button>
         ) : (
           heading

@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Minus, Search, X } from "lucide-react";
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import {
   Button as AriaButton,
   Checkbox as AriaCheckbox,
@@ -52,6 +52,54 @@ export function TextField({ label, description, errorMessage, placeholder, code,
       )}
       <FieldError className="ui-field__error">{errorMessage}</FieldError>
     </AriaTextField>
+  );
+}
+
+export interface TextAreaProps {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  rows?: number;
+  placeholder?: string;
+  description?: string;
+  /** Monospace, no spell check (code, paths one per line). */
+  code?: boolean;
+  disabled?: boolean;
+  testId?: string;
+  className?: string;
+}
+
+/**
+ * Multi-line text input with a visible label (native textarea: IME and
+ * composition safe), sharing the field look of TextField.
+ */
+export function TextArea({ label, value, onChange, rows = 3, placeholder, description, code, disabled, testId, className }: TextAreaProps) {
+  const id = useId();
+  const descriptionId = useId();
+  return (
+    <div className={cx("ui-field", className)}>
+      <label className="ui-field__label" htmlFor={id}>
+        {label}
+      </label>
+      <textarea
+        id={id}
+        className="ui-input ui-textarea"
+        rows={rows}
+        value={value}
+        placeholder={placeholder}
+        spellCheck={!code}
+        disabled={disabled}
+        data-code={code || undefined}
+        aria-describedby={description ? descriptionId : undefined}
+        onChange={(event) => onChange(event.target.value)}
+        data-testid={testId}
+      />
+      {description && (
+        <span className="ui-field__description" id={descriptionId}>
+          {description}
+        </span>
+      )}
+    </div>
   );
 }
 

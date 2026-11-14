@@ -295,6 +295,7 @@ function Proposal({ proposal }: { proposal: TaskProposal }) {
   return (
     <ListRow
       role="listitem"
+      static
       className="agents-proposal"
       data-testid="agents-proposal"
       data-state={proposal.state}

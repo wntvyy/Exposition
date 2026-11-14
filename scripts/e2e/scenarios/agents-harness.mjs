@@ -225,8 +225,8 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     await page.waitForFunction(() => {
       const panelEl = document.querySelector("[data-testid=agents-panel]");
       const task = panelEl?.querySelector("[data-testid=agents-task-status]")?.textContent;
-      const draft = panelEl?.querySelector("[data-testid=agents-draft] .ui-status-pill")?.textContent;
-      const tool = panelEl?.querySelector("[data-testid=agents-tool-call][data-tool=edit_document] summary .ui-status-pill")?.textContent;
+      const draft = panelEl?.querySelector("[data-testid=agents-draft] .ui-status-text")?.textContent;
+      const tool = panelEl?.querySelector("[data-testid=agents-tool-call][data-tool=edit_document] summary .ui-status-text")?.textContent;
       const bar = document.querySelector("[data-status-item='agents.status']")?.textContent;
       return (
         task === "Waiting for approval" &&

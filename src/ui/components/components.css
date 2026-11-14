@@ -458,6 +458,26 @@
   font-size: var(--font-size-md);
   user-select: text;
 }
+.ui-textarea {
+  height: auto;
+  min-height: calc(var(--control-height-md) * 2);
+  padding: var(--space-1-5) var(--space-2);
+  font-family: inherit;
+  line-height: var(--line-height-normal);
+  resize: vertical;
+}
+.ui-textarea[data-code] {
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+}
+.ui-textarea:focus {
+  border-color: var(--color-focus-ring);
+  outline: var(--border-width) solid var(--color-focus-ring);
+  outline-offset: 0;
+}
+.ui-textarea:disabled {
+  color: var(--color-text-disabled);
+}
 .ui-input::placeholder {
   color: var(--color-text-subtle);
 }
@@ -1314,7 +1334,7 @@
   padding: var(--space-1) var(--space-1) 0 var(--pane-inset);
 }
 .ui-section[data-variant="content"] > .ui-section__header .ui-section__toggle {
-  margin-left: calc(-1 * (14px + var(--space-1)));
+  flex: 0 1 auto;
 }
 .ui-section__toggle {
   display: flex;
@@ -2005,12 +2025,17 @@
   outline: none;
   cursor: default;
 }
-.ui-list-row:hover {
+.ui-list-row:not([data-static]):hover {
   background: var(--color-surface-hover);
 }
 .ui-list-row[data-selected],
 .ui-list-row[data-op-selected] {
   background: var(--color-surface-selected);
+}
+/* The current item (the one shown in the detail view) also carries an accent
+   bar, so it stays distinguishable from a multi-item operation selection. */
+.ui-list-row[data-current] {
+  box-shadow: inset 2px 0 0 var(--color-accent);
 }
 :focus-within > .ui-list-row[data-selected],
 :focus-within > .ui-list-row[data-op-selected],
@@ -2019,6 +2044,11 @@
 }
 .ui-list-row:focus-visible {
   box-shadow: inset 0 0 0 var(--focus-ring-width) var(--color-focus-ring);
+}
+.ui-list-row[data-current]:focus-visible {
+  box-shadow:
+    inset 2px 0 0 var(--color-accent),
+    inset 0 0 0 var(--focus-ring-width) var(--color-focus-ring);
 }
 .ui-list-row__icon {
   display: inline-flex;

@@ -80,9 +80,9 @@ async function showTask(panel) {
 async function visibleStates(panel) {
   return panel.evaluate((root) => ({
     task: root.querySelector("[data-testid=agents-task-status]")?.textContent ?? null,
-    draft: root.querySelector("[data-testid=agents-draft] .ui-status-pill")?.textContent ?? null,
+    draft: root.querySelector("[data-testid=agents-draft] .ui-status-text")?.textContent ?? null,
     tools: [...root.querySelectorAll("[data-testid=agents-tool-call]")].map(
-      (el) => `${el.dataset.tool}: ${el.querySelector("summary .ui-status-pill")?.textContent ?? ""}`,
+      (el) => `${el.dataset.tool}: ${el.querySelector("summary .ui-status-text")?.textContent ?? ""}`,
     ),
   }));
 }
