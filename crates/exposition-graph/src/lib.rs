@@ -43,6 +43,7 @@ pub mod journal;
 pub mod mac;
 pub mod model;
 pub mod ops;
+pub mod project_ops;
 pub mod query;
 pub mod reconcile;
 pub mod service;

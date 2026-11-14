@@ -1291,4 +1291,82 @@ impl TriggerService {
         self.shared.stopped.store(true, Ordering::SeqCst);
         self.wake();
     }
+
+    // ----- P1 project operations ---------------------------------------------
+
+    /// Active triggers of the open project watching any of `paths` (a folder
+    /// covers everything beneath it): deleting those inputs would make them
+    /// fire or suspend.
+    pub fn watching(&self, paths: &[WorkspacePath]) -> Vec<WorkflowTrigger> {
+        let Ok(triggers) = self.list(None) else { return Vec::new() };
+        triggers
+            .into_iter()
+            .filter(|t| {
+                t.state == TriggerState::Active && t.watched.iter().any(|w| paths.iter().any(|p| touches(p, &w.path)))
+            })
+            .collect()
+    }
+
+    /// Turn off every trigger of `workflow` in the open project (one saved
+    /// change; nothing is applied when it cannot be saved). Disabled triggers
+    /// stay disabled until the user enables them again; nothing re-enables
+    /// them (a restored workflow included). Returns the triggers turned off.
+    pub fn disable_workflow(&self, workflow: &WorkflowId) -> Result<Vec<WorkflowTriggerId>, WorkflowRunError> {
+        let root = self.shared.starter.project_root().ok_or_else(no_project)?;
+        let key = project_key(&root);
+        let now = self.now();
+        let mut engine = lock(&self.shared.engine);
+        self.ensure_store(&mut engine)?;
+        let before = engine.entries.clone();
+        let mut changed = Vec::new();
+        for entry in engine.entries.iter_mut() {
+            if entry.stored.project_key == key
+                && &entry.stored.trigger.workflow == workflow
+                && entry.stored.trigger.state != TriggerState::Disabled
+            {
+                entry.stored.trigger.state = TriggerState::Disabled;
+                entry.rt = Runtime::default();
+                entry.version += 1;
+                record(entry, now, TriggerHistoryEvent::Disabled);
+                changed.push(entry.stored.trigger.id.clone());
+            }
+        }
+        if changed.is_empty() {
+            return Ok(changed);
+        }
+        if let Err(e) = self.persist(&mut engine) {
+            engine.entries = before;
+            return Err(e);
+        }
+        let events: Vec<_> = engine
+            .entries
+            .iter()
+            .filter(|e| changed.contains(&e.stored.trigger.id))
+            .map(|e| engine.event(e, None))
+            .collect();
+        drop(engine);
+        for event in events {
+            self.emit(event);
+        }
+        Ok(changed)
+    }
+
+    /// Remove every trigger of `workflow` in the open project for good (the
+    /// workflow was purged). Returns how many were removed.
+    pub fn remove_workflow(&self, workflow: &WorkflowId) -> Result<usize, WorkflowRunError> {
+        let root = self.shared.starter.project_root().ok_or_else(no_project)?;
+        let key = project_key(&root);
+        let mut engine = lock(&self.shared.engine);
+        self.ensure_store(&mut engine)?;
+        let before = engine.entries.clone();
+        engine.entries.retain(|e| !(e.stored.project_key == key && &e.stored.trigger.workflow == workflow));
+        let removed = before.len() - engine.entries.len();
+        if removed > 0
+            && let Err(e) = self.persist(&mut engine)
+        {
+            engine.entries = before;
+            return Err(e);
+        }
+        Ok(removed)
+    }
 }
