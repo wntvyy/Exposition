@@ -896,24 +896,26 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
             </div>
 
             {run.state === "running" && (
-              <div data-testid="workflow-run-concurrent" data-count={running.length}>
-                <Section title={`Running now (${running.length}${maxParallel > 1 ? ` of at most ${maxParallel} at once` : ""})`}>
-                  {running.length === 0 ? (
-                    <p className="ui-meta">Nothing is in flight: the next step waits for its inputs or a free slot.</p>
-                  ) : (
-                    <ul className="xp-wf-running">
-                      {running.map((r) => (
-                        <li key={`${r.step}-${r.instance ?? "s"}`} data-testid={`workflow-running-${r.step}${r.instance === null ? "" : `-${r.instance}`}`}>
-                          <Cpu size={14} aria-hidden="true" />
-                          <span className="xp-wf-name">{r.label}</span>
-                          {r.detail && <span> · {r.detail}</span>}
-                          {r.sinceMs !== null && <span className="ui-meta"> · since {formatTime(r.sinceMs)}</span>}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </Section>
-              </div>
+              <Section
+                data-testid="workflow-run-concurrent"
+                data-count={running.length}
+                title={`Running now (${running.length}${maxParallel > 1 ? ` of at most ${maxParallel} at once` : ""})`}
+              >
+                {running.length === 0 ? (
+                  <p className="ui-meta">Nothing is in flight: the next step waits for its inputs or a free slot.</p>
+                ) : (
+                  <ul className="xp-wf-running">
+                    {running.map((r) => (
+                      <li key={`${r.step}-${r.instance ?? "s"}`} data-testid={`workflow-running-${r.step}${r.instance === null ? "" : `-${r.instance}`}`}>
+                        <Cpu size={14} aria-hidden="true" />
+                        <span className="xp-wf-name">{r.label}</span>
+                        {r.detail && <span> · {r.detail}</span>}
+                        {r.sinceMs !== null && <span className="ui-meta"> · since {formatTime(r.sinceMs)}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </Section>
             )}
 
             <Section title="Usage against the run's budgets">

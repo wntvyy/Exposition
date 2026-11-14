@@ -916,6 +916,10 @@
   color: var(--color-text-muted);
   font-size: var(--font-size-lg);
 }
+.ui-dialog[data-body="content"] .ui-dialog__body {
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+}
 .ui-dialog__body:last-child {
   padding-bottom: var(--space-5);
 }

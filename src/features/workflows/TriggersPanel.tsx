@@ -275,6 +275,7 @@ export function TriggerDialog({ workflow, revision, definition, initial, replace
     <Dialog
       title={standing ? "Review the standing plan" : "New trigger"}
       size="xl"
+      body="content"
       isOpen={isOpen}
       onOpenChange={onOpenChange}
       isDismissable={!enabling}

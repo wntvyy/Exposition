@@ -342,10 +342,6 @@
 /* ---------- Plan review and trigger dialogs ---------- */
 
 /* The plan is read as content (body text), not as dialog prose. */
-.xp-wf-plan-dialog .ui-dialog__body {
-  color: var(--color-text);
-  font-size: var(--font-size-md);
-}
 .xp-wf-plan-dialog .ui-dialog__footer {
   flex-wrap: wrap;
   align-items: center;

@@ -25,6 +25,11 @@ export interface DialogProps {
   role?: "dialog" | "alertdialog";
   /** `xl`: the content reading width (long reviews such as a workflow plan). */
   size?: "sm" | "md" | "lg" | "xl";
+  /**
+   * `message` (default): a short message in muted 14px prose. `content`: the
+   * body is the subject itself (a plan, a form, a review) in 13px text color.
+   */
+  body?: "message" | "content";
   /** Dismiss by clicking the backdrop (default true for `dialog`, false for `alertdialog`). */
   isDismissable?: boolean;
   isOpen?: ModalOverlayProps["isOpen"];
@@ -46,6 +51,7 @@ export function Dialog({
   isOpen,
   onOpenChange,
   className,
+  body = "message",
 }: DialogProps) {
   return (
     <ModalOverlay
@@ -56,7 +62,7 @@ export function Dialog({
       onOpenChange={onOpenChange}
     >
       <Modal className="ui-modal" data-size={size}>
-        <AriaDialog className={cx("ui-dialog", className)} role={role}>
+        <AriaDialog className={cx("ui-dialog", className)} role={role} data-body={body}>
           <Heading slot="title" className="ui-dialog__title">
             {title}
           </Heading>

@@ -72,7 +72,8 @@ export interface SectionProps {
   count?: number | string;
   /** Id of the heading (for aria-labelledby). */
   headingId?: string;
-  "data-testid"?: string;
+  /** `data-*` attributes (test ids, counts) land on the section element. */
+  [dataAttribute: `data-${string}`]: string | number | boolean | undefined;
   /** Collapsible sections remember nothing; persist expansion in the owning view if needed. */
   collapsible?: boolean;
   defaultExpanded?: boolean;
@@ -98,7 +99,7 @@ export function Section({
   className,
   variant = "content",
   headingId,
-  ...rest
+  ...data
 }: SectionProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const bodyId = useId();
@@ -116,9 +117,9 @@ export function Section({
   return (
     <section
       className={cx("ui-section", className)}
+      {...data}
       data-variant={variant}
       data-expanded={expanded || undefined}
-      data-testid={rest["data-testid"]}
     >
       <div className="ui-section__header">
         {collapsible ? (
