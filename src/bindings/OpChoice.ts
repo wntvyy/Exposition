@@ -6,11 +6,14 @@ import type { OpChoiceOption } from "./OpChoiceOption";
  */
 export type OpChoice = { 
 /**
- * Stable key, e.g. `unsavedBuffers` (`preserve` | `discard`),
+ * Stable key, e.g. `unsavedBuffers` (`preserve` | `discard` | `cancel`),
  * `activeWork` (`stop`), `triggers` (`disable`).
  */
 key: string, label: string, options: Array<OpChoiceOption>, 
 /**
- * Option used when the user does not pick (never a destructive one).
+ * Option used when the user does not pick: the one that loses nothing
+ * irreversibly (e.g. preserve a buffer, keep pinned revisions, skip active
+ * work); `triggers` defaults to `disable`, which proceeds and turns the
+ * trigger off (restorable by re-enabling).
  */
 default: string, };

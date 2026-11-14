@@ -7,7 +7,7 @@ import type { OpTarget } from "./OpTarget";
 export type OpRefusal = { target: OpTarget, 
 /**
  * Stable code, e.g. `ops.outsideProject`, `ops.protected`, `ops.readOnly`,
- * `ops.intoItself`, `ops.linkNotCopied`, `ops.trashUnavailable`,
+ * `ops.intoItself`, `ops.linkNotCopied`,
  * `ops.notFound`, `ops.notSupported`, `ops.agentScope`.
  */
 code: string, message: string, };

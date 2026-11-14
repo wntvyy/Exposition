@@ -15,8 +15,9 @@
 //!    success is normal and reported, never hidden). Graph and history state
 //!    follow the actual filesystem outcomes.
 //! 3. `project_op_restore(OpRestore)` restores an app-known deletion without
-//!    overwriting anything at the original location (a collision gets a fresh
-//!    name unless the user chose otherwise).
+//!    overwriting anything at the original location (files and run outputs:
+//!    a collision gets a fresh name unless the user chose `cancel`; data
+//!    records whose identity is taken are refused rather than renamed).
 //!
 //! IDs are strings here (the owning services validate their prefixes: `wf-`,
 //! `wrun-`, `ent-`, `rel-`, `view-`, agent task ids, research run ids).
@@ -54,7 +55,8 @@ pub enum OpTarget {
     RunOutputs { run: String },
     /// An agent task record.
     AgentTask { task: String },
-    /// A graph entity (file-backed entities delegate to their source file).
+    /// A graph entity. File-backed entities are refused here (`ops.useSourceFile`):
+    /// their deletion is the deletion of the source file, a `Path` target.
     GraphEntity { entity: String },
     /// A graph relationship.
     GraphRelation { relation: String },
@@ -128,12 +130,15 @@ pub enum ImpactKind {
     PinnedRevision,
     /// An open buffer with unsaved changes would lose its file.
     UnsavedBuffer,
-    /// A running workflow/research run/agent task/build uses it.
+    /// A running workflow run, research run, or agent task of this project
+    /// uses it. (Document builds are not detected as active work — a known
+    /// limitation: a build of a deleted source fails and reports it.)
     ActiveWork,
     /// An enabled trigger watches it (would fire or suspend).
     EnabledTrigger,
-    /// The operation destroys the last recoverable copy (permanent deletion
-    /// of user-authored or retained content, emptying its recovery).
+    /// The operation destroys the last recoverable copy (permanent deletion of
+    /// any project content other than links and disposable caches, or purging
+    /// app-managed recovery).
     RecoveryLoss,
     /// Informational, no decision: a source with unsaved edits was copied as
     /// its SAVED version.
@@ -177,12 +182,15 @@ pub struct OpImpact {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct OpChoice {
-    /// Stable key, e.g. `unsavedBuffers` (`preserve` | `discard`),
+    /// Stable key, e.g. `unsavedBuffers` (`preserve` | `discard` | `cancel`),
     /// `activeWork` (`stop`), `triggers` (`disable`).
     pub key: String,
     pub label: String,
     pub options: Vec<OpChoiceOption>,
-    /// Option used when the user does not pick (never a destructive one).
+    /// Option used when the user does not pick: the one that loses nothing
+    /// irreversibly (e.g. preserve a buffer, keep pinned revisions, skip active
+    /// work); `triggers` defaults to `disable`, which proceeds and turns the
+    /// trigger off (restorable by re-enabling).
     pub default: String,
 }
 
@@ -215,7 +223,7 @@ pub enum OpRecovery {
 pub struct OpRefusal {
     pub target: OpTarget,
     /// Stable code, e.g. `ops.outsideProject`, `ops.protected`, `ops.readOnly`,
-    /// `ops.intoItself`, `ops.linkNotCopied`, `ops.trashUnavailable`,
+    /// `ops.intoItself`, `ops.linkNotCopied`,
     /// `ops.notFound`, `ops.notSupported`, `ops.agentScope`.
     pub code: String,
     pub message: String,
