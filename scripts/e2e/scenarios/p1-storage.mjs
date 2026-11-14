@@ -100,7 +100,8 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
         return t && !["queued", "running", "awaitingApproval"].includes(t.status.kind);
       }, { timeout: 30_000, message: "scripted task finished" });
       await runCommand(page, "Open Agents Page", /Agent: Open Agents Page/);
-      const card = page.locator(`[data-op-item="${task.id}"]`);
+      // The Agents side panel may list the same task: use the page's list.
+      const card = page.getByTestId("agents-page-tasks").locator(`[data-op-item="${task.id}"]`);
       await card.waitFor({ timeout: 15_000 });
       await page.getByTestId("agents-page-tasks").getByTestId(`op-more-${task.id}`).click();
       await page.getByRole("menuitem", { name: /Delete Task Record/ }).click();
