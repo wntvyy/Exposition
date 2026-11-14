@@ -903,3 +903,164 @@ fn an_agent_deletion_can_be_reverted_after_a_restart() {
     assert!(result.ok, "{}", result.message);
     assert_eq!(fs::read_to_string(fx.file("notes/n1.md")).unwrap(), "n1");
 }
+
+// ----- docs-audit fixes ------------------------------------------------------
+
+/// A test trash that "crashes" (panics) right after moving an item out of
+/// the bin during a restore, before it is put in place.
+struct CrashingRestore(DirTrash);
+
+impl TrashBin for CrashingRestore {
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+    fn delete(&self, paths: &[PathBuf]) -> Vec<Result<Option<TrashedItem>, TrashFailure>> {
+        self.0.delete(paths)
+    }
+    fn contains(&self, item: &TrashedItem) -> Result<bool, String> {
+        self.0.contains(item)
+    }
+    fn restore_to(&self, item: &TrashedItem, parent: &Path, name: &str) -> Result<(), String> {
+        self.0.restore_to(item, parent, name)?;
+        panic!("simulated crash between leaving the bin and being put in place");
+    }
+    fn purge(&self, items: &[TrashedItem]) -> Result<(), String> {
+        self.0.purge(items)
+    }
+}
+
+fn staging_entries(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(exposition_workspace::fsutil::TEMP_MARKER))
+        .collect()
+}
+
+#[test]
+fn an_interrupted_restore_is_completed_after_a_restart_and_its_item_never_deleted() {
+    for occupied in [false, true] {
+        let fx = fixture();
+        let trash = fx.dir.0.join("trash");
+        let ops = fx.ops(CrashingRestore(DirTrash::new(&trash)));
+        let tokens = delete_tokens(&ops, &fx, &fx.ws, &["notes/n1.md"]);
+        let data = FakeData::default();
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ops.restore(&fx.ws, &data, OpRestore { restore: tokens[0].clone(), on_collision: None })
+        }));
+        assert!(crashed.is_err(), "the simulated crash happened");
+        // The only copy is out of the bin under a hidden staging name.
+        assert_eq!(staging_entries(&fx.file("notes")).len(), 1);
+        assert!(!fx.exists("notes/n1.md"));
+        if occupied {
+            fs::write(fx.file("notes/n1.md"), "a NEW n1").unwrap();
+        }
+        drop(ops);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ws = fx.restart();
+        let ops = fx.ops(DirTrash::new(&trash));
+        let data = FakeData::default();
+        let results = ops.reconcile_interrupted(&ws, &data);
+        assert_eq!(results.len(), 1, "reported");
+        assert!(staging_entries(&fx.file("notes")).is_empty(), "no hidden leftover");
+        let expected = if occupied { "notes/n1 (2).md" } else { "notes/n1.md" };
+        assert_eq!(fs::read_to_string(fx.file(expected)).unwrap(), "n1", "the restore was completed, never deleted");
+        if occupied {
+            assert_eq!(fs::read_to_string(fx.file("notes/n1.md")).unwrap(), "a NEW n1", "never overwritten");
+        }
+        let outcome = &results[0].outcomes[0];
+        assert_eq!(outcome.status, OpStatus::Succeeded, "{outcome:?}");
+        assert_eq!(outcome.code.as_deref(), Some("ops.restored"));
+        assert_eq!(outcome.created, Some(path(expected)));
+        let after = data.after.lock().unwrap();
+        assert!(after.iter().flatten().any(|o| o.created == Some(path(expected))), "the data side was told");
+    }
+}
+
+#[test]
+fn a_retained_artifact_can_be_restored_into_its_run_folder() {
+    let fx = fixture();
+    let artifact = ".exposition/artifacts/r1/output-1.png";
+    fs::create_dir_all(fx.file(".exposition/artifacts/r1")).unwrap();
+    fs::write(fx.file(artifact), "PNG").unwrap();
+    let trash = fx.dir.0.join("trash");
+    let ops = fx.ops(DirTrash::new(&trash));
+    let data = FakeData { resources: vec![artifact.into()], ..FakeData::default() };
+    let plan = ops.plan(&fx.ws, &data, request(OpKind::Delete { permanent: false }, &[artifact])).unwrap();
+    let result = apply_plan(&ops, &fx, &data, &plan).unwrap();
+    let token = result.outcomes[0].restore.clone().expect("restorable");
+    assert!(!fx.exists(artifact));
+    let restored = ops.restore(&fx.ws, &data, OpRestore { restore: token, on_collision: None }).unwrap();
+    assert_eq!(restored.outcomes[0].status, OpStatus::Succeeded, "{:?}", restored.outcomes);
+    assert_eq!(fs::read_to_string(fx.file(artifact)).unwrap(), "PNG");
+}
+
+#[test]
+fn a_restore_refused_for_good_spends_its_token() {
+    let fx = fixture();
+    let trash = fx.dir.0.join("trash");
+    let ops = fx.ops(DirTrash::new(&trash));
+    // A record (as an earlier session wrote it) for an item whose original
+    // place is the project graph's own storage: never restorable there.
+    fs::create_dir_all(&trash).unwrap();
+    fs::write(trash.join("x-graph.sqlite3"), "db").unwrap();
+    let root = fx.ws.open_root().unwrap();
+    let record = ops
+        .journal
+        .begin(OperationKind::CrossService, &root, None, "Project operation: move to the trash 1 item", vec![])
+        .unwrap();
+    let item = TrashedItem {
+        id: "x-graph.sqlite3".into(),
+        name: "graph.sqlite3".into(),
+        original_parent: root.join(".exposition"),
+        deleted_at: 7,
+    };
+    let kept = serde_json::to_string(&vec![Restorable {
+        token: "trash-test-1".into(),
+        path: wp(".exposition/graph.sqlite3x"),
+        item,
+    }])
+    .unwrap();
+    ops.journal
+        .record_step(&root, &record.id, "restorable", BTreeMap::from([("items".to_owned(), kept)]), true, None)
+        .unwrap();
+    ops.journal.complete(&root, &record.id).unwrap();
+    let data = FakeData::default();
+    let first = ops.restore(&fx.ws, &data, OpRestore { restore: "trash-test-1".into(), on_collision: None }).unwrap();
+    assert_eq!(first.outcomes[0].code.as_deref(), Some("ops.protected"));
+    let again = ops.restore(&fx.ws, &data, OpRestore { restore: "trash-test-1".into(), on_collision: None });
+    assert_eq!(again.unwrap_err().code, "ops.restoreUnknown", "not offered again");
+    assert!(trash.join("x-graph.sqlite3").exists(), "the item stays in the bin");
+}
+
+#[test]
+fn messages_name_this_platforms_trash() {
+    let fx = fixture();
+    let ops = fx.ops(DirTrash::new(&fx.dir.0.join("trash")));
+    let e = ops.restore(&fx.ws, &FakeData::default(), OpRestore { restore: "trash-0-0".into(), on_collision: None });
+    let e = e.unwrap_err();
+    assert_eq!(e.code, "ops.restoreUnknown");
+    assert!(e.message.contains("the test trash") && !e.message.contains("Recycle Bin"), "{}", e.message);
+}
+
+#[test]
+fn a_reconciliation_triggered_by_planning_is_announced() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let data = FakeData { crash_after_paths: true, ..FakeData::default() };
+    let plan = ops.plan(&fx.ws, &data, request(OpKind::Delete { permanent: false }, &["a.txt"])).unwrap();
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| apply_plan(&ops, &fx, &data, &plan)));
+    assert!(crashed.is_err());
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let ws = fx.restart();
+    let ops = fx.ops(FakeTrash::default());
+    let announced: Arc<Mutex<Vec<OpResult>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&announced);
+    ops.set_event_sink(Arc::new(move |r: &OpResult| sink.lock().unwrap().push(r.clone())));
+    // The first plan of the session reconciles first, and says so.
+    ops.plan(&ws, &FakeData::default(), request(OpKind::Duplicate, &["b.txt"])).unwrap();
+    let announced = announced.lock().unwrap();
+    assert_eq!(announced.len(), 1, "one project-op event for the reconciliation");
+    assert!(announced[0].notices[0].contains("interrupted"));
+}
