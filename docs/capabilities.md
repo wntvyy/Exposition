@@ -675,7 +675,11 @@ anything runs: the folder, the base Python, the packages, that they download
 from PyPI as binary packages only (no package build code runs during the
 install), that it runs on this computer with your account's privileges, what
 happens if it fails, and every command. Package names and versions are
-validated; URLs, paths, options, and requirement files are refused. Setup
+validated; URLs, paths, options, requirement files, and names that look
+like local files (such as `name-1.0.tar` or `.whl`) are refused, and pip runs
+from an empty folder Exposition owns and reads no configuration file, so it
+installs only from PyPI. Planning a setup never runs the project's own
+Python. Setup
 never installs into a Python installed for the whole computer, never
 elevates, and never runs a script or requirements file from the repository;
 it needs a trusted folder and network access to PyPI, and it can be
@@ -910,7 +914,9 @@ otherwise. A third, `npm run e2e -- live-graph`, has the model read the project 
   the folder's Lean server, research kernels, LaTeX builds, and other trusted
   jobs before it completes.
 - Child processes get an environment built from scratch; credential-like
-  variables are refused. Logs and events are bounded and redacted.
+  variables are refused (the refusal names the variable; host settings such
+  as `AWS_PROFILE` or a configuration folder are not treated as secrets).
+  Logs and events are bounded and redacted.
 - Trusted native code runs with your account's privileges. Exposition kills
   the process trees it starts, but processes created through system services
   (for example WMI) can outlive a job.
