@@ -153,23 +153,7 @@
   user-select: text;
 }
 
-.agents-msg {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-0-5);
-}
-
-.agents-msg__text {
-  margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.agents-msg[data-role="user"] .agents-msg__text {
-  padding: var(--space-1-5) var(--space-2);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-hover);
-}
+/* Messages (.agents-msg*): transcript.css, next to Transcript.tsx. */
 
 .agents-disclosure > summary {
   display: flex;
