@@ -161,14 +161,33 @@ and proofs need review, citing items need citation review, files that
 include or use the item are stale. Rejected relationships are not followed,
 suggested ones are labelled, cycles are reported, and files whose coverage
 is unknown are listed, because a missing result there is not evidence of
-absence. Evidence is current only when every input it records still has the
+absence. Asked of a file, the answer also lists the items located in that
+file: the declarations it declares and every other item bound to it (for
+example a theorem you or an agent recorded and bound to a manuscript). These
+are informational: each may or may not have changed with the file, what
+depends on them is not followed, and the Graph inspector says so ("Items in a
+changed file are listed without what depends on them; ask this of an item to
+follow it."). Evidence of such an item is reported only when it records that
+file as an input. Everything else in an impact answer follows relationships
+only. Evidence is current only when every input it records still has the
 same content; it is stale when an input changed or was deleted, and unknown
 when that cannot be established. Unknown is never shown as current, and
 freshness reflects the last reconciled content of each file.
 
 **Mathematics and Lean.** The Graph page's Mathematics view lists
 statements with their informal proof, formal association, verifier verdict,
-and freshness. The verdict comes only from Lean's audit evidence. The Lean
+and freshness. The verdict comes only from Lean's audit evidence. That
+evidence is recorded on the formal declaration, never on the statement it
+formalizes, and only by three actions: Record evidence or Associate with…
+for a declaration in the Lean view, and accepting the association a
+workflow's Lean audit proposes. Checking a file, in the editor or by an
+agent, records nothing, and a "formalizes" relationship, suggested or
+accepted, neither creates evidence nor moves it to the statement. A
+statement with an associated declaration therefore shows no evidence of its
+own: the Graph inspector and the Dependencies view name the associated
+declarations, with the state of each association, and say that the evidence
+is on the declaration; a declaration without evidence says how its verdict
+is recorded. The Lean
 audit reports no declaration dependencies, so formal evidence is never
 current against imported modules and formal dependency edges are shown as
 unavailable. Evidence recorded on another computer (for example in a graph
@@ -280,6 +299,18 @@ a workflow makes a new draft ("… (copy)", revision 1, fresh step ids) with no
 triggers, runs, or approvals; deleting one turns its triggers off and keeps
 it restorable in Storage & History; steps and inputs copied on the workflow
 canvas paste into a draft with new ids, and nothing runs.
+
+A saved workflow is opened by its own workflow id from every place that
+lists it: the Workflows tab, the Agents page ("Kept in the project graph"),
+and the Research page's Workflows group, whose inspector offers "Open in the
+workflow editor". A workflow the project graph lists without a saved
+definition says so there and offers nothing to open. A workflow tab that
+cannot show its draft says why and offers Show Workflows and Close: "This
+workflow is not in the open project" when the draft was deleted (it can be
+restored from Settings › Storage & History) or belongs to a project that is
+not open, and "This tab does not point to a saved workflow" when the tab's
+reference is not a workflow id; nothing is looked up by another identifier
+or changed. Any other failure to load keeps Retry.
 
 ### Parallel steps, composite workflows, conditions, and repeats
 
@@ -732,7 +763,9 @@ Incomplete (`sorry`), Checked with axioms, Relies on compiled code
 (`native_decide` and other native evaluation), Partially checked (`#exit`,
 or another command that ends elaboration early),
 Not verified, Errors. Goals are shown as plain text; third-party infoview
-widgets are not executed. Toolchains are never downloaded implicitly.
+widgets are not executed. Toolchains are never downloaded implicitly: only
+by Install toolchain, or as a listed step of a Mathlib setup you start
+(below).
 
 What Checked certifies: the declarations listed under the status were
 re-checked by Lean's kernel in the audit's own elaboration of exactly that
@@ -758,11 +791,115 @@ correspondingly long.
 
 Formal evidence in the project graph is recorded only from the audit Lean
 itself produced for an exact revision, one declaration at a time, with the
-declaration's own verdict next to the file's. The audit does not report
+declaration's own verdict next to the file's, and only when you ask for it:
+Record evidence or Associate with… in the Lean view, or accepting the
+association a workflow's Lean audit proposes. A check by itself (opening the
+file, an agent's check) records none. For a file in a Lake package the
+record also names the package folder, the toolchain, the SHA-256 of the
+package's `lake-manifest.json`, and the Mathlib commit that manifest pins,
+and it lists `lean-toolchain` and `lake-manifest.json` with their digests as
+inputs; the Lean view shows the Mathlib revision and manifest digest next to
+the evidence. The same text audited against a different manifest is a
+different audit and gets a new record. The audit does not report
 declaration dependencies, so evidence is never shown as current against
-imported modules; after the file changes it is historical. Associating a Lean
+imported modules; after the file changes it is historical, and after
+`lake-manifest.json` or `lean-toolchain` changes or is deleted it is stale.
+This is file-level only: nothing fingerprints the individual declarations a
+proof depends on, a change inside the dependency checkouts that leaves the
+manifest unchanged is not noticed, and a package file the project index
+cannot tell about is never reported as changed. Associating a Lean
 declaration with a statement in a paper records your reviewed correspondence;
 it is not a machine proof that the two statements are equivalent.
+
+**Mathlib.** The command Lean: Set Up Mathlib… prepares a Lake package that
+uses Mathlib, in one of two ways, and shows the whole plan before anything
+runs: the package folder, the Lean toolchain, the Mathlib revision, the files
+it creates and the ones it keeps unchanged, what it downloads, what happens
+if it fails, and every command.
+
+- **New package** (a folder inside the project, or the project folder
+  itself, and a library name such as `Formal`): pins an exact Lean release
+  and requires Mathlib at the release tag of the same name (Lean
+  `leanprover/lean4:v4.35.0` with Mathlib `v4.35.0`). The Lean release is
+  the folder's own `lean-toolchain` when it has one, otherwise elan's default
+  toolchain when that is an installed release, otherwise the newest
+  installed release; a `lean-toolchain` that pins something other than a
+  Lean release or release candidate (a nightly, a custom build) is refused,
+  and so is a setup on a computer without elan or without any installed
+  release. The setup writes `lakefile.toml`, `lean-toolchain`
+  (unless one exists), `<Name>.lean`, `<Name>/Basic.lean` (one starter
+  theorem), and `.gitignore` (unless one exists), then runs
+  `lake --keep-toolchain update`, `lake exe cache get`, and
+  `lake build <Name>`. Nothing existing is replaced, and a package is never
+  created inside or around another Lake package.
+- **Existing package**: with a `lake-manifest.json`, fetches exactly the
+  revisions it pins and runs no `lake update`; without one, resolves the
+  lakefile's requirements once (`lake --keep-toolchain update`, which writes
+  the manifest). Then `lake exe cache get` and
+  `lake build --no-build Mathlib`, which checks that Mathlib's build outputs
+  are complete and builds nothing. The lakefile, `lean-toolchain`, and an
+  existing manifest are never changed. A package without a `lean-toolchain`
+  file, one that does not require Mathlib (Exposition does not edit an
+  existing lakefile), one already prepared, and one whose Mathlib revision
+  is made for another Lean version than the package pins are refused with
+  the reason.
+
+A pinned toolchain that is not installed is installed as the plan's first
+step (`elan toolchain install`, for your user account). Every command is the
+pinned toolchain's own `lake` (never an elan shim), run directly without a
+shell in the package folder. elan's default toolchain is never changed,
+`lean-toolchain` is never rewritten (if Lake changes it, the setup fails),
+and nothing is ever upgraded: there is no upgrade flow, and moving a package
+to a newer Lean or Mathlib is done by hand. Starting builds the plan again
+and refuses one that no longer matches the project; one setup runs at a
+time; it continues while its dialog is hidden (the status bar shows it) and
+can be canceled.
+
+The setup needs network access (GitHub and `cache.mathlib.org`) and several
+GB of disk in the package's `.lake` folder. It runs natively with your
+account's privileges: `lake update` and `lake exe cache get` run the
+package's Lake configuration and programs downloaded from the internet, and
+nothing sandboxes Lake. It therefore needs a trusted folder (the dialog asks
+to trust the project first); for a new package whose folder does not exist
+yet, the nearest existing folder above it decides, and every step is checked
+again when it starts. Only you start a setup: agents have no tool for it.
+The prebuilt cache is a convenience, not a check; verdicts still come only
+from the audit of a file.
+
+A setup that fails or is canceled removes what it created. For a new
+package that is every file and folder it made, and nothing else in the
+project changes. For an existing package it is the manifest and `.lake`
+folder when the setup created them; when `.lake` already existed, completed
+downloads stay, the package is recorded on this computer as unfinished, and
+it is not offered as ready until a setup of it succeeds. A Lean toolchain
+the setup installed stays installed.
+
+Lean does not start on a package that requires Mathlib and is not prepared,
+because starting it would download dependencies or build Mathlib from source
+inside the language server. The file reads "Lean unavailable" and the Lean
+view says which case applies and offers Set Up Mathlib…: the dependencies
+are not resolved, the pinned dependencies are not downloaded, a setup did
+not finish, or Mathlib's prebuilt cache is missing. For a missing cache you
+can instead choose "Build from source instead…" (hours, several GB of
+memory; the choice lasts until Exposition closes). A package whose Mathlib
+revision is built for another Lean version than it pins is not checked and
+no setup is offered: change `lean-toolchain` or the required revision. While
+a setup runs in a package, its files are not checked. The editor, an
+agent's Lean check, and a workflow's Lean audit step all go through the same
+Lean service, so they use the same package root, pinned toolchain, and
+dependencies, and none of them runs on an unprepared package.
+
+Limits: one Lean and Mathlib pair is tested (Lean 4.35.0 with Mathlib
+`v4.35.0`; the audit programs also target Lean 4.35). The parts that
+download (a complete setup, and checking against a prepared Mathlib) are
+covered only by scenarios that run on request (`npm run e2e -- mathlib-setup`
+with `EXPOSITION_MATHLIB_SETUP=1`; `mathlib` with
+`EXPOSITION_MATHLIB_PACKAGE`); the default suite covers the unprepared
+package, the plan, and the refusals without downloading anything. The first
+check of a file that imports Mathlib takes noticeably longer than a
+standalone file (expect a minute or more). Only packages whose Mathlib comes
+from a Lean release tag can be created, and there is no setting for a
+mirror or an offline cache. Setup is verified on Windows only.
 
 ## Agents
 
@@ -873,6 +1010,61 @@ admits it into the graph; ordinary tasks stay operational records. The Agents
 page and the Agent panel show the same tasks and approvals, with each task's
 graph context, proposals, and changes.
 
+What a task is told about itself comes from the application's own state,
+never from project files, graph labels, or tool output, and describing an
+authorization grants nothing. The task context at the start lists the
+approval mode (in Auto with the project's permissions), what you approved
+for the rest of the task, and what each kind of call gets now: proceeds
+without a prompt (and why), asks first, or is refused. Every follow-up is
+preceded by an update of those lines as they are then, with the files the
+task changed (saved or unsaved, and kept, reverted, or not yet reviewed) and
+the open documents with unsaved changes. Each result of a call that needed
+authority says how that call was authorized: by the task's settings, the
+project's permissions, an approval for the rest of the task, or a prompt
+answered once or for the task.
+
+Results also say where a change is. `create_file` writes the new file to
+disk. `edit_document` and `insert_artifact` change the editor text only: the
+file on disk keeps its last saved version until you save it, and agents
+cannot save (Keep in review accepts a change; it does not save the file).
+`read_file`, `build_document`, and `check_lean` use the editor text, unsaved
+changes included, and a Lean check reports which text it checked;
+`run_command`, `run_python`, and `copy_paths` see only what is saved, and a
+run's result lists the open files whose unsaved changes it did not see. The
+project graph follows saved files, so a task is told to take a file's state
+from the file tools and the task context, not from the graph. The agent's
+instructions name the app's controls it may point you to (Save, Review
+changes, the Research panel, Review and run…, Record evidence, Set Up
+Mathlib…, and so on); a test fails when one of those names is no longer in
+the interface source that defines it.
+
+An agent's Lean check returns its result to the task and records no
+evidence, and a task cannot assert computational, formal, or build evidence
+in a graph proposal: such a relationship must cite a record a service
+wrote, and the refusal names the ways those records come to exist. Graph
+queries tell a task where evidence is: a query of a statement lists the
+formal evidence of its associated declarations separately
+(`formalEvidence`, with the state of each association), results that show
+formal declarations or associations carry a note on how formal evidence is
+recorded, and the impact of a file lists the items located in it
+(`locatedIn`) with a note that their dependents were not followed. Agents
+cannot prepare a Mathlib package: a check of a file in an unprepared
+package reports that Lean did not run and that you run Set Up Mathlib….
+
+`workflow_propose` gives the model every registered operation with its
+exact input and output ports, parameters, payload, and the ceiling it needs,
+generated from the operation registry (running another saved workflow is
+not offered to agents), together with the input types and which outputs
+each outcome accepts. Its result states four things apart: whether a
+revision was saved (or nothing new, when the definition equals the latest
+revision), whether the draft is well-formed or incomplete with its errors
+and warnings, that nothing ran, and where you open and run it. A correction
+or change that names the saved workflow's id and revision becomes a new
+revision of that workflow, and the result says how to do that; a proposal
+without an id creates another workflow. An incomplete draft is kept and
+stays editable. Agents never run a workflow: a run starts only from the run
+plan you review, or from a trigger you turned on.
+
 Approvals show the complete code or text that will run or change, with
 invisible and direction-changing characters made visible; what runs is
 exactly what was shown, and an approval answered after the project changed
@@ -905,7 +1097,7 @@ natively, when no image is configured; it uses no development-only command, so
 it also runs against an installed release. The default automated
 suite uses a scripted development provider that release builds do not contain,
 and development builds use a separate development credential entry unless told
-otherwise. A third, `npm run e2e -- live-graph`, has the model read the project graph, propose a mathematical dependency (kept as a suggestion until a person accepts it), and save a workflow draft, and checks that a task with "File names only" consent never sends or receives theorem labels or file text. A fourth, `npm run e2e -- live-workflow`, has the model propose a restricted Python workflow (saving it runs nothing), then plans and starts it as the user and checks that it ran in the Docker sandbox and produced its validated output; agents have no tool that starts a run.
+otherwise. A third, `npm run e2e -- live-graph`, has the model read the project graph, propose a mathematical dependency (kept as a suggestion until a person accepts it), and save a workflow draft, and checks that a task with "File names only" consent never sends or receives theorem labels or file text. A fourth, `npm run e2e -- live-workflow`, has the model propose a restricted Python workflow (saving it runs nothing), then plans and starts it as the user and checks that it ran in the Docker sandbox and produced its validated output; agents have no tool that starts a run. Two more record what a real model says and assert only what the application did: `npm run e2e -- live-agentctx` (approvals and saved state: a native run approved for the task, then an edited script run again without a prompt) and `npm run e2e -- live-workflow-audit` (a formal audit workflow drafted from a plain request: saving ran nothing, every proposal of the task is one workflow, and the draft opens by its own id). What a model is sent about approvals and saved state is covered in the default suite with the scripted provider by `agentctx-narration`.
 
 ## Execution and security
 
