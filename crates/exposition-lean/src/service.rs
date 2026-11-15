@@ -43,6 +43,10 @@ use crate::convert::{self, is_sorry_message};
 use crate::lsp::{Incoming, LspClient, LspError, PendingRequest};
 use crate::project::{self, LAKEFILES, LeanProject, PinSource, ProjectKind, TOOLCHAIN_FILE};
 use crate::server::{self, StartError, StartedServer};
+use crate::setup::{
+    self, LeanPackageInspection, LeanSetup, LeanSetupEvent, LeanSetupPlan, LeanSetupRequest, LeanSetupStatus,
+    SetupRecords,
+};
 use crate::toolchain::{self, Resolution, ResolvedToolchain};
 use crate::types::*;
 use crate::uri::{path_to_uri, same_path, uri_to_path};
@@ -71,6 +75,9 @@ pub struct LeanConfig {
     /// Application-owned scratch directory (axiom audits write temporary
     /// copies of the checked text here, never into the project).
     pub scratch_dir: PathBuf,
+    /// Application-owned file recording Mathlib setups that did not finish
+    /// (`<data>/lean/setup-records.json`); `None` keeps no record.
+    pub setup_records: Option<PathBuf>,
 }
 
 impl Default for LeanConfig {
@@ -80,6 +87,7 @@ impl Default for LeanConfig {
             restart_backoff: [1, 2, 4, 8, 16].into_iter().map(Duration::from_secs).collect(),
             idle_shutdown: Duration::from_secs(120),
             scratch_dir: std::env::temp_dir().join("exposition-lean"),
+            setup_records: None,
         }
     }
 }
@@ -90,6 +98,7 @@ pub struct LeanService {
     tx: mpsc::UnboundedSender<Msg>,
     events: broadcast::Sender<LeanEvent>,
     workspace: Arc<WorkspaceService>,
+    setup: LeanSetup,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -226,6 +235,18 @@ enum Msg {
         version: Option<String>,
     },
     InstallDone,
+    /// A Mathlib setup started or ended in this package root.
+    PackageChanged {
+        root: PathBuf,
+    },
+    PackageFor {
+        document: DocumentId,
+        reply: Reply<Result<Option<PathBuf>, LeanError>>,
+    },
+    AllowLocalBuild {
+        document: DocumentId,
+        reply: Reply<Result<(), LeanError>>,
+    },
 }
 
 impl LeanService {
@@ -243,8 +264,19 @@ impl LeanService {
         let ws_rx = workspace.subscribe();
         // Subscribed now, so a grant or revoke made before the actor runs is not missed.
         let trust_rx = execution.subscribe_trust();
-        let actor = Actor::new(execution, Arc::clone(&workspace), documents, config, events.clone(), tx.clone());
-        (LeanService { tx, events, workspace }, actor.run(rx, doc_rx, ws_rx, trust_rx))
+        let records = Arc::new(SetupRecords::new(config.setup_records.clone()));
+        let notify = tx.clone();
+        let setup = LeanSetup::new(
+            execution.clone(),
+            config.elan_home.clone(),
+            records,
+            Box::new(move |root| {
+                let _ = notify.send(Msg::PackageChanged { root: root.to_path_buf() });
+            }),
+        );
+        let actor =
+            Actor::new(execution, Arc::clone(&workspace), documents, config, events.clone(), tx.clone(), setup.clone());
+        (LeanService { tx, events, workspace, setup }, actor.run(rx, doc_rx, ws_rx, trust_rx))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<LeanEvent> {
@@ -410,6 +442,67 @@ impl LeanService {
     /// not trusted, still checking) or the audit could not certify the file.
     pub async fn audit_record(&self, document: DocumentId) -> Result<Option<LeanAuditRecord>, LeanError> {
         self.ask(|reply| Msg::AuditRecord { document, reply }).await?
+    }
+
+    // ----- Mathlib package setup ---------------------------------------------------
+
+    /// The open project folder in the form the Lean service uses.
+    fn project_root(&self) -> Result<PathBuf, LeanError> {
+        self.workspace
+            .open_root()
+            .and_then(|root| canonicalize(&root).ok())
+            .ok_or_else(|| LeanError::new("lean.noWorkspace", "No folder is open."))
+    }
+
+    /// What `folder` of the open project holds as a Lake package (files only).
+    pub fn package_inspect(&self, folder: &str) -> Result<LeanPackageInspection, LeanError> {
+        self.setup.inspect(&self.project_root()?, folder)
+    }
+
+    /// The Lake package `document` belongs to (`None` for a standalone file).
+    pub async fn package_for(&self, document: DocumentId) -> Result<Option<LeanPackageInspection>, LeanError> {
+        let Some(package_root) = self.ask(|reply| Msg::PackageFor { document, reply }).await?? else {
+            return Ok(None);
+        };
+        let root = self.project_root()?;
+        Ok(Some(setup::inspect_package(&root, &package_root, self.setup.elan_home(), self.setup.records())))
+    }
+
+    /// Describe a Mathlib setup of the open project (runs nothing).
+    pub fn setup_plan(&self, request: &LeanSetupRequest) -> Result<LeanSetupPlan, LeanError> {
+        self.setup.plan(&self.project_root()?, request)
+    }
+
+    /// Start a reviewed plan (the user's explicit action). The package's Lean
+    /// server is stopped first: it holds files the setup replaces.
+    pub fn setup_start(&self, plan: &LeanSetupPlan) -> Result<LeanSetupStatus, LeanError> {
+        let status = self.setup.start(&self.project_root()?, plan)?;
+        let _ = self.tx.send(Msg::PackageChanged { root: PathBuf::from(&status.plan.package_root) });
+        Ok(status)
+    }
+
+    pub fn setup_cancel(&self, setup_id: &str) -> bool {
+        self.setup.cancel(setup_id)
+    }
+
+    /// The running setup, else the last finished one.
+    pub fn setup_status(&self) -> Option<LeanSetupStatus> {
+        self.setup.status()
+    }
+
+    pub async fn setup_wait(&self, setup_id: &str) -> Option<LeanSetupStatus> {
+        self.setup.wait(setup_id).await
+    }
+
+    pub fn subscribe_setup(&self) -> broadcast::Receiver<LeanSetupEvent> {
+        self.setup.subscribe()
+    }
+
+    /// The user's explicit choice, for this session: check `document`'s
+    /// package although Mathlib's prebuilt cache is missing, so Lake builds
+    /// Mathlib from source.
+    pub async fn allow_local_build(&self, document: DocumentId) -> Result<(), LeanError> {
+        self.ask(|reply| Msg::AllowLocalBuild { document, reply }).await?
     }
 
     /// The process id of the server serving `document` (diagnostics/tests).

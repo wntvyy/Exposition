@@ -83,6 +83,42 @@ pub fn lean_provenance(workspace_root: &Path, file: &Path) -> LeanProvenance {
     out
 }
 
+/// The Lake package context of an audit of `file` (absolute, inside
+/// `workspace_root`; both canonical): the package folder and the digests of
+/// its `lean-toolchain` and `lake-manifest.json` as they are now. `None` for
+/// a standalone file. Reads files only.
+pub fn audit_package(workspace_root: &Path, file: &Path) -> Option<crate::types::LeanAuditPackage> {
+    use crate::types::{LeanAuditFile, LeanAuditPackage};
+    let project = project_for(workspace_root, file);
+    if !matches!(project.kind, ProjectKind::Lake { .. }) {
+        return None;
+    }
+    let relative = project.root.strip_prefix(workspace_root).ok()?;
+    let folder =
+        relative.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/");
+    let inside = |name: &str| {
+        let text = if folder.is_empty() { name.to_owned() } else { format!("{folder}/{name}") };
+        exposition_core::path::WorkspacePath::parse(&text).ok()
+    };
+    let digest = |bytes: &[u8]| -> String { Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect() };
+    // The same bounded, link-refusing read as the manifest's.
+    let toolchain_file =
+        read_manifest(workspace_root, &project.root.join(crate::project::TOOLCHAIN_FILE)).ok().flatten().and_then(
+            |bytes| Some(LeanAuditFile { path: inside(crate::project::TOOLCHAIN_FILE)?, sha256: digest(&bytes) }),
+        );
+    let manifest_bytes = read_manifest(workspace_root, &project.root.join(LAKE_MANIFEST)).ok().flatten();
+    let packages = manifest_bytes.as_deref().and_then(|bytes| parse_packages(bytes).ok()).unwrap_or_default();
+    let manifest =
+        manifest_bytes.and_then(|bytes| Some(LeanAuditFile { path: inside(LAKE_MANIFEST)?, sha256: digest(&bytes) }));
+    Some(LeanAuditPackage {
+        folder,
+        toolchain_file,
+        manifest,
+        mathlib_revision: packages.iter().find(|p| p.name.eq_ignore_ascii_case("mathlib")).and_then(|p| p.rev.clone()),
+        dependency_count: packages.len() as u32,
+    })
+}
+
 /// `text` with the workspace root's absolute location removed (paths
 /// become project-relative).
 fn without_root(text: &str, root: &Path) -> String {
@@ -102,7 +138,7 @@ fn without_root(text: &str, root: &Path) -> String {
 
 /// The manifest's bytes: `Ok(None)` when there is none. A link, a folder, an
 /// oversized file, or a path that resolves outside the workspace is refused.
-fn read_manifest(workspace_root: &Path, path: &Path) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn read_manifest(workspace_root: &Path, path: &Path) -> Result<Option<Vec<u8>>, String> {
     let Ok(meta) = std::fs::symlink_metadata(path) else { return Ok(None) };
     if !meta.is_file() {
         return Err(format!("{LAKE_MANIFEST} is not a regular file"));
@@ -128,7 +164,7 @@ fn field(value: &serde_json::Value, name: &str) -> Option<String> {
 
 /// Dependencies of a manifest (Lake manifest versions 7 and later: a
 /// `packages` array of `{ type, name, rev, inputRev, … }`).
-fn parse_packages(bytes: &[u8]) -> Result<Vec<LakePackage>, String> {
+pub(crate) fn parse_packages(bytes: &[u8]) -> Result<Vec<LakePackage>, String> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|e| format!("{LAKE_MANIFEST} is not valid JSON: {e}"))?;
     let Some(packages) = value.get("packages").and_then(|p| p.as_array()) else {
@@ -243,6 +279,36 @@ mod tests {
         let bare = root.display().to_string();
         let bare = bare.strip_prefix(r"\\?\").unwrap_or(&bare).to_owned();
         assert!(!error.contains(&bare), "{error}");
+    }
+
+    #[test]
+    fn the_audit_package_names_the_files_that_pin_lean_and_the_dependencies() {
+        let (_tmp, root) = project(&[
+            ("paper.typ", "= Paper\n"),
+            ("lean/lakefile.toml", "name = \"Formal\"\n"),
+            ("lean/lean-toolchain", "leanprover/lean4:v4.35.0\n"),
+            ("lean/lake-manifest.json", MANIFEST),
+            ("lean/Formal/Basic.lean", ""),
+            ("notes/Scratch.lean", ""),
+        ]);
+        let package =
+            audit_package(&root, &root.join("lean").join("Formal").join("Basic.lean")).expect("a Lake package");
+        assert_eq!(package.folder, "lean");
+        let manifest = package.manifest.expect("manifest");
+        assert_eq!(manifest.path.as_str(), "lean/lake-manifest.json");
+        assert_eq!(manifest.sha256, lean_provenance(&root, &root.join("lean").join("X.lean")).manifest_digest.unwrap());
+        let pin = package.toolchain_file.expect("toolchain file");
+        assert_eq!(pin.path.as_str(), "lean/lean-toolchain");
+        assert_eq!(pin.sha256.len(), 64);
+        assert_eq!(package.mathlib_revision.as_deref(), Some("0123456789abcdef0123456789abcdef01234567"));
+        assert!(package.dependency_count >= 1);
+        // A standalone file has no package context; a package at the project folder has the empty folder.
+        assert_eq!(audit_package(&root, &root.join("notes").join("Scratch.lean")), None);
+        let (_tmp2, flat) = project(&[("lakefile.toml", "name = \"X\"\n"), ("X.lean", "")]);
+        let flat_package = audit_package(&flat, &flat.join("X.lean")).unwrap();
+        assert_eq!(flat_package.folder, "");
+        assert!(flat_package.manifest.is_none() && flat_package.toolchain_file.is_none());
+        assert_eq!(flat_package.dependency_count, 0);
     }
 
     #[test]

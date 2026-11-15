@@ -58,9 +58,23 @@ pub fn declaration_verdict(verdict: DeclarationVerdict) -> FormalVerdict {
     }
 }
 
-/// Identifier of an audit (path, revision, and digest of the text checked).
+/// Environment key of the Lake package folder an audit ran in.
+pub const ENV_PACKAGE: &str = "lake package";
+/// Environment key of the digest of the package's `lake-manifest.json`.
+pub const ENV_MANIFEST: &str = "lake-manifest.json sha256";
+/// Environment key of the Mathlib commit the manifest pins.
+pub const ENV_MATHLIB: &str = "mathlib revision";
+
+/// Identifier of an audit: path, revision, and digest of the text checked,
+/// and for a package with a manifest the digest of the pinned dependencies
+/// (the same text audited against other dependencies is another audit).
 pub fn audit_id(record: &LeanAuditRecord) -> String {
-    format!("{}@{}:{}", record.path, record.revision, &record.content_hash[..record.content_hash.len().min(16)])
+    let short = |hash: &str| hash[..hash.len().min(16)].to_owned();
+    let base = format!("{}@{}:{}", record.path, record.revision, short(&record.content_hash));
+    match record.package.as_ref().and_then(|p| p.manifest.as_ref()) {
+        Some(manifest) => format!("{base}+{}", short(&manifest.sha256)),
+        None => base,
+    }
 }
 
 /// The formal part of an evidence record for one audited declaration.
@@ -96,17 +110,41 @@ pub fn evidence_record(
     if let Some(version) = &record.toolchain_version {
         environment.push(("lean --version".to_owned(), version.clone()));
     }
+    let mut inputs = vec![VersionedInput {
+        path: record.path.clone(),
+        content_hash: Some(record.content_hash.clone()),
+        revision: Some(record.revision),
+        unsaved: !saved,
+    }];
+    // The dependency identity the audit ran against: the files that pin the
+    // Lean version and every dependency revision are inputs of the record,
+    // so a change to either makes it historical.
+    if let Some(package) = &record.package {
+        environment.push((
+            ENV_PACKAGE.to_owned(),
+            if package.folder.is_empty() { ".".to_owned() } else { package.folder.clone() },
+        ));
+        if let Some(manifest) = &package.manifest {
+            environment.push((ENV_MANIFEST.to_owned(), manifest.sha256.clone()));
+        }
+        if let Some(revision) = &package.mathlib_revision {
+            environment.push((ENV_MATHLIB.to_owned(), revision.clone()));
+        }
+        for file in [&package.toolchain_file, &package.manifest].into_iter().flatten() {
+            inputs.push(VersionedInput {
+                path: file.path.clone(),
+                content_hash: Some(file.sha256.clone()),
+                revision: None,
+                unsaved: false,
+            });
+        }
+    }
     Some(Evidence {
         id: EvidenceId::mint(),
         kind: EvidenceKind::FormalCheck,
         subject: Some(subject.clone()),
         operation: OperationRef { kind: "leanAudit".into(), id: audit_id(record) },
-        inputs: vec![VersionedInput {
-            path: record.path.clone(),
-            content_hash: Some(record.content_hash.clone()),
-            revision: Some(record.revision),
-            unsaved: !saved,
-        }],
+        inputs,
         outcome: EvidenceOutcome::Verdict { verdict },
         environment,
         outputs: Vec::new(),
@@ -485,8 +523,42 @@ pub fn formal_freshness(evidence: &Evidence, current_digest: Option<&str>) -> ex
     }
 }
 
+/// Whether the package files a record was checked against (its inputs other
+/// than the Lean source: `lean-toolchain`, `lake-manifest.json`) still have
+/// the recorded digests in the project index. A changed or deleted one makes
+/// the record historical; one the index cannot tell about is never reported.
+fn dependency_staleness(store: &exposition_graph::store::GraphStore, evidence: &Evidence) -> Vec<String> {
+    let Some(formal) = &evidence.formal else { return Vec::new() };
+    let mut reasons = Vec::new();
+    for input in evidence.inputs.iter().filter(|i| i.path != formal.source_path) {
+        let Some(recorded) = &input.content_hash else { continue };
+        match store.coverage(&input.path) {
+            Ok(Some(coverage)) => {
+                if coverage.content_hash.as_ref().is_some_and(|current| current != recorded) {
+                    reasons.push(format!(
+                        "{} changed since this was checked: the Lean version or dependency revisions it was checked against are no longer the package's",
+                        input.path
+                    ));
+                }
+            }
+            Ok(None) => {
+                let deleted = store
+                    .entities_by_key(EntityKind::Resource, input.path.as_str())
+                    .map(|es| !es.is_empty() && es.iter().all(|e| e.lifecycle == Lifecycle::Tombstoned))
+                    .unwrap_or(false);
+                if deleted {
+                    reasons.push(format!("{} was deleted since this was checked", input.path));
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    reasons
+}
+
 /// Formal declarations bound to `path`, their evidence (with freshness
-/// against `current_digest`), and their `formalizes` associations.
+/// against `current_digest` and the package files it was checked against),
+/// and their `formalizes` associations.
 pub fn declaration_evidence(
     graph: &GraphService,
     path: &WorkspacePath,
@@ -522,7 +594,20 @@ pub fn declaration_evidence(
                 entity: entity.id,
                 evidence: evidence
                     .into_iter()
-                    .map(|e| EvidenceView { freshness: formal_freshness(&e, current_digest), evidence: e })
+                    .map(|e| {
+                        let mut freshness = formal_freshness(&e, current_digest);
+                        let dependencies = dependency_staleness(store, &e);
+                        if !dependencies.is_empty() {
+                            freshness = match freshness {
+                                exposition_graph::Freshness::Stale { mut reasons } => {
+                                    reasons.extend(dependencies);
+                                    exposition_graph::Freshness::Stale { reasons }
+                                }
+                                _ => exposition_graph::Freshness::Stale { reasons: dependencies },
+                            };
+                        }
+                        EvidenceView { freshness, evidence: e }
+                    })
                     .collect(),
                 associations,
             });
@@ -551,6 +636,7 @@ mod tests {
             declarations: decls,
             truncated,
             finished_at_ms: 1,
+            package: None,
         }
     }
 
@@ -732,6 +818,59 @@ mod tests {
         assert_eq!(a.evidence.len(), 2);
         assert!(matches!(a.evidence[0].freshness, Freshness::Unknown { .. }), "{:?}", a.evidence[0].freshness);
         assert!(matches!(a.evidence[1].freshness, Freshness::Stale { .. }), "{:?}", a.evidence[1].freshness);
+    }
+
+    #[test]
+    fn the_dependency_identity_is_part_of_the_evidence_and_of_the_audit() {
+        use crate::types::{LeanAuditFile, LeanAuditPackage};
+        let (_dir, graph) = graph();
+        let package = |manifest: &str| LeanAuditPackage {
+            folder: "Proofs".into(),
+            toolchain_file: Some(LeanAuditFile {
+                path: WorkspacePath::parse("Proofs/lean-toolchain").unwrap(),
+                sha256: "11".repeat(32),
+            }),
+            manifest: Some(LeanAuditFile {
+                path: WorkspacePath::parse("Proofs/lake-manifest.json").unwrap(),
+                sha256: manifest.repeat(32),
+            }),
+            mathlib_revision: Some("56a005855ea17e0b0958f73ec801ae140b0a1679".into()),
+            dependency_count: 9,
+        };
+        let mut r = record(checked(), vec![decl("Main.a", DeclarationVerdict::Checked, &["propext"])], false);
+        let standalone = audit_id(&r);
+        r.package = Some(package("aa"));
+        assert_ne!(audit_id(&r), standalone, "the pinned dependencies identify the audit");
+        let subject = EntityId::mint();
+        let evidence = evidence_record(&r, &r.declarations[0], &subject, true, 1).unwrap();
+        let environment: std::collections::BTreeMap<_, _> = evidence.environment.iter().cloned().collect();
+        assert_eq!(environment[ENV_PACKAGE], "Proofs");
+        assert_eq!(environment[ENV_MANIFEST], "aa".repeat(32));
+        assert_eq!(environment[ENV_MATHLIB], "56a005855ea17e0b0958f73ec801ae140b0a1679");
+        assert_eq!(environment["lean toolchain"], "leanprover/lean4:v4.35.0");
+        // The source first, then the files that pin the Lean version and the dependencies.
+        let inputs: Vec<(&str, Option<&str>)> =
+            evidence.inputs.iter().map(|i| (i.path.as_str(), i.content_hash.as_deref())).collect();
+        assert_eq!(inputs[0].0, "Proofs/Main.lean");
+        assert_eq!(inputs[1], ("Proofs/lean-toolchain", Some("11".repeat(32).as_str())));
+        assert_eq!(inputs[2], ("Proofs/lake-manifest.json", Some("aa".repeat(32).as_str())));
+        // The verdict and what it certifies are unchanged by the package context.
+        let formal = evidence.formal.as_ref().unwrap();
+        assert_eq!(formal.declaration_verdict, Some(FormalVerdict::Checked));
+        assert!(formal.dependency_fingerprints.is_none(), "no declaration-level fingerprints are claimed");
+
+        // The same text audited against other pinned dependencies is another
+        // audit: new evidence, and the old record is not reused for it.
+        let first = record_evidence(&graph, &r, &["Main.a".into()], true, 1).unwrap();
+        let mut upgraded = r.clone();
+        upgraded.package = Some(package("bb"));
+        let second = record_evidence(&graph, &upgraded, &["Main.a".into()], true, 2).unwrap();
+        assert!(!second.recorded[0].existing);
+        assert_ne!(second.recorded[0].evidence, first.recorded[0].evidence);
+        assert!(record_evidence(&graph, &upgraded, &["Main.a".into()], true, 3).unwrap().recorded[0].existing);
+        // Without an index of the package files nothing is called stale or current.
+        let views = declaration_evidence(&graph, &r.path, Some(&r.content_hash)).unwrap();
+        assert!(views[0].evidence.iter().all(|e| matches!(e.freshness, Freshness::Unknown { .. })), "{views:?}");
     }
 
     #[test]

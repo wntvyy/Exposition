@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lean-setup-status"
+description = "Enables the lean_setup_status command without any pre-configured scope."
+commands.allow = ["lean_setup_status"]
+
+[[permission]]
+identifier = "deny-lean-setup-status"
+description = "Denies the lean_setup_status command without any pre-configured scope."
+commands.deny = ["lean_setup_status"]

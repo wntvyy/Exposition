@@ -12,6 +12,8 @@ import { StatusPill } from "../../ui/components";
 import { publishProblems } from "../../app/problems";
 import { goToDefinition, installLeanMonaco, revealInEditor } from "./leanMonaco";
 import { LEAN_VIEW_ID, LeanPanel, installToolchain, trustAndRestart } from "./LeanPanel";
+import { MathlibSetupStatusItem } from "./MathlibSetup";
+import { openMathlibSetup } from "./setup";
 import { statusView } from "./status";
 import { leanStateForPath, startLeanTracking, useLean } from "./store";
 
@@ -57,6 +59,9 @@ registry.registerView({
 
 registry.registerStatusItem({ id: "lean.status", alignment: "left", order: 40, render: () => <LeanStatusItem /> });
 
+// The running Mathlib setup (it continues while its dialog is hidden); the item also hosts the dialog.
+registry.registerStatusItem({ id: "lean.mathlibSetup", alignment: "left", order: 41, render: () => <MathlibSetupStatusItem /> });
+
 /** The Lean state of the active editor, if it is a Lean file. */
 function activeState() {
   const s = useEditors.getState();
@@ -82,6 +87,13 @@ registry.registerCommand({
   title: "Show Lean Infoview",
   category: "Lean",
   run: () => layout.showView("auxiliary", LEAN_VIEW_ID),
+});
+
+registry.registerCommand({
+  id: "lean.setUpMathlib",
+  title: "Set Up Mathlib…",
+  category: "Lean",
+  run: () => openMathlibSetup({ kind: "auto" }),
 });
 
 registry.registerCommand({

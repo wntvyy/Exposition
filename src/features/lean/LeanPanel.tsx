@@ -30,6 +30,7 @@ import { requestWorkspaceTrust } from "../jobs/trust";
 import { CheckedDeclarations } from "./CheckedDeclarations";
 import { AuditedDeclarations, useDeclarationEvidence } from "./FormalEvidence";
 import { revealInEditor } from "./leanMonaco";
+import { PackagePreparation } from "./MathlibSetup";
 import { statusSentence, statusView } from "./status";
 import { startLeanTracking, useLean } from "./store";
 
@@ -338,7 +339,7 @@ function LeanDocumentView({ state }: { state: LeanDocumentState }) {
             <pre className="exp-lean__message">{status.message}</pre>
           </Banner>
         )}
-        {status.kind === "unavailable" && <Banner tone="warning" title="Lean cannot check this file">{status.reason}</Banner>}
+        {status.kind === "unavailable" && <PackagePreparation state={state} />}
         {status.kind === "serverUnavailable" && (
           <Banner
             tone="warning"

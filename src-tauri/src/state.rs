@@ -86,7 +86,12 @@ impl AppState {
         let workspace = WorkspaceService::new(Arc::clone(&documents), data_dir.clone());
         let graph = GraphService::new(GraphConfig { data_dir: data_dir.clone() });
         let reconciler = exposition_graph::reconcile::spawn(Arc::clone(&graph), Arc::clone(&workspace));
-        let (lean, lean_actor) = LeanService::new(execution.clone(), Arc::clone(&workspace), LeanConfig::default());
+        // Mathlib lane: setups that did not finish are recorded in the data folder.
+        let lean_config = LeanConfig {
+            setup_records: Some(data_dir.join("lean").join("setup-records.json")),
+            ..LeanConfig::default()
+        };
+        let (lean, lean_actor) = LeanService::new(execution.clone(), Arc::clone(&workspace), lean_config);
         tauri::async_runtime::spawn(lean_actor);
         let tex = TexService::new(
             execution.clone(),

@@ -32,6 +32,7 @@ pub mod project;
 pub mod provenance;
 mod server;
 mod service;
+pub mod setup;
 pub mod toolchain;
 pub mod types;
 pub mod uri;
