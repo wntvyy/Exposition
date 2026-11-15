@@ -4,8 +4,9 @@
 //! present), R with an IRkernel kernelspec, and Julia with an IJulia kernelspec.
 //! Every probe is a short process run through the launcher with a fixed
 //! argument array, a neutral working directory, and the research environment.
-//! Missing runtimes produce `Unavailable` entries with exact setup guidance;
-//! nothing is ever installed.
+//! Missing runtimes produce `Unavailable` entries with exact setup guidance
+//! and a structured [`SetupHint`]. Discovery itself never installs anything;
+//! project-local Python setup is the explicit [`crate::setup`] flow.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -16,7 +17,9 @@ use exposition_core::job::{ExecutionPolicy, JobSpec};
 use serde::Deserialize;
 
 use crate::launcher::{KernelProcessLauncher, looks_secret, research_environment};
-use crate::types::{Availability, EnvironmentReport, KernelChoice, RuntimeEnvironment, RuntimeLanguage};
+use crate::types::{
+    Availability, EnvironmentReport, KernelChoice, RuntimeEnvironment, RuntimeLanguage, SetupAction, SetupHint,
+};
 
 const PROBE_MARKER: &str = "EXPOSITION-PROBE";
 
@@ -53,22 +56,48 @@ if out["importable"]["jupyter_client"]:
 print("EXPOSITION-PROBE" + json.dumps(out))
 "#;
 
-pub const PYTHON_MISSING_GUIDANCE: &str = "Install Python 3.10 or newer (https://www.python.org/downloads/), then install the Jupyter kernel packages into it with: python -m pip install ipykernel jupyter_client — then refresh environments. Exposition never installs runtimes or packages itself.";
+pub const PYTHON_DOWNLOAD_URL: &str = "https://www.python.org/downloads/";
+pub const R_DOWNLOAD_URL: &str = "https://cran.r-project.org/";
+pub const JULIA_DOWNLOAD_URL: &str = "https://julialang.org/install/";
 
-pub const R_MISSING_GUIDANCE: &str = "Install R 4.x from https://cran.r-project.org/, then in R run: install.packages('IRkernel'); IRkernel::installspec() — then refresh environments. Exposition never installs runtimes or packages itself.";
+pub const PYTHON_MISSING_GUIDANCE: &str = "Install Python 3.10 or newer from https://www.python.org/downloads/, then check again; Set up environment then creates a project environment with the Jupyter kernel packages. Exposition never installs Python itself.";
+
+pub const R_MISSING_GUIDANCE: &str = "Install R 4.x from https://cran.r-project.org/, then in R run: install.packages('IRkernel'); IRkernel::installspec() — then check again. Exposition never installs R or R packages itself.";
 
 pub const IRKERNEL_SPEC_GUIDANCE: &str =
-    "In R, run: IRkernel::installspec() — then refresh environments. Exposition never registers kernels itself.";
+    "In R, run: IRkernel::installspec() — then check again. Exposition never registers kernels itself.";
 
-pub const IJULIA_SPEC_GUIDANCE: &str = "In Julia, run: using IJulia; installkernel(\"Julia\") — then refresh environments. Exposition never registers kernels itself.";
+pub const IJULIA_SPEC_GUIDANCE: &str = "In Julia, run: using IJulia; installkernel(\"Julia\") — then check again. Exposition never registers kernels itself.";
 
-pub const IRKERNEL_MISSING_GUIDANCE: &str = "In R, run: install.packages('IRkernel'); IRkernel::installspec() — then refresh environments. Exposition never installs packages itself.";
+pub const IRKERNEL_MISSING_GUIDANCE: &str = "In R, run: install.packages('IRkernel'); IRkernel::installspec() — then check again. Exposition never installs R packages itself.";
 
-pub const JULIA_MISSING_GUIDANCE: &str = "Install Julia from https://julialang.org/downloads/ (juliaup is recommended), then in Julia run: using Pkg; Pkg.add(\"IJulia\") — then refresh environments. Exposition never installs runtimes or packages itself.";
+pub const JULIA_MISSING_GUIDANCE: &str = "Install Julia from https://julialang.org/install/ (juliaup is recommended), then in Julia run: using Pkg; Pkg.add(\"IJulia\") — then check again. Exposition never installs Julia or Julia packages itself.";
 
-pub const IJULIA_MISSING_GUIDANCE: &str = "In Julia, run: using Pkg; Pkg.add(\"IJulia\") — then refresh environments. Exposition never installs packages itself.";
+pub const IJULIA_MISSING_GUIDANCE: &str = "In Julia, run: using Pkg; Pkg.add(\"IJulia\") — then check again. Exposition never installs Julia packages itself.";
 
-pub const HOST_MISSING_GUIDANCE: &str = "R and Julia kernels run through Exposition's Jupyter helper, which needs a Python interpreter with jupyter_client: python -m pip install jupyter_client — then refresh environments. Exposition never installs packages itself.";
+pub const HOST_MISSING_GUIDANCE: &str = "R and Julia kernels run through Exposition's Jupyter helper, which needs a Python with jupyter_client: set up a project Python environment, or run python -m pip install jupyter_client — then check again. Exposition never installs packages outside a project environment.";
+
+const IRKERNEL_INSTALL: &str = "install.packages('IRkernel')";
+const IRKERNEL_SPEC: &str = "IRkernel::installspec()";
+const IJULIA_INSTALL: &str = "using Pkg; Pkg.add(\"IJulia\")";
+const IJULIA_SPEC: &str = "using IJulia; installkernel(\"Julia\")";
+
+/// R/Julia kernel commands the person runs (user-wide: they install for the
+/// account, not only this project).
+fn kernel_commands(language: RuntimeLanguage, spec_only: bool) -> SetupHint {
+    let (program, commands): (&str, Vec<&str>) = match (language, spec_only) {
+        (RuntimeLanguage::R, true) => ("R", vec![IRKERNEL_SPEC]),
+        (RuntimeLanguage::R, false) => ("R", vec![IRKERNEL_INSTALL, IRKERNEL_SPEC]),
+        (_, true) => ("Julia", vec![IJULIA_SPEC]),
+        (_, false) => ("Julia", vec![IJULIA_INSTALL]),
+    };
+    SetupHint {
+        commands: commands.into_iter().map(str::to_owned).collect(),
+        commands_for: Some(program.to_owned()),
+        user_wide: true,
+        ..SetupHint::default()
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,9 +171,22 @@ pub fn discover(options: &DiscoveryOptions<'_>) -> EnvironmentReport {
         .into_iter()
         .filter(|p| project_root.as_ref().is_none_or(|root| !inside(p, root)))
         .collect();
-    let project: Vec<PathBuf> = match &options.project {
-        Some(scope) if scope.trusted => dedupe(project_candidates(&scope.root)),
-        _ => Vec::new(),
+    // A project environment whose setup by Exposition did not finish is
+    // listed as unavailable and its interpreter is never run.
+    let (unfinished, project): (Vec<PathBuf>, Vec<PathBuf>) = match &options.project {
+        Some(scope) if scope.trusted => {
+            let unfinished: Vec<PathBuf> = crate::setup::PROJECT_ENVIRONMENT_FOLDERS
+                .iter()
+                .map(|name| scope.root.join(name))
+                .filter(|dir| crate::setup::setup_unfinished(dir))
+                .collect();
+            let candidates = project_candidates(&scope.root)
+                .into_iter()
+                .filter(|exe| !unfinished.iter().any(|dir| exe.starts_with(dir)))
+                .collect();
+            (unfinished, dedupe(candidates))
+        }
+        _ => (Vec::new(), Vec::new()),
     };
     let candidates: Vec<(PathBuf, bool)> =
         system.into_iter().map(|p| (p, false)).chain(project.into_iter().map(|p| (p, true))).collect();
@@ -172,7 +214,9 @@ pub fn discover(options: &DiscoveryOptions<'_>) -> EnvironmentReport {
             .then_with(|| version_key(&b.probe.version).cmp(&version_key(&a.probe.version)))
     });
 
-    let mut runtimes: Vec<RuntimeEnvironment> = pythons.iter().map(python_runtime).collect();
+    let mut runtimes: Vec<RuntimeEnvironment> =
+        pythons.iter().map(|p| python_runtime(p, project_root.as_deref())).collect();
+    runtimes.extend(unfinished.iter().map(|dir| unfinished_runtime(dir)));
     if pythons.is_empty() {
         runtimes.push(RuntimeEnvironment {
             id: "python:none".into(),
@@ -188,6 +232,8 @@ pub fn discover(options: &DiscoveryOptions<'_>) -> EnvironmentReport {
                 reason: "No Python interpreter was found.".into(),
                 guidance: PYTHON_MISSING_GUIDANCE.into(),
             },
+            setup: Some(SetupHint { download_url: Some(PYTHON_DOWNLOAD_URL.into()), ..SetupHint::default() }),
+            project_folder: None,
         });
     }
     let host = pythons.iter().find(|p| p.has("jupyter_client"));
@@ -196,8 +242,13 @@ pub fn discover(options: &DiscoveryOptions<'_>) -> EnvironmentReport {
     EnvironmentReport { runtimes, scanned_at_ms: now_ms() }
 }
 
-fn python_runtime(python: &ProbedPython) -> RuntimeEnvironment {
+fn python_runtime(python: &ProbedPython, project_root: Option<&Path>) -> RuntimeEnvironment {
     let probe = &python.probe;
+    // Interpreters of a project environment say so (`.venv`, `venv`).
+    let project_folder = project_root
+        .and_then(|root| python.path.strip_prefix(root).ok())
+        .and_then(|rel| rel.components().next())
+        .map(|c| c.as_os_str().to_string_lossy().into_owned());
     let executable = probe.executable.clone();
     let packages: Vec<ToolVersion> = probe
         .packages
@@ -207,19 +258,40 @@ fn python_runtime(python: &ProbedPython) -> RuntimeEnvironment {
     let missing: Vec<&str> = ["ipykernel", "jupyter_client"].into_iter().filter(|m| !python.has(m)).collect();
     let availability = if missing.is_empty() {
         Availability::Available
+    } else if project_folder.is_some() {
+        Availability::Unavailable {
+            reason: format!("Python {} at {} lacks {}.", probe.version, executable, missing.join(" and ")),
+            guidance: format!(
+                "Install packages adds them to this project environment, or run: \"{executable}\" -m pip install {} — then check again.",
+                missing.join(" ")
+            ),
+        }
     } else {
         Availability::Unavailable {
             reason: format!("Python {} at {} lacks {}.", probe.version, executable, missing.join(" and ")),
             guidance: format!(
-                "Install them into this interpreter: \"{executable}\" -m pip install {} — then refresh environments. Exposition never installs packages itself.",
+                "Set up environment creates a project environment from this Python with the kernel packages, or install them into it yourself: \"{executable}\" -m pip install {} — then check again. Exposition never installs packages into a Python outside the project.",
                 missing.join(" ")
             ),
         }
     };
+    let setup = (!missing.is_empty()).then(|| SetupHint {
+        action: Some(if project_folder.is_some() {
+            SetupAction::InstallPackages
+        } else {
+            SetupAction::CreateEnvironment
+        }),
+        ..SetupHint::default()
+    });
     RuntimeEnvironment {
         id: format!("python:{}", python.path.display()),
         language: RuntimeLanguage::Python,
-        display_name: format!("Python {} ({})", probe.version, implementation_name(&probe.implementation)),
+        display_name: match &project_folder {
+            Some(folder) => {
+                format!("Python {} ({}, project {folder})", probe.version, implementation_name(&probe.implementation))
+            }
+            None => format!("Python {} ({})", probe.version, implementation_name(&probe.implementation)),
+        },
         executable: Some(executable.clone()),
         version: Some(probe.version.clone()),
         kernel: missing.is_empty().then_some(KernelChoice::Python),
@@ -227,6 +299,33 @@ fn python_runtime(python: &ProbedPython) -> RuntimeEnvironment {
         packages,
         kernel_environment: BTreeMap::new(),
         availability,
+        setup,
+        project_folder,
+    }
+}
+
+pub const UNFINISHED_SETUP_GUIDANCE: &str = "Set up the environment again (an unfinished environment Exposition created is removed first), or delete the folder.";
+
+/// A project environment whose setup did not finish (never probed).
+fn unfinished_runtime(dir: &Path) -> RuntimeEnvironment {
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let python = crate::setup::environment_id_for(dir);
+    RuntimeEnvironment {
+        id: python.clone(),
+        language: RuntimeLanguage::Python,
+        display_name: format!("Project environment {name} (setup not finished)"),
+        executable: python.strip_prefix("python:").map(str::to_owned),
+        version: None,
+        kernel: None,
+        host_interpreter: None,
+        packages: Vec::new(),
+        kernel_environment: BTreeMap::new(),
+        availability: Availability::Unavailable {
+            reason: format!("The setup of the project environment {name} did not finish."),
+            guidance: UNFINISHED_SETUP_GUIDANCE.into(),
+        },
+        setup: Some(SetupHint { action: Some(SetupAction::CreateEnvironment), ..SetupHint::default() }),
+        project_folder: Some(name),
     }
 }
 
@@ -278,6 +377,8 @@ fn kernelspec_runtime(
         packages,
         kernel_environment: probe.kernel_environment.clone(),
         availability: Availability::Available,
+        setup: None,
+        project_folder: None,
     };
     match (spec, host, &executable) {
         (Some(spec), Some(_), _) => RuntimeEnvironment {
@@ -294,6 +395,7 @@ fn kernelspec_runtime(
                 ),
                 guidance: HOST_MISSING_GUIDANCE.into(),
             },
+            setup: Some(SetupHint { action: Some(SetupAction::CreateEnvironment), ..SetupHint::default() }),
             ..base
         },
         (None, _, Some(exe)) => {
@@ -316,7 +418,11 @@ fn kernelspec_runtime(
                     if language == RuntimeLanguage::R { IRKERNEL_MISSING_GUIDANCE } else { IJULIA_MISSING_GUIDANCE },
                 )
             };
-            RuntimeEnvironment { availability: Availability::Unavailable { reason, guidance: guidance.into() }, ..base }
+            RuntimeEnvironment {
+                availability: Availability::Unavailable { reason, guidance: guidance.into() },
+                setup: Some(kernel_commands(language, probe.kernel_package_installed)),
+                ..base
+            }
         }
         (_, _, None) => RuntimeEnvironment {
             availability: Availability::Unavailable {
@@ -324,6 +430,12 @@ fn kernelspec_runtime(
                 guidance: if language == RuntimeLanguage::R { R_MISSING_GUIDANCE } else { JULIA_MISSING_GUIDANCE }
                     .into(),
             },
+            setup: Some(SetupHint {
+                download_url: Some(
+                    if language == RuntimeLanguage::R { R_DOWNLOAD_URL } else { JULIA_DOWNLOAD_URL }.to_owned(),
+                ),
+                ..kernel_commands(language, false)
+            }),
             ..base
         },
     }
@@ -588,7 +700,7 @@ mod tests {
     #[test]
     fn every_setup_guidance_names_the_fix_and_that_exposition_never_does_it() {
         let cases = [
-            (PYTHON_MISSING_GUIDANCE, "ipykernel"),
+            (PYTHON_MISSING_GUIDANCE, "python.org/downloads"),
             (R_MISSING_GUIDANCE, "IRkernel"),
             (IRKERNEL_SPEC_GUIDANCE, "IRkernel::installspec"),
             (IRKERNEL_MISSING_GUIDANCE, "IRkernel"),
@@ -602,6 +714,25 @@ mod tests {
             assert!(
                 guidance.contains("Exposition never installs") || guidance.contains("Exposition never registers"),
                 "{guidance}"
+            );
+        }
+    }
+
+    #[test]
+    fn kernel_commands_are_exact_and_user_wide() {
+        let r = kernel_commands(RuntimeLanguage::R, false);
+        assert_eq!(r.commands, vec!["install.packages('IRkernel')", "IRkernel::installspec()"]);
+        assert_eq!(r.commands_for.as_deref(), Some("R"));
+        assert!(r.user_wide && r.action.is_none());
+        let julia = kernel_commands(RuntimeLanguage::Julia, true);
+        assert_eq!(julia.commands, vec!["using IJulia; installkernel(\"Julia\")"]);
+        // Every command also appears in the matching prose guidance.
+        for command in r.commands.iter().chain(&kernel_commands(RuntimeLanguage::Julia, false).commands) {
+            assert!(
+                [R_MISSING_GUIDANCE, IRKERNEL_MISSING_GUIDANCE, JULIA_MISSING_GUIDANCE, IJULIA_MISSING_GUIDANCE]
+                    .iter()
+                    .any(|g| g.contains(command.as_str())),
+                "{command}"
             );
         }
     }
