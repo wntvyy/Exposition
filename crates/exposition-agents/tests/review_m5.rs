@@ -136,6 +136,7 @@ fn request(
         execution,
         consent: Some(ContextConsent::ScopeContent),
         budgets: None,
+        approval_mode: None,
     }
 }
 

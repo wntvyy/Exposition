@@ -117,6 +117,7 @@ async fn run(h: &mut Harness, root: &Path, calls: Vec<Value>) -> TaskId {
             execution: ExecutionMode::Disabled,
             consent: Some(ContextConsent::ScopeContent),
             budgets: None,
+            approval_mode: None,
         })
         .unwrap();
     let id = task.id.clone();

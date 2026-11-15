@@ -176,6 +176,11 @@
     "allow-clipboard-files-read",
     "allow-clipboard-files-write",
     "allow-storage-overview",
-    "allow-document-save-copy"
+    "allow-document-save-copy",
+    "allow-agents-permissions-get",
+    "allow-agents-permissions-list",
+    "allow-agents-permissions-set",
+    "allow-agents-permissions-revoke",
+    "allow-agents-allowance-revoke"
   ]
 }

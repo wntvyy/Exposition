@@ -47,6 +47,8 @@ fn copy_fixture(from: &Path, to: &Path) {
 struct Harness {
     service: AgentService,
     execution: ExecutionService,
+    workspace: Arc<WorkspaceService>,
+    documents: Arc<DocumentService>,
     project: TempDir,
     events: broadcast::Receiver<AgentEvent>,
     _data: TempDir,
@@ -74,8 +76,8 @@ fn harness() -> Harness {
     let services = AppToolServices::new(execution.clone()).with_workspace(Arc::clone(&workspace)).with_lean(lean);
     let service = AgentService::new(AgentConfig {
         database: None,
-        documents,
-        workspace: Some(workspace),
+        documents: Arc::clone(&documents),
+        workspace: Some(Arc::clone(&workspace)),
         credentials: Arc::new(MemoryStore::default()),
         services: Arc::new(services),
         runtime: tokio::runtime::Handle::current(),
@@ -89,14 +91,18 @@ fn harness() -> Harness {
         .update_settings(ProviderSettings { provider: ProviderKind::Scripted, ..ProviderSettings::default() })
         .unwrap();
     let events = service.subscribe();
-    Harness { service, execution, project, events, _data: data }
+    Harness { service, execution, workspace, documents, project, events, _data: data }
 }
 
 fn check(id: &str, path: &str) -> Value {
     json!({"toolUse": {"id": id, "name": "check_lean", "input": {"path": path}}})
 }
 
-async fn run(h: &mut Harness, script: Value, execution: ExecutionMode) -> (TaskSummary, Vec<(bool, Value)>, u32) {
+async fn run(
+    h: &mut Harness,
+    script: Value,
+    execution: ExecutionMode,
+) -> (TaskSummary, Vec<(bool, Value)>, Vec<ApprovalRequest>) {
     h.service.load_script(script).unwrap();
     let task = h
         .service
@@ -108,15 +114,16 @@ async fn run(h: &mut Harness, script: Value, execution: ExecutionMode) -> (TaskS
             execution,
             consent: None,
             budgets: None,
+            approval_mode: None,
         })
         .unwrap();
-    let mut approvals = 0;
+    let mut approvals = Vec::new();
     tokio::time::timeout(Duration::from_secs(600), async {
         loop {
             match h.events.recv().await {
                 Ok(AgentEvent::ApprovalRequested { approval }) if approval.task_id == task.id => {
-                    approvals += 1;
                     h.service.resolve_approval(&task.id, &approval.id, true).unwrap();
+                    approvals.push(approval);
                 }
                 Ok(AgentEvent::TaskChanged { task: t }) if t.id == task.id && !t.status.is_active() => break,
                 _ => {}
@@ -153,7 +160,7 @@ async fn check_lean_reports_checked_only_for_complete_error_free_text() {
 
     // Untrusted folder: refused before any approval; nothing runs.
     let (_, out, approvals) = run(&mut h, script.clone(), ExecutionMode::ApproveEach).await;
-    assert_eq!(approvals, 0);
+    assert!(approvals.is_empty());
     assert!(out[0].0 && out[0].1["error"].as_str().unwrap().contains("not trusted"), "{}", out[0].1);
     // Restricted-only tasks never run Lean (it only runs natively).
     let (_, out, _) = run(&mut h, script, ExecutionMode::Restricted).await;
@@ -166,7 +173,7 @@ async fn check_lean_reports_checked_only_for_complete_error_free_text() {
     ]});
     let (task, out, approvals) = run(&mut h, script, ExecutionMode::ApproveEach).await;
     assert_eq!(task.status, TaskStatus::Completed);
-    assert_eq!(approvals, 2, "each Lean check is approved");
+    assert_eq!(approvals.len(), 2, "each Lean check is approved");
     let (defs_error, defs) = &out[0];
     assert!(!defs_error, "{defs}");
     assert_eq!(defs["checked"], true);
@@ -179,4 +186,112 @@ async fn check_lean_reports_checked_only_for_complete_error_free_text() {
     assert!(proofs["diagnostics"].as_array().unwrap().iter().any(|d| d["severity"] == "error"), "{proofs}");
     assert!(proofs["note"].as_str().unwrap().starts_with("Not checked"), "{proofs}");
     assert_eq!(task.usage.commands, 2);
+}
+
+/// Wait (bounded) until `path` exists.
+async fn appears(path: &Path, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    path.exists()
+}
+
+/// A Lean line that writes `marker` when Lean elaborates it.
+fn eval_writes(marker: &Path) -> String {
+    let target = marker.display().to_string().replace('\\', "/");
+    format!("\n#eval IO.FS.writeFile \"{target}\" \"ran\"\n")
+}
+
+/// D7 (R-m9): the live Lean server elaborates the unsaved text of every open
+/// Lean document in a trusted folder (the Lean service tracks each document
+/// service document whose path ends in `.lean` and sends its buffer, so an
+/// agent's edit is elaborated as soon as it is applied). A change that puts
+/// text into a Lean file is therefore native execution.
+///
+/// Fail-before: an Ask task that applies changes directly with execution
+/// disabled could make that edit before A1, and the code in it ran. Now the
+/// edit is refused (execution disabled), the buffer is unchanged, and nothing
+/// runs; with per-command approval it asks first and says that Lean
+/// elaborates the text natively.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lean_file_edits_are_native_execution() {
+    if !toolchain_installed() {
+        eprintln!("SKIPPED: Lean toolchain {TOOLCHAIN_DIR} is not installed through elan");
+        return;
+    }
+    let mut h = harness();
+    h.execution.grant_trust(&h.project.path().display().to_string()).unwrap();
+    let markers = tempfile::tempdir().unwrap();
+    let path = exposition_core::path::WorkspacePath::parse("LeanBasic/Defs.lean").unwrap();
+
+    // 1. The elaboration path itself: an agent-origin transaction on the open
+    // buffer (never saved) makes Lean run the code.
+    let direct = markers.path().join("direct.txt");
+    let opened = h.workspace.open_document(&path).unwrap();
+    let id = opened.state.info.id.clone();
+    let text = h.documents.snapshot(&id).unwrap().text;
+    let end = exposition_core::text::byte_to_utf16(&text, text.len()).unwrap() as u32;
+    h.documents
+        .apply(exposition_core::document::TransactionRequest {
+            id: exposition_core::document::TransactionId("agent-probe".into()),
+            origin: exposition_core::document::EditOrigin::Agent { task_id: "task-probe".into() },
+            edits: vec![exposition_core::document::DocumentEdit {
+                document: id.clone(),
+                base_revision: opened.state.info.revision,
+                patches: vec![exposition_core::document::TextPatch::insert(end, eval_writes(&direct))],
+            }],
+            undo: exposition_core::document::UndoBehavior::NewGroup,
+            conflict: exposition_core::document::ConflictPolicy::RebaseDisjoint,
+            label: None,
+            selection: None,
+        })
+        .unwrap();
+    assert!(appears(&direct, Duration::from_secs(300)).await, "Lean elaborated the unsaved agent edit natively");
+    assert!(
+        !std::fs::read_to_string(h.project.path().join("LeanBasic/Defs.lean")).unwrap().contains("#eval"),
+        "never saved"
+    );
+    // Undo the probe so the next steps start from the saved text.
+    h.documents.undo(&id, exposition_core::document::EditOrigin::Agent { task_id: "task-probe".into() }).unwrap();
+
+    // 2. Fail-before: execution disabled refuses the edit; nothing reaches the buffer.
+    let refused = markers.path().join("refused.txt");
+    let edit = |id: &str, marker: &Path| {
+        json!({"toolUse": {"id": id, "name": "edit_document", "input": {
+            "path": "LeanBasic/Defs.lean",
+            "base_revision": format!("$ref:read-{id}/revision"),
+            "edits": [{"old_text": "end LeanBasic", "new_text": format!("end LeanBasic{}", eval_writes(marker))}]
+        }}})
+    };
+    let read = |id: &str| json!({"toolUse": {"id": format!("read-{id}"), "name": "read_file", "input": {"path": "LeanBasic/Defs.lean"}}});
+    let script =
+        json!({"turns": [{"steps": [read("e1")]}, {"steps": [edit("e1", &refused)]}, {"steps": [{"text": "done"}]}]});
+    let (_, out, approvals) = run(&mut h, script, ExecutionMode::Disabled).await;
+    assert!(approvals.is_empty(), "refused, never asked");
+    let (is_error, result) = &out[1];
+    assert!(is_error, "{result}");
+    assert_eq!(result["code"], "agents.executionDisabled", "{result}");
+    assert!(result["error"].as_str().unwrap().contains("Lean elaborates"), "{result}");
+    assert!(!h.documents.snapshot(&id).unwrap().text.contains("refused.txt"), "the buffer is unchanged");
+    assert!(!appears(&refused, Duration::from_secs(20)).await, "nothing ran");
+
+    // 3. With per-command approval it asks first, saying what happens; approved, it runs.
+    let approved = markers.path().join("approved.txt");
+    let script =
+        json!({"turns": [{"steps": [read("e2")]}, {"steps": [edit("e2", &approved)]}, {"steps": [{"text": "done"}]}]});
+    let (_, out, approvals) = run(&mut h, script, ExecutionMode::ApproveEach).await;
+    assert_eq!(approvals.len(), 1, "one card for the Lean edit");
+    assert_eq!(approvals[0].title, "Apply edits to LeanBasic/Defs.lean");
+    assert!(
+        approvals[0].detail.contains("Lean elaborates the text of an open Lean file natively"),
+        "{}",
+        approvals[0].detail
+    );
+    assert_eq!(approvals[0].for_task, vec![AllowanceKind::NativeCode]);
+    assert!(!out[1].0, "{}", out[1].1);
+    assert!(appears(&approved, Duration::from_secs(300)).await, "approved: Lean elaborated it");
 }

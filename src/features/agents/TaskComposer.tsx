@@ -1,6 +1,7 @@
 import { FolderOpen, Play } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
+import type { ApprovalMode } from "../../bindings/ApprovalMode";
 import type { Budgets } from "../../bindings/Budgets";
 import type { ContextConsent } from "../../bindings/ContextConsent";
 import type { ExecutionMode } from "../../bindings/ExecutionMode";
@@ -10,8 +11,9 @@ import type { TaskScope } from "../../bindings/TaskScope";
 import { editors } from "../../app/editors";
 import { registry } from "../../app/registry";
 import { commands } from "../../lib/ipc";
-import { Banner, Button, Section, Select, TextArea, TextField } from "../../ui/components";
-import { CONSENT_LABELS, EXECUTION_LABELS, PERMISSION_LABELS } from "./format";
+import { Banner, Button, SegmentedControl, Section, Select, TextArea, TextField } from "../../ui/components";
+import { APPROVAL_MODE_LABELS, CONSENT_LABELS, EXECUTION_LABELS, PERMISSION_LABELS } from "./format";
+import { AutoProfile, useProjectPermissions } from "./permissions";
 import { agents, useAgents } from "./store";
 
 type ScopeKind = "workspace" | "files" | "document";
@@ -70,19 +72,29 @@ export function TaskComposer({
   const [execution, setExecution] = useState<ExecutionMode>("disabled");
   const [consent, setConsent] = useState<ContextConsent>(status?.settings.consent ?? "scopeContent");
   const [budgets, setBudgets] = useState<Budgets>(DEFAULT_BUDGETS);
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
   const [busy, setBusy] = useState(false);
+  const auto = approvalMode === "auto";
+  const projectPermissions = useProjectPermissions(auto && folder ? folder : null);
+  // Auto needs the project's permissions first (chosen in the profile below).
+  const autoReady = !auto || projectPermissions.state?.permissions != null;
 
   const scope = buildScope(scopeKind, files, document);
   const providerReady = status !== null && (status.settings.provider === "scripted" || status.configured);
-  const canStart = prompt.trim().length > 0 && folder.trim().length > 0 && scope !== null && providerReady && !busy;
+  const canStart =
+    prompt.trim().length > 0 && folder.trim().length > 0 && scope !== null && providerReady && autoReady && !busy;
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     if (!canStart || !scope) return;
     setBusy(true);
-    const task = await agents.run(() =>
-      commands.agentsTaskCreate({ prompt, workspaceRoot: folder, scope, permission, execution, consent, budgets }),
-    );
+    // In Auto the project's permissions decide; the task's own settings are
+    // the widest ceiling (the backend still refuses what the project or the
+    // task prohibits).
+    const request = auto
+      ? { prompt, workspaceRoot: folder, scope, permission: "autoApply" as const, execution: "approveEach" as const, consent, budgets, approvalMode }
+      : { prompt, workspaceRoot: folder, scope, permission, execution, consent, budgets, approvalMode };
+    const task = await agents.run(() => commands.agentsTaskCreate(request));
     setBusy(false);
     if (task) {
       setPrompt("");
@@ -147,14 +159,37 @@ export function TaskComposer({
         <TextField label="Document (relative to the project folder)" code value={document} onChange={setDocument} />
       )}
       {scopeKind === "files" && <TextArea label="Files and folders, one per line" code value={files} onChange={setFiles} />}
-      <Select
-        label="Document changes"
-        value={permission}
-        onChange={setPermission}
-        options={option(PERMISSION_LABELS)}
-        data-testid="agents-permission"
-      />
-      <Select label="Commands and code" value={execution} onChange={setExecution} options={option(EXECUTION_LABELS)} />
+      <div className="agents-stack">
+        <span className="ui-field__label" aria-hidden>
+          Approvals
+        </span>
+        <SegmentedControl<ApprovalMode>
+          aria-label="Approvals"
+          value={approvalMode}
+          onChange={setApprovalMode}
+          options={option(APPROVAL_MODE_LABELS)}
+          data-testid="agents-approval-mode"
+        />
+        <p className="ui-meta" data-testid="agents-approval-mode-help">
+          {auto
+            ? "Proceeds within this project's permissions and asks only for anything beyond them."
+            : "Asks before actions the settings below do not cover."}
+        </p>
+      </div>
+      {auto ? (
+        folder && <AutoProfile permissions={projectPermissions} />
+      ) : (
+        <>
+          <Select
+            label="Document changes"
+            value={permission}
+            onChange={setPermission}
+            options={option(PERMISSION_LABELS)}
+            data-testid="agents-permission"
+          />
+          <Select label="Commands and code" value={execution} onChange={setExecution} options={option(EXECUTION_LABELS)} />
+        </>
+      )}
       <Select label="Content sent to the model provider" value={consent} onChange={setConsent} options={option(CONSENT_LABELS)} />
       <Section title="Budgets" collapsible defaultExpanded={false} className="agents-section">
         <div className="agents-grid">

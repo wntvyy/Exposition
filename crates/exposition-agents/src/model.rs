@@ -108,6 +108,101 @@ pub enum ExecutionMode {
     Restricted,
 }
 
+/// Whether a task asks the user before actions its own settings do not
+/// already cover (Ask), or proceeds under the project's permissions and asks
+/// only for actions beyond them (Auto). Either way the application decides;
+/// a model never approves its own requests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalMode {
+    /// The task's own settings (document changes, commands and code, consent)
+    /// decide; anything they do not cover waits for the user's approval.
+    #[default]
+    Ask,
+    /// The project's permissions (app-local, chosen by the user for this
+    /// project) intersected with the task's scope, consent, settings, the
+    /// executor, and folder trust: covered actions proceed without a dialog,
+    /// legitimate expansions ask once, prohibited actions are refused.
+    Auto,
+}
+
+/// A kind of action the user can approve for the rest of a task ("Approve
+/// for this task"). Consequential project operations are never repeatable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum AllowanceKind {
+    /// Code that runs natively on this computer: Python, commands, Lean
+    /// checks, LaTeX builds, and Lean-file edits the Lean server elaborates.
+    NativeCode,
+    /// Document and file changes inside the task's scope (consequential
+    /// deletions and copies still ask every time).
+    DocumentChanges,
+    /// Package installation into the project's environment.
+    PackageSetup,
+}
+
+impl AllowanceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AllowanceKind::NativeCode => "nativeCode",
+            AllowanceKind::DocumentChanges => "documentChanges",
+            AllowanceKind::PackageSetup => "packageSetup",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "nativeCode" => Some(AllowanceKind::NativeCode),
+            "documentChanges" => Some(AllowanceKind::DocumentChanges),
+            "packageSetup" => Some(AllowanceKind::PackageSetup),
+            _ => None,
+        }
+    }
+}
+
+/// How the user answered an approval request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalScope {
+    /// This call only.
+    #[default]
+    Once,
+    /// This call, and later calls of the same kinds in this task.
+    Task,
+}
+
+/// How a call that ran was authorized (recorded with the call).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum AuthorizedBy {
+    /// Nothing beyond the task's scope and consent was needed (reads, queries).
+    NotRequired,
+    /// The task's own settings cover it (Ask: changes applied directly,
+    /// restricted runs).
+    TaskSettings,
+    /// Auto: covered by the project's permissions at this version.
+    ProjectPermissions { version: u64 },
+    /// An earlier "Approve for this task" of these kinds.
+    TaskAllowance { kinds: Vec<AllowanceKind> },
+    /// The user approved this call (`for_task`: and later ones of its kinds).
+    Approved { for_task: bool },
+}
+
+/// An allowance the user granted a task, as the task view lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskAllowance {
+    pub kind: AllowanceKind,
+    pub granted_at_ms: u64,
+    /// Title of the approval that granted it.
+    pub approved: String,
+}
+
 /// What document content may be sent to the model provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -347,6 +442,12 @@ pub struct TaskSpec {
     pub consent: ContextConsent,
     pub budgets: Budgets,
     pub provider: ProviderChoice,
+    /// Ask or Auto. Tasks stored before approval modes existed read as Ask.
+    /// In Auto, `permission` and `execution` are the task's ceiling (read
+    /// only, or execution disabled, prohibit those actions outright); the
+    /// project's permissions decide within it.
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
 }
 
 /// Request from the composer.
@@ -363,6 +464,10 @@ pub struct CreateTaskRequest {
     pub consent: Option<ContextConsent>,
     /// `None` uses the default budgets.
     pub budgets: Option<Budgets>,
+    /// `None` (or absent) is Ask. Auto needs the project's permissions.
+    #[serde(default)]
+    #[ts(optional)]
+    pub approval_mode: Option<ApprovalMode>,
 }
 
 /// Request to start the generation task of a newly created project.
@@ -379,6 +484,10 @@ pub struct GenerationTaskRequest {
     pub execution: Option<ExecutionMode>,
     pub consent: Option<ContextConsent>,
     pub budgets: Option<Budgets>,
+    /// `None` (or absent) is Ask. Auto needs the new project's permissions.
+    #[serde(default)]
+    #[ts(optional)]
+    pub approval_mode: Option<ApprovalMode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -470,6 +579,9 @@ pub enum TranscriptItem {
         /// Result text (bounded).
         result: Option<String>,
         is_error: bool,
+        /// How the call was authorized when it ran (`None`: it did not run,
+        /// or it ran before authorizations were recorded).
+        authorized_by: Option<AuthorizedBy>,
     },
     Notice {
         seq: u64,
@@ -489,6 +601,12 @@ pub struct ApprovalRequest {
     pub title: String,
     /// Plain-text details (proposed edits, program and arguments).
     pub detail: String,
+    /// Why this call needs the user now when that is not obvious from the
+    /// task's settings (Auto: beyond the project's permissions; Lean edits).
+    pub reason: Option<String>,
+    /// The kinds "Approve for this task" would allow for the rest of the
+    /// task; empty when only a one-off approval is possible.
+    pub for_task: Vec<AllowanceKind>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -500,6 +618,8 @@ pub struct TaskDetail {
     pub approvals: Vec<ApprovalRequest>,
     /// The task's graph record: its context, targets, proposals, investigation.
     pub graph: crate::graph::TaskGraphInfo,
+    /// What the user approved for the rest of this task (revocable).
+    pub allowances: Vec<TaskAllowance>,
 }
 
 /// Events on the `agents:event` channel.
@@ -567,6 +687,11 @@ pub enum AgentEvent {
     /// only what `provider_status` returns; never the key.
     ProviderChanged {
         status: Box<ProviderStatus>,
+    },
+    /// A project's permissions were set, changed, or revoked (from any
+    /// surface); views showing them re-read.
+    PermissionsChanged {
+        change: Box<crate::permissions::PermissionsChange>,
     },
 }
 

@@ -55,6 +55,7 @@ function summary(overrides: Partial<TaskSummary> = {}): TaskSummary {
       consent: "scopeContent",
       budgets: DEFAULT_BUDGETS,
       provider: { provider: "scripted", model: "claude-opus-5-5", effort: "medium" },
+      approvalMode: "ask",
     },
     usage: {
       turns: 1,
@@ -85,6 +86,8 @@ const approval = {
   tool: "create_file",
   title: "Create notes/new.typ",
   detail: "= Draft",
+  reason: null,
+  forTask: [],
 };
 
 afterEach(() => {
@@ -118,7 +121,7 @@ describe("tool-call states", () => {
 
 describe("the streaming draft follows the call through approval", () => {
   function renderTask(status: TaskSummary["status"]) {
-    const detail: TaskDetail = { summary: summary({ status }), transcript: [], approvals: [], graph: NO_GRAPH };
+    const detail: TaskDetail = { summary: summary({ status }), transcript: [], approvals: [], graph: NO_GRAPH, allowances: [] };
     ipc.agentsTaskDetail.mockResolvedValue(detail);
     useAgents.setState({ details: { "task-1": detail }, tasks: [detail.summary] });
     return render(<TaskView id="task-1" />);
@@ -160,7 +163,7 @@ describe("a finished task's outcome", () => {
       status: { kind: "budgetExceeded", budget: "turns", detail: "the limit of 40 model turns was reached." },
       spec: { ...summary().spec, provider: { provider: "anthropic", model: "claude-opus-5-5", effort: "xhigh" } },
     });
-    const detail: TaskDetail = { summary: stopped, transcript: [], approvals: [], graph: NO_GRAPH };
+    const detail: TaskDetail = { summary: stopped, transcript: [], approvals: [], graph: NO_GRAPH, allowances: [] };
     ipc.agentsTaskDetail.mockResolvedValue(detail);
     useAgents.setState({ details: { "task-1": detail }, tasks: [stopped] });
     render(<TaskView id="task-1" />);

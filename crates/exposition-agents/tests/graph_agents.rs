@@ -259,6 +259,7 @@ fn request(root: &Path, scope: TaskScope, permission: PermissionProfile, consent
         execution: ExecutionMode::ApproveEach,
         consent: Some(consent),
         budgets: None,
+        approval_mode: None,
     }
 }
 
@@ -683,6 +684,7 @@ fn gate_matrix(kind: GraphKind) {
                             model: "scripted".into(),
                             effort: Effort::Low,
                         },
+                        approval_mode: ApprovalMode::Ask,
                     };
                     let env = ToolEnv {
                         task_id: &task_id,
@@ -693,6 +695,7 @@ fn gate_matrix(kind: GraphKind) {
                         services: services.as_ref(),
                         store: &store,
                         graph: Some(GraphEnv { service: &f.graph, project: None }),
+                        authority: Default::default(),
                     };
                     let expected = expect(kind, permission, scope);
                     let gate = exec::gate(&call, &env);
@@ -1293,6 +1296,7 @@ fn no_tool_passes_the_gate_without_a_usable_graph() {
         consent: ContextConsent::ScopeContent,
         budgets: Budgets::default(),
         provider: ProviderChoice { provider: ProviderKind::Scripted, model: "scripted".into(), effort: Effort::Low },
+        approval_mode: ApprovalMode::Ask,
     };
     let env = ToolEnv {
         task_id: &task_id,
@@ -1303,6 +1307,7 @@ fn no_tool_passes_the_gate_without_a_usable_graph() {
         services: services.as_ref(),
         store: &store,
         graph: Some(GraphEnv { service: &f.graph, project: None }),
+        authority: Default::default(),
     };
     let calls_in = [
         (tools::LIST_FILES, json!({"path": "", "recursive": false})),
@@ -1496,6 +1501,7 @@ async fn a_generation_task_builds_structure_through_validated_tools_only() {
             execution: None,
             consent: None,
             budgets: None,
+            approval_mode: None,
         })
         .unwrap();
     assert_eq!(task.spec.scope, TaskScope::Workspace);
@@ -1748,6 +1754,7 @@ fn gate_rows(f: &Fixture, rows: &[(&str, Value, Option<&str>)]) -> Vec<String> {
         consent: ContextConsent::ScopeContent,
         budgets: Budgets::default(),
         provider: ProviderChoice { provider: ProviderKind::Scripted, model: "scripted".into(), effort: Effort::Low },
+        approval_mode: ApprovalMode::Ask,
     };
     let env = ToolEnv {
         task_id: &task_id,
@@ -1758,6 +1765,7 @@ fn gate_rows(f: &Fixture, rows: &[(&str, Value, Option<&str>)]) -> Vec<String> {
         services: services.as_ref(),
         store: &store,
         graph: Some(GraphEnv { service: &f.graph, project: None }),
+        authority: Default::default(),
     };
     let mut failures = Vec::new();
     for (name, input, code) in rows {

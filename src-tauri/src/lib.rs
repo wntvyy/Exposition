@@ -57,6 +57,8 @@ pub fn run() {
             workflow_triggers::start(app.handle().clone());
             app.state::<AppState>().typesetting.start(app.handle().clone());
             project_ops::start(app.handle());
+            // A1 lane P: clear task allowances when folder trust is revoked.
+            agents::forward_trust_revocations(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -237,6 +239,12 @@ pub fn run() {
             project_ops::clipboard_files_write,
             project_ops::storage_overview,
             workspace::document_save_copy,
+            // A1 lane P: project permissions (Auto) and task allowances.
+            agents::agents_permissions_get,
+            agents::agents_permissions_list,
+            agents::agents_permissions_set,
+            agents::agents_permissions_revoke,
+            agents::agents_allowance_revoke,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

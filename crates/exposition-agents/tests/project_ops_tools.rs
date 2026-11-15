@@ -196,6 +196,7 @@ impl Fixture {
                 model: "scripted".into(),
                 effort: Effort::Low,
             },
+            approval_mode: ApprovalMode::Ask,
         }
     }
     fn env<'a>(&'a self, spec: &'a TaskSpec) -> ToolEnv<'a> {
@@ -208,6 +209,7 @@ impl Fixture {
             services: &self.services,
             store: &self.store,
             graph: None,
+            authority: Default::default(),
         }
     }
     async fn call(&self, spec: &TaskSpec, name: &str, input: Value) -> (Gate, Option<(bool, Value)>) {
@@ -333,7 +335,7 @@ async fn consequences_need_the_user_and_are_shown_on_the_existing_approval() {
     let review = fx.spec(PermissionProfile::ReviewEdits, TaskScope::Workspace);
     let call = ToolCall::parse(tools::DELETE_PATHS, &json!({"paths": ["main.typ"]})).unwrap();
     let env = fx.env(&review);
-    let Gate::NeedsApproval { title, detail, authorization } = exec::gate(&call, &env) else { panic!("approval") };
+    let Gate::NeedsApproval { title, detail, authorization, .. } = exec::gate(&call, &env) else { panic!("approval") };
     assert!(title.contains("Recycle Bin"), "{title}");
     assert!(detail.contains("main.typ") && detail.contains("unsaved changes"), "{detail}");
     assert!(detail.contains("Keep the unsaved text open in the editor"), "the default that applies: {detail}");

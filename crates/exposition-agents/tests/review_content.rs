@@ -73,6 +73,7 @@ async fn run(h: &Harness, script: Value) -> TaskId {
             execution: ExecutionMode::Disabled,
             consent: None,
             budgets: None,
+            approval_mode: None,
         })
         .unwrap();
     tokio::time::timeout(Duration::from_secs(20), h.service.join(&task.id)).await.expect("task finished");

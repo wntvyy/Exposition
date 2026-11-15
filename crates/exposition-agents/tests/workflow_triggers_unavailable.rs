@@ -100,6 +100,7 @@ async fn an_agent_calling_trigger_commands_is_refused() {
             execution: ExecutionMode::Disabled,
             consent: None,
             budgets: None,
+            approval_mode: None,
         })
         .unwrap();
     tokio::time::timeout(Duration::from_secs(20), service.join(&task.id)).await.expect("task finished");

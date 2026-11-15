@@ -17,11 +17,12 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::model::{
-    Checkpoint, NoticeLevel, ReviewChangeKind, ReviewState, TaskId, TaskSpec, TaskStatus, TaskUsage, ToolCallStatus,
+    AllowanceKind, AuthorizedBy, Checkpoint, NoticeLevel, ReviewChangeKind, ReviewState, TaskId, TaskSpec, TaskStatus,
+    TaskUsage, ToolCallStatus,
 };
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (
@@ -151,6 +152,26 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ALTER TABLE task_files ADD COLUMN op_ref TEXT;
     "#,
     ),
+    // A1 approval modes: how each call that ran was authorized, and what the
+    // user approved for the rest of a task ("Approve for this task"), bound
+    // to the task's project folder and graph identity; the allowance version
+    // changes with every grant, revocation, or clearing.
+    (
+        5,
+        r#"
+    ALTER TABLE tool_calls ADD COLUMN authorized_by TEXT;
+    ALTER TABLE tasks ADD COLUMN allowance_version INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE task_allowances (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        root TEXT NOT NULL,
+        project TEXT,
+        approved TEXT NOT NULL,
+        granted_at INTEGER NOT NULL,
+        PRIMARY KEY (task_id, kind)
+    );
+    "#,
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -204,6 +225,20 @@ pub struct ToolCallRow {
     pub status: ToolCallStatus,
     pub result: Option<String>,
     pub is_error: bool,
+    /// How the call was authorized when it ran (kept once recorded).
+    pub authorized_by: Option<AuthorizedBy>,
+}
+
+/// An allowance as stored: what, for which project, granted by which approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowanceRow {
+    pub kind: AllowanceKind,
+    /// The task's project folder when it was granted.
+    pub root: String,
+    /// The project-graph identity when it was granted.
+    pub project: Option<String>,
+    pub approved: String,
+    pub granted_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -566,11 +601,12 @@ impl Store {
         // A queued call has not started yet; it starts when it first runs.
         let started = (row.status != ToolCallStatus::Pending).then_some(now);
         self.lock().execute(
-            "INSERT INTO tool_calls (task_id, tool_use_id, turn, name, input, status, result, is_error, started_at, finished_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO tool_calls (task_id, tool_use_id, turn, name, input, status, result, is_error, started_at, finished_at, authorized_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(task_id, tool_use_id) DO UPDATE SET status = excluded.status, result = excluded.result,
                is_error = excluded.is_error, started_at = COALESCE(tool_calls.started_at, excluded.started_at),
-               finished_at = excluded.finished_at",
+               finished_at = excluded.finished_at,
+               authorized_by = COALESCE(excluded.authorized_by, tool_calls.authorized_by)",
             params![
                 task.0,
                 row.tool_use_id,
@@ -581,7 +617,8 @@ impl Store {
                 row.result,
                 row.is_error,
                 started,
-                if finished { Some(now) } else { None }
+                if finished { Some(now) } else { None },
+                row.authorized_by.as_ref().map(to_json).transpose()?
             ],
         )?;
         Ok(())
@@ -590,7 +627,7 @@ impl Store {
     pub fn tool_calls(&self, task: &TaskId) -> StoreResult<Vec<ToolCallRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT tool_use_id, turn, name, input, status, result, is_error FROM tool_calls WHERE task_id = ?1 ORDER BY rowid",
+            "SELECT tool_use_id, turn, name, input, status, result, is_error, authorized_by FROM tool_calls WHERE task_id = ?1 ORDER BY rowid",
         )?;
         let raws = stmt
             .query_map([&task.0], |r| {
@@ -602,11 +639,12 @@ impl Store {
                     r.get::<_, String>(4)?,
                     r.get::<_, Option<String>>(5)?,
                     r.get::<_, bool>(6)?,
+                    r.get::<_, Option<String>>(7)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         raws.into_iter()
-            .map(|(tool_use_id, turn, name, input, status, result, is_error)| {
+            .map(|(tool_use_id, turn, name, input, status, result, is_error, authorized_by)| {
                 Ok(ToolCallRow {
                     tool_use_id,
                     turn,
@@ -615,9 +653,103 @@ impl Store {
                     status: from_json(&status)?,
                     result,
                     is_error,
+                    // An unreadable record reads as "not recorded", never as authorized.
+                    authorized_by: authorized_by.and_then(|raw| serde_json::from_str(&raw).ok()),
                 })
             })
             .collect()
+    }
+
+    // ---- allowances ("Approve for this task")
+
+    /// The task's allowance version and its allowances.
+    pub fn allowances(&self, task: &TaskId) -> StoreResult<(u64, Vec<AllowanceRow>)> {
+        let conn = self.lock();
+        let version: Option<i64> =
+            conn.query_row("SELECT allowance_version FROM tasks WHERE id = ?1", [&task.0], |r| r.get(0)).optional()?;
+        let mut stmt = conn.prepare(
+            "SELECT kind, root, project, approved, granted_at FROM task_allowances WHERE task_id = ?1 ORDER BY granted_at, kind",
+        )?;
+        let rows = stmt
+            .query_map([&task.0], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let rows = rows
+            .into_iter()
+            // A kind this build does not know is not honored.
+            .filter_map(|(kind, root, project, approved, at)| {
+                AllowanceKind::parse(&kind).map(|kind| AllowanceRow {
+                    kind,
+                    root,
+                    project,
+                    approved,
+                    granted_at_ms: u(at),
+                })
+            })
+            .collect();
+        Ok((version.map(u).unwrap_or(0), rows))
+    }
+
+    /// Grant `kinds` to the task (bound to `root` and `project`); returns the
+    /// new allowance version.
+    pub fn grant_allowances(
+        &self,
+        task: &TaskId,
+        kinds: &[AllowanceKind],
+        root: &str,
+        project: Option<&str>,
+        approved: &str,
+    ) -> StoreResult<u64> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let now = i(now_ms());
+        for kind in kinds {
+            tx.execute(
+                "INSERT INTO task_allowances (task_id, kind, root, project, approved, granted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(task_id, kind) DO UPDATE SET root = excluded.root, project = excluded.project,
+                   approved = excluded.approved, granted_at = excluded.granted_at",
+                params![task.0, kind.as_str(), root, project, approved, now],
+            )?;
+        }
+        tx.execute("UPDATE tasks SET allowance_version = allowance_version + 1 WHERE id = ?1", [&task.0])?;
+        let version: i64 =
+            tx.query_row("SELECT allowance_version FROM tasks WHERE id = ?1", [&task.0], |r| r.get(0))?;
+        tx.commit()?;
+        Ok(u(version))
+    }
+
+    /// Remove one allowance (`Some(kind)`) or all of them; returns the new
+    /// allowance version and whether anything was removed.
+    pub fn revoke_allowances(&self, task: &TaskId, kind: Option<AllowanceKind>) -> StoreResult<(u64, bool)> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let removed = match kind {
+            Some(kind) => tx.execute(
+                "DELETE FROM task_allowances WHERE task_id = ?1 AND kind = ?2",
+                params![task.0, kind.as_str()],
+            )?,
+            None => tx.execute("DELETE FROM task_allowances WHERE task_id = ?1", [&task.0])?,
+        };
+        tx.execute("UPDATE tasks SET allowance_version = allowance_version + 1 WHERE id = ?1", [&task.0])?;
+        let version: i64 =
+            tx.query_row("SELECT allowance_version FROM tasks WHERE id = ?1", [&task.0], |r| r.get(0))?;
+        tx.commit()?;
+        Ok((u(version), removed > 0))
+    }
+
+    /// Tasks that hold any allowance.
+    pub fn tasks_with_allowances(&self) -> StoreResult<Vec<TaskId>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT DISTINCT task_id FROM task_allowances ORDER BY task_id")?;
+        let ids = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(ids.into_iter().map(TaskId).collect())
     }
 
     // ---- checkpoints
@@ -1006,6 +1138,7 @@ mod tests {
                 model: DEFAULT_MODEL.into(),
                 effort: Effort::Medium,
             },
+            approval_mode: ApprovalMode::Ask,
         }
     }
 
@@ -1110,6 +1243,79 @@ mod tests {
         assert_eq!(left, 0, "the purge removes the task's transcript too");
         let (before, after) = store.compact().unwrap();
         assert!(before.is_some() && after.is_some());
+    }
+
+    /// A1: a schema-4 database gains authorizations and allowances; it is
+    /// copied aside first, its tasks read as Ask (nothing migrates to Auto),
+    /// and its recorded calls carry no authorization.
+    #[test]
+    fn version_4_tasks_read_as_ask_after_the_v5_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("agents.sqlite3");
+        let id = TaskId::new();
+        {
+            let conn = Connection::open(&db).unwrap();
+            for (version, sql) in &MIGRATIONS[..4] {
+                conn.execute_batch(&format!("BEGIN; {sql} PRAGMA user_version = {version}; COMMIT;")).unwrap();
+            }
+            // A spec as v4 stored it: no approvalMode field.
+            let mut spec = serde_json::to_value(spec()).unwrap();
+            spec.as_object_mut().unwrap().remove("approvalMode");
+            conn.execute(
+                "INSERT INTO tasks (id, created_at, updated_at, title, spec, status, usage) VALUES (?1, 1, 1, 'Old', ?2, ?3, ?4)",
+                params![
+                    id.0,
+                    spec.to_string(),
+                    serde_json::to_string(&TaskStatus::Completed).unwrap(),
+                    serde_json::to_string(&TaskUsage::default()).unwrap()
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tool_calls (task_id, tool_use_id, turn, name, input, status, result, is_error)
+                 VALUES (?1, 't1', 1, 'run_python', '{}', '\"succeeded\"', '{}', 0)",
+                [&id.0],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&db).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 5);
+        let task = store.task(&id).unwrap().unwrap();
+        assert_eq!(task.spec.approval_mode, ApprovalMode::Ask, "old tasks read as Ask");
+        assert_eq!(store.tool_calls(&id).unwrap()[0].authorized_by, None);
+        assert_eq!(store.allowances(&id).unwrap(), (0, Vec::new()));
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("agents.sqlite3.premigration-v4-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "copied aside before the upgrade");
+        let old = Connection::open(backups[0].path()).unwrap();
+        let v: i64 = old.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(v, 4);
+        // Allowances: versioned, bound to the project, revocable.
+        let v1 = store
+            .grant_allowances(&id, &[AllowanceKind::NativeCode], "C:/p", Some("prj-a"), "Run Python code")
+            .unwrap();
+        let (version, rows) = store.allowances(&id).unwrap();
+        assert_eq!(version, v1);
+        assert_eq!(rows[0].kind, AllowanceKind::NativeCode);
+        assert_eq!(rows[0].project.as_deref(), Some("prj-a"));
+        assert_eq!(store.tasks_with_allowances().unwrap(), vec![id.clone()]);
+        let (v2, removed) = store.revoke_allowances(&id, None).unwrap();
+        assert!(removed && v2 > v1);
+        let (v3, removed) = store.revoke_allowances(&id, None).unwrap();
+        assert!(!removed && v3 > v2, "every change moves the version");
+        // An authorization is kept once recorded.
+        let mut row = store.tool_calls(&id).unwrap().remove(0);
+        row.authorized_by = Some(AuthorizedBy::ProjectPermissions { version: 9 });
+        store.upsert_tool_call(&id, &row).unwrap();
+        row.authorized_by = None;
+        store.upsert_tool_call(&id, &row).unwrap();
+        assert_eq!(
+            store.tool_calls(&id).unwrap()[0].authorized_by,
+            Some(AuthorizedBy::ProjectPermissions { version: 9 })
+        );
     }
 
     #[test]

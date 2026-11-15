@@ -681,4 +681,21 @@ impl ToolServices for AppToolServices {
             let _ = research.shutdown(&session.id).await;
         }
     }
+
+    fn task_leftovers(&self, task_id: &str) -> Vec<String> {
+        let Some(research) = &self.research else { return Vec::new() };
+        let owner = SessionOwner::Agent { task_id: task_id.to_owned() };
+        research
+            .sessions()
+            .into_iter()
+            .filter(|s| {
+                s.owner == owner
+                    && !matches!(
+                        s.state,
+                        SessionState::Stopped | SessionState::Detached { .. } | SessionState::Crashed { .. }
+                    )
+            })
+            .map(|s| format!("its research session {} has not stopped", s.id))
+            .collect()
+    }
 }

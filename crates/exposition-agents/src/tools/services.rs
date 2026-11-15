@@ -156,6 +156,13 @@ pub trait ToolServices: Send + Sync {
     /// agent's research sessions).
     async fn task_finished(&self, _task_id: &str) {}
 
+    /// What the services still hold for a task whose run ended (e.g. a
+    /// research session that did not shut down), in plain words; empty when
+    /// everything was released.
+    fn task_leftovers(&self, _task_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The application's project-operations orchestrator (the same one the
     /// interface uses), when present.
     fn project_operations(&self) -> Option<Arc<dyn ProjectOperations>> {

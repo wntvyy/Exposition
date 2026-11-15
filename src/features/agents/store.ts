@@ -9,6 +9,7 @@ import type { TaskId } from "../../bindings/TaskId";
 import type { TaskSummary } from "../../bindings/TaskSummary";
 import type { WorkspaceInfo } from "../../bindings/WorkspaceInfo";
 import type { DocumentEvent } from "../../bindings/DocumentEvent";
+import type { PermissionsChange } from "../../bindings/PermissionsChange";
 import { layout, useLayout } from "../../app/layout";
 import { pages } from "../../app/pages";
 import type { Notification } from "../../app/notifications";
@@ -71,6 +72,8 @@ export interface AgentsState {
   settingsOpen: boolean;
   error: string | null;
   page: PageState;
+  /** Incremented when any project's permissions change (views re-read them). */
+  permissionsVersion: number;
 }
 
 export const initialAgentsState: AgentsState = {
@@ -85,6 +88,7 @@ export const initialAgentsState: AgentsState = {
   settingsOpen: false,
   error: null,
   page: { selected: null, tab: "run", filter: "all", composing: false },
+  permissionsVersion: 0,
 };
 
 export const useAgents = create<AgentsState>(() => initialAgentsState);
@@ -265,7 +269,30 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
       };
     case "fallback":
       return { patch: {}, refetch: null };
+    case "permissionsChanged":
+      return {
+        patch: { permissionsVersion: state.permissionsVersion + 1 },
+        refetch: null,
+        notification: permissionsNotification(event.change),
+      };
   }
+}
+
+/**
+ * After a narrowing: which Auto tasks stopped, and any cleanup Exposition
+ * could not confirm (never a claim that finished work was undone).
+ */
+export function permissionsNotification(change: PermissionsChange): EventEffect["notification"] {
+  if (change.stopped.length === 0 && change.problems.length === 0) return undefined;
+  const n = change.stopped.length;
+  const stopped = n > 0 ? `${n} Auto task${n === 1 ? "" : "s"} stopped; what they did stays reviewable.` : null;
+  return {
+    id: `agents-permissions-${change.root}`,
+    tone: change.problems.length > 0 ? "warning" : "info",
+    title: change.permissions ? "Project permissions changed" : "Project permissions revoked",
+    body: [stopped, ...change.problems].filter((part): part is string => part !== null).join(" "),
+    timeoutMs: change.problems.length > 0 ? null : undefined,
+  };
 }
 
 /**

@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod graph;
 pub mod model;
 pub mod patch;
+pub mod permissions;
 pub mod prompt;
 pub mod provider;
 pub mod review;

@@ -27,12 +27,16 @@ use tokio_util::sync::CancellationToken;
 use crate::credentials::{SecretStore, normalize_api_key};
 use crate::graph::{GraphEnv, TaskGraphInfo};
 use crate::model::*;
+use crate::permissions::{
+    PermissionChoice, PermissionError, PermissionStore, PermissionsChange, ProjectPermissions, ProjectPermissionsEntry,
+    ProjectPermissionsState, same_folder, within_folder,
+};
 use crate::provider::anthropic::{API_BASE, AnthropicProvider, MAX_TOKENS_PER_TURN, RetryPolicy};
 use crate::provider::{
     Provider, ProviderError, ProviderMessage, ProviderRequest, StreamEvent, block_type, sanitize_after_fallback,
 };
 use crate::store::{Store, StoreError, TaskRow, ToolCallRow, TranscriptEntry, now_ms};
-use crate::tools::exec::{self, Gate, SeenTexts, ToolEnv, ToolOutput};
+use crate::tools::exec::{self, Allowances, Authority, Gate, SeenTexts, ToolEnv, ToolOutput, codes};
 use crate::tools::services::ToolServices;
 use crate::tools::{self, ToolCall};
 use crate::workspace::{LocalProjectFiles, ProjectFiles, content_hash};
@@ -126,8 +130,18 @@ struct Inner {
     graph: Option<Arc<GraphService>>,
     /// How long a call waits for reconciliation of its targets before pausing.
     graph_settle: Mutex<Duration>,
+    /// Project permissions (Auto): `<data>/execution/project-permissions.json`
+    /// beside the task database's data directory; in memory without one.
+    permissions: PermissionStore,
     #[cfg(debug_assertions)]
     scripts: Mutex<ScriptState>,
+}
+
+/// The user's answer to an approval request.
+#[derive(Clone, Copy, Debug)]
+struct ApprovalAnswer {
+    approved: bool,
+    scope: ApprovalScope,
 }
 
 #[cfg(debug_assertions)]
@@ -139,7 +153,7 @@ struct ScriptState {
 
 struct Running {
     cancel: CancellationToken,
-    approvals: HashMap<String, (ApprovalRequest, oneshot::Sender<bool>)>,
+    approvals: HashMap<String, (ApprovalRequest, oneshot::Sender<ApprovalAnswer>)>,
     join: Option<JoinHandle<()>>,
     /// The task loop has ended and its terminal status is stored; the worker
     /// may still be releasing services (e.g. stopping research kernels).
@@ -172,6 +186,15 @@ impl AgentService {
             )?;
         }
         let (events, _) = broadcast::channel(4096);
+        // Project permissions live in the application's data directory (the
+        // task database's folder), under execution/ beside trust.json.
+        let permissions = match config.database.as_deref().and_then(Path::parent) {
+            Some(data) => PermissionStore::load(data.join("execution").join("project-permissions.json")),
+            None => PermissionStore::in_memory(),
+        };
+        if let Some(warning) = permissions.warning() {
+            tracing::warn!("{warning}");
+        }
         Ok(Self {
             inner: Arc::new(Inner {
                 store,
@@ -187,6 +210,7 @@ impl AgentService {
                 running: Mutex::new(HashMap::new()),
                 graph: config.graph,
                 graph_settle: Mutex::new(graph::targets::DEFAULT_SETTLE),
+                permissions,
                 #[cfg(debug_assertions)]
                 scripts: Mutex::new(ScriptState::default()),
             }),
@@ -294,7 +318,8 @@ impl AgentService {
             .map(|r| r.approvals.values().map(|(a, _)| a.clone()).collect())
             .unwrap_or_default();
         let graph = self.inner.graph_info(id)?;
-        Ok(TaskDetail { summary, transcript, approvals, graph })
+        let allowances = self.inner.task_allowances(id)?;
+        Ok(TaskDetail { summary, transcript, approvals, graph, allowances })
     }
 
     pub fn create_task(&self, request: CreateTaskRequest) -> Result<TaskSummary> {
@@ -322,6 +347,14 @@ impl AgentService {
             TaskScope::Selection { path, range, revision } => Some(self.inner.selection_text(path, *range, *revision)?),
             _ => None,
         };
+        let approval_mode = request.approval_mode.unwrap_or_default();
+        // Auto acts under the project's permissions: a project without a
+        // record (new, imported, copied, moved) has none until the user
+        // chooses them.
+        let grant = match approval_mode {
+            ApprovalMode::Ask => None,
+            ApprovalMode::Auto => Some(self.inner.require_permissions(files.root())?),
+        };
         let spec = TaskSpec {
             prompt: prompt.to_owned(),
             workspace_root: files.display_root(),
@@ -331,6 +364,7 @@ impl AgentService {
             consent,
             budgets,
             provider: ProviderChoice { provider: settings.provider, model: settings.model, effort: settings.effort },
+            approval_mode,
         };
         let id = TaskId::new();
         // Mandatory scoped graph context (refused when the graph cannot be used).
@@ -348,8 +382,13 @@ impl AgentService {
         };
         self.inner.store.insert_task(&row)?;
         let selection = selection_text.filter(|_| consent == ContextConsent::ScopeContent);
-        let context =
-            prompt::context_block(&spec, &self.inner.documents, self.inner.services.as_ref(), selection.as_deref());
+        let context = prompt::context_block(
+            &spec,
+            &self.inner.documents,
+            self.inner.services.as_ref(),
+            selection.as_deref(),
+            grant.as_ref(),
+        );
         let mut content = vec![json!({"type": "text", "text": context})];
         if let Some(graph_context) = &graph_context {
             self.inner.store.insert_graph_context(&id, graph_context)?;
@@ -388,6 +427,11 @@ impl AgentService {
         // A fresh graph context for this run, from the graph the task is bound to.
         let files = LocalProjectFiles::open(Path::new(&row.spec.workspace_root))
             .map_err(|e| AgentError::new("agents.invalidWorkspace", e.to_string()))?;
+        // An Auto task continues only while the project has permissions
+        // (they may have been revoked since it stopped).
+        if row.spec.approval_mode == ApprovalMode::Auto {
+            self.inner.require_permissions(files.root())?;
+        }
         let recorded = self.inner.store.graph_project(id)?;
         let graph_context = self.inner.graph_context(files.root(), &row.spec, recorded.as_ref())?;
         let provider = self.inner.make_provider(&row.spec.provider, id)?;
@@ -414,15 +458,39 @@ impl AgentService {
         self.inner.summary(id)
     }
 
+    /// Answer an approval request for this call only.
     pub fn resolve_approval(&self, id: &TaskId, approval_id: &str, approved: bool) -> Result<()> {
-        let sender = lock(&self.inner.running).get_mut(id).and_then(|r| r.approvals.remove(approval_id));
-        match sender {
-            Some((_, tx)) => {
-                let _ = tx.send(approved);
-                Ok(())
-            }
-            None => Err(AgentError::new("agents.noApproval", "That approval request is no longer pending.")),
+        self.resolve_approval_scoped(id, approval_id, approved, ApprovalScope::Once)
+    }
+
+    /// Answer an approval request; `ApprovalScope::Task` also allows later
+    /// calls of the request's repeatable kinds for the rest of the task. Only
+    /// the user's approval card calls this (through the webview); a request
+    /// that can only be approved once refuses `Task` and stays pending.
+    pub fn resolve_approval_scoped(
+        &self,
+        id: &TaskId,
+        approval_id: &str,
+        approved: bool,
+        scope: ApprovalScope,
+    ) -> Result<()> {
+        let mut running = lock(&self.inner.running);
+        let pending = running.get_mut(id).and_then(|r| r.approvals.get(approval_id).map(|(a, _)| a.clone()));
+        let Some(request) = pending else {
+            return Err(AgentError::new("agents.noApproval", "That approval request is no longer pending."));
+        };
+        if approved && scope == ApprovalScope::Task && request.for_task.is_empty() {
+            return Err(AgentError::new(
+                codes::NOT_REPEATABLE,
+                "This action can only be approved once: it has consequences you decide each time.",
+            ));
         }
+        let sender = running.get_mut(id).and_then(|r| r.approvals.remove(approval_id));
+        drop(running);
+        if let Some((_, tx)) = sender {
+            let _ = tx.send(ApprovalAnswer { approved, scope: if approved { scope } else { ApprovalScope::Once } });
+        }
+        Ok(())
     }
 
     /// Wait for a task's current run to finish (tests and shutdown).
@@ -691,7 +759,186 @@ impl AgentService {
             execution: request.execution.unwrap_or(ExecutionMode::Disabled),
             consent: request.consent,
             budgets: request.budgets,
+            approval_mode: request.approval_mode,
         })
+    }
+}
+
+// ---- A1: project permissions (Auto) and task allowances
+
+fn permission_error(e: PermissionError) -> AgentError {
+    match e {
+        PermissionError::Invalid(message) => AgentError::new(codes::INVALID_PERMISSIONS, message),
+        PermissionError::Io(message) => AgentError::new("agents.storage", message),
+    }
+}
+
+/// How long changing permissions waits for an affected task to stop.
+const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl AgentService {
+    /// The open project's permissions, with the facts the composer states
+    /// about the execution environment. `root` must be the open project.
+    pub fn project_permissions(&self, root: &str) -> Result<ProjectPermissionsState> {
+        let files = self.inner.open_project(root)?;
+        let project = self.inner.graph_project_of(files.root());
+        let restricted_available = self.inner.services.restricted_backend().is_some();
+        Ok(ProjectPermissionsState {
+            root: files.display_root(),
+            permissions: self.inner.permissions.get(files.root(), project.as_deref()),
+            project,
+            defaults: PermissionChoice::defaults(restricted_available),
+            restricted_available,
+            trusted: self.inner.services.native_refusal(files.root()).is_none(),
+        })
+    }
+
+    /// Every project-permission record (Settings › Agents).
+    pub fn list_project_permissions(&self) -> Vec<ProjectPermissionsEntry> {
+        let open = self.inner.workspace.as_deref().and_then(|w| w.current()).map(|c| PathBuf::from(c.root));
+        let open_project = open.as_deref().and_then(|root| self.inner.graph_project_of(root));
+        self.inner
+            .permissions
+            .list()
+            .into_iter()
+            .map(|(root, project, permissions)| ProjectPermissionsEntry {
+                exists: Path::new(&root).is_dir(),
+                open: open.as_deref().is_some_and(|o| same_folder(o, Path::new(&root))) && open_project == project,
+                root,
+                project,
+                permissions,
+            })
+            .collect()
+    }
+
+    /// Grant or change the open project's permissions (the user's choice in
+    /// the composer or Settings). A narrowing stops the project's active
+    /// Auto tasks (it waits, bounded, until they stopped; call it off the
+    /// async runtime). Ask tasks and other projects are not affected.
+    pub fn set_project_permissions(&self, root: &str, choice: PermissionChoice) -> Result<PermissionsChange> {
+        let files = self.inner.open_project(root)?;
+        let project = self.inner.graph_project_of(files.root());
+        if self.inner.graph.is_some() && project.is_none() {
+            return Err(AgentError::new(
+                "agents.graphUnavailable",
+                "The project graph is not attached, so the project cannot be identified for its permissions.",
+            ));
+        }
+        let (before, after) =
+            self.inner.permissions.set(files.root(), project.as_deref(), choice).map_err(permission_error)?;
+        Ok(self.permissions_changed(files.display_root(), project, before.as_ref(), Some(after)))
+    }
+
+    /// Revoke a project's permissions (Settings, composer). The project need
+    /// not be open; its active Auto tasks stop.
+    pub fn revoke_project_permissions(&self, root: &str, project: Option<&str>) -> Result<PermissionsChange> {
+        if root.is_empty() || root.len() > 4096 || root.contains('\0') || !Path::new(root).is_absolute() {
+            return Err(AgentError::new("agents.invalidWorkspace", "invalid project folder"));
+        }
+        let before = self.inner.permissions.revoke(Path::new(root), project).map_err(permission_error)?;
+        let Some(before) = before else {
+            return Err(AgentError::new("agents.notFound", "This project has no permissions to revoke."));
+        };
+        Ok(self.permissions_changed(root.to_owned(), project.map(str::to_owned), Some(&before), None))
+    }
+
+    fn permissions_changed(
+        &self,
+        root: String,
+        project: Option<String>,
+        before: Option<&ProjectPermissions>,
+        after: Option<ProjectPermissions>,
+    ) -> PermissionsChange {
+        let narrowed = crate::permissions::narrowed(before, after.as_ref());
+        let (stopped, problems) = if narrowed.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            self.stop_auto_tasks(Path::new(&root), project.as_deref(), &narrowed)
+        };
+        let change = PermissionsChange { root, project, permissions: after, narrowed, stopped, problems };
+        self.inner.emit(AgentEvent::PermissionsChanged { change: Box::new(change.clone()) });
+        change
+    }
+
+    /// Stop the project's active Auto tasks after a narrowing: each gets a
+    /// notice, is canceled (its stream, approval wait, or running tool, with
+    /// the tool's job or research run), and its agent research sessions are
+    /// shut down by the worker. Returns the stopped tasks and what could not
+    /// be confirmed.
+    fn stop_auto_tasks(&self, root: &Path, project: Option<&str>, narrowed: &[String]) -> (Vec<TaskId>, Vec<String>) {
+        let rows = self.inner.store.tasks().unwrap_or_default();
+        let affected: Vec<TaskRow> = rows
+            .into_iter()
+            .filter(|row| row.spec.approval_mode == ApprovalMode::Auto)
+            .filter(|row| row.status.is_active() || self.is_running(&row.id))
+            .filter(|row| same_folder(Path::new(&row.spec.workspace_root), root))
+            .filter(|row| {
+                let bound = self.inner.store.graph_project(&row.id).ok().flatten();
+                match (bound, project) {
+                    (Some(bound), Some(project)) => bound.as_str() == project,
+                    _ => true,
+                }
+            })
+            .collect();
+        let what = narrowed.join(", ");
+        for row in &affected {
+            let _ = self.inner.store.append_notice(
+                &row.id,
+                NoticeLevel::Warning,
+                &format!(
+                    "Project permissions changed ({what}), so this Auto task was stopped. What it did before \
+                     stopping was not undone and stays reviewable."
+                ),
+            );
+            self.inner.emit(AgentEvent::TranscriptChanged { task_id: row.id.clone() });
+            let _ = self.cancel_task(&row.id);
+        }
+        let mut problems = Vec::new();
+        let deadline = Instant::now() + STOP_TIMEOUT;
+        for row in &affected {
+            // Stopped, and the worker released the task's services.
+            while lock(&self.inner.running).contains_key(&row.id) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if lock(&self.inner.running).contains_key(&row.id) {
+                problems.push(format!("“{}” is still stopping.", row.title));
+                continue;
+            }
+            for leftover in self.inner.services.task_leftovers(&row.id.0) {
+                problems.push(format!("“{}”: {leftover}", row.title));
+            }
+        }
+        (affected.into_iter().map(|row| row.id).collect(), problems)
+    }
+
+    /// Revoke one of a task's allowances (`Some(kind)`) or all of them (the
+    /// user, from the task view). Calls already authorized by them and not yet
+    /// started are refused (`agents.permissionsChanged`).
+    pub fn revoke_allowance(&self, id: &TaskId, kind: Option<AllowanceKind>) -> Result<()> {
+        self.inner.store.task(id)?.ok_or_else(|| not_found(id))?;
+        self.inner.store.revoke_allowances(id, kind)?;
+        self.inner.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
+        Ok(())
+    }
+
+    /// Folder trust was revoked for `root`: the allowances of tasks in it are
+    /// cleared (a re-grant of trust does not bring them back).
+    pub fn trust_revoked(&self, root: &str) {
+        let Ok(ids) = self.inner.store.tasks_with_allowances() else { return };
+        for id in ids {
+            let Ok(Some((row, _))) = self.inner.store.task_any(&id) else { continue };
+            if !within_folder(Path::new(&row.spec.workspace_root), Path::new(root)) {
+                continue;
+            }
+            if let Ok((_, true)) = self.inner.store.revoke_allowances(&id, None) {
+                let _ = self.inner.store.append_notice(
+                    &id,
+                    NoticeLevel::Info,
+                    "Folder trust was revoked, so what you approved for the rest of this task was cleared.",
+                );
+                self.inner.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
+            }
+        }
     }
 }
 
@@ -832,7 +1079,7 @@ enum Interrupt {
 }
 
 enum ApprovalOutcome {
-    Approved,
+    Approved(ApprovalScope),
     Declined,
     Canceled,
 }
@@ -840,6 +1087,72 @@ enum ApprovalOutcome {
 impl Inner {
     fn emit(&self, event: AgentEvent) {
         let _ = self.events.send(event);
+    }
+
+    /// `root` as the open project (absolute, existing, the open folder).
+    fn open_project(&self, root: &str) -> Result<LocalProjectFiles> {
+        if root.len() > 4096 || root.contains('\0') {
+            return Err(AgentError::new("agents.invalidWorkspace", "invalid project folder"));
+        }
+        let files = LocalProjectFiles::open(Path::new(root.trim()))
+            .map_err(|e| AgentError::new("agents.invalidWorkspace", e.to_string()))?;
+        crate::workspace::check_root(self.workspace.as_deref(), files.root())
+            .map_err(|e| AgentError::new("agents.workspaceNotOpen", e))?;
+        Ok(files)
+    }
+
+    /// The identity of the project graph attached to `root` (`None` without
+    /// a graph service, or when the attached graph is another folder's).
+    fn graph_project_of(&self, root: &Path) -> Option<String> {
+        let graph = self.graph.as_deref()?;
+        let graph_root = graph.root()?;
+        if !same_folder(&graph_root, root) {
+            return None;
+        }
+        graph.status().project.map(|p| p.as_str().to_owned())
+    }
+
+    /// The project's permissions, required for Auto.
+    fn require_permissions(&self, root: &Path) -> Result<ProjectPermissions> {
+        let project = self.graph_project_of(root);
+        self.permissions.get(root, project.as_deref()).ok_or_else(|| {
+            AgentError::new(
+                codes::PERMISSIONS_REQUIRED,
+                "This project has no Auto permissions yet. Choose them (Use these permissions) before starting an \
+                 Auto task, or start it in Ask mode.",
+            )
+        })
+    }
+
+    /// The live authority of a task's calls: the project's permissions (Auto
+    /// tasks only) and the task's allowances that are bound to this project.
+    fn authority(&self, id: &TaskId, spec: &TaskSpec, root: &Path, project: Option<&ProjectId>) -> Authority {
+        let project = project.map(|p| p.as_str().to_owned());
+        let grant = match spec.approval_mode {
+            ApprovalMode::Ask => None,
+            ApprovalMode::Auto => self.permissions.get(root, project.as_deref()),
+        };
+        let allowances = match self.store.allowances(id) {
+            Ok((version, rows)) => Allowances {
+                version,
+                kinds: rows
+                    .into_iter()
+                    .filter(|row| same_folder(Path::new(&row.root), root) && row.project == project)
+                    .map(|row| row.kind)
+                    .collect(),
+            },
+            // Unreadable allowances allow nothing (and change the basis).
+            Err(_) => Allowances { version: u64::MAX, kinds: Vec::new() },
+        };
+        Authority { project: grant, allowances }
+    }
+
+    fn task_allowances(&self, id: &TaskId) -> Result<Vec<TaskAllowance>> {
+        let (_, rows) = self.store.allowances(id)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| TaskAllowance { kind: row.kind, granted_at_ms: row.granted_at_ms, approved: row.approved })
+            .collect())
     }
 
     /// The scoped graph context for a run of a task with `spec` in `root`
@@ -1040,6 +1353,7 @@ impl Inner {
                                         .and_then(|c| c.result.as_deref())
                                         .map(|r| bounded(r, TRANSCRIPT_RESULT_LIMIT)),
                                     is_error: call.is_some_and(|c| c.is_error),
+                                    authorized_by: call.and_then(|c| c.authorized_by.clone()),
                                     tool_use_id,
                                 });
                             }
@@ -1126,6 +1440,7 @@ impl Inner {
                         started: Instant::now(),
                         paused: Duration::ZERO,
                         seen: SeenTexts::default(),
+                        authorized: HashMap::new(),
                         files,
                     };
                     let status = run.drive(provider.as_ref()).await;
@@ -1287,6 +1602,8 @@ struct Run<'a> {
     paused: Duration,
     base_elapsed: u64,
     seen: SeenTexts,
+    /// How each call of this run that is about to run, or ran, was authorized.
+    authorized: HashMap<String, AuthorizedBy>,
     files: LocalProjectFiles,
     /// The project graph the task is bound to.
     graph_project: Option<ProjectId>,
@@ -1489,6 +1806,14 @@ impl Run<'_> {
         status: ToolCallStatus,
         result: Option<&ToolOutput>,
     ) {
+        // Recorded once the call was authorized and started (never for a call
+        // that was refused, declined, or not run).
+        let authorized_by = match status {
+            ToolCallStatus::Running | ToolCallStatus::Succeeded | ToolCallStatus::Failed | ToolCallStatus::Canceled => {
+                self.authorized.get(tool_use_id).cloned()
+            }
+            _ => None,
+        };
         let row = ToolCallRow {
             tool_use_id: tool_use_id.to_owned(),
             turn,
@@ -1497,6 +1822,7 @@ impl Run<'_> {
             status,
             result: result.map(ToolOutput::text),
             is_error: result.is_some_and(|r| r.is_error),
+            authorized_by,
         };
         if let Err(e) = self.inner.store.upsert_tool_call(&self.id, &row) {
             tracing::error!("failed to record tool call: {e}");
@@ -1637,7 +1963,7 @@ impl Run<'_> {
         let authorization = match gate {
             Gate::Refused(output) => return Ok(output),
             Gate::Allowed(authorization) => authorization,
-            Gate::NeedsApproval { title, detail, authorization } => {
+            Gate::NeedsApproval { title, detail, reason, for_task, authorization } => {
                 if let Some(prepared) = authorization.proposal() {
                     graph::propose::record(
                         &self.inner.store,
@@ -1650,13 +1976,38 @@ impl Run<'_> {
                     );
                 }
                 let shown = authorization.proposal().cloned();
-                match self.request_approval(tool_use_id, name, input, title, detail).await {
+                let approved_title = title.clone();
+                match self.request_approval(tool_use_id, name, input, title, detail, reason, for_task.clone()).await {
                     // The approval binds the call to exactly what was shown, in
-                    // the task's own project: checked again now.
-                    ApprovalOutcome::Approved => {
+                    // the task's own project, under the same authority: checked
+                    // again now. "Approve for this task" grants its kinds only
+                    // once the call is confirmed.
+                    ApprovalOutcome::Approved(scope) => {
                         self.settle_graph(&call).await;
                         match exec::confirm(&call, &self.env(), authorization) {
-                            Ok(authorization) => authorization,
+                            Ok(mut authorization) => {
+                                let granted = match scope {
+                                    ApprovalScope::Task if !for_task.is_empty() => {
+                                        match self.grant_allowances(&for_task, &approved_title) {
+                                            Ok(version) => Some(version),
+                                            Err(e) => {
+                                                // Approved once; the allowance could not be stored.
+                                                self.notice(
+                                                    NoticeLevel::Warning,
+                                                    &format!(
+                                                        "Approved once: the approval for the rest of the task could \
+                                                         not be saved ({e})."
+                                                    ),
+                                                );
+                                                None
+                                            }
+                                        }
+                                    }
+                                    _ => None,
+                                };
+                                authorization.approve(granted);
+                                authorization
+                            }
                             Err(refusal) => {
                                 if let Some(prepared) = &shown {
                                     let message =
@@ -1699,9 +2050,14 @@ impl Run<'_> {
         if call.is_process() {
             self.usage.commands += 1;
         }
+        self.authorized.insert(tool_use_id.to_owned(), authorization.authorized_by().clone());
         let cancel = self.cancel.child_token();
         let wall = self.remaining_wall();
         let inner = Arc::clone(self.inner);
+        // The authority read again now: `run` refuses the call when the
+        // project's permissions or the task's allowances changed since it was
+        // authorized (the check immediately before it runs).
+        let authority = inner.authority(&self.id, &self.spec, self.files.root(), self.graph_project.as_ref());
         let env = ToolEnv {
             task_id: &self.id,
             spec: &self.spec,
@@ -1711,6 +2067,7 @@ impl Run<'_> {
             services: inner.services.as_ref(),
             store: &inner.store,
             graph: inner.graph.as_deref().map(|service| GraphEnv { service, project: self.graph_project.as_ref() }),
+            authority,
         };
         // A tool that is still running when the task is canceled (or the time
         // budget ends) has its own token canceled and gets a short grace period
@@ -1719,7 +2076,14 @@ impl Run<'_> {
         tokio::pin!(tool);
         let interrupt = tokio::select! {
             biased;
-            output = &mut tool => return Ok(output),
+            output = &mut tool => {
+                // Refused immediately before running: it did not run.
+                let code = output.content.get("code").and_then(Value::as_str);
+                if matches!(code, Some(codes::PERMISSIONS_CHANGED | codes::PROJECT_CHANGED)) {
+                    self.authorized.remove(tool_use_id);
+                }
+                return Ok(output);
+            }
             _ = self.cancel.cancelled() => Interrupt::Canceled,
             _ = tokio::time::sleep(wall) => Interrupt::WallTime,
         };
@@ -1746,7 +2110,18 @@ impl Run<'_> {
                 .graph
                 .as_deref()
                 .map(|service| GraphEnv { service, project: self.graph_project.as_ref() }),
+            authority: self.inner.authority(&self.id, &self.spec, self.files.root(), self.graph_project.as_ref()),
         }
+    }
+
+    /// Store the kinds the user approved for the rest of this task, bound to
+    /// its project folder and graph identity; the new allowance version.
+    fn grant_allowances(&self, kinds: &[AllowanceKind], approved: &str) -> Result<u64, StoreError> {
+        let root = crate::workspace::display_path(self.files.root());
+        let project = self.graph_project.as_ref().map(|p| p.as_str().to_owned());
+        let version = self.inner.store.grant_allowances(&self.id, kinds, &root, project.as_deref(), approved)?;
+        self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
+        Ok(version)
     }
 
     /// Wait (bounded) while the call's targets are pending reconciliation.
@@ -1757,6 +2132,7 @@ impl Run<'_> {
         graph::targets::settle(env, &call.effects(), max, &self.cancel).await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn request_approval(
         &mut self,
         tool_use_id: &str,
@@ -1764,6 +2140,8 @@ impl Run<'_> {
         input: &Value,
         title: String,
         detail: String,
+        reason: Option<String>,
+        for_task: Vec<AllowanceKind>,
     ) -> ApprovalOutcome {
         let approval = ApprovalRequest {
             id: format!("approval-{}", uuid::Uuid::new_v4()),
@@ -1772,6 +2150,8 @@ impl Run<'_> {
             tool: tool.to_owned(),
             title,
             detail,
+            reason,
+            for_task,
         };
         let (tx, rx) = oneshot::channel();
         match lock(&self.inner.running).get_mut(&self.id) {
@@ -1786,21 +2166,24 @@ impl Run<'_> {
         self.inner.emit(AgentEvent::ApprovalRequested { approval: approval.clone() });
         let waiting = Instant::now();
         let outcome = tokio::select! {
-            decision = rx => if decision.unwrap_or(false) { ApprovalOutcome::Approved } else { ApprovalOutcome::Declined },
+            decision = rx => match decision {
+                Ok(ApprovalAnswer { approved: true, scope }) => ApprovalOutcome::Approved(scope),
+                _ => ApprovalOutcome::Declined,
+            },
             _ = self.cancel.cancelled() => ApprovalOutcome::Canceled,
         };
         self.paused += waiting.elapsed();
         if let Some(running) = lock(&self.inner.running).get_mut(&self.id) {
             running.approvals.remove(&approval.id);
         }
-        if matches!(outcome, ApprovalOutcome::Approved) {
+        if matches!(outcome, ApprovalOutcome::Approved(_)) {
             // Approved: it runs now (shown before the resolution is announced).
             self.record_call(tool_use_id, turn, tool, input, ToolCallStatus::Running, None);
         }
         self.inner.emit(AgentEvent::ApprovalResolved {
             task_id: self.id.clone(),
             approval_id: approval.id,
-            approved: matches!(outcome, ApprovalOutcome::Approved),
+            approved: matches!(outcome, ApprovalOutcome::Approved(_)),
         });
         if !matches!(outcome, ApprovalOutcome::Canceled) {
             self.set_status(TaskStatus::Running);

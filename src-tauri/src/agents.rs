@@ -5,9 +5,12 @@
 //! key crosses this boundary once, inbound, when the user saves it; nothing
 //! here ever returns it.
 
+use exposition_agents::permissions::{
+    PermissionChoice, PermissionsChange, ProjectPermissionsEntry, ProjectPermissionsState,
+};
 use exposition_agents::{
-    AgentError, Budgets, CreateTaskRequest, FileDiff, GenerationTaskRequest, ProviderSettings, ProviderStatus,
-    ReviewActionResult, TaskDetail, TaskId, TaskReview, TaskSummary,
+    AgentError, AllowanceKind, ApprovalScope, Budgets, CreateTaskRequest, FileDiff, GenerationTaskRequest,
+    ProviderSettings, ProviderStatus, ReviewActionResult, TaskDetail, TaskId, TaskReview, TaskSummary,
 };
 use exposition_core::path::WorkspacePath;
 use exposition_graph::EntityId;
@@ -92,17 +95,111 @@ pub async fn agents_task_cancel(state: State<'_, AppState>, task: TaskId) -> Res
     state.agents.cancel_task(&task_id(task)?).map_err(command_error)
 }
 
+/// Answer an approval request. `scope: "task"` ("Approve for this task")
+/// also allows later calls of the request's repeatable kinds in this task;
+/// absent or `"once"` approves this call only. Only the approval card calls
+/// this; rendered content has no IPC access.
 #[tauri::command]
 pub async fn agents_approval_resolve(
     state: State<'_, AppState>,
     task: TaskId,
     approval: String,
     approved: bool,
+    scope: Option<ApprovalScope>,
 ) -> Result<(), CommandError> {
     if approval.len() > 128 {
         return Err(CommandError::new("agents.invalidApproval", "invalid approval identifier"));
     }
-    state.agents.resolve_approval(&task_id(task)?, &approval, approved).map_err(command_error)
+    state
+        .agents
+        .resolve_approval_scoped(&task_id(task)?, &approval, approved, scope.unwrap_or_default())
+        .map_err(command_error)
+}
+
+/// Revoke one allowance of a task (`kind`) or all of them (`null`).
+#[tauri::command]
+pub async fn agents_allowance_revoke(
+    state: State<'_, AppState>,
+    task: TaskId,
+    kind: Option<AllowanceKind>,
+) -> Result<(), CommandError> {
+    state.agents.revoke_allowance(&task_id(task)?, kind).map_err(command_error)
+}
+
+fn validate_root(root: &str) -> Result<(), CommandError> {
+    if root.is_empty() || root.len() > 4096 || root.contains('\0') {
+        return Err(CommandError::new("agents.invalidWorkspace", "invalid project folder"));
+    }
+    Ok(())
+}
+
+/// The open project's permissions (Auto) and the execution facts the
+/// composer states.
+#[tauri::command]
+pub async fn agents_permissions_get(
+    state: State<'_, AppState>,
+    root: String,
+) -> Result<ProjectPermissionsState, CommandError> {
+    validate_root(&root)?;
+    state.agents.project_permissions(&root).map_err(command_error)
+}
+
+/// Every project-permission record (Settings › Agents).
+#[tauri::command]
+pub async fn agents_permissions_list(state: State<'_, AppState>) -> Result<Vec<ProjectPermissionsEntry>, CommandError> {
+    Ok(state.agents.list_project_permissions())
+}
+
+/// Grant or change the open project's permissions (composer "Use these
+/// permissions", Settings › Change). A narrowing stops the project's Auto
+/// tasks; that wait runs off the async runtime.
+#[tauri::command]
+pub async fn agents_permissions_set(
+    state: State<'_, AppState>,
+    root: String,
+    choice: PermissionChoice,
+) -> Result<PermissionsChange, CommandError> {
+    validate_root(&root)?;
+    let agents = state.agents.clone();
+    tauri::async_runtime::spawn_blocking(move || agents.set_project_permissions(&root, choice))
+        .await
+        .map_err(|e| CommandError::new("internal.task", format!("Agent task failed: {e}")))?
+        .map_err(command_error)
+}
+
+/// Revoke a project's permissions (the project need not be open).
+#[tauri::command]
+pub async fn agents_permissions_revoke(
+    state: State<'_, AppState>,
+    root: String,
+    project: Option<String>,
+) -> Result<PermissionsChange, CommandError> {
+    validate_root(&root)?;
+    if project.as_ref().is_some_and(|p| p.len() > 128) {
+        return Err(CommandError::new("agents.invalidWorkspace", "invalid project identity"));
+    }
+    let agents = state.agents.clone();
+    tauri::async_runtime::spawn_blocking(move || agents.revoke_project_permissions(&root, project.as_deref()))
+        .await
+        .map_err(|e| CommandError::new("internal.task", format!("Agent task failed: {e}")))?
+        .map_err(command_error)
+}
+
+/// Clear task allowances when folder trust is revoked (from any surface).
+pub fn forward_trust_revocations(app: AppHandle) {
+    let mut rx = app.state::<AppState>().execution.subscribe_trust();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(change) if !change.granted => {
+                    let agents = app.state::<AppState>().agents.clone();
+                    let _ = tauri::async_runtime::spawn_blocking(move || agents.trust_revoked(&change.root)).await;
+                }
+                Ok(_) | Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 #[tauri::command]

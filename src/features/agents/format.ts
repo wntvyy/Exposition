@@ -1,5 +1,11 @@
 // Labels and derived values for the agent panel (pure; unit tested).
+import type { AllowanceKind } from "../../bindings/AllowanceKind";
+import type { ApprovalMode } from "../../bindings/ApprovalMode";
+import type { AuthorizedBy } from "../../bindings/AuthorizedBy";
 import type { BudgetKind } from "../../bindings/BudgetKind";
+import type { CodeAccess } from "../../bindings/CodeAccess";
+import type { FilesAccess } from "../../bindings/FilesAccess";
+import type { TaskSpec } from "../../bindings/TaskSpec";
 import type { ContextConsent } from "../../bindings/ContextConsent";
 import type { Effort } from "../../bindings/Effort";
 import type { ExecutionMode } from "../../bindings/ExecutionMode";
@@ -150,6 +156,115 @@ export const CONSENT_LABELS: Record<ContextConsent, string> = {
   scopeContent: "File contents in scope",
   metadataOnly: "File names only",
 };
+
+export const APPROVAL_MODE_LABELS: Record<ApprovalMode, string> = {
+  ask: "Ask",
+  auto: "Auto",
+};
+
+/** Files access of a project's Auto permissions. */
+export const FILES_LABELS: Record<FilesAccess, string> = {
+  edit: "Edit files in scope",
+  off: "Ask before each change",
+};
+
+/** Code access of a project's Auto permissions. */
+export const CODE_LABELS: Record<CodeAccess, string> = {
+  off: "Ask before running code",
+  restricted: "Restricted container",
+  native: "Native on this computer",
+};
+
+const FILES_SHORT: Record<FilesAccess, string> = { edit: "edit", off: "ask" };
+const CODE_SHORT: Record<CodeAccess, string> = { off: "ask", restricted: "restricted container", native: "native" };
+
+/** One line for a project's permissions: "Files: edit · Code: restricted container · Setup: off". */
+export function profileSummary(p: { files: FilesAccess; code: CodeAccess; setup: boolean }): string {
+  return [`Files: ${FILES_SHORT[p.files]}`, `Code: ${CODE_SHORT[p.code]}`, `Setup: ${p.setup ? "on" : "off"}`].join(" · ");
+}
+
+/** What running code can actually access under a code access level, stated as enforced. */
+export function environmentText(
+  code: CodeAccess,
+  facts: { trusted: boolean; restrictedAvailable: boolean },
+): { tone: "info" | "warning"; text: string }[] {
+  switch (code) {
+    case "native":
+      return [
+        {
+          tone: "warning",
+          text: "Runs on this computer with your account's privileges — not a sandbox; Exposition cannot confirm each action inside running code.",
+        },
+        ...(facts.trusted
+          ? []
+          : [{ tone: "warning" as const, text: "This folder is not trusted, so native code is refused until you trust it." }]),
+      ];
+    case "restricted":
+      return facts.restrictedAvailable
+        ? [
+            {
+              tone: "info",
+              text: "Runs in the restricted container: no network, read-only project, non-root, no host environment; never falls back to native.",
+            },
+          ]
+        : [
+            {
+              tone: "warning",
+              text: "No container image is configured, so restricted runs are refused; they never run natively instead.",
+            },
+          ];
+    case "off":
+      return [{ tone: "info", text: "Running code asks each time; approving runs it natively on this computer." }];
+  }
+}
+
+/** Allowance kinds as nouns ("Allowed for this task: Native code"). */
+export const ALLOWANCE_LABELS: Record<AllowanceKind, string> = {
+  nativeCode: "Native code",
+  documentChanges: "File changes in scope",
+  packageSetup: "Package installs",
+};
+
+function listJoin(items: string[]): string {
+  if (items.length <= 1) return items.join("");
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** What "Approve for this task" also covers. */
+export function forTaskSentence(kinds: AllowanceKind[]): string {
+  const what = listJoin(kinds.map((k) => ALLOWANCE_LABELS[k].toLowerCase()));
+  return `Approve for this task also covers later ${what} in this task; revoke it from the task.`;
+}
+
+/** How a call that ran was authorized (quiet text); `null` when nothing needed authorizing. */
+export function authorizationLabel(by: AuthorizedBy | null | undefined): string | null {
+  if (!by) return null;
+  switch (by.kind) {
+    case "notRequired":
+      return null;
+    case "taskSettings":
+      return "Allowed by task settings";
+    case "projectPermissions":
+      return "Auto: project permissions";
+    case "taskAllowance":
+      return "Allowed for this task";
+    case "approved":
+      return by.forTask ? "Approved by you for this task" : "Approved by you";
+  }
+}
+
+/** The task's settings for its meta line (joined with middle dots by the caller). */
+export function specLabels(spec: TaskSpec): string[] {
+  if (spec.approvalMode === "auto") {
+    const ceiling = [
+      spec.permission === "readOnly" ? PERMISSION_LABELS.readOnly : null,
+      spec.execution === "disabled" ? EXECUTION_LABELS.disabled : null,
+      spec.execution === "restricted" ? EXECUTION_LABELS.restricted : null,
+    ].filter((part): part is string => part !== null);
+    return ["Auto: project permissions", ...ceiling, CONSENT_LABELS[spec.consent]];
+  }
+  return [PERMISSION_LABELS[spec.permission], EXECUTION_LABELS[spec.execution], CONSENT_LABELS[spec.consent]];
+}
 
 export const EFFORT_LABELS: Record<Effort, string> = {
   low: "Low",
