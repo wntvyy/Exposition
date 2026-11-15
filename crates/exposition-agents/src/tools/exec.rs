@@ -357,7 +357,7 @@ fn entry_visible(path: &str, scope: &TaskScope) -> bool {
     scope.allows(&parsed) || scoped_paths(scope).iter().any(|p| p.as_str().starts_with(&format!("{path}/")))
 }
 
-fn read_only() -> ToolOutput {
+fn read_only_refusal() -> ToolOutput {
     refusal(
         codes::READ_ONLY,
         "This task is read-only: the user did not allow document changes. Describe the change instead.",
@@ -810,7 +810,7 @@ fn contract(call: &ToolCall, env: &ToolEnv<'_>) -> Result<(), ToolOutput> {
     workspace::check_root(env.workspace, root).map_err(ToolOutput::error)?;
     let effects = call.effects();
     if effects.changes && spec.permission == PermissionProfile::ReadOnly {
-        return Err(read_only());
+        return Err(read_only_refusal());
     }
     for (raw, path_use) in &effects.paths {
         check_path(env, raw, *path_use)?;
@@ -827,6 +827,34 @@ fn contract(call: &ToolCall, env: &ToolEnv<'_>) -> Result<(), ToolOutput> {
             }
         }
     }
+    effects_contract(env, &effects)?;
+    if let Some(kind) = effects.service
+        && !env.services.available(kind)
+    {
+        return Err(refusal(codes::SERVICE_UNAVAILABLE, ServiceError::NotAvailable(kind).to_string()));
+    }
+    // The project graph: usable, bound to the task's own project, and every
+    // target in a usable graph state. Never skipped for "legacy" file tools.
+    match env.graph {
+        Some(graph) => {
+            crate::graph::bound_status(graph, root)?;
+            crate::graph::targets::check_targets(graph, &effects)?;
+        }
+        None if matches!(call, ToolCall::GraphQuery(_) | ToolCall::GraphPropose(_) | ToolCall::WorkflowPropose(_)) => {
+            return Err(crate::graph::unavailable("no project graph is attached to this task"));
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// Rules 4 and 5 for a call's effects (what its result can carry to the model
+/// and the task's execution contract), apart from the paths it names. The
+/// gate applies them to every call; [`outlook`] applies the same rules to
+/// describe what a kind of action would get.
+fn effects_contract(env: &ToolEnv<'_>, effects: &tools::Effects<'_>) -> Result<(), ToolOutput> {
+    let spec = env.spec;
+    let root = env.files.root();
     match effects.exposes {
         Exposure::Metadata | Exposure::ConsentFiltered => {}
         Exposure::ScopedContent => require_content_consent(spec, effects.what)?,
@@ -872,24 +900,112 @@ fn contract(call: &ToolCall, env: &ToolEnv<'_>) -> Result<(), ToolOutput> {
             ));
         }
     }
-    if let Some(kind) = effects.service
-        && !env.services.available(kind)
-    {
-        return Err(refusal(codes::SERVICE_UNAVAILABLE, ServiceError::NotAvailable(kind).to_string()));
-    }
-    // The project graph: usable, bound to the task's own project, and every
-    // target in a usable graph state. Never skipped for "legacy" file tools.
-    match env.graph {
-        Some(graph) => {
-            crate::graph::bound_status(graph, root)?;
-            crate::graph::targets::check_targets(graph, &effects)?;
-        }
-        None if matches!(call, ToolCall::GraphQuery(_) | ToolCall::GraphPropose(_) | ToolCall::WorkflowPropose(_)) => {
-            return Err(crate::graph::unavailable("no project graph is attached to this task"));
-        }
-        None => {}
-    }
     Ok(())
+}
+
+/// What the gate would decide now for one kind of action. A description for
+/// the context the agent is given, never an authorization: every call is
+/// still decided by [`gate`] when it is made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expect {
+    /// Proceeds without asking the user (`policy`: how a process would run).
+    Proceeds { policy: Option<ExecutionPolicy>, by: AuthorizedBy },
+    /// The user is asked first; `for_task`: the approval can cover the rest
+    /// of the task.
+    Asks { for_task: bool },
+    /// Refused, with the gate's stable code.
+    Refused { code: String, reason: String },
+}
+
+/// What the gate would decide now, per kind of action, from the same rules
+/// and the same live authority [`gate`] uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outlook {
+    /// Document, file, graph, and workflow-draft changes.
+    pub changes: Expect,
+    /// Changes to files the application executes (Lean sources, Lean/Lake
+    /// configuration, R startup files).
+    pub executed_changes: Expect,
+    /// `run_python`, `run_command`.
+    pub code: Expect,
+    /// Native-only launches: `check_lean`, a LaTeX build.
+    pub native_only: Expect,
+    /// `install_packages`.
+    pub setup: Expect,
+}
+
+fn expect(
+    result: Result<Option<ExecutionPolicy>, ToolOutput>,
+    asks: &Asks,
+    covered: &Covered,
+    authority: &Authority,
+) -> Expect {
+    match result {
+        Err(refused) => Expect::Refused {
+            code: refused.content.get("code").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            reason: refused.content.get("error").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        },
+        Ok(_) if asks.asked => Expect::Asks { for_task: !asks.for_task().is_empty() },
+        Ok(policy) => Expect::Proceeds { policy, by: covered.authorized_by(authority) },
+    }
+}
+
+/// See [`Outlook`]. Paths, services, and the graph are per call and not
+/// considered here.
+pub fn outlook(env: &ToolEnv<'_>) -> Outlook {
+    let spec = env.spec;
+    let effects = |launch, what, setup| tools::Effects {
+        paths: Vec::new(),
+        exposes: Exposure::Unconfined,
+        launch,
+        changes: false,
+        service: None,
+        what,
+        targets: false,
+        setup,
+    };
+    let read_only = spec.permission == PermissionProfile::ReadOnly;
+    let changes = {
+        let (mut asks, mut covered) = (Asks::default(), Covered::default());
+        let result = if read_only { Err(read_only_refusal()) } else { Ok(None) };
+        if result.is_ok() {
+            change_authority(env, &mut asks, &mut covered);
+        }
+        expect(result, &asks, &covered, &env.authority)
+    };
+    let executed_changes = {
+        let (mut asks, mut covered) = (Asks::default(), Covered::default());
+        let trusted = env.services.native_refusal(env.files.root()).is_none();
+        let kind = AutoExec::LeanSource;
+        let result =
+            if read_only { Err(read_only_refusal()) } else { lean_contract(spec, kind, trusted).map(|()| None) };
+        if result.is_ok() {
+            change_authority(env, &mut asks, &mut covered);
+            lean_authority(env, kind, trusted, &mut asks, &mut covered);
+        }
+        expect(result, &asks, &covered, &env.authority)
+    };
+    let launch = |launch: Launch, what: &'static str| {
+        let (mut asks, mut covered) = (Asks::default(), Covered::default());
+        let result = effects_contract(env, &effects(launch, what, false))
+            .and_then(|()| launch_authority(env, launch, what, &mut asks, &mut covered))
+            .map(Some);
+        expect(result, &asks, &covered, &env.authority)
+    };
+    let setup = {
+        let (mut asks, mut covered) = (Asks::default(), Covered::default());
+        let result = effects_contract(env, &effects(Launch::NativeOnly, "Package setup", true))
+            .and_then(|()| setup_authority(env, &mut asks, &mut covered))
+            .map(Some);
+        expect(result, &asks, &covered, &env.authority)
+    };
+    Outlook {
+        changes,
+        executed_changes,
+        code: launch(Launch::NativeOrRestricted, "Code"),
+        native_only: launch(Launch::NativeOnly, "Lean checking"),
+        setup,
+    }
 }
 
 fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
@@ -1419,7 +1535,8 @@ pub async fn run(
         ToolCall::InsertArtifact(input) => insert_artifact(env, seen, tool_use_id, input, insertion),
         ToolCall::RunPython(input) => {
             let Some(policy) = policy else { return ToolOutput::error("missing execution policy") };
-            service_result(
+            let unsaved = unsaved_documents(env);
+            let result = service_result(
                 env.services
                     .run_python(
                         PythonRequest {
@@ -1434,22 +1551,26 @@ pub async fn run(
                         cancel,
                     )
                     .await,
-            )
+            );
+            with_disk_note(result, unsaved)
         }
         ToolCall::CheckLean(input) => {
             let Some(policy) = policy else { return ToolOutput::error("missing execution policy") };
             match parse_path(&input.path) {
                 Ok(path) => {
                     let graph_info = resolve_target(env, &path, TargetUse::Check);
-                    with_graph(
-                        service_result(env.services.check_lean(LeanRequest { path, policy }, cancel).await),
-                        graph_info,
-                    )
+                    let result = service_result(
+                        env.services.check_lean(LeanRequest { path: path.clone(), policy }, cancel).await,
+                    );
+                    with_graph(with_checked_text(result, env, &path), graph_info)
                 }
                 Err(e) => Err(e),
             }
         }
-        ToolCall::RunCommand(input) => run_command(env, input, policy, cancel).await,
+        ToolCall::RunCommand(input) => {
+            let unsaved = unsaved_documents(env);
+            with_disk_note(run_command(env, input, policy, cancel).await, unsaved)
+        }
         ToolCall::InstallPackages(_) => match (setup, policy) {
             (Some(plan), Some(ExecutionPolicy::TrustedNative)) => service_result(
                 env.services
@@ -1467,6 +1588,83 @@ pub async fn run(
         },
     };
     result.unwrap_or_else(|e| e)
+}
+
+/// Open documents in the task's scope whose editor text is not saved, now
+/// (bounded). A process reads files from disk, so it does not see that text.
+fn unsaved_documents(env: &ToolEnv<'_>) -> Vec<String> {
+    const LIMIT: usize = 20;
+    let mut paths: Vec<String> = env
+        .documents
+        .list()
+        .into_iter()
+        .filter(|info| info.saved_revision != Some(info.revision))
+        .filter_map(|info| info.path)
+        .filter(|path| env.spec.scope.allows(path) && !crate::graph::targets::graph_storage(path))
+        .map(|path| path.as_str().to_owned())
+        .collect();
+    paths.sort();
+    paths.truncate(LIMIT);
+    paths
+}
+
+/// Say which snapshot a process saw: the files on disk, not the unsaved
+/// editor text of the documents listed (as they were when it started).
+fn with_disk_note(result: Result<ToolOutput, ToolOutput>, unsaved: Vec<String>) -> Result<ToolOutput, ToolOutput> {
+    if unsaved.is_empty() {
+        return result;
+    }
+    let add = |mut output: ToolOutput| {
+        if let Some(obj) = output.content.as_object_mut() {
+            obj.insert("unsavedNotSeen".into(), json!(unsaved));
+            obj.insert(
+                "filesNote".into(),
+                json!(
+                    "The process read files as saved on disk. The files in unsavedNotSeen had unsaved editor changes \
+                     when it started, which it did not see; only the user saves them."
+                ),
+            );
+        }
+        output
+    };
+    match result {
+        Ok(output) => Ok(add(output)),
+        Err(output) => Err(add(output)),
+    }
+}
+
+/// Say which text a Lean check used: the report's `revision` is the editor
+/// revision checked (absent when the file was read from disk).
+fn with_checked_text(
+    result: Result<ToolOutput, ToolOutput>,
+    env: &ToolEnv<'_>,
+    path: &WorkspacePath,
+) -> Result<ToolOutput, ToolOutput> {
+    let saved_revision =
+        env.documents.find_by_path(path).and_then(|id| env.documents.info(&id).ok()).map(|info| info.saved_revision);
+    let add = |mut output: ToolOutput| {
+        let Some(obj) = output.content.as_object_mut() else { return output };
+        // Only a result that reports a checked text (it carries its hash).
+        if !obj.contains_key("contentHash") {
+            return output;
+        }
+        let text = match (obj.get("revision").and_then(Value::as_u64), saved_revision) {
+            (Some(revision), Some(saved)) if saved == Some(revision) => {
+                format!("the editor text at revision {revision}, which is the saved file (no unsaved changes)")
+            }
+            (Some(revision), Some(_)) => format!(
+                "the editor text at revision {revision}, which has unsaved changes: the file on disk differs until the \
+                 user saves it"
+            ),
+            _ => "the saved file on disk".to_owned(),
+        };
+        obj.insert("checkedText".into(), json!(text));
+        output
+    };
+    match result {
+        Ok(output) => Ok(add(output)),
+        Err(output) => Err(add(output)),
+    }
 }
 
 /// The saved version of a file (its hash on disk), never an unsaved buffer.
@@ -1697,6 +1895,16 @@ fn read_file(env: &ToolEnv<'_>, seen: &mut SeenTexts, input: ReadFileInput) -> R
     Ok(ToolOutput::ok(result))
 }
 
+/// Where an applied edit or insertion is (in every such result).
+const EDITED_NOTE: &str = "Applied to the editor text, not saved to disk: the file on disk keeps its last saved \
+    version until the user saves it (you cannot save). read_file, build_document, and check_lean use the editor text; \
+    programs you run and copy_paths read the saved file. The user reviews the change (Keep or Revert).";
+/// Where a created file is (in every such result).
+const CREATED_NOTE: &str =
+    "Written to disk (saved) and opened in the editor. The user reviews the creation (Keep or Revert).";
+const CREATED_CHANGED_NOTE: &str = "Written to disk and opened in the editor; the editor text has changed since and \
+    has unsaved changes. The user reviews the creation (Keep or Revert).";
+
 /// Locate each `old_text` exactly once in `base` and build sorted patches.
 fn resolve_edits(base: &str, input: &EditDocumentInput) -> Result<Vec<TextPatch>, ToolOutput> {
     let mut ranges: Vec<(usize, usize, &str, usize)> = Vec::new();
@@ -1807,17 +2015,18 @@ fn edit_document(
         "path": path.as_str(),
         "revision": applied.revision,
         "previousRevision": applied.previous_revision,
-        "note": "Applied to the open document (not saved). The user reviews agent changes.",
+        "unsavedChanges": true,
+        "note": EDITED_NOTE,
     });
     if let Some(graph) = graph_info {
         result["graph"] = graph;
     }
     if applied.rebased {
         result["rebased"] = json!(true);
-        result["note"] = json!(
+        result["note"] = json!(format!(
             "Applied over concurrent edits made since your base revision (they did not overlap). Read the file \
-             again before further edits."
-        );
+             again before further edits. {EDITED_NOTE}"
+        ));
     }
     Ok(ToolOutput::ok(result))
 }
@@ -1921,7 +2130,8 @@ fn insert_artifact(
         "revision": applied.revision,
         "attachmentKey": plan.attachment_key,
         "warnings": plan.warnings,
-        "note": "Inserted with the format's figure/table markup into the open document (not saved); reviewable like any agent edit.",
+        "unsavedChanges": true,
+        "note": format!("Inserted with the format's figure/table markup. {EDITED_NOTE}"),
     });
     if let Some(graph) = graph_info {
         result["graph"] = graph;
@@ -2049,6 +2259,14 @@ fn create_file(
     if let Some((_, snapshot)) = &document {
         result["revision"] = json!(snapshot.revision);
     }
+    // The file is written to disk before it is opened: say so (an edit, by
+    // contrast, changes only the editor text).
+    let unsaved = document
+        .as_ref()
+        .and_then(|(id, _)| env.documents.info(id).ok())
+        .is_some_and(|info| info.saved_revision != Some(info.revision));
+    result["unsavedChanges"] = json!(unsaved);
+    result["note"] = json!(if unsaved { CREATED_CHANGED_NOTE } else { CREATED_NOTE });
     if let Some(graph) = graph_info {
         result["graph"] = graph;
     }

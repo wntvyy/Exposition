@@ -67,8 +67,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: READ_FILE,
             strict: true,
             description: "Read a text file of the project. Returns the current text, including unsaved changes in \
-                the user's open editor, and its revision number. Always read a file (again) before editing it: \
-                edit_document needs the revision you read, and the user may have changed the file since.",
+                the user's open editor, its revision number, and unsavedChanges (whether the editor text differs \
+                from the file saved on disk). Always read a file (again) before editing it: edit_document needs the \
+                revision you read, and the user may have changed the file since.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -84,8 +85,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
             description: "Change a text file by replacing exact snippets of the revision you read. Each old_text \
                 must occur exactly once in that revision (copy it exactly, with enough surrounding text to be unique) \
                 and edits must not overlap; to insert, include neighbouring text in old_text and new_text. All edits \
-                apply together as one transaction to the user's open document (not saved to disk); the user reviews \
-                and can revert them. If the user changed the same text meanwhile, the call fails with the current \
+                apply together as one transaction to the editor text of the document; the file on disk keeps its \
+                last saved version until the user saves it (you cannot save), so programs you run afterwards do not \
+                see the edit. The user reviews and can revert it. If the user changed the same text meanwhile, the \
+                call fails with the current \
                 revision: read the file again and redo the edit on the new text.",
             input_schema: json!({
                 "type": "object",
@@ -114,8 +117,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: CREATE_FILE,
             strict: true,
             description: "Create a new text file with the given content. Fails if the file already exists (use \
-                edit_document to change existing files). Missing folders are created. The user can review and \
-                revert the creation.",
+                edit_document to change existing files). Missing folders are created. The file is written to disk \
+                (saved) and opened in the editor. The user can review and revert the creation.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -133,8 +136,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 LaTeX .tex) from the current editor state, unsaved changes included, and report the real status, \
                 diagnostics with locations, and page count. Use it to check that your changes build; report its \
                 result honestly, including failures. A Typst or Markdown build reads only files in the task's scope; \
-                a LaTeX build runs TeX natively, so it needs a task scoped to the whole project and the user's \
-                approval.",
+                a LaTeX build runs TeX natively, so it needs a task scoped to the whole project and native-code \
+                authority (the task context says whether that asks the user now).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -150,8 +153,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
             strict: true,
             description: "Insert a figure or table produced by a research run (an artifact listed in a run_python \
                 result) into a Typst, LaTeX, or Markdown document using the format's own figure/table markup and a \
-                stable attachment key, or update an earlier insertion by its key. The change is applied to the open \
-                document like an edit and is reviewable.",
+                stable attachment key, or update an earlier insertion by its key. The change is applied to the \
+                editor text like an edit (not saved to disk) and is reviewable.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -171,6 +174,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
             strict: true,
             description: "Run Python code in a separate process for this task (never the user's own sessions) and \
                 return its real exit code and output. Use it for calculations and data analysis the user asked for. \
+                Code that reads project files sees them as saved on disk, not unsaved editor text. \
                 In the restricted sandbox the project is read-only at /workspace and files can be written to /out. \
                 Available only for tasks scoped to the whole project.",
             input_schema: json!({
@@ -186,8 +190,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: CHECK_LEAN,
             strict: true,
             description: "Check a Lean file with the project's Lean toolchain and return the real diagnostics and \
-                proof status (incomplete proofs and `sorry` are reported as such). Lean runs natively, so this needs a \
-                task scoped to the whole project and the user's approval.",
+                proof status (incomplete proofs and `sorry` are reported as such). It checks the editor text when the \
+                file is open, unsaved changes included (checkedText says which text was checked). Lean runs natively, \
+                so this needs a task scoped to the whole project and native-code authority (the task context says \
+                whether that asks the user now).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -201,7 +207,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: RUN_COMMAND,
             strict: true,
             description: "Run one program with an argument list (no shell, no pipes or redirection) in the project \
-                folder and return its exit code and bounded output. Use only when no dedicated tool fits. In the \
+                folder and return its exit code and bounded output. Use only when no dedicated tool fits. The \
+                program reads files as saved on disk, not unsaved editor text (the result lists open files with \
+                unsaved changes it did not see). In the \
                 restricted sandbox the project is read-only at /workspace and files can be written to /out. \
                 Available only for tasks scoped to the whole project.",
             input_schema: json!({

@@ -2192,3 +2192,274 @@ async fn narrowing_clears_auto_task_allowances_so_continue_asks_again() {
     )));
     assert_eq!(h.service.task_detail(&ask.id).unwrap().allowances.len(), 1, "the Ask task keeps its allowance");
 }
+
+// ---------------------------------------------------------------------------
+// What the model is told about approvals and saved state (pre-review).
+// ---------------------------------------------------------------------------
+
+/// The outlook the task context is written from is the gate's own decision.
+fn agrees(outlook: &exec::Expect, gate: &Gate) -> bool {
+    match (outlook, gate) {
+        (exec::Expect::Refused { code, .. }, Gate::Refused(out)) => out.content["code"] == json!(code),
+        (exec::Expect::Asks { for_task }, Gate::NeedsApproval { for_task: kinds, .. }) => *for_task != kinds.is_empty(),
+        (exec::Expect::Proceeds { policy, by }, Gate::Allowed(authorization)) => {
+            authorization.policy() == policy.as_ref() && authorization.authorized_by() == by
+        }
+        _ => false,
+    }
+}
+
+/// For every task setting or project profile, trust state, and allowance
+/// set, what the context says a kind of action gets is what the gate decides
+/// for a call of that kind: the context never promises a prompt the gate
+/// will not raise, or the reverse.
+#[test]
+fn outlook_matches_the_gate_for_every_setting_profile_trust_and_allowance() {
+    let f = fixture();
+    let mut failures = Vec::new();
+    let mut n = 0;
+    let mut check = |spec: &TaskSpec, authority: Authority, label: String| {
+        let outlook = exec::outlook(&f.env(spec, authority.clone()));
+        let pairs = [
+            (Kind::Edit, &outlook.changes),
+            (Kind::Create, &outlook.changes),
+            (Kind::LeanCreate, &outlook.executed_changes),
+            (Kind::LakeConfig, &outlook.executed_changes),
+            (Kind::Python, &outlook.code),
+            (Kind::Command, &outlook.code),
+            (Kind::Lean, &outlook.native_only),
+            (Kind::BuildLatex, &outlook.native_only),
+            (Kind::Install, &outlook.setup),
+        ];
+        for (kind, expected) in pairs {
+            n += 1;
+            let gate = exec::gate(&kind.tool_call(f.files.root()), &f.env(spec, authority.clone()));
+            if !agrees(expected, &gate) {
+                failures.push(format!("{kind:?} {label}: outlook {expected:?}, gate {gate:?}"));
+            }
+        }
+    };
+    for trusted in [true, false] {
+        f.services.trusted.store(trusted, Ordering::SeqCst);
+        for allowed in ALLOWANCE_SETS {
+            for mode in [ExecutionMode::Disabled, ExecutionMode::ApproveEach, ExecutionMode::Restricted] {
+                for permission in
+                    [PermissionProfile::ReadOnly, PermissionProfile::ReviewEdits, PermissionProfile::AutoApply]
+                {
+                    let spec = spec(f.files.root(), ApprovalMode::Ask, permission, mode);
+                    check(
+                        &spec,
+                        authority(None, allowed),
+                        format!("Ask {mode:?} {permission:?} {trusted} {allowed:?}"),
+                    );
+                }
+            }
+            for profile in profiles() {
+                for mode in [ExecutionMode::Disabled, ExecutionMode::ApproveEach, ExecutionMode::Restricted] {
+                    let spec = spec(f.files.root(), ApprovalMode::Auto, PermissionProfile::AutoApply, mode);
+                    check(
+                        &spec,
+                        authority(profile, allowed),
+                        format!("Auto {mode:?} {profile:?} {trusted} {allowed:?}"),
+                    );
+                }
+            }
+        }
+    }
+    assert!(f.services.take().iter().all(|c| c.tool == "setup_plan"), "the outlook runs nothing");
+    assert!(failures.is_empty(), "{} of {n} combinations differ:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// Every message of a task as the provider receives it.
+fn sent(h: &Harness, task: &TaskId) -> Vec<(String, Vec<Value>)> {
+    Store::open(&h._data.path().join("agents.sqlite3")).unwrap().messages(task).unwrap()
+}
+
+/// The task-context blocks sent so far (the first, then one per follow-up).
+fn contexts(h: &Harness, task: &TaskId) -> Vec<String> {
+    sent(h, task)
+        .into_iter()
+        .filter(|(role, _)| role == "user")
+        .flat_map(|(_, content)| content)
+        .filter_map(|block| block.get("text").and_then(Value::as_str).map(str::to_owned))
+        .filter(|text| text.starts_with("<task_context>"))
+        .collect()
+}
+
+/// The result of a call as the provider receives it.
+fn result_sent(h: &Harness, task: &TaskId, tool_use_id: &str) -> Value {
+    sent(h, task)
+        .into_iter()
+        .flat_map(|(_, content)| content)
+        .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == tool_use_id)
+        .and_then(|block| block["content"].as_str().and_then(|text| serde_json::from_str(text).ok()))
+        .unwrap_or_else(|| panic!("no result for {tool_use_id}"))
+}
+
+fn has(text: &str, needle: &str) {
+    assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+}
+
+/// The walkthrough's situation: Auto with Files: edit and Code: off. The
+/// first native run asks and is approved for the task; later runs reuse that
+/// approval. The context, each result, and the update before a follow-up say
+/// exactly that, and where each changed file is (saved or only in the
+/// editor), so the model has no reason to predict prompts or guess at saves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_context_and_results_state_authorization_and_saved_state_as_they_are() {
+    let dir = project();
+    let mut h = harness();
+    let root = dir.path().display().to_string();
+    h.service
+        .set_project_permissions(
+            &root,
+            PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Off, setup: false },
+        )
+        .unwrap();
+    h.service
+        .load_script(json!({"turns": [
+            {"steps": [tool("p1", Kind::Python)]},
+            {"steps": [tool("c1", Kind::Command), tool("n1", Kind::Create), tool("r1", Kind::Read)]},
+            {"steps": [
+                {"toolUse": {"id": "e1", "name": "edit_document", "input": {
+                    "path": "main.typ", "base_revision": "$ref:r1/revision",
+                    "edits": [{"old_text": "quickly", "new_text": "QUICKLY"}]}}},
+                tool("c2", Kind::Command)
+            ]},
+            done_turn(),
+            done_turn(),
+            done_turn()
+        ]}))
+        .unwrap();
+    let task = h
+        .service
+        .create_task(request(
+            dir.path(),
+            Some(ApprovalMode::Auto),
+            PermissionProfile::AutoApply,
+            ExecutionMode::ApproveEach,
+        ))
+        .unwrap();
+    let cards = drive(&mut h, &task.id, |_| Some(ApprovalScope::Task)).await;
+    assert_eq!(cards.len(), 1, "one prompt in the whole run: {cards:?}");
+    assert_eq!(cards[0].tool_use_id, "p1");
+
+    // The first context: the mode, the project's permissions, and what asks.
+    let blocks = contexts(&h, &task.id);
+    assert_eq!(blocks.len(), 1);
+    let first = &blocks[0];
+    has(first, "Approval mode: Auto (the project's permissions: Files edit · Code off · Setup off");
+    has(first, "Approved by the user for the rest of this task: nothing\n");
+    has(first, "- File, graph, and workflow-draft changes: proceeds without a prompt (the project's permissions)\n");
+    has(first, "- run_python, run_command: asks the user first (they can approve once or for the rest of the task)\n");
+    has(first, "- check_lean, LaTeX build_document: asks the user first (they can approve once");
+    assert!(!first.contains("each process launch waits"), "no blanket claim that every launch asks:\n{first}");
+
+    // Each result says how that call was authorized.
+    let p1 = result_sent(&h, &task.id, "p1");
+    has(p1["authorization"].as_str().unwrap(), "The user approved this call in a prompt, for the rest of this task");
+    has(p1["authorization"].as_str().unwrap(), "proceed without a prompt unless the user revokes it");
+    let c1 = result_sent(&h, &task.id, "c1");
+    has(
+        c1["authorization"].as_str().unwrap(),
+        "No prompt: covered by what the user approved for the rest of this task (native code",
+    );
+    let n1 = result_sent(&h, &task.id, "n1");
+    assert_eq!(n1["authorization"], "No prompt: the project's permissions cover it (Auto).");
+    assert!(result_sent(&h, &task.id, "r1").get("authorization").is_none(), "a read needs no authority");
+    // The transcript the user sees carries the same result.
+    let rows = calls(&h, &task.id);
+    assert!(rows.iter().find(|row| row.0 == "c1").unwrap().3.contains("No prompt: covered by what the user approved"));
+
+    // Saved state: a created file is on disk; an edit is only in the editor,
+    // and a program run afterwards did not see it.
+    assert_eq!(n1["unsavedChanges"], false);
+    has(n1["note"].as_str().unwrap(), "Written to disk (saved)");
+    assert_eq!(std::fs::read_to_string(dir.path().join("notes/new.typ")).unwrap(), "= New\n");
+    let e1 = result_sent(&h, &task.id, "e1");
+    assert_eq!(e1["unsavedChanges"], true);
+    has(e1["note"].as_str().unwrap(), "not saved to disk");
+    assert_eq!(std::fs::read_to_string(dir.path().join("main.typ")).unwrap(), MAIN, "the disk keeps the saved text");
+    assert!(result_sent(&h, &task.id, "c1").get("unsavedNotSeen").is_none(), "nothing was unsaved then");
+    let c2 = result_sent(&h, &task.id, "c2");
+    assert_eq!(c2["unsavedNotSeen"], json!(["main.typ"]));
+    has(c2["filesNote"].as_str().unwrap(), "read files as saved on disk");
+
+    // A follow-up gets the state as it is now: the allowance, no prompt for
+    // native code, and each changed file's saved and review state.
+    h.service.continue_task(&task.id, "again", None).unwrap();
+    assert!(drive(&mut h, &task.id, |_| panic!("no card expected")).await.is_empty());
+    let blocks = contexts(&h, &task.id);
+    assert_eq!(blocks.len(), 2);
+    let update = &blocks[1];
+    has(update, "Update before this follow-up");
+    has(update, "Approved by the user for the rest of this task: native code");
+    has(
+        update,
+        "- run_python, run_command: runs natively without a prompt (approved by the user for the rest of this task)\n",
+    );
+    has(
+        update,
+        "- main.typ (edited by you): unsaved changes in the editor (not written to disk); not reviewed by the \
+         user yet\n",
+    );
+    has(
+        update,
+        "- notes/new.typ (created by you): saved (the editor and the file on disk are the same); not reviewed by the \
+         user yet\n",
+    );
+    has(update, "Open documents with unsaved changes:\n- main.typ (revision ");
+    // The follow-up's blocks are not shown as the user's words.
+    let detail = h.service.task_detail(&task.id).unwrap();
+    assert!(
+        detail.transcript.iter().all(|item| !matches!(
+            item,
+            TranscriptItem::UserText { text, .. } if text.contains("task_context")
+        )),
+        "context blocks stay out of the transcript"
+    );
+
+    // The user keeps the edit and revokes the allowance: the next update says so.
+    h.service.accept(&task.id, Some(&p("main.typ"))).unwrap();
+    h.service.revoke_allowance(&task.id, Some(AllowanceKind::NativeCode)).unwrap();
+    h.service.continue_task(&task.id, "once more", None).unwrap();
+    drive(&mut h, &task.id, |_| panic!("no card expected")).await;
+    let blocks = contexts(&h, &task.id);
+    assert_eq!(blocks.len(), 3);
+    let update = &blocks[2];
+    has(update, "Approved by the user for the rest of this task: nothing\n");
+    has(update, "- run_python, run_command: asks the user first (they can approve once or for the rest of the task)\n");
+    has(update, "- main.typ (edited by you): unsaved changes in the editor (not written to disk); kept by the user\n");
+}
+
+/// Ask with per-command approval: an approval given once is reported as
+/// once, so the model knows the next run asks again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_a_one_off_approval_is_reported_as_one_off() {
+    let dir = project();
+    let mut h = harness();
+    h.service
+        .load_script(json!({"turns": [
+            {"steps": [tool("p1", Kind::Python)]},
+            {"steps": [tool("p2", Kind::Python)]},
+            done_turn()
+        ]}))
+        .unwrap();
+    let task = h
+        .service
+        .create_task(request(dir.path(), None, PermissionProfile::AutoApply, ExecutionMode::ApproveEach))
+        .unwrap();
+    let mut answers = vec![None, Some(ApprovalScope::Once)];
+    let cards = drive(&mut h, &task.id, |_| answers.pop().unwrap()).await;
+    assert_eq!(cards.len(), 2, "each run asked: {cards:?}");
+    let first = &contexts(&h, &task.id)[0];
+    has(first, "Approval mode: Ask (this task's own settings decide what asks)");
+    has(first, "- File, graph, and workflow-draft changes: proceeds without a prompt (this task's settings)\n");
+    has(first, "- run_python, run_command: asks the user first (they can approve once or for the rest of the task)\n");
+    assert_eq!(
+        result_sent(&h, &task.id, "p1")["authorization"],
+        "The user approved this call in a prompt, once: the next call of this kind asks again."
+    );
+    let declined = result_sent(&h, &task.id, "p2");
+    assert!(declined.get("authorization").is_none(), "a declined call was not authorized: {declined}");
+}
