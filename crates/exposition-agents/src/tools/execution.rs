@@ -627,7 +627,9 @@ impl ToolServices for AppToolServices {
         let mut value = serde_json::to_value(&report).map_err(|e| ServiceError::Failed(e.to_string()))?;
         let note = match &report.status {
             _ if report.checked => "Lean finished exactly this text with no errors, no sorry (also none through \
-                 imports or suppressed warnings), kernel checking on, and only the standard axioms: the file is checked."
+                 imports or suppressed warnings), kernel checking on, and only the standard axioms: the file is checked. \
+                 This check is not recorded as evidence in the project graph; the user records it with Record \
+                 evidence in the Lean view."
                 .to_owned(),
             LeanStatus::CheckedWithAxioms { axioms, .. } => format!(
                 "Not checked: no errors, but declarations depend on axioms beyond Lean's standard ones ({}).",
@@ -651,6 +653,10 @@ impl ToolServices for AppToolServices {
                 format!("Not checked: {count} declaration(s) depend on sorry (directly, through an import, or with the warning suppressed), so the material is incomplete.")
             }
             LeanStatus::Errors { count, .. } => format!("Not checked: Lean reported {count} error(s)."),
+            LeanStatus::Unavailable { reason } => format!(
+                "Not checked: Lean did not run on this file. {reason} You cannot fix a package that is not prepared: \
+                 the user runs Set Up Mathlib… from the command palette."
+            ),
             _ => "Not checked: Lean did not finish checking this exact text.".to_owned(),
         };
         value["note"] = json!(note);

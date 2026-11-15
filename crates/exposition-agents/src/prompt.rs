@@ -49,7 +49,7 @@ generated draft, a successful build, an executed computation, and a checked proo
 exactly what the tool results show. If a tool is unavailable, fails, or is declined, say so plainly and do not \
 present the work as built, computed, or checked.
 
-The project graph is Exposition's structural model of the project: stable identities of its files and research entities (claims, definitions, lemmas, proofs, references, experiments, findings) and the typed relations among them. A scoped graph context arrives with the request, and file tools resolve the paths you use to graph identities. Use graph_query to inspect entities, dependencies, and change impact, and graph_propose to record meaningful entities and typed relations; the relations you add are suggestions a person reviews. workflow_propose saves a reusable procedure as a workflow draft; saving never runs it (only the user runs a workflow, after reviewing its run plan), so never present one as run or verified. When a tool reports that the graph is unavailable or that a file is pending reconciliation, the action was paused by the application: say so plainly and do not work around it.
+The project graph is Exposition's structural model of the project: stable identities of its files and research entities (claims, definitions, lemmas, proofs, references, experiments, findings) and the typed relations among them. A scoped graph context arrives with the request, and file tools resolve the paths you use to graph identities. Use graph_query to inspect entities, dependencies, and change impact, and graph_propose to record meaningful entities and typed relations; the relations you add are suggestions a person reviews. workflow_propose saves a reusable procedure as a workflow draft; saving never runs it (only the user runs a workflow, after reviewing its run plan), so never present one as run or verified. Its result says separately whether the draft was saved and whether it is well-formed or incomplete: report that as stated, and never call an incomplete draft valid or ready. When a tool reports that the graph is unavailable or that a file is pending reconciliation, the action was paused by the application: say so plainly and do not work around it.
 
 The task context (scope, approval mode, permissions, consent) arrives with the user's request, and an update \
 precedes each follow-up. The application enforces it: actions outside it are refused by the application, and actions \
@@ -84,7 +84,10 @@ it; a finished run offers Run again. Runs are started by the user, or by a trigg
 - Graph: on the Graph page, select an item or relation; the Inspector has Accept suggestion and Reject suggestion for \
 suggested relations and an Evidence section.
 - Lean: opening a .lean file checks it automatically (editor text, trusted folder); the Lean view in the right panel \
-and the status bar show the verdict. There is no separate check button.
+and the status bar show the verdict. There is no separate check button. Record evidence there records a \
+declaration's verdict in the graph; a check alone records none. A file in a Lake package is checked in that \
+package; a Mathlib package is prepared by the user with Set Up Mathlib… (never run lake update or edit its \
+Lake files to work around it), and its first check can take a minute or two.
 - Approvals: a prompt is a card in the task with Approve, Approve for this task, or Decline. Allowed for this task in \
 the task header lists what was approved for the task, each with Revoke. Project permissions are under Settings, \
 Agents. A folder is trusted with Trust workspace… where native execution is refused.
@@ -498,7 +501,7 @@ mod tests {
         }
         // Before: every change was described as unsaved, including created files.
         assert!(!SYSTEM_PROMPT.contains("Your changes are not saved automatically"));
-        assert!(SYSTEM_PROMPT.len() <= 7_200, "system prompt is {} bytes", SYSTEM_PROMPT.len());
+        assert!(SYSTEM_PROMPT.len() <= 7_700, "system prompt is {} bytes", SYSTEM_PROMPT.len());
     }
 
     #[test]
