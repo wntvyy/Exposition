@@ -129,7 +129,21 @@ export default async function reviewPr({ launchApp, artifactsDir, assert, fixtur
     const before = await tree(root);
     const plan = await invoke(page, "lean_setup_plan", { request: { kind: "newMathlibPackage", folder: "fresh", name: "Formal" } });
     note("B-plan-creates-in-the-named-folder", plan.packageRoot.replace(/\\/g, "/").endsWith("/project/fresh") && plan.createsPackage && plan.steps[0].args.join(" ") === "--keep-toolchain update", { packageRoot: plan.packageRoot, steps: plan.steps.map((s) => s.args.join(" ")) });
-    const started = await invoke(page, "lean_setup_start", { plan });
+    // The package folder does not exist yet (the dialog's default case).
+    const first = await invokeError(page, "lean_setup_start", { plan });
+    note(
+      "B-a-new-package-in-a-new-folder-starts (R-pr-F0)",
+      "unexpectedSuccess" in first,
+      first.error ?? "started",
+      true,
+    );
+    let started = first.unexpectedSuccess;
+    if (!started) {
+      // Control: with the (empty) folder made first, the same request starts.
+      await mkdir(join(root, "fresh"));
+      const replanned = await invoke(page, "lean_setup_plan", { request: { kind: "newMathlibPackage", folder: "fresh", name: "Formal" } });
+      started = await invoke(page, "lean_setup_start", { plan: replanned });
+    }
     setupId = started.id;
     await waitFor(async () => (await invoke(page, "lean_setup_status"))?.phase === "step", { timeout: 30_000, interval: 50, message: "the first command runs" });
     // The user's own file, added to the new library folder while the setup runs.

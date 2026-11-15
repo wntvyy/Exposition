@@ -409,7 +409,7 @@ fn review_pr_held_hostile_folders_and_pins_are_refused() {
         std::fs::write(f.root.join("lean").join("lean-toolchain"), format!("{pin}\n")).unwrap();
         let got = code(Fixture::prepare("lean"));
         assert!(
-            matches!(got.as_deref(), Err("lean.setup.invalidToolchain")),
+            got.as_ref().err().map(String::as_str) == Some("lean.setup.invalidToolchain"),
             "pin {pin:?} must be refused as invalid, got {got:?}"
         );
     }
@@ -438,4 +438,27 @@ fn review_pr_f7_a_channel_pin_plans_the_lake_that_is_installed() {
             assert!(Path::new(&lake).is_file(), "the plan runs a lake that is not installed: {lake}");
         }
     }
+}
+
+/// R-pr-F0. A new package in a folder that does not exist yet (the dialog's
+/// default, `lean`) cannot be started in a trusted project: trust is looked
+/// up for the package folder, which has to exist to be looked up, so the
+/// start answers `lean.untrusted` ("Trust the project folder first") and
+/// trusting the project again changes nothing.
+#[test]
+#[ignore = "R-pr-F0: a new package in a folder that does not exist yet never starts"]
+fn review_pr_f0_a_new_package_in_a_new_folder_starts_in_a_trusted_project() {
+    let f = Fixture::new(true);
+    let request = LeanSetupRequest::NewMathlibPackage { folder: "fresh".into(), name: "Formal".into() };
+    let plan = f.setup.plan(&f.root, &request).unwrap();
+    assert!(f.exec.trust_status(&f.root.display().to_string()).is_ok_and(|s| s.trusted), "the project is trusted");
+    let started = f.setup.start(&f.root, &plan).map(|s| s.id).map_err(|e| format!("{}: {}", e.code, e.message));
+    println!("start in a folder that does not exist yet: {started:?}");
+    if let Ok(id) = &started {
+        // The stand-in lake fails at once; let the run end and clean up.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _ = runtime.block_on(async { tokio::time::timeout(Duration::from_secs(120), f.setup.wait(id)).await });
+    }
+    assert!(started.is_ok(), "{started:?}");
+    // The same request with the folder made first does start (control).
 }
