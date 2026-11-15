@@ -303,7 +303,7 @@ export function SetupDialog({ choice, isOpen, onOpenChange }: SetupDialogProps) 
             <pre className="exp-setup__commands" data-testid="setup-commands" tabIndex={0} aria-label="Commands the setup runs">
               {plan.steps.map((step, i) => `${i + 1}. ${step.label}\n   ${commandLine(step.program, step.args)}`).join("\n")}
             </pre>
-            <p className="ui-meta">Each runs directly (no shell) in the project folder.</p>
+            <p className="ui-meta">Each runs directly (no shell) in an empty working folder Exposition owns, not in the project folder.</p>
           </Section>
         )}
       </div>

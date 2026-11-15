@@ -11,7 +11,11 @@
 //!    application's own environment, secrets the application registers while
 //!    it runs (the stored provider API key, whatever its shape), plus
 //!    well-known token shapes (`sk-ant-...`, `ghp_...`, `github_pat_...`, AWS
-//!    key ids, ...).
+//!    key ids, ...). A host value that cannot be a secret is not a literal
+//!    ([`host_value_is_secret`]): a path, a profile/region/session-id/location
+//!    setting, or a short value under a name that matched only a provider
+//!    prefix (`AWS_PROFILE=research` must not make every path containing
+//!    "research" look secret). Token shapes are matched whatever the name.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
@@ -24,6 +28,27 @@ pub const REDACTED: &str = "[REDACTED]";
 /// Literal secret values shorter than this are not redacted by value: a
 /// two-character "secret" would otherwise shred ordinary output.
 pub const MIN_LITERAL_SECRET_LEN: usize = 8;
+
+/// Values of credential-like host variables that matched only a provider
+/// prefix (configuration such as `OPENAI_ORG`) are literal secrets only from
+/// this length; names that say "secret" (`*_TOKEN`, `*_PASSWORD`, `*_API_KEY`,
+/// ...) use [`MIN_LITERAL_SECRET_LEN`].
+pub const MIN_PREFIX_ONLY_SECRET_LEN: usize = 16;
+
+/// Name endings whose values are locations, identifiers, or settings, not
+/// secrets (the variables themselves are still never passed to children).
+const NON_SECRET_NAME_SUFFIXES: &[&str] = &[
+    "_PROFILE",
+    "_REGION",
+    "_CONFIG_DIR",
+    "_CONFIG_FILE",
+    "_SESSION_ID",
+    "_HOME",
+    "_PATH",
+    "_DIR",
+    "_FILE",
+    "_VERSION",
+];
 
 /// Name prefixes that always denote provider/cloud credentials or configuration.
 const CREDENTIAL_PREFIXES: &[&str] = &[
@@ -72,10 +97,16 @@ const CREDENTIAL_KEY_QUALIFIERS: &[&str] =
 /// positive refuses a job with a clear reason; a false negative leaks a secret.
 pub fn is_credential_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
+    names_a_secret(&upper) || CREDENTIAL_PREFIXES.iter().any(|p| upper.starts_with(p))
+}
+
+/// The (upper-case) name says it holds a secret, not just that it belongs
+/// to a provider.
+fn names_a_secret(upper: &str) -> bool {
     if upper.contains("PASSWORD") || upper.contains("PASSWD") {
         return true;
     }
-    if CREDENTIAL_NAMES.contains(&upper.as_str()) || CREDENTIAL_PREFIXES.iter().any(|p| upper.starts_with(p)) {
+    if CREDENTIAL_NAMES.contains(&upper) {
         return true;
     }
     let segments: Vec<&str> = upper.split('_').filter(|s| !s.is_empty()).collect();
@@ -94,6 +125,45 @@ pub fn is_credential_name(name: &str) -> bool {
         }
     }
     false
+}
+
+/// A value that is a filesystem location rather than a secret: a Windows
+/// drive or UNC path, anything with a backslash, or an absolute or `~/`
+/// Unix path made only of path characters. (A value merely containing `/`
+/// can still be a secret: base64 keys such as AWS secret access keys do.)
+fn looks_like_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let drive =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/');
+    if drive || value.starts_with("\\\\") || value.contains('\\') {
+        return true;
+    }
+    (value.starts_with('/') || value.starts_with("~/"))
+        && value.matches('/').count() >= 2
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ' ' | '~'))
+}
+
+/// Whether the value of host variable `name` is a literal secret: the name
+/// looks like a credential, the name does not describe a location or
+/// setting (`*_PROFILE`, `*_REGION`, `*_CONFIG_DIR`, `*_SESSION_ID`,
+/// `*_HOME`, `*_PATH`, ...), the value is not a path, and it is long enough
+/// ([`MIN_LITERAL_SECRET_LEN`] for names that say "secret",
+/// [`MIN_PREFIX_ONLY_SECRET_LEN`] for names that only carry a provider
+/// prefix).
+pub fn host_value_is_secret(name: &str, value: &str) -> bool {
+    if !is_credential_name(name) {
+        return false;
+    }
+    let upper = name.to_ascii_uppercase();
+    if NON_SECRET_NAME_SUFFIXES.iter().any(|suffix| upper.ends_with(suffix)) {
+        return false;
+    }
+    let value = value.trim();
+    if looks_like_path(value) {
+        return false;
+    }
+    let min = if names_a_secret(&upper) { MIN_LITERAL_SECRET_LEN } else { MIN_PREFIX_ONLY_SECRET_LEN };
+    value.len() >= min
 }
 
 /// Token shapes redacted wherever they appear, independent of the environment.
@@ -120,14 +190,27 @@ const TOKEN_PATTERNS: &[&str] = &[
 
 /// Redacts secret values and token shapes from text.
 pub struct Redactor {
-    /// Literal secrets from the host environment.
-    base: Vec<String>,
+    /// Literal secrets from the host environment, with the variable they
+    /// came from (empty when unnamed).
+    base: Vec<(String, String)>,
     /// Secrets registered at run time, by name.
     registered: RwLock<BTreeMap<String, Vec<String>>>,
     /// Every literal secret (and each line of multi-line values), longest
     /// first so a value that contains another is replaced whole.
     literals: RwLock<Arc<Vec<String>>>,
+    /// Where each literal came from (a host variable or a registered name).
+    sources: RwLock<Arc<BTreeMap<String, String>>>,
     patterns: Vec<Regex>,
+}
+
+/// What made text secret ([`Redactor::find_secret`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SecretMatch {
+    /// It contains the literal value of this host variable or registered
+    /// secret (`None` when the literal has no name).
+    Literal { source: Option<String> },
+    /// It matches a well-known token shape.
+    TokenShape,
 }
 
 /// Never prints the secrets themselves.
@@ -167,20 +250,32 @@ impl Redactor {
         K: AsRef<str>,
         V: AsRef<str>,
     {
-        let secrets =
-            vars.into_iter().filter(|(k, _)| is_credential_name(k.as_ref())).map(|(_, v)| v.as_ref().to_owned());
-        Self::with_literals(secrets)
+        let secrets = vars
+            .into_iter()
+            .filter(|(k, v)| host_value_is_secret(k.as_ref(), v.as_ref()))
+            .map(|(k, v)| (k.as_ref().to_owned(), v.as_ref().to_owned()));
+        Self::with_named_literals(secrets)
     }
 
+    /// Literal secrets without names.
     pub fn with_literals<I: IntoIterator<Item = String>>(values: I) -> Self {
+        Self::with_named_literals(values.into_iter().map(|v| (String::new(), v)))
+    }
+
+    /// Literal secrets with the variable each came from (for refusal messages).
+    pub fn with_named_literals<I: IntoIterator<Item = (String, String)>>(values: I) -> Self {
         // Multi-line secrets (PEM keys, JSON service accounts) are also
         // matched per line.
-        let base: Vec<String> = values.into_iter().flat_map(|v| literal_forms(&v)).collect();
+        let base: Vec<(String, String)> = values
+            .into_iter()
+            .flat_map(|(name, v)| literal_forms(&v).into_iter().map(move |f| (name.clone(), f)))
+            .collect();
         let patterns = TOKEN_PATTERNS.iter().map(|p| Regex::new(p).expect("token pattern compiles")).collect();
         let redactor = Self {
             base,
             registered: RwLock::new(BTreeMap::new()),
             literals: RwLock::new(Arc::new(Vec::new())),
+            sources: RwLock::new(Arc::new(BTreeMap::new())),
             patterns,
         };
         redactor.rebuild();
@@ -189,10 +284,20 @@ impl Redactor {
 
     fn rebuild(&self) {
         let registered = self.registered.read().unwrap_or_else(|p| p.into_inner());
-        let set: BTreeSet<&String> = self.base.iter().chain(registered.values().flatten()).collect();
+        let mut sources: BTreeMap<String, String> = BTreeMap::new();
+        for (name, literal) in &self.base {
+            sources.entry(literal.clone()).or_insert_with(|| name.clone());
+        }
+        for (name, forms) in registered.iter() {
+            for literal in forms {
+                sources.entry(literal.clone()).or_insert_with(|| name.clone());
+            }
+        }
+        let set: BTreeSet<&String> = sources.keys().collect();
         let mut literals: Vec<String> = set.into_iter().cloned().collect();
         literals.sort_by_key(|s| std::cmp::Reverse(s.len()));
         *self.literals.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(literals);
+        *self.sources.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(sources);
     }
 
     /// Register (`Some`) or forget (`None`) a secret the application holds at
@@ -224,8 +329,18 @@ impl Redactor {
 
     /// True when the text matches a token shape or contains a known secret.
     pub fn contains_secret(&self, text: &str) -> bool {
-        self.current_literals().iter().any(|l| text.contains(l.as_str()))
-            || self.patterns.iter().any(|p| p.is_match(text))
+        self.find_secret(text).is_some()
+    }
+
+    /// Why the text is secret, if it is: the variable (or registered name)
+    /// whose value it contains, or a token shape. Never the value itself.
+    pub fn find_secret(&self, text: &str) -> Option<SecretMatch> {
+        if let Some(literal) = self.current_literals().iter().find(|l| text.contains(l.as_str())) {
+            let sources = Arc::clone(&self.sources.read().unwrap_or_else(|p| p.into_inner()));
+            let source = sources.get(literal).filter(|name| !name.is_empty()).cloned();
+            return Some(SecretMatch::Literal { source });
+        }
+        self.patterns.iter().any(|p| p.is_match(text)).then_some(SecretMatch::TokenShape)
     }
 
     /// Replace every secret occurrence with [`REDACTED`].
@@ -398,6 +513,62 @@ mod tests {
         ] {
             assert!(!is_credential_name(name), "{name} should not be treated as a credential");
         }
+    }
+
+    /// R-a1 F6: values that cannot be secrets are not literals; real ones are.
+    #[test]
+    fn only_host_values_that_can_be_secrets_are_literals() {
+        let not_secrets = [
+            ("AWS_PROFILE", "research"),
+            ("AWS_DEFAULT_REGION", "eu-central-1"),
+            ("AZURE_CONFIG_DIR", r"C:\Users\u"),
+            ("CLAUDE_CODE_SESSION_ID", "5efb95c5-e1e2-456f-a33c-4f8b09ff0d72"),
+            ("GOOGLE_APPLICATION_CREDENTIALS", r"C:\Users\u\keys\sa.json"),
+            ("KUBECONFIG", "/home/u/.kube/config"),
+            ("SSH_AUTH_SOCK", "/tmp/ssh-XXXX/agent.123"),
+            ("AWS_SHARED_CREDENTIALS_FILE", "~/.aws/credentials"),
+            ("OPENAI_ORG", "org-research"),
+            ("HF_HOME", r"D:\models\hf"),
+            ("ANTHROPIC_API_KEY_PATH", r"\\server\share\key.txt"),
+        ];
+        for (name, value) in not_secrets {
+            assert!(!host_value_is_secret(name, value), "{name}={value} is not a secret");
+        }
+        let secrets = [
+            ("ANTHROPIC_API_KEY", "fake-anthropic-value-123456"),
+            ("DB_PASSWORD", "hunter2pw"),
+            ("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+            ("AWS_SESSION_TOKEN", "IQoJb3JpZ2luX2VjEXAMPLETOKEN"),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "0123456789abcdef0123"),
+            ("GITHUB_TOKEN", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+            (
+                "SERVICE_PRIVATE_KEY",
+                "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----",
+            ),
+            ("DATABASE_URL", "postgres://user:pw@db.example/x"),
+            ("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com/"),
+        ];
+        for (name, value) in secrets {
+            assert!(host_value_is_secret(name, value), "{name} keeps its value secret");
+        }
+        let r = Redactor::from_host_env(not_secrets.iter().chain(secrets.iter()).copied());
+        assert_eq!(
+            r.redact("profile research in C:\\Users\\u eu-central-1"),
+            "profile research in C:\\Users\\u eu-central-1"
+        );
+        assert_eq!(r.redact("k=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"), "k=[REDACTED]");
+        assert_eq!(r.find_secret("x hunter2pw y"), Some(SecretMatch::Literal { source: Some("DB_PASSWORD".into()) }));
+        assert_eq!(r.find_secret("token sk-ant-api03-AbCdEf0123456789_xyz"), Some(SecretMatch::TokenShape));
+        assert_eq!(r.find_secret("C:\\Users\\u\\research"), None);
+        r.register("provider-api-key", Some("Zq9plainKeyNoKnownShape7f3a2b1c"));
+        assert_eq!(
+            r.find_secret("a Zq9plainKeyNoKnownShape7f3a2b1c b"),
+            Some(SecretMatch::Literal { source: Some("provider-api-key".into()) })
+        );
+        assert_eq!(
+            Redactor::with_literals(["unnamed-literal-1".into()]).find_secret("unnamed-literal-1"),
+            Some(SecretMatch::Literal { source: None })
+        );
     }
 
     #[test]

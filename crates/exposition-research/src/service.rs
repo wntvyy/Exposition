@@ -340,6 +340,32 @@ impl ResearchService {
         }
     }
 
+    /// Environments for planning a setup without running anything from the
+    /// project: the discovery report already cached for the open project
+    /// (made when the person opened or refreshed Research, or after a setup),
+    /// else a discovery of interpreters outside the project only. A project
+    /// environment's interpreter is never started to plan (an agent's setup
+    /// request is planned before its approval); setup recognizes project
+    /// environments by their files.
+    pub(crate) async fn planning_environments(&self) -> Result<EnvironmentReport, ResearchError> {
+        if let Some(report) = self.cached_environments() {
+            return Ok(report);
+        }
+        let workspace = lock(&self.shared.workspace).clone();
+        // `trusted: false`: project interpreters are neither listed nor probed.
+        let project = workspace.map(|w| ProjectScope { root: w.root, trusted: false });
+        let probe_dir = match self.shared.config.launcher.probe_dir() {
+            Some(dir) => dir,
+            None => self.shared.research_dir("probe")?,
+        };
+        let launcher = self.shared.config.launcher.clone();
+        tokio::task::spawn_blocking(move || {
+            discover(&DiscoveryOptions { launcher: launcher.as_ref(), probe_dir: &probe_dir, project })
+        })
+        .await
+        .map_err(|e| ResearchError::Io(format!("environment discovery failed: {e}")))
+    }
+
     /// The application data directory research uses.
     pub(crate) fn data_dir(&self) -> &Path {
         &self.shared.config.data_dir
