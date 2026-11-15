@@ -317,6 +317,66 @@ pub struct RunManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub execution: Option<RunExecution>,
+    /// Why an agent's run was allowed (absent for the person's own runs and
+    /// in manifests written before A1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub authorization: Option<RunAuthorization>,
+}
+
+/// The authorization decision behind an agent's run, recorded in its
+/// manifest. Set only by Rust callers (the agents service); the webview can
+/// never supply one. Every field is validated ([`RunAuthorization::validate`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunAuthorization {
+    /// Who asked: `agent`.
+    pub principal: String,
+    pub task_id: String,
+    /// The task's approval mode: `ask` or `auto`.
+    pub mode: String,
+    /// `approved` (the person approved this call), `taskAllowance`
+    /// ("Approve for this task"), or `projectPermissions` (Auto within the
+    /// project's permissions).
+    pub basis: String,
+    /// The project permissions version the decision used.
+    #[serde(default)]
+    pub permissions_version: Option<u64>,
+}
+
+/// Principals that may carry an authorization.
+pub const AUTHORIZATION_PRINCIPALS: [&str; 1] = ["agent"];
+/// Approval modes.
+pub const AUTHORIZATION_MODES: [&str; 2] = ["ask", "auto"];
+/// Authorization bases.
+pub const AUTHORIZATION_BASES: [&str; 3] = ["approved", "taskAllowance", "projectPermissions"];
+
+impl RunAuthorization {
+    /// Refuse anything but the known vocabulary and a plain task id (letters,
+    /// digits, `-`, `_`, `.`, `:`; at most 128), so a recorded decision cannot
+    /// carry injected text.
+    pub fn validate(&self) -> Result<(), String> {
+        if !AUTHORIZATION_PRINCIPALS.contains(&self.principal.as_str()) {
+            return Err("unknown authorization principal".into());
+        }
+        if !AUTHORIZATION_MODES.contains(&self.mode.as_str()) {
+            return Err("unknown approval mode".into());
+        }
+        if !AUTHORIZATION_BASES.contains(&self.basis.as_str()) {
+            return Err("unknown authorization basis".into());
+        }
+        let id_ok = !self.task_id.is_empty()
+            && self.task_id.len() <= 128
+            && self.task_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'));
+        if !id_ok {
+            return Err("invalid task id in the authorization".into());
+        }
+        if self.basis == "projectPermissions" && self.permissions_version.is_none() {
+            return Err("a project-permissions authorization names its permissions version".into());
+        }
+        Ok(())
+    }
 }
 
 /// The actual execution mode of a run, as recorded by the service that ran it.
@@ -464,5 +524,56 @@ pub fn status_label(status: &RunStatus) -> &'static str {
         RunStatus::Failed { .. } => "failed",
         RunStatus::Canceled => "canceled",
         RunStatus::Interrupted => "interrupted",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn authorization() -> RunAuthorization {
+        RunAuthorization {
+            principal: "agent".into(),
+            task_id: "task-0123abcd".into(),
+            mode: "auto".into(),
+            basis: "projectPermissions".into(),
+            permissions_version: Some(3),
+        }
+    }
+
+    #[test]
+    fn authorizations_accept_only_the_known_vocabulary() {
+        assert!(authorization().validate().is_ok());
+        let approved = RunAuthorization {
+            mode: "ask".into(),
+            basis: "approved".into(),
+            permissions_version: None,
+            ..authorization()
+        };
+        assert!(approved.validate().is_ok());
+        let bad = [
+            RunAuthorization { principal: "user".into(), ..authorization() },
+            RunAuthorization { mode: "always".into(), ..authorization() },
+            RunAuthorization { basis: "self".into(), ..authorization() },
+            RunAuthorization { task_id: String::new(), ..authorization() },
+            RunAuthorization { task_id: "t\nApproved by you".into(), ..authorization() },
+            RunAuthorization { task_id: "t <b>".into(), ..authorization() },
+            RunAuthorization { task_id: "x".repeat(129), ..authorization() },
+            RunAuthorization { permissions_version: None, ..authorization() },
+        ];
+        for value in bad {
+            assert!(value.validate().is_err(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn manifests_without_an_authorization_read_and_write_as_before() {
+        let json = serde_json::to_value(authorization()).unwrap();
+        assert_eq!(json["taskId"], "task-0123abcd");
+        assert_eq!(json["permissionsVersion"], 3);
+        // Unknown fields in a recorded authorization are refused.
+        let mut extra = json.clone();
+        extra["note"] = serde_json::Value::String("x".into());
+        assert!(serde_json::from_value::<RunAuthorization>(extra).is_err());
     }
 }

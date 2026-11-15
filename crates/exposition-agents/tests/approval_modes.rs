@@ -90,7 +90,7 @@ struct Recorder {
     slow_python: AtomicBool,
     slow_setup: AtomicBool,
     /// How each Python run was authorized (as its provenance would record it).
-    runs: Mutex<Vec<RunAuthorization>>,
+    runs: Mutex<Vec<Option<exposition_research::types::RunAuthorization>>>,
 }
 
 impl Recorder {
@@ -1222,9 +1222,10 @@ async fn loop_auto_native_profile_runs_and_edits_without_any_card() {
     let runs = std::mem::take(&mut *h.recorder.runs.lock().unwrap());
     assert_eq!(runs.len(), 1);
     for run in runs {
+        let run = run.expect("a native agent run records its authorization");
         assert_eq!(run.principal, "agent");
         assert_eq!(run.task_id, task.id.0);
-        assert_eq!(run.mode, ApprovalMode::Auto);
+        assert_eq!(run.mode, "auto");
         assert_eq!(run.basis, "projectPermissions");
         assert_eq!(run.permissions_version, Some(version));
     }

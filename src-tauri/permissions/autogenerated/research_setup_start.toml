@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-setup-start"
+description = "Enables the research_setup_start command without any pre-configured scope."
+commands.allow = ["research_setup_start"]
+
+[[permission]]
+identifier = "deny-research-setup-start"
+description = "Denies the research_setup_start command without any pre-configured scope."
+commands.deny = ["research_setup_start"]

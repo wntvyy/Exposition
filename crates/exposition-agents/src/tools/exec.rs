@@ -1380,11 +1380,7 @@ pub async fn run(
                             working_directory: env.files.root().to_path_buf(),
                             policy,
                             session: format!("agent-{}", env.task_id.0),
-                            authorization: crate::model::RunAuthorization::of(
-                                env.task_id,
-                                env.spec.approval_mode,
-                                &authorized_by,
-                            ),
+                            authorization: authorized_by.run_authorization(env.task_id, env.spec.approval_mode),
                         },
                         cancel,
                     )

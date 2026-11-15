@@ -8,13 +8,16 @@ import { registry } from "../../app/registry";
 import { ResearchPage } from "./ResearchPage";
 import { ResearchPanel } from "./ResearchPanel";
 import { RESEARCH_PAGE_ID, enableResearch, revealInResearch, startSpaceTracking } from "./space";
+import { activeUserRunId, lastUserRun } from "./runloop";
 import {
   interruptSession,
   loadEnvironments,
+  rerun,
   restartSession,
   runFile,
   runSelection,
   startResearchTracking,
+  stopRun,
   stopSession,
   useResearch,
   userSession,
@@ -84,6 +87,28 @@ registry.registerCommand({
       return;
     }
     await runFile(path);
+  },
+});
+
+registry.registerCommand({
+  id: "research.stopRun",
+  title: "Stop the Running Research Code",
+  category: "Research",
+  enabled: () => {
+    const state = useResearch.getState();
+    return activeUserRunId(userSession(state), state.runs) !== null;
+  },
+  run: () => stopRun(),
+});
+
+registry.registerCommand({
+  id: "research.rerun",
+  title: "Rerun the Last Research Run",
+  category: "Research",
+  enabled: () => lastUserRun(useResearch.getState().runs) !== undefined,
+  run: async () => {
+    show();
+    await rerun();
   },
 });
 

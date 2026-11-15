@@ -73,11 +73,12 @@ pub struct ResearchStartRequest {
     pub environment_id: String,
 }
 
-/// Run code from the webview, always as the user (a `requester` sent by the
-/// webview is ignored).
+/// Run code from the webview, always as the user. Unknown fields are refused:
+/// the webview cannot name a requester or supply an authorization record
+/// (only the agents service records one, in Rust).
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResearchExecuteRequest {
     pub session_id: String,
     pub source: RunSource,
@@ -107,7 +108,7 @@ pub struct AttachRunArtifactRequest {
 /// Follow the workspace service's open folder: research runs in the open
 /// project (registered with the execution service by `workspace_open`); trust
 /// is always the execution service's decision.
-fn sync_workspace(state: &AppState) -> Result<(), CommandError> {
+pub(crate) fn sync_workspace(state: &AppState) -> Result<(), CommandError> {
     match state.workspace.current() {
         Some(info) => {
             let root = PathBuf::from(&info.root);
@@ -478,4 +479,21 @@ pub fn forward_events(app: AppHandle) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResearchExecuteRequest;
+
+    #[test]
+    fn the_webview_cannot_supply_an_authorization_or_requester() {
+        let ok = serde_json::json!({ "sessionId": "s", "source": { "kind": "input", "code": "1" } });
+        assert!(serde_json::from_value::<ResearchExecuteRequest>(ok).is_ok());
+        for extra in ["authorization", "requester"] {
+            let mut forged = serde_json::json!({ "sessionId": "s", "source": { "kind": "input", "code": "1" } });
+            forged[extra] =
+                serde_json::json!({ "principal": "agent", "taskId": "t", "mode": "auto", "basis": "approved" });
+            assert!(serde_json::from_value::<ResearchExecuteRequest>(forged).is_err(), "{extra} must be refused");
+        }
+    }
 }

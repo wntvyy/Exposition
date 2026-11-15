@@ -25,6 +25,8 @@ mod workflow_runs;
 mod workflow_triggers;
 mod workflows;
 mod workspace;
+// A1 lane E: guided environment setup and the remembered environment choice.
+mod setup;
 
 use tauri::{Manager, RunEvent};
 
@@ -59,6 +61,8 @@ pub fn run() {
             project_ops::start(app.handle());
             // A1 lane P: clear task allowances when folder trust is revoked.
             agents::forward_trust_revocations(app.handle().clone());
+            // A1 lane E: environment setup progress events.
+            setup::forward_events(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -245,6 +249,13 @@ pub fn run() {
             agents::agents_permissions_set,
             agents::agents_permissions_revoke,
             agents::agents_allowance_revoke,
+            // A1 lane E: guided environment setup and the remembered environment choice.
+            setup::research_setup_plan,
+            setup::research_setup_start,
+            setup::research_setup_cancel,
+            setup::research_setup_status,
+            setup::research_selection_get,
+            setup::research_selection_set,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

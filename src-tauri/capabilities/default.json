@@ -181,6 +181,12 @@
     "allow-agents-permissions-list",
     "allow-agents-permissions-set",
     "allow-agents-permissions-revoke",
-    "allow-agents-allowance-revoke"
+    "allow-agents-allowance-revoke",
+    "allow-research-setup-plan",
+    "allow-research-setup-start",
+    "allow-research-setup-cancel",
+    "allow-research-setup-status",
+    "allow-research-selection-get",
+    "allow-research-selection-set"
   ]
 }

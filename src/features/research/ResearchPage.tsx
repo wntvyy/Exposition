@@ -28,7 +28,7 @@ import {
   Tabs,
   Toolbar,
 } from "../../ui/components";
-import { SourceEditor, handleForPath, type DocumentHandle } from "../editor";
+import { SourceEditor, type DocumentHandle } from "../editor";
 import { ExecutionModes } from "./ExecutionLabel";
 import { ResearchExplorer } from "./Explorer";
 import { ResearchInspector } from "./Inspector";
@@ -41,23 +41,22 @@ import {
   startSpaceTracking,
   useSpace,
 } from "./space";
-import { execute, loadEnvironments, openProjectFolder, runFile, startResearchTracking, useResearch } from "./store";
+import { startSetupTracking } from "./setup";
+import {
+  loadEnvironments,
+  openProjectFolder,
+  runFile,
+  runSourceSelection as runSelectionOf,
+  startResearchTracking,
+  useResearch,
+} from "./store";
 import "./research.css";
 
 const SCRIPT = /\.(py|ipy|r|jl)$/i;
 
 /** Run the selection of a research source (pinned to the revision the editor shows). */
 async function runSourceSelection(path: string): Promise<void> {
-  const handle = handleForPath(path);
-  if (!handle) return;
-  for (let i = 0; i < 40 && handle.sync.pendingCount > 0; i += 1) await new Promise((r) => setTimeout(r, 50));
-  const range = handle.selection[0];
-  if (!range || range.start === range.end || handle.sync.pendingCount > 0) {
-    notify({ tone: "info", title: "Nothing selected", body: "Select code in the source first." });
-    return;
-  }
-  const ordered = range.start <= range.end ? range : { start: range.end, end: range.start };
-  await execute({ kind: "selection", document: handle.id, revision: handle.sync.revision, range: ordered });
+  if (!(await runSelectionOf(path))) notify({ tone: "info", title: "Nothing selected", body: "Select code in the source first." });
 }
 
 const closeWatchers = new Map<string, () => void>();
@@ -217,6 +216,7 @@ export function ResearchPage() {
   useEffect(() => {
     startResearchTracking();
     startSpaceTracking();
+    startSetupTracking();
     if (!useResearch.getState().environments) void loadEnvironments(false);
   }, []);
 

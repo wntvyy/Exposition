@@ -417,12 +417,17 @@ impl AppToolServices {
         let owner = SessionOwner::Agent { task_id: request.task_id.clone() };
         let session_id = self.agent_session(&research, &owner).await?;
         let mut events = research.subscribe();
+        // The run's provenance records how the agent's call was authorized.
         let queued = research
-            .execute(ExecuteRequest {
-                session_id: session_id.clone(),
-                source: RunSource::Input { code: request.code },
-                requester: owner,
-            })
+            .execute_authorized(
+                ExecuteRequest {
+                    session_id: session_id.clone(),
+                    source: RunSource::Input { code: request.code },
+                    requester: owner,
+                },
+                &[],
+                request.authorization.clone(),
+            )
             .map_err(|e| ServiceError::Failed(e.to_string()))?;
         let run_id = queued.id.0.clone();
         let finished: RunSummary = loop {

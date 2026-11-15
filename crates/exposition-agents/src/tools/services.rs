@@ -98,8 +98,9 @@ pub struct PythonRequest {
     pub policy: ExecutionPolicy,
     /// Agent runs use a session separate from the user's.
     pub session: String,
-    /// How the run was authorized, for the run's provenance.
-    pub authorization: crate::model::RunAuthorization,
+    /// How the run was authorized, recorded in the run's provenance
+    /// (`None` when the task's settings alone allowed it).
+    pub authorization: Option<exposition_research::types::RunAuthorization>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

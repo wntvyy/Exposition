@@ -1623,6 +1623,7 @@ mod attachments {
             output: OutputSummary::default(),
             unsaved_inputs: Vec::new(),
             execution: None,
+            authorization: None,
         };
         exposition_research::store::write_manifest(root, &manifest).unwrap();
         artifact_id

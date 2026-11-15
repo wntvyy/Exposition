@@ -137,6 +137,7 @@ fn record_run(root: &Path, run: &str, inputs: Vec<RunInput>, unsaved: Vec<Worksp
         output: OutputSummary::default(),
         unsaved_inputs: unsaved,
         execution: None,
+        authorization: None,
     };
     write_manifest(root, &manifest).unwrap();
     manifest

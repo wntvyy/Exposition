@@ -192,31 +192,33 @@ pub enum AuthorizedBy {
     Approved { for_task: bool },
 }
 
-/// How an agent's run was authorized, in the shape a run's provenance
-/// records (`principal` is always `agent`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-#[serde(rename_all = "camelCase")]
-pub struct RunAuthorization {
-    pub principal: String,
-    pub task_id: String,
-    pub mode: ApprovalMode,
-    /// `approved`, `taskAllowance`, `projectPermissions`, or `taskSettings`
-    /// (an Ask task whose settings allow it, e.g. a restricted run).
-    pub basis: String,
-    /// The project's permission version (Auto, `projectPermissions`).
-    pub permissions_version: Option<u64>,
-}
-
-impl RunAuthorization {
-    pub fn of(task: &TaskId, mode: ApprovalMode, by: &AuthorizedBy) -> Self {
-        let (basis, permissions_version) = match by {
+impl AuthorizedBy {
+    /// The authorization a run's provenance records (lane E's
+    /// `RunAuthorization`), for calls that needed one: approved,
+    /// taskAllowance, or projectPermissions. `None` for calls the task's
+    /// settings alone allowed (restricted runs) or that needed nothing.
+    pub fn run_authorization(
+        &self,
+        task: &TaskId,
+        mode: ApprovalMode,
+    ) -> Option<exposition_research::types::RunAuthorization> {
+        let (basis, permissions_version) = match self {
             AuthorizedBy::Approved { .. } => ("approved", None),
             AuthorizedBy::TaskAllowance { .. } => ("taskAllowance", None),
             AuthorizedBy::ProjectPermissions { version } => ("projectPermissions", Some(*version)),
-            AuthorizedBy::TaskSettings | AuthorizedBy::NotRequired => ("taskSettings", None),
+            AuthorizedBy::TaskSettings | AuthorizedBy::NotRequired => return None,
         };
-        Self { principal: "agent".into(), task_id: task.0.clone(), mode, basis: basis.into(), permissions_version }
+        Some(exposition_research::types::RunAuthorization {
+            principal: "agent".into(),
+            task_id: task.0.clone(),
+            mode: match mode {
+                ApprovalMode::Ask => "ask",
+                ApprovalMode::Auto => "auto",
+            }
+            .into(),
+            basis: basis.into(),
+            permissions_version,
+        })
     }
 }
 
