@@ -75,6 +75,12 @@
   margin: 0;
 }
 
+/* Running text keeps a readable line length on wide pages; code, tables, and
+   display math may use the full width of the response. */
+.ui-markdown > :where(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, section) {
+  max-width: 80ch;
+}
+
 .ui-markdown :where(*) + :where(p, ul, ol, blockquote, pre, hr, section, .ui-md-code, .ui-md-table, .ui-md-math-display, .ui-md-math-source) {
   margin-top: var(--space-2);
 }

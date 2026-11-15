@@ -72,6 +72,17 @@ export async function runInResearch(code: string, language: RunnableLanguage): P
     await research.runCode(code);
     return;
   }
+  // Never discard code the user typed into the Research input.
+  const current = research.useResearch.getState().code;
+  if (current.trim() && current !== code) {
+    notify({
+      tone: "info",
+      title: "The Research input already has code",
+      body: "It was kept. Replace it with the code from the response, or start a session to run the response's code directly.",
+      actions: [{ label: "Replace input", run: () => research.useResearch.setState({ code }) }],
+    });
+    return;
+  }
   research.useResearch.setState({ code });
 }
 

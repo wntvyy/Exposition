@@ -14,6 +14,7 @@ const research = vi.hoisted(() => ({
   userSession: vi.fn(),
   runCode: vi.fn(),
   setState: vi.fn(),
+  getState: vi.fn(),
 }));
 const shell = vi.hoisted(() => ({ active: vi.fn(), show: vi.fn(), runCommand: vi.fn(), notify: vi.fn() }));
 
@@ -21,7 +22,7 @@ vi.mock("../../lib/ipc", () => ({ commands: ipc, errorMessage: (e: unknown) => S
 vi.mock("../research/store", () => ({
   userSession: research.userSession,
   runCode: research.runCode,
-  useResearch: { setState: research.setState },
+  useResearch: { setState: research.setState, getState: research.getState },
 }));
 vi.mock("../../app/pages", () => ({ EDITOR_PAGE: "editor", pages: { active: shell.active, show: shell.show } }));
 vi.mock("../../app/registry", () => ({ registry: { runCommand: shell.runCommand } }));
@@ -39,6 +40,7 @@ beforeEach(() => {
   ipc.appOpenExternal.mockResolvedValue(undefined);
   research.runCode.mockResolvedValue(null);
   shell.active.mockReturnValue("editor");
+  research.getState.mockReturnValue({ code: "" });
 });
 afterEach(() => cleanup());
 
@@ -103,6 +105,18 @@ describe("Run in Research", () => {
     await runInResearch("x <- 1", "r");
     expect(research.runCode).not.toHaveBeenCalled();
     expect(research.setState).toHaveBeenCalledWith({ code: "x <- 1" });
+  });
+
+  it("keeps code the user typed in the Research input and offers to replace it", async () => {
+    research.userSession.mockReturnValue(undefined);
+    research.getState.mockReturnValue({ code: "my_scratch = 42" });
+    await runInResearch("print(1)", "python");
+    expect(research.setState).not.toHaveBeenCalled();
+    expect(shell.notify).toHaveBeenCalledTimes(1);
+    const note = shell.notify.mock.calls[0]![0] as { actions: { label: string; run: () => void }[] };
+    expect(note.actions[0]!.label).toBe("Replace input");
+    note.actions[0]!.run();
+    expect(research.setState).toHaveBeenCalledWith({ code: "print(1)" });
   });
 
   it("does not run code in a session of another language or one that is not ready", async () => {
