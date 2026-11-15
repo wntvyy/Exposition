@@ -2,6 +2,7 @@
 // which run Stop cancels, which environment to select, and what setup an
 // environment offers. Unit-tested; the store and views call these.
 import type { EnvironmentReport } from "../../bindings/EnvironmentReport";
+import type { RunAuthorization } from "../../bindings/RunAuthorization";
 import type { RunSummary } from "../../bindings/RunSummary";
 import type { RuntimeEnvironment } from "../../bindings/RuntimeEnvironment";
 import type { SessionInfo } from "../../bindings/SessionInfo";
@@ -22,6 +23,18 @@ export function activeUserRunId(session: SessionInfo | undefined, runs: RunSumma
   if (session?.activeRun) return session.activeRun;
   const running = runs.find((r) => r.owner.kind === "user" && r.status.kind === "running" && !r.queued);
   return running?.id ?? null;
+}
+
+/** The authorization an agent's run recorded, as one quiet line ("Agent task t-1 · Auto: project permissions v3"). */
+export function authorizationText(authorization: RunAuthorization): string {
+  const mode = authorization.mode === "auto" ? "Auto" : "Ask";
+  const basis =
+    authorization.basis === "approved"
+      ? "approved by you"
+      : authorization.basis === "taskAllowance"
+        ? "allowed for this task"
+        : `project permissions v${authorization.permissionsVersion ?? "?"}`;
+  return `Agent task ${authorization.taskId} · ${mode}: ${basis}`;
 }
 
 /** What Rerun runs, in words (its accessible name and tooltip). */

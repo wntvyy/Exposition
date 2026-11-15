@@ -54,7 +54,7 @@ import {
 import { SetupArea, SetupButton } from "./EnvironmentSetup";
 import { ExecutionLabel } from "./ExecutionLabel";
 import { PromotionControls, RetainControls } from "./Promotion";
-import { activeUserRunId, lastUserRun, rerunDescription } from "./runloop";
+import { activeUserRunId, authorizationText, lastUserRun, rerunDescription } from "./runloop";
 import { startSetupTracking } from "./setup";
 import { startSpaceTracking } from "./space";
 import {
@@ -463,8 +463,8 @@ export function RunOutputView() {
         </span>
         {run.executionCount !== null && <span className="ui-meta">In [{run.executionCount}]</span>}
         <code className="exp-research__preview">{run.codePreview}</code>
-        {/* The running code stops with Stop in the run controls; a queued run can be dropped here. */}
-        {run.queued && isActiveRun(run) && (
+        {/* This run only (also a queued one); Stop in the run controls stops whatever runs now. */}
+        {isActiveRun(run) && (
           <Button size="sm" variant="ghost" icon={SquareX} onPress={() => void cancelRun(run.id)}>
             Cancel run
           </Button>
@@ -729,6 +729,16 @@ export function Provenance({ run }: { run: RunSummary }) {
         </>
       ),
     },
+    ...(manifest.authorization
+      ? [
+          {
+            key: "authorization",
+            label: "Authorized",
+            value: authorizationText(manifest.authorization),
+            valueProps: { "data-testid": "research-authorization" },
+          },
+        ]
+      : []),
     ...record.inputs.map((input) => inputFact(manifest, input)),
     {
       key: "kernel",

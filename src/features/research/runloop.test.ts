@@ -7,6 +7,7 @@ import type { RuntimeEnvironment } from "../../bindings/RuntimeEnvironment";
 import type { SessionInfo } from "../../bindings/SessionInfo";
 import {
   activeUserRunId,
+  authorizationText,
   commandLine,
   lastUserRun,
   pickEnvironment,
@@ -177,5 +178,16 @@ describe("setup choices", () => {
       'C:\\Python312\\python.exe -I -m venv "C:\\My Project\\.venv"',
     );
     expect(commandLine("py", ["pandas>=2.2", "--only-binary=:all:"])).toBe('py "pandas>=2.2" --only-binary=:all:');
+  });
+});
+
+describe("run authorization", () => {
+  it("reads as one quiet line", () => {
+    const base = { principal: "agent", taskId: "task-1", permissionsVersion: null };
+    expect(authorizationText({ ...base, mode: "auto", basis: "projectPermissions", permissionsVersion: 3 })).toBe(
+      "Agent task task-1 · Auto: project permissions v3",
+    );
+    expect(authorizationText({ ...base, mode: "ask", basis: "approved" })).toBe("Agent task task-1 · Ask: approved by you");
+    expect(authorizationText({ ...base, mode: "ask", basis: "taskAllowance" })).toBe("Agent task task-1 · Ask: allowed for this task");
   });
 });

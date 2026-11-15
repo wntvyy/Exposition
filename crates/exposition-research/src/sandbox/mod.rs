@@ -635,6 +635,7 @@ impl ScopedBatchRunner {
             output: OutputSummary::default(),
             unsaved_inputs: Vec::new(),
             execution: Some(execution),
+            authorization: None,
         };
         // The environment recorded is the one the job gets: settings changed
         // since the availability check refuse the batch (retry).
