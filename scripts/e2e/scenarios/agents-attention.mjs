@@ -389,7 +389,7 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     await waitFor(async () => (await invoke(page, "agents_task_detail", { task: states.id })).approvals[0]?.tool === "run_command", {
       message: "run_command approval",
     });
-    await panel.getByRole("button", { name: "Approve" }).click();
+    await panel.getByRole("button", { name: "Approve", exact: true }).click();
     const running = await waitFor(
       async () => {
         const v = await visibleStates(panel);

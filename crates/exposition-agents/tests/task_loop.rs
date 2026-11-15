@@ -83,6 +83,7 @@ fn request(h: &Harness, permission: PermissionProfile) -> CreateTaskRequest {
         execution: ExecutionMode::Disabled,
         consent: None,
         budgets: None,
+        approval_mode: None,
     }
 }
 
@@ -768,6 +769,7 @@ async fn tasks_persist_and_interrupted_runs_are_marked_after_restart() {
         execution: ExecutionMode::Disabled,
         consent: None,
         budgets: None,
+        approval_mode: None,
     };
     let done = first.create_task(req.clone()).unwrap();
     first.join(&done.id).await;

@@ -40,6 +40,7 @@ function summary(overrides: Partial<TaskSummary> = {}): TaskSummary {
       consent: "scopeContent",
       budgets: DEFAULT_BUDGETS,
       provider: { provider: "anthropic", model: "claude-opus-5-5", effort: "medium" },
+      approvalMode: "ask",
     },
     usage: {
       turns: 2,
@@ -77,7 +78,7 @@ describe("event reducer", () => {
   });
 
   it("keeps task summaries sorted and updates loaded details", () => {
-    const detail: TaskDetail = { summary: summary(), transcript: [], approvals: [], graph: NO_GRAPH };
+    const detail: TaskDetail = { summary: summary(), transcript: [], approvals: [], graph: NO_GRAPH, allowances: [] };
     const state = { ...initialAgentsState, details: { "task-1": detail } };
     const done = summary({ status: { kind: "completed" } });
     const { patch } = reduceEvent(state, { kind: "taskChanged", task: done });
@@ -103,7 +104,7 @@ describe("event reducer", () => {
       ...initialAgentsState,
       drafts: { "task-1": { turn: 1, text: "partial", thinking: "", activeTool: null } },
     };
-    const detail = { summary: summary(), transcript: [], approvals: [], graph: NO_GRAPH };
+    const detail = { summary: summary(), transcript: [], approvals: [], graph: NO_GRAPH, allowances: [] };
     // A detail read while the turn is still streaming keeps the draft.
     expect(mergeDetail(streaming, detail).drafts?.["task-1"]?.text).toBe("partial");
     const stored = { ...streaming, ...reduceEvent(streaming, { kind: "transcriptChanged", taskId: "task-1" }).patch };
@@ -154,13 +155,15 @@ describe("task view", () => {
           status: "awaitingApproval",
           result: null,
           isError: false,
+          authorizedBy: null,
         },
         { kind: "notice", seq: 3, level: "warning", message: "Careful" },
       ],
       approvals: [
-        { id: "approval-1", taskId: "task-1", toolUseId: "t1", tool: "edit_document", title: "Apply edits to main.typ", detail: "- a\n+ b" },
+        { id: "approval-1", taskId: "task-1", toolUseId: "t1", tool: "edit_document", title: "Apply edits to main.typ", detail: "- a\n+ b", reason: null, forTask: [] },
       ],
       graph: NO_GRAPH,
+      allowances: [],
     };
     ipc.agentsTaskDetail.mockResolvedValue(detail);
     ipc.agentsApprovalResolve.mockResolvedValue(undefined);

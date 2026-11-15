@@ -395,6 +395,7 @@ fn spec(
         consent,
         budgets: Budgets::default(),
         provider: ProviderChoice { provider: ProviderKind::Scripted, model: "scripted".into(), effort: Effort::Low },
+        approval_mode: ApprovalMode::Ask,
     }
 }
 
@@ -428,6 +429,7 @@ fn gate_matrix(kind: Kind) {
                         services: services.as_ref(),
                         store: &store,
                         graph: Some(GraphEnv { service: &graph, project: None }),
+                        authority: Default::default(),
                     };
                     let expected = expect(kind, mode, permission, scope, consent);
                     let gate = exec::gate(&call, &env);
@@ -581,6 +583,7 @@ async fn observe(
             execution: mode,
             consent: Some(consent),
             budgets: None,
+            approval_mode: None,
         })
         .unwrap();
     let id = task.id.clone();
@@ -864,6 +867,7 @@ fn every_path_tool_refuses_a_link_inside_the_scope_that_leads_outside_it() {
         services: services.as_ref(),
         store: &store,
         graph: None,
+        authority: Default::default(),
     };
     let through_link = [
         (tools::READ_FILE, json!({"path": "public/link/secret.txt"})),
@@ -961,6 +965,7 @@ async fn a_scoped_typst_build_cannot_read_files_outside_the_scope() {
                 execution: ExecutionMode::Disabled,
                 consent: Some(ContextConsent::ScopeContent),
                 budgets: None,
+                approval_mode: None,
             })
             .unwrap()
     };
@@ -1073,6 +1078,7 @@ async fn approvals_answered_after_a_project_switch_do_nothing() {
                 execution: ExecutionMode::ApproveEach,
                 consent: Some(ContextConsent::ScopeContent),
                 budgets: None,
+                approval_mode: None,
             })
             .unwrap();
         let approval = tokio::time::timeout(Duration::from_secs(20), async {
@@ -1133,6 +1139,7 @@ async fn approval_shows_hidden_characters_and_long_payloads_completely() {
             execution: ExecutionMode::ApproveEach,
             consent: Some(ContextConsent::ScopeContent),
             budgets: None,
+            approval_mode: None,
         })
         .unwrap();
     let approval = tokio::time::timeout(Duration::from_secs(20), async {
@@ -1265,6 +1272,7 @@ async fn a_call_refused_when_its_approval_is_checked_again_is_recorded_failed_wi
                 execution,
                 consent: Some(ContextConsent::ScopeContent),
                 budgets: None,
+                approval_mode: None,
             })
             .unwrap();
         let approval = tokio::time::timeout(Duration::from_secs(20), async {

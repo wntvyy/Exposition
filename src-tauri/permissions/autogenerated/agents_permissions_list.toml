@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agents-permissions-list"
+description = "Enables the agents_permissions_list command without any pre-configured scope."
+commands.allow = ["agents_permissions_list"]
+
+[[permission]]
+identifier = "deny-agents-permissions-list"
+description = "Denies the agents_permissions_list command without any pre-configured scope."
+commands.deny = ["agents_permissions_list"]

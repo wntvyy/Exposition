@@ -243,7 +243,7 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     await setTheme(page, "light");
     state = await documentText(page, "main.typ");
     await userEdit(state.info.revision, state.text.length, "// user keeps typing\n");
-    await panel.getByRole("button", { name: "Approve" }).click();
+    await panel.getByRole("button", { name: "Approve", exact: true }).click();
     await waitForStatus(page, "completed");
     state = await documentText(page, "main.typ");
     assert.equal(state.text, "// draft\n= Notes\nThe cat sat quietly on the mat.\n// user keeps typing\n");
@@ -301,7 +301,7 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     await panel.getByRole("button", { name: "Start task" }).click();
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 30_000 });
     await shot(page, "agents-python-approval-light");
-    await panel.getByRole("button", { name: "Approve" }).click();
+    await panel.getByRole("button", { name: "Approve", exact: true }).click();
     await waitForStatus(page, "completed", 180_000);
     const pyTask = (await invoke(page, "agents_task_list"))[0];
     const pyDetail = await invoke(page, "agents_task_detail", { task: pyTask.id });
@@ -440,7 +440,7 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
       await panel.getByRole("button", { name: "Start task" }).click();
       for (let i = 0; i < 2; i++) {
         await page.waitForSelector("[data-testid=agents-approval]", { timeout: 60_000 });
-        await panel.getByRole("button", { name: "Approve" }).click();
+        await panel.getByRole("button", { name: "Approve", exact: true }).click();
         await page.waitForSelector("[data-testid=agents-approval]", { state: "detached", timeout: 10_000 });
       }
       await waitForStatus(page, "completed", 600_000);

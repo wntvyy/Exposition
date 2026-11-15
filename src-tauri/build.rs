@@ -186,6 +186,12 @@ const COMMANDS: &[&str] = &[
     "storage_overview",
     // Save a copy of a document's current text (src/workspace.rs).
     "document_save_copy",
+    // A1 lane P: project permissions (Auto) and task allowances (src/agents.rs).
+    "agents_permissions_get",
+    "agents_permissions_list",
+    "agents_permissions_set",
+    "agents_permissions_revoke",
+    "agents_allowance_revoke",
     // A1 lane E: guided environment setup and the remembered environment choice (src/setup.rs).
     "research_setup_plan",
     "research_setup_start",
