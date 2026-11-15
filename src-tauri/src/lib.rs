@@ -34,6 +34,7 @@ pub use state::AppState;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(app::navigation_guard())
         .setup(|app| {
             let state = AppState::initialize(app.handle())?;
             app.manage(state);
@@ -60,6 +61,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app::app_info,
+            app::app_open_external,
             documents::document_list,
             documents::document_state,
             documents::document_apply,

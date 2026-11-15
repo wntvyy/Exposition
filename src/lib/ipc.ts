@@ -92,6 +92,8 @@ import type { WorkspaceStatus } from "../bindings/WorkspaceStatus";
 
 export const commands = {
   appInfo: () => invoke<AppInfo>("app_info"),
+  /** Open an http(s) link in the system browser (validated in Rust). */
+  appOpenExternal: (url: string) => invoke<void>("app_open_external", { url }),
 
   documentList: () => invoke<DocumentInfo[]>("document_list"),
   documentState: (document: DocumentId) => invoke<DocumentState>("document_state", { document }),

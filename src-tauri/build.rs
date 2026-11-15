@@ -4,6 +4,7 @@
 
 const COMMANDS: &[&str] = &[
     "app_info",
+    "app_open_external",
     "document_list",
     "document_state",
     "document_apply",

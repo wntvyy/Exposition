@@ -1,15 +1,13 @@
-import { ArrowLeft, Check, FileDiff, PanelTop, Square, X } from "lucide-react";
+import { ArrowLeft, FileDiff, PanelTop, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import type { ApprovalRequest } from "../../bindings/ApprovalRequest";
 import type { TaskId } from "../../bindings/TaskId";
 import type { TaskStatus } from "../../bindings/TaskStatus";
 import type { TaskSummary } from "../../bindings/TaskSummary";
-import type { TranscriptItem } from "../../bindings/TranscriptItem";
 import { commands } from "../../lib/ipc";
 import { Banner, Button, IconButton, LoadingState, ProgressBar, Section, StatusPill, StatusText, TextArea } from "../../ui/components";
+import { ApprovalCard } from "./ApprovalCard";
 import {
-  activeToolLabel,
   asSentence,
   budgetRows,
   CONSENT_LABELS,
@@ -18,11 +16,12 @@ import {
   isActive,
   PERMISSION_LABELS,
   statusLabel,
-  toolStatusLabel,
-  toolSummary,
 } from "./format";
 import { freshnessLabel, graphSummary } from "./GraphViews";
-import { agents, useAgents, type StreamDraft } from "./store";
+import { agents, useAgents } from "./store";
+import { Draft, TranscriptEntry } from "./Transcript";
+
+export { payloadSize } from "./ApprovalCard";
 
 function BudgetMeter({ task }: { task: TaskSummary }) {
   return (
@@ -78,136 +77,6 @@ function OutcomeBanner({ status }: { status: TaskStatus }) {
     default:
       return null;
   }
-}
-
-/** Size of an approval payload, so the user knows how much there is to review. */
-export function payloadSize(text: string): string {
-  const lines = text.split("\n").length;
-  const bytes = new TextEncoder().encode(text).length;
-  return `${lines.toLocaleString()} ${lines === 1 ? "line" : "lines"} · ${bytes.toLocaleString()} ${bytes === 1 ? "byte" : "bytes"}`;
-}
-
-/**
- * Whether an element's content overflows it (it scrolls). Re-measured when
- * `content` changes and when the element is resized.
- */
-function useOverflows(content: string) {
-  const ref = useRef<HTMLPreElement>(null);
-  const [overflows, setOverflows] = useState(false);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const measure = () => setOverflows(el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth);
-    measure();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [content]);
-  return [ref, overflows] as const;
-}
-
-function Approval({ approval }: { approval: ApprovalRequest }) {
-  const [busy, setBusy] = useState(false);
-  // A payload that scrolls is a tab stop, so it can be read with the keyboard;
-  // a short one is not, and Tab goes straight to Approve.
-  const [payloadRef, scrolls] = useOverflows(approval.detail);
-  async function resolve(approved: boolean) {
-    setBusy(true);
-    await agents.run(() => commands.agentsApprovalResolve(approval.taskId, approval.id, approved));
-    setBusy(false);
-  }
-  return (
-    <section className="agents-stack agents-approval" aria-label={`Approval needed: ${approval.title}`} data-testid="agents-approval">
-      <Banner tone="warning" title={approval.title}>
-        Nothing is applied until you approve. Review the complete content below.
-      </Banner>
-      <p className="ui-meta" data-testid="agents-approval-size">
-        {payloadSize(approval.detail)} · complete, nothing omitted
-      </p>
-      <pre
-        ref={payloadRef}
-        className="agents-pre agents-approval__payload"
-        tabIndex={scrolls ? 0 : undefined}
-        role="region"
-        aria-label={`Complete content to approve: ${approval.title}`}
-        data-testid="agents-approval-payload"
-      >
-        {approval.detail}
-      </pre>
-      <div className="agents-row">
-        <Button size="sm" variant="primary" icon={Check} isDisabled={busy} onPress={() => void resolve(true)} data-testid="agents-approve">
-          Approve
-        </Button>
-        <Button size="sm" variant="secondary" icon={X} isDisabled={busy} onPress={() => void resolve(false)}>
-          Decline
-        </Button>
-      </div>
-    </section>
-  );
-}
-
-function TranscriptEntry({ item }: { item: TranscriptItem }) {
-  switch (item.kind) {
-    case "userText":
-      return (
-        <div className="agents-msg" data-role="user">
-          <span className="ui-group-label">You</span>
-          <p className="agents-msg__text">{item.text}</p>
-        </div>
-      );
-    case "assistantText":
-      return (
-        <div className="agents-msg" data-role="assistant" data-testid="agents-assistant-text">
-          <span className="ui-group-label">Agent</span>
-          <p className="agents-msg__text">{item.text}</p>
-        </div>
-      );
-    case "thinking":
-      return (
-        <details className="agents-disclosure">
-          <summary>Reasoning summary</summary>
-          <p className="agents-msg__text ui-meta">{item.text}</p>
-        </details>
-      );
-    case "toolCall": {
-      const pill = toolStatusLabel(item.status, item.result);
-      return (
-        <details className="agents-disclosure agents-tool" data-testid="agents-tool-call" data-tool={item.name}>
-          <summary>
-            <code className="ui-code">{item.name}</code>
-            <span className="ui-meta agents-tool__summary">{toolSummary(item.name, item.input)}</span>
-            <StatusText status={pill.status} label={pill.label} />
-          </summary>
-          <pre className="agents-pre">{JSON.stringify(item.input, null, 2)}</pre>
-          {item.result && <pre className="agents-pre">{item.result}</pre>}
-        </details>
-      );
-    }
-    case "notice":
-      return (
-        <p className="agents-notice" data-level={item.level}>
-          {item.message}
-        </p>
-      );
-  }
-}
-
-function Draft({ draft }: { draft: StreamDraft }) {
-  return (
-    <div className="agents-msg" data-role="assistant" data-testid="agents-draft">
-      <span className="ui-group-label">Agent</span>
-      {draft.thinking && (
-        <details className="agents-disclosure">
-          <summary>Reasoning summary (streaming)</summary>
-          <p className="agents-msg__text ui-meta">{draft.thinking}</p>
-        </details>
-      )}
-      {draft.text && <p className="agents-msg__text">{draft.text}</p>}
-      {draft.activeTool && <StatusText {...activeToolLabel(draft.activeTool, draft.activeToolStatus ?? "running")} />}
-      {!draft.text && !draft.thinking && !draft.activeTool && <StatusText status="running" label="Thinking" />}
-    </div>
-  );
 }
 
 function ContinueForm({ id }: { id: TaskId }) {
@@ -325,7 +194,7 @@ export function TaskView({ id, variant = "panel" }: { id: TaskId; variant?: "pan
       </p>
       <GraphSummaryLine id={id} variant={variant} />
       {!active && <OutcomeBanner status={task.status} />}
-      {detail?.approvals.map((approval) => <Approval key={approval.id} approval={approval} />)}
+      {detail?.approvals.map((approval) => <ApprovalCard key={approval.id} approval={approval} />)}
       <div className="agents-transcript" role="log" aria-live="polite" aria-label="Transcript" ref={logRef} data-testid="agents-transcript">
         {detail?.transcript.map((item, index) => <TranscriptEntry key={`${item.seq}-${index}`} item={item} />)}
         {active && draft && <Draft draft={draft} />}

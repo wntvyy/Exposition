@@ -9,6 +9,7 @@
     "core:window:allow-destroy",
     "dialog:allow-open",
     "allow-app-info",
+    "allow-app-open-external",
     "allow-document-list",
     "allow-document-state",
     "allow-document-apply",
