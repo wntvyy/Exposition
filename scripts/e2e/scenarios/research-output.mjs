@@ -19,7 +19,7 @@ const KERNEL_TIMEOUT = 120_000;
 const FRAME_BUDGET_MS = 200;
 
 const submit = (page, sessionId, code) =>
-  invoke(page, "research_execute", { request: { sessionId, source: { kind: "input", code }, requester: { kind: "user" } } });
+  invoke(page, "research_execute", { request: { sessionId, source: { kind: "input", code } } });
 
 async function settle(page, runId, timeout = KERNEL_TIMEOUT) {
   return waitFor(

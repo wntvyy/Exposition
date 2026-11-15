@@ -24,12 +24,19 @@ import { runCommand } from "../palette.mjs";
 
 const KERNEL_TIMEOUT = 120_000;
 
-/** Start a session; `owner` and `requester` fields are sent as a hostile webview would. */
+/** Start a session; an `owner` field is sent as a hostile webview would (it is ignored). */
 const startSession = (page, environmentId, owner = { kind: "user" }) =>
   invoke(page, "research_session_start", { request: { environmentId, owner } });
 
-const execute = (page, sessionId, code, requester = { kind: "user" }) =>
-  invokeError(page, "research_execute", { request: { sessionId, source: { kind: "input", code }, requester } });
+/**
+ * Run code as the webview does. A `requester` is sent only to play a hostile
+ * webview: since A1 the request refuses unknown fields, so a forged requester
+ * (or authorization) is rejected instead of being ignored.
+ */
+const execute = (page, sessionId, code, requester = null) =>
+  invokeError(page, "research_execute", {
+    request: { sessionId, source: { kind: "input", code }, ...(requester ? { requester } : {}) },
+  });
 
 async function settle(page, runId) {
   return waitFor(

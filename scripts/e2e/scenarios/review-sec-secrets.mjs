@@ -69,7 +69,7 @@ async function settle(page, runId) {
 
 async function run(page, sessionId, code) {
   const started = await invoke(page, "research_execute", {
-    request: { sessionId, source: { kind: "input", code }, requester: { kind: "user" } },
+    request: { sessionId, source: { kind: "input", code } },
   });
   const manifest = await settle(page, started.id);
   const output = await invoke(page, "research_run_output", { runId: started.id, after: null, limit: 200 });
