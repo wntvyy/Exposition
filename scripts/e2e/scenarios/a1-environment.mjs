@@ -310,6 +310,9 @@ export default async function a1Environment({ launchApp, artifactsDir, fixture, 
     const item = page.getByTestId(`workflow-run-item-${firstRun.id}`).first();
     await item.waitFor({ timeout: 30_000 });
     const openFirst = async () => {
+      // The Workflows list is an editor tab: bring it forward, then open the first run.
+      await runCommand(page, "Show Workflows", /Show Workflows/);
+      await page.getByTestId("workflows-view").waitFor({ timeout: 15_000 });
       await item.getByRole("button", { name: /^Open run/ }).click();
       const monitor = page.locator(`[data-testid="workflow-run"][data-run="${firstRun.id}"]`);
       await monitor.waitFor({ timeout: 15_000 });

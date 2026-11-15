@@ -353,7 +353,15 @@ export function SetupProgress({ status }: { status: SetupStatus }) {
 }
 
 /** A finished setup that did not succeed: what happened, and what to do next. */
-export function SetupOutcome({ status, onRetry }: { status: SetupStatus; onRetry?: () => void }) {
+export function SetupOutcome({
+  status,
+  onRetry,
+  retryLabel = "Set up again…",
+}: {
+  status: SetupStatus;
+  onRetry?: () => void;
+  retryLabel?: string;
+}) {
   const log = useSetup((s) => s.log);
   const [showLog, setShowLog] = useState(false);
   const canceled = status.state === "canceled";
@@ -361,12 +369,20 @@ export function SetupOutcome({ status, onRetry }: { status: SetupStatus; onRetry
     <div data-testid="setup-outcome" data-state={status.state} data-removed={String(status.removed)}>
       <Banner
         tone={canceled ? "canceled" : "danger"}
-        title={canceled ? "Setup canceled" : "Setup failed"}
+        title={
+          status.plan.createsEnvironment
+            ? canceled
+              ? "Setup canceled"
+              : "Setup failed"
+            : canceled
+              ? "Installation canceled"
+              : "Installation failed"
+        }
         actions={
           <>
             {onRetry && (
               <Button size="sm" icon={Wrench} onPress={onRetry}>
-                Set up again…
+                {retryLabel}
               </Button>
             )}
             {log.length > 0 && (
@@ -508,7 +524,11 @@ export function SetupArea() {
     <>
       {outcome && (
         <>
-          <SetupOutcome status={outcome} onRetry={retryChoice ? () => setRetry(true) : undefined} />
+          <SetupOutcome
+            status={outcome}
+            onRetry={retryChoice ? () => setRetry(true) : undefined}
+            retryLabel={retryChoice?.kind === "installPackages" ? "Install packages…" : "Set up again…"}
+          />
           {retryChoice && <SetupDialog choice={retryChoice} isOpen={retry} onOpenChange={setRetry} />}
         </>
       )}
