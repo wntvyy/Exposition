@@ -833,10 +833,11 @@ one, and a restricted run without a configured container image is refused,
 never run natively. Text an agent puts into a Lean file in a trusted folder
 counts as running code, because the Lean server elaborates it natively (an
 `#eval` runs): it needs native authority as well as permission to edit.
-<!-- A1 D7b --> The same holds for Lean/Lake configuration files
+The same holds for Lean/Lake configuration files
 (`lakefile.lean`, `lakefile.toml`, `lean-toolchain`, `lake-manifest.json`) in
 any folder, and agents never write, create, copy into, or delete anything
-under `.git/`, `.lake/`, `.venv/`, or `venv/`. <!-- /A1 D7b --> Code an agent
+under `.git/`, `.lake/`, `.venv/`, or `venv/` (package installs go through
+the reviewed `install_packages` tool). Code an agent
 writes into an ordinary project file does not run when it is written; it
 runs when it is later run or imported (by you, or by a tool the gate
 allows), so review such a change as you would imported code. Workflow agent
