@@ -44,6 +44,12 @@ import type { LeanGoals } from "../bindings/LeanGoals";
 import type { LeanHover } from "../bindings/LeanHover";
 import type { LeanLocation } from "../bindings/LeanLocation";
 import type { LeanProjectInfo } from "../bindings/LeanProjectInfo";
+// Mathlib lane: Lake package inspection and guided Mathlib setup.
+import type { LeanPackageInspection } from "../bindings/LeanPackageInspection";
+import type { LeanSetupEvent } from "../bindings/LeanSetupEvent";
+import type { LeanSetupPlan } from "../bindings/LeanSetupPlan";
+import type { LeanSetupRequest } from "../bindings/LeanSetupRequest";
+import type { LeanSetupStatus } from "../bindings/LeanSetupStatus";
 import type { LineEnding } from "../bindings/LineEnding";
 import type { Motion } from "../bindings/Motion";
 import type { NavigationResult } from "../bindings/NavigationResult";
@@ -182,6 +188,19 @@ export const commands = {
   /** Explicit user action only: install the toolchain the project pins (runs a job). */
   leanInstallToolchain: (document: DocumentId) => invoke<JobId>("lean_install_toolchain", { document }),
   leanCheck: (request: LeanCheckRequest) => invoke<LeanCheckReport>("lean_check", { request }),
+  // Mathlib lane: Lake package inspection and guided Mathlib setup. Rust
+  // chooses the toolchain and the Mathlib revision and builds every command.
+  /** What a folder of the open project holds as a Lake package (`""` is the project folder). Runs nothing. */
+  leanPackageInspect: (folder: string) => invoke<LeanPackageInspection>("lean_package_inspect", { folder }),
+  /** The Lake package an open Lean document belongs to (`null` for a standalone file). */
+  leanPackageFor: (document: DocumentId) => invoke<LeanPackageInspection | null>("lean_package_for", { document }),
+  leanSetupPlan: (request: LeanSetupRequest) => invoke<LeanSetupPlan>("lean_setup_plan", { request }),
+  /** Start a reviewed plan (`lean.setup.planStale` when the project changed since). */
+  leanSetupStart: (plan: LeanSetupPlan) => invoke<LeanSetupStatus>("lean_setup_start", { plan }),
+  leanSetupCancel: (setupId: string) => invoke<boolean>("lean_setup_cancel", { setupId }),
+  leanSetupStatus: () => invoke<LeanSetupStatus | null>("lean_setup_status"),
+  /** Check the document's package without Mathlib's prebuilt cache (builds from source), this session. */
+  leanAllowLocalBuild: (document: DocumentId) => invoke<void>("lean_allow_local_build", { document }),
   /** Build a LaTeX target of the open workspace (`null`: the project's default target). */
   texBuild: (target: BuildTarget | null, mode: TexBuildMode) =>
     invoke<TexTargetRef>("tex_build", { target, mode }),
@@ -280,6 +299,10 @@ export const events = {
     listen<LeanEvent>("lean:event", (e) => handler(e.payload)),
   /** The frontend fell behind; re-read `leanDocuments`. */
   leanResync: (handler: () => void): Promise<UnlistenFn> => listen("lean:resync", () => handler()),
+  /** Mathlib lane: Mathlib setup progress, in order. */
+  leanSetup: (handler: (event: LeanSetupEvent) => void): Promise<UnlistenFn> =>
+    listen<LeanSetupEvent>("lean:setup", (e) => handler(e.payload)),
+  leanSetupResync: (handler: () => void): Promise<UnlistenFn> => listen("lean:setup-resync", () => handler()),
   /** LaTeX build lifecycle (queued, started, finished with the build result). */
   tex: (handler: (event: TexEvent) => void): Promise<UnlistenFn> =>
     listen<TexEvent>("tex:event", (e) => handler(e.payload)),

@@ -128,6 +128,34 @@ pub struct AuditedDeclaration {
     pub verdict: DeclarationVerdict,
 }
 
+/// A file of the package context with the digest it had when it was read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct LeanAuditFile {
+    pub path: WorkspacePath,
+    /// SHA-256 (hex) of the file's bytes.
+    pub sha256: String,
+}
+
+/// The Lake package an audit ran in: what pinned its Lean version and its
+/// dependencies when the audit finished. Read from files; nothing runs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct LeanAuditPackage {
+    /// The package root inside the project (`""` is the project folder).
+    pub folder: String,
+    /// The package's `lean-toolchain`.
+    pub toolchain_file: Option<LeanAuditFile>,
+    /// The package's `lake-manifest.json` (the exact revision of every dependency).
+    pub manifest: Option<LeanAuditFile>,
+    /// The Mathlib commit the manifest pins, when the package uses Mathlib.
+    pub mathlib_revision: Option<String>,
+    /// Dependencies the manifest pins.
+    pub dependency_count: u32,
+}
+
 /// At most this many declarations are kept in a [`LeanAuditRecord`].
 pub const AUDIT_RECORD_LIMIT: usize = 2000;
 
@@ -159,6 +187,8 @@ pub struct LeanAuditRecord {
     /// listed has no evidence of its own.
     pub truncated: bool,
     pub finished_at_ms: u64,
+    /// The Lake package context of the audit (`None` for a standalone file).
+    pub package: Option<LeanAuditPackage>,
 }
 
 /// Checking status of one Lean document.

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lean-package-for"
+description = "Enables the lean_package_for command without any pre-configured scope."
+commands.allow = ["lean_package_for"]
+
+[[permission]]
+identifier = "deny-lean-package-for"
+description = "Denies the lean_package_for command without any pre-configured scope."
+commands.deny = ["lean_package_for"]

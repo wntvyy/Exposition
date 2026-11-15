@@ -63,6 +63,8 @@ pub fn run() {
             agents::forward_trust_revocations(app.handle().clone());
             // A1 lane E: environment setup progress events.
             setup::forward_events(app.handle().clone());
+            // Mathlib lane: Mathlib setup progress events.
+            lean::forward_setup_events(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -254,6 +256,14 @@ pub fn run() {
             setup::research_setup_start,
             setup::research_setup_cancel,
             setup::research_setup_status,
+            // Mathlib lane: Lake package inspection and guided Mathlib setup.
+            lean::lean_package_inspect,
+            lean::lean_package_for,
+            lean::lean_setup_plan,
+            lean::lean_setup_start,
+            lean::lean_setup_cancel,
+            lean::lean_setup_status,
+            lean::lean_allow_local_build,
             setup::research_selection_get,
             setup::research_selection_set,
         ])

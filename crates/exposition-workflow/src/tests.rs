@@ -247,6 +247,7 @@ impl LeanAuditor for FakeLean {
             declarations,
             truncated: false,
             finished_at_ms: 0,
+            package: None,
         })
     }
     fn record_evidence(

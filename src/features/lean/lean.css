@@ -204,3 +204,47 @@
 .exp-lean__new-claim > :first-child {
   flex: 1;
 }
+
+/* Mathlib setup: the plan's command listing and the live output (code/log
+   listings; everything else in the dialog is shared components). */
+.exp-lean-setup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.exp-lean-setup p {
+  margin: 0;
+}
+
+.exp-lean-setup__commands,
+.exp-lean-setup__log {
+  margin: 0;
+  max-height: 12rem;
+  overflow: auto;
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--line-height-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.exp-lean-setup__log {
+  margin-top: var(--space-2);
+  max-height: 9rem;
+  color: var(--color-text-muted);
+}
+
+.exp-lean-setup__progress .ui-banner__body {
+  min-width: 0;
+  flex: 1;
+}
+
+/* Actions under a long explanation in the narrow infoview. */
+.exp-lean-setup__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}

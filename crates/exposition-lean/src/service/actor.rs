@@ -204,6 +204,10 @@ pub(super) struct Actor {
     /// [`ExecutionService::trust_generation`] when trust was last checked.
     trust_seen: u64,
     auditor: Arc<audit::Auditor>,
+    setup: LeanSetup,
+    /// Package roots the user chose to check without Mathlib's prebuilt
+    /// cache (Lake builds Mathlib from source), for this session.
+    local_build: Vec<PathBuf>,
 }
 
 impl Actor {
@@ -214,6 +218,7 @@ impl Actor {
         config: LeanConfig,
         events: broadcast::Sender<LeanEvent>,
         tx: mpsc::UnboundedSender<Msg>,
+        setup: LeanSetup,
     ) -> Self {
         let trust_seen = exec.trust_generation();
         let auditor = Arc::new(audit::Auditor::new(config.scratch_dir.join("audit")));
@@ -232,6 +237,8 @@ impl Actor {
             next_temp: 0,
             trust_seen,
             auditor,
+            setup,
+            local_build: Vec::new(),
         }
     }
 
@@ -428,7 +435,7 @@ impl Actor {
             }
             let abs = join(&root, &change.path);
             let name = change.path.file_name();
-            if name == TOOLCHAIN_FILE || LAKEFILES.contains(&name) {
+            if name == TOOLCHAIN_FILE || LAKEFILES.contains(&name) || name == crate::provenance::LAKE_MANIFEST {
                 // The toolchain or Lake configuration changed: statuses computed
                 // with the old one are no longer valid. Restart the servers it
                 // concerns, and re-resolve documents that have no server (e.g.
@@ -593,6 +600,14 @@ impl Actor {
                 return;
             }
         };
+        // A package that is being set up, was left incomplete by a setup, or
+        // would make Lake download dependencies or build Mathlib from source
+        // inside the language server is not started: the reason names the
+        // supported preparation.
+        if let Some(reason) = self.package_block(&root, &project) {
+            self.set_status(id, LeanStatus::Unavailable { reason });
+            return;
+        }
         let key = ServerKey { root: project.root.clone(), toolchain: resolved.dir.clone() };
         if let Some(doc) = self.docs.get_mut(id) {
             doc.key = Some(key.clone());
@@ -652,6 +667,40 @@ impl Actor {
                 self.set_status(id, status);
             }
             Phase::Stopped | Phase::Untrusted { .. } => self.ensure_started(&key),
+        }
+    }
+
+    /// Why the Lean server must not start on `project` now, if it must not.
+    fn package_block(&self, workspace_root: &Path, project: &LeanProject) -> Option<String> {
+        if !matches!(project.kind, ProjectKind::Lake { .. }) {
+            return None;
+        }
+        if self.setup.running_root().is_some_and(|running| same_path(&running, &project.root)) {
+            return Some(
+                "Mathlib is being set up in this package. Checking starts when the setup has finished.".into(),
+            );
+        }
+        let local_build = self.local_build.iter().any(|allowed| same_path(allowed, &project.root));
+        setup::inspect_package(workspace_root, &project.root, self.config.elan_home.as_deref(), self.setup.records())
+            .blocks_checking(local_build)
+    }
+
+    /// A setup started or ended in `package_root`, or its preparation changed:
+    /// stop the package's server (it holds files a setup replaces) and
+    /// resolve its documents again.
+    fn on_package_changed(&mut self, package_root: &Path) {
+        let keys: Vec<ServerKey> = self.servers.keys().filter(|k| same_path(&k.root, package_root)).cloned().collect();
+        for key in keys {
+            self.restart_server(&key);
+        }
+        let waiting: Vec<DocumentId> = self
+            .docs
+            .values()
+            .filter(|d| d.key.is_none() && d.project_root.as_ref().is_some_and(|r| same_path(r, package_root)))
+            .map(|d| d.id.clone())
+            .collect();
+        for id in waiting {
+            self.reattach(&id);
         }
     }
 
@@ -1440,6 +1489,12 @@ impl Actor {
         if let Some(server) = self.servers.get_mut(&key) {
             server.attempts = 0; // the server demonstrably works again
         }
+        // What pins the package's Lean version and dependencies now (a change
+        // to either file restarts the server, so this is what the audit used).
+        let package = match (&self.root, self.docs.get(id).and_then(|d| d.abs.as_ref())) {
+            (Some(root), Some(abs)) if audited.is_some() => crate::provenance::audit_package(root, abs),
+            _ => None,
+        };
         let doc = self.docs.get_mut(id).expect("present");
         doc.work = None;
         doc.diagnostics = diagnostics;
@@ -1463,6 +1518,7 @@ impl Actor {
                 _ => String::new(),
             };
             doc.audit = Some(LeanAuditRecord {
+                package,
                 document: doc.id.clone(),
                 path: doc.path.clone(),
                 revision: version,
@@ -1797,6 +1853,32 @@ impl Actor {
             }
             Msg::Install { document, reply } => {
                 let _ = reply.send(self.install(&document));
+            }
+            Msg::PackageChanged { root } => self.on_package_changed(&root),
+            Msg::PackageFor { document, reply } => {
+                let result = match (self.docs.get(&document), &self.root) {
+                    (None, _) => Err(unknown_document()),
+                    (Some(doc), Some(root)) => Ok(doc.abs.as_ref().and_then(|abs| {
+                        let project = project::project_for(root, abs);
+                        matches!(project.kind, ProjectKind::Lake { .. }).then_some(project.root)
+                    })),
+                    (Some(_), None) => Ok(None),
+                };
+                let _ = reply.send(result);
+            }
+            Msg::AllowLocalBuild { document, reply } => {
+                let root = self.docs.get(&document).and_then(|d| d.project_root.clone());
+                let result = match root {
+                    None => Err(unknown_document()),
+                    Some(root) => {
+                        if !self.local_build.iter().any(|r| same_path(r, &root)) {
+                            self.local_build.push(root.clone());
+                        }
+                        self.on_package_changed(&root);
+                        Ok(())
+                    }
+                };
+                let _ = reply.send(result);
             }
             Msg::BeginCheck { target, reply } => {
                 let _ = reply.send(self.begin_check(target));
@@ -2405,7 +2487,15 @@ mod trust_race_tests {
             let workspace = WorkspaceService::new(Arc::clone(&documents), tmp.path().join("app"));
             let (events_tx, events) = broadcast::channel(256);
             let (tx, rx) = mpsc::unbounded_channel();
-            let mut actor = Actor::new(exec.clone(), workspace, documents, LeanConfig::default(), events_tx, tx);
+            let mut actor = Actor::new(
+                exec.clone(),
+                workspace,
+                documents,
+                LeanConfig::default(),
+                events_tx,
+                tx,
+                LeanSetup::new(exec.clone(), None, Arc::new(SetupRecords::new(None)), Box::new(|_| {})),
+            );
             actor.set_root(Some(root.display().to_string()));
             let key = ServerKey { root: root.clone(), toolchain: root.join("toolchain") };
             let doc = DocumentId("doc-1".into());

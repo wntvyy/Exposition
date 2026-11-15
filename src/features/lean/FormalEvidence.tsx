@@ -78,8 +78,17 @@ export function DeclarationEvidenceControls({
   const formal = latest?.evidence.formal;
   // A stale record's reason is shown once, in the history line below.
   const fresh = latest ? freshnessStatus(latest.freshness) : null;
-  const recordedForAudit =
-    Boolean(audit && formal && formal.sourceDigest === audit.contentHash && formal.revision === audit.revision);
+  // The package context the record was checked in (Lake packages only).
+  const environment = new Map(latest?.evidence.environment ?? []);
+  const manifestDigest = environment.get("lake-manifest.json sha256") ?? null;
+  const mathlibRevision = environment.get("mathlib revision") ?? null;
+  const recordedForAudit = Boolean(
+    audit &&
+      formal &&
+      formal.sourceDigest === audit.contentHash &&
+      formal.revision === audit.revision &&
+      (audit.package?.manifest?.sha256 ?? null) === manifestDigest,
+  );
   const record = async () => {
     setBusy(true);
     try {
@@ -109,6 +118,11 @@ export function DeclarationEvidenceControls({
           )}
           {evidence && evidence.evidence.length > 1 && <span className="ui-meta">{evidence.evidence.length - 1} older</span>}
           <span className="ui-meta">dependencies: {formal.dependencies.kind === "unavailable" ? "not reported by the audit" : formal.dependencies.names.join(", ")}</span>
+          {manifestDigest && (
+            <span className="ui-meta" data-testid="lean-evidence-package" title={`lake-manifest.json sha256 ${manifestDigest}${mathlibRevision ? `, Mathlib ${mathlibRevision}` : ""}`}>
+              {[mathlibRevision ? `Mathlib ${mathlibRevision.slice(0, 12)}` : null, `lake-manifest.json ${manifestDigest.slice(0, 12)}`].filter(Boolean).join(" · ")}
+            </span>
+          )}
         </div>
       ) : (
         <span className="ui-meta">No evidence recorded in the project graph.</span>

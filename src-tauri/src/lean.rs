@@ -15,6 +15,7 @@ use exposition_graph::GraphError;
 use exposition_lean::evidence::{
     self, DeclarationEvidence, DeclarationRef, EvidenceOutcomeReport, LeanAssociateRequest, LeanAssociation,
 };
+use exposition_lean::setup::{LeanPackageInspection, LeanSetupPlan, LeanSetupRequest, LeanSetupStatus};
 use exposition_lean::{
     LeanAuditRecord, LeanCheckReport, LeanCheckRequest, LeanCheckTarget, LeanDocumentState, LeanError, LeanGoals,
     LeanHover, LeanLocation, LeanProjectInfo,
@@ -243,6 +244,124 @@ pub async fn lean_declaration_evidence(
         .await
         .map_err(|e| LeanError::new("internal.task", e.to_string()))?
         .map_err(graph_error)
+}
+
+// ---- Lake packages and guided Mathlib setup -----------------------------------
+//
+// The webview names a folder inside the open project and a library name;
+// Rust validates both, chooses the toolchain and the Mathlib revision, and
+// builds every command. Starting re-plans and refuses a plan that changed.
+// Setups started here are the user's explicit action; no agent tool reaches
+// these commands.
+
+/// Event carrying every [`exposition_lean::setup::LeanSetupEvent`], in order.
+pub const LEAN_SETUP_EVENT: &str = "lean:setup";
+/// Emitted if the frontend fell behind and must re-read `lean_setup_status`.
+pub const LEAN_SETUP_RESYNC: &str = "lean:setup-resync";
+
+fn validate_folder(folder: &str) -> Result<(), LeanError> {
+    if folder.len() > 400 || folder.chars().any(char::is_control) {
+        return Err(LeanError::new("lean.setup.invalidFolder", "That is not a folder inside the project."));
+    }
+    Ok(())
+}
+
+fn validate_request(request: &LeanSetupRequest) -> Result<(), LeanError> {
+    match request {
+        LeanSetupRequest::NewMathlibPackage { folder, name } => {
+            validate_folder(folder)?;
+            if name.len() > 200 {
+                return Err(LeanError::new("lean.setup.invalidName", "The library name is too long."));
+            }
+            Ok(())
+        }
+        LeanSetupRequest::PrepareMathlibPackage { folder } => validate_folder(folder),
+    }
+}
+
+/// What a folder of the open project holds as a Lake package (reads files only).
+#[tauri::command]
+pub async fn lean_package_inspect(
+    state: State<'_, AppState>,
+    folder: String,
+) -> Result<LeanPackageInspection, LeanError> {
+    validate_folder(&folder)?;
+    let lean = state.lean.clone();
+    tauri::async_runtime::spawn_blocking(move || lean.package_inspect(&folder))
+        .await
+        .map_err(|e| LeanError::new("internal.task", e.to_string()))?
+}
+
+/// The Lake package an open Lean document belongs to (`null` for a standalone file).
+#[tauri::command]
+pub async fn lean_package_for(
+    state: State<'_, AppState>,
+    document: DocumentId,
+) -> Result<Option<LeanPackageInspection>, LeanError> {
+    validate_document(&document)?;
+    state.lean.package_for(document).await
+}
+
+/// Describe a Mathlib setup for the open project (runs nothing).
+#[tauri::command]
+pub async fn lean_setup_plan(
+    state: State<'_, AppState>,
+    request: LeanSetupRequest,
+) -> Result<LeanSetupPlan, LeanError> {
+    validate_request(&request)?;
+    let lean = state.lean.clone();
+    tauri::async_runtime::spawn_blocking(move || lean.setup_plan(&request))
+        .await
+        .map_err(|e| LeanError::new("internal.task", e.to_string()))?
+}
+
+/// Start a reviewed plan as the user's explicit action. Rust builds the plan
+/// again and refuses one that changed (`lean.setup.planStale`).
+#[tauri::command]
+pub async fn lean_setup_start(state: State<'_, AppState>, plan: LeanSetupPlan) -> Result<LeanSetupStatus, LeanError> {
+    validate_request(&plan.request)?;
+    let lean = state.lean.clone();
+    tauri::async_runtime::spawn_blocking(move || lean.setup_start(&plan))
+        .await
+        .map_err(|e| LeanError::new("internal.task", e.to_string()))?
+}
+
+/// Cancel a running setup (false when it is not running).
+#[tauri::command]
+pub async fn lean_setup_cancel(state: State<'_, AppState>, setup_id: String) -> Result<bool, LeanError> {
+    Ok(state.lean.setup_cancel(&setup_id))
+}
+
+/// The running Mathlib setup, else the last finished one of this session.
+#[tauri::command]
+pub async fn lean_setup_status(state: State<'_, AppState>) -> Result<Option<LeanSetupStatus>, LeanError> {
+    Ok(state.lean.setup_status())
+}
+
+/// The user's explicit choice: check the document's package without
+/// Mathlib's prebuilt cache (Lake builds Mathlib from source), this session.
+#[tauri::command]
+pub async fn lean_allow_local_build(state: State<'_, AppState>, document: DocumentId) -> Result<(), LeanError> {
+    validate_document(&document)?;
+    state.lean.allow_local_build(document).await
+}
+
+/// Forward Mathlib setup events to the webview in order.
+pub fn forward_setup_events(app: AppHandle) {
+    let mut rx = app.state::<AppState>().lean.subscribe_setup();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let _ = app.emit(LEAN_SETUP_EVENT, &event);
+                }
+                Err(RecvError::Lagged(_)) => {
+                    let _ = app.emit(LEAN_SETUP_RESYNC, ());
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 /// Forward Lean events to the webview in order.

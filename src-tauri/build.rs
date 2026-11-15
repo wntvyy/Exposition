@@ -197,6 +197,14 @@ const COMMANDS: &[&str] = &[
     "research_setup_start",
     "research_setup_cancel",
     "research_setup_status",
+    // Mathlib lane: Lake package inspection and guided Mathlib setup (src/lean.rs).
+    "lean_package_inspect",
+    "lean_package_for",
+    "lean_setup_plan",
+    "lean_setup_start",
+    "lean_setup_cancel",
+    "lean_setup_status",
+    "lean_allow_local_build",
     "research_selection_get",
     "research_selection_set",
 ];

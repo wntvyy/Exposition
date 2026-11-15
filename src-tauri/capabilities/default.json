@@ -186,6 +186,13 @@
     "allow-research-setup-start",
     "allow-research-setup-cancel",
     "allow-research-setup-status",
+    "allow-lean-package-inspect",
+    "allow-lean-package-for",
+    "allow-lean-setup-plan",
+    "allow-lean-setup-start",
+    "allow-lean-setup-cancel",
+    "allow-lean-setup-status",
+    "allow-lean-allow-local-build",
     "allow-research-selection-get",
     "allow-research-selection-set"
   ]
