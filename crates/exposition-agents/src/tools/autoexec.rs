@@ -10,7 +10,9 @@
 //!   reads the nearest configuration, may clone the packages it requires and
 //!   elaborate their `lakefile.lean`, and elan may download the toolchain it
 //!   names). Putting such text into the project is native execution: the
-//!   gate requires native-code authority as well as change authority (D7).
+//!   gate requires native-code authority as well as change authority (D7),
+//!   whether or not the folder is trusted yet — trust only decides whether
+//!   Lean and Lake run it now or once the folder is trusted.
 //! - **Protected folders** ([`protected`]): `.git/` (hooks and configuration
 //!   run in the user's tools), `.lake/` (packages and build products Lake
 //!   loads), and the project environments `.venv/` and `venv/` (environment
@@ -57,27 +59,46 @@ fn auto_executed_name(name: &str) -> Option<AutoExec> {
 }
 
 impl AutoExec {
-    /// What happens to such text, for refusals and approval cards.
-    pub fn consequence(self) -> &'static str {
-        match self {
-            AutoExec::LeanSource => {
+    /// What happens to such text, for refusals and approval cards; in a
+    /// folder that is not trusted yet, nothing runs now but it runs once the
+    /// folder is trusted.
+    pub fn consequence(self, trusted: bool) -> &'static str {
+        match (self, trusted) {
+            (AutoExec::LeanSource, true) => {
                 "Lean elaborates the text of an open Lean file natively as soon as it changes: code in it (for \
                  example #eval) runs on this computer with your account's privileges."
             }
-            AutoExec::LakeConfig => {
+            (AutoExec::LeanSource, false) => {
+                "Lean elaborates the text of Lean files natively. This folder is not trusted yet, so nothing runs \
+                 now; once it is trusted, code in this text (for example #eval) runs on this computer with your \
+                 account's privileges."
+            }
+            (AutoExec::LakeConfig, true) => {
                 "Lake reads Lean and Lake configuration natively when the Lean server starts for a Lean file in that \
                  folder: it may download the packages it names and run their build code, and elan may download the \
                  toolchain it names, with your account's privileges."
+            }
+            (AutoExec::LakeConfig, false) => {
+                "Lake reads Lean and Lake configuration natively. This folder is not trusted yet, so nothing runs \
+                 now; once it is trusted, Lake may download the packages it names and run their build code, and \
+                 elan may download the toolchain it names, with your account's privileges."
             }
         }
     }
 
     /// The short reason an approval states.
-    pub fn reason(self) -> &'static str {
-        match self {
-            AutoExec::LeanSource => "Lean elaborates this file's text natively as soon as it changes.",
-            AutoExec::LakeConfig => {
+    pub fn reason(self, trusted: bool) -> &'static str {
+        match (self, trusted) {
+            (AutoExec::LeanSource, true) => "Lean elaborates this file's text natively as soon as it changes.",
+            (AutoExec::LeanSource, false) => {
+                "Lean will elaborate this file's text natively once the folder is trusted."
+            }
+            (AutoExec::LakeConfig, true) => {
                 "Lake acts on this configuration natively (it may download and run packages and toolchains)."
+            }
+            (AutoExec::LakeConfig, false) => {
+                "Lake will act on this configuration natively once the folder is trusted (it may download and run \
+                 packages and toolchains)."
             }
         }
     }

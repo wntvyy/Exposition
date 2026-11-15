@@ -404,10 +404,12 @@ fn check_path(env: &ToolEnv<'_>, raw: &str, path_use: PathUse) -> Result<(), Too
 /// 7. files the application executes automatically ([`super::autoexec`]):
 ///    a change or copy that puts Lean source or Lean/Lake configuration
 ///    (`lakefile.lean`, `lakefile.toml`, `lean-toolchain`,
-///    `lake-manifest.json`) into a trusted folder is native execution too
-///    (the Lean server elaborates Lean text; Lake may download and run
-///    packages, elan may download toolchains): it needs native authority as
-///    well as change authority (D7). Protected folders (`.git`, `.lake`,
+///    `lake-manifest.json`) into the project is native execution too (the
+///    Lean server elaborates Lean text; Lake may download and run packages,
+///    elan may download toolchains): it needs native authority as well as
+///    change authority (D7), whether or not the folder is trusted yet — trust
+///    decides only whether it runs now or once the folder is trusted, and
+///    this authority does not itself require trust. Protected folders (`.git`, `.lake`,
 ///    `.venv`, `venv`, at any depth) are never written, created, copied
 ///    into, or deleted (rule 3, `agents.protectedTarget`);
 /// 8. authority: Ask — the task's settings and its allowances; Auto — the
@@ -692,9 +694,9 @@ fn describe_setup(plan: &exposition_research::setup::SetupPlan) -> (String, Stri
 /// the project: an edited, created, or inserted file named as a Lean source
 /// or Lean/Lake configuration (requested or resolved name), or such a file
 /// anywhere in a copied tree (bounded; a tree too large to inspect counts as
-/// configuration). Only in a folder trusted for native execution, where the
-/// Lean service runs the toolchain (and Lake). A copy that would create a
-/// protected folder is refused here, whatever the trust.
+/// configuration). In any folder, trusted or not: the Lean service runs the
+/// toolchain (and Lake) on such text as soon as the folder is trusted. A
+/// copy that would create a protected folder is refused here.
 fn auto_exec_target(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Option<AutoExec>, ToolOutput> {
     let root = env.files.root();
     let found = match call {
@@ -728,7 +730,7 @@ fn auto_exec_target(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Option<AutoExe
         }
         _ => None,
     };
-    Ok(found.filter(|_| env.services.native_refusal(root).is_none()))
+    Ok(found)
 }
 
 /// The edited, created, or inserted path's auto-executed kind (requested or resolved name).
@@ -738,9 +740,10 @@ fn path_kind(env: &ToolEnv<'_>, raw: &str) -> Option<AutoExec> {
     autoexec::auto_executed(&requested).max(resolved.as_ref().and_then(autoexec::auto_executed))
 }
 
-/// D7: the task's contract for a change that puts auto-executed content in place.
-fn lean_contract(spec: &TaskSpec, kind: AutoExec) -> Result<(), ToolOutput> {
-    let consequence = kind.consequence();
+/// D7: the task's contract for a change that puts auto-executed content in
+/// place (`trusted`: whether the folder is trusted now, for the wording).
+fn lean_contract(spec: &TaskSpec, kind: AutoExec, trusted: bool) -> Result<(), ToolOutput> {
+    let consequence = kind.consequence(trusted);
     match spec.execution {
         ExecutionMode::Disabled => Err(refusal(
             codes::EXECUTION_DISABLED,
@@ -761,8 +764,10 @@ fn lean_contract(spec: &TaskSpec, kind: AutoExec) -> Result<(), ToolOutput> {
 }
 
 /// D7: the native authority such a change needs besides change authority.
-fn lean_authority(env: &ToolEnv<'_>, kind: AutoExec, asks: &mut Asks, covered: &mut Covered) {
-    let reason = kind.reason();
+/// It does not require trust (nothing runs now in an untrusted folder; a
+/// native launch itself still needs trust).
+fn lean_authority(env: &ToolEnv<'_>, kind: AutoExec, trusted: bool, asks: &mut Asks, covered: &mut Covered) {
+    let reason = kind.reason(trusted);
     match (env.spec.approval_mode, env.authority.project) {
         (ApprovalMode::Auto, Some(p)) if p.code == CodeAccess::Native => covered.project = true,
         (ApprovalMode::Auto, project) => {
@@ -893,8 +898,9 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     // D7: content the application executes automatically (Lean text, Lake
     // configuration) needs native authority too.
     let auto = if effects.changes { auto_exec_target(call, env)? } else { None };
+    let trusted = auto.is_some() && env.services.native_refusal(root).is_none();
     if let Some(kind) = auto {
-        lean_contract(spec, kind)?;
+        lean_contract(spec, kind, trusted)?;
     }
     // Authority: who covers each part, and what asks the user.
     let mut asks = Asks::default();
@@ -903,7 +909,7 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         change_authority(env, &mut asks, &mut covered);
     }
     if let Some(kind) = auto {
-        lean_authority(env, kind, &mut asks, &mut covered);
+        lean_authority(env, kind, trusted, &mut asks, &mut covered);
     }
     let policy = match effects.launch {
         Launch::None => None,
@@ -989,7 +995,7 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         detail.push_str("\n\nRuns natively with your account's privileges.");
     }
     if let Some(kind) = auto {
-        detail.push_str(&format!("\n\n{}", kind.consequence()));
+        detail.push_str(&format!("\n\n{}", kind.consequence(trusted)));
     }
     authorization.insertion = insertion.map(|(planned, _)| planned);
     authorization.approved = Some(detail.clone());
