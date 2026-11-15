@@ -12,6 +12,7 @@
 //! tool may act is decided per call by the task's scope, permission profile,
 //! execution mode, consent, and budgets — never by model or project text.
 
+pub mod autoexec;
 pub mod exec;
 pub mod execution;
 pub mod scope;

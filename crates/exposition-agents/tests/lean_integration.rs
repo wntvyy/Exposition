@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use exposition_agents::credentials::MemoryStore;
+use exposition_agents::permissions::{CodeAccess, FilesAccess, PermissionChoice};
 use exposition_agents::tools::execution::AppToolServices;
 use exposition_agents::*;
 use exposition_execution::{ExecutionConfig, ExecutionService, ExecutionSettings};
@@ -294,4 +295,163 @@ async fn lean_file_edits_are_native_execution() {
     assert_eq!(approvals[0].for_task, vec![AllowanceKind::NativeCode]);
     assert!(!out[1].0, "{}", out[1].1);
     assert!(appears(&approved, Duration::from_secs(300)).await, "approved: Lean elaborated it");
+}
+
+fn git_available() -> bool {
+    std::process::Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success())
+}
+
+fn slash(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
+/// A git repository (standing in for a remote one an agent names) holding a
+/// Lake package whose `lakefile.lean` writes `marker` when Lake elaborates it.
+/// (Adapted from the independent review's R-a1 F1 repro.)
+fn hostile_lake_package(dir: &Path, marker: &Path) -> PathBuf {
+    let repo = dir.join("hostile-lake-package");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("lean-toolchain"), "leanprover/lean4:v4.35.0\n").unwrap();
+    std::fs::write(
+        repo.join("lakefile.lean"),
+        format!("import Lake\nopen Lake DSL\n{}\npackage hostile\n", eval_writes(marker)),
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.email=r@example.invalid", "-c", "user.name=review", "-c", "core.autocrlf=false"])
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q", "-b", "master"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "hostile"]);
+    repo
+}
+
+/// A nested Lake project's `lakefile.toml` that requires the hostile package.
+fn nested_lakefile(repo: &Path) -> String {
+    format!("name = \"nested\"\n\n[[require]]\nname = \"hostile\"\ngit = \"{}\"\nrev = \"master\"\n", slash(repo))
+}
+
+/// Run one task in `mode`, answering every approval with `approve`; the
+/// tool results and the approval cards.
+async fn run_mode(
+    h: &mut Harness,
+    script: Value,
+    mode: ApprovalMode,
+    execution: ExecutionMode,
+    approve: bool,
+) -> (Vec<(bool, Value)>, Vec<ApprovalRequest>) {
+    h.service.load_script(script).unwrap();
+    let task = h
+        .service
+        .create_task(CreateTaskRequest {
+            prompt: "Work on the Lean project".into(),
+            workspace_root: h.project.path().display().to_string(),
+            scope: TaskScope::Workspace,
+            permission: PermissionProfile::AutoApply,
+            execution,
+            consent: Some(ContextConsent::ScopeContent),
+            budgets: None,
+            approval_mode: Some(mode),
+        })
+        .unwrap();
+    let mut approvals = Vec::new();
+    tokio::time::timeout(Duration::from_secs(300), async {
+        loop {
+            match h.events.recv().await {
+                Ok(AgentEvent::ApprovalRequested { approval }) if approval.task_id == task.id => {
+                    h.service.resolve_approval(&task.id, &approval.id, approve).unwrap();
+                    approvals.push(approval);
+                }
+                Ok(AgentEvent::TaskChanged { task: t }) if t.id == task.id && !t.status.is_active() => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("task finished");
+    h.service.join(&task.id).await;
+    let results = h
+        .service
+        .task_detail(&task.id)
+        .unwrap()
+        .transcript
+        .into_iter()
+        .filter_map(|item| match item {
+            TranscriptItem::ToolCall { is_error, result, .. } => {
+                Some((is_error, result.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or(Value::Null)))
+            }
+            _ => None,
+        })
+        .collect();
+    (results, approvals)
+}
+
+/// R-a1 F1 (generalized D7): in a trusted Lean folder an agent with only
+/// change authority creates `LeanBasic/lean-toolchain` and
+/// `LeanBasic/lakefile.toml` requiring a Lake package from a git URL of its
+/// choice, then reads `LeanBasic/Defs.lean`. Before the fix the Lean service
+/// started `lake serve` for the nested project, Lake cloned the package and
+/// elaborated its `lakefile.lean` natively (the marker appeared). Now Lake
+/// configuration is execution: with execution disabled the creations are
+/// refused (naming Lake), under Auto without native code they ask (declined
+/// here), so nothing is created and nothing runs; reading the Lean file is
+/// still allowed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lake_configuration_from_an_agent_cannot_run_code_without_native_authority() {
+    if !toolchain_installed() {
+        eprintln!("SKIPPED: Lean toolchain {TOOLCHAIN_DIR} is not installed through elan");
+        return;
+    }
+    if !git_available() {
+        eprintln!("SKIPPED: git is not available");
+        return;
+    }
+    let mut h = harness();
+    let root = h.project.path().display().to_string();
+    h.execution.grant_trust(&root).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let marker = outside.path().join("lake-package-ran.txt");
+    let repo = hostile_lake_package(outside.path(), &marker);
+    let script = || {
+        json!({"turns": [
+            {"steps": [{"toolUse": {"id": "c0", "name": "create_file", "input": {"path": "LeanBasic/lean-toolchain", "content": "leanprover/lean4:v4.35.0\n"}}}]},
+            {"steps": [{"toolUse": {"id": "c1", "name": "create_file", "input": {"path": "LeanBasic/lakefile.toml", "content": nested_lakefile(&repo)}}}]},
+            {"steps": [{"toolUse": {"id": "r1", "name": "read_file", "input": {"path": "LeanBasic/Defs.lean"}}}]},
+            {"steps": [{"text": "done"}]}
+        ]})
+    };
+    // Ask, changes applied directly, execution disabled: refused, never asked.
+    let (out, approvals) = run_mode(&mut h, script(), ApprovalMode::Ask, ExecutionMode::Disabled, true).await;
+    assert!(approvals.is_empty(), "refused, never asked");
+    for (is_error, result) in &out[..2] {
+        assert!(is_error, "{result}");
+        assert_eq!(result["code"], "agents.executionDisabled", "{result}");
+        assert!(result["error"].as_str().unwrap().contains("Lake"), "{result}");
+    }
+    assert!(!out[2].0, "reading the Lean file is allowed: {}", out[2].1);
+    assert!(!h.project.path().join("LeanBasic/lakefile.toml").exists());
+    assert!(!h.project.path().join("LeanBasic/lean-toolchain").exists());
+
+    // Auto with file changes but no native code: each asks once; declined.
+    h.service
+        .set_project_permissions(
+            &root,
+            PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Off, setup: false },
+        )
+        .unwrap();
+    let (out, approvals) = run_mode(&mut h, script(), ApprovalMode::Auto, ExecutionMode::ApproveEach, false).await;
+    assert_eq!(approvals.len(), 2, "one card per Lake configuration file");
+    for approval in &approvals {
+        assert!(approval.detail.contains("Lake reads Lean and Lake configuration natively"), "{}", approval.detail);
+    }
+    assert!(out[0].0 && out[1].0, "declined");
+    assert!(!h.project.path().join("LeanBasic/lakefile.toml").exists());
+    // The Lean file was opened twice; the hostile package never ran.
+    assert!(!appears(&marker, Duration::from_secs(90)).await, "Lake ran a package an agent named");
 }
