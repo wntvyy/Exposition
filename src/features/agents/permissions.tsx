@@ -160,8 +160,7 @@ export function AutoProfile({ permissions }: { permissions: ReturnType<typeof us
         </p>
       ) : (
         <p className="ui-meta" data-testid="agents-permissions-summary">
-          This project has no Auto permissions yet. Covered actions will proceed without asking; anything beyond them asks
-          once.
+          This project has no Auto permissions yet. Choose them before starting an Auto task.
         </p>
       )}
       {editing ? (
