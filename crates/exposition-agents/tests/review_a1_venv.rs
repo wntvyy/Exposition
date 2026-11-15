@@ -414,6 +414,8 @@ async fn review_a1_f8_agent_rprofile_runs_when_the_user_starts_an_r_session() {
         eprintln!("refused: {}", out[0].1);
         return;
     }
+    // The Research page follows the open project (as `research::sync_workspace` does in the app).
+    h.research.set_workspace(&std::fs::canonicalize(h.project.path()).unwrap(), false).unwrap();
     let report = h.research.environments(true).await.unwrap();
     let Some(r) = report
         .runtimes
