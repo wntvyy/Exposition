@@ -435,7 +435,12 @@ export default async function reviewA1({ launchApp, artifactsDir, assert }) {
         note("C-host-file-via-windows-path-mnt-admin-share-not-readable", [r.winpath, r.mntc, r.adminShare, r.hostmnt].every(noRead), [r.winpath, r.mntc, r.adminShare, r.hostmnt], true);
         note("C-project-not-writable", r.projectWrite !== "WROTE" && !existsSync(join(root, "probe-write.txt")), r.projectWrite, true);
         note("C-no-network", r.dns !== "RESOLVED" && r.tcp !== "CONNECTED", { dns: r.dns, tcp: r.tcp }, true);
-        const leaky = r.env.filter((k) => /KEY|TOKEN|SECRET|PASS|ANTHROPIC|EXPOSITION_DATA|WEBVIEW2|USERPROFILE|APPDATA/i.test(k));
+        // GPG_KEY / PYTHON_SHA256 are the official python image's own ENV (the public release-signing key id
+        // and the source checksum), not host variables.
+        const imageDefined = new Set(["GPG_KEY", "PYTHON_SHA256", "PYTHON_VERSION", "LANG", "PATH", "HOME", "HOSTNAME", "PWD", "TMPDIR"]);
+        const leaky = r.env.filter(
+          (k) => !imageDefined.has(k) && /KEY|TOKEN|SECRET|PASS|ANTHROPIC|EXPOSITION|WEBVIEW2|USERPROFILE|APPDATA|CLAUDE|AWS|AZURE/i.test(k),
+        );
         note("C-no-host-or-secret-environment", leaky.length === 0, { env: r.env }, true);
         note("C-no-docker-socket", r.dockerSocket.length === 0, r.dockerSocket, true);
         note("C-non-root", r.uid !== 0, r.uid, true);
