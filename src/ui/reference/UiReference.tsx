@@ -50,6 +50,7 @@ import {
   KeyValueList,
   ListRow,
   LoadingState,
+  Markdown,
   Menu,
   MenuItem,
   MenuSection,
@@ -62,6 +63,7 @@ import {
   PanelHeader,
   ProgressBar,
   ResizeHandle,
+  ResponseSurface,
   SearchField,
   Section,
   SegmentedControl,
@@ -84,7 +86,9 @@ import {
   Tree,
   TreeItem,
   UnavailableState,
+  type CodeRunAction,
   type EditorTabItem,
+  type ResponseVariant,
   type Status,
 } from "../components";
 import { setThemePreference, useTheme, type ThemePreference } from "../theme";
@@ -230,6 +234,98 @@ const sampleInputs: SampleInput[] = [
   { input: "Observations (Dataset)", path: "data/obs.csv", size: "16 B", version: "Current at review" },
   { input: "Parameters (Table)", path: "data/params.csv", size: "1.2 KiB", version: "Pinned revision 3" },
 ];
+
+/** The representative response shown in every treatment (also streamed by the a1-responses e2e scenario). */
+export const SAMPLE_RESPONSE = [
+  "The series converges because the terms decay like $1/n^2$; see the [Basel problem](https://en.wikipedia.org/wiki/Basel_problem) for the closed form. In short, **the sum is finite** and *the partial sums increase monotonically*.",
+  "",
+  "$$",
+  String.raw`\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}`,
+  "$$",
+  "",
+  "A quick numerical check in Python:",
+  "",
+  "```python",
+  "import math",
+  "",
+  "partial = sum(1 / n**2 for n in range(1, 10_001))",
+  "print(partial, math.pi**2 / 6)  # 1.6448340718 1.6449340668",
+  "```",
+  "",
+  "What the check shows:",
+  "",
+  String.raw`- the partial sum after $10^4$ terms is within $10^{-4}$ of $\pi^2/6$;`,
+  "- the error shrinks like $1/N$;",
+  "- no term is negative, so the order of summation does not matter.",
+  "",
+  "| $N$ | Partial sum | Error |",
+  "|---:|---:|---:|",
+  "| 10 | 1.549768 | 0.095166 |",
+  "| 100 | 1.634984 | 0.009950 |",
+  "| 10 000 | 1.644834 | 0.000100 |",
+].join("\n");
+
+const RESPONSE_TREATMENTS: { variant: ResponseVariant; label: string }[] = [
+  { variant: "band", label: "A — Tinted band" },
+  { variant: "inset", label: "B — Inset block" },
+  { variant: "document", label: "C — Document surface" },
+];
+
+const sampleRun: CodeRunAction = {
+  label: "Run in Research",
+  run: () => notify({ tone: "info", title: "Sample only", body: "In a transcript, Run in Research hands the code to your research session." }),
+};
+
+function SampleResponse({ variant }: { variant: ResponseVariant }) {
+  return (
+    <ResponseSurface variant={variant} label="Agent" copyText={SAMPLE_RESPONSE}>
+      <Markdown source={SAMPLE_RESPONSE} runAction={sampleRun} />
+    </ResponseSurface>
+  );
+}
+
+/** A pane as the transcript sees it: its backdrop and the pane inset (the band reaches the edges). */
+function ResponsePane({ variant, region }: { variant: ResponseVariant; region: boolean }) {
+  return (
+    <div
+      data-testid={`ref-response-${variant}-${region ? "panel" : "page"}`}
+      style={{
+        padding: "var(--space-3) var(--pane-inset)",
+        border: "var(--border-width) solid var(--color-border)",
+        borderRadius: "var(--radius-md)",
+        background: region ? "var(--color-surface-sunken)" : "var(--color-surface)",
+        overflow: "hidden",
+      }}
+    >
+      <div style={variant === "band" ? { marginInline: "calc(-1 * var(--pane-inset))" } : undefined}>
+        <SampleResponse variant={variant} />
+      </div>
+    </div>
+  );
+}
+
+function AgentResponseSpecimens() {
+  return (
+    <>
+      {RESPONSE_TREATMENTS.map(({ variant, label }) => (
+        <Specimen key={`page-${variant}`} label={`${label} · page`} wide>
+          <div style={{ width: "100%" }}>
+            <ResponsePane variant={variant} region={false} />
+          </div>
+        </Specimen>
+      ))}
+      <StateSizeProvider value="compact">
+        {RESPONSE_TREATMENTS.map(({ variant, label }) => (
+          <Specimen key={`panel-${variant}`} label={`${label} · panel`}>
+            <div style={{ width: "100%", maxWidth: 400 }}>
+              <ResponsePane variant={variant} region />
+            </div>
+          </Specimen>
+        ))}
+      </StateSizeProvider>
+    </>
+  );
+}
 
 export function UiReference() {
   const [section, setSection] = useState<"project" | "math">("project");
@@ -737,6 +833,13 @@ export function UiReference() {
             Danger
           </Button>
         </Specimen>
+      </RefSection>
+
+      <RefSection
+        title="Agent responses"
+        description="One response in the three treatments under review (A1): A tinted band across the pane, B tinted block on the pane inset, C document surface. Page width, then the narrow Agent panel. Sample content."
+      >
+        <AgentResponseSpecimens />
       </RefSection>
 
       <RefSection

@@ -1,0 +1,43 @@
+/* Transcript messages (Transcript.tsx). The agent's responses use the shared
+   ResponseSurface + Markdown (src/ui/components/Markdown.css); this file only
+   places them in the transcript. Tokens only. */
+
+.agents-msg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  min-width: 0;
+}
+
+/* Plain-text messages: the user's own text and reasoning summaries. */
+.agents-msg__text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The user's message is plain 14px prose under its label; only the agent's
+   response carries a surface, so the two never compete. */
+.agents-msg[data-role="user"] {
+  padding-top: var(--space-1);
+}
+
+.agents-msg[data-role="user"] .agents-msg__text {
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-normal);
+}
+
+/* The streaming draft's reasoning disclosure sits above the response text. */
+.agents-msg .ui-response .agents-disclosure + .ui-markdown {
+  margin-top: var(--space-1-5);
+}
+
+/* Treatment A (band, under review): the transcript reaches the pane edges so
+   the band spans the pane; every other entry keeps the pane inset. */
+.agents-transcript:has(> .agents-msg[data-variant="band"]) {
+  margin-inline: calc(-1 * var(--pane-inset));
+}
+
+.agents-transcript:has(> .agents-msg[data-variant="band"]) > :not(.agents-msg[data-variant="band"]) {
+  margin-inline: var(--pane-inset);
+}
