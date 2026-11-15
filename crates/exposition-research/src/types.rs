@@ -45,8 +45,9 @@ pub enum KernelChoice {
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Availability {
     Available,
-    /// Not usable; `guidance` tells the user exactly what to set up. Exposition
-    /// never installs runtimes or packages itself.
+    /// Not usable; `guidance` tells the user exactly what to set up (see also
+    /// [`RuntimeEnvironment::setup`]). Exposition never installs runtimes, and
+    /// installs packages only into a project environment on an explicit request.
     Unavailable {
         reason: String,
         guidance: String,
@@ -75,6 +76,47 @@ pub struct RuntimeEnvironment {
     /// environment (e.g. `R_LIBS_USER`, `JULIA_DEPOT_PATH`), from discovery.
     pub kernel_environment: BTreeMap<String, String>,
     pub availability: Availability,
+    /// How to make an unavailable environment usable (absent when it is ready).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub setup: Option<SetupHint>,
+    /// The project environment folder (`.venv`, `venv`) this interpreter
+    /// belongs to; absent for interpreters installed for the computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_folder: Option<String>,
+}
+
+/// What Exposition can do in the project to make an environment usable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum SetupAction {
+    /// Create the project environment `.venv` from a discovered Python
+    /// (`SetupRequest::CreateEnvironment`); also replaces an unfinished one
+    /// Exposition created.
+    CreateEnvironment,
+    /// Install the kernel packages into this project environment
+    /// (`SetupRequest::InstallPackages`).
+    InstallPackages,
+}
+
+/// Structured setup guidance for an unavailable environment.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupHint {
+    /// The runtime itself is missing: its official download page.
+    pub download_url: Option<String>,
+    /// What Exposition can do itself, in the project.
+    pub action: Option<SetupAction>,
+    /// Commands the person runs in `commands_for` (R/Julia kernel packages;
+    /// Exposition does not run them).
+    pub commands: Vec<String>,
+    /// The program the commands are typed into ("R", "Julia").
+    pub commands_for: Option<String>,
+    /// The commands install for the user account, not only this project.
+    pub user_wide: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -10,6 +10,11 @@
 //!   project (see [`store`] for the layout); figures and tables are artifacts
 //!   referenced by path, never copied repeatedly through IPC.
 //!
+//! * [`setup`] plans and runs guided environment setup: a project-local
+//!   Python `.venv` and validated package installs, as cancellable trusted
+//!   project jobs (nothing is installed globally). The environment chosen for
+//!   each project is remembered app-locally.
+//!
 //! * [`sandbox`] runs workflow-owned Python batches ([`batch::BatchRunner`]):
 //!   restricted (Docker, scoped working copy) or trusted native, with
 //!   controlled output registration.
@@ -29,7 +34,9 @@ pub mod protocol;
 pub mod records;
 mod runs;
 pub mod sandbox;
+mod selection;
 mod service;
+pub mod setup;
 pub mod store;
 pub mod types;
 

@@ -2,6 +2,7 @@
 import type { Availability } from "./Availability";
 import type { KernelChoice } from "./KernelChoice";
 import type { RuntimeLanguage } from "./RuntimeLanguage";
+import type { SetupHint } from "./SetupHint";
 import type { ToolVersion } from "./ToolVersion";
 
 /**
@@ -32,4 +33,13 @@ packages: Array<ToolVersion>,
  * Library locations the kernel needs under the cleaned research
  * environment (e.g. `R_LIBS_USER`, `JULIA_DEPOT_PATH`), from discovery.
  */
-kernelEnvironment: { [key in string]: string }, availability: Availability, };
+kernelEnvironment: { [key in string]: string }, availability: Availability, 
+/**
+ * How to make an unavailable environment usable (absent when it is ready).
+ */
+setup?: SetupHint, 
+/**
+ * The project environment folder (`.venv`, `venv`) this interpreter
+ * belongs to; absent for interpreters installed for the computer.
+ */
+projectFolder?: string, };

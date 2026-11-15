@@ -149,6 +149,10 @@ struct Shared {
     /// Workflow batch runs executing now (their manifests read "running"
     /// legitimately and are not settled as orphans).
     batches: Mutex<HashSet<String>>,
+    /// Guided environment setup (one run at a time) and its records.
+    setup: crate::setup::SetupSlot,
+    /// The environment chosen for each project (app-local).
+    selections: crate::selection::SelectionStore,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -170,8 +174,12 @@ impl Shared {
 impl ResearchService {
     pub fn new(config: ResearchConfig) -> Self {
         let (events, _) = broadcast::channel(8192);
+        let setup = crate::setup::SetupSlot::new(&config.data_dir);
+        let selections = crate::selection::SelectionStore::new(&config.data_dir);
         Self {
             shared: Arc::new(Shared {
+                setup,
+                selections,
                 config,
                 events,
                 workspace: Mutex::new(None),
@@ -208,6 +216,7 @@ impl ResearchService {
             .map_err(|e| ResearchError::InvalidWorkspace(format!("the workspace cannot be used for execution: {e}")))?;
         let previous = lock(&self.shared.workspace).replace(Workspace { root: canonical.clone(), trusted });
         if previous.as_ref().is_none_or(|p| p.root != canonical) {
+            self.shared.setup.cancel_outside(Some(&canonical), self.shared.config.launcher.as_ref());
             self.detach_sessions_outside(
                 Some(&canonical),
                 "The project folder changed; this session's kernel was stopped.",
@@ -223,6 +232,7 @@ impl ResearchService {
     pub fn clear_workspace(&self) {
         let previous = lock(&self.shared.workspace).take();
         if previous.is_some() {
+            self.shared.setup.cancel_outside(None, self.shared.config.launcher.as_ref());
             self.detach_sessions_outside(None, "The project folder was closed; this session's kernel was stopped.");
             *lock(&self.shared.environments) = None;
         }
@@ -333,6 +343,39 @@ impl ResearchService {
     /// The application data directory research uses.
     pub(crate) fn data_dir(&self) -> &Path {
         &self.shared.config.data_dir
+    }
+
+    /// Discover again, ignoring the cache (blocking callers: environment setup).
+    pub(crate) fn rediscover_blocking(&self) -> Result<EnvironmentReport, ResearchError> {
+        *lock(&self.shared.environments) = None;
+        self.environments_blocking()
+    }
+
+    pub(crate) fn launcher(&self) -> Arc<dyn KernelProcessLauncher> {
+        self.shared.config.launcher.clone()
+    }
+
+    pub(crate) fn setup_slot(&self) -> &crate::setup::SetupSlot {
+        &self.shared.setup
+    }
+
+    pub(crate) fn selections(&self) -> &crate::selection::SelectionStore {
+        &self.shared.selections
+    }
+
+    /// Another handle on the same service (for worker threads).
+    pub(crate) fn handle(&self) -> ResearchService {
+        ResearchService { shared: self.shared.clone() }
+    }
+
+    /// Tests: use `report` as the discovery result for the open project.
+    #[cfg(test)]
+    pub(crate) fn seed_environments(&self, report: EnvironmentReport) {
+        let key = lock(&self.shared.workspace).clone().map(|w| {
+            let trusted = self.shared.config.launcher.workspace_trusted(&w.root).unwrap_or(w.trusted);
+            (w.root, trusted)
+        });
+        *lock(&self.shared.environments) = Some((key, report));
     }
 
     fn environment(&self, id: &str) -> Result<RuntimeEnvironment, ResearchError> {
@@ -1922,6 +1965,8 @@ mod tests {
                 packages: Vec::new(),
                 kernel_environment: BTreeMap::new(),
                 availability: Availability::Available,
+                setup: None,
+                project_folder: None,
             };
             let root = service.workspace_root().unwrap();
             let session = Session::new(&service.shared, env, SessionOwner::User, root);
