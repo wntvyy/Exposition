@@ -192,6 +192,34 @@ pub enum AuthorizedBy {
     Approved { for_task: bool },
 }
 
+/// How an agent's run was authorized, in the shape a run's provenance
+/// records (`principal` is always `agent`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAuthorization {
+    pub principal: String,
+    pub task_id: String,
+    pub mode: ApprovalMode,
+    /// `approved`, `taskAllowance`, `projectPermissions`, or `taskSettings`
+    /// (an Ask task whose settings allow it, e.g. a restricted run).
+    pub basis: String,
+    /// The project's permission version (Auto, `projectPermissions`).
+    pub permissions_version: Option<u64>,
+}
+
+impl RunAuthorization {
+    pub fn of(task: &TaskId, mode: ApprovalMode, by: &AuthorizedBy) -> Self {
+        let (basis, permissions_version) = match by {
+            AuthorizedBy::Approved { .. } => ("approved", None),
+            AuthorizedBy::TaskAllowance { .. } => ("taskAllowance", None),
+            AuthorizedBy::ProjectPermissions { version } => ("projectPermissions", Some(*version)),
+            AuthorizedBy::TaskSettings | AuthorizedBy::NotRequired => ("taskSettings", None),
+        };
+        Self { principal: "agent".into(), task_id: task.0.clone(), mode, basis: basis.into(), permissions_version }
+    }
+}
+
 /// An allowance the user granted a task, as the task view lists it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]

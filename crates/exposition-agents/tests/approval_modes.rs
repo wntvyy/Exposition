@@ -23,7 +23,7 @@ use exposition_agents::store::Store;
 use exposition_agents::tools::exec::{self, Allowances, Authority, Gate, SeenTexts, ToolEnv, codes};
 use exposition_agents::tools::services::{
     BuildRequest, CommandRequest, LeanRequest, ProjectOperations, PythonRequest, ServiceError, ServiceKind,
-    ToolServices,
+    SetupInstallRequest, ToolServices,
 };
 use exposition_agents::tools::{self, ToolCall};
 use exposition_agents::workspace::{LocalProjectFiles, ProjectFiles};
@@ -31,6 +31,7 @@ use exposition_agents::*;
 use exposition_core::artifact::{ArtifactId, ArtifactKind, ArtifactRecord};
 use exposition_core::job::ExecutionPolicy;
 use exposition_core::path::WorkspacePath;
+use exposition_research::setup::{SetupPlan, SetupRequest, SetupStep};
 use exposition_workspace::DocumentService;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -87,6 +88,9 @@ struct Recorder {
     container: AtomicBool,
     consequential: AtomicBool,
     slow_python: AtomicBool,
+    slow_setup: AtomicBool,
+    /// How each Python run was authorized (as its provenance would record it).
+    runs: Mutex<Vec<RunAuthorization>>,
 }
 
 impl Recorder {
@@ -97,6 +101,8 @@ impl Recorder {
             container: AtomicBool::new(true),
             consequential: AtomicBool::new(false),
             slow_python: AtomicBool::new(false),
+            slow_setup: AtomicBool::new(false),
+            runs: Mutex::new(Vec::new()),
         })
     }
     fn take(&self) -> Vec<Call> {
@@ -125,6 +131,7 @@ impl ToolServices for Recorder {
     }
     async fn run_python(&self, request: PythonRequest, cancel: CancellationToken) -> Result<Value, ServiceError> {
         self.record("run_python", Some(request.policy.clone()));
+        self.runs.lock().unwrap().push(request.authorization.clone());
         if self.slow_python.load(Ordering::SeqCst) {
             cancel.cancelled().await;
             return Err(ServiceError::Canceled);
@@ -144,6 +151,59 @@ impl ToolServices for Recorder {
     }
     fn project_operations(&self) -> Option<Arc<dyn ProjectOperations>> {
         Some(Arc::new(Ops { consequential: self.consequential.load(Ordering::SeqCst) }))
+    }
+    async fn setup_plan(&self, root: &Path, packages: &[String]) -> Result<SetupPlan, ServiceError> {
+        self.record("setup_plan", None);
+        Ok(setup_plan(root, packages))
+    }
+    async fn install_packages(
+        &self,
+        request: SetupInstallRequest,
+        cancel: CancellationToken,
+    ) -> Result<Value, ServiceError> {
+        self.record("install_packages", None);
+        if self.slow_setup.load(Ordering::SeqCst) {
+            cancel.cancelled().await;
+            return Err(ServiceError::Canceled);
+        }
+        Ok(json!({"state": "succeeded", "packages": request.plan.packages}))
+    }
+}
+
+/// A plan as the setup service makes it (here: into an existing `.venv`).
+fn setup_plan(root: &Path, packages: &[String]) -> SetupPlan {
+    let mut all: Vec<String> = vec!["ipykernel".into(), "jupyter_client".into()];
+    all.extend(packages.iter().cloned());
+    let target = root.join(".venv").display().to_string();
+    let interpreter = root.join(".venv").join("Scripts").join("python.exe").display().to_string();
+    let mut args: Vec<String> =
+        ["-I", "-m", "pip", "--isolated", "install", "--only-binary=:all:", "--index-url", "https://pypi.org/simple"]
+            .iter()
+            .map(|a| (*a).to_owned())
+            .collect();
+    args.extend(all.iter().cloned());
+    SetupPlan {
+        request: SetupRequest::InstallPackages { environment: "python:venv".into(), packages: packages.to_vec() },
+        root: root.display().to_string(),
+        target: target.clone(),
+        target_name: ".venv".into(),
+        creates_environment: false,
+        removes_unfinished: false,
+        base_interpreter: None,
+        base_display_name: None,
+        interpreter: interpreter.clone(),
+        packages: all,
+        index_url: "https://pypi.org/simple".into(),
+        network: true,
+        steps: vec![SetupStep {
+            label: "Install packages".into(),
+            program: interpreter,
+            args,
+            network: true,
+            timeout_ms: 1_800_000,
+        }],
+        summary: format!("Install {} into the project environment .venv.", packages.join(", ")),
+        plan_hash: "hash-1".into(),
     }
 }
 
@@ -240,9 +300,11 @@ enum Kind {
     LeanEdit,
     /// D7: a new Lean file.
     LeanCreate,
+    /// install_packages (with the plan the application made).
+    Install,
 }
 
-const KINDS: [Kind; 14] = [
+const KINDS: [Kind; 15] = [
     Kind::List,
     Kind::Read,
     Kind::Edit,
@@ -257,6 +319,7 @@ const KINDS: [Kind; 14] = [
     Kind::Copy,
     Kind::LeanEdit,
     Kind::LeanCreate,
+    Kind::Install,
 ];
 
 impl Kind {
@@ -289,6 +352,7 @@ impl Kind {
             Kind::LeanCreate => {
                 (tools::CREATE_FILE, json!({"path": "notes/Proof.lean", "content": "#eval IO.println \"hi\"\n"}))
             }
+            Kind::Install => (tools::INSTALL_PACKAGES, json!({"packages": ["numpy", "scipy==1.14.1"]})),
         }
     }
     fn changes(self) -> bool {
@@ -298,10 +362,19 @@ impl Kind {
         )
     }
     fn launch(self) -> bool {
-        matches!(self, Kind::BuildLatex | Kind::Python | Kind::Lean | Kind::Command)
+        matches!(self, Kind::BuildLatex | Kind::Python | Kind::Lean | Kind::Command | Kind::Install)
     }
     fn native_only(self) -> bool {
-        matches!(self, Kind::BuildLatex | Kind::Lean)
+        matches!(self, Kind::BuildLatex | Kind::Lean | Kind::Install)
+    }
+    /// The parsed call, with the setup plan the application makes before the gate.
+    fn tool_call(self, root: &Path) -> ToolCall {
+        let (name, input) = self.call();
+        let mut call = ToolCall::parse(name, &input).unwrap();
+        if let ToolCall::InstallPackages(setup) = &mut call {
+            setup.plan = Some(Box::new(setup_plan(root, &setup.packages)));
+        }
+        call
     }
     fn lean_text(self) -> bool {
         matches!(self, Kind::LeanEdit | Kind::LeanCreate)
@@ -340,6 +413,19 @@ fn expect_ask(
         if kind.native_only() && mode == ExecutionMode::Restricted {
             return Expect::Refused(codes::NATIVE_NOT_ALLOWED);
         }
+    }
+    if kind == Kind::Install {
+        if !trusted {
+            return Expect::Refused(codes::NATIVE_REFUSED);
+        }
+        let mut used = Vec::new();
+        let mut needs = Vec::new();
+        if allowed.contains(&AllowanceKind::PackageSetup) {
+            used.push(AllowanceKind::PackageSetup)
+        } else {
+            needs.push(AllowanceKind::PackageSetup)
+        }
+        return decision(Some(ExecutionPolicy::TrustedNative), needs, used, false, false);
     }
     if lean {
         match mode {
@@ -414,6 +500,19 @@ fn decision(
 /// allowances, one approval for a legitimate expansion.
 fn expect_auto(kind: Kind, profile: Option<PermissionChoice>, trusted: bool, allowed: &[AllowanceKind]) -> Expect {
     let lean = kind.lean_text() && trusted;
+    if kind == Kind::Install {
+        if !trusted {
+            return Expect::Refused(codes::NATIVE_REFUSED);
+        }
+        let native = Some(ExecutionPolicy::TrustedNative);
+        if profile.is_some_and(|p| p.setup && p.code == CodeAccess::Native) {
+            return decision(native, Vec::new(), Vec::new(), true, false);
+        }
+        if allowed.contains(&AllowanceKind::PackageSetup) {
+            return decision(native, Vec::new(), vec![AllowanceKind::PackageSetup], false, false);
+        }
+        return decision(native, vec![AllowanceKind::PackageSetup], Vec::new(), false, false);
+    }
     let mut needs = Vec::new();
     let mut used = Vec::new();
     let mut project = false;
@@ -495,8 +594,9 @@ fn profiles() -> Vec<Option<PermissionChoice>> {
     out
 }
 
-const ALLOWANCE_SETS: [&[AllowanceKind]; 4] = [
+const ALLOWANCE_SETS: [&[AllowanceKind]; 5] = [
     &[],
+    &[AllowanceKind::PackageSetup],
     &[AllowanceKind::NativeCode],
     &[AllowanceKind::DocumentChanges],
     &[AllowanceKind::NativeCode, AllowanceKind::DocumentChanges],
@@ -563,8 +663,7 @@ fn gate_ask_matrix_every_tool_setting_trust_and_allowance() {
     let mut failures = Vec::new();
     let mut n = 0;
     for kind in KINDS {
-        let (name, input) = kind.call();
-        let call = ToolCall::parse(name, &input).unwrap();
+        let call = kind.tool_call(f.files.root());
         for mode in [ExecutionMode::Disabled, ExecutionMode::ApproveEach, ExecutionMode::Restricted] {
             for permission in
                 [PermissionProfile::ReadOnly, PermissionProfile::ReviewEdits, PermissionProfile::AutoApply]
@@ -600,8 +699,7 @@ fn gate_auto_matrix_every_tool_profile_trust_and_allowance() {
     let mut failures = Vec::new();
     let mut n = 0;
     for kind in KINDS {
-        let (name, input) = kind.call();
-        let call = ToolCall::parse(name, &input).unwrap();
+        let call = kind.tool_call(f.files.root());
         for profile in profiles() {
             for trusted in [true, false] {
                 f.services.trusted.store(trusted, Ordering::SeqCst);
@@ -638,20 +736,16 @@ fn gate_auto_matrix_every_tool_profile_trust_and_allowance() {
 /// In Auto the task's own settings are a ceiling: read only and execution
 /// disabled prohibit (refused, never asked), whatever the project grants;
 /// so do scope, consent, and service-owned paths.
+/// (tool, task permission, task execution, scope, consent, project profile, expected code)
+type ProhibitedCase =
+    (Kind, PermissionProfile, ExecutionMode, TaskScope, ContextConsent, Option<PermissionChoice>, &'static str);
+
 #[test]
 fn gate_auto_prohibited_is_refused_never_asked() {
     let f = fixture();
     let wide = Some(PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Native, setup: true });
     let none = None;
-    let cases: Vec<(
-        Kind,
-        PermissionProfile,
-        ExecutionMode,
-        TaskScope,
-        ContextConsent,
-        Option<PermissionChoice>,
-        &str,
-    )> = vec![
+    let cases: Vec<ProhibitedCase> = vec![
         (
             Kind::Edit,
             PermissionProfile::ReadOnly,
@@ -898,7 +992,7 @@ fn no_tool_or_field_can_change_authority() {
         keys(&def.input_schema, &mut names);
         for name in names {
             let lower = name.to_lowercase();
-            for word in ["approv", "allowance", "permission", "trust", "grant", "for_task", "mode"] {
+            for word in ["approv", "allowance", "permission", "trust", "grant", "for_task"] {
                 assert!(!lower.contains(word), "{} has a property {name:?}", def.name);
             }
         }
@@ -1124,6 +1218,16 @@ async fn loop_auto_native_profile_runs_and_edits_without_any_card() {
     assert_eq!(ran.iter().filter(|c| c.policy == Some(ExecutionPolicy::TrustedNative)).count(), 2);
     assert!(dir.path().join("notes/new.typ").exists(), "the file was created");
     let version = h.service.project_permissions(&root).unwrap().permissions.unwrap().version;
+    // The Python run carries how it was authorized (for its provenance).
+    let runs = std::mem::take(&mut *h.recorder.runs.lock().unwrap());
+    assert_eq!(runs.len(), 1);
+    for run in runs {
+        assert_eq!(run.principal, "agent");
+        assert_eq!(run.task_id, task.id.0);
+        assert_eq!(run.mode, ApprovalMode::Auto);
+        assert_eq!(run.basis, "projectPermissions");
+        assert_eq!(run.permissions_version, Some(version));
+    }
     for (id, status, by, result) in calls(&h, &task.id) {
         assert_eq!(status, ToolCallStatus::Succeeded, "{id}: {result}");
         assert_eq!(by, Some(AuthorizedBy::ProjectPermissions { version }), "{id}");
@@ -1441,4 +1545,148 @@ async fn project_permissions_persist_and_copies_have_none() {
     let list = h.service.list_project_permissions();
     assert_eq!(list.len(), 1);
     assert!(list[0].exists);
+}
+
+/// install_packages: the approval shows the complete plan (summary, target,
+/// index, network, every command exactly); "Approve for this task" covers the
+/// next installation; Auto with the setup permission asks nothing; a
+/// restricted-only task refuses it before anything is planned; canceling the
+/// task cancels a running setup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_install_packages_asks_with_the_full_plan_and_follows_setup_authority() {
+    let dir = project();
+    let mut h = harness();
+    let install =
+        |id: &str, pkg: &str| json!({"toolUse": {"id": id, "name": "install_packages", "input": {"packages": [pkg]}}});
+    // Ask: approve the first for the task.
+    h.service
+        .load_script(
+            json!({"turns": [{"steps": [install("i1", "numpy")]}, {"steps": [install("i2", "scipy")]}, done_turn()]}),
+        )
+        .unwrap();
+    let task = h
+        .service
+        .create_task(request(dir.path(), None, PermissionProfile::AutoApply, ExecutionMode::ApproveEach))
+        .unwrap();
+    let mut details = Vec::new();
+    let cards = {
+        let service = h.service.clone();
+        let id = task.id.clone();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut cards = Vec::new();
+            loop {
+                match h.events.recv().await {
+                    Ok(AgentEvent::ApprovalRequested { approval }) if approval.task_id == id => {
+                        details.push(approval.detail.clone());
+                        cards.push((approval.title.clone(), approval.for_task.clone()));
+                        service.resolve_approval_scoped(&id, &approval.id, true, ApprovalScope::Task).unwrap();
+                    }
+                    Ok(AgentEvent::TaskChanged { task: t }) if t.id == id && !t.status.is_active() => break cards,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap()
+    };
+    h.service.join(&task.id).await;
+    assert_eq!(cards, vec![("Install packages into .venv".to_owned(), vec![AllowanceKind::PackageSetup])]);
+    let detail = &details[0];
+    for part in [
+        "Install numpy into the project environment .venv.",
+        "Package index: https://pypi.org/simple",
+        "Packages: ipykernel jupyter_client numpy",
+        "Needs network; installs into the project environment.",
+        "\"--only-binary=:all:\"",
+        "Runs natively with your account's privileges.",
+    ] {
+        assert!(detail.contains(part), "{part} missing from:\n{detail}");
+    }
+    let ran: Vec<&str> = h.recorder.take().iter().map(|c| c.tool).collect();
+    assert_eq!(ran, vec!["setup_plan", "install_packages", "setup_plan", "install_packages"]);
+    let rows = calls(&h, &task.id);
+    assert_eq!(rows[1].2, Some(AuthorizedBy::TaskAllowance { kinds: vec![AllowanceKind::PackageSetup] }));
+
+    // A restricted-only task: refused before anything is planned.
+    h.service.load_script(json!({"turns": [{"steps": [install("i3", "numpy")]}, done_turn()]})).unwrap();
+    let task = h
+        .service
+        .create_task(request(dir.path(), None, PermissionProfile::AutoApply, ExecutionMode::Restricted))
+        .unwrap();
+    drive(&mut h, &task.id, |_| panic!("no card")).await;
+    let rows = calls(&h, &task.id);
+    assert!(
+        rows[0].3.contains(codes::NATIVE_NOT_ALLOWED) && rows[0].3.contains("does not use that environment"),
+        "{}",
+        rows[0].3
+    );
+    assert!(h.recorder.take().is_empty(), "nothing planned or run");
+
+    // Auto with the setup permission: no card; without it: one card.
+    let root = dir.path().display().to_string();
+    h.service
+        .set_project_permissions(
+            &root,
+            PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Native, setup: true },
+        )
+        .unwrap();
+    h.service.load_script(json!({"turns": [{"steps": [install("i4", "numpy")]}, done_turn()]})).unwrap();
+    let task = h
+        .service
+        .create_task(request(
+            dir.path(),
+            Some(ApprovalMode::Auto),
+            PermissionProfile::AutoApply,
+            ExecutionMode::ApproveEach,
+        ))
+        .unwrap();
+    assert!(drive(&mut h, &task.id, |_| panic!("no card")).await.is_empty());
+    assert!(matches!(calls(&h, &task.id)[0].2, Some(AuthorizedBy::ProjectPermissions { .. })));
+    h.service
+        .set_project_permissions(
+            &root,
+            PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Native, setup: false },
+        )
+        .unwrap();
+    h.recorder.take();
+    // Canceling the task cancels the running setup.
+    h.recorder.slow_setup.store(true, Ordering::SeqCst);
+    h.service.load_script(json!({"turns": [{"steps": [install("i5", "numpy")]}, done_turn()]})).unwrap();
+    let task = h
+        .service
+        .create_task(request(
+            dir.path(),
+            Some(ApprovalMode::Auto),
+            PermissionProfile::AutoApply,
+            ExecutionMode::ApproveEach,
+        ))
+        .unwrap();
+    let service = h.service.clone();
+    let id = task.id.clone();
+    let recorder = h.recorder.clone();
+    let cards = drive(&mut h, &task.id, move |_| {
+        // Approve, then cancel the task once the setup runs.
+        let service = service.clone();
+        let id = id.clone();
+        let recorder = recorder.clone();
+        tokio::spawn(async move {
+            for _ in 0..200 {
+                if recorder.calls.lock().unwrap().iter().any(|c| c.tool == "install_packages") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            service.cancel_task(&id).unwrap();
+        });
+        Some(ApprovalScope::Once)
+    })
+    .await;
+    assert_eq!(cards.len(), 1, "setup off in the profile: asks once");
+    assert!(cards[0].reason.as_deref().unwrap().contains("Setup: off"));
+    assert_eq!(h.service.task(&task.id).unwrap().status, TaskStatus::Canceled);
+    assert_eq!(calls(&h, &task.id)[0].1, ToolCallStatus::Canceled, "the running setup was canceled");
+}
+
+fn done_turn() -> Value {
+    json!({"steps": [{"text": "done"}]})
 }

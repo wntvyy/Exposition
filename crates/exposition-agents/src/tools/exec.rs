@@ -263,6 +263,8 @@ pub struct Authorization {
     workflow: Option<Box<crate::graph::workflow::PreparedWorkflow>>,
     /// A project operation (delete/copy) planned (and shown) at the gate.
     project_op: Option<Box<PreparedOp>>,
+    /// A package setup planned (and shown) before the gate.
+    setup: Option<Box<exposition_research::setup::SetupPlan>>,
     /// The project permission and allowance versions it was issued under.
     basis: Basis,
     /// How it is authorized (recorded with the call).
@@ -612,6 +614,70 @@ fn launch_authority(
     }
 }
 
+/// The authority a package setup needs: setup authority (Ask: the user's
+/// approval of the complete plan, or "for this task"; Auto: the project's
+/// setup permission), natively in a trusted folder. The task's contract
+/// (read only, execution disabled, restricted only) was checked before.
+fn setup_authority(env: &ToolEnv<'_>, asks: &mut Asks, covered: &mut Covered) -> Result<ExecutionPolicy, ToolOutput> {
+    if let Some(reason) = env.services.native_refusal(env.files.root()) {
+        return Err(ToolOutput::error_with(
+            reason.clone(),
+            json!({"code": codes::NATIVE_REFUSED, "status": "refused", "reason": reason}),
+        ));
+    }
+    match (env.spec.approval_mode, env.authority.project) {
+        (ApprovalMode::Auto, Some(p)) if p.setup && p.code == CodeAccess::Native => covered.project = true,
+        (ApprovalMode::Auto, project) => {
+            let reason = match project {
+                Some(_) => "Installing packages is beyond this project's permissions (Setup: off).",
+                None => NO_PROJECT_PERMISSIONS,
+            };
+            covered_or_ask(env, AllowanceKind::PackageSetup, Some(reason.to_owned()), asks, covered);
+        }
+        (ApprovalMode::Ask, _) => covered_or_ask(env, AllowanceKind::PackageSetup, None, asks, covered),
+    }
+    Ok(ExecutionPolicy::TrustedNative)
+}
+
+/// Title and complete detail of a package setup: the plan's summary, target,
+/// index, packages, and every command exactly as it runs.
+fn describe_setup(plan: &exposition_research::setup::SetupPlan) -> (String, String) {
+    let title = if plan.creates_environment {
+        format!("Create {} and install packages", plan.target_name)
+    } else {
+        format!("Install packages into {}", plan.target_name)
+    };
+    let mut detail = format!(
+        "{}\n\nTarget environment: {}\nPackage index: {}\nPackages: {}\n",
+        shown(&plan.summary),
+        shown(&plan.target),
+        shown(&plan.index_url),
+        shown(&plan.packages.join(" "))
+    );
+    if let Some(base) = &plan.base_interpreter {
+        detail.push_str(&format!("Created from: {}\n", shown(base)));
+    }
+    detail.push_str(
+        "Needs network; installs into the project environment. Packages run code when they are imported later.\n",
+    );
+    if plan.removes_unfinished {
+        detail.push_str("An unfinished environment an earlier setup by Exposition left there is removed first.\n");
+    }
+    detail.push_str("\nCommands, exactly as they run (no shell):\n");
+    for (i, step) in plan.steps.iter().enumerate() {
+        let args: Vec<String> = step.args.iter().map(|a| format!("{a:?}")).collect();
+        detail.push_str(&format!(
+            "{}. {}{}\n   {:?} [{}]\n",
+            i + 1,
+            shown(&step.label),
+            if step.network { " (network)" } else { "" },
+            shown(&step.program),
+            shown(&args.join(", "))
+        ));
+    }
+    (title, detail.trim_end().to_owned())
+}
+
 /// A change that puts text into a Lean source the live Lean server can
 /// elaborate: an open `.lean` document (requested or resolved name) in a
 /// folder trusted for native execution, where the Lean service runs the
@@ -674,7 +740,24 @@ fn lean_authority(env: &ToolEnv<'_>, asks: &mut Asks, covered: &mut Covered) {
     }
 }
 
-fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
+/// The rules that need nothing but the call and the task (rules 1–6): the
+/// project, read only, paths, consent and scope, the execution contract, the
+/// service, the project graph. The service checks them before it plans a
+/// package setup, so nothing is planned for a call that is refused anyway.
+pub fn precheck(call: &ToolCall, env: &ToolEnv<'_>) -> Result<(), ToolOutput> {
+    contract(call, env)
+}
+
+fn setup_refused_in_restricted() -> ToolOutput {
+    refusal(
+        codes::NATIVE_NOT_ALLOWED,
+        "Package setup installs into the project's own environment with installers that run natively; the restricted \
+         container does not use that environment, and this task allows only the restricted sandbox. Nothing was \
+         installed.",
+    )
+}
+
+fn contract(call: &ToolCall, env: &ToolEnv<'_>) -> Result<(), ToolOutput> {
     let spec = env.spec;
     let root = env.files.root();
     workspace::check_root(env.workspace, root).map_err(ToolOutput::error)?;
@@ -718,6 +801,19 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         if spec.permission == PermissionProfile::ReadOnly || spec.execution == ExecutionMode::Disabled {
             return Err(execution_disabled());
         }
+        if effects.setup && spec.execution == ExecutionMode::Restricted {
+            return Err(setup_refused_in_restricted());
+        }
+        // Setup always runs natively: an untrusted folder refuses it before
+        // anything is planned (never asked: approving cannot grant trust).
+        if effects.setup
+            && let Some(reason) = env.services.native_refusal(root)
+        {
+            return Err(ToolOutput::error_with(
+                reason.clone(),
+                json!({"code": codes::NATIVE_REFUSED, "status": "refused", "reason": reason}),
+            ));
+        }
         if effects.launch == Launch::NativeOnly && spec.execution == ExecutionMode::Restricted {
             return Err(refusal(
                 codes::NATIVE_NOT_ALLOWED,
@@ -746,6 +842,14 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         }
         None => {}
     }
+    Ok(())
+}
+
+fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
+    contract(call, env)?;
+    let spec = env.spec;
+    let root = env.files.root();
+    let effects = call.effects();
     // D7: Lean-file text is executed by the Lean server.
     let lean = effects.changes && lean_target(call, env);
     if lean {
@@ -762,7 +866,21 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     }
     let policy = match effects.launch {
         Launch::None => None,
+        _ if effects.setup => Some(setup_authority(env, &mut asks, &mut covered)?),
         launch => Some(launch_authority(env, launch, effects.what, &mut asks, &mut covered)?),
+    };
+    // Package setup: the plan the application made (exactly what will run).
+    let setup = match call {
+        ToolCall::InstallPackages(input) => match &input.plan {
+            Some(plan) => Some(plan.clone()),
+            None => {
+                return Err(refusal(
+                    codes::SERVICE_UNAVAILABLE,
+                    "The package setup could not be planned, so nothing was installed.",
+                ));
+            }
+        },
+        _ => None,
     };
     let project_op = match call {
         ToolCall::DeletePaths(_) | ToolCall::CopyPaths(_) => {
@@ -806,6 +924,7 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         proposal: None,
         workflow: None,
         project_op: None,
+        setup,
         basis: env.authority.basis(spec.approval_mode),
         authorized_by: covered.authorized_by(&env.authority),
     };
@@ -1025,6 +1144,10 @@ fn describe(call: &ToolCall, insertion: Option<&str>) -> (String, String) {
                 ),
             )
         }
+        ToolCall::InstallPackages(input) => match &input.plan {
+            Some(plan) => describe_setup(plan),
+            None => (String::new(), String::new()),
+        },
         ToolCall::ListFiles(_)
         | ToolCall::ReadFile(_)
         | ToolCall::GraphQuery(_)
@@ -1192,7 +1315,7 @@ pub async fn run(
     if let Err(refused) = check_basis(env, &authorization) {
         return refused;
     }
-    let Authorization { policy, insertion, proposal, workflow, project_op, .. } = authorization;
+    let Authorization { policy, insertion, proposal, workflow, project_op, setup, authorized_by, .. } = authorization;
     let result = match call {
         ToolCall::GraphQuery(input) => match env.graph {
             Some(graph) => crate::graph::query::run(graph, env.files.root(), env.spec, &input),
@@ -1257,6 +1380,11 @@ pub async fn run(
                             working_directory: env.files.root().to_path_buf(),
                             policy,
                             session: format!("agent-{}", env.task_id.0),
+                            authorization: crate::model::RunAuthorization::of(
+                                env.task_id,
+                                env.spec.approval_mode,
+                                &authorized_by,
+                            ),
                         },
                         cancel,
                     )
@@ -1277,6 +1405,21 @@ pub async fn run(
             }
         }
         ToolCall::RunCommand(input) => run_command(env, input, policy, cancel).await,
+        ToolCall::InstallPackages(_) => match (setup, policy) {
+            (Some(plan), Some(ExecutionPolicy::TrustedNative)) => service_result(
+                env.services
+                    .install_packages(
+                        super::services::SetupInstallRequest {
+                            root: env.files.root().to_path_buf(),
+                            task_id: env.task_id.0.clone(),
+                            plan: *plan,
+                        },
+                        cancel,
+                    )
+                    .await,
+            ),
+            _ => Err(ToolOutput::error("the package setup was not authorized by the gate")),
+        },
     };
     result.unwrap_or_else(|e| e)
 }

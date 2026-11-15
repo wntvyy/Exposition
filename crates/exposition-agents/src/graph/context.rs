@@ -309,6 +309,18 @@ pub fn operations(spec: &TaskSpec, services: &dyn ToolServices) -> Vec<ContextOp
         op("run_python", processes.0, processes.1),
         op("check_lean", processes.0 && spec.execution != ExecutionMode::Restricted, processes.1),
         op("run_command", processes.0, processes.1),
+        op(
+            "install_packages",
+            processes.0 && spec.execution != ExecutionMode::Restricted,
+            match spec.execution {
+                ExecutionMode::Restricted => "refused: the restricted sandbox does not use the project's environment",
+                _ if !processes.0 => processes.1,
+                _ if auto => "Auto: installs when the project's permissions allow setup; otherwise the user is asked",
+                _ => {
+                    "each installation waits for the user's approval of the complete plan (runs natively, needs network)"
+                }
+            },
+        ),
     ]
 }
 

@@ -19,7 +19,7 @@ vi.mock("../../lib/ipc", () => ({
   errorMessage: (e: unknown) => String(e),
 }));
 
-const { authorizationLabel, environmentText, forTaskSentence, profileSummary, specLabels } = await import("./format");
+const { authorizationLabel, environmentText, forTaskSentence, profileSummary, specLabels, toolSummary } = await import("./format");
 const { ApprovalCard } = await import("./ApprovalCard");
 const { TaskComposer, DEFAULT_BUDGETS } = await import("./TaskComposer");
 const { TaskAllowances } = await import("./permissions");
@@ -76,6 +76,7 @@ describe("permission wording", () => {
     expect(environmentText("restricted", { trusted: true, restrictedAvailable: false })[0]!.text).toContain(
       "never run natively instead",
     );
+    expect(toolSummary("install_packages", { packages: ["numpy", "pandas>=2.2"] })).toBe("numpy pandas>=2.2");
     expect(forTaskSentence(["nativeCode", "documentChanges"])).toBe(
       "Approve for this task also covers later native code and file changes in scope in this task; revoke it from the task.",
     );

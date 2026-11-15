@@ -16,6 +16,7 @@ use exposition_core::job::ExecutionPolicy;
 use exposition_core::ops::{OpError, OpPlan, OpRequest, OpResult};
 use exposition_core::path::WorkspacePath;
 use exposition_research::project::types::{AttachmentNotice, AttachmentRecorded};
+use exposition_research::setup::SetupPlan;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +30,8 @@ pub enum ServiceKind {
     Execution,
     /// The application's project operations (P1: delete, copy, restore).
     ProjectOps,
+    /// Project-local Python environment setup (A1: install packages).
+    Setup,
 }
 
 impl ServiceKind {
@@ -39,6 +42,7 @@ impl ServiceKind {
             ServiceKind::Lean => "Lean checking",
             ServiceKind::Execution => "command execution (execution service)",
             ServiceKind::ProjectOps => "project file operations (delete and copy)",
+            ServiceKind::Setup => "project environment setup (package installation)",
         }
     }
 }
@@ -94,6 +98,8 @@ pub struct PythonRequest {
     pub policy: ExecutionPolicy,
     /// Agent runs use a session separate from the user's.
     pub session: String,
+    /// How the run was authorized, for the run's provenance.
+    pub authorization: crate::model::RunAuthorization,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +121,18 @@ pub struct BuildRequest {
     /// the gate, `TrustedNative` only after the user approved the launch.
     /// `None` for in-process builds; a LaTeX build without it is refused.
     pub policy: Option<ExecutionPolicy>,
+}
+
+/// A package installation the user (or the project's permissions) authorized:
+/// exactly this plan, run on behalf of the agent task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupInstallRequest {
+    /// Canonical project root of the task.
+    pub root: PathBuf,
+    pub task_id: String,
+    /// The plan shown for approval (the setup service re-plans and refuses a
+    /// changed plan: `setup.planStale`).
+    pub plan: SetupPlan,
 }
 
 #[async_trait]
@@ -161,6 +179,24 @@ pub trait ToolServices: Send + Sync {
     /// everything was released.
     fn task_leftovers(&self, _task_id: &str) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Plan installing `packages` (already validated) into the project's
+    /// environment: into its `.venv`/`venv` when there is one, else a new
+    /// `.venv` from the newest Python installed on this computer. Runs
+    /// nothing.
+    async fn setup_plan(&self, _root: &Path, _packages: &[String]) -> Result<SetupPlan, ServiceError> {
+        Err(ServiceError::NotAvailable(ServiceKind::Setup))
+    }
+
+    /// Run an authorized setup plan for the task (canceled with `cancel`;
+    /// the setup service removes an environment it created and did not finish).
+    async fn install_packages(
+        &self,
+        _request: SetupInstallRequest,
+        _cancel: CancellationToken,
+    ) -> Result<Value, ServiceError> {
+        Err(ServiceError::NotAvailable(ServiceKind::Setup))
     }
 
     /// The application's project-operations orchestrator (the same one the

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agents-allowance-revoke"
+description = "Enables the agents_allowance_revoke command without any pre-configured scope."
+commands.allow = ["agents_allowance_revoke"]
+
+[[permission]]
+identifier = "deny-agents-allowance-revoke"
+description = "Denies the agents_allowance_revoke command without any pre-configured scope."
+commands.deny = ["agents_allowance_revoke"]

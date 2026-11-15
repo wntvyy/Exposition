@@ -1935,10 +1935,28 @@ impl Run<'_> {
             return Ok(ToolOutput::error("Not executed: the task's tool-call budget is used up."));
         }
         self.usage.tool_calls += 1;
-        let call = match ToolCall::parse(name, input) {
+        let mut call = match ToolCall::parse(name, input) {
             Ok(call) => call,
             Err(message) => return Ok(ToolOutput::error(message)),
         };
+        // A package setup is planned by the application (it runs nothing)
+        // before the gate decides, so the approval shows the exact plan; a
+        // call the task's contract refuses is not planned at all.
+        if let ToolCall::InstallPackages(setup) = &call {
+            let packages = setup.packages.clone();
+            if let Err(refused) = exec::precheck(&call, &self.env()) {
+                return Ok(refused);
+            }
+            let planned = self.inner.services.setup_plan(self.files.root(), &packages).await;
+            match (planned, &mut call) {
+                (Ok(plan), ToolCall::InstallPackages(setup)) => setup.plan = Some(Box::new(plan)),
+                (Err(tools::services::ServiceError::Outcome(value)), _) => {
+                    return Ok(ToolOutput { content: value, is_error: true });
+                }
+                (Err(e), _) => return Ok(ToolOutput::error(e.to_string())),
+                (Ok(_), _) => {}
+            }
+        }
         // Targets pending reconciliation get a short, bounded wait before the
         // gate pauses the call.
         self.settle_graph(&call).await;

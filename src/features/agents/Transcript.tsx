@@ -11,7 +11,7 @@ import { registry } from "../../app/registry";
 import type { TranscriptItem } from "../../bindings/TranscriptItem";
 import { commands, errorMessage } from "../../lib/ipc";
 import { Markdown, ResponseSurface, StatusText, type CodeRunAction, type RunnableLanguage } from "../../ui/components";
-import { activeToolLabel, toolStatusLabel, toolSummary } from "./format";
+import { activeToolLabel, authorizationLabel, toolStatusLabel, toolSummary } from "./format";
 import type { StreamDraft } from "./store";
 
 // ---------------------------------------------------------------- follow the bottom
@@ -144,12 +144,19 @@ export function TranscriptEntry({ item }: { item: TranscriptItem }) {
       );
     case "toolCall": {
       const pill = toolStatusLabel(item.status, item.result);
+      // How it was authorized, quietly (nothing for reads and calls that did not run).
+      const authorization = authorizationLabel(item.authorizedBy);
       return (
         <details className="agents-disclosure agents-tool" data-testid="agents-tool-call" data-tool={item.name}>
           <summary>
             <code className="ui-code">{item.name}</code>
             <span className="ui-meta agents-tool__summary">{toolSummary(item.name, item.input)}</span>
             <StatusText status={pill.status} label={pill.label} />
+            {authorization && (
+              <span className="ui-meta" data-testid="agents-tool-authorization">
+                {authorization}
+              </span>
+            )}
           </summary>
           <pre className="agents-pre">{JSON.stringify(item.input, null, 2)}</pre>
           {item.result && <pre className="agents-pre">{item.result}</pre>}

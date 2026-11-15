@@ -371,6 +371,8 @@ export function toolSummary(name: string, input: unknown): string {
     }
     case "run_python":
       return str(obj.code).split("\n")[0] ?? "";
+    case "install_packages":
+      return Array.isArray(obj.packages) ? obj.packages.filter((p): p is string => typeof p === "string").join(" ") : "";
     default:
       return "";
   }

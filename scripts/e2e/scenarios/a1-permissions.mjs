@@ -15,6 +15,8 @@
 //   d. Auto: a deletion with consequences (unsaved edits) asks once, never "for
 //      this task".
 //   e. Auto: an out-of-scope change is refused, no card.
+//   h. Ask: install_packages shows one card with the complete setup plan
+//      (declined, so nothing is installed and no network is used).
 //   f. Revoking the project's permissions in Settings › Agents while an Auto
 //      task runs Python stops it; its research session stops too.
 // Evidence: test-results/e2e/a1-permissions/evidence.json (+ screenshots); the
@@ -189,6 +191,15 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
       ],
     );
     await page.getByTestId("agents-allowances").waitFor();
+    // Each tool-call row says quietly how it was authorized.
+    await page.waitForFunction(
+      () => document.querySelectorAll("[data-testid=agents-panel] [data-testid=agents-tool-authorization]").length >= 2,
+    );
+    const authorizationLabels = await page
+      .getByTestId("agents-panel")
+      .getByTestId("agents-tool-authorization")
+      .allInnerTexts();
+    assert.deepEqual(authorizationLabels, ["Approved by you for this task", "Allowed for this task"]);
     await shot(page, "a1-task-allowance-light");
     let step = await record(page, "a. Ask: native Python ×2, first approved for the task", task.id);
     assert.equal(step.cards.length, 1, "exactly one card");
@@ -326,6 +337,34 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
     assert.ok(!existsSync(join(project, "notes", "outside.typ")));
     step = await record(page, "e. Auto: out-of-scope create refused", task.id);
     assert.equal(step.cards.length, 0);
+
+    // --- h. install_packages: one card with the complete plan (declined: nothing installed).
+    await watchCards(page);
+    await invoke(page, "agents_dev_load_script", {
+      script: { turns: [{ steps: [tool("i", "install_packages", { packages: ["tomli"] })] }, done] },
+    });
+    panel = await compose(page, {
+      prompt: "Install tomli",
+      mode: "Ask",
+      permission: "Apply changes, review afterwards",
+      execution: "Ask before each command (runs natively)",
+    });
+    task = await start(page, panel);
+    await page.waitForSelector("[data-testid=agents-approval]", { timeout: 120_000 });
+    const setupPayload = await page.getByTestId("agents-approval-payload").innerText();
+    assert.match(setupPayload, /Needs network; installs into the project environment/);
+    assert.match(setupPayload, /Package index: https:\/\/pypi\.org\/simple/);
+    assert.match(setupPayload, /"--only-binary=:all:"/);
+    assert.equal(await page.getByTestId("agents-approve-task").count(), 1, "package setup is repeatable");
+    await shot(page, "a1-setup-approval-light");
+    await page.getByTestId("agents-decline").click();
+    task = await waitDone(page, task.id);
+    assert.ok(!existsSync(join(project, ".venv")), "declined: no environment created");
+    step = await record(page, "h. Ask: install_packages shows the complete plan (declined)", task.id, {
+      payload: setupPayload,
+    });
+    assert.equal(step.cards.length, 1);
+    assert.match(step.cards[0], /install packages/i);
 
     // --- f. Revoke in Settings › Agents while an Auto task runs Python.
     await invoke(page, "agents_permissions_set", { root, choice: { files: "edit", code: "native", setup: false } });
