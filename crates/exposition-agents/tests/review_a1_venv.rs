@@ -226,3 +226,155 @@ async fn review_a1_f4_agent_pth_runs_on_environment_discovery() {
         "DEFECT: agent-written .pth ran natively (planning: {during_planning}, refresh: {after_refresh})"
     );
 }
+
+/// The 8.3 short name Windows gave `<dir>/<name>`, if any (`dir /x`).
+fn short_name(dir: &Path, name: &str) -> Option<String> {
+    let out = std::process::Command::new("cmd").args(["/c", "dir", "/x", "/a"]).arg(dir).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.lines().find_map(|line| {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        (parts.last() == Some(&name) && parts.len() >= 2)
+            .then(|| parts[parts.len() - 2].to_owned())
+            .filter(|s| s.contains('~'))
+    })
+}
+
+fn tool(id: &str, name: &str, input: Value) -> Value {
+    json!({"steps": [{"toolUse": {"id": id, "name": name, "input": input}}]})
+}
+
+/// Routes around the protected project environments (R-a1 F4 fix, main
+/// 18dd709): a case variant, a junction inside the project that resolves into
+/// `.venv`, a trailing-dot spelling, the 8.3 short name, an edit and a delete
+/// of an existing file in `.venv`, and copies of a prepared tree into `.venv`
+/// (by name and through the junction). Every change is refused and nothing an
+/// agent wrote runs at the next discovery. Auto with Files: edit (the default
+/// profile), Code: off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_a1_held_routes_around_protected_environments_are_refused() {
+    let project = tempfile::tempdir().unwrap();
+    if !make_venv(project.path()) {
+        eprintln!("SKIPPED: no host Python could create a virtual environment");
+        return;
+    }
+    let site = site_packages(project.path()).expect("the venv has site-packages");
+    let relative = site.strip_prefix(project.path()).unwrap().display().to_string().replace('\\', "/");
+    // A junction inside the project that resolves into the environment.
+    let junction = project.path().join("libs");
+    let made = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&site)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    assert!(made, "control: junction created");
+    let short = short_name(project.path(), ".venv");
+    eprintln!("8.3 name of .venv: {short:?}");
+    let mut h = harness(project);
+    let root = h.project.path().display().to_string();
+    h.execution.grant_trust(&root).unwrap();
+    h.service
+        .set_project_permissions(
+            &root,
+            PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Off, setup: false },
+        )
+        .unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let marker = outside.path().join("pth-ran.txt");
+    let pth =
+        format!("import os; open({:?}, \"a\").write(\"ran\\n\")\n", marker.display().to_string().replace('\\', "/"));
+    let upper = relative.replacen(".venv", ".VENV", 1);
+    let trailing = relative.replacen(".venv", ".venv.", 1);
+    let mut turns = vec![
+        tool("case", "create_file", json!({"path": format!("{upper}/a.pth"), "content": pth})),
+        tool("junction", "create_file", json!({"path": "libs/b.pth", "content": pth})),
+        tool("dot", "create_file", json!({"path": format!("{trailing}/c.pth"), "content": pth})),
+        tool("read-cfg", "read_file", json!({"path": ".venv/pyvenv.cfg"})),
+        tool(
+            "edit-cfg",
+            "edit_document",
+            json!({"path": ".venv/pyvenv.cfg", "base_revision": "$ref:read-cfg/revision",
+                   "edits": [{"old_text": "home", "new_text": "home "}]}),
+        ),
+        tool("stage", "create_file", json!({"path": "stage/Lib/site-packages/e.pth", "content": pth})),
+        tool("copy", "copy_paths", json!({"paths": ["stage/Lib"], "destination": ".venv"})),
+        tool("copy-junction", "copy_paths", json!({"paths": ["stage/Lib/site-packages/e.pth"], "destination": "libs"})),
+        tool("delete", "delete_paths", json!({"paths": [".venv/pyvenv.cfg"]})),
+    ];
+    if let Some(short) = &short {
+        let alias = relative.replacen(".venv", short, 1);
+        turns.push(tool("short", "create_file", json!({"path": format!("{alias}/d.pth"), "content": pth})));
+    }
+    turns.push(json!({"steps": [{"text": "done"}]}));
+    let ids: Vec<String> =
+        turns.iter().filter_map(|t| t["steps"][0]["toolUse"]["id"].as_str().map(str::to_owned)).collect();
+    let (out, cards) = run(&mut h, json!({ "turns": turns }), ApprovalMode::Auto).await;
+    let mut not_refused = Vec::new();
+    for (id, (is_error, result)) in ids.iter().zip(&out) {
+        let shown: String = result.to_string().chars().take(160).collect();
+        eprintln!("{id}: error={is_error} code={} {shown}", result["code"]);
+        let control = id == "stage" || id == "read-cfg";
+        if !control && !is_error {
+            not_refused.push(id.clone());
+        }
+    }
+    eprintln!("cards: {:?}", cards.iter().map(|c| c.title.clone()).collect::<Vec<_>>());
+    let names = ["a.pth", "b.pth", "c.pth", "d.pth", "e.pth"];
+    let pth_files: Vec<String> = std::fs::read_dir(&site)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| names.contains(&n.as_str()))
+        .collect();
+    let cfg_intact = h.project.path().join(".venv").join("pyvenv.cfg").is_file();
+    let _ = h.research.environments(true).await;
+    let ran = marker.exists();
+    eprintln!("agent .pth files in site-packages: {pth_files:?}; pyvenv.cfg present: {cfg_intact}; ran: {ran}");
+    assert!(not_refused.is_empty(), "changes not refused: {not_refused:?}");
+    assert!(pth_files.is_empty() && cfg_intact && !ran, "an agent change reached the environment");
+}
+
+/// R-a1 F7 (planning order; LOW once agents cannot write into environments).
+/// `install_packages` is planned before the gate decides; planning runs
+/// environment discovery, which runs the project's interpreter natively
+/// (here a `.pth` the user's own environment contains stands for that
+/// environment's startup code). Under Auto with Code: off and Setup: off the
+/// call needs an approval, yet the interpreter has run before the card is
+/// shown. Expected: nothing runs natively for a call the gate has not allowed
+/// (plan from cached discovery, or plan after the gate).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "R-a1 F7: install_packages planning runs the project interpreter (discovery) before the approval"]
+async fn review_a1_f7_setup_planning_runs_the_project_interpreter_before_approval() {
+    let project = tempfile::tempdir().unwrap();
+    if !make_venv(project.path()) {
+        eprintln!("SKIPPED: no host Python could create a virtual environment");
+        return;
+    }
+    let outside = tempfile::tempdir().unwrap();
+    let marker = outside.path().join("interpreter-ran.txt");
+    let site = site_packages(project.path()).expect("the venv has site-packages");
+    std::fs::write(
+        site.join("users_own_startup.pth"),
+        format!("import os; open({:?}, \"a\").write(\"ran\\n\")\n", marker.display().to_string().replace('\\', "/")),
+    )
+    .unwrap();
+    let mut h = harness(project);
+    let root = h.project.path().display().to_string();
+    h.execution.grant_trust(&root).unwrap();
+    h.service
+        .set_project_permissions(
+            &root,
+            PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Off, setup: false },
+        )
+        .unwrap();
+    let script = json!({"turns": [
+        tool("i", "install_packages", json!({"packages": ["tomli"]})),
+        {"steps": [{"text": "done"}]}
+    ]});
+    let (out, cards) = run(&mut h, script, ApprovalMode::Auto).await;
+    let titles: Vec<String> = cards.iter().map(|c| c.title.clone()).collect();
+    eprintln!("install_packages: error={} cards={titles:?}", out[0].0);
+    let ran = marker.exists();
+    eprintln!("project interpreter ran before/while the card was shown (declined): {ran}");
+    assert!(!ran, "DEFECT: the project interpreter ran natively for a call that was never approved");
+}
