@@ -82,7 +82,6 @@ fn review_a1_held_hostile_package_specs_are_refused() {
 /// to the setup job's working directory, the project folder) pass the
 /// validator: they are valid PEP 508 names. D5 says "no URLs, paths".
 #[test]
-#[ignore = "R-a1 F2: archive file names (.tar, .whl, .zip, .tar.gz) pass package validation and pip installs them from the project folder"]
 fn review_a1_f2_archive_file_names_are_refused() {
     for spec in ["evilsdist-1.0.tar", "evilsdist-1.0.tar.gz", "evil.zip", "evilpkg-1.0-py3-none-any.whl", "x.tgz"] {
         assert!(
@@ -167,7 +166,6 @@ async fn base_python(service: &ResearchService, root: &Path) -> Option<RuntimeEn
 /// the plan says binary wheels from https://pypi.org/simple only
 /// (`--only-binary=:all:` does not apply to a local archive's build).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "R-a1 F2: setup runs build code from a project archive named as a package"]
 async fn review_a1_f2_setup_runs_build_code_from_a_project_archive() {
     let (dir, root, execution, service) = fixture();
     let Some(base) = base_python(&service, &root).await else {

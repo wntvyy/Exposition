@@ -164,7 +164,6 @@ async fn run(h: &mut Harness, script: Value, mode: ApprovalMode) -> (Vec<(bool, 
 /// neither during the planning discovery before the card nor at the user's
 /// next discovery (Research page open / Check again).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "R-a1 F4: an agent-written .pth in the project .venv runs natively on the next environment discovery"]
 async fn review_a1_f4_agent_pth_runs_on_environment_discovery() {
     let project = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("analysis.py"), "print(1)\n").unwrap();
@@ -343,7 +342,6 @@ async fn review_a1_held_routes_around_protected_environments_are_refused() {
 /// shown. Expected: nothing runs natively for a call the gate has not allowed
 /// (plan from cached discovery, or plan after the gate).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "R-a1 F7: install_packages planning runs the project interpreter (discovery) before the approval"]
 async fn review_a1_f7_setup_planning_runs_the_project_interpreter_before_approval() {
     let project = tempfile::tempdir().unwrap();
     if !make_venv(project.path()) {
@@ -388,7 +386,6 @@ async fn review_a1_f7_setup_planning_runs_the_project_interpreter_before_approva
 /// interpreter startup files the app's sessions load (or sessions start
 /// without them).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "R-a1 F8: an agent-written .Rprofile runs natively when the user's R session starts"]
 async fn review_a1_f8_agent_rprofile_runs_when_the_user_starts_an_r_session() {
     let project = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("analysis.R"), "x <- 1\n").unwrap();

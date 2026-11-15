@@ -36,7 +36,6 @@ fn review_a1_held_a_real_secret_in_a_job_variable_is_refused() {
 /// R-a1 F6: ordinary configuration values under credential-like names make
 /// ordinary paths look secret. Each case is a plausible real setup.
 #[test]
-#[ignore = "R-a1 F6: non-secret values of credential-named host variables refuse jobs whose paths contain them"]
 fn review_a1_f6_non_secret_values_do_not_refuse_ordinary_paths() {
     let cases = [
         // Running Exposition from a shell started by Claude Code (lane E's observation).

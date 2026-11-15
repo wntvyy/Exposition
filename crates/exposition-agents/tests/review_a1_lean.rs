@@ -236,6 +236,7 @@ fn skip() -> bool {
     false
 }
 
+#[ignore = "R-a1 F1 (fixed in 18dd709): passes with --include-ignored (about 9 min of real Lake waits); covered in the default run by lean_integration::lake_configuration_from_an_agent_cannot_run_code_without_native_authority"]
 /// R-a1 F1 (D7 bypass through Lake configuration). In a trusted Lean folder,
 /// an Ask task that applies changes directly with process execution DISABLED
 /// creates `LeanBasic/lakefile.toml` (not a `.lean` file, so D7 does not
@@ -245,7 +246,6 @@ fn skip() -> bool {
 /// and elaborates its `lakefile.lean` natively. Expected: no agent change can
 /// make Lean/Lake run code without native authority.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "R-a1 F1: a created lakefile.toml makes Lake fetch and elaborate a package's lakefile natively (D7 bypass)"]
 async fn review_a1_f1_lake_config_runs_code_with_execution_disabled() {
     if skip() {
         return;
@@ -272,11 +272,11 @@ async fn review_a1_f1_lake_config_runs_code_with_execution_disabled() {
     );
 }
 
+#[ignore = "R-a1 F1 (fixed in 18dd709): passes with --include-ignored (about 9 min of real Lake waits); covered in the default run by lean_integration::lake_configuration_from_an_agent_cannot_run_code_without_native_authority"]
 /// R-a1 F1, Auto variant: the project's permissions allow file changes but
 /// no native code (Files: edit, Code: off). Expected: no native code runs
 /// without an approval card.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "R-a1 F1: a created lakefile.toml makes Lake fetch and elaborate a package's lakefile natively under Auto without native code"]
 async fn review_a1_f1_lake_config_runs_code_under_auto_without_native() {
     if skip() {
         return;
@@ -316,7 +316,7 @@ async fn review_a1_f1_lake_config_runs_code_under_auto_without_native() {
 /// that never received native authority does not run when trust is granted
 /// for another purpose (or the trust grant states it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "R-a1 F3: an agent's Lean edit made while untrusted runs natively once the folder is trusted"]
+#[ignore = "R-a1 F3 (fixed in 86a5070): kept as fail-before evidence; its control step asserts the old no-card behavior. The fix is covered by lean_integration::an_untrusted_lean_change_needs_native_authority_before_trust_is_granted"]
 async fn review_a1_f3_untrusted_lean_edit_runs_when_trust_is_granted() {
     if skip() {
         return;

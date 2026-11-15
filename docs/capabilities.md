@@ -842,7 +842,13 @@ The same holds for Lean/Lake configuration files
 (`lakefile.lean`, `lakefile.toml`, `lean-toolchain`, `lake-manifest.json`) in
 any folder, and agents never write, create, copy into, or delete anything
 under `.git/`, `.lake/`, `.venv/`, or `venv/` (package installs go through
-the reviewed `install_packages` tool). Code an agent
+the reviewed `install_packages` tool). Putting an R startup file (`.Rprofile`,
+`.Renviron`, any folder) into the project needs native-code authority too,
+whatever the folder trust, because R runs it at the start of every session
+there; files such a startup file sources (for example `renv/activate.R`)
+are ordinary files whose changes are reviewable but not gated. Narrowing
+or revoking a project's permissions also clears what you approved "for
+this task" in that project's Auto tasks, so continuing one asks again. Code an agent
 writes into an ordinary project file does not run when it is written; it
 runs when it is later run or imported (by you, or by a tool the gate
 allows), so review such a change as you would imported code. Workflow agent
