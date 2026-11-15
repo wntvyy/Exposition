@@ -336,7 +336,10 @@ export default async function a1Environment({ launchApp, artifactsDir, fixture, 
     monitor = await openFirst();
     await monitor.getByTestId("workflow-run-again").click();
     await page.getByTestId("plan-review-notice").waitFor({ timeout: 30_000 });
-    await page.getByTestId("workflow-plan-details").waitFor({ timeout: 30_000 });
+    const review = page.getByTestId("workflow-plan-review");
+    await review.getByTestId("workflow-plan-details").waitFor({ timeout: 30_000 });
+    const firstApproval = (await invoke(page, "workflow_run_get", { run: firstRun.id })).plan.approvalHash;
+    assert.notEqual(await review.getByTestId("workflow-plan-details").getAttribute("data-approval"), firstApproval, "the reviewed plan differs");
     assert.match(await page.getByTestId("plan-review-notice").innerText(), /differs from the one this run was approved with/);
     await shot(page, "a1-workflow-run-again-review");
     assert.equal((await runsOf()).length, runsNow, "nothing started while the review is open");
