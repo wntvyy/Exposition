@@ -4,7 +4,9 @@ use exposition_core::artifact::{ArtifactRecord, AttachmentPlacement};
 use exposition_core::document::DocumentId;
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::TextRange;
-use exposition_graph::{EntityId, EvidenceId, Lifecycle, OperationId, OperationRecord, RelationId, ResourceRole};
+use exposition_graph::{
+    EntityId, EvidenceId, Lifecycle, OperationId, OperationRecord, RelationId, ResourceRole, WorkflowId,
+};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -150,7 +152,12 @@ pub struct ExperimentSummary {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct ResearchWorkflowItem {
+    /// The `Workflow` graph entity (what Research selects and inspects).
     pub entity: EntityId,
+    /// The saved workflow this entity stands for: the id every workflow
+    /// command and the workflow editor take. An entity id is never a
+    /// workflow id; `None` when the entity names no valid workflow.
+    pub workflow: Option<WorkflowId>,
     pub label: String,
     pub lifecycle: Lifecycle,
 }

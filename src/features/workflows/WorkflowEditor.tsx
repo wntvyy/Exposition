@@ -30,7 +30,7 @@ import type { WorkflowInput } from "../../bindings/WorkflowInput";
 import type { WorkflowSummary } from "../../bindings/WorkflowSummary";
 import type { WorkflowValidation } from "../../bindings/WorkflowValidation";
 import { COMPOSITE_OPERATION, type SavedWorkflow, type WorkflowDefinition, type WorkflowStep } from "./contract";
-import { errorMessage } from "../../lib/ipc";
+import { errorMessage, isCommandError } from "../../lib/ipc";
 import {
   Badge,
   Banner,
@@ -56,7 +56,7 @@ import {
 } from "../../ui/components";
 import { useWorkspace } from "../workspace/store";
 import { CodePayloadEditor } from "./CodePayloadEditor";
-import { exportBundle } from "./actions";
+import { exportBundle, WORKFLOWS_KEY } from "./actions";
 import { workflowCommands } from "./ipc";
 import {
   addCompositeStep,
@@ -100,6 +100,7 @@ import {
   setPrerequisites,
   sourceKey,
   updateStep,
+  isWorkflowId,
   WORKFLOW_KEY_PREFIX,
 } from "./model";
 
@@ -444,21 +445,22 @@ function InputRow({
   );
 }
 
-/**
- * Load a workflow by id. Some views (the Research inspector) open a workflow
- * by its graph entity id; resolve that through the workflow list.
- */
-async function resolveWorkflow(id: string): Promise<SavedWorkflow> {
-  try {
-    return await workflowCommands.get(id);
-  } catch (error) {
-    const unknown = typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "workflow.unknown";
-    if (!unknown) throw error;
-    const match = (await workflowCommands.list()).find((w) => w.entity === id);
-    if (!match) throw error;
-    return workflowCommands.get(match.id);
-  }
+/** Why a workflow tab shows no draft. */
+type LoadFailure =
+  /** The tab's key does not hold a workflow id (a stale or malformed reference); nothing was requested. */
+  | { kind: "invalidReference" }
+  /** No such workflow is saved in the open project (deleted, or it belongs to another project). */
+  | { kind: "missing"; message: string }
+  | { kind: "error"; message: string };
+
+function loadFailure(error: unknown): LoadFailure {
+  if (isCommandError(error) && error.code === "workflow.unknown") return { kind: "missing", message: error.message };
+  // The IPC layer refuses a malformed id before the command runs (a plain string, no code).
+  if (typeof error === "string" && error.startsWith("invalid args")) return { kind: "invalidReference" };
+  return { kind: "error", message: errorMessage(error) };
 }
+
+const showWorkflows = () => editors.open({ key: WORKFLOWS_KEY, title: "Workflows" });
 
 type EditorView = "form" | "canvas";
 const VIEW_KEY = "exposition.workflows.view";
@@ -488,7 +490,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
   const [draft, setDraftState] = useState<WorkflowDefinition | null>(null);
   const [contracts, setContracts] = useState<OperationContract[]>([]);
   const [validation, setValidation] = useState<WorkflowValidation | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<LoadFailure | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [newStep, setNewStep] = useState<string | null>(null);
@@ -516,8 +518,13 @@ export function WorkflowEditor({ resource }: EditorProps) {
   };
 
   const load = useCallback(async () => {
+    // The key must hold the workflow's own id; anything else is not looked up or guessed.
+    if (!isWorkflowId(id)) {
+      setLoadError({ kind: "invalidReference" });
+      return;
+    }
     try {
-      const [workflow, ops] = await Promise.all([resolveWorkflow(id), workflowCommands.operations()]);
+      const [workflow, ops] = await Promise.all([workflowCommands.get(id), workflowCommands.operations()]);
       setSaved(workflow);
       setDraftState(workflow.definition);
       setValidation(workflow.validation);
@@ -526,7 +533,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
       setLoadError(null);
       editors.setTitle(resource.key, workflow.definition.title || "Workflow draft");
     } catch (error) {
-      setLoadError(errorMessage(error));
+      setLoadError(loadFailure(error));
     }
   }, [id, resource.key]);
 
@@ -610,9 +617,39 @@ export function WorkflowEditor({ resource }: EditorProps) {
   );
 
   if (loadError) {
+    const recovery = (
+      <>
+        <Button variant="primary" onPress={showWorkflows}>
+          Show Workflows
+        </Button>
+        <Button onPress={() => void editors.close(resource.key)}>Close</Button>
+      </>
+    );
+    if (loadError.kind === "invalidReference") {
+      return (
+        <div className="xp-wf" data-testid="workflow-invalid-reference">
+          <UnavailableState
+            title="This tab does not point to a saved workflow"
+            description="Its reference is not a workflow id, so nothing was opened or changed. Open the workflow from the Workflows list."
+            actions={recovery}
+          />
+        </div>
+      );
+    }
+    if (loadError.kind === "missing") {
+      return (
+        <div className="xp-wf" data-testid="workflow-missing">
+          <UnavailableState
+            title="This workflow is not in the open project"
+            description={`${loadError.message} A deleted workflow can be restored from Settings › Storage & History; a workflow of another project opens when that project is open.`}
+            actions={recovery}
+          />
+        </div>
+      );
+    }
     return (
-      <div className="xp-wf">
-        <ErrorState title="Could not open this workflow draft" description={loadError} actions={<Button onPress={() => void load()}>Retry</Button>} />
+      <div className="xp-wf" data-testid="workflow-load-error">
+        <ErrorState title="Could not open this workflow draft" description={loadError.message} actions={<Button onPress={() => void load()}>Retry</Button>} />
       </div>
     );
   }

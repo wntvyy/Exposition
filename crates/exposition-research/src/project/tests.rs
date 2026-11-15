@@ -212,6 +212,52 @@ fn enabling_research_creates_exactly_one_space_without_a_manuscript_or_code() {
     assert!(!f.root.join(".exposition/runs").exists());
 }
 
+/// The Research listing names each saved workflow by its own id next to its
+/// graph entity: the workflow editor and every workflow command take the
+/// workflow id, and an entity id is not one (2026-11-15: Research opened
+/// `workflow:<entity id>`, which `workflow_get` refuses).
+#[test]
+fn the_listing_names_each_saved_workflow_by_its_own_id() {
+    use exposition_graph::workflow::presets::{FORMAL_AUDIT, WorkflowPresetRequest, draft};
+    use exposition_graph::{Origin, SaveWorkflowRequest, ValidationContext, WorkflowId};
+
+    let f = fixture();
+    f.project.enable().unwrap();
+    let mut definition = draft(&WorkflowPresetRequest { preset: FORMAL_AUDIT.into(), ..Default::default() }).unwrap();
+    let ctx = ValidationContext::default();
+    let saved = f
+        .graph
+        .save_workflow(
+            &Origin::Agent { task_id: "task-1".into() },
+            &SaveWorkflowRequest { id: None, expected_revision: None, definition: definition.clone() },
+            &ctx,
+        )
+        .unwrap();
+    let listing = f.project.listing().unwrap();
+    assert_eq!(listing.workflows.len(), 1);
+    let item = &listing.workflows[0];
+    assert_eq!(Some(&item.entity), saved.entity.as_ref());
+    assert_eq!(item.workflow.as_ref(), Some(&saved.id), "the workflow id, not the entity id");
+    assert!(WorkflowId::parse(item.entity.as_str()).is_err(), "an entity id is never a workflow id");
+    assert!(f.graph.workflow(item.workflow.as_ref().unwrap(), None).is_ok(), "the listed id opens the workflow");
+
+    // A corrected revision is the same workflow and the same listed item.
+    definition.title = "Formal audit, corrected".into();
+    let revised = f
+        .graph
+        .save_workflow(
+            &Origin::Agent { task_id: "task-1".into() },
+            &SaveWorkflowRequest { id: Some(saved.id.clone()), expected_revision: Some(1), definition },
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(revised.revision, 2);
+    let listing = f.project.listing().unwrap();
+    assert_eq!(listing.workflows.len(), 1, "a revision adds no second workflow");
+    assert_eq!(listing.workflows[0].workflow.as_ref(), Some(&saved.id));
+    assert_eq!(listing.workflows[0].label, "Formal audit, corrected");
+}
+
 #[test]
 fn research_files_get_resource_identities_and_imports_record_their_origin() {
     let f = fixture();
