@@ -455,3 +455,53 @@ async fn lake_configuration_from_an_agent_cannot_run_code_without_native_authori
     // The Lean file was opened twice; the hostile package never ran.
     assert!(!appears(&marker, Duration::from_secs(90)).await, "Lake ran a package an agent named");
 }
+
+/// R-a1 F3: D7 does not depend on trust at decision time. In a folder that
+/// is NOT trusted, an Auto task with file changes but no native code
+/// (Files: edit, Code: off) edits an open Lean file, creates a Lean file, and
+/// creates Lake configuration. Before the fix the edit applied with no card
+/// (no Lean server runs while untrusted), and when the user later trusted the
+/// folder Lean elaborated the agent's unsaved text natively (the marker
+/// appeared). Now each change asks first, saying Lean/Lake run it natively
+/// once the folder is trusted; declined, nothing changes, and trusting the
+/// folder afterwards runs nothing of the agent's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_untrusted_lean_change_needs_native_authority_before_trust_is_granted() {
+    if !toolchain_installed() {
+        eprintln!("SKIPPED: Lean toolchain {TOOLCHAIN_DIR} is not installed through elan");
+        return;
+    }
+    let mut h = harness();
+    let root = h.project.path().display().to_string();
+    h.service
+        .set_project_permissions(
+            &root,
+            PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Off, setup: false },
+        )
+        .unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let marker = outside.path().join("untrusted-edit-ran.txt");
+    let script = json!({"turns": [
+        {"steps": [{"toolUse": {"id": "read-e1", "name": "read_file", "input": {"path": "LeanBasic/Defs.lean"}}}]},
+        {"steps": [{"toolUse": {"id": "e1", "name": "edit_document", "input": {
+            "path": "LeanBasic/Defs.lean",
+            "base_revision": "$ref:read-e1/revision",
+            "edits": [{"old_text": "end LeanBasic", "new_text": format!("end LeanBasic{}", eval_writes(&marker))}]
+        }}}]},
+        {"steps": [{"toolUse": {"id": "c1", "name": "create_file", "input": {"path": "LeanBasic/Extra.lean", "content": eval_writes(&marker)}}}]},
+        {"steps": [{"toolUse": {"id": "c2", "name": "create_file", "input": {"path": "LeanBasic/lakefile.toml", "content": "name = \"nested\"\n"}}}]},
+        {"steps": [{"text": "done"}]}
+    ]});
+    let (out, approvals) = run_mode(&mut h, script, ApprovalMode::Auto, ExecutionMode::ApproveEach, false).await;
+    assert_eq!(approvals.len(), 3, "each Lean change asks, though the folder is not trusted yet");
+    assert!(approvals[0].detail.contains("once it is trusted, code in this text"), "{}", approvals[0].detail);
+    assert!(approvals[2].detail.contains("once it is trusted, Lake may download"), "{}", approvals[2].detail);
+    for (is_error, result) in &out[1..] {
+        assert!(is_error, "declined: {result}");
+    }
+    assert!(!h.project.path().join("LeanBasic/Extra.lean").exists());
+    assert!(!h.project.path().join("LeanBasic/lakefile.toml").exists());
+    // The user trusts the folder (for anything): nothing of the agent's runs.
+    h.execution.grant_trust(&root).unwrap();
+    assert!(!appears(&marker, Duration::from_secs(90)).await, "the agent's Lean text ran once the folder was trusted");
+}

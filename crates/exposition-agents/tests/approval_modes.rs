@@ -423,7 +423,9 @@ fn expect_ask(
     trusted: bool,
     allowed: &[AllowanceKind],
 ) -> Expect {
-    let lean = kind.lean_text() && trusted;
+    // Lean text and Lake configuration need native authority in any folder
+    // (trust decides only whether Lean runs it now or once trusted).
+    let lean = kind.lean_text();
     if kind.changes() && permission == PermissionProfile::ReadOnly {
         return Expect::Refused(codes::READ_ONLY);
     }
@@ -520,7 +522,9 @@ fn decision(
 /// code not prohibited by the task): the project's profile, the task's
 /// allowances, one approval for a legitimate expansion.
 fn expect_auto(kind: Kind, profile: Option<PermissionChoice>, trusted: bool, allowed: &[AllowanceKind]) -> Expect {
-    let lean = kind.lean_text() && trusted;
+    // Lean text and Lake configuration need native authority in any folder
+    // (trust decides only whether Lean runs it now or once trusted).
+    let lean = kind.lean_text();
     if kind == Kind::Install {
         if !trusted {
             return Expect::Refused(codes::NATIVE_REFUSED);
@@ -1725,8 +1729,10 @@ fn gate_of(f: &Fixture, spec: &TaskSpec, authority: Authority, name: &str, input
 /// Lean/Lake configuration in any folder needs native authority: refused with
 /// execution disabled or a restricted ceiling (the message names Lake), asked
 /// once (the card names Lake) with per-command approval or Auto without
-/// native code, allowed under Auto with Code: native. Untrusted folders: an
-/// ordinary change (no Lean server runs there).
+/// native code, allowed under Auto with Code: native. The same in a folder
+/// that is not trusted yet (Lake would act on it once the folder is
+/// trusted), and the wording says so; the authority itself never requires
+/// trust.
 #[test]
 fn lake_configuration_is_execution_in_any_folder() {
     let f = fixture();
@@ -1776,14 +1782,24 @@ fn lake_configuration_is_execution_in_any_folder() {
                 "{name}: Auto with {code:?} asks"
             );
         }
-        // Untrusted: no Lean server runs, an ordinary change.
+        // Not trusted yet: the same decisions, worded for "once trusted".
         f.services.trusted.store(false, Ordering::SeqCst);
+        let Gate::Refused(out) = gate_of(&f, &disabled, authority(None, &all), tools::CREATE_FILE, input.clone())
+        else {
+            panic!("{name}: untrusted, execution disabled: not refused")
+        };
+        assert_eq!(out.content["code"], json!(codes::EXECUTION_DISABLED), "{name}");
+        assert!(out.text().contains("not trusted yet"), "{name}: {}", out.text());
+        match gate_of(&f, &ask, authority(None, &[]), tools::CREATE_FILE, input.clone()) {
+            Gate::NeedsApproval { detail, reason, .. } => {
+                assert!(detail.contains("once it is trusted, Lake may download"), "{name}: {detail}");
+                assert!(reason.unwrap().contains("once the folder is trusted"), "{name}");
+            }
+            other => panic!("{name}: untrusted, per-command approval: {other:?}"),
+        }
         assert!(
-            matches!(
-                gate_of(&f, &disabled, authority(None, &all), tools::CREATE_FILE, input.clone()),
-                Gate::Allowed(_)
-            ),
-            "{name}: untrusted folders treat it as an ordinary change"
+            matches!(gate_of(&f, &auto, authority(native, &[]), tools::CREATE_FILE, input.clone()), Gate::Allowed(_)),
+            "{name}: Auto with native code proceeds without trust (nothing runs now)"
         );
         f.services.trusted.store(true, Ordering::SeqCst);
     }
