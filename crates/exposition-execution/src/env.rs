@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use exposition_core::job::EnvironmentSpec;
 
-use crate::credentials::{Redactor, is_credential_name};
+use crate::credentials::{Redactor, SecretMatch, is_credential_name};
 
 /// A snapshot of the application's own environment.
 #[derive(Clone, Debug, Default)]
@@ -76,6 +76,12 @@ pub enum EnvError {
     CredentialName(String),
     #[error("environment variable {0} has a value that looks like a secret token and was refused")]
     SecretValue(String),
+    /// The value contains the value of a credential-like variable (named so
+    /// the person can act; the value itself is never shown).
+    #[error(
+        "environment variable {variable} was refused: its value contains the value of {credential}, which Exposition treats as a secret and never passes to programs it runs"
+    )]
+    SecretValueOf { variable: String, credential: String },
     #[error("invalid environment variable name {0:?}")]
     InvalidName(String),
     #[error("environment variable {0} has an invalid value (NUL byte, or a newline where unsupported)")]
@@ -245,8 +251,12 @@ fn validate_value(name: &str, value: &str, redactor: &Redactor, single_line: boo
     if value.contains('\0') || (single_line && (value.contains('\n') || value.contains('\r'))) {
         return Err(EnvError::InvalidValue(name.to_owned()));
     }
-    if redactor.contains_secret(value) {
-        return Err(EnvError::SecretValue(name.to_owned()));
+    match redactor.find_secret(value) {
+        Some(SecretMatch::Literal { source: Some(source) }) => {
+            return Err(EnvError::SecretValueOf { variable: name.to_owned(), credential: source });
+        }
+        Some(_) => return Err(EnvError::SecretValue(name.to_owned())),
+        None => {}
     }
     Ok(())
 }
@@ -352,7 +362,16 @@ mod tests {
             inherit: vec![],
             set: [("HARMLESS_NAME".to_string(), "fake-anthropic-key-for-tests".to_string())].into(),
         };
-        assert_eq!(build(&set), Err(EnvError::SecretValue("HARMLESS_NAME".into())));
+        let refused = build(&set).unwrap_err();
+        assert_eq!(
+            refused,
+            EnvError::SecretValueOf { variable: "HARMLESS_NAME".into(), credential: "ANTHROPIC_API_KEY".into() }
+        );
+        let message = refused.to_string();
+        assert!(
+            message.contains("ANTHROPIC_API_KEY") && !message.contains("fake-anthropic-key-for-tests"),
+            "{message}"
+        );
         for bad in ["", "A=B", "NUL\0NAME"] {
             let spec = EnvironmentSpec { inherit: vec![bad.into()], set: Default::default() };
             assert_eq!(build(&spec), Err(EnvError::InvalidName(bad.into())));
