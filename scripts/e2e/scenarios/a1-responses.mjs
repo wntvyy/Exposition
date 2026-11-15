@@ -464,6 +464,25 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
     await waitDone(page, longTask.id);
     step("streaming follows the bottom only while the reader is there", { following, reading });
 
+    // ---------------------------------------------------------------- 8. UI Reference specimens
+    await gotoPage("Editor");
+    await runCommand(page, "ui reference", /Developer: Show UI Reference/);
+    const reference = page.getByTestId("ui-reference");
+    await reference.waitFor();
+    const specimens = reference.getByRole("region", { name: "Agent responses" });
+    await specimens.scrollIntoViewIfNeeded();
+    for (const pane of ["band", "inset", "document"].flatMap((v) => [`ref-response-${v}-page`, `ref-response-${v}-panel`])) {
+      await specimens.getByTestId(pane).locator("[data-math=display] .katex").waitFor();
+    }
+    // The whole section: a window tall enough that the editor area does not clip it.
+    const sectionHeight = await specimens.evaluate((el) => el.getBoundingClientRect().height);
+    await page.setViewportSize({ width: 1440, height: Math.min(Math.ceil(sectionHeight) + 600, 9000) });
+    await specimens.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(400);
+    await shot(specimens, "ui-reference-agent-responses-light");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    step("UI Reference shows the three treatments (page and panel)");
+
     const errors = consoleErrors(app);
     assert.deepEqual(errors, [], "no console errors");
     evidence.hits = hits;

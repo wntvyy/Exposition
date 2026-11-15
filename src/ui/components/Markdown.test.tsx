@@ -17,6 +17,9 @@ const { Markdown, ResponseSurface } = await import("./Markdown");
 const { StateSizeProvider } = await import("./stateSize");
 const { externalUrl, isOpenFence, isOpenMath, normalizeMathDelimiters, runnableLanguage } = await import("./MarkdownPolicy");
 
+const { contrastRatio } = await import("../color");
+const { palettes } = await import("../tokens");
+
 const writeText = vi.fn<(text: string) => Promise<void>>();
 
 function renderMd(source: string, props: Partial<Parameters<typeof Markdown>[0]> = {}) {
@@ -489,5 +492,23 @@ describe("copy and run actions", () => {
     );
     expect(page.container.querySelector(".ui-response")?.getAttribute("data-density")).toBe("comfortable");
     expect(within(page.container).queryByRole("button")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------- contrast
+
+describe("contrast", () => {
+  // Every text role the renderer uses (prose, muted addresses and labels, comments,
+  // links, syntax colors, TeX errors) on both response fills, in both themes.
+  const roles = ["text", "text-muted", "text-subtle", "accent-text", "success-text", "warning-text", "status-stale-text", "danger-text"] as const;
+  const fills = ["surface", "surface-sunken"] as const;
+  it.each(["light", "dark"] as const)("text on response and code fills meets 4.5:1 (%s)", (theme) => {
+    const failures = fills.flatMap((bg) =>
+      roles
+        .map((fg) => ({ fg, bg, ratio: contrastRatio(palettes[theme][fg], palettes[theme][bg]) }))
+        .filter((r) => r.ratio < 4.5)
+        .map((r) => `${r.fg} on ${r.bg}: ${r.ratio.toFixed(2)}`),
+    );
+    expect(failures).toEqual([]);
   });
 });
