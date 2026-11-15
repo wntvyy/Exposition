@@ -559,6 +559,288 @@ async fn graph_queries_are_scoped_and_consent_filtered() {
     }
 }
 
+/// A formal declaration of `Main.lean` admitted as the Lean service admits
+/// one, with one formal-check evidence record of the file's indexed text.
+fn lean_declaration_with_evidence(f: &Fixture) -> (EntityId, EntityId, exposition_graph::EvidenceId) {
+    use exposition_graph::{
+        BatchRef, EntityUpsert, Evidence, EvidenceId, EvidenceKind, EvidenceOutcome, FormalDependencies,
+        FormalEvidence, FormalVerdict, OperationRef, RelationUpsert, ServiceBatch, SourceBinding, VersionedInput,
+    };
+    const LEAN: &str = "theorem t : 1 = 1 := rfl\n";
+    let origin = Origin::Service { service: "lean".into() };
+    let file = f.graph.ensure_resource(&p("Main.lean"), Some(&sha(LEAN)), false, "test").unwrap().id;
+    mark(&f.graph, "Main.lean", CoverageState::Complete);
+    let batch = ServiceBatch {
+        entities: vec![EntityUpsert {
+            id: None,
+            kind: EntityKind::FormalDeclaration,
+            roles: Vec::new(),
+            label: "t".into(),
+            key: Some("t".into()),
+            attributes: BTreeMap::new(),
+            lifecycle: None,
+            tombstone_reason: None,
+            bindings: Some(vec![SourceBinding {
+                entity: EntityId::mint(),
+                path: p("Main.lean"),
+                selector: SourceSelector::Declaration {
+                    syntax: "lean.declaration".into(),
+                    name: Some("t".into()),
+                    ordinal: None,
+                },
+                range: None,
+                version: None,
+                fingerprint: None,
+                state: BindingState::Resolved,
+                detail: None,
+            }]),
+        }],
+        relations: vec![RelationUpsert {
+            kind: RelationKind::AnchoredIn,
+            from: BatchRef::Batch(0),
+            to: BatchRef::Existing(file.clone()),
+            status: None,
+            evidence_kind: None,
+            evidence: Vec::new(),
+            note: None,
+        }],
+        summary: "Admit formal declaration t".into(),
+        ..Default::default()
+    };
+    let declaration = f.graph.apply_service_batch(&origin, &batch).unwrap().entity_ids.remove(0);
+    let evidence = Evidence {
+        id: EvidenceId::mint(),
+        kind: EvidenceKind::FormalCheck,
+        subject: Some(declaration.clone()),
+        operation: OperationRef { kind: "leanAudit".into(), id: "Main.lean@1".into() },
+        inputs: vec![VersionedInput {
+            path: p("Main.lean"),
+            content_hash: Some(sha(LEAN)),
+            revision: Some(1),
+            unsaved: false,
+        }],
+        outcome: EvidenceOutcome::Verdict { verdict: FormalVerdict::Checked },
+        environment: vec![],
+        outputs: vec![],
+        formal: Some(FormalEvidence {
+            declaration: "t".into(),
+            declaration_kind: "theorem".into(),
+            statement: "t : 1 = 1 STATEMENT-MARK".into(),
+            axioms: vec![],
+            file_verdict: FormalVerdict::Checked,
+            declaration_verdict: Some(FormalVerdict::Checked),
+            toolchain: "leanprover/lean4:v4.35.0".into(),
+            source_path: p("Main.lean"),
+            source_digest: sha(LEAN),
+            revision: Some(1),
+            dependency_fingerprints: None,
+            dependencies: FormalDependencies::Unavailable { reason: "not reported".into() },
+        }),
+        recorded_by: origin.clone(),
+        recorded_at_ms: 1,
+    };
+    let evidence = f.graph.register_evidence(&origin, evidence).unwrap();
+    (file, declaration, evidence)
+}
+
+/// Pre-review walkthrough, leads A and B. The agent asked what a change to a
+/// file affects and got nothing although a lemma is bound to that file; it
+/// then looked for evidence on a statement whose formal declaration had been
+/// associated and had to guess why there was none and how evidence comes to
+/// exist. The results now say it: a file lists what is located in it (and
+/// states that their dependents are not followed), and an entity result
+/// shows the evidence of associated declarations apart from the statement's
+/// own, with how evidence is recorded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_impact_and_formal_evidence_are_stated_not_left_to_guess() {
+    let f = fixture();
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let lemma = f.ids.lemma.as_str();
+    let main = f.ids.main.as_str();
+    let parse = |text: &str| serde_json::from_str::<Value>(text).unwrap_or_else(|e| panic!("{e}: {text}"));
+
+    // Before anything formal exists: a file's impact, and a plain entity.
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let (id, _) = run(
+        &mut h,
+        req,
+        vec![query("file", "impact", "", main, "", 3), query("lemma", "entity", "", lemma, "", 1)],
+        true,
+    )
+    .await;
+    let (_, err, file) = call(&h, &id, "file");
+    assert!(!err, "{file}");
+    let file = parse(&file);
+    let item = file["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["entity"]["id"] == json!(lemma))
+        .unwrap_or_else(|| panic!("the lemma is bound to main.typ: {file}"));
+    assert_eq!(item["locatedIn"], json!(main), "{item}");
+    assert_eq!(item["action"], json!("informational"));
+    assert_eq!(item["via"], json!([]), "a binding is not a relation");
+    assert_eq!(item["reason"], json!("is located in “main.typ”, which changed; check whether it changed"));
+    assert!(
+        !file["items"].as_array().unwrap().iter().any(|i| i["entity"]["id"] == json!(f.ids.claim.as_str())),
+        "the lemma's dependents are not followed from the file: {file}"
+    );
+    assert_eq!(file["scope"], json!(exposition_agents::graph::query::FILE_IMPACT_NOTE));
+    let (_, _, plain) = call(&h, &id, "lemma");
+    let plain = parse(&plain);
+    assert!(plain.get("formalEvidence").is_none() && plain.get("evidenceNote").is_none(), "{plain}");
+    assert!(plain.get("scope").is_none());
+
+    // The Lean service records evidence on the declaration; the user accepts
+    // an association with the lemma.
+    let (lean_file, declaration, evidence) = lean_declaration_with_evidence(&f);
+    let (_, outcome) = f
+        .graph
+        .propose_and_apply(
+            Origin::User,
+            &ChangeRequest {
+                base_revision: f.graph.status().revision,
+                operations: vec![GraphOperation::AddRelation {
+                    kind: RelationKind::Formalizes,
+                    from: EntityRef::Id { id: declaration.clone() },
+                    to: EntityRef::Id { id: f.ids.lemma.clone() },
+                    evidence_kind: None,
+                    evidence: vec![],
+                    note: None,
+                }],
+                summary: None,
+            },
+        )
+        .unwrap();
+    assert!(matches!(outcome, exposition_graph::ApplyOutcome::Applied { .. }), "{outcome:?}");
+    let queries = |prefix: &str| {
+        vec![
+            query(&format!("{prefix}lemma"), "entity", "", lemma, "", 1),
+            query(&format!("{prefix}decl"), "entity", "", declaration.as_str(), "", 1),
+            query(&format!("{prefix}near"), "neighborhood", "", lemma, "", 1),
+            query(&format!("{prefix}leanfile"), "impact", "", lean_file.as_str(), "", 1),
+        ]
+    };
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let (id, _) = run(&mut h, req, queries("c-"), true).await;
+    let note = exposition_agents::graph::query::FORMAL_EVIDENCE_NOTE;
+    let statement = parse(&call(&h, &id, "c-lemma").2);
+    assert_eq!(statement["evidence"], json!([]), "nothing is recorded on the statement itself: {statement}");
+    let formal = &statement["formalEvidence"][0];
+    assert_eq!(formal["declaration"], json!(declaration.as_str()), "{statement}");
+    assert_eq!(formal["label"], json!("t"));
+    assert_eq!(formal["association"], json!("accepted"));
+    assert_eq!(formal["evidence"][0]["id"], json!(evidence.as_str()));
+    assert_eq!(formal["evidence"][0]["outcome"], json!({"verdict": "checked"}));
+    assert_eq!(formal["evidence"][0]["freshness"], json!("unknown"), "formal evidence is never current");
+    assert_eq!(statement["evidenceNote"], json!(note));
+    let own = parse(&call(&h, &id, "c-decl").2);
+    assert_eq!(own["evidence"][0]["id"], json!(evidence.as_str()), "{own}");
+    assert!(own.get("formalEvidence").is_none(), "a declaration's evidence is its own: {own}");
+    assert_eq!(own["evidenceNote"], json!(note));
+    assert_eq!(parse(&call(&h, &id, "c-near").2)["evidenceNote"], json!(note));
+    let lean_impact = parse(&call(&h, &id, "c-leanfile").2);
+    let listed =
+        lean_impact["items"].as_array().unwrap().iter().find(|i| i["entity"]["id"] == json!(declaration.as_str()));
+    assert_eq!(listed.unwrap()["locatedIn"], json!(lean_file.as_str()), "{lean_impact}");
+    let hit = &lean_impact["evidence"][0];
+    assert_eq!(hit["id"], json!(evidence.as_str()), "{lean_impact}");
+    assert_eq!(hit["subject"], json!(declaration.as_str()));
+    assert!(hit["reason"].as_str().unwrap().contains("a change to the file makes this evidence historical"), "{hit}");
+
+    // Metadata-only consent: the same structure without labels, statements, or reasons.
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::MetadataOnly);
+    let (id, _) = run(&mut h, req, queries("m-"), true).await;
+    for (tool_use_id, _, _, result) in calls(&h, &id) {
+        for marker in CONTENT_MARKERS.iter().chain(["STATEMENT-MARK", "\"reason\""].iter()) {
+            assert!(!result.contains(marker), "{tool_use_id} leaks {marker}: {result}");
+        }
+    }
+    let statement = parse(&call(&h, &id, "m-lemma").2);
+    assert_eq!(statement["formalEvidence"][0]["evidence"][0]["id"], json!(evidence.as_str()), "{statement}");
+    assert_eq!(statement["formalEvidence"][0]["label"], Value::Null);
+
+    // A narrow scope that cannot see the Lean file sees no evidence through the association.
+    let req = request(&f.root, files_scope(), PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let (id, _) = run(&mut h, req, vec![query("n-lemma", "entity", "", lemma, "", 1)], true).await;
+    let (_, err, narrow) = call(&h, &id, "n-lemma");
+    assert!(!err && !narrow.contains(declaration.as_str()) && !narrow.contains(evidence.as_str()), "{narrow}");
+
+    // The boundary the walkthrough met first: an agent cannot assert
+    // service-owned evidence, and the refusal names the real routes. Citing
+    // the service's record, or a review-kind relation, is accepted (as a
+    // suggestion); the user's rejection then drops it from impact.
+    let before = f.graph.status().revision;
+    let evidence_for = |kind: &str, cited: Value| {
+        json!({"summary": "", "base_revision": before, "operations": [{"op": "add_relation", "relation": "evidenceFor",
+            "from": declaration.as_str(), "to": lemma, "evidence_kind": kind, "evidence": cited, "note": ""}]})
+    };
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+    let (id, _) = run(
+        &mut h,
+        req,
+        vec![
+            tool("forge", tools::GRAPH_PROPOSE, evidence_for("computational", json!([]))),
+            tool("wrongkind", tools::GRAPH_PROPOSE, evidence_for("computational", json!([evidence.as_str()]))),
+            tool("cite", tools::GRAPH_PROPOSE, evidence_for("formalCheck", json!([evidence.as_str()]))),
+        ],
+        true,
+    )
+    .await;
+    let (_, err, forged) = call(&h, &id, "forge");
+    assert!(err && code_of(&forged).as_deref() == Some(codes::GRAPH_INVALID), "{forged}");
+    let forged = parse(&forged);
+    assert_eq!(forged["diagnostics"][0]["code"], json!("graph.serviceOwnedEvidence"), "{forged}");
+    assert_eq!(forged["guidance"], json!(exposition_agents::graph::propose::SERVICE_EVIDENCE_GUIDANCE));
+    let (_, err, wrong) = call(&h, &id, "wrongkind");
+    assert!(err && wrong.contains("graph.evidenceKind"), "a record of another kind cannot be cited: {wrong}");
+    assert!(parse(&wrong).get("guidance").is_none());
+    let (_, err, cited) = call(&h, &id, "cite");
+    assert!(!err, "citing the service's own record is the legitimate route: {cited}");
+    let relation = f
+        .graph
+        .entity_detail(&f.ids.lemma)
+        .unwrap()
+        .incoming
+        .into_iter()
+        .find(|r| r.kind == RelationKind::EvidenceFor)
+        .expect("the cited evidence relation");
+    assert_eq!(relation.status, AssertionStatus::Suggested, "an agent's relation is a suggestion");
+    assert_eq!(relation.evidence, vec![evidence.clone()]);
+    let impact = |h: &Harness, id: &TaskId| parse(&call(h, id, "impact").2);
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let (id, _) = run(&mut h, req, vec![query("impact", "impact", "", declaration.as_str(), "", 1)], true).await;
+    let suggested = impact(&h, &id);
+    let reasons: Vec<&str> =
+        suggested["items"].as_array().unwrap().iter().filter_map(|i| i["reason"].as_str()).collect();
+    assert!(reasons.iter().any(|r| r.ends_with("(suggested relationship)")), "{suggested}");
+    assert!(suggested.get("scope").is_none(), "the file note is for files only");
+    f.graph
+        .propose_and_apply(
+            Origin::User,
+            &ChangeRequest {
+                base_revision: f.graph.status().revision,
+                operations: vec![GraphOperation::SetRelationStatus {
+                    relation: relation.id.clone(),
+                    status: AssertionStatus::Rejected,
+                }],
+                summary: None,
+            },
+        )
+        .unwrap();
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let (id, _) = run(&mut h, req, vec![query("impact", "impact", "", declaration.as_str(), "", 1)], true).await;
+    let rejected = impact(&h, &id);
+    assert!(
+        !rejected["items"].as_array().unwrap().iter().any(|i| i["via"][0]["kind"] == json!("evidenceFor")),
+        "a rejected relation is not followed: {rejected}"
+    );
+    assert!(
+        rejected["items"].as_array().unwrap().iter().any(|i| i["via"][0]["kind"] == json!("formalizes")),
+        "the accepted association still is: {rejected}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. The central gate for the new tools: every mode × permission × scope ×
 //    consent, with an independent statement of the rules.

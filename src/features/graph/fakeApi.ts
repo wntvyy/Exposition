@@ -14,6 +14,7 @@ import type { GraphOperation } from "../../bindings/GraphOperation";
 import type { GraphStatus } from "../../bindings/GraphStatus";
 import type { GraphView } from "../../bindings/GraphView";
 import type { MathOverview } from "../../bindings/MathOverview";
+import type { ImpactReport } from "../../bindings/ImpactReport";
 import type { MathRow } from "../../bindings/MathRow";
 import type { Relation } from "../../bindings/Relation";
 import type { RelationKind } from "../../bindings/RelationKind";
@@ -268,15 +269,29 @@ export function createFakeGraph(seed: { entities?: Entity[]; relations?: Relatio
     },
     async impact(request) {
       record("impact", request);
-      const items = relations
+      const items: ImpactReport["items"] = relations
         .filter((r) => request.entities.includes(r.to) && r.kind === "dependsOn")
         .map((r) => ({
           entity: entities.find((e) => e.id === r.from)!,
           depth: 1,
           path: [{ relation: r.id, kind: r.kind, from: r.from, to: r.to }],
+          locatedIn: null,
           action: "needsReview" as const,
           reason: "depends on a changed entity",
         }));
+      // A file lists the items located in it (here: those whose path attribute names it).
+      for (const file of entities.filter((e) => e.kind === "resource" && request.entities.includes(e.id))) {
+        for (const e of entities.filter((x) => x.kind !== "resource" && x.attributes.path === file.key)) {
+          items.push({
+            entity: e,
+            depth: 1,
+            path: [],
+            locatedIn: file.id,
+            action: "informational",
+            reason: `is located in “${file.label}”, which changed; check whether it changed`,
+          });
+        }
+      }
       return { roots: request.entities, items, cycles: [], truncated: false, workLimitReached: false, unknownCoverage: [], evidence: [], graphRevision: revision };
     },
     async propose(request) {

@@ -225,10 +225,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
             description: "Read the project graph: Exposition's structural model of this project (stable identities of \
                 files and research entities such as claims, lemmas, proofs, references, and experiments, and the \
                 typed relations among them). Results are bounded and filtered to this task's scope and content \
-                consent. query: search (by kinds and text), entity (one entity with its relations and evidence), \
-                neighborhood (entities within depth relations), inspect (the entities bound in one file), impact \
-                (what must be reviewed if an entity changes). Entity ids (ent-…) come from the graph context or \
-                earlier results.",
+                consent. query: search (by kinds and text), entity (one entity with its relations and evidence; for \
+                a statement also the evidence of the formal declarations associated with it), neighborhood \
+                (entities within depth relations), inspect (the entities bound in one file), impact (what must be \
+                reviewed if an entity changes, following its relations; for a file's entity, the items located in \
+                that file, whose own dependents are not followed). Evidence is recorded only by Exposition's \
+                services (checks you run record none). Entity ids (ent-…) come from the graph context or earlier \
+                results.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
