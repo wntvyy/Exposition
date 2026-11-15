@@ -165,7 +165,7 @@ export default async function a1Environment({ launchApp, artifactsDir, fixture, 
       const notice = panel.getByTestId("research-unavailable");
       await notice.waitFor({ timeout: 15_000 });
       assert.equal(await notice.getAttribute("data-setup"), "createEnvironment", "the notice offers Set up environment");
-      assert.match(await notice.innerText(), /creates a Python environment in .venv inside the project/);
+      assert.ok((await notice.innerText()).includes(lacking.availability.guidance.slice(0, 40)), "the notice shows the exact guidance");
       await shot(page, "a1-setup-notice");
       await panel.getByTestId("setup-open").click();
     } else {
@@ -310,6 +310,9 @@ export default async function a1Environment({ launchApp, artifactsDir, fixture, 
     const item = page.getByTestId(`workflow-run-item-${firstRun.id}`).first();
     await item.waitFor({ timeout: 30_000 });
     const openFirst = async () => {
+      // The Workflows list is an editor tab: bring it forward, then open the first run.
+      await runCommand(page, "Show Workflows", /Show Workflows/);
+      await page.getByTestId("workflows-view").waitFor({ timeout: 15_000 });
       await item.getByRole("button", { name: /^Open run/ }).click();
       const monitor = page.locator(`[data-testid="workflow-run"][data-run="${firstRun.id}"]`);
       await monitor.waitFor({ timeout: 15_000 });
@@ -333,7 +336,10 @@ export default async function a1Environment({ launchApp, artifactsDir, fixture, 
     monitor = await openFirst();
     await monitor.getByTestId("workflow-run-again").click();
     await page.getByTestId("plan-review-notice").waitFor({ timeout: 30_000 });
-    await page.getByTestId("workflow-plan-details").waitFor({ timeout: 30_000 });
+    const review = page.getByTestId("workflow-plan-review");
+    await review.getByTestId("workflow-plan-details").waitFor({ timeout: 30_000 });
+    const firstApproval = (await invoke(page, "workflow_run_get", { run: firstRun.id })).plan.approvalHash;
+    assert.notEqual(await review.getByTestId("workflow-plan-details").getAttribute("data-approval"), firstApproval, "the reviewed plan differs");
     assert.match(await page.getByTestId("plan-review-notice").innerText(), /differs from the one this run was approved with/);
     await shot(page, "a1-workflow-run-again-review");
     assert.equal((await runsOf()).length, runsNow, "nothing started while the review is open");

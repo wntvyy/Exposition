@@ -209,18 +209,27 @@ export async function refreshRuns(): Promise<void> {
   }
 }
 
+/** Increases with every environment load; an older load's result is dropped. */
+let environmentsSerial = 0;
+
 export async function loadEnvironments(refresh = false): Promise<void> {
+  const serial = ++environmentsSerial;
+  const root = useResearch.getState().workspace?.root ?? null;
+  // A newer load (or another project) supersedes this one.
+  const superseded = () => serial !== environmentsSerial || (useResearch.getState().workspace?.root ?? null) !== root;
   useResearch.setState({ environmentsLoading: true, environmentsError: null });
   try {
     const environments = await commands.researchEnvironments(refresh);
     // The environment remembered for this project (app-local; may be stale).
     const remembered = await setupCommands.selection().catch(() => null);
+    if (superseded()) return;
     useResearch.setState((state) => ({
       environments,
       environmentsLoading: false,
       selectedEnvironment: pickEnvironment(environments, state.selectedEnvironment, remembered),
     }));
   } catch (e) {
+    if (superseded()) return;
     useResearch.setState({ environmentsLoading: false, environmentsError: errorMessage(e) });
   }
 }

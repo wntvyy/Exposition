@@ -1375,7 +1375,13 @@ fn run_steps(
                 return Err(Stop::Failed(format!(
                     "{} failed (exit code {code}){}",
                     step.label,
-                    if detail.is_empty() { ".".to_owned() } else { format!(": {detail}") }
+                    if detail.is_empty() {
+                        ".".to_owned()
+                    } else if detail.ends_with(['.', '!', '?']) {
+                        format!(": {detail}")
+                    } else {
+                        format!(": {detail}.")
+                    }
                 )));
             }
             ProjectJobEnd::Canceled => {

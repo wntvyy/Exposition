@@ -353,7 +353,15 @@ export function SetupProgress({ status }: { status: SetupStatus }) {
 }
 
 /** A finished setup that did not succeed: what happened, and what to do next. */
-export function SetupOutcome({ status, onRetry }: { status: SetupStatus; onRetry?: () => void }) {
+export function SetupOutcome({
+  status,
+  onRetry,
+  retryLabel = "Set up again…",
+}: {
+  status: SetupStatus;
+  onRetry?: () => void;
+  retryLabel?: string;
+}) {
   const log = useSetup((s) => s.log);
   const [showLog, setShowLog] = useState(false);
   const canceled = status.state === "canceled";
@@ -361,12 +369,20 @@ export function SetupOutcome({ status, onRetry }: { status: SetupStatus; onRetry
     <div data-testid="setup-outcome" data-state={status.state} data-removed={String(status.removed)}>
       <Banner
         tone={canceled ? "canceled" : "danger"}
-        title={canceled ? "Setup canceled" : "Setup failed"}
+        title={
+          status.plan.createsEnvironment
+            ? canceled
+              ? "Setup canceled"
+              : "Setup failed"
+            : canceled
+              ? "Installation canceled"
+              : "Installation failed"
+        }
         actions={
           <>
             {onRetry && (
               <Button size="sm" icon={Wrench} onPress={onRetry}>
-                Set up again…
+                {retryLabel}
               </Button>
             )}
             {log.length > 0 && (
@@ -393,23 +409,12 @@ export function SetupOutcome({ status, onRetry }: { status: SetupStatus; onRetry
 
 // ---- what an unavailable environment needs ---------------------------------
 
-function CommandList({ commands: lines, program }: { commands: string[]; program: string }) {
-  const all = lines.join("\n");
-  return (
-    <div className="exp-setup__command-list" data-testid="setup-guidance-commands">
-      <pre className="exp-setup__commands" tabIndex={0} aria-label={`Commands to run in ${program}`}>
-        {all}
-      </pre>
-      <IconButton icon={Copy} size="sm" aria-label={`Copy the ${program} commands`} onPress={() => void copy(all, "Commands")} />
-    </div>
-  );
-}
-
 /**
  * The selected environment is not usable: the concrete next step. Exposition
  * sets up Python project environments itself; it links to official installers
  * for missing runtimes (and checks again when the window gets focus); R/Julia
- * kernel packages are commands to copy.
+ * kernel packages are commands to copy. The reason and guidance come from
+ * discovery, word for word.
  */
 export function EnvironmentHelp({ env }: { env: RuntimeEnvironment }) {
   const environments = useResearch((s) => s.environments);
@@ -418,11 +423,13 @@ export function EnvironmentHelp({ env }: { env: RuntimeEnvironment }) {
   const [open, setOpen] = useState(false);
   const hint = env.setup ?? null;
   const choice = setupChoiceFor(env, environments);
-  const external = Boolean(hint?.downloadUrl || (hint?.commands.length ?? 0) > 0);
+  const commands = hint?.commands ?? [];
+  const external = Boolean(hint?.downloadUrl || commands.length > 0);
   useRedetectOnFocus(external);
   if (env.availability.kind !== "unavailable") return null;
   const program = hint?.commandsFor ?? "the runtime";
   const install = choice?.kind === "installPackages";
+  const runtimeName = env.language === "python" ? "Python" : env.language === "r" ? "R" : "Julia";
   return (
     <div data-testid="research-unavailable" data-environment={env.id} data-setup={choice?.kind ?? "none"}>
       <UnavailableState
@@ -431,27 +438,14 @@ export function EnvironmentHelp({ env }: { env: RuntimeEnvironment }) {
         description={
           <>
             <p>{env.availability.reason}</p>
-            {choice ? (
-              <p>
-                {install
-                  ? "Install packages adds ipykernel and jupyter_client to the project environment."
-                  : "Set up environment creates a Python environment in .venv inside the project, with the Jupyter kernel packages."}
-                {!trusted && " Trust the folder first: setup runs on this computer with your account's privileges."}
-              </p>
-            ) : hint?.downloadUrl ? (
-              <p>Install it from the official site; Exposition checks again when you come back to this window.</p>
-            ) : null}
-            {hint && hint.commands.length > 0 && (
-              <>
-                <p>
-                  {hint.downloadUrl ? "Then, in " : "In "}
-                  {program}, run:
-                </p>
-                <CommandList commands={hint.commands} program={program} />
-                {hint.userWide && <p className="ui-meta">These install for your user account, not only for this project.</p>}
-              </>
+            <p className="exp-research__guidance" data-testid="setup-guidance">
+              {env.availability.guidance}
+            </p>
+            {choice && !trusted && <p>Trust the folder first: setup runs on this computer with your account&rsquo;s privileges.</p>}
+            {hint?.userWide && commands.length > 0 && (
+              <p className="ui-meta">The {program} commands install for your user account, not only for this project.</p>
             )}
-            {!choice && !hint && <p className="exp-research__guidance">{env.availability.guidance}</p>}
+            {external && <p className="ui-meta">Exposition checks again when you come back to this window.</p>}
           </>
         }
         actions={
@@ -469,7 +463,12 @@ export function EnvironmentHelp({ env }: { env: RuntimeEnvironment }) {
                 onPress={() => void openOfficialPage(hint.downloadUrl as string)}
                 data-testid="setup-download"
               >
-                {`Get ${env.language === "python" ? "Python" : env.language === "r" ? "R" : "Julia"}`}
+                {`Get ${runtimeName}`}
+              </Button>
+            )}
+            {commands.length > 0 && (
+              <Button size="sm" icon={Copy} onPress={() => void copy(commands.join("\n"), `${program} commands`)} data-testid="setup-copy-commands">
+                {`Copy ${program} commands`}
               </Button>
             )}
             <Button size="sm" icon={RefreshCw} isPending={loading} onPress={() => void loadEnvironments(true)}>
@@ -525,7 +524,11 @@ export function SetupArea() {
     <>
       {outcome && (
         <>
-          <SetupOutcome status={outcome} onRetry={retryChoice ? () => setRetry(true) : undefined} />
+          <SetupOutcome
+            status={outcome}
+            onRetry={retryChoice ? () => setRetry(true) : undefined}
+            retryLabel={retryChoice?.kind === "installPackages" ? "Install packages…" : "Set up again…"}
+          />
           {retryChoice && <SetupDialog choice={retryChoice} isOpen={retry} onOpenChange={setRetry} />}
         </>
       )}

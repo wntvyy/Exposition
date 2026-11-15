@@ -439,6 +439,9 @@ export function RunOutputView() {
   const output = useResearch((s) => (s.selectedRun ? s.outputs[s.selectedRun] : undefined)) ?? EMPTY_RUN_OUTPUT;
   const viewer = useRef<HTMLDivElement>(null);
   const now = useNow(Boolean(run && isActiveRun(run)));
+  // The user's executing run is stopped with Stop in the run controls; Cancel
+  // run is for a queued run or another session's run.
+  const stoppable = useResearch((s) => activeUserRunId(userSession(s), s.runs));
 
   useLayoutEffect(() => {
     const el = viewer.current;
@@ -463,8 +466,7 @@ export function RunOutputView() {
         </span>
         {run.executionCount !== null && <span className="ui-meta">In [{run.executionCount}]</span>}
         <code className="exp-research__preview">{run.codePreview}</code>
-        {/* This run only (also a queued one); Stop in the run controls stops whatever runs now. */}
-        {isActiveRun(run) && (
+        {isActiveRun(run) && run.id !== stoppable && (
           <Button size="sm" variant="ghost" icon={SquareX} onPress={() => void cancelRun(run.id)}>
             Cancel run
           </Button>
