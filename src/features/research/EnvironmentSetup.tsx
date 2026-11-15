@@ -257,10 +257,11 @@ export function SetupDialog({ choice, isOpen, onOpenChange }: SetupDialogProps) 
         )}
         {load.kind === "loading" && !plan && <LoadingState title="Preparing the plan…" fill={false} />}
         {plan && (
-          <>
-            <p data-testid="setup-summary">{plan.summary}</p>
+          // The facts list is the plan's summary here (the one-sentence
+          // `plan.summary` is for places without it, such as agent approvals).
+          <div data-testid="setup-summary">
             <KeyValueList items={facts} />
-          </>
+          </div>
         )}
         <div data-testid="setup-extra-packages">
           <TextField
