@@ -875,3 +875,223 @@ fn a_manual_region_binding_resolves_without_a_file_change() {
     assert_eq!(binding.state, BindingState::Resolved, "{binding:?}");
     assert!(binding.fingerprint.is_some(), "anchored by its text");
 }
+
+// ---- a changed file: what is located in it, and what a save invalidates ----
+
+const ODD_TYP: &str =
+    "= Odd sums\n\nTheorem. The sum of the first n odd numbers is n squared.\n\nProof. By induction on n.\n";
+const ODD_STATEMENT: &str = "Theorem. The sum of the first n odd numbers is n squared.";
+const ODD_LEAN: &str = "def oddSum : Nat -> Nat\n  | 0 => 0\n  | n + 1 => oddSum n + (2 * n + 1)\n\ntheorem oddSum_eq_sq (n : Nat) : oddSum n = n * n := by\n  sorry\n";
+
+fn bound(temp: &str, kind: EntityKind, label: &str, path: &str, range: Option<(u32, u32)>) -> GraphOperation {
+    GraphOperation::CreateEntity {
+        temp_id: temp.into(),
+        kind,
+        roles: vec![],
+        label: label.into(),
+        key: None,
+        attributes: BTreeMap::new(),
+        binding: Some(NewBinding {
+            path: wp(path),
+            selector: if range.is_some() { SourceSelector::Region } else { SourceSelector::WholeFile },
+            range: range.map(|(s, e)| exposition_core::text::TextRange::new(s, e)),
+        }),
+    }
+}
+
+/// The walkthrough's graph: a theorem and its proof curated by an agent and
+/// bound to `main.typ`, a finding that references the theorem, and a Lean
+/// file with an indexed declaration. Returns (theorem, proof, finding).
+fn odd_sums(p: &Project) -> (EntityId, EntityId, EntityId) {
+    p.full();
+    let start = ODD_TYP.find(ODD_STATEMENT).unwrap() as u32;
+    let base = p.svc.status().revision;
+    let (proposal, outcome) = p
+        .svc
+        .propose_and_apply(
+            Origin::Agent { task_id: "task-1".into() },
+            &ChangeRequest {
+                base_revision: base,
+                operations: vec![
+                    bound(
+                        "thm",
+                        EntityKind::Theorem,
+                        "Sum of odd numbers",
+                        "main.typ",
+                        Some((start, start + ODD_STATEMENT.len() as u32)),
+                    ),
+                    bound("prf", EntityKind::Proof, "Proof by induction", "main.typ", None),
+                    create("fnd", EntityKind::Finding, "Numerical check up to 1000"),
+                    GraphOperation::AddRelation {
+                        kind: RelationKind::ProofOf,
+                        from: EntityRef::Temp { temp_id: "prf".into() },
+                        to: EntityRef::Temp { temp_id: "thm".into() },
+                        evidence_kind: None,
+                        evidence: vec![],
+                        note: None,
+                    },
+                    GraphOperation::AddRelation {
+                        kind: RelationKind::References,
+                        from: EntityRef::Temp { temp_id: "fnd".into() },
+                        to: EntityRef::Temp { temp_id: "thm".into() },
+                        evidence_kind: None,
+                        evidence: vec![],
+                        note: None,
+                    },
+                ],
+                summary: None,
+            },
+        )
+        .unwrap();
+    assert!(proposal.valid, "{:?}", proposal.diagnostics);
+    let ApplyOutcome::Applied { created, .. } = outcome else { panic!("{outcome:?}") };
+    (created[0].id.clone(), created[1].id.clone(), created[2].id.clone())
+}
+
+fn impact_of(p: &Project, id: &EntityId) -> ImpactReport {
+    p.svc.impact(&ImpactRequest { entities: vec![id.clone()], max_depth: None, max_items: None }).unwrap()
+}
+
+/// Formal evidence the Lean service would record for `name` in `path` at the
+/// file's indexed content.
+fn formal_evidence(p: &Project, path: &str, name: &str, subject: &EntityId) -> EvidenceId {
+    let file = p.resource(path).unwrap();
+    let digest = p.svc.entity_detail(&file.id).unwrap().coverage.unwrap().content_hash.unwrap();
+    let origin = Origin::Service { service: "lean".into() };
+    let evidence = Evidence {
+        id: EvidenceId::mint(),
+        kind: EvidenceKind::FormalCheck,
+        subject: Some(subject.clone()),
+        operation: OperationRef { kind: "leanAudit".into(), id: format!("{path}@1") },
+        inputs: vec![VersionedInput {
+            path: wp(path),
+            content_hash: Some(digest.clone()),
+            revision: Some(1),
+            unsaved: false,
+        }],
+        outcome: EvidenceOutcome::Verdict { verdict: FormalVerdict::Checked },
+        environment: vec![],
+        outputs: vec![],
+        formal: Some(FormalEvidence {
+            declaration: name.into(),
+            declaration_kind: "theorem".into(),
+            statement: format!("{name} : True"),
+            axioms: vec![],
+            file_verdict: FormalVerdict::Checked,
+            declaration_verdict: Some(FormalVerdict::Checked),
+            toolchain: "leanprover/lean4:v4.35.0".into(),
+            source_path: wp(path),
+            source_digest: digest,
+            revision: Some(1),
+            dependency_fingerprints: None,
+            dependencies: FormalDependencies::Unavailable { reason: "not reported".into() },
+        }),
+        recorded_by: origin.clone(),
+        recorded_at_ms: 1,
+    };
+    p.svc.register_evidence(&origin, evidence).unwrap()
+}
+
+/// Walkthrough lead B: "what is affected if main.typ changes?" answered
+/// nothing, although a theorem and its proof are bound to that file (a
+/// binding is not a relation). The file now lists what is located in it,
+/// labelled as such; like declarations anchored in a file, those items are
+/// informational and their own dependents are not followed.
+#[test]
+fn a_changed_file_lists_the_entities_bound_to_it() {
+    let p = project(&[("main.typ", ODD_TYP), ("lean/OddSums.lean", ODD_LEAN)]);
+    let (theorem, proof, finding) = odd_sums(&p);
+    let file = p.resource("main.typ").unwrap();
+
+    let report = impact_of(&p, &file.id);
+    let item = |id: &EntityId| report.items.iter().find(|i| &i.entity.id == id);
+    for id in [&theorem, &proof] {
+        let item = item(id).unwrap_or_else(|| panic!("{id} is bound to main.typ: {:?}", report.items));
+        assert_eq!(item.action, ImpactAction::Informational);
+        assert_eq!(item.located_in.as_ref(), Some(&file.id));
+        assert!(item.path.is_empty(), "a binding is not a relation: {:?}", item.path);
+        assert_eq!(item.reason, "is located in “main.typ”, which changed; check whether it changed");
+        assert_eq!(item.depth, 1);
+    }
+    assert!(item(&finding).is_none(), "dependents of an item in the file are not followed from the file");
+    assert_eq!(report.items.len(), 2, "{:?}", report.items);
+
+    // Naming the item follows its relations (unchanged).
+    let report = impact_of(&p, &theorem);
+    let actions: Vec<(EntityId, ImpactAction)> = report.items.iter().map(|i| (i.entity.id.clone(), i.action)).collect();
+    assert!(actions.contains(&(proof.clone(), ImpactAction::NeedsReview)), "{actions:?}");
+    assert!(actions.contains(&(finding.clone(), ImpactAction::CitationReview)), "{actions:?}");
+    assert!(report.items.iter().all(|i| i.located_in.is_none()));
+    assert!(report.items.iter().all(|i| i.reason.ends_with("(suggested relationship)")), "{:?}", report.items);
+
+    // An indexed declaration is anchored in its file and bound to it: listed once.
+    let lean = p.resource("lean/OddSums.lean").unwrap();
+    let decl = by_key(&p, EntityKind::FormalDeclaration, "oddSum_eq_sq").expect("indexed Lean declaration");
+    let report = impact_of(&p, &lean.id);
+    let listed: Vec<&ImpactItem> = report.items.iter().filter(|i| i.entity.id == decl.id).collect();
+    assert_eq!(listed.len(), 1, "{:?}", report.items);
+    assert_eq!(listed[0].located_in.as_ref(), Some(&lean.id));
+    assert!(listed[0].reason.starts_with("is declared in “OddSums.lean”"), "{}", listed[0].reason);
+
+    // A rejected relation drops out.
+    let relation = p.svc.entity_detail(&finding).unwrap().outgoing[0].id.clone();
+    p.user(vec![GraphOperation::SetRelationStatus { relation, status: AssertionStatus::Rejected }]);
+    let report = impact_of(&p, &theorem);
+    assert!(report.items.iter().all(|i| i.entity.id != finding), "a rejected relation is not followed");
+}
+
+/// The integrity side of lead B: evidence that records a file is reported
+/// when that file is asked about, and an actual save of the file leaves no
+/// verification falsely current.
+#[test]
+fn a_saved_change_makes_the_evidence_of_a_file_historical_and_flags_changed_bindings() {
+    let p = project(&[("main.typ", ODD_TYP), ("lean/OddSums.lean", ODD_LEAN)]);
+    let (theorem, proof, _) = odd_sums(&p);
+    let lean = p.resource("lean/OddSums.lean").unwrap();
+    let decl = by_key(&p, EntityKind::FormalDeclaration, "oddSum_eq_sq").unwrap();
+    let evidence = formal_evidence(&p, "lean/OddSums.lean", "oddSum_eq_sq", &decl.id);
+    p.user(vec![add_rel(RelationKind::Formalizes, &decl.id, &theorem)]);
+
+    // Before any change: the file's impact names the evidence that pins it.
+    let report = impact_of(&p, &lean.id);
+    let hit = report.evidence.iter().find(|e| e.evidence == evidence).expect("evidence of a declaration in the file");
+    assert_eq!(hit.subject, decl.id);
+    assert!(!matches!(hit.freshness, Freshness::Stale { .. }), "{:?}", hit.freshness);
+    assert_eq!(
+        hit.reason,
+        "formalCheck evidence for “oddSum_eq_sq” records lean/OddSums.lean as an input; a change to the file makes this evidence historical"
+    );
+    let row = |p: &Project, id: &EntityId| {
+        p.svc.math_overview().unwrap().rows.into_iter().find(|r| &r.entity.id == id).unwrap()
+    };
+    assert_eq!(row(&p, &theorem).verdict, Some(FormalVerdict::Checked), "the declaration's verdict, by association");
+    assert!(matches!(row(&p, &theorem).freshness, Some(Freshness::Unknown { .. })), "never current");
+
+    // The Lean file changes on disk and is reconciled (a save).
+    write(&p.root, "lean/OddSums.lean", &ODD_LEAN.replace("sorry", "induction n <;> simp_all [oddSum]"));
+    p.paths(&["lean/OddSums.lean"]);
+    let detail = p.svc.entity_detail(&decl.id).unwrap();
+    let fresh = &detail.evidence_freshness.iter().find(|(id, _)| id == &evidence).unwrap().1;
+    assert!(matches!(fresh, Freshness::Stale { .. }), "{fresh:?}");
+    for id in [&decl.id, &theorem] {
+        assert!(matches!(row(&p, id).freshness, Some(Freshness::Stale { .. })), "{:?}", row(&p, id).freshness);
+    }
+    let report = impact_of(&p, &lean.id);
+    let hit = report.evidence.iter().find(|e| e.evidence == evidence).unwrap();
+    assert!(matches!(hit.freshness, Freshness::Stale { .. }));
+    assert_eq!(hit.reason, "formalCheck evidence for “oddSum_eq_sq” was recorded for older inputs");
+
+    // The manuscript statement changes: the theorem bound to that text no
+    // longer resolves (it is not silently moved), the whole-file proof follows
+    // the file, and the formal evidence is untouched (it never was about the
+    // manuscript).
+    write(&p.root, "main.typ", &ODD_TYP.replace("n squared", "n cubed"));
+    p.paths(&["main.typ"]);
+    let t = p.svc.entity_detail(&theorem).unwrap();
+    assert_eq!(t.bindings[0].state, BindingState::Missing, "{:?}", t.bindings[0]);
+    assert_eq!(t.bindings[0].detail.as_deref(), Some("The bound text was changed or removed."));
+    assert_eq!(p.svc.entity_detail(&proof).unwrap().bindings[0].state, BindingState::Resolved);
+    let report = impact_of(&p, &p.resource("main.typ").unwrap().id);
+    assert!(report.unknown_coverage.contains(&wp("main.typ")), "an unresolved binding makes the file's impact unknown");
+    assert!(report.items.iter().any(|i| i.entity.id == theorem), "still listed with the file it was bound to");
+}

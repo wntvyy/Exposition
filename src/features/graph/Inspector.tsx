@@ -304,6 +304,64 @@ export function FormalEvidenceBody({ formal }: { formal: NonNullable<Evidence["f
   );
 }
 
+/**
+ * Where an item's formal evidence is, when it is not on the item: Lean
+ * evidence belongs to a formal declaration, never to the statement it
+ * formalizes, so a statement points at its associated declarations (with the
+ * state of each association) instead of reading as unchecked or as verified.
+ * A declaration without evidence says how its verdict gets recorded.
+ */
+export function FormalEvidencePointer({
+  detail,
+  onSelectEntity,
+}: {
+  detail: EntityDetail;
+  onSelectEntity?: (id: string) => void;
+}) {
+  if (detail.entity.kind === "formalDeclaration") {
+    if (detail.evidence.length > 0) return null;
+    return (
+      <p className="ui-meta" data-testid="graph-evidence-how">
+        A Lean check alone records nothing here. To record Lean&rsquo;s verdict for this declaration, open its file and choose
+        Record evidence in the Lean panel.
+      </p>
+    );
+  }
+  const formalizations = detail.incoming.filter((r) => r.kind === "formalizes" && r.status !== "rejected");
+  if (formalizations.length === 0) return null;
+  const neighbors = new Map(detail.neighbors.map((n) => [n.id, n]));
+  return (
+    <div className="xp-graph-stack" data-testid="graph-evidence-formal">
+      <p className="ui-meta">
+        Lean evidence is recorded for a formal declaration, not for the item it formalizes. Associated with this item:
+      </p>
+      <ul className="xp-graph-rows">
+        {formalizations.map((r) => {
+          const label = neighbors.get(r.from)?.label ?? r.from;
+          return (
+            <li key={r.id} className="xp-graph-row" data-testid="graph-evidence-formal-declaration" data-entity-id={r.from} data-status={r.status}>
+              <p className="xp-graph-row__line xp-graph-row__main">
+                {onSelectEntity ? (
+                  <button type="button" className="xp-link" onClick={() => onSelectEntity(r.from)}>
+                    {label}
+                  </button>
+                ) : (
+                  label
+                )}{" "}
+                <RelationStatus status={r.status} />
+              </p>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="ui-meta">
+        Its evidence is on the declaration. An association records a correspondence; it is not a machine proof that the
+        declaration and this item are equivalent.
+      </p>
+    </div>
+  );
+}
+
 const ACTION_LABEL: Record<ImpactReport["items"][number]["action"], { label: string; tone: BadgeTone }> = {
   needsReview: { label: "Needs review", tone: "warning" },
   stale: { label: "Stale", tone: "stale" },
@@ -373,6 +431,11 @@ export function ImpactSection({ entityId, labelOf, onSelectEntity }: { entityId:
             )}
             {report.unknownCoverage.length > 0 && (
               <p className="ui-meta">Impact through {report.unknownCoverage.join(", ")} is unknown (incomplete extraction).</p>
+            )}
+            {report.items.some((item) => item.locatedIn) && (
+              <p className="ui-meta" data-testid="graph-impact-file-scope">
+                Items in a changed file are listed without what depends on them; ask this of an item to follow it.
+              </p>
             )}
             <p className="ui-meta">A change never makes a result false by itself; it marks what to review.</p>
           </>
@@ -564,6 +627,10 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
             </ul>
           ) : (
             <p className="ui-muted">No evidence recorded.</p>
+          )}
+          {/* The Mathematics view's own Formal verification section already lists the associations. */}
+          {(entity.kind === "formalDeclaration" || !children) && (
+            <FormalEvidencePointer detail={detail} onSelectEntity={actions.onSelectEntity} />
           )}
         </Section>
 

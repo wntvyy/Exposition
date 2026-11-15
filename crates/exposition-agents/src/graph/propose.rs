@@ -358,6 +358,18 @@ pub fn visible_effects(proposal: &ChangeProposal, consent: ContextConsent) -> Ve
         .collect()
 }
 
+/// What a task can do instead when it tried to assert service-owned evidence
+/// (`graph.serviceOwnedEvidence`): the boundary stays, the routes are named.
+pub const SERVICE_EVIDENCE_GUIDANCE: &str = "An evidenceFor relation of kind computational, formalCheck, or build \
+    must cite at least one existing evidence record of that kind (evidence: [\"evd-…\"]); such records are written \
+    only by Exposition's services, never by a proposal, and a run or check you made is not one by itself. \
+    graph_query entity lists the records an entity has, with their ids. Computational evidence is recorded when \
+    the user keeps a run's result in Research (Keep) or a workflow retains one; formal evidence when \
+    the user chooses Record evidence for a declaration in the Lean panel or accepts the association a workflow's \
+    Lean audit proposes. Without such a record, do not claim it: relate the items with references, or use \
+    evidenceFor with evidence_kind review or literature for a report or a source, and tell the user which step \
+    records the evidence.";
+
 /// Validate the call: scope of every referenced record, then the graph's own
 /// validation. Invalid proposals are refused before anyone is asked.
 pub fn prepare(
@@ -435,15 +447,19 @@ pub fn prepare(
     let proposal = graph.service.propose_change(origin, &request).map_err(|e| super::unavailable(&e.message))?;
     if !proposal.valid {
         let errors = proposal.diagnostics.iter().filter(|d| d.severity == DiagnosticSeverity::Error).count();
+        let mut content = json!({
+            "code": codes::GRAPH_INVALID,
+            "diagnostics": visible_diagnostics(&proposal.diagnostics, spec.consent),
+        });
+        if proposal.diagnostics.iter().any(|d| d.code == "graph.serviceOwnedEvidence") {
+            content["guidance"] = json!(SERVICE_EVIDENCE_GUIDANCE);
+        }
         return Err(ToolOutput::error_with(
             format!(
                 "The graph change is invalid ({errors} error(s)); nothing was proposed to the user or applied. Fix the \
                  operations and call graph_propose again."
             ),
-            json!({
-                "code": codes::GRAPH_INVALID,
-                "diagnostics": visible_diagnostics(&proposal.diagnostics, spec.consent),
-            }),
+            content,
         ));
     }
     let detail = approval_detail(&proposal);

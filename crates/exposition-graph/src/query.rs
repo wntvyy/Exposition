@@ -157,6 +157,11 @@ pub struct ImpactItem {
     pub depth: u32,
     /// Relations from a changed entity to this one.
     pub path: Vec<ImpactStep>,
+    /// The file (resource entity) this item is located in, when it is listed
+    /// only because that file changed: a declaration anchored in it, or an
+    /// entity bound to it (a binding is not a relation, so `path` then ends
+    /// at the file). Its own dependents were not followed.
+    pub located_in: Option<EntityId>,
     pub action: ImpactAction,
     pub reason: String,
 }

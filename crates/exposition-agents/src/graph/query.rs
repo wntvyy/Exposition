@@ -8,8 +8,10 @@ use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 
 use exposition_core::path::WorkspacePath;
+use exposition_graph::store::GraphStore;
 use exposition_graph::{
-    EntityId, EntityKind, EvidenceOutcome, Freshness, ImpactRequest, Lifecycle, service::evidence_freshness,
+    AssertionStatus, EntityId, EntityKind, Evidence, EvidenceKind, EvidenceOutcome, Freshness, ImpactRequest,
+    Lifecycle, RelationKind, service::evidence_freshness,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -84,6 +86,67 @@ impl GraphQueryInput {
     pub fn named_path(&self) -> Option<&str> {
         (self.query == "inspect").then_some(self.path.as_str())
     }
+}
+
+/// How evidence comes to exist and where it is recorded, stated with every
+/// result that shows formal declarations or their associations, so that a
+/// task does not have to guess why a check it ran left no evidence.
+pub const FORMAL_EVIDENCE_NOTE: &str = "\
+    Evidence is recorded only by Exposition's services, on the entity it is about. check_lean returns its result \
+    to you and records no evidence. Formal (Lean) evidence is recorded for a formal declaration when the user \
+    opens the Lean file and chooses Record evidence (or Associate with…) for that declaration in the Lean panel, \
+    or accepts the association a workflow's Lean audit proposes. It is never recorded on the statement the \
+    declaration formalizes: a formalizes relation, suggested or accepted, is a correspondence a person reviews, \
+    not a proof that the two say the same. Query entity on a statement lists the evidence of its associated \
+    declarations under formalEvidence.";
+
+/// What an impact result for a file covers.
+pub const FILE_IMPACT_NOTE: &str = "\
+    For a file, the items located in it are listed (declared in it or bound to it; locatedIn names the file). \
+    Each may or may not change when the file does, so it is informational and what depends on it is not followed \
+    here: query impact for an item to follow its relations. evidence lists the recorded evidence that a change \
+    would make historical.";
+
+/// One evidence record as a task may see it: kind, outcome kind, freshness;
+/// the formal statement and axioms only with content consent.
+fn evidence_item(store: &GraphStore, vis: &Visibility<'_>, record: &Evidence) -> Value {
+    let freshness = match evidence_freshness(store, record) {
+        Freshness::Current => "current",
+        Freshness::Stale { .. } => "stale",
+        Freshness::Unknown { .. } => "unknown",
+    };
+    let outcome = match &record.outcome {
+        EvidenceOutcome::Succeeded => json!("succeeded"),
+        EvidenceOutcome::Failed { .. } => json!("failed"),
+        EvidenceOutcome::Canceled => json!("canceled"),
+        EvidenceOutcome::Interrupted => json!("interrupted"),
+        EvidenceOutcome::Verdict { verdict } => json!({"verdict": verdict}),
+        EvidenceOutcome::Reported { .. } => json!("reported"),
+    };
+    let mut item = json!({
+        "id": record.id,
+        "kind": record.kind,
+        "operation": record.operation.kind,
+        "outcome": outcome,
+        "freshness": freshness,
+        "recordedAtMs": record.recorded_at_ms,
+    });
+    if let Some(formal) = &record.formal {
+        item["declarationVerdict"] = json!(formal.declaration_verdict);
+        item["fileVerdict"] = json!(formal.file_verdict);
+        if vis.content() {
+            item["declaration"] = json!(formal.declaration);
+            item["statement"] = json!(truncate_chars(&formal.statement, 2000));
+            item["axioms"] = json!(formal.axioms);
+        }
+    }
+    item
+}
+
+/// Whether a result shows formal declarations or formal associations.
+fn mentions_formal(entities: &[ContextEntity], relations: &[ContextRelation]) -> bool {
+    entities.iter().any(|e| e.kind == EntityKind::FormalDeclaration)
+        || relations.iter().any(|r| r.kind == RelationKind::Formalizes)
 }
 
 /// The id is not echoed: the refusal reads the same whether the entity is
@@ -213,42 +276,43 @@ fn entity(graph: GraphEnv<'_>, vis: &Visibility<'_>, input: &GraphQueryInput) ->
                     neighbors.push(vis.describe(store, &o, &ob)?);
                 }
             }
-            // Evidence about the entity: kind, outcome kind, freshness; the
-            // formal statement and axioms only with content consent.
-            let mut evidence = Vec::new();
-            for record in store.evidence_for_subject(&id)?.iter().take(20) {
-                let freshness = match evidence_freshness(store, record) {
-                    Freshness::Current => "current",
-                    Freshness::Stale { .. } => "stale",
-                    Freshness::Unknown { .. } => "unknown",
-                };
-                let outcome = match &record.outcome {
-                    EvidenceOutcome::Succeeded => json!("succeeded"),
-                    EvidenceOutcome::Failed { .. } => json!("failed"),
-                    EvidenceOutcome::Canceled => json!("canceled"),
-                    EvidenceOutcome::Interrupted => json!("interrupted"),
-                    EvidenceOutcome::Verdict { verdict } => json!({"verdict": verdict}),
-                    EvidenceOutcome::Reported { .. } => json!("reported"),
-                };
-                let mut item = json!({
-                    "id": record.id,
-                    "kind": record.kind,
-                    "operation": record.operation.kind,
-                    "outcome": outcome,
-                    "freshness": freshness,
-                    "recordedAtMs": record.recorded_at_ms,
-                });
-                if let Some(formal) = &record.formal {
-                    item["declarationVerdict"] = json!(formal.declaration_verdict);
-                    item["fileVerdict"] = json!(formal.file_verdict);
-                    if vis.content() {
-                        item["declaration"] = json!(formal.declaration);
-                        item["statement"] = json!(truncate_chars(&formal.statement, 2000));
-                        item["axioms"] = json!(formal.axioms);
+            // Evidence about the entity itself.
+            let evidence: Vec<Value> =
+                store.evidence_for_subject(&id)?.iter().take(20).map(|r| evidence_item(store, vis, r)).collect();
+            // Formal evidence belongs to a declaration, never to what it
+            // formalizes: for an informal entity, the evidence of each
+            // associated declaration is listed apart, with the state of the
+            // association (rejected ones are left out).
+            let mut formal_evidence = Vec::new();
+            if e.kind != EntityKind::FormalDeclaration {
+                for r in store.relations_to(&id)? {
+                    if r.kind != RelationKind::Formalizes || r.status == AssertionStatus::Rejected {
+                        continue;
                     }
+                    let Some((declaration, _)) = vis.entity_id(store, &r.from)? else { continue };
+                    if formal_evidence.len() >= 10 {
+                        truncated = true;
+                        break;
+                    }
+                    let mut records: Vec<Evidence> = store
+                        .evidence_for_subject(&declaration.id)?
+                        .into_iter()
+                        .filter(|x| x.kind == EvidenceKind::FormalCheck)
+                        .collect();
+                    records.sort_by_key(|x| std::cmp::Reverse(x.recorded_at_ms));
+                    let records: Vec<Value> = records.iter().take(5).map(|x| evidence_item(store, vis, x)).collect();
+                    formal_evidence.push(json!({
+                        "declaration": declaration.id,
+                        "label": vis.label(&declaration),
+                        "relation": r.id,
+                        "association": r.status,
+                        "evidence": records,
+                    }));
                 }
-                evidence.push(item);
             }
+            let formal = e.kind == EntityKind::FormalDeclaration
+                || !formal_evidence.is_empty()
+                || mentions_formal(&neighbors, &relations);
             let mut out = json!({
                 "entity": described,
                 "relations": relations,
@@ -256,6 +320,12 @@ fn entity(graph: GraphEnv<'_>, vis: &Visibility<'_>, input: &GraphQueryInput) ->
                 "evidence": evidence,
                 "truncated": truncated,
             });
+            if e.kind != EntityKind::FormalDeclaration && !formal_evidence.is_empty() {
+                out["formalEvidence"] = json!(formal_evidence);
+            }
+            if formal {
+                out["evidenceNote"] = json!(FORMAL_EVIDENCE_NOTE);
+            }
             if vis.content() && !e.attributes.is_empty() {
                 let attributes: serde_json::Map<String, Value> =
                     e.attributes.iter().map(|(k, v)| (k.clone(), json!(truncate_chars(v, 500)))).collect();
@@ -317,7 +387,12 @@ fn neighborhood(
             }
             let relations: Vec<ContextRelation> =
                 store.relations_among(&seen)?.iter().take(MAX_RELATIONS).map(|r| vis.relation(r)).collect();
-            Ok(Ok(json!({"entities": entities, "relations": relations, "truncated": truncated})))
+            let formal = mentions_formal(&entities, &relations);
+            let mut out = json!({"entities": entities, "relations": relations, "truncated": truncated});
+            if formal {
+                out["evidenceNote"] = json!(FORMAL_EVIDENCE_NOTE);
+            }
+            Ok(Ok(out))
         })
         .map_err(store_error)?
 }
@@ -380,14 +455,19 @@ fn inspect(
             });
             let relations: Vec<ContextRelation> =
                 store.relations_among(&ids)?.iter().take(MAX_RELATIONS).map(|r| vis.relation(r)).collect();
-            Ok(json!({
+            let formal = mentions_formal(&entities, &relations);
+            let mut out = json!({
                 "path": path,
                 "resource": resource,
                 "coverage": coverage,
                 "entities": entities,
                 "relations": relations,
                 "truncated": truncated,
-            }))
+            });
+            if formal {
+                out["evidenceNote"] = json!(FORMAL_EVIDENCE_NOTE);
+            }
+            Ok(out)
         })
         .map_err(store_error)
 }
@@ -400,10 +480,11 @@ fn impact(
     limit: usize,
 ) -> Result<Value, ToolOutput> {
     let id = EntityId::parse(input.entity.trim()).map_err(|e| ToolOutput::error(e.to_string()))?;
-    let visible = graph.service.with_store(|store| Ok(vis.entity_id(store, &id)?.is_some())).map_err(store_error)?;
-    if !visible {
+    let root =
+        graph.service.with_store(|store| Ok(vis.entity_id(store, &id)?.map(|(e, _)| e.kind))).map_err(store_error)?;
+    let Some(root_kind) = root else {
         return Err(not_visible(id.as_str()));
-    }
+    };
     // The service call takes the store lock itself: never call it inside `with_store`.
     let report = graph
         .service
@@ -423,6 +504,11 @@ fn impact(
                         }
                     }
                 }
+                if let Some(file) = &item.located_in
+                    && vis.entity_id(store, file)?.is_none()
+                {
+                    ok = false;
+                }
                 let Some((e, eb)) = vis.entity_id(store, &item.entity.id)? else { continue };
                 if !ok {
                     continue;
@@ -437,13 +523,49 @@ fn impact(
                     "action": item.action,
                     "via": item.path.iter().map(|s| json!({"relation": s.relation, "kind": s.kind, "from": s.from, "to": s.to})).collect::<Vec<_>>(),
                 });
+                if let Some(file) = &item.located_in {
+                    v["locatedIn"] = json!(file);
+                }
                 if vis.content() {
                     v["reason"] = json!(truncate_chars(&item.reason, 300));
                 }
                 items.push(v);
             }
+            // Evidence the change would affect, with its current
+            // applicability (only evidence of entities the task may see).
+            let mut evidence = Vec::new();
+            for hit in report.evidence.iter().take(50) {
+                if vis.entity_id(store, &hit.subject)?.is_none() {
+                    continue;
+                }
+                let freshness = match &hit.freshness {
+                    Freshness::Current => "current",
+                    Freshness::Stale { .. } => "stale",
+                    Freshness::Unknown { .. } => "unknown",
+                };
+                let mut v = json!({
+                    "id": hit.evidence,
+                    "kind": hit.kind,
+                    "subject": hit.subject,
+                    "freshness": freshness,
+                });
+                if vis.content() {
+                    v["reason"] = json!(truncate_chars(&hit.reason, 300));
+                }
+                evidence.push(v);
+            }
             let unknown: Vec<&WorkspacePath> = report.unknown_coverage.iter().filter(|p| vis.path(p)).collect();
-            Ok(json!({"root": id, "items": items, "unknownCoverage": unknown, "truncated": truncated}))
+            let mut out = json!({
+                "root": id,
+                "items": items,
+                "evidence": evidence,
+                "unknownCoverage": unknown,
+                "truncated": truncated,
+            });
+            if root_kind == EntityKind::Resource {
+                out["scope"] = json!(FILE_IMPACT_NOTE);
+            }
+            Ok(out)
         })
         .map_err(store_error)
 }

@@ -16,7 +16,7 @@ import { Badge, Button, EmptyState, ErrorState, LoadingState, Section, StatusTex
 import { useActiveSourcePosition } from "../editor";
 import { useWorkspace } from "../workspace/store";
 import { graphApi } from "./api";
-import { evidenceKindLabel, OutcomeText, RelationStatus, TypeLabel } from "./Inspector";
+import { evidenceKindLabel, FormalEvidencePointer, OutcomeText, RelationStatus, TypeLabel } from "./Inspector";
 import { entityDisplay, FAMILY_LABELS, FAMILY_ORDER, freshnessView, kindDisplay, relationDisplay, type VocabularyIndex } from "./model";
 import { openInGraph } from "./navigation";
 import { coverageStateLabel, FreshnessPill } from "./status";
@@ -111,7 +111,14 @@ function EvidenceSummary({ entityId }: { entityId: string }) {
   const loaded = useGraphLoad(`deps-evidence:${entityId}`, () => graphApi().entity(entityId));
   const detail = loaded.data;
   if (!detail) return null;
-  if (detail.evidence.length === 0) return <p className="ui-muted" data-testid="deps-evidence">No evidence recorded for this item.</p>;
+  if (detail.evidence.length === 0) {
+    return (
+      <>
+        <p className="ui-muted" data-testid="deps-evidence">No evidence recorded for this item.</p>
+        <FormalEvidencePointer detail={detail} />
+      </>
+    );
+  }
   return (
     <div className="xp-graph-group">
       <h4 className="ui-group-label">Evidence</h4>

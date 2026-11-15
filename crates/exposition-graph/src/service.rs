@@ -741,6 +741,15 @@ impl GraphService {
     /// Change impact: who must review or is stale if `entities` change.
     /// Follows each relation kind in the direction its meaning propagates,
     /// bounded in depth and work; cycles are reported, not followed forever.
+    ///
+    /// A changed file lists what is in it: declarations anchored in it and
+    /// every other entity bound to it (a binding states no relation, so
+    /// without this a file whose items were curated by a person or an agent
+    /// would answer "nothing"). Those items may or may not have changed
+    /// themselves: they are informational and their dependents are not
+    /// followed (name an item as a root to follow it). Evidence of those
+    /// items that records the file as an input is reported, because a change
+    /// to the file does make that evidence historical.
     pub fn impact(&self, req: &ImpactRequest) -> GraphResult<ImpactReport> {
         let max_depth = req.max_depth.unwrap_or(4).clamp(1, MAX_DEPTH);
         let max_items = req.max_items.unwrap_or(200).clamp(1, 1000) as usize;
@@ -759,6 +768,9 @@ impl GraphService {
             let mut truncated = false;
             let mut unknown: BTreeSet<WorkspacePath> = BTreeSet::new();
             let mut root_entities: Vec<Entity> = Vec::new();
+            // Changed files met (roots and files reached through relations):
+            // resource id, path, label.
+            let mut files: Vec<(EntityId, WorkspacePath, String)> = Vec::new();
             for root in &roots {
                 if let Some(e) = store.entity(root)? {
                     note_unknown_coverage(store, &e, &mut unknown)?;
@@ -783,6 +795,31 @@ impl GraphService {
                         let other = r.to.clone();
                         edges.push((r, other));
                     }
+                }
+                // Entities bound to a changed file without a relation that
+                // says so (curated bindings): located in it, by binding.
+                let mut located: Vec<Entity> = Vec::new();
+                let mut file_label = String::new();
+                if current_kind == Some(EntityKind::Resource)
+                    && let Some(file) = store.entity(&current)?
+                    && let Some(file_path) = resource_path(store, &file)?
+                {
+                    let anchored: BTreeSet<&EntityId> =
+                        edges.iter().filter(|(r, _)| r.kind == RelationKind::AnchoredIn).map(|(_, o)| o).collect();
+                    let mut ids: Vec<EntityId> = Vec::new();
+                    for b in store.bindings_at_path(&file_path)? {
+                        if b.entity != current && !anchored.contains(&b.entity) && !ids.contains(&b.entity) {
+                            ids.push(b.entity);
+                        }
+                    }
+                    for e in store.entities(&ids)? {
+                        if !matches!(e.kind, EntityKind::Resource | EntityKind::Folder) {
+                            located.push(e);
+                        }
+                    }
+                    located.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
+                    file_label = file.label.clone();
+                    files.push((current.clone(), file_path, file.label));
                 }
                 for (r, other) in edges {
                     work += 1;
@@ -821,7 +858,15 @@ impl GraphService {
                         truncated = true;
                         break;
                     }
-                    items.push(ImpactItem { entity, depth: depth + 1, path: step_path.clone(), action, reason });
+                    let located_in = (r.kind == RelationKind::AnchoredIn).then(|| current.clone());
+                    items.push(ImpactItem {
+                        entity,
+                        depth: depth + 1,
+                        path: step_path.clone(),
+                        located_in,
+                        action,
+                        reason,
+                    });
                     // A declaration in a changed file may or may not have
                     // changed itself: it is listed, its dependents are not
                     // (name it as a root to follow it).
@@ -832,19 +877,56 @@ impl GraphService {
                 if truncated || work_limit_reached {
                     break;
                 }
+                // The same holds for an entity bound to the file.
+                for entity in located {
+                    work += 1;
+                    if work > 20_000 {
+                        work_limit_reached = true;
+                        break;
+                    }
+                    if entity.lifecycle == Lifecycle::Tombstoned || !seen.insert(entity.id.clone()) {
+                        continue;
+                    }
+                    note_unknown_coverage(store, &entity, &mut unknown)?;
+                    if items.len() >= max_items {
+                        truncated = true;
+                        break;
+                    }
+                    items.push(ImpactItem {
+                        entity,
+                        depth: depth + 1,
+                        path: path.clone(),
+                        located_in: Some(current.clone()),
+                        action: ImpactAction::Informational,
+                        reason: format!("is located in “{file_label}”, which changed; check whether it changed"),
+                    });
+                }
+                if truncated || work_limit_reached {
+                    break;
+                }
             }
             // Evidence recorded for the changed entities and their stale or
             // to-be-reviewed dependents: it stays valid history for the inputs
             // it recorded; its current applicability is reported.
             let mut evidence: Vec<EvidenceImpact> = Vec::new();
             let mut seen_evidence: BTreeSet<EvidenceId> = BTreeSet::new();
-            let subjects = root_entities.iter().map(|e| (e.id.clone(), e.label.clone(), None)).chain(
-                items
-                    .iter()
-                    .filter(|i| matches!(i.action, ImpactAction::Stale | ImpactAction::NeedsReview))
-                    .map(|i| (i.entity.id.clone(), i.entity.label.clone(), Some(i.reason.clone()))),
-            );
-            'subjects: for (subject, label, why) in subjects {
+            let subjects = root_entities
+                .iter()
+                .map(|e| (e.id.clone(), e.label.clone(), None, None))
+                .chain(
+                    items
+                        .iter()
+                        .filter(|i| matches!(i.action, ImpactAction::Stale | ImpactAction::NeedsReview))
+                        .map(|i| (i.entity.id.clone(), i.entity.label.clone(), Some(i.reason.clone()), None)),
+                )
+                // Items located in a changed file: only their evidence that
+                // records that file (a change to it makes it historical).
+                .chain(items.iter().filter_map(|i| {
+                    let file = i.located_in.as_ref()?;
+                    let (_, path, _) = files.iter().find(|(id, _, _)| id == file)?;
+                    Some((i.entity.id.clone(), i.entity.label.clone(), None, Some(path.clone())))
+                }));
+            'subjects: for (subject, label, why, only_input) in subjects {
                 let mut records = store.evidence_for_subject(&subject)?;
                 for r in store.relations_to(&subject)?.into_iter().chain(store.relations_from(&subject)?) {
                     if r.kind == RelationKind::EvidenceFor {
@@ -859,11 +941,22 @@ impl GraphService {
                     if evidence.len() >= 200 {
                         break 'subjects;
                     }
+                    if let Some(file) = &only_input
+                        && !(e.inputs.iter().any(|i| &i.path == file)
+                            || e.formal.as_ref().is_some_and(|f| &f.source_path == file))
+                    {
+                        continue;
+                    }
                     if !seen_evidence.insert(e.id.clone()) {
                         continue;
                     }
                     let freshness = evidence_freshness(store, &e);
                     let reason = match (&freshness, &why) {
+                        (Freshness::Current | Freshness::Unknown { .. }, None) if only_input.is_some() => format!(
+                            "{} evidence for “{label}” records {} as an input; a change to the file makes this evidence historical",
+                            e.kind.as_str(),
+                            only_input.as_ref().map(|p| p.as_str()).unwrap_or_default()
+                        ),
                         (Freshness::Current, None) => format!(
                             "{} evidence for “{label}” matches the current sources; a change to it makes this evidence historical",
                             e.kind.as_str()
@@ -1605,6 +1698,14 @@ fn neighborhood(
         }
     }
     Ok((out, total))
+}
+
+/// The file a resource entity stands for (its key; its binding otherwise).
+fn resource_path(store: &GraphStore, resource: &Entity) -> Result<Option<WorkspacePath>, StoreError> {
+    if let Some(path) = resource.key.as_deref().and_then(|k| WorkspacePath::parse(k).ok()) {
+        return Ok(Some(path));
+    }
+    Ok(store.bindings(&resource.id)?.into_iter().next().map(|b| b.path))
 }
 
 /// Relation kinds whose meaning propagates from `to` back to `from` when `to` changes.
