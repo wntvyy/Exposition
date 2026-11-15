@@ -50,6 +50,7 @@ import {
   KeyValueList,
   ListRow,
   LoadingState,
+  Markdown,
   Menu,
   MenuItem,
   MenuSection,
@@ -62,6 +63,7 @@ import {
   PanelHeader,
   ProgressBar,
   ResizeHandle,
+  ResponseSurface,
   SearchField,
   Section,
   SegmentedControl,
@@ -84,6 +86,7 @@ import {
   Tree,
   TreeItem,
   UnavailableState,
+  type CodeRunAction,
   type EditorTabItem,
   type Status,
 } from "../components";
@@ -230,6 +233,79 @@ const sampleInputs: SampleInput[] = [
   { input: "Observations (Dataset)", path: "data/obs.csv", size: "16 B", version: "Current at review" },
   { input: "Parameters (Table)", path: "data/params.csv", size: "1.2 KiB", version: "Pinned revision 3" },
 ];
+
+/** The representative response shown in every treatment (also streamed by the a1-responses e2e scenario). */
+export const SAMPLE_RESPONSE = [
+  "The series converges because the terms decay like $1/n^2$; see the [Basel problem](https://en.wikipedia.org/wiki/Basel_problem) for the closed form. In short, **the sum is finite** and *the partial sums increase monotonically*.",
+  "",
+  "$$",
+  String.raw`\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}`,
+  "$$",
+  "",
+  "A quick numerical check in Python:",
+  "",
+  "```python",
+  "import math",
+  "",
+  "partial = sum(1 / n**2 for n in range(1, 10_001))",
+  "print(partial, math.pi**2 / 6)  # 1.6448340718 1.6449340668",
+  "```",
+  "",
+  "What the check shows:",
+  "",
+  String.raw`- the partial sum after $10^4$ terms is within $10^{-4}$ of $\pi^2/6$;`,
+  "- the error shrinks like $1/N$;",
+  "- no term is negative, so the order of summation does not matter.",
+  "",
+  "| $N$ | Partial sum | Error |",
+  "|---:|---:|---:|",
+  "| 10 | 1.549768 | 0.095166 |",
+  "| 100 | 1.634984 | 0.009950 |",
+  "| 10 000 | 1.644834 | 0.000100 |",
+].join("\n");
+
+const sampleRun: CodeRunAction = {
+  label: "Run in Research",
+  run: () => notify({ tone: "info", title: "Sample only", body: "In a transcript, Run in Research hands the code to your research session." }),
+};
+
+/** A pane as the transcript sees it: its backdrop (page white or region sunken) and the pane inset. */
+function ResponsePane({ region }: { region: boolean }) {
+  return (
+    <div
+      data-testid={`ref-response-${region ? "panel" : "page"}`}
+      style={{
+        padding: "var(--space-3) var(--pane-inset)",
+        border: "var(--border-width) solid var(--color-border)",
+        borderRadius: "var(--radius-md)",
+        background: region ? "var(--color-surface-sunken)" : "var(--color-surface)",
+      }}
+    >
+      <ResponseSurface label="Agent" copyText={SAMPLE_RESPONSE}>
+        <Markdown source={SAMPLE_RESPONSE} runAction={sampleRun} />
+      </ResponseSurface>
+    </div>
+  );
+}
+
+function AgentResponseSpecimens() {
+  return (
+    <>
+      <Specimen label="Page (Agents page, comfortable)" wide>
+        <div style={{ width: "100%" }}>
+          <ResponsePane region={false} />
+        </div>
+      </Specimen>
+      <StateSizeProvider value="compact">
+        <Specimen label="Panel (Agent panel, compact)">
+          <div style={{ width: "100%", maxWidth: 400 }}>
+            <ResponsePane region />
+          </div>
+        </Specimen>
+      </StateSizeProvider>
+    </>
+  );
+}
 
 export function UiReference() {
   const [section, setSection] = useState<"project" | "math">("project");
@@ -737,6 +813,13 @@ export function UiReference() {
             Danger
           </Button>
         </Specimen>
+      </RefSection>
+
+      <RefSection
+        title="Agent responses"
+        description="ResponseSurface + Markdown: an inset block with a subtle fill on the pane inset, comfortable on pages and compact in panels. Prose, math, a code fence, a list, and a table. Sample content."
+      >
+        <AgentResponseSpecimens />
       </RefSection>
 
       <RefSection

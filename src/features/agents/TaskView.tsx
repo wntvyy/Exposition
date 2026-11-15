@@ -11,7 +11,7 @@ import { asSentence, budgetRows, EFFORT_LABELS, isActive, specLabels, statusLabe
 import { freshnessLabel, graphSummary } from "./GraphViews";
 import { TaskAllowances } from "./permissions";
 import { agents, useAgents } from "./store";
-import { Draft, TranscriptEntry } from "./Transcript";
+import { Draft, TranscriptEntry, useFollowBottom } from "./Transcript";
 
 export { payloadSize } from "./ApprovalCard";
 
@@ -133,12 +133,9 @@ export function TaskView({ id, variant = "panel" }: { id: TaskId; variant?: "pan
     void agents.refetch(id);
   }, [id]);
 
-  useEffect(() => {
-    const log = logRef.current;
-    if (log) log.scrollTop = log.scrollHeight;
-  }, [detail?.transcript.length, draft?.text, draft?.thinking]);
-
   const task = detail?.summary ?? summary;
+  // Follow new output only while the reader is at the end of the transcript (A1 lane R).
+  useFollowBottom(logRef, task ? id : null);
   if (!task) return <LoadingState title="Loading task…" />;
   const pill = statusLabel(task.status);
   const active = isActive(task.status);

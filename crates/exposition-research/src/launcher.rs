@@ -100,6 +100,31 @@ pub struct ProbeOutput {
 
 pub type LaunchFuture<'a> = Pin<Box<dyn Future<Output = Result<InteractiveProcess, LaunchError>> + Send + 'a>>;
 
+/// How a project job ([`KernelProcessLauncher::start_project_job`]) ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectJobEnd {
+    Exited(i32),
+    Canceled,
+    TimedOut,
+    /// Refused or failed to start; `untrusted` when the folder is not trusted.
+    NotStarted {
+        message: String,
+        untrusted: bool,
+    },
+    Terminated(String),
+}
+
+/// New output of a project job since the last poll, and its end once it ended.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectJobProgress {
+    /// Redacted output chunks in order (stdout and stderr interleaved).
+    pub output: Vec<String>,
+    /// Pass back to the next poll.
+    pub cursor: Option<u64>,
+    /// Set once every chunk has been returned and the job has ended.
+    pub end: Option<ProjectJobEnd>,
+}
+
 pub trait KernelProcessLauncher: Send + Sync {
     /// Launch a long-lived interactive process (from an async context).
     fn launch_interactive(&self, spec: JobSpec) -> LaunchFuture<'_>;
@@ -125,6 +150,21 @@ pub trait KernelProcessLauncher: Send + Sync {
     fn redact(&self, text: &str) -> String {
         text.to_owned()
     }
+    /// Start a short project command (environment setup) as a trusted
+    /// project batch job: refused unless the project is trusted, never
+    /// downgraded. Returns the job id for [`Self::poll_project_job`].
+    fn start_project_job(&self, _spec: &JobSpec) -> Result<String, LaunchError> {
+        Err(LaunchError::Refused("this launcher cannot run project commands".into()))
+    }
+    /// New output after `cursor` and, once it ended, how the job ended.
+    fn poll_project_job(&self, _job: &str, _cursor: Option<u64>) -> ProjectJobProgress {
+        ProjectJobProgress {
+            end: Some(ProjectJobEnd::NotStarted { message: "unknown job".into(), untrusted: false }),
+            ..Default::default()
+        }
+    }
+    /// Stop a project job and its process tree.
+    fn cancel_project_job(&self, _job: &str) {}
 }
 
 /// [`KernelProcessLauncher`] over the shared execution service.
@@ -240,6 +280,47 @@ impl KernelProcessLauncher for ExecutionLauncher {
 
     fn redact(&self, text: &str) -> String {
         self.execution.redact(text)
+    }
+
+    fn start_project_job(&self, spec: &JobSpec) -> Result<String, LaunchError> {
+        if spec.policy != exposition_core::job::ExecutionPolicy::TrustedNative {
+            return Err(LaunchError::InvalidSpec("project commands run as trusted native jobs".into()));
+        }
+        Ok(self.execution.launch(spec.clone()).0)
+    }
+
+    fn poll_project_job(&self, job: &str, cursor: Option<u64>) -> ProjectJobProgress {
+        let id = JobId(job.to_owned());
+        let Some(page) = self.execution.output(&id, cursor, 256 * 1024) else {
+            return ProjectJobProgress {
+                end: Some(ProjectJobEnd::NotStarted { message: "the job is no longer known".into(), untrusted: false }),
+                ..Default::default()
+            };
+        };
+        let next = page.chunks.last().map(|c| c.seq).or(cursor);
+        let output = page.chunks.into_iter().map(|c| c.text).collect();
+        // `complete` means the result exists and every retained chunk is in
+        // the log: once no page remains, the end is final.
+        let end = if page.complete && !page.has_more {
+            self.execution.result(&id).map(|result| match result.outcome {
+                JobOutcome::Exited { code } => ProjectJobEnd::Exited(code),
+                JobOutcome::Canceled => ProjectJobEnd::Canceled,
+                JobOutcome::TimedOut => ProjectJobEnd::TimedOut,
+                JobOutcome::Terminated { description } => ProjectJobEnd::Terminated(description),
+                JobOutcome::FailedToStart { reason } => {
+                    let refusal = self.execution.summary(&id).and_then(|s| s.refusal);
+                    let untrusted = refusal.as_ref().is_some_and(|r| r.code == RefusalCode::UntrustedWorkspace);
+                    ProjectJobEnd::NotStarted { message: refusal.map(|r| r.message).unwrap_or(reason), untrusted }
+                }
+            })
+        } else {
+            None
+        };
+        ProjectJobProgress { output, cursor: next, end }
+    }
+
+    fn cancel_project_job(&self, job: &str) {
+        self.execution.cancel(&JobId(job.to_owned()));
     }
 }
 
