@@ -604,3 +604,8 @@
   min-width: 0;
   flex: 1;
 }
+
+.exp-research__guidance {
+  user-select: text;
+  overflow-wrap: anywhere;
+}

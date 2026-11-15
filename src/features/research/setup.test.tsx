@@ -92,7 +92,11 @@ const env = (id: string, overrides: Partial<RuntimeEnvironment> = {}): RuntimeEn
 
 const system312 = env("python:312", {
   displayName: "Python 3.12.10 (CPython)",
-  availability: unavailable("Python 3.12.10 at C:\\Python312\\python.exe lacks ipykernel and jupyter_client."),
+  availability: {
+    kind: "unavailable",
+    reason: "Python 3.12.10 at C:\\Python312\\python.exe lacks ipykernel and jupyter_client.",
+    guidance: "Set up environment creates a project environment from this Python with the kernel packages, or install them into it yourself.",
+  },
   setup: { downloadUrl: null, action: "createEnvironment", commands: [], commandsFor: null, userWide: false },
 });
 
@@ -171,7 +175,7 @@ describe("environment setup", () => {
     setupIpc.start.mockResolvedValue(status());
     render(<EnvironmentHelp env={system312} />);
     expect(screen.getByTestId("research-unavailable").getAttribute("data-setup")).toBe("createEnvironment");
-    expect(screen.getByText(/creates a Python environment in .venv inside the project/)).toBeTruthy();
+    expect(screen.getByTestId("setup-guidance").textContent).toContain("Set up environment creates a project environment");
     expect(setupIpc.plan).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByTestId("setup-open"));
@@ -266,9 +270,10 @@ describe("environment setup", () => {
       setup: { downloadUrl: null, action: null, commands: ["install.packages('IRkernel')", "IRkernel::installspec()"], commandsFor: "R", userWide: true },
     });
     render(<EnvironmentHelp env={r} />);
-    expect(screen.getByTestId("setup-guidance-commands").textContent).toContain("IRkernel::installspec()");
-    expect(screen.getByText("These install for your user account, not only for this project.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Copy the R commands" }));
+    expect(screen.getByText("The R commands install for your user account, not only for this project.")).toBeTruthy();
+    expect(screen.getByText("Exposition checks again when you come back to this window.")).toBeTruthy();
+    expect(screen.getByTestId("setup-copy-commands").textContent).toBe("Copy R commands");
+    fireEvent.click(screen.getByTestId("setup-copy-commands"));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("install.packages('IRkernel')\nIRkernel::installspec()"));
   });
 

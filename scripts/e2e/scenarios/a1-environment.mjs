@@ -165,7 +165,7 @@ export default async function a1Environment({ launchApp, artifactsDir, fixture, 
       const notice = panel.getByTestId("research-unavailable");
       await notice.waitFor({ timeout: 15_000 });
       assert.equal(await notice.getAttribute("data-setup"), "createEnvironment", "the notice offers Set up environment");
-      assert.match(await notice.innerText(), /creates a Python environment in .venv inside the project/);
+      assert.ok((await notice.innerText()).includes(lacking.availability.guidance.slice(0, 40)), "the notice shows the exact guidance");
       await shot(page, "a1-setup-notice");
       await panel.getByTestId("setup-open").click();
     } else {
