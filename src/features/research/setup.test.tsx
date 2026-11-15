@@ -70,7 +70,7 @@ vi.mock("../jobs/trust", () => ({ requestWorkspaceTrust: vi.fn(async () => true)
 vi.mock("../editor", () => ({ activeHandle: () => null, handleForPath: () => null }));
 
 const { EnvironmentHelp, SetupOutcome, SetupProgress } = await import("./EnvironmentSetup");
-const { useResearch } = await import("./store");
+const { loadEnvironments, useResearch } = await import("./store");
 const { applySetupEvent, useSetup } = await import("./setup");
 
 const ROOT = "C:\\Users\\r\\thesis";
@@ -92,7 +92,11 @@ const env = (id: string, overrides: Partial<RuntimeEnvironment> = {}): RuntimeEn
 
 const system312 = env("python:312", {
   displayName: "Python 3.12.10 (CPython)",
-  availability: unavailable("Python 3.12.10 at C:\\Python312\\python.exe lacks ipykernel and jupyter_client."),
+  availability: {
+    kind: "unavailable",
+    reason: "Python 3.12.10 at C:\\Python312\\python.exe lacks ipykernel and jupyter_client.",
+    guidance: "Set up environment creates a project environment from this Python with the kernel packages, or install them into it yourself.",
+  },
   setup: { downloadUrl: null, action: "createEnvironment", commands: [], commandsFor: null, userWide: false },
 });
 
@@ -171,7 +175,7 @@ describe("environment setup", () => {
     setupIpc.start.mockResolvedValue(status());
     render(<EnvironmentHelp env={system312} />);
     expect(screen.getByTestId("research-unavailable").getAttribute("data-setup")).toBe("createEnvironment");
-    expect(screen.getByText(/creates a Python environment in .venv inside the project/)).toBeTruthy();
+    expect(screen.getByTestId("setup-guidance").textContent).toContain("Set up environment creates a project environment");
     expect(setupIpc.plan).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByTestId("setup-open"));
@@ -266,9 +270,10 @@ describe("environment setup", () => {
       setup: { downloadUrl: null, action: null, commands: ["install.packages('IRkernel')", "IRkernel::installspec()"], commandsFor: "R", userWide: true },
     });
     render(<EnvironmentHelp env={r} />);
-    expect(screen.getByTestId("setup-guidance-commands").textContent).toContain("IRkernel::installspec()");
-    expect(screen.getByText("These install for your user account, not only for this project.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Copy the R commands" }));
+    expect(screen.getByText("The R commands install for your user account, not only for this project.")).toBeTruthy();
+    expect(screen.getByText("Exposition checks again when you come back to this window.")).toBeTruthy();
+    expect(screen.getByTestId("setup-copy-commands").textContent).toBe("Copy R commands");
+    fireEvent.click(screen.getByTestId("setup-copy-commands"));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("install.packages('IRkernel')\nIRkernel::installspec()"));
   });
 
@@ -308,6 +313,25 @@ describe("environment setup", () => {
     await waitFor(() => expect(useResearch.getState().selectedEnvironment).toBe(venv.id));
     expect(setupIpc.select).toHaveBeenCalledWith(venv.id);
     expect(notify).toHaveBeenCalledWith(expect.objectContaining({ tone: "success", title: "Environment ready" }));
+  });
+
+  it("restores the remembered environment and drops a list that arrives for the previous project", async () => {
+    const venv = env("python:venv", { displayName: "Python 3.12.10 (CPython, project .venv)", projectFolder: ".venv" });
+    const other = env("python:314", { displayName: "Python 3.14.5 (CPython)" });
+    let resolveStale: (value: EnvironmentReport) => void = () => {};
+    ipc.researchEnvironments
+      .mockImplementationOnce(() => new Promise<EnvironmentReport>((resolve) => (resolveStale = resolve)))
+      .mockResolvedValueOnce(report(other, venv));
+    setupIpc.selection.mockResolvedValue(venv.id);
+    useResearch.setState({ workspace: { root: "C:\other", trusted: true }, selectedEnvironment: null });
+    const stale = loadEnvironments(false);
+    // The person switches back to the project before the other project's list arrives.
+    useResearch.setState({ workspace: { root: ROOT, trusted: true }, selectedEnvironment: null });
+    await loadEnvironments(false);
+    resolveStale(report(other));
+    await stale;
+    expect(useResearch.getState().selectedEnvironment).toBe(venv.id);
+    expect(useResearch.getState().environments?.runtimes.map((r) => r.id)).toEqual(["python:314", "python:venv"]);
   });
 
   it("ignores another project's setup events", () => {
