@@ -50,7 +50,7 @@ use super::services::{
     SetupInstallRequest, ToolServices,
 };
 use crate::model::TaskScope;
-use exposition_research::setup::{SetupPlan, SetupRequest, SetupState};
+use exposition_research::setup::{SetupPlan, SetupState};
 
 /// Default wall-clock limit for one agent-launched process.
 const JOB_TIMEOUT_MS: u64 = 10 * 60 * 1000;
@@ -702,28 +702,11 @@ impl ToolServices for AppToolServices {
         let research = self.research.as_ref().ok_or(ServiceError::NotAvailable(ServiceKind::Setup))?;
         self.sync_research_workspace(research, root)?;
         let coded = |e: exposition_research::ResearchError| super::services::research_outcome(&e.code(), e.to_string());
-        let report = research.environments(false).await.map_err(coded)?;
-        let python: Vec<_> = report.runtimes.iter().filter(|r| r.language == RuntimeLanguage::Python).collect();
         // Into the project's own environment when there is one; otherwise a
-        // new .venv from the newest Python installed on this computer.
-        let request = match python.iter().find(|r| r.project_folder.is_some()) {
-            Some(project) => {
-                SetupRequest::InstallPackages { environment: project.id.clone(), packages: packages.to_vec() }
-            }
-            None => {
-                let base = python
-                    .iter()
-                    .filter(|r| r.project_folder.is_none() && r.executable.is_some())
-                    .max_by_key(|r| version_key(r.version.as_deref()))
-                    .ok_or_else(|| {
-                        super::services::research_outcome(
-                            "setup.unsupported",
-                            "No Python is installed on this computer to create the project environment from.",
-                        )
-                    })?;
-                SetupRequest::CreateEnvironment { base_environment: base.id.clone(), packages: packages.to_vec() }
-            }
-        };
+        // new .venv from the newest Python installed on this computer. This
+        // runs before the gate decides, so nothing here may run a project
+        // interpreter (R-a1 F7): the research service chooses by files.
+        let request = research.setup_request_for_packages(root, packages).await.map_err(coded)?;
         research.setup_plan(root, &request).await.map_err(coded)
     }
 
@@ -788,13 +771,4 @@ impl ToolServices for AppToolServices {
             .chain(setup)
             .collect()
     }
-}
-
-/// Sort key of a version string ("3.12.10" → [3, 12, 10]); unknown sorts first.
-fn version_key(version: Option<&str>) -> Vec<u64> {
-    version
-        .map(|v| {
-            v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect()
-        })
-        .unwrap_or_default()
 }

@@ -1067,7 +1067,50 @@ fn busy(run: &SetupRun) -> ResearchError {
     refused("setup.busy", format!("An environment setup ({what}) is running; wait for it or cancel it."))
 }
 
+/// Newest first: the numeric parts of a version ("3.14.5" → [3, 14, 5]).
+fn version_parts(version: Option<&str>) -> Vec<u64> {
+    version
+        .map(|v| {
+            v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect()
+        })
+        .unwrap_or_default()
+}
+
 impl ResearchService {
+    /// The setup an agent's package request maps to, chosen without running
+    /// anything (R-a1 F7): installing into the project's `.venv` or `venv`
+    /// when one exists (recognized by its folder; [`Self::setup_plan`] then
+    /// checks it is a usable environment), otherwise creating `.venv` from
+    /// the newest Python installed outside the project.
+    pub async fn setup_request_for_packages(
+        &self,
+        root: &Path,
+        packages: &[String],
+    ) -> Result<SetupRequest, ResearchError> {
+        let (canonical, _) = self.setup_project(root)?;
+        if let Some(folder) =
+            PROJECT_ENVIRONMENT_FOLDERS.iter().map(|name| canonical.join(name)).find(|dir| dir.is_dir())
+        {
+            return Ok(SetupRequest::InstallPackages {
+                environment: environment_id_for(&folder),
+                packages: packages.to_vec(),
+            });
+        }
+        let report = self.planning_environments().await?;
+        let base = report
+            .runtimes
+            .iter()
+            .filter(|r| r.language == RuntimeLanguage::Python && r.project_folder.is_none() && r.executable.is_some())
+            .max_by_key(|r| version_parts(r.version.as_deref()))
+            .ok_or_else(|| {
+                refused(
+                    "setup.unsupported",
+                    "No Python is installed on this computer to create the project environment from.",
+                )
+            })?;
+        Ok(SetupRequest::CreateEnvironment { base_environment: base.id.clone(), packages: packages.to_vec() })
+    }
+
     /// Plan a setup for the project at `root` (it must be the open project).
     /// Runs nothing; uses the current discovery report.
     pub async fn setup_plan(&self, root: &Path, request: &SetupRequest) -> Result<SetupPlan, ResearchError> {
