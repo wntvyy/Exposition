@@ -378,7 +378,7 @@ export default async function mathlibSetup({
       await page
         .locator('[data-testid="file-tree"] [data-path="paper.typ"]')
         .waitFor({ timeout: 15_000 });
-      const trust = await invoke(page, "trust_status", { path: info.root });
+      const trust = await invoke(page, "trust_status", { root: info.root });
       note("trust-is-reused-after-reopen", trust.trusted === true, trust);
       const again = await invokeError(page, "lean_setup_plan", {
         request: { kind: "prepareMathlibPackage", folder: "lean" },
