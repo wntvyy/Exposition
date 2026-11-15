@@ -7,7 +7,7 @@ use std::path::Path;
 use exposition_core::path::WorkspacePath;
 use exposition_graph::{
     BatchRef, Entity, EntityId, EntityKind, EntityUpsert, Lifecycle, RelationKind, RelationUpsert, ResourceRole,
-    ServiceBatch,
+    ServiceBatch, WorkflowId,
 };
 use exposition_workspace::WorkspaceService;
 
@@ -356,7 +356,19 @@ impl ResearchProject {
         listing.results.sort_by(|a, b| rank(a.lifecycle).cmp(&rank(b.lifecycle)).then(b.path.cmp(&a.path)));
         for e in self.entities_of(&[EntityKind::Workflow], 500)? {
             if e.lifecycle != Lifecycle::Tombstoned {
-                listing.workflows.push(ResearchWorkflowItem { entity: e.id, label: e.label, lifecycle: e.lifecycle });
+                // The workflow's own id: the entity's key (set when the draft is
+                // saved), else its `workflow.id` attribute.
+                let workflow = e
+                    .key
+                    .as_deref()
+                    .or_else(|| e.attributes.get("workflow.id").map(String::as_str))
+                    .and_then(|raw| WorkflowId::parse(raw).ok());
+                listing.workflows.push(ResearchWorkflowItem {
+                    entity: e.id,
+                    workflow,
+                    label: e.label,
+                    lifecycle: e.lifecycle,
+                });
             }
         }
         Ok(())

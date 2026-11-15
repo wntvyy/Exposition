@@ -26,6 +26,7 @@ const dialog = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 const editorsMock = vi.hoisted(() => ({
   open: vi.fn(),
+  close: vi.fn(),
   setDirty: vi.fn(),
   setTitle: vi.fn(),
   registerCloseGuard: vi.fn(() => () => {}),
@@ -335,18 +336,59 @@ describe("WorkflowEditor", () => {
     expect((screen.getByTestId("workflow-review-run") as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("marks an agent's proposal as a draft the user reviews, and opens a workflow by its graph entity id", async () => {
-    wfIpc.get.mockImplementation(async (id: string) => {
-      if (id === "ent-1") throw { code: "workflow.unknown", message: "That workflow (revision) does not exist." };
-      return { ...saved(1, audit), origin: { kind: "agent", taskId: "task-7" } };
-    });
-    wfIpc.list.mockResolvedValue([{ id: "wf-1", entity: "ent-1" }]);
-    render(<WorkflowEditor resource={{ key: "workflow:ent-1", title: "Formal audit" }} mode="source" active />);
+  it("marks an agent's proposal as a draft the user reviews", async () => {
+    wfIpc.get.mockResolvedValue({ ...saved(1, audit), origin: { kind: "agent", taskId: "task-7" } });
+    render(<WorkflowEditor resource={{ key: "workflow:wf-1", title: "Formal audit" }} mode="source" active />);
     const origin = await screen.findByTestId("workflow-origin");
     expect(origin.textContent).toMatch(/Proposed by agent task task-7/);
     expect(origin.textContent).toMatch(/runs only from a plan you review and start/);
-    expect(screen.getByTestId("workflow-editor").getAttribute("data-workflow")).toBe("wf-1");
+    expect(wfIpc.get).toHaveBeenCalledWith("wf-1");
     expect(runIpc.start).not.toHaveBeenCalled();
+  });
+
+  // The 2026-11-15 incident: a tab keyed by a graph entity id. The real
+  // backend refuses such an id before `workflow_get` runs, with a plain
+  // string and no error code, so nothing can be "resolved" from it.
+  it("does not look up or guess a workflow from a key that holds no workflow id, and offers recovery", async () => {
+    wfIpc.get.mockRejectedValue("invalid args `id` for command `workflow_get`: invalid workflow identifier");
+    wfIpc.list.mockResolvedValue([{ id: "wf-1", entity: "ent-1" }]);
+    for (const key of ["workflow:ent-1", "workflow:", "workflow:wf-../x", `workflow:wf-${"a".repeat(80)}`]) {
+      const view = render(<WorkflowEditor resource={{ key, title: "Formal audit" }} mode="source" active />);
+      const state = await screen.findByTestId("workflow-invalid-reference");
+      expect(state.textContent).toMatch(/does not point to a saved workflow/);
+      expect(state.textContent).not.toMatch(/invalid args|workflow_get/);
+      expect(screen.queryByTestId("workflow-editor")).toBeNull();
+      view.unmount();
+    }
+    expect(wfIpc.get).not.toHaveBeenCalled();
+    expect(wfIpc.list).not.toHaveBeenCalled();
+    render(<WorkflowEditor resource={{ key: "workflow:ent-1", title: "Formal audit" }} mode="source" active />);
+    const state = await screen.findByTestId("workflow-invalid-reference");
+    fireEvent.click(within(state).getByRole("button", { name: "Show Workflows" }));
+    expect(editorsMock.open).toHaveBeenLastCalledWith({ key: "workflows:", title: "Workflows" });
+    fireEvent.click(within(state).getByRole("button", { name: "Close" }));
+    expect(editorsMock.close).toHaveBeenLastCalledWith("workflow:ent-1");
+  });
+
+  it("says when a workflow is not in the open project (deleted or another project's) instead of a raw error", async () => {
+    wfIpc.get.mockRejectedValue({ code: "workflow.unknown", message: "That workflow was deleted from this project." });
+    render(<WorkflowEditor resource={{ key: "workflow:wf-gone", title: "Formal audit" }} mode="source" active />);
+    const state = await screen.findByTestId("workflow-missing");
+    expect(state.textContent).toMatch(/This workflow is not in the open project/);
+    expect(state.textContent).toMatch(/That workflow was deleted from this project\./);
+    expect(state.textContent).toMatch(/Storage & History/);
+    expect(within(state).getByRole("button", { name: "Show Workflows" })).toBeTruthy();
+    expect(within(state).queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(wfIpc.save).not.toHaveBeenCalled();
+  });
+
+  it("keeps Retry for a failure that may pass (the id is well formed and the backend failed otherwise)", async () => {
+    wfIpc.get.mockRejectedValueOnce({ code: "graph.unavailable", message: "The project graph is unavailable." });
+    render(<WorkflowEditor resource={{ key: "workflow:wf-1", title: "Formal audit" }} mode="source" active />);
+    const state = await screen.findByTestId("workflow-load-error");
+    expect(state.textContent).toMatch(/The project graph is unavailable\./);
+    fireEvent.click(within(state).getByRole("button", { name: "Retry" }));
+    expect((await screen.findByTestId("workflow-editor")).getAttribute("data-workflow")).toBe("wf-1");
   });
 
   it("edits the same draft on the canvas: select a step to inspect it, Delete removes it", async () => {

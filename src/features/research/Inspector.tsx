@@ -28,6 +28,7 @@ import {
   type KeyValueItem,
 } from "../../ui/components";
 import { fileKey } from "../editor/documentClient";
+import { workflowKey } from "../workflows/model";
 import { GraphDependencies } from "./GraphInspect";
 import { formatBytes, formatClock, isActiveRun, runPill } from "./model";
 import { PromotionControls, lifecyclePill } from "./Promotion";
@@ -368,13 +369,16 @@ function WorkflowInspector({ entity }: { entity: EntityId }) {
   useSyncExternalStore(subscribe, version);
   const listing = useSpace((s) => s.listing);
   const workflow = listing?.workflows.find((w) => w.entity === entity);
-  const resource = { key: `workflow:${entity}`, title: workflow?.label ?? "Workflow" };
-  const editor = registry.editorFor(resource);
+  // The editor opens a workflow by its own id (wf-…), never by this graph entity's id.
+  const resource = workflow?.workflow ? { key: workflowKey(workflow.workflow), title: workflow.label } : null;
+  const editor = resource ? registry.editorFor(resource) : undefined;
+  if (listing && !workflow) return <EmptyState title="Workflow not found" description="It may have been deleted from the project." />;
   return (
     <div className="exp-rinspector" data-testid="research-inspector" data-kind="workflow" data-entity={entity}>
       <InspectorHeader
         title={workflow?.label ?? "Workflow"}
         actions={
+          resource &&
           editor && (
             <Button
               size="sm"
@@ -388,7 +392,14 @@ function WorkflowInspector({ entity }: { entity: EntityId }) {
           )
         }
       />
-      {!editor && (
+      {workflow && !resource && (
+        <EmptyState
+          fill={false}
+          title="No saved definition for this workflow"
+          description="The project graph lists it, but it names no saved workflow, so there is nothing to open. Saved workflows are in the Workflows list."
+        />
+      )}
+      {resource && !editor && (
         <EmptyState
           fill={false}
           title="The workflow editor is not available"

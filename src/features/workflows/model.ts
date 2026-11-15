@@ -14,6 +14,15 @@ export const WORKFLOW_KEY_PREFIX = "workflow:";
 
 export const workflowKey = (id: string) => `${WORKFLOW_KEY_PREFIX}${id}`;
 
+/**
+ * Whether `raw` has the shape of a workflow id (`wf-…`; the rule of
+ * crates/exposition-graph/src/ids.rs). Rust remains the validator: this only
+ * lets the editor say that a tab does not point to a workflow instead of
+ * showing the IPC layer's argument error. A graph entity id (`ent-…`) is
+ * never a workflow id.
+ */
+export const isWorkflowId = (raw: string) => raw.length <= 64 && /^wf-[A-Za-z0-9-]+$/.test(raw);
+
 /** Mirrors the backend's outcome rule for building choices (display only). */
 export const OUTCOME_ACCEPTS: Record<OutcomeKind, PortType[]> = {
   transformedDataset: ["dataset", "retainedArtifact"],
