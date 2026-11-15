@@ -166,8 +166,9 @@ function MdLink({ node, children }: { node?: unknown; children?: ReactNode }) {
   const raw = String(element?.properties?.href ?? "");
   const url = externalUrl(raw);
   const text = hastText(element);
-  // An autolink shows its address already (`www.` literals gain `http://`).
-  const showsAddress = text === raw || `http://${text}` === raw || `mailto:${text}` === raw || raw === "";
+  // An autolink shows its address already (`www.` literals gain `http://`); an
+  // in-message fragment (footnote references and back-references) has none worth showing.
+  const showsAddress = text === raw || `http://${text}` === raw || `mailto:${text}` === raw || raw === "" || raw.startsWith("#");
   const address = showsAddress ? null : (
     <span className="ui-md-link__address">{url ?? displayAddress(raw)}</span>
   );

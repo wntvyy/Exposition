@@ -262,6 +262,14 @@ describe("untrusted content renders inert", () => {
     expect(link.nextElementSibling?.textContent).toBe("https://example.org/doc");
   });
 
+  it("renders footnotes without live links or stray addresses", () => {
+    const { container } = renderMd("A claim[^1].\n\n[^1]: The source.");
+    expect(container.querySelector("section[data-footnotes]")?.textContent).toContain("The source.");
+    expect(container.querySelectorAll("[data-external-link]")).toHaveLength(0);
+    expect(container.querySelectorAll(".ui-md-link__address")).toHaveLength(0);
+    expect(liveHazards(container)).toEqual([]);
+  });
+
   it("shows autolinks once and offers only http(s) as links", () => {
     const { container } = renderMd("See <https://example.org/a> and www.example.org and https://example.org/b.");
     const links = screen.getAllByRole("link");
