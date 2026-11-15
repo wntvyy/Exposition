@@ -351,8 +351,11 @@ propose a new workflow).
 
 A run starts only from **Review and run…** in the workflow editor (or
 **Reproduce…** in a run, reviewed the same way), for a saved, well-formed
-revision (never from unsaved edits), or from a trigger under a standing
-plan you approved (see Triggers). The review shows
+revision (never from unsaved edits), from **Run again** on a finished run
+(it starts directly only when the new plan is exactly the plan that run was
+approved with and nothing blocks it; otherwise the review opens and says
+why; an interrupted run always gets a review), or from a trigger under a
+standing plan you approved (see Triggers). The review shows
 the complete plan: every input file with the SHA-256 of the content the run
 will read and whether that version is pinned, every step in the order it
 will run with its complete code (inline, the full text of the script file
@@ -458,8 +461,8 @@ are stored as text and never rendered as active content. Batches
 
 **Limitations.** Each image must provide its interpreter (`python3`,
 `Rscript`, or `julia` on its standard path) and every package the code
-needs: Exposition never pulls images or installs packages, and the
-container has no network. Restricted R and Julia batches run only in their
+needs: Exposition never pulls images or installs anything into them, and
+the container has no network. Restricted R and Julia batches run only in their
 own configured image (Settings › Execution › R image / Julia image); there
 is no default R or Julia image. The trusted native Python, R, and Julia
 steps and the Lean audit run with your account's privileges and are not
@@ -640,7 +643,9 @@ they resolve against this project's own workflows.
 | | Python | R | Julia |
 |---|---|---|---|
 | Discovery of installed environments | Yes | Yes (with IRkernel) | Yes (with IJulia) |
-| Managed kernel sessions, run input / selection / file | Yes | Yes | Yes |
+| Guided setup | Yes: a project `.venv` and packages from PyPI | Kernel package: the exact IRkernel commands to copy; a missing Jupyter host can be a project `.venv` set up as for Python | Kernel package: the exact IJulia commands to copy; Jupyter host as for R |
+| Missing runtime | Official download page, then automatic re-detection | Same | Same |
+| Managed kernel sessions, run input / selection / file; Run, Stop, Rerun | Yes | Yes | Yes |
 | Interrupt | Yes | No — IRkernel ignores interrupts on Windows; Cancel restarts the kernel | Yes (IJulia; a kernel without message-mode interrupts reports it as unsupported, and Cancel restarts it) |
 | Figures and tables captured as artifacts with provenance | Yes | Yes | Yes |
 | Insert and update a figure/table in a Typst, LaTeX, or Markdown document | Yes | Yes | Yes |
@@ -654,7 +659,42 @@ installed.
 
 Sessions belong to one project folder and require it to be trusted; switching
 or closing the folder, or revoking trust, detaches them. Agent runs use
-separate sessions. Exposition never installs runtimes or packages.
+separate sessions. The environment you choose is remembered for the project
+on this computer. Run, Stop, and Rerun work the same in the Research panel
+and on the Research page: Rerun repeats your last kind of run (the file, the
+selection, or the input) against the current source, and running is your own
+action, with no extra dialog.
+
+**Guided environment setup** (Python). When the selected environment is not
+usable, the Research view says why and offers the next step. **Set up
+environment…** creates the project environment `.venv` from a Python
+installed on this computer and installs the Jupyter kernel packages plus any
+packages you add; **Install packages…** adds packages to the project's
+existing `.venv` or `venv`. A plan shows exactly what will change before
+anything runs: the folder, the base Python, the packages, that they download
+from PyPI as binary packages only (no package build code runs during the
+install), that it runs on this computer with your account's privileges, what
+happens if it fails, and every command. Package names and versions are
+validated; URLs, paths, options, and requirement files are refused. Setup
+never installs into a Python installed for the whole computer, never
+elevates, and never runs a script or requirements file from the repository;
+it needs a trusted folder and network access to PyPI, and it can be
+canceled. A setup that fails or is canceled removes only the environment it
+created (proved by a marker and a record kept on this computer); an existing
+environment is never deleted or replaced, and a failed install into it
+leaves it as it was. An environment whose setup did not finish is never
+offered as ready. Packages run code with your account's privileges when they
+are imported later; a virtual environment is not a sandbox. Exposition never
+installs runtimes: for a missing Python, R, or Julia it opens the official
+download page in your browser and checks again when you return to the
+window. R and Julia kernel packages are installed by you with the commands
+shown (they install for your user account, not only the project).
+
+Not supported: conda, uv, or poetry environments; private package indexes
+or proxy settings (setup uses PyPI only, and its clean environment carries
+no proxy variables); setting up a restricted container image (the image must
+already hold every package). pip's download cache in your user profile is
+used. Setup is verified on Windows only; macOS and Linux are unverified.
 
 Interactive research sessions run natively with your account's privileges
 ("Trusted native"); the research space and per-owner sessions organize work
@@ -725,27 +765,86 @@ it is not a machine proof that the two statements are equivalent.
 The first provider is Anthropic's Messages API (`claude-opus-5-5` by default).
 Agents use the same services as people: they read and edit documents through
 the shared document service (every change is reviewable and revertible), build
-documents, run Python (in their own research sessions when you approve native
-runs, or one run at a time in the container in restricted mode), check
-Lean files, and move project files to the Recycle Bin or copy them within
+documents, run Python (in their own research sessions when native runs are
+approved or allowed, or one run at a time in the container in restricted
+mode), install Python packages into the project's environment (with setup
+authority; never in restricted mode), check Lean files, and move project
+files to the Recycle Bin or copy them within
 the project through the same operations you use (never a permanent
-deletion; a deletion that needs your decision is refused in tasks that apply
-changes directly; review shows each deletion with Restore and each copy with
-Remove Copy).
+deletion; a deletion that needs your decision is refused in Ask tasks that
+apply changes directly and otherwise asks you once; review shows each
+deletion with Restore and each copy with Remove Copy).
 
 The application, not the model, enforces each task's scope, consent, permission
-profile, execution mode, and budgets. Every tool declares what it reads,
-changes, and runs, and one gate checks that declaration before anything
-happens:
+profile, execution mode, approval mode, and budgets. Every tool declares what
+it reads, changes, and runs, and one gate decides before anything happens:
+the call proceeds, waits for your approval, or is refused with a stable
+reason. A task runs in one of two approval modes, chosen in the composer:
 
-| Tool | Execution off | Ask before each | Restricted (container) | Scope and consent |
+- **Ask** (the default, and every task created before Auto existed): the
+  task's own settings decide, and anything they do not cover waits for your
+  approval. An approval card can be answered **Approve** (this call) or,
+  for native code, file changes in scope, and package installs, **Approve
+  for this task**, which covers later calls of that kind in the same task
+  until you revoke it from the task view; revoking folder trust clears it.
+- **Auto**: the project's permissions decide (below). What they cover
+  proceeds without a dialog; a legitimate step beyond them (native code when
+  the project allows only the container or no code, a file change when files
+  are off, a package install without setup permission) asks once, with
+  Approve for this task where that kind allows it; a deletion or copy with
+  consequences in the project always asks, once, and never for the rest of
+  the task; anything the task's scope, consent, read-only setting, or the
+  application's own rules prohibit is refused, as in Ask.
+
+| Tool (Ask) | Execution off | Ask before each | Restricted (container) | Scope and consent |
 |---|---|---|---|---|
 | List, read files | allowed | allowed | allowed | path in scope (links resolved); reading needs content consent |
 | Edit, create files; insert an artifact | allowed (approval when reviewing edits; never in a read-only task) | same | same | path in scope; for an artifact, its file too |
+| The same into a Lean file in a trusted folder | refused | approval (Lean runs the text natively) | refused | as above |
 | Build Typst or Markdown (in-process) | allowed | allowed | allowed | entry in scope; the build reads only the scope; refused under "file names only" |
 | Build LaTeX, check Lean | refused | trusted folder + approval | refused | whole project + content consent |
 | Run Python, run a command | refused | trusted folder + approval | container only, unattended | whole project + content consent |
+| Install Python packages | refused | trusted folder + approval of the complete setup plan | refused (the container does not use the project environment) | whole project + content consent |
 | Delete files (to the Recycle Bin only), copy files | allowed (approval when reviewing edits; refused when applying directly and the deletion needs your decision; never in a read-only task) | same | same | paths in scope; file names suffice |
+
+**Project permissions** are what Auto tasks may do without asking in one
+project: Files (edit files in scope, or ask before each change), Code (ask
+before running code, run in the restricted container, or run natively on
+this computer), and Setup (install packages into the project environment;
+only with native code). The first time you choose Auto in a project, the
+composer suggests files edit, code in the restricted container when a
+container image is configured (otherwise asking), and setup off; native code
+is never pre-selected, and the composer states what running code can
+actually reach under the choice. Nothing runs in Auto until you choose. The
+permissions are stored on this computer, never in the project, and bound to
+the project's folder and its project-graph identity: a copied, moved,
+imported, or generated project has none. Settings › Agents lists every
+project's permissions, lets you change the open project's and revoke any;
+narrowing or revoking them stops that project's running Auto tasks (what
+they already did stays reviewable and is not undone) and leaves Ask tasks
+alone. If the permissions or a task's allowances change while a call waits
+to run, the call is refused rather than run under the old ones.
+
+Auto does not let a model approve itself. No tool, input field, file,
+retrieved text, tool output, or response changes permissions, allowances,
+the approval mode, or folder trust; only your composer, approval cards,
+task view, and Settings do. Auto never turns a restricted run into a native
+one, and a restricted run without a configured container image is refused,
+never run natively. Text an agent puts into a Lean file in a trusted folder
+counts as running code, because the Lean server elaborates it natively (an
+`#eval` runs): it needs native authority as well as permission to edit.
+<!-- A1 D7b --> The same holds for Lean/Lake configuration files
+(`lakefile.lean`, `lakefile.toml`, `lean-toolchain`, `lake-manifest.json`) in
+any folder, and agents never write, create, copy into, or delete anything
+under `.git/`, `.lake/`, `.venv/`, or `venv/`. <!-- /A1 D7b --> Code an agent
+writes into an ordinary project file does not run when it is written; it
+runs when it is later run or imported (by you, or by a tool the gate
+allows), so review such a change as you would imported code. Workflow agent
+steps always run in Ask with their own read-only contract. The decisions are
+covered by gate tests over every tool, both modes, every task setting and
+project profile, folder trust, and allowances, and in the real application
+(development build, scripted provider in place of the model) by
+`npm run e2e -- a1-permissions`.
 
 The project graph is part of every agent task, enforced by the application:
 each run starts with a scoped graph context (the project's identity and
@@ -778,8 +877,9 @@ copy is deleted and a local copy written, and the result is checked after
 Credential Manager has reloaded its stores, so no old copy comes back later
 over a replaced key or after Remove. It is kept out of every child
 process's environment and redacted from output, transcripts, and stored
-text artifacts. Trusted native code (research kernels, and the commands,
-Python, LaTeX builds, and Lean checks you approve) runs as your Windows user
+text artifacts. Trusted native code (research kernels, package installs, and
+the commands, Python, LaTeX builds, and Lean checks you approve or allow)
+runs as your Windows user
 and could read the stored key; Exposition cannot hide it from code you trust.
 
 A live end-to-end run against the real provider is covered by the opt-in
@@ -812,11 +912,22 @@ otherwise. A third, `npm run e2e -- live-graph`, has the model read the project 
 - Trusted native code runs with your account's privileges. Exposition kills
   the process trees it starts, but processes created through system services
   (for example WMI) can outlive a job.
-- Unattended agent execution uses the restricted backend: Docker with no
-  network, a read-only project mount, a non-root user, and no host
-  environment. It must be configured with a locally present image (which
-  must provide `/bin/sh`); Exposition never pulls images and never falls back
-  to native execution. An agent's container stops when Exposition exits or
+- Whether you are asked (Ask or Auto) and what running code can reach
+  (restricted container or native) are two separate decisions, shown
+  separately. Approving, or allowing native code under Auto, does not
+  contain the code: native code is not a sandbox, runs with your account's
+  privileges, and Exposition cannot confirm each action inside it. It can
+  change any file your account can write, including Exposition's own
+  settings (trusted folders, project permissions); keeping those outside the
+  project protects them from agent tools and project content, not from
+  native code. A project folder, a virtual environment, a separate process,
+  or a kernel is not a sandbox either.
+- Agent execution that does not ask uses the restricted backend (Docker
+  with no network, a read-only project mount, a non-root user, and no host
+  environment), unless you allowed native code for the project's Auto tasks
+  or approved it for the rest of a task. The backend must be configured with
+  a locally present image (which must provide `/bin/sh`); Exposition never
+  pulls images and never falls back to native execution, in Ask or Auto. An agent's container stops when Exposition exits or
   crashes and when its time limit passes; leftovers are removed at the next
   start when an image is configured, or else before the next restricted run.
 - Workflow restricted Python, R, and Julia steps use the same Docker
@@ -839,6 +950,15 @@ otherwise. A third, `npm run e2e -- live-graph`, has the model read the project 
   every kernel as data, never as code.
 - Rendered pages, kernel HTML/SVG, and Lean output are displayed as inert
   content without access to application commands.
+- Agent responses are rendered as Markdown that never executes: raw HTML,
+  scripts, and event handlers are shown as text, images never load (a
+  placeholder shows the alt text and address), math cannot create links or
+  images, and nothing in a response can call application commands. A web
+  link (http or https) is shown with its full address and opens only in your
+  system browser after you click it; every other kind of link stays inert
+  text. The application window itself never navigates away from Exposition.
+  Rendering or opening a response never runs code; **Run in Research** on a
+  code block is your own action.
 - Deleting, copying, and restoring go through one application service for
   every route (shortcut, menu, Storage & History, agent): paths are checked
   inside the project, links and junctions are never followed out of it,
@@ -945,8 +1065,9 @@ is not secure erasure. Before an upgrade, the run history and task databases
 are copied aside; a run history written by a newer version is left untouched.
 
 **Agents** delete only to the Recycle Bin and copy only within their scope,
-through the same operations; an agent that applies changes directly cannot
-perform a deletion that needs your decision, and reviewing an agent's
+through the same operations; an agent in an Ask task that applies changes
+directly cannot perform a deletion that needs your decision, any other task
+asks you once (never for the rest of the task), and reviewing an agent's
 deletion offers Restore.
 
 **Platforms.** On Windows the Recycle Bin, Undo, the file clipboard, junction
@@ -970,6 +1091,7 @@ the same headers, sections, lists, tables, dialogs, and status treatments.
 | Reduced motion | Supported (transitions off; spinners slow down) |
 | Narrow windows (down to the 720×480 minimum) | Partial: side panels collapse below 1100 and 860 px; Graph and Research inspectors become drawers; long pages scroll |
 | Status wording | Generated drafts, successful builds, executed computations, and checked proofs carry distinct labels; Lean verdicts are shown exactly; "Current" freshness is neutral, never green |
+| Agent responses | Supported: rendered as Markdown (headings, lists, quotes, tables, links, task lists, footnotes) with inline and display math, in one inset block per response in the Agent panel and on the Agents page; code highlighted, with Copy (exact text) and Run in Research for Python, R, and Julia; Copy of the whole response copies the original Markdown; streaming, long, and wide content stays usable in a narrow Agent panel (exercised at about 400 px, with no sideways page scroll); the view follows new output only while you are at the end. Limits: links to project files stay inert text; KaTeX `\color` can lower contrast; Lean hovers use the editor's own Markdown rendering |
 | High-contrast theme, Windows forced-colors mode | Not available (forced colors fall back to system defaults) |
 | Editor tab drag-and-drop, more than two editor groups | Not available |
 | Screen readers | Unverified: controls have accessible names and roles, but no NVDA/Narrator/VoiceOver pass has been done |
