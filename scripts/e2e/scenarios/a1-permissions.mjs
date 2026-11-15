@@ -410,7 +410,8 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
       (s) => s.owner?.kind === "agent" && s.owner.taskId === running && !["stopped", "detached", "crashed"].includes(s.state.kind),
     );
     assert.deepEqual(alive, [], "the agent's research session stopped");
-    assert.equal(await page.getByTestId("settings-project-permissions-empty").count(), 1);
+    // Revoking returns once the stopped task released its services (bounded).
+    await page.getByTestId("settings-project-permissions-empty").waitFor({ timeout: 20_000 });
     await shot(page, "a1-settings-agents-revoked-light");
     step = await record(page, "f. Revoked in Settings › Agents while Python ran: task stopped", running, {
       notice: notice.message,
