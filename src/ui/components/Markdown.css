@@ -1,0 +1,397 @@
+/* Shared Markdown renderer (.ui-markdown) and response surface (.ui-response),
+   src/ui/components/Markdown.tsx. Tokens only. Rendered content is selectable
+   text; code, tables, and display math scroll inside their own block. */
+
+/* ---------- Response surface ---------- */
+
+/* An inset block (A1, the user's choice): a subtle neutral fill with the
+   control radius, on the pane inset, no border. The fill is the neutral step
+   next to its backdrop: sunken on a page or document (white in light),
+   document white inside a sunken region (panels, sidebars). Code blocks and
+   inline code take the other step. */
+.ui-response {
+  --ui-response-bg: var(--color-surface-sunken);
+  --ui-response-inset-bg: var(--color-surface);
+  --ui-response-pad-x: var(--space-3);
+  --ui-response-pad-y: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--ui-response-pad-y) var(--ui-response-pad-x) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--ui-response-bg);
+}
+
+.ui-response[data-context="region"] {
+  --ui-response-bg: var(--color-surface);
+  --ui-response-inset-bg: var(--color-surface-sunken);
+}
+
+.ui-response[data-density="compact"] {
+  --ui-response-pad-x: var(--space-2);
+  --ui-response-pad-y: var(--space-1-5);
+}
+
+.ui-response__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-height-sm);
+}
+
+.ui-response__actions {
+  display: inline-flex;
+  gap: var(--space-0-5);
+  margin-left: auto;
+  /* The ghost button's padding aligns its icon with the content edge. */
+  margin-right: calc(-1 * var(--space-2));
+}
+
+.ui-response__body {
+  min-width: 0;
+}
+
+.ui-response__footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* ---------- Markdown ---------- */
+
+.ui-markdown {
+  --ui-md-inset-bg: var(--ui-response-inset-bg, var(--color-surface-sunken));
+  min-width: 0;
+  color: var(--color-text);
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-normal);
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+
+.ui-markdown :where(p, ul, ol, blockquote, pre, hr, h1, h2, h3, h4, h5, h6, section, table) {
+  margin: 0;
+}
+
+/* Running text keeps a readable line length on wide pages; code, tables, and
+   display math may use the full width of the response. */
+.ui-markdown > :where(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, section) {
+  max-width: 80ch;
+}
+
+.ui-markdown :where(*) + :where(p, ul, ol, blockquote, pre, hr, section, .ui-md-code, .ui-md-table, .ui-md-math-display, .ui-md-math-source) {
+  margin-top: var(--space-2);
+}
+
+.ui-markdown :where(*) + :where(h1, h2, h3, h4, h5, h6) {
+  margin-top: var(--space-4);
+}
+
+.ui-markdown :where(h1, h2, h3, h4, h5, h6) {
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.ui-markdown h1 {
+  font-size: var(--font-size-xl);
+}
+
+.ui-markdown :where(h2, h3) {
+  font-size: var(--font-size-lg);
+}
+
+.ui-markdown :where(h4, h5, h6) {
+  font-size: var(--font-size-md);
+}
+
+.ui-markdown strong {
+  font-weight: var(--font-weight-semibold);
+}
+
+.ui-markdown :where(ul, ol) {
+  padding-left: var(--space-5);
+}
+
+.ui-markdown li + li,
+.ui-markdown li > :where(ul, ol) {
+  margin-top: var(--space-1);
+}
+
+.ui-markdown li::marker {
+  color: var(--color-text-muted);
+}
+
+.ui-markdown .contains-task-list {
+  padding-left: var(--space-1);
+  list-style: none;
+}
+
+.ui-md-task {
+  margin: 0 var(--space-1-5) 0 0;
+  vertical-align: -2px;
+  accent-color: var(--color-accent);
+}
+
+.ui-markdown blockquote {
+  padding-left: var(--space-3);
+  border-left: var(--border-width) solid var(--color-border-strong);
+  color: var(--color-text-muted);
+}
+
+.ui-markdown hr {
+  height: 0;
+  border: 0;
+  border-top: var(--border-width) solid var(--color-border);
+}
+
+/* Raw HTML from the response, shown as the literal text it is. */
+.ui-markdown .ui-md-raw {
+  white-space: pre-wrap;
+}
+
+/* Footnote section label (screen readers only). */
+.ui-markdown .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ui-markdown section[data-footnotes] {
+  padding-top: var(--space-2);
+  border-top: var(--border-width) solid var(--color-border-subtle);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+/* ---------- Links and images ---------- */
+
+.ui-md-link {
+  border-radius: var(--radius-sm);
+  color: var(--color-accent-text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.ui-md-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+.ui-md-link:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.ui-md-link__address {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.ui-md-link-inert {
+  color: var(--color-text);
+}
+
+.ui-md-image {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  padding: var(--space-1) var(--space-2);
+  border: var(--border-width) dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  vertical-align: middle;
+}
+
+.ui-md-image__icon {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.ui-md-image__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ui-md-image__alt {
+  font-size: var(--font-size-md);
+}
+
+.ui-md-image__note {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.ui-md-image__address {
+  font-family: var(--font-code);
+}
+
+/* ---------- Code ---------- */
+
+.ui-md-code-inline {
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--ui-md-inset-bg);
+  font-family: var(--font-code);
+  font-size: 0.9em;
+}
+
+.ui-md-code {
+  min-width: 0;
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--ui-md-inset-bg);
+}
+
+.ui-md-code__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-height-md);
+  padding: 0 var(--space-1) 0 var(--space-3);
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+}
+
+.ui-md-code__language {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.ui-md-code__actions {
+  display: inline-flex;
+  gap: var(--space-0-5);
+  margin-left: auto;
+}
+
+.ui-md-code__body,
+.ui-md-math-source {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  overflow: auto;
+  max-height: 480px;
+  color: var(--color-text);
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--line-height-code);
+  white-space: pre;
+  overflow-wrap: normal;
+  tab-size: 4;
+}
+
+.ui-md-math-source {
+  border-radius: var(--radius-md);
+  background: var(--ui-md-inset-bg);
+}
+
+.ui-md-code__body:focus-visible,
+.ui-md-table:focus-visible,
+.ui-md-math-display:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-width));
+}
+
+/* Token colors: the same roles as the Monaco themes (src/ui/monaco-theme.ts). */
+.ui-md-tok-comment {
+  color: var(--color-text-subtle);
+  font-style: italic;
+}
+.ui-md-tok-keyword,
+.ui-md-tok-tag {
+  color: var(--color-accent-text);
+}
+.ui-md-tok-string,
+.ui-md-tok-regexp {
+  color: var(--color-success-text);
+}
+.ui-md-tok-number,
+.ui-md-tok-constant {
+  color: var(--color-warning-text);
+}
+.ui-md-tok-type,
+.ui-md-tok-attribute,
+.ui-md-tok-predefined {
+  color: var(--color-status-stale-text);
+}
+.ui-md-tok-delimiter,
+.ui-md-tok-operator {
+  color: var(--color-text-muted);
+}
+.ui-md-tok-invalid {
+  color: var(--color-danger-text);
+}
+
+/* ---------- Tables ---------- */
+
+.ui-md-table {
+  max-width: 100%;
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+}
+
+.ui-md-table table {
+  border-collapse: collapse;
+  font-size: var(--font-size-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-md-table :where(th, td) {
+  padding: var(--space-1) var(--space-3) var(--space-1) 0;
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: normal;
+}
+
+.ui-md-table th {
+  border-bottom-color: var(--color-border-strong);
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+
+.ui-md-table :where(th, td):last-child {
+  padding-right: 0;
+}
+
+.ui-md-table :where(th, td)[align="right"] {
+  text-align: right;
+}
+
+.ui-md-table :where(th, td)[align="center"] {
+  text-align: center;
+}
+
+/* ---------- Math ---------- */
+
+.ui-md-math-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: var(--space-0-5) 0;
+}
+
+.ui-markdown .katex {
+  font-size: 1.1em;
+}
+
+.ui-markdown .katex-display {
+  margin: 0;
+}
+
+/* ---------- Density ---------- */
+
+.ui-response[data-density="compact"] .ui-md-code__header {
+  padding-left: var(--space-2);
+}
+
+.ui-response[data-density="compact"] .ui-md-code__body,
+.ui-response[data-density="compact"] .ui-md-math-source {
+  padding: var(--space-1-5) var(--space-2);
+}
+
+.ui-response[data-density="compact"] .ui-markdown :where(ul, ol) {
+  padding-left: var(--space-4);
+}

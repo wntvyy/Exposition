@@ -42,3 +42,8 @@ export type { TooltipProps } from "./Tooltip";
 export { Tree, TreeItem } from "./Tree";
 export type { TreeItemProps, TreeProps } from "./Tree";
 export { cx } from "./cx";
+export { Markdown, ResponseSurface, useFrameThrottled } from "./Markdown";
+export type { CodeRunAction, MarkdownProps, ResponseDensity, ResponseSurfaceProps } from "./Markdown";
+export { CopyButton, copyText } from "./MarkdownCode";
+export { externalUrl, runnableLanguage } from "./MarkdownPolicy";
+export type { RunnableLanguage } from "./MarkdownPolicy";
