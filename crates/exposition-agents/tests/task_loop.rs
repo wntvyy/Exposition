@@ -674,7 +674,9 @@ async fn cancellation_mid_tool_stops_the_process_and_keeps_changes_revertible() 
     assert_eq!(answered["is_error"], true);
     assert!(answered["content"].as_str().unwrap().contains("canceled"));
     let (role, last_user) = &messages[messages.len() - 2];
-    assert_eq!((role.as_str(), last_user[0]["text"].as_str()), ("user", Some("Go on")));
+    // The current task context comes first, the request last.
+    assert!(last_user.iter().any(|b| b["text"].as_str().is_some_and(|t| t.starts_with("<task_context>"))));
+    assert_eq!((role.as_str(), last_user.last().unwrap()["text"].as_str()), ("user", Some("Go on")));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

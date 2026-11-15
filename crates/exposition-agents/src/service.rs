@@ -382,13 +382,10 @@ impl AgentService {
         };
         self.inner.store.insert_task(&row)?;
         let selection = selection_text.filter(|_| consent == ContextConsent::ScopeContent);
-        let context = prompt::context_block(
-            &spec,
-            &self.inner.documents,
-            self.inner.services.as_ref(),
-            selection.as_deref(),
-            grant.as_ref(),
-        );
+        // What the gate would decide now (a new task has no allowances yet).
+        let authority = Authority { project: grant, ..Authority::default() };
+        let outlook = self.inner.outlook(&id, &spec, &files, authority.clone());
+        let context = prompt::context_block(&spec, &self.inner.documents, selection.as_deref(), &authority, &outlook);
         let mut content = vec![json!({"type": "text", "text": context})];
         if let Some(graph_context) = &graph_context {
             self.inner.store.insert_graph_context(&id, graph_context)?;
@@ -436,6 +433,16 @@ impl AgentService {
         let graph_context = self.inner.graph_context(files.root(), &row.spec, recorded.as_ref())?;
         let provider = self.inner.make_provider(&row.spec.provider, id)?;
         let mut content = self.inner.dangling_tool_results(id)?;
+        // The approvals and the files' saved and review state as they are
+        // now (the user may have approved, revoked, saved, kept, or reverted
+        // since the last run): the model must not infer them from the graph.
+        let authority = self.inner.authority(id, &row.spec, files.root(), recorded.as_ref());
+        let outlook = self.inner.outlook(id, &row.spec, &files, authority.clone());
+        let changed = prompt::changed_files(&self.inner.store, id, &self.inner.documents, &files);
+        content.push(json!({
+            "type": "text",
+            "text": prompt::context_update(&row.spec, &self.inner.documents, &authority, &outlook, &changed),
+        }));
         if let Some(graph_context) = &graph_context {
             self.inner.store.insert_graph_context(id, graph_context)?;
             content.push(json!({"type": "text", "text": graph::context::block(graph_context)}));
@@ -1208,6 +1215,22 @@ impl Inner {
         Authority { project: grant, allowances }
     }
 
+    /// What the gate would decide now for each kind of action of a task
+    /// (for the context the model is given; it authorizes nothing).
+    fn outlook(&self, id: &TaskId, spec: &TaskSpec, files: &LocalProjectFiles, authority: Authority) -> exec::Outlook {
+        exec::outlook(&ToolEnv {
+            task_id: id,
+            spec,
+            files,
+            documents: &self.documents,
+            workspace: self.workspace.as_deref(),
+            services: self.services.as_ref(),
+            store: &self.store,
+            graph: None,
+            authority,
+        })
+    }
+
     fn task_allowances(&self, id: &TaskId) -> Result<Vec<TaskAllowance>> {
         let (_, rows) = self.store.allowances(id)?;
         Ok(rows
@@ -1502,6 +1525,7 @@ impl Inner {
                         paused: Duration::ZERO,
                         seen: SeenTexts::default(),
                         authorized: HashMap::new(),
+                        granted: HashMap::new(),
                         files,
                     };
                     let status = run.drive(provider.as_ref()).await;
@@ -1665,6 +1689,8 @@ struct Run<'a> {
     seen: SeenTexts,
     /// How each call of this run that is about to run, or ran, was authorized.
     authorized: HashMap<String, AuthorizedBy>,
+    /// What the approval of a call granted for the rest of the task.
+    granted: HashMap<String, Vec<AllowanceKind>>,
     files: LocalProjectFiles,
     /// The project graph the task is bound to.
     graph_project: Option<ProjectId>,
@@ -1953,6 +1979,7 @@ impl Run<'_> {
                 ToolCallStatus::Failed if self.cancel.is_cancelled() => ToolCallStatus::Canceled,
                 status => status,
             };
+            let output = self.with_authorization(tool_use_id, output);
             self.record_call(tool_use_id, turn, name, input, status, Some(&output));
             self.inner.emit(AgentEvent::ToolCallFinished {
                 task_id: self.id.clone(),
@@ -2084,6 +2111,9 @@ impl Run<'_> {
                                     }
                                     _ => None,
                                 };
+                                if granted.is_some() {
+                                    self.granted.insert(tool_use_id.to_owned(), for_task.clone());
+                                }
                                 authorization.approve(granted);
                                 authorization
                             }
@@ -2173,6 +2203,19 @@ impl Run<'_> {
             .await
             .unwrap_or_else(|_| ToolOutput::error("Stopped while running; the tool did not report how far it got."));
         Err((interrupt, Some(output)))
+    }
+
+    /// Add how a call that ran was authorized to its result, so the model
+    /// describes approvals as they were (a call that did not run has none).
+    fn with_authorization(&self, tool_use_id: &str, mut output: ToolOutput) -> ToolOutput {
+        let granted = self.granted.get(tool_use_id).map(Vec::as_slice).unwrap_or_default();
+        if let Some(by) = self.authorized.get(tool_use_id)
+            && let Some(note) = prompt::authorization_note(by, granted)
+            && let Some(obj) = output.content.as_object_mut()
+        {
+            obj.insert("authorization".into(), json!(note));
+        }
+        output
     }
 
     fn env(&self) -> ToolEnv<'_> {
