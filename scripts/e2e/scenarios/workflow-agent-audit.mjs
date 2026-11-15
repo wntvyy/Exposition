@@ -76,7 +76,7 @@ export default async function workflowAgentAudit({ launchApp, artifactsDir, asse
   const statusBarJobs = async () => (await page.locator('[data-testid="jobs-status"]').textContent().catch(() => null)) ?? null;
   const formalRows = async () => {
     const math = await invoke(page, "graph_math_overview");
-    return math.rows.filter((r) => r.entity.kind === "formalDeclaration").map((r) => ({ label: r.entity.label, entity: r.entity.id, evidence: r.evidence?.kind ?? null }));
+    return math.rows.filter((r) => r.entity.kind === "formalDeclaration").map((r) => ({ label: r.entity.label, entity: r.entity.id, evidence: r.evidence?.kind ?? null, verdict: r.verdict?.kind ?? r.verdict ?? null, freshness: r.freshness?.kind ?? r.freshness ?? null }));
   };
   const finish = async (runId, timeout = 600_000) => {
     let run;
