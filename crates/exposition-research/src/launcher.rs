@@ -165,6 +165,14 @@ pub trait KernelProcessLauncher: Send + Sync {
     }
     /// Stop a project job and its process tree.
     fn cancel_project_job(&self, _job: &str) {}
+    /// Make `dir` (an empty, application-owned folder) the working directory
+    /// of project commands for `owner`: they still need `owner`'s trust and
+    /// stop when it is revoked. Returns the canonical folder.
+    fn register_project_workdir(&self, dir: &Path, _owner: &Path) -> Result<PathBuf, String> {
+        Ok(dir.to_path_buf())
+    }
+    /// Forget a folder registered with [`Self::register_project_workdir`].
+    fn unregister_project_workdir(&self, _dir: &Path) {}
 }
 
 /// [`KernelProcessLauncher`] over the shared execution service.
@@ -321,6 +329,14 @@ impl KernelProcessLauncher for ExecutionLauncher {
 
     fn cancel_project_job(&self, job: &str) {
         self.execution.cancel(&JobId(job.to_owned()));
+    }
+
+    fn register_project_workdir(&self, dir: &Path, owner: &Path) -> Result<PathBuf, String> {
+        self.execution.register_app_dir(dir, Some(owner)).map_err(|e| e.to_string())
+    }
+
+    fn unregister_project_workdir(&self, dir: &Path) {
+        self.execution.unregister_root(dir);
     }
 }
 

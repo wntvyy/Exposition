@@ -90,6 +90,52 @@ fn hostile_or_unsupported_specifications_are_refused() {
     assert!(parse_package(&long).is_err());
 }
 
+/// R-a1 F2: text pip would resolve as a local archive or distribution file
+/// (relative to its working directory) is never a package name.
+#[test]
+fn archive_and_distribution_file_names_are_refused() {
+    let files = [
+        "evilsdist-1.0.tar",
+        "evilsdist-1.0.tar.gz",
+        "EVILSDIST-1.0.TAR.GZ",
+        "evil.zip",
+        "evilpkg-1.0-py3-none-any.whl",
+        "x.tgz",
+        "x.tar.bz2",
+        "x.tbz",
+        "x.tbz2",
+        "x.tar.xz",
+        "x.txz",
+        "x.tlz",
+        "x.tar.lz",
+        "x.tar.lzma",
+        "x-1.0-py3.8.egg",
+        "setup.exe",
+        "installer.msi",
+        "x.tar.foo",
+        "x.whl.bak",
+        "pkg==1.whl",
+        "pkg>=1.0.zip",
+        "evil.tar[extra]",
+        "evil.tar[extra]==1.0",
+    ];
+    for spec in files {
+        let reason = parse_package(spec).expect_err(spec);
+        assert!(reason.contains("only package names from PyPI"), "{spec}: {reason}");
+        let error = validate_packages(&[spec.to_owned()]).unwrap_err();
+        assert_eq!(error.code(), "setup.invalidPackage", "{spec}");
+        assert!(error.to_string().contains("only package names from PyPI"), "{error}");
+    }
+    // Real names that merely contain such letters stay accepted.
+    for name in
+        ["zope.interface", "backports.tarfile", "backports.lzma", "py2exe", "zipp", "tarsafe", "exepy", "msilib-x"]
+    {
+        assert!(parse_package(name).is_ok(), "{name} must stay accepted");
+    }
+    assert!(!looks_like_archive("pandas>=2.2,<3"));
+    assert!(!looks_like_archive("torch==2.3.1+cpu"));
+}
+
 #[test]
 fn package_lists_are_bounded_deduplicated_and_led_by_the_kernel_packages() {
     let many: Vec<String> = (0..=MAX_PACKAGES).map(|i| format!("pkg{i}")).collect();
@@ -379,6 +425,11 @@ struct ScriptedLauncher {
     specs: Mutex<Vec<JobSpec>>,
     project_probes: AtomicUsize,
     next: AtomicUsize,
+    /// (working folder, owner) registrations.
+    workdirs: Mutex<Vec<(PathBuf, PathBuf)>>,
+    unregistered: Mutex<Vec<PathBuf>>,
+    /// Steps that started in an empty working folder.
+    empty_workdir: AtomicUsize,
 }
 
 impl ScriptedLauncher {
@@ -391,6 +442,9 @@ impl ScriptedLauncher {
             specs: Mutex::new(Vec::new()),
             project_probes: AtomicUsize::new(0),
             next: AtomicUsize::new(0),
+            workdirs: Mutex::new(Vec::new()),
+            unregistered: Mutex::new(Vec::new()),
+            empty_workdir: AtomicUsize::new(0),
         })
     }
 
@@ -421,8 +475,18 @@ impl KernelProcessLauncher for ScriptedLauncher {
     fn workspace_trusted(&self, _root: &Path) -> Option<bool> {
         Some(self.trusted.load(Ordering::SeqCst))
     }
+    fn register_project_workdir(&self, dir: &Path, owner: &Path) -> Result<PathBuf, String> {
+        self.workdirs.lock().unwrap().push((dir.to_path_buf(), owner.to_path_buf()));
+        Ok(dir.to_path_buf())
+    }
+    fn unregister_project_workdir(&self, dir: &Path) {
+        self.unregistered.lock().unwrap().push(dir.to_path_buf());
+    }
     fn start_project_job(&self, spec: &JobSpec) -> Result<String, LaunchError> {
         self.specs.lock().unwrap().push(spec.clone());
+        if std::fs::read_dir(&spec.working_directory).is_ok_and(|mut entries| entries.next().is_none()) {
+            self.empty_workdir.fetch_add(1, Ordering::SeqCst);
+        }
         let id = format!("job-{}", self.next.fetch_add(1, Ordering::SeqCst));
         let is_venv = spec.args.iter().any(|a| a == "venv");
         let behavior = if is_venv { *self.venv.lock().unwrap() } else { *self.pip.lock().unwrap() };
@@ -519,14 +583,26 @@ async fn a_successful_setup_creates_a_ready_environment_and_marks_it_complete() 
     assert!(f.records().is_empty(), "no unfinished record remains");
     assert_eq!(status.jobs.len(), 2);
     assert!(status.log.iter().any(|l| l.contains("Collecting packages")));
-    // Every step ran as a trusted native project job in the project folder.
+    // Every step ran as a trusted native job in an empty application-owned
+    // working folder (never the project folder), with no pip configuration.
     let specs = f.launcher.specs.lock().unwrap().clone();
     assert_eq!(specs.len(), 2);
+    let workdirs = f.launcher.workdirs.lock().unwrap().clone();
+    assert_eq!(workdirs.len(), 1, "one working folder per setup, bound to the project");
+    let (workdir, owner) = &workdirs[0];
+    assert_eq!(owner, &f.service.workspace_root().unwrap());
+    assert!(workdir.starts_with(&f.plan.data), "{workdir:?} is application-owned");
+    assert!(!workdir.starts_with(&f.plan.root), "{workdir:?} is not in the project");
     for spec in &specs {
         assert_eq!(spec.policy, ExecutionPolicy::TrustedNative);
-        assert_eq!(spec.working_directory, status.plan.root);
+        assert_eq!(spec.working_directory, display_path(workdir));
+        assert_ne!(spec.working_directory, status.plan.root);
         assert!(spec.environment.inherit.is_empty());
+        assert_eq!(spec.environment.set.get("PIP_CONFIG_FILE").map(String::as_str), Some(NULL_DEVICE));
     }
+    assert_eq!(f.launcher.empty_workdir.load(Ordering::SeqCst), 2, "the working folder was empty for every step");
+    assert!(!workdir.exists(), "the working folder is removed afterwards");
+    assert_eq!(f.launcher.unregistered.lock().unwrap().as_slice(), std::slice::from_ref(workdir));
     assert_eq!(specs[1].args, status.plan.steps[1].args);
     // The service reports it as the project's last setup.
     assert_eq!(f.service.setup_status().map(|s| s.id), Some(status.id));

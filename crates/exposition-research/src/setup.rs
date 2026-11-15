@@ -15,9 +15,17 @@
 //! - Package specifications are validated ([`validate_packages`]): a name,
 //!   optional extras, optional version clauses from a restricted set — never
 //!   URLs, paths, options, markers, direct references (`@`), or files (`-r`).
-//! - pip runs isolated (`-I`, `--isolated`), only inside the virtual
-//!   environment (`--require-virtualenv`), binary wheels only (no package
-//!   build code runs during the install), from PyPI only.
+//! - pip runs isolated (`-I`, `--isolated`, no configuration files:
+//!   `PIP_CONFIG_FILE` is the null device, so a project environment's
+//!   `pip.ini` cannot add indexes or local find-links), only inside the
+//!   virtual environment (`--require-virtualenv`), binary wheels only, from
+//!   PyPI only. Every command runs in an empty application-owned working
+//!   folder, never the project folder: pip resolves requirement text that
+//!   names an archive (`x-1.0.tar`, `x.whl`) as a local file relative to its
+//!   working directory and would run that archive's build code, so such
+//!   names are refused ([`parse_package`]) and nothing project-written is
+//!   reachable from the working directory (nor, on Windows, from its DLL
+//!   search path).
 //! - An environment the run created is removed when the run fails or is
 //!   canceled: the marker written at creation (and the app-local record)
 //!   prove it is the run's own. An existing environment is never deleted or
@@ -262,6 +270,44 @@ pub fn normalize_name(name: &str) -> String {
 
 const OPERATORS: [&str; 7] = ["==", "!=", "<=", ">=", "~=", "<", ">"];
 
+/// File name endings pip (and Windows) treat as a distribution or archive
+/// file rather than a package name.
+const ARCHIVE_SUFFIXES: [&str; 16] = [
+    ".whl",
+    ".zip",
+    ".tar",
+    ".tar.gz",
+    ".tgz",
+    ".tar.bz2",
+    ".tbz",
+    ".tbz2",
+    ".tar.xz",
+    ".txz",
+    ".tlz",
+    ".tar.lz",
+    ".tar.lzma",
+    ".egg",
+    ".exe",
+    ".msi",
+];
+/// Dotted parts that make text look like an archive file name wherever they
+/// appear (`x.tar.foo`, `pkg==1.whl`).
+const ARCHIVE_PARTS: [&str; 11] = ["whl", "zip", "tar", "tgz", "tbz", "tbz2", "txz", "tlz", "egg", "exe", "msi"];
+
+/// Requirement text pip would treat as a local archive or distribution file
+/// (case-insensitive): it ends in an archive suffix, or one of its dotted
+/// words (split at characters that cannot be in a name) has an archive part
+/// after a dot. pip resolves such text relative to its working directory.
+pub fn looks_like_archive(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    if ARCHIVE_SUFFIXES.iter().any(|suffix| lower.ends_with(suffix)) {
+        return true;
+    }
+    lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '!' | '+' | '*')))
+        .any(|word| word.split('.').skip(1).any(|part| ARCHIVE_PARTS.contains(&part)))
+}
+
 fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
 }
@@ -330,6 +376,12 @@ pub fn parse_package(spec: &str) -> Result<PackageSpec, String> {
     }
     if text.contains("===") {
         return Err("arbitrary equality (===) is not accepted".into());
+    }
+    if looks_like_archive(text) {
+        return Err(
+            "it looks like a file name (an archive or a distribution file); only package names from PyPI are accepted"
+                .into(),
+        );
     }
     if let Some(bad) = text.chars().find(|c| c.is_control() || (!c.is_ascii() && !c.is_whitespace())) {
         return Err(format!("it contains the character {:?}", bad));
@@ -1314,6 +1366,9 @@ fn run_steps(
             .map_err(|e| Stop::Failed(format!("The setup marker could not be written: {e}.")))?;
     }
 
+    // Removed (and forgotten by the execution service) when the steps end.
+    let workdir = WorkDir::create(service, &run.id, &run.root)
+        .map_err(|e| Stop::Failed(format!("The setup's working folder could not be prepared: {e}.")))?;
     for (index, step) in plan.steps.iter().enumerate() {
         if run.canceled.load(Ordering::SeqCst) {
             return Err(canceled());
@@ -1328,8 +1383,8 @@ fn run_steps(
             label: format!("environment setup: {}", step.label),
             program: step.program.clone(),
             args: step.args.clone(),
-            environment: research_environment(BTreeMap::new()),
-            working_directory: plan.root.clone(),
+            environment: setup_environment(),
+            working_directory: display_path(&workdir.path),
             policy: ExecutionPolicy::TrustedNative,
             timeout_ms: Some(step.timeout_ms),
             log_limit_bytes: Some(JOB_LOG_LIMIT),
@@ -1415,6 +1470,47 @@ fn run_steps(
         }
     }
     Ok(())
+}
+
+/// The null device: `PIP_CONFIG_FILE` set to it makes pip load no
+/// configuration file at all (global, site — e.g. a project environment's
+/// `pip.ini` — or user).
+const NULL_DEVICE: &str = if cfg!(windows) { "nul" } else { "/dev/null" };
+
+/// The environment of every setup command: the research base plus no pip
+/// configuration files.
+pub(crate) fn setup_environment() -> exposition_core::job::EnvironmentSpec {
+    let mut extra = BTreeMap::new();
+    extra.insert("PIP_CONFIG_FILE".to_owned(), NULL_DEVICE.to_owned());
+    research_environment(extra)
+}
+
+/// The working folder of one setup's commands: empty, application-owned
+/// (`<data>/research/setup-work/<setup id>`), never the project folder, and
+/// bound to the project only for trust (revoking it stops the commands).
+struct WorkDir {
+    path: PathBuf,
+    launcher: Arc<dyn KernelProcessLauncher>,
+}
+
+impl WorkDir {
+    fn create(service: &ResearchService, setup_id: &str, owner: &Path) -> Result<Self, String> {
+        let dir = service.data_dir().join("research").join("setup-work").join(setup_id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let launcher = service.launcher();
+        let path = launcher.register_project_workdir(&dir, owner)?;
+        Ok(Self { path, launcher })
+    }
+}
+
+impl Drop for WorkDir {
+    fn drop(&mut self) {
+        self.launcher.unregister_project_workdir(&self.path);
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 fn chunks(text: &str, size: usize) -> Vec<String> {
