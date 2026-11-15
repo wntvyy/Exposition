@@ -1333,7 +1333,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       note("treeBeforeCancel", tree);
       await shot("07c-long-run-light");
       const t0 = Date.now();
-      await output().getByRole("button", { name: "Cancel run" }).click();
+      await page.getByTestId("research-stop").first().click();
       await page.locator(`[data-testid="research-output"][data-run-id="${runId}"][data-status="canceled"]`).waitFor({ timeout: 60_000 });
       await waitFor(() => survivors(tree).length === 0 && processesMentioning(marker).length === 0, {
         timeout: 30_000,
