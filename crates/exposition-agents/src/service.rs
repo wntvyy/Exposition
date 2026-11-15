@@ -812,9 +812,10 @@ impl AgentService {
     }
 
     /// Grant or change the open project's permissions (the user's choice in
-    /// the composer or Settings). A narrowing stops the project's active
-    /// Auto tasks (it waits, bounded, until they stopped; call it off the
-    /// async runtime). Ask tasks and other projects are not affected.
+    /// the composer or Settings). A narrowing clears the allowances of the
+    /// project's Auto tasks and stops the active ones (it waits, bounded,
+    /// until they stopped; call it off the async runtime). Ask tasks and
+    /// other projects are not affected.
     pub fn set_project_permissions(&self, root: &str, choice: PermissionChoice) -> Result<PermissionsChange> {
         let files = self.inner.open_project(root)?;
         let project = self.inner.graph_project_of(files.root());
@@ -830,7 +831,8 @@ impl AgentService {
     }
 
     /// Revoke a project's permissions (Settings, composer). The project need
-    /// not be open; its active Auto tasks stop.
+    /// not be open; its active Auto tasks stop and its Auto tasks' allowances
+    /// are cleared.
     pub fn revoke_project_permissions(&self, root: &str, project: Option<&str>) -> Result<PermissionsChange> {
         if root.is_empty() || root.len() > 4096 || root.contains('\0') || !Path::new(root).is_absolute() {
             return Err(AgentError::new("agents.invalidWorkspace", "invalid project folder"));
@@ -853,7 +855,12 @@ impl AgentService {
         let (stopped, problems) = if narrowed.is_empty() {
             (Vec::new(), Vec::new())
         } else {
-            self.stop_auto_tasks(Path::new(&root), project.as_deref(), &narrowed)
+            // Cleared first: a call an allowance authorized and not yet
+            // started is refused at launch (`agents.permissionsChanged`).
+            let mut problems = self.clear_auto_allowances(Path::new(&root), project.as_deref(), &narrowed);
+            let (stopped, more) = self.stop_auto_tasks(Path::new(&root), project.as_deref(), &narrowed);
+            problems.extend(more);
+            (stopped, problems)
         };
         let change = PermissionsChange { root, project, permissions: after, narrowed, stopped, problems };
         self.inner.emit(AgentEvent::PermissionsChanged { change: Box::new(change.clone()) });
@@ -869,16 +876,8 @@ impl AgentService {
         let rows = self.inner.store.tasks().unwrap_or_default();
         let affected: Vec<TaskRow> = rows
             .into_iter()
-            .filter(|row| row.spec.approval_mode == ApprovalMode::Auto)
             .filter(|row| row.status.is_active() || self.is_running(&row.id))
-            .filter(|row| same_folder(Path::new(&row.spec.workspace_root), root))
-            .filter(|row| {
-                let bound = self.inner.store.graph_project(&row.id).ok().flatten();
-                match (bound, project) {
-                    (Some(bound), Some(project)) => bound.as_str() == project,
-                    _ => true,
-                }
-            })
+            .filter(|row| self.is_auto_task_of(row, root, project))
             .collect();
         let what = narrowed.join(", ");
         for row in &affected {
@@ -909,6 +908,68 @@ impl AgentService {
             }
         }
         (affected.into_iter().map(|row| row.id).collect(), problems)
+    }
+
+    /// Whether `row` is an Auto task of the project at `root` (bound to
+    /// `project` when both are known).
+    fn is_auto_task_of(&self, row: &TaskRow, root: &Path, project: Option<&str>) -> bool {
+        if row.spec.approval_mode != ApprovalMode::Auto || !same_folder(Path::new(&row.spec.workspace_root), root) {
+            return false;
+        }
+        let bound = self.inner.store.graph_project(&row.id).ok().flatten();
+        match (bound, project) {
+            (Some(bound), Some(project)) => bound.as_str() == project,
+            _ => true,
+        }
+    }
+
+    /// After a narrowing or revocation, clear the allowances of every Auto
+    /// task of the project, active or not (the version bump refuses calls
+    /// they authorized and that have not started), so a later Continue under
+    /// the narrower permissions cannot inherit what was approved under the
+    /// broader grant. Ask tasks keep theirs: they do not depend on the
+    /// project's permissions. Returns what could not be cleared.
+    fn clear_auto_allowances(&self, root: &Path, project: Option<&str>, narrowed: &[String]) -> Vec<String> {
+        let ids = match self.inner.store.tasks_with_allowances() {
+            Ok(ids) => ids,
+            Err(e) => {
+                return vec![format!("What you approved for this project's Auto tasks could not be cleared ({e}).")];
+            }
+        };
+        let what = narrowed.join(", ");
+        let mut problems = Vec::new();
+        for id in ids {
+            let row = match self.inner.store.task_any(&id) {
+                Ok(Some((row, _))) => row,
+                Ok(None) => continue,
+                Err(e) => {
+                    problems.push(format!("What you approved for task {} could not be checked ({e}).", id.0));
+                    continue;
+                }
+            };
+            if !self.is_auto_task_of(&row, root, project) {
+                continue;
+            }
+            match self.inner.store.revoke_allowances(&id, None) {
+                Ok((_, true)) => {
+                    let _ = self.inner.store.append_notice(
+                        &id,
+                        NoticeLevel::Info,
+                        &format!(
+                            "Project permissions changed ({what}), so what you approved for the rest of this Auto \
+                             task was cleared."
+                        ),
+                    );
+                    self.inner.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
+                }
+                Ok((_, false)) => {}
+                Err(e) => problems.push(format!(
+                    "“{}”: what you approved for the rest of the task could not be cleared ({e}).",
+                    row.title
+                )),
+            }
+        }
+        problems
     }
 
     /// Revoke one of a task's allowances (`Some(kind)`) or all of them (the

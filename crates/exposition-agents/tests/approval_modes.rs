@@ -57,6 +57,10 @@ fn project() -> TempDir {
     std::fs::write(root.join("notes/a.typ"), "= A\n").unwrap();
     std::fs::create_dir_all(root.join("proofs/sub")).unwrap();
     std::fs::write(root.join("proofs/sub/P.lean"), "theorem p : True := trivial\n").unwrap();
+    std::fs::create_dir_all(root.join("analysis")).unwrap();
+    std::fs::write(root.join("analysis/.Rprofile"), "options(digits = 4)\n").unwrap();
+    std::fs::create_dir_all(root.join("rproj/sub")).unwrap();
+    std::fs::write(root.join("rproj/sub/.Renviron"), "R_LIBS_USER=lib\n").unwrap();
     std::fs::create_dir_all(root.join("drafts")).unwrap();
     std::fs::create_dir_all(root.join(".exposition/artifacts/run-1")).unwrap();
     std::fs::write(root.join(".exposition/artifacts/run-1/fig.png"), FIGURE).unwrap();
@@ -306,11 +310,13 @@ enum Kind {
     LakeConfig,
     /// D7 generalized: a copy of a folder holding a Lean file.
     LeanCopy,
+    /// F8: a new R startup file (R runs it at every session start in the folder).
+    RProfile,
     /// install_packages (with the plan the application made).
     Install,
 }
 
-const KINDS: [Kind; 17] = [
+const KINDS: [Kind; 18] = [
     Kind::List,
     Kind::Read,
     Kind::Edit,
@@ -327,6 +333,7 @@ const KINDS: [Kind; 17] = [
     Kind::LeanCreate,
     Kind::LakeConfig,
     Kind::LeanCopy,
+    Kind::RProfile,
     Kind::Install,
 ];
 
@@ -365,6 +372,7 @@ impl Kind {
                 json!({"path": "notes/lakefile.toml", "content": "name = \"n\"\n[[require]]\nname = \"x\"\ngit = \"https://example.invalid/x\"\n"}),
             ),
             Kind::LeanCopy => (tools::COPY_PATHS, json!({"paths": ["proofs"], "destination": "notes"})),
+            Kind::RProfile => (tools::CREATE_FILE, json!({"path": ".Rprofile", "content": "system(\"calc\")\n"})),
             Kind::Install => (tools::INSTALL_PACKAGES, json!({"packages": ["numpy", "scipy==1.14.1"]})),
         }
     }
@@ -380,6 +388,7 @@ impl Kind {
                 | Kind::LeanCreate
                 | Kind::LakeConfig
                 | Kind::LeanCopy
+                | Kind::RProfile
         )
     }
     fn launch(self) -> bool {
@@ -398,7 +407,7 @@ impl Kind {
         call
     }
     fn lean_text(self) -> bool {
-        matches!(self, Kind::LeanEdit | Kind::LeanCreate | Kind::LakeConfig | Kind::LeanCopy)
+        matches!(self, Kind::LeanEdit | Kind::LeanCreate | Kind::LakeConfig | Kind::LeanCopy | Kind::RProfile)
     }
 }
 
@@ -1899,4 +1908,287 @@ fn a_link_into_a_protected_folder_is_refused() {
         panic!("a link into .venv was not refused")
     };
     assert_eq!(out.content["code"], json!(codes::PROTECTED_TARGET), "{}", out.text());
+}
+
+// ---------------------------------------------------------------------------
+// R startup files (R-a1 F8): R reads .Rprofile / .Renviron from its working
+// directory at every session start (Rscript too) and runs the profile.
+// ---------------------------------------------------------------------------
+
+/// Every tool that can put an R startup file in place needs native authority,
+/// in any folder and whatever the trust: refused with execution disabled or a
+/// restricted ceiling, asked with per-command approval or Auto without native
+/// code (the text says R runs it at every session start), allowed under Auto
+/// with Code: native. They are not protected: with native authority an agent
+/// may set them up (e.g. for renv).
+#[test]
+fn r_startup_files_need_native_authority_for_every_tool() {
+    let f = fixture();
+    let calls = [
+        (tools::CREATE_FILE, json!({"path": ".Rprofile", "content": "system(\"calc\")\n"})),
+        (tools::CREATE_FILE, json!({"path": "sub/.RENVIRON", "content": "R_PROFILE_USER=x\n"})),
+        (
+            tools::EDIT_DOCUMENT,
+            json!({"path": "analysis/.Rprofile", "base_revision": 1, "edits": [{"old_text": "options(digits = 4)", "new_text": "system(\"calc\")"}]}),
+        ),
+        (
+            tools::INSERT_ARTIFACT,
+            json!({"path": "analysis/.Rprofile", "run_id": "run-1", "artifact_id": "fig", "after_text": "", "caption": "", "update_key": ""}),
+        ),
+        (tools::COPY_PATHS, json!({"paths": ["rproj"], "destination": "notes"})),
+        (tools::COPY_PATHS, json!({"paths": ["analysis/.Rprofile"], "destination": "notes"})),
+    ];
+    let disabled = spec(f.files.root(), ApprovalMode::Ask, PermissionProfile::AutoApply, ExecutionMode::Disabled);
+    let restricted = spec(f.files.root(), ApprovalMode::Ask, PermissionProfile::AutoApply, ExecutionMode::Restricted);
+    let ask = spec(f.files.root(), ApprovalMode::Ask, PermissionProfile::AutoApply, ExecutionMode::ApproveEach);
+    let auto = spec(f.files.root(), ApprovalMode::Auto, PermissionProfile::AutoApply, ExecutionMode::ApproveEach);
+    let native = Some(PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Native, setup: false });
+    let off = Some(PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Off, setup: false });
+    for trusted in [true, false] {
+        f.services.trusted.store(trusted, Ordering::SeqCst);
+        for (name, input) in &calls {
+            let label = format!("{name} {input} trusted={trusted}");
+            let Gate::Refused(out) = gate_of(&f, &disabled, authority(None, &[]), name, input.clone()) else {
+                panic!("{label}: not refused with execution disabled")
+            };
+            assert_eq!(out.content["code"], json!(codes::EXECUTION_DISABLED), "{label}");
+            assert!(out.text().contains("R runs this file at the start of every R session"), "{label}: {}", out.text());
+            let Gate::Refused(out) = gate_of(&f, &restricted, authority(None, &[]), name, input.clone()) else {
+                panic!("{label}: not refused in a restricted task")
+            };
+            assert_eq!(out.content["code"], json!(codes::NATIVE_NOT_ALLOWED), "{label}");
+            // An insertion asks by showing its exact text, which a startup
+            // file (no figure format) cannot hold: refused for that reason,
+            // never applied without native authority.
+            let insert = *name == tools::INSERT_ARTIFACT;
+            match gate_of(&f, &ask, authority(None, &[]), name, input.clone()) {
+                Gate::NeedsApproval { detail, reason, for_task, .. } if !insert => {
+                    assert!(detail.contains("R runs this file at the start of every R session"), "{label}: {detail}");
+                    assert!(reason.unwrap().contains("R runs this file natively"), "{label}");
+                    assert_eq!(for_task, vec![AllowanceKind::NativeCode], "{label}");
+                    if !trusted {
+                        assert!(detail.contains("not trusted yet"), "{label}: {detail}");
+                    }
+                }
+                Gate::Refused(out) if insert => assert!(out.text().contains("not a Typst"), "{label}: {}", out.text()),
+                other => panic!("{label}: per-command approval: {other:?}"),
+            }
+            assert!(
+                matches!(
+                    gate_of(&f, &ask, authority(None, &[AllowanceKind::NativeCode]), name, input.clone()),
+                    Gate::Allowed(_)
+                ),
+                "{label}: a nativeCode allowance covers it"
+            );
+            let unauthorized = gate_of(&f, &auto, authority(off, &[]), name, input.clone());
+            assert!(
+                matches!(unauthorized, Gate::NeedsApproval { .. })
+                    || (insert && matches!(unauthorized, Gate::Refused(_))),
+                "{label}: Auto with Code: off asks: {unauthorized:?}"
+            );
+            assert!(
+                matches!(gate_of(&f, &auto, authority(native, &[]), name, input.clone()), Gate::Allowed(_)),
+                "{label}: Auto with Code: native proceeds (not a protected target)"
+            );
+        }
+    }
+    f.services.trusted.store(true, Ordering::SeqCst);
+}
+
+/// Rscript, if installed (on PATH or under Program Files\R).
+fn rscript() -> Option<std::path::PathBuf> {
+    let on_path = std::process::Command::new("Rscript").arg("--version").output().is_ok_and(|o| o.status.success());
+    if on_path {
+        return Some("Rscript".into());
+    }
+    let base = std::path::Path::new(r"C:\Program Files\R");
+    let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(base)
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join("bin").join("Rscript.exe"))
+        .filter(|p| p.exists())
+        .collect();
+    found.sort();
+    found.pop()
+}
+
+/// End to end through the task loop (R itself when installed): with native
+/// authority withheld, the agent's `.Rprofile` is not created and starting R
+/// in the project runs nothing of the agent's; under Auto with Code: native
+/// it is created, and R runs it at the next session start (the consequence
+/// the gate guards).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_an_agent_rprofile_exists_only_with_native_authority() {
+    let dir = project();
+    let mut h = harness();
+    let marker = tempfile::tempdir().unwrap();
+    let marker = marker.path().join("rprofile-ran.txt");
+    let profile = format!("writeLines(\"ran\", \"{}\")\n", marker.display().to_string().replace('\\', "/"));
+    let script = json!({"turns": [
+        {"steps": [{"toolUse": {"id": "r1", "name": "create_file", "input": {"path": ".Rprofile", "content": profile}}}]},
+        {"steps": [{"text": "done"}]}
+    ]});
+    let start_r = || {
+        let rscript = rscript()?;
+        let out = std::process::Command::new(rscript)
+            .args(["-e", "invisible(0)"])
+            .current_dir(dir.path())
+            .env_remove("R_PROFILE_USER")
+            .env_remove("R_ENVIRON_USER")
+            .output()
+            .ok()?;
+        Some(out.status.success())
+    };
+    // Authority withheld: refused (Ask, execution disabled) and declined (Auto, Code: off).
+    h.service.load_script(script.clone()).unwrap();
+    let task = h
+        .service
+        .create_task(request(dir.path(), None, PermissionProfile::AutoApply, ExecutionMode::Disabled))
+        .unwrap();
+    assert!(drive(&mut h, &task.id, |_| panic!("refused, never asked")).await.is_empty());
+    let root = dir.path().display().to_string();
+    h.service
+        .set_project_permissions(
+            &root,
+            PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Off, setup: false },
+        )
+        .unwrap();
+    h.service.load_script(script.clone()).unwrap();
+    let task = h
+        .service
+        .create_task(request(
+            dir.path(),
+            Some(ApprovalMode::Auto),
+            PermissionProfile::AutoApply,
+            ExecutionMode::ApproveEach,
+        ))
+        .unwrap();
+    let cards = drive(&mut h, &task.id, |_| None).await;
+    assert_eq!(cards.len(), 1, "Auto without native code asks once");
+    assert!(!dir.path().join(".Rprofile").exists(), "authority withheld: not created");
+    match start_r() {
+        Some(ok) => {
+            assert!(ok, "R started");
+            assert!(!marker.exists(), "nothing of the agent's ran at R startup");
+        }
+        None => eprintln!("SKIPPED (R part): Rscript is not installed"),
+    }
+    // Auto with native code: created without a card, and R runs it.
+    h.service
+        .set_project_permissions(
+            &root,
+            PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Native, setup: false },
+        )
+        .unwrap();
+    h.service.load_script(script).unwrap();
+    let task = h
+        .service
+        .create_task(request(
+            dir.path(),
+            Some(ApprovalMode::Auto),
+            PermissionProfile::AutoApply,
+            ExecutionMode::ApproveEach,
+        ))
+        .unwrap();
+    assert!(drive(&mut h, &task.id, |_| panic!("no card")).await.is_empty());
+    assert!(dir.path().join(".Rprofile").exists(), "created under Code: native");
+    match start_r() {
+        Some(ok) => {
+            assert!(ok, "R started");
+            assert!(marker.exists(), "R ran the profile at startup (what the gate guards)");
+        }
+        None => eprintln!("SKIPPED (R part): Rscript is not installed"),
+    }
+}
+
+/// A narrowing or revocation clears the allowances of the project's Auto
+/// tasks, active or not: a later Continue under the narrower permissions
+/// cannot run on a native allowance given under the broader grant. Ask tasks
+/// of the project keep theirs (they do not depend on its permissions).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn narrowing_clears_auto_task_allowances_so_continue_asks_again() {
+    let dir = project();
+    let mut h = harness();
+    let root = dir.path().display().to_string();
+    let restricted = PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Restricted, setup: false };
+    let native = PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Native, setup: false };
+    h.service.set_project_permissions(&root, restricted).unwrap();
+    // Turns are used in order across runs.
+    h.service
+        .load_script(json!({"turns": [
+            {"steps": [tool("l1", Kind::Lean)]},
+            {"steps": [{"text": "done"}]},
+            {"steps": [tool("l2", Kind::Lean)]},
+            {"steps": [{"text": "done"}]},
+            {"steps": [tool("l3", Kind::Lean)]},
+            {"steps": [{"text": "done"}]}
+        ]}))
+        .unwrap();
+    // The Auto task: the native-only Lean check asks; approved for the task.
+    let auto = h
+        .service
+        .create_task(request(
+            dir.path(),
+            Some(ApprovalMode::Auto),
+            PermissionProfile::AutoApply,
+            ExecutionMode::ApproveEach,
+        ))
+        .unwrap();
+    let cards = drive(&mut h, &auto.id, |_| Some(ApprovalScope::Task)).await;
+    assert_eq!(cards.len(), 1, "{cards:?}");
+    assert_eq!(cards[0].for_task, vec![AllowanceKind::NativeCode]);
+    assert_eq!(h.service.task_detail(&auto.id).unwrap().allowances.len(), 1);
+    // An Ask task of the same project with its own native allowance.
+    h.service
+        .load_script(json!({"turns": [{"steps": [tool("p1", Kind::Python)]}, {"steps": [{"text": "done"}]}]}))
+        .unwrap();
+    let ask = h
+        .service
+        .create_task(request(dir.path(), None, PermissionProfile::AutoApply, ExecutionMode::ApproveEach))
+        .unwrap();
+    assert_eq!(drive(&mut h, &ask.id, |_| Some(ApprovalScope::Task)).await.len(), 1);
+    assert_eq!(h.service.task_detail(&ask.id).unwrap().allowances.len(), 1);
+    // Widening keeps the allowance; narrowing native → restricted clears it
+    // (the task is not active, so nothing is stopped).
+    assert!(h.service.set_project_permissions(&root, native).unwrap().narrowed.is_empty());
+    assert_eq!(h.service.task_detail(&auto.id).unwrap().allowances.len(), 1, "a widening clears nothing");
+    let change = h.service.set_project_permissions(&root, restricted).unwrap();
+    assert_eq!(change.narrowed, vec!["Code: native → restricted"]);
+    assert!(change.stopped.is_empty(), "{:?}", change.stopped);
+    let detail = h.service.task_detail(&auto.id).unwrap();
+    assert!(detail.allowances.is_empty(), "the Auto task's allowance was cleared");
+    assert!(
+        detail.transcript.iter().any(|item| matches!(
+            item,
+            TranscriptItem::Notice { message, .. } if message
+                == "Project permissions changed (Code: native → restricted), so what you approved for the rest of this Auto task was cleared."
+        )),
+        "a notice says why"
+    );
+    assert_eq!(h.service.task_detail(&ask.id).unwrap().allowances.len(), 1, "the Ask task keeps its allowance");
+    // Continue: the native-only call asks again (declined: it never ran).
+    h.recorder.take();
+    h.service.continue_task(&auto.id, "again", None).unwrap();
+    let cards = drive(&mut h, &auto.id, |_| None).await;
+    assert_eq!(cards.len(), 1, "asks again: {cards:?}");
+    assert_eq!(cards[0].tool_use_id, "l2");
+    assert_eq!(cards[0].for_task, vec![AllowanceKind::NativeCode]);
+    assert!(h.recorder.take().iter().all(|c| c.tool != "check_lean"), "never ran on the old allowance");
+    let rows = calls(&h, &auto.id);
+    let l2 = rows.iter().find(|row| row.0 == "l2").unwrap();
+    assert_eq!(l2.1, ToolCallStatus::Declined);
+    assert_eq!(l2.2, None);
+    // Revocation clears an allowance approved under the narrower grant too.
+    h.service.continue_task(&auto.id, "again", None).unwrap();
+    assert_eq!(drive(&mut h, &auto.id, |_| Some(ApprovalScope::Task)).await.len(), 1);
+    assert_eq!(h.service.task_detail(&auto.id).unwrap().allowances.len(), 1);
+    h.service.revoke_project_permissions(&root, None).unwrap();
+    let detail = h.service.task_detail(&auto.id).unwrap();
+    assert!(detail.allowances.is_empty(), "revocation clears it");
+    assert!(detail.transcript.iter().any(|item| matches!(
+        item,
+        TranscriptItem::Notice { message, .. } if message
+            == "Project permissions changed (revoked), so what you approved for the rest of this Auto task was cleared."
+    )));
+    assert_eq!(h.service.task_detail(&ask.id).unwrap().allowances.len(), 1, "the Ask task keeps its allowance");
 }
