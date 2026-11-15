@@ -1284,7 +1284,7 @@ impl LeanSetup {
                 "The project changed since this plan was made (files, toolchains, or the manifest). Review the new plan.",
             ));
         }
-        match self.inner.exec.trust_status(&current.package_root) {
+        match self.inner.exec.trust_status(&trust_scope(Path::new(&current.package_root)).display().to_string()) {
             Ok(status) if status.trusted => {}
             _ => {
                 return Err(LeanError::new(
@@ -1595,8 +1595,12 @@ impl LeanSetup {
                     if run.canceled.load(Ordering::SeqCst) {
                         return Err(canceled());
                     }
-                    let untrusted =
-                        self.inner.exec.trust_status(&plan.package_root).map(|s| !s.trusted).unwrap_or(false);
+                    let untrusted = self
+                        .inner
+                        .exec
+                        .trust_status(&trust_scope(package_root).display().to_string())
+                        .map(|s| !s.trusted)
+                        .unwrap_or(false);
                     return Err(Stop::Canceled(if untrusted {
                         "Workspace trust was revoked; setup was stopped.".into()
                     } else {
@@ -1849,9 +1853,39 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
+/// The folder whose trust decides a setup of `package_root`: the package
+/// folder itself, or, while a new package's folder does not exist yet, the
+/// nearest folder above it that does. Trust is looked up on the real
+/// (canonical) folder, so a missing folder has no answer of its own; what is
+/// created there lands inside this one. Each step is checked again at launch,
+/// when the folder exists.
+fn trust_scope(package_root: &Path) -> &Path {
+    let mut scope = package_root;
+    while !scope.is_dir() {
+        match scope.parent() {
+            Some(parent) => scope = parent,
+            None => break,
+        }
+    }
+    scope
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trust_of_a_new_package_is_decided_by_the_nearest_existing_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        assert_eq!(trust_scope(&root), root);
+        assert_eq!(trust_scope(&root.join("lean")), root);
+        assert_eq!(trust_scope(&root.join("formal").join("lean")), root);
+        std::fs::create_dir_all(root.join("formal")).unwrap();
+        assert_eq!(trust_scope(&root.join("formal").join("lean")), root.join("formal"));
+        std::fs::write(root.join("file"), b"").unwrap();
+        assert_eq!(trust_scope(&root.join("file")), root);
+    }
 
     const MANIFEST: &str = r#"{"version": "1.3.0", "packagesDir": ".lake/packages", "packages": [
       {"url": "https://github.com/leanprover-community/mathlib4", "type": "git", "rev": "56a005855ea17e0b0958f73ec801ae140b0a1679",
