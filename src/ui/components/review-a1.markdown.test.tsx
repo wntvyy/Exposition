@@ -20,8 +20,6 @@ const { Markdown } = await import("./Markdown");
 
 afterEach(() => cleanup());
 
-const defect = process.env.REVIEW_A1_DEFECTS ? it : it.skip;
-
 // A Python line whose comment holds a right-to-left override: everything
 // after it on the line is displayed reversed, so the shown line differs from
 // the code that runs (Trojan Source, CVE-2021-42574).
@@ -38,7 +36,7 @@ describe("R-a1: Run in Research on a fence with invisible or direction-changing 
     expect(run).toHaveBeenCalledWith(CODE, "python");
   });
 
-  defect("R-a1 F5: the fence shows the controls (or refuses Run) so the visible code is what runs", () => {
+  it("R-a1 F5 (fixed): the fence shows the controls, so the visible code is what runs", () => {
     const run = vi.fn();
     render(<Markdown source={"```python\n" + CODE + "\n```"} runAction={{ label: "Run in Research", run }} />);
     const shown = screen.getByTestId("md-code-text").textContent ?? "";
@@ -48,5 +46,9 @@ describe("R-a1: Run in Research on a fence with invisible or direction-changing 
     expect({ revealed, refused, shownHasRawRLO: shown.includes(RLO) }).toMatchObject(
       revealed || refused ? {} : { revealed: true },
     );
+    expect(shown).toContain("⟨U+202E⟩");
+    expect(screen.getByTestId("md-code-hidden").textContent).toMatch(/^3 invisible or direction-changing characters/);
+    fireEvent.click(screen.getByRole("button", { name: "Run in Research" }));
+    expect(run).toHaveBeenCalledWith(CODE, "python");
   });
 });

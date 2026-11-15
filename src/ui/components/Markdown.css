@@ -262,6 +262,19 @@
   font-size: var(--font-size-sm);
 }
 
+/* Hidden characters in a fence are shown, never silently rendered (R-a1 F5). */
+.ui-md-code__notice {
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+  color: var(--color-warning-text);
+  font-size: var(--font-size-sm);
+}
+
+.ui-md-hidden-char {
+  color: var(--color-warning-text);
+}
+
 .ui-md-code__actions {
   display: inline-flex;
   gap: var(--space-0-5);

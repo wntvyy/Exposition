@@ -57,6 +57,79 @@ export function CopyButton({ text, what, testId }: { text: string; what: string;
   );
 }
 
+/**
+ * Invisible and direction-changing characters, the set approval cards make
+ * visible (Rust `tools::exec::hidden`): C0/C1 controls except tab and line
+ * ends, the escape's own opening bracket, and the format, joiner, bidi, and
+ * tag characters. A carriage return directly before a line feed is a line end.
+ * Code points, not a regular expression, so no escape can be mistyped.
+ */
+const HIDDEN_RANGES: readonly (readonly [number, number])[] = [
+  [0x0000, 0x0008],
+  [0x000b, 0x000c],
+  [0x000e, 0x001f],
+  [0x007f, 0x009f],
+  [0x00ad, 0x00ad],
+  [0x034f, 0x034f],
+  [0x061c, 0x061c],
+  [0x115f, 0x1160],
+  [0x17b4, 0x17b5],
+  [0x180b, 0x180f],
+  [0x200b, 0x200f],
+  [0x2028, 0x202e],
+  [0x2060, 0x206f],
+  [0x27e8, 0x27e8],
+  [0x3164, 0x3164],
+  [0xfeff, 0xfeff],
+  [0xffa0, 0xffa0],
+  [0xfff9, 0xfffb],
+  [0x1d173, 0x1d17a],
+  [0xe0000, 0xe0fff],
+];
+
+function isHidden(cp: number, next: number | undefined): boolean {
+  if (cp === 0x0d) return next !== 0x0a;
+  return HIDDEN_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi);
+}
+
+/** The text split into visible runs and hidden code points. */
+function splitHidden(text: string): (string | number)[] {
+  const parts: (string | number)[] = [];
+  const cps = Array.from(text, (c) => c.codePointAt(0) ?? 0);
+  let run = "";
+  cps.forEach((cp, i) => {
+    if (isHidden(cp, cps[i + 1])) {
+      if (run) parts.push(run);
+      run = "";
+      parts.push(cp);
+    } else {
+      run += String.fromCodePoint(cp);
+    }
+  });
+  if (run) parts.push(run);
+  return parts;
+}
+
+/** How many hidden characters `text` holds. */
+export function hiddenCount(text: string): number {
+  return splitHidden(text).filter((part) => typeof part === "number").length;
+}
+
+/** `text` with each hidden character shown as ⟨U+XXXX⟩ (React nodes; the source is unchanged). */
+function revealHidden(text: string): ReactNode {
+  const parts = splitHidden(text);
+  if (parts.every((part) => typeof part === "string")) return text;
+  return parts.map((part, i) => {
+    if (typeof part === "string") return part;
+    const code = part.toString(16).toUpperCase().padStart(4, "0");
+    return (
+      <span key={i} className="ui-md-hidden-char" title={`Invisible or direction-changing character U+${code}`}>
+        {`⟨U+${code}⟩`}
+      </span>
+    );
+  });
+}
+
 let highlighter: Promise<typeof import("./MarkdownHighlight")> | null = null;
 const loadHighlighter = () => (highlighter ??= import("./MarkdownHighlight"));
 
@@ -95,17 +168,19 @@ export const CodeBlock = memo(function CodeBlock({ code, language, open = false,
   const lines = useHighlight(code, language, !open);
   const [scrollRef, scrolls] = useOverflows<HTMLPreElement>(code);
   const runnable = runnableLanguage(language);
-  let body: ReactNode = code;
+  // What is shown is what Copy and Run use: hidden characters appear as ⟨U+XXXX⟩.
+  const hidden = hiddenCount(code);
+  let body: ReactNode = revealHidden(code);
   if (lines) {
     body = lines.map((spans, index) => (
       <span key={index}>
         {spans.map((span, s) =>
           span.kind ? (
             <span key={s} className={`ui-md-tok-${span.kind}`}>
-              {span.text}
+              {revealHidden(span.text)}
             </span>
           ) : (
-            span.text
+            <span key={s}>{revealHidden(span.text)}</span>
           ),
         )}
         {index < lines.length - 1 ? "\n" : null}
@@ -127,6 +202,12 @@ export const CodeBlock = memo(function CodeBlock({ code, language, open = false,
           </span>
         )}
       </div>
+      {hidden > 0 && !open && (
+        <p className="ui-md-code__notice" data-testid="md-code-hidden">
+          {hidden === 1 ? "1 invisible or direction-changing character" : `${hidden} invisible or direction-changing characters`}{" "}
+          shown as ⟨U+…⟩. Copy and Run use the code exactly as written.
+        </p>
+      )}
       <pre
         ref={scrollRef}
         className="ui-md-code__body"
