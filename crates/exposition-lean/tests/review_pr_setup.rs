@@ -414,3 +414,28 @@ fn review_pr_held_hostile_folders_and_pins_are_refused() {
         );
     }
 }
+
+/// R-pr-F7. A package pinned to a channel (`stable`) is inspected as having
+/// its toolchain installed (the newest installed release is used for
+/// checking), but the plan's commands name `toolchains/leanprover--lean4---stable/bin/lake`,
+/// which is not where that toolchain is: the setup cannot start its first
+/// command.
+#[test]
+#[ignore = "R-pr-F7: the plan for a channel-pinned package names a lake that does not exist"]
+fn review_pr_f7_a_channel_pin_plans_the_lake_that_is_installed() {
+    let f = Fixture::new(false);
+    let dir = f.package("lean");
+    std::fs::write(dir.join("lean-toolchain"), "stable\n").unwrap();
+    std::fs::write(dir.join(".lake").join("packages").join("mathlib").join("lean-toolchain"), "stable\n").unwrap();
+    let inspection = f.inspect("lean");
+    println!("toolchain installed: {}; readiness: {:?}", inspection.toolchain_installed, inspection.readiness);
+    assert!(inspection.toolchain_installed, "the channel resolves to the installed release");
+    match f.setup.plan(&f.root, &Fixture::prepare("lean")) {
+        Err(e) => println!("refused with guidance: {} {}", e.code, e.message),
+        Ok(plan) => {
+            let lake = plan.steps.iter().map(|s| s.program.clone()).find(|p| p.contains("lake")).unwrap_or_default();
+            println!("planned lake: {lake}");
+            assert!(Path::new(&lake).is_file(), "the plan runs a lake that is not installed: {lake}");
+        }
+    }
+}
