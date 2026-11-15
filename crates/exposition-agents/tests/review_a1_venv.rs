@@ -378,3 +378,75 @@ async fn review_a1_f7_setup_planning_runs_the_project_interpreter_before_approva
     eprintln!("project interpreter ran before/while the card was shown (declined): {ran}");
     assert!(!ran, "DEFECT: the project interpreter ran natively for a call that was never approved");
 }
+
+/// R-a1 F8 (the same class as F4, outside the protected folders). R reads
+/// `.Rprofile` from its working directory at startup; the IRkernel kernelspec
+/// (`R --slave -e IRkernel::main()`) has no `--vanilla`/`--no-init-file`, and
+/// the user's R research session starts in the project folder. An agent that
+/// may only change files creates `.Rprofile`; the user's next R session runs
+/// it natively before any code the user chose. Expected: agents cannot plant
+/// interpreter startup files the app's sessions load (or sessions start
+/// without them).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "R-a1 F8: an agent-written .Rprofile runs natively when the user's R session starts"]
+async fn review_a1_f8_agent_rprofile_runs_when_the_user_starts_an_r_session() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("analysis.R"), "x <- 1\n").unwrap();
+    let mut h = harness(project);
+    let root = h.project.path().display().to_string();
+    h.execution.grant_trust(&root).unwrap();
+    h.service
+        .set_project_permissions(
+            &root,
+            PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Off, setup: false },
+        )
+        .unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let marker = outside.path().join("rprofile-ran.txt");
+    let rprofile = format!("writeLines(\"ran\", {:?})\n", marker.display().to_string().replace('\\', "/"));
+    let script = json!({"turns": [
+        tool("c", "create_file", json!({"path": ".Rprofile", "content": rprofile})),
+        {"steps": [{"text": "done"}]}
+    ]});
+    let (out, cards) = run(&mut h, script, ApprovalMode::Auto).await;
+    eprintln!("create_file .Rprofile: error={} cards={}", out[0].0, cards.len());
+    if out[0].0 {
+        eprintln!("refused: {}", out[0].1);
+        return;
+    }
+    let report = h.research.environments(true).await.unwrap();
+    let Some(r) = report
+        .runtimes
+        .iter()
+        .find(|r| {
+            r.language == exposition_research::types::RuntimeLanguage::R
+                && r.availability == exposition_research::types::Availability::Available
+        })
+        .cloned()
+    else {
+        eprintln!("SKIPPED: no R environment with a registered IRkernel was discovered");
+        return;
+    };
+    assert!(!marker.exists(), "control: discovery (R --vanilla) did not read .Rprofile");
+    // The user starts an R session (Research page / Run on an R file).
+    let session = h
+        .research
+        .start_session(exposition_research::StartSessionRequest {
+            environment_id: r.id.clone(),
+            owner: exposition_research::types::SessionOwner::User,
+        })
+        .await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let ran = marker.exists();
+    eprintln!(
+        "session: {:?}; agent .Rprofile ran at the user's R session start: {ran}",
+        session.as_ref().map(|s| &s.state)
+    );
+    if let Ok(session) = session {
+        let _ = h.research.shutdown(&session.id).await;
+    }
+    assert!(!ran, "DEFECT: the agent's .Rprofile ran natively when the user's R session started");
+}
