@@ -70,7 +70,7 @@ vi.mock("../jobs/trust", () => ({ requestWorkspaceTrust: vi.fn(async () => true)
 vi.mock("../editor", () => ({ activeHandle: () => null, handleForPath: () => null }));
 
 const { EnvironmentHelp, SetupOutcome, SetupProgress } = await import("./EnvironmentSetup");
-const { useResearch } = await import("./store");
+const { loadEnvironments, useResearch } = await import("./store");
 const { applySetupEvent, useSetup } = await import("./setup");
 
 const ROOT = "C:\\Users\\r\\thesis";
@@ -313,6 +313,25 @@ describe("environment setup", () => {
     await waitFor(() => expect(useResearch.getState().selectedEnvironment).toBe(venv.id));
     expect(setupIpc.select).toHaveBeenCalledWith(venv.id);
     expect(notify).toHaveBeenCalledWith(expect.objectContaining({ tone: "success", title: "Environment ready" }));
+  });
+
+  it("restores the remembered environment and drops a list that arrives for the previous project", async () => {
+    const venv = env("python:venv", { displayName: "Python 3.12.10 (CPython, project .venv)", projectFolder: ".venv" });
+    const other = env("python:314", { displayName: "Python 3.14.5 (CPython)" });
+    let resolveStale: (value: EnvironmentReport) => void = () => {};
+    ipc.researchEnvironments
+      .mockImplementationOnce(() => new Promise<EnvironmentReport>((resolve) => (resolveStale = resolve)))
+      .mockResolvedValueOnce(report(other, venv));
+    setupIpc.selection.mockResolvedValue(venv.id);
+    useResearch.setState({ workspace: { root: "C:\other", trusted: true }, selectedEnvironment: null });
+    const stale = loadEnvironments(false);
+    // The person switches back to the project before the other project's list arrives.
+    useResearch.setState({ workspace: { root: ROOT, trusted: true }, selectedEnvironment: null });
+    await loadEnvironments(false);
+    resolveStale(report(other));
+    await stale;
+    expect(useResearch.getState().selectedEnvironment).toBe(venv.id);
+    expect(useResearch.getState().environments?.runtimes.map((r) => r.id)).toEqual(["python:314", "python:venv"]);
   });
 
   it("ignores another project's setup events", () => {
