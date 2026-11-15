@@ -55,6 +55,8 @@ fn project() -> TempDir {
     std::fs::write(root.join("Main.lean"), "theorem t : 1 = 1 := rfl\n").unwrap();
     std::fs::create_dir_all(root.join("notes")).unwrap();
     std::fs::write(root.join("notes/a.typ"), "= A\n").unwrap();
+    std::fs::create_dir_all(root.join("proofs/sub")).unwrap();
+    std::fs::write(root.join("proofs/sub/P.lean"), "theorem p : True := trivial\n").unwrap();
     std::fs::create_dir_all(root.join("drafts")).unwrap();
     std::fs::create_dir_all(root.join(".exposition/artifacts/run-1")).unwrap();
     std::fs::write(root.join(".exposition/artifacts/run-1/fig.png"), FIGURE).unwrap();
@@ -300,11 +302,15 @@ enum Kind {
     LeanEdit,
     /// D7: a new Lean file.
     LeanCreate,
+    /// D7 generalized: new Lake configuration (any folder).
+    LakeConfig,
+    /// D7 generalized: a copy of a folder holding a Lean file.
+    LeanCopy,
     /// install_packages (with the plan the application made).
     Install,
 }
 
-const KINDS: [Kind; 15] = [
+const KINDS: [Kind; 17] = [
     Kind::List,
     Kind::Read,
     Kind::Edit,
@@ -319,6 +325,8 @@ const KINDS: [Kind; 15] = [
     Kind::Copy,
     Kind::LeanEdit,
     Kind::LeanCreate,
+    Kind::LakeConfig,
+    Kind::LeanCopy,
     Kind::Install,
 ];
 
@@ -352,13 +360,26 @@ impl Kind {
             Kind::LeanCreate => {
                 (tools::CREATE_FILE, json!({"path": "notes/Proof.lean", "content": "#eval IO.println \"hi\"\n"}))
             }
+            Kind::LakeConfig => (
+                tools::CREATE_FILE,
+                json!({"path": "notes/lakefile.toml", "content": "name = \"n\"\n[[require]]\nname = \"x\"\ngit = \"https://example.invalid/x\"\n"}),
+            ),
+            Kind::LeanCopy => (tools::COPY_PATHS, json!({"paths": ["proofs"], "destination": "notes"})),
             Kind::Install => (tools::INSTALL_PACKAGES, json!({"packages": ["numpy", "scipy==1.14.1"]})),
         }
     }
     fn changes(self) -> bool {
         matches!(
             self,
-            Kind::Edit | Kind::Create | Kind::Insert | Kind::Delete | Kind::Copy | Kind::LeanEdit | Kind::LeanCreate
+            Kind::Edit
+                | Kind::Create
+                | Kind::Insert
+                | Kind::Delete
+                | Kind::Copy
+                | Kind::LeanEdit
+                | Kind::LeanCreate
+                | Kind::LakeConfig
+                | Kind::LeanCopy
         )
     }
     fn launch(self) -> bool {
@@ -377,7 +398,7 @@ impl Kind {
         call
     }
     fn lean_text(self) -> bool {
-        matches!(self, Kind::LeanEdit | Kind::LeanCreate)
+        matches!(self, Kind::LeanEdit | Kind::LeanCreate | Kind::LakeConfig | Kind::LeanCopy)
     }
 }
 
@@ -1690,4 +1711,176 @@ async fn loop_install_packages_asks_with_the_full_plan_and_follows_setup_authori
 
 fn done_turn() -> Value {
     json!({"steps": [{"text": "done"}]})
+}
+
+// ---------------------------------------------------------------------------
+// Files the application executes automatically, and protected folders
+// (R-a1 F1 and its generalization).
+// ---------------------------------------------------------------------------
+
+fn gate_of(f: &Fixture, spec: &TaskSpec, authority: Authority, name: &str, input: Value) -> Gate {
+    exec::gate(&ToolCall::parse(name, &input).unwrap(), &f.env(spec, authority))
+}
+
+/// Lean/Lake configuration in any folder needs native authority: refused with
+/// execution disabled or a restricted ceiling (the message names Lake), asked
+/// once (the card names Lake) with per-command approval or Auto without
+/// native code, allowed under Auto with Code: native. Untrusted folders: an
+/// ordinary change (no Lean server runs there).
+#[test]
+fn lake_configuration_is_execution_in_any_folder() {
+    let f = fixture();
+    let all = [AllowanceKind::DocumentChanges];
+    for name in ["notes/lakefile.toml", "notes/sub/LAKEFILE.LEAN", "lean-toolchain", "x/lake-manifest.json"] {
+        let input = json!({"path": name, "content": "x"});
+        // Ask, changes applied directly, execution disabled: refused, naming Lake.
+        let disabled = spec(f.files.root(), ApprovalMode::Ask, PermissionProfile::AutoApply, ExecutionMode::Disabled);
+        let Gate::Refused(out) = gate_of(&f, &disabled, authority(None, &all), tools::CREATE_FILE, input.clone())
+        else {
+            panic!("{name}: not refused with execution disabled")
+        };
+        assert_eq!(out.content["code"], json!(codes::EXECUTION_DISABLED), "{name}");
+        assert!(out.text().contains("Lake"), "{name}: {}", out.text());
+        // Restricted ceiling: refused.
+        let restricted =
+            spec(f.files.root(), ApprovalMode::Ask, PermissionProfile::AutoApply, ExecutionMode::Restricted);
+        let Gate::Refused(out) = gate_of(&f, &restricted, authority(None, &all), tools::CREATE_FILE, input.clone())
+        else {
+            panic!("{name}: not refused in a restricted task")
+        };
+        assert_eq!(out.content["code"], json!(codes::NATIVE_NOT_ALLOWED), "{name}");
+        // Ask, per-command approval: one card that names Lake.
+        let ask = spec(f.files.root(), ApprovalMode::Ask, PermissionProfile::AutoApply, ExecutionMode::ApproveEach);
+        match gate_of(&f, &ask, authority(None, &[]), tools::CREATE_FILE, input.clone()) {
+            Gate::NeedsApproval { detail, reason, for_task, .. } => {
+                assert!(detail.contains("Lake reads Lean and Lake configuration natively"), "{name}: {detail}");
+                assert!(reason.unwrap().contains("Lake"), "{name}");
+                assert_eq!(for_task, vec![AllowanceKind::NativeCode]);
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+        // Auto: Code native proceeds; Code off/restricted asks.
+        let auto = spec(f.files.root(), ApprovalMode::Auto, PermissionProfile::AutoApply, ExecutionMode::ApproveEach);
+        let native = Some(PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Native, setup: false });
+        assert!(
+            matches!(gate_of(&f, &auto, authority(native, &[]), tools::CREATE_FILE, input.clone()), Gate::Allowed(_)),
+            "{name}: Auto with native code proceeds"
+        );
+        for code in [CodeAccess::Off, CodeAccess::Restricted] {
+            let profile = Some(PermissionChoice { files: FilesAccess::Edit, code, setup: false });
+            assert!(
+                matches!(
+                    gate_of(&f, &auto, authority(profile, &[]), tools::CREATE_FILE, input.clone()),
+                    Gate::NeedsApproval { .. }
+                ),
+                "{name}: Auto with {code:?} asks"
+            );
+        }
+        // Untrusted: no Lean server runs, an ordinary change.
+        f.services.trusted.store(false, Ordering::SeqCst);
+        assert!(
+            matches!(
+                gate_of(&f, &disabled, authority(None, &all), tools::CREATE_FILE, input.clone()),
+                Gate::Allowed(_)
+            ),
+            "{name}: untrusted folders treat it as an ordinary change"
+        );
+        f.services.trusted.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Protected folders: `.venv`/`venv` (a planted `.pth` runs when the project
+/// interpreter starts), `.lake`, and `.git`, at any depth and in any case,
+/// are never written, created, inserted into, copied into, or deleted, in
+/// every mode and with every authority; reads stay possible.
+#[test]
+fn protected_folders_are_never_changed_by_agents() {
+    let f = fixture();
+    let root = f.files.root();
+    std::fs::create_dir_all(root.join(".venv/Lib/site-packages")).unwrap();
+    std::fs::write(root.join(".venv/Lib/site-packages/existing.pth"), "").unwrap();
+    std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+    std::fs::create_dir_all(root.join("env/venv")).unwrap();
+    std::fs::write(root.join("env/venv/pyvenv.cfg"), "").unwrap();
+    let pth = ".venv/Lib/site-packages/evil.pth";
+    let wide = Some(PermissionChoice { files: FilesAccess::Edit, code: CodeAccess::Native, setup: true });
+    let every = [AllowanceKind::NativeCode, AllowanceKind::DocumentChanges, AllowanceKind::PackageSetup];
+    let specs = [
+        spec(root, ApprovalMode::Ask, PermissionProfile::AutoApply, ExecutionMode::ApproveEach),
+        spec(root, ApprovalMode::Ask, PermissionProfile::ReviewEdits, ExecutionMode::Disabled),
+        spec(root, ApprovalMode::Auto, PermissionProfile::AutoApply, ExecutionMode::ApproveEach),
+    ];
+    let calls = [
+        (tools::CREATE_FILE, json!({"path": pth, "content": "import os"})),
+        (tools::CREATE_FILE, json!({"path": ".VENV/lib/site-packages/evil.pth", "content": "import os"})),
+        (
+            tools::EDIT_DOCUMENT,
+            json!({"path": ".venv/Lib/site-packages/existing.pth", "base_revision": 1, "edits": [{"old_text": "", "new_text": "import os"}]}),
+        ),
+        (tools::DELETE_PATHS, json!({"paths": [".venv/Lib/site-packages/existing.pth"]})),
+        (tools::DELETE_PATHS, json!({"paths": [".venv"]})),
+        (tools::COPY_PATHS, json!({"paths": ["notes/a.typ"], "destination": ".venv/Lib/site-packages"})),
+        (tools::COPY_PATHS, json!({"paths": ["env"], "destination": "notes"})),
+        (tools::COPY_PATHS, json!({"paths": [".venv"], "destination": "notes"})),
+        (tools::CREATE_FILE, json!({"path": "env/venv/Lib/site-packages/x.pth", "content": "x"})),
+        (tools::CREATE_FILE, json!({"path": ".git/hooks/pre-commit", "content": "#!/bin/sh"})),
+        (tools::CREATE_FILE, json!({"path": "sub/.git/config", "content": "[core]"})),
+        (tools::CREATE_FILE, json!({"path": ".lake/packages/x/lakefile.lean", "content": "x"})),
+        (
+            tools::INSERT_ARTIFACT,
+            json!({"path": ".lake/build/doc.typ", "run_id": "run-1", "artifact_id": "fig", "after_text": "", "caption": "", "update_key": ""}),
+        ),
+    ];
+    for spec in &specs {
+        for (name, input) in &calls {
+            match gate_of(&f, spec, authority(wide, &every), name, input.clone()) {
+                Gate::Refused(out) => {
+                    assert_eq!(out.content["code"], json!(codes::PROTECTED_TARGET), "{name} {input}: {}", out.text());
+                }
+                other => panic!("{name} {input} in {:?}: not refused: {other:?}", spec.approval_mode),
+            }
+        }
+        // Reading stays possible; copying out of a protected folder creates nothing protected.
+        let read = gate_of(
+            &f,
+            spec,
+            authority(wide, &every),
+            tools::READ_FILE,
+            json!({"path": ".venv/Lib/site-packages/existing.pth"}),
+        );
+        assert!(matches!(read, Gate::Allowed(_)), "{read:?}");
+    }
+    assert!(!root.join(pth).exists());
+}
+
+/// A link inside the project that resolves into a protected folder is
+/// refused like the folder itself.
+#[cfg(windows)]
+#[test]
+fn a_link_into_a_protected_folder_is_refused() {
+    let f = fixture();
+    let root = f.files.root();
+    std::fs::create_dir_all(root.join(".venv/Lib/site-packages")).unwrap();
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(root.join("notes").join("env"))
+        .arg(root.join(".venv"))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !made {
+        eprintln!("SKIPPED: could not create a junction");
+        return;
+    }
+    let spec = spec(root, ApprovalMode::Ask, PermissionProfile::AutoApply, ExecutionMode::ApproveEach);
+    let Gate::Refused(out) = gate_of(
+        &f,
+        &spec,
+        authority(None, &[]),
+        tools::CREATE_FILE,
+        json!({"path": "notes/env/Lib/site-packages/evil.pth", "content": "x"}),
+    ) else {
+        panic!("a link into .venv was not refused")
+    };
+    assert_eq!(out.content["code"], json!(codes::PROTECTED_TARGET), "{}", out.text());
 }

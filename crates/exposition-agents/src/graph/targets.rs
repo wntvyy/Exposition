@@ -89,7 +89,9 @@ pub fn service_owned(path: &WorkspacePath) -> Option<&'static str> {
 }
 
 /// Path rules that hold whatever the graph's state: its storage is never a
-/// file tool target, and service-owned records are never written by agents.
+/// file tool target, service-owned records are never written by agents, and
+/// protected folders (`.git`, `.lake`, `.venv`, `venv`, at any depth; see
+/// [`crate::tools::autoexec`]) are never written, created, or deleted.
 pub fn check_path_policy(path: &WorkspacePath, path_use: PathUse) -> Result<(), ToolOutput> {
     if graph_storage(path) {
         return Err(refusal(
@@ -108,6 +110,11 @@ pub fn check_path_policy(path: &WorkspacePath, path_use: PathUse) -> Result<(), 
             codes::SERVICE_OWNED,
             format!("{path} is {what}. Agents cannot {action}; nothing was changed."),
         ));
+    }
+    if matches!(path_use, PathUse::Write | PathUse::Create)
+        && let Some(p) = crate::tools::autoexec::protected(path)
+    {
+        return Err(refusal(codes::PROTECTED_TARGET, p.refused(path)));
     }
     Ok(())
 }

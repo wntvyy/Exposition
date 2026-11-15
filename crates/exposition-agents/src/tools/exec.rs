@@ -28,6 +28,7 @@ use exposition_workspace::{DocumentService, WorkspaceService};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use super::autoexec::{self, AutoExec};
 use super::services::{
     BuildRequest, CommandRequest, LatexEngine, LeanRequest, PythonRequest, ServiceError, ToolServices,
 };
@@ -238,6 +239,9 @@ pub mod codes {
     pub const NOT_REPEATABLE: &str = "agents.notRepeatable";
     /// Project permissions that cannot be granted as asked.
     pub const INVALID_PERMISSIONS: &str = "agents.invalidPermissions";
+    /// A folder agents never change (`.git`, `.lake`, `.venv`, `venv`): the
+    /// application or the user's tools run what is in it.
+    pub const PROTECTED_TARGET: &str = "agents.protectedTarget";
 }
 
 /// A refusal with its stable code.
@@ -397,9 +401,15 @@ fn check_path(env: &ToolEnv<'_>, raw: &str, path_use: PathUse) -> Result<(), Too
 ///    native-only tools never start in a restricted-only task (in Auto these
 ///    task settings are the ceiling: they prohibit, never ask);
 /// 6. the service exists;
-/// 7. a change that puts text into a Lean file the Lean server elaborates
-///    (a trusted folder) is native execution too: it needs native authority
-///    as well as change authority (D7);
+/// 7. files the application executes automatically ([`super::autoexec`]):
+///    a change or copy that puts Lean source or Lean/Lake configuration
+///    (`lakefile.lean`, `lakefile.toml`, `lean-toolchain`,
+///    `lake-manifest.json`) into a trusted folder is native execution too
+///    (the Lean server elaborates Lean text; Lake may download and run
+///    packages, elan may download toolchains): it needs native authority as
+///    well as change authority (D7). Protected folders (`.git`, `.lake`,
+///    `.venv`, `venv`, at any depth) are never written, created, copied
+///    into, or deleted (rule 3, `agents.protectedTarget`);
 /// 8. authority: Ask — the task's settings and its allowances; Auto — the
 ///    project's permissions, the task's allowances, and one approval for a
 ///    legitimate expansion. Restricted launches need the restricted backend
@@ -678,41 +688,71 @@ fn describe_setup(plan: &exposition_research::setup::SetupPlan) -> (String, Stri
     (title, detail.trim_end().to_owned())
 }
 
-/// A change that puts text into a Lean source the live Lean server can
-/// elaborate: an open `.lean` document (requested or resolved name) in a
-/// folder trusted for native execution, where the Lean service runs the
-/// project's toolchain on the unsaved text.
-fn lean_target(call: &ToolCall, env: &ToolEnv<'_>) -> bool {
-    let raw = match call {
-        ToolCall::EditDocument(input) => &input.path,
-        ToolCall::CreateFile(input) => &input.path,
-        ToolCall::InsertArtifact(input) => &input.path,
-        _ => return false,
+/// The auto-executed content ([`AutoExec`]) a change or copy would put into
+/// the project: an edited, created, or inserted file named as a Lean source
+/// or Lean/Lake configuration (requested or resolved name), or such a file
+/// anywhere in a copied tree (bounded; a tree too large to inspect counts as
+/// configuration). Only in a folder trusted for native execution, where the
+/// Lean service runs the toolchain (and Lake). A copy that would create a
+/// protected folder is refused here, whatever the trust.
+fn auto_exec_target(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Option<AutoExec>, ToolOutput> {
+    let root = env.files.root();
+    let found = match call {
+        ToolCall::EditDocument(input) => path_kind(env, &input.path),
+        ToolCall::CreateFile(input) => path_kind(env, &input.path),
+        ToolCall::InsertArtifact(input) => path_kind(env, &input.path),
+        ToolCall::CopyPaths(input) => {
+            let mut budget = autoexec::MAX_SCAN_ENTRIES;
+            let mut found = None;
+            for raw in &input.paths {
+                let requested = parse_path(raw.trim())?;
+                // What the copy creates is named after the source entry and
+                // what it holds (a copy out of a protected folder is fine; a
+                // copy that creates one is not).
+                let source = scope::resolve(root, &requested).ok().flatten().unwrap_or_else(|| requested.clone());
+                let scan = autoexec::scan_tree(root, &source, &mut budget);
+                if let Some((at, p)) = scan.protected {
+                    return Err(refusal(
+                        codes::PROTECTED_TARGET,
+                        format!(
+                            "Copying {requested} would create {at}, which is {}. Agents never create or change it; \
+                             nothing was copied. {}",
+                            p.what, p.instead
+                        ),
+                    ));
+                }
+                let kind = if scan.truncated { Some(AutoExec::LakeConfig) } else { scan.auto };
+                found = found.max(kind);
+            }
+            found
+        }
+        _ => None,
     };
-    let is_lean = |p: &WorkspacePath| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lean"));
-    let Ok(requested) = WorkspacePath::parse(raw.trim()) else { return false };
-    let resolved = scope::resolve(env.files.root(), &requested).ok().flatten();
-    (is_lean(&requested) || resolved.as_ref().is_some_and(is_lean))
-        && env.services.native_refusal(env.files.root()).is_none()
+    Ok(found.filter(|_| env.services.native_refusal(root).is_none()))
 }
 
-const LEAN_NATIVE: &str = "Lean elaborates the text of an open Lean file natively as soon as it changes: code in it \
-     (for example #eval) runs on this computer with your account's privileges.";
+/// The edited, created, or inserted path's auto-executed kind (requested or resolved name).
+fn path_kind(env: &ToolEnv<'_>, raw: &str) -> Option<AutoExec> {
+    let requested = WorkspacePath::parse(raw.trim()).ok()?;
+    let resolved = scope::resolve(env.files.root(), &requested).ok().flatten();
+    autoexec::auto_executed(&requested).max(resolved.as_ref().and_then(autoexec::auto_executed))
+}
 
-/// D7: the task's contract for a Lean-file change.
-fn lean_contract(spec: &TaskSpec) -> Result<(), ToolOutput> {
+/// D7: the task's contract for a change that puts auto-executed content in place.
+fn lean_contract(spec: &TaskSpec, kind: AutoExec) -> Result<(), ToolOutput> {
+    let consequence = kind.consequence();
     match spec.execution {
         ExecutionMode::Disabled => Err(refusal(
             codes::EXECUTION_DISABLED,
             format!(
-                "{LEAN_NATIVE} Process execution is disabled for this task by the user, so nothing was changed. \
+                "{consequence} Process execution is disabled for this task by the user, so nothing was changed. \
                  Describe the change instead."
             ),
         )),
         ExecutionMode::Restricted => Err(refusal(
             codes::NATIVE_NOT_ALLOWED,
             format!(
-                "{LEAN_NATIVE} That runs natively, which this task does not allow (restricted sandbox only), so \
+                "{consequence} That runs natively, which this task does not allow (restricted sandbox only), so \
                  nothing was changed. Describe the change instead."
             ),
         )),
@@ -720,9 +760,9 @@ fn lean_contract(spec: &TaskSpec) -> Result<(), ToolOutput> {
     }
 }
 
-/// D7: the native authority a Lean-file change needs besides change authority.
-fn lean_authority(env: &ToolEnv<'_>, asks: &mut Asks, covered: &mut Covered) {
-    let reason = "Lean elaborates this file's text natively as soon as it changes.";
+/// D7: the native authority such a change needs besides change authority.
+fn lean_authority(env: &ToolEnv<'_>, kind: AutoExec, asks: &mut Asks, covered: &mut Covered) {
+    let reason = kind.reason();
     match (env.spec.approval_mode, env.authority.project) {
         (ApprovalMode::Auto, Some(p)) if p.code == CodeAccess::Native => covered.project = true,
         (ApprovalMode::Auto, project) => {
@@ -850,10 +890,11 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     let spec = env.spec;
     let root = env.files.root();
     let effects = call.effects();
-    // D7: Lean-file text is executed by the Lean server.
-    let lean = effects.changes && lean_target(call, env);
-    if lean {
-        lean_contract(spec)?;
+    // D7: content the application executes automatically (Lean text, Lake
+    // configuration) needs native authority too.
+    let auto = if effects.changes { auto_exec_target(call, env)? } else { None };
+    if let Some(kind) = auto {
+        lean_contract(spec, kind)?;
     }
     // Authority: who covers each part, and what asks the user.
     let mut asks = Asks::default();
@@ -861,8 +902,8 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     if effects.changes {
         change_authority(env, &mut asks, &mut covered);
     }
-    if lean {
-        lean_authority(env, &mut asks, &mut covered);
+    if let Some(kind) = auto {
+        lean_authority(env, kind, &mut asks, &mut covered);
     }
     let policy = match effects.launch {
         Launch::None => None,
@@ -947,8 +988,8 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     if native {
         detail.push_str("\n\nRuns natively with your account's privileges.");
     }
-    if lean {
-        detail.push_str(&format!("\n\n{LEAN_NATIVE}"));
+    if let Some(kind) = auto {
+        detail.push_str(&format!("\n\n{}", kind.consequence()));
     }
     authorization.insertion = insertion.map(|(planned, _)| planned);
     authorization.approved = Some(detail.clone());
