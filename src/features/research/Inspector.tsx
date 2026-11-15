@@ -42,6 +42,7 @@ import {
   type ResearchItem,
 } from "./space";
 import { runFile, selectRun, useResearch } from "./store";
+import { authorizationText } from "./runloop";
 
 const subscribe = (l: () => void) => registry.subscribe(l);
 const version = () => registry.getVersion();
@@ -458,6 +459,11 @@ function RunInspector({ runId }: { runId: string }) {
         }
       />
       <div className="exp-rinspector__facts">
+        {manifest?.authorization && (
+          <p className="ui-meta" data-testid="research-inspector-authorization">
+            {authorizationText(manifest.authorization)}
+          </p>
+        )}
         <p className="ui-meta">Runs are not in the project graph; results you keep are.</p>
       </div>
       <InspectorBody>

@@ -47,6 +47,7 @@ vi.mock("../research/Promotion", () => ({
 
 const { PlanReviewDialog } = await import("./PlanReview");
 const { RunMonitor, RunHistory, WorkflowRunView } = await import("./RunView");
+const { decideRunAgain } = await import("./runAgain");
 const canvasModel = await import("./canvasModel");
 const { WorkflowCanvas } = await import("./WorkflowCanvas");
 
@@ -348,6 +349,58 @@ describe("run monitor", () => {
     await screen.findByTestId("workflow-plan-details");
     expect(runIpc.plan).toHaveBeenCalledWith("wf-1", 3);
     expect(runIpc.start).not.toHaveBeenCalled();
+  });
+
+  it("Run again starts an unchanged approved plan directly, without a second review", async () => {
+    runIpc.plan.mockResolvedValueOnce(plan({ plan: "plan-2" }));
+    runIpc.start.mockResolvedValueOnce(run({ id: "run-2", state: "running", finishedAtMs: null }));
+    render(<RunMonitor run={run()} onRun={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("workflow-run-again"));
+    await waitFor(() => expect(runIpc.start).toHaveBeenCalledWith({ plan: "plan-2", approvalHash: "f".repeat(64) }));
+    expect(runIpc.plan).toHaveBeenCalledWith("wf-1", 3);
+    await waitFor(() => expect(editorsMock.open).toHaveBeenCalledWith(expect.objectContaining({ key: expect.stringContaining("run-2") })));
+    expect(screen.queryByTestId("workflow-plan-review")).toBeNull();
+  });
+
+  it("Run again opens the normal review when the plan changed, is blocked, or went stale", async () => {
+    // Changed (different approval hash: e.g. an input's content or native consent changed).
+    runIpc.plan.mockResolvedValue(plan({ plan: "plan-3", approvalHash: "1".repeat(64) }));
+    const { unmount } = render(<RunMonitor run={run()} onRun={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("workflow-run-again"));
+    expect((await screen.findByTestId("plan-review-notice")).textContent).toContain("differs from the one this run was approved with");
+    const review = await screen.findByTestId("workflow-plan-review");
+    await waitFor(() => expect(review.getAttribute("data-state")).toBe("ready"), { timeout: 3000 }).catch(() => {
+      throw new Error(`review state ${review.getAttribute("data-state")}: ${review.textContent?.slice(0, 300)}`);
+    });
+    expect(runIpc.start).not.toHaveBeenCalled();
+    unmount();
+    cleanup();
+
+    // Same hash but a blocker now: review, never a blind start.
+    runIpc.plan.mockResolvedValue(plan({ plan: "plan-4", blockers: [{ code: "workflow.untrustedFolder", message: "Trust the folder.", step: null, input: null }] }));
+    render(<RunMonitor run={run()} onRun={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("workflow-run-again"));
+    await screen.findByTestId("plan-review-notice");
+    expect(runIpc.start).not.toHaveBeenCalled();
+    cleanup();
+
+    // Unchanged when planned, changed before it started: the refusal opens the review.
+    runIpc.plan.mockResolvedValue(plan({ plan: "plan-5" }));
+    runIpc.start.mockRejectedValueOnce({ code: "workflow.planStale", message: "Input “Measurements” changed." });
+    render(<RunMonitor run={run()} onRun={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("workflow-run-again"));
+    const notice = await screen.findByTestId("plan-review-notice");
+    expect(notice.textContent).toContain("Input “Measurements” changed. Nothing was started.");
+    expect(runIpc.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("decides Run again only from the approval hash, blockers, and how the run ended", () => {
+    expect(decideRunAgain(run(), plan({ plan: "p" })).kind).toBe("start");
+    expect(decideRunAgain(run({ state: "failed" }), plan()).kind).toBe("start");
+    expect(decideRunAgain(run({ state: "canceled" }), plan()).kind).toBe("start");
+    expect(decideRunAgain(run({ state: "interrupted" }), plan()).kind).toBe("review");
+    expect(decideRunAgain(run(), plan({ approvalHash: "0".repeat(64) })).kind).toBe("review");
+    expect(decideRunAgain(run(), plan({ blockers: [{ code: "x", message: "y", step: null, input: null }] })).kind).toBe("review");
   });
 
   it("shows refused outputs with their reasons, distinct from validated outputs", () => {

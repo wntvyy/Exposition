@@ -483,10 +483,21 @@ export interface PlanReviewDialogProps {
   loadPlan?: () => Promise<ReviewPlan>;
   /** Dialog title prefix (default "Review and run"). */
   heading?: string;
+  /** Why this review opened (e.g. "Run again" found a changed plan). */
+  notice?: string;
 }
 
 /** "Review and run": fetches the plan when opened; starting requires an explicit press of "Start run". */
-export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onStarted, loadPlan, heading = "Review and run" }: PlanReviewDialogProps) {
+export function PlanReviewDialog({
+  workflow,
+  revision,
+  isOpen,
+  onOpenChange,
+  onStarted,
+  loadPlan,
+  heading = "Review and run",
+  notice,
+}: PlanReviewDialogProps) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [starting, setStarting] = useState(false);
   const [failure, setFailure] = useState<{ code: string; message: string } | null>(null);
@@ -575,6 +586,11 @@ export function PlanReviewDialog({ workflow, revision, isOpen, onOpenChange, onS
             fill={false}
             actions={<Button onPress={() => void fetchPlan()}>Retry</Button>}
           />
+        )}
+        {notice && (
+          <div data-testid="plan-review-notice">
+            <Banner tone="info">{notice}</Banner>
+          </div>
         )}
         {plan && (
           <>

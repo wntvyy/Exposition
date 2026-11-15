@@ -3,8 +3,9 @@ import type { RunSource } from "./RunSource";
 import type { WorkspacePath } from "./WorkspacePath";
 
 /**
- * Run code from the webview, always as the user (a `requester` sent by the
- * webview is ignored).
+ * Run code from the webview, always as the user. Unknown fields are refused:
+ * the webview cannot name a requester or supply an authorization record
+ * (only the agents service records one, in Rust).
  */
 export type ResearchExecuteRequest = { sessionId: string, source: RunSource, 
 /**

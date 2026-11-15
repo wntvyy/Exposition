@@ -65,6 +65,7 @@ import { workflowEvents, workflowRunCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
 import { describeRepeat, describeTest } from "./orchestration";
 import { FullHash, PlanDetails, PlanReviewDialog, StepIndex } from "./PlanReview";
+import { decideRunAgain } from "./runAgain";
 import { runActions } from "./workflowOps";
 import {
   ATTEMPT_STATE_VIEW,
@@ -757,19 +758,22 @@ function CauseView({ cause, run }: { cause: WorkflowRunCause | undefined; run: W
   );
 }
 
-type MonitorAction = "cancel" | "ack" | "manifest";
+type MonitorAction = "cancel" | "ack" | "manifest" | "again";
 
 /** The title of a failed action's banner: which action did not happen (the message says why). */
 const ACTION_FAILED: Record<MonitorAction, string> = {
   cancel: "Run not canceled",
   ack: "Not marked as reviewed",
   manifest: "Manifest not exported",
+  again: "Run not started",
 };
 
 export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: WorkflowRun) => void }) {
   const [busy, setBusy] = useState<MonitorAction | null>(null);
   const [error, setError] = useState<{ action: MonitorAction; message: string } | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
+  /** Why "Run again" opened the review instead of starting (shown in the review). */
+  const [reviewNotice, setReviewNotice] = useState<string | null>(null);
   const [reproduceOpen, setReproduceOpen] = useState(false);
   const [manifest, setManifest] = useState<WorkflowManifestExport | null>(null);
   const view = RUN_STATE_VIEW[run.state];
@@ -794,6 +798,46 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
     } finally {
       setBusy(null);
     }
+  };
+
+  /**
+   * Run again: plan the same revision; an unchanged approved plan (same
+   * approval hash, native consent included) starts as the person's explicit
+   * action, anything else opens the plan review.
+   */
+  const runAgain = async () => {
+    setBusy("again");
+    setError(null);
+    try {
+      const fresh = await workflowRunCommands.plan(run.workflow, run.revision);
+      const decision = decideRunAgain(run, fresh);
+      if (decision.kind === "review") {
+        setReviewNotice(decision.reason);
+        setReviewOpen(true);
+        return;
+      }
+      try {
+        const next = await workflowRunCommands.start({ plan: decision.plan.plan, approvalHash: decision.plan.approvalHash });
+        openRun(next);
+      } catch (e) {
+        // Changed between planning and starting: review instead of retrying blindly.
+        if (isCommandError(e) && e.code.startsWith("workflow.plan")) {
+          setReviewNotice(`${errorMessage(e)} Nothing was started.`);
+          setReviewOpen(true);
+        } else {
+          setError({ action: "again", message: errorMessage(e) });
+        }
+      }
+    } catch (e) {
+      setError({ action: "again", message: errorMessage(e) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const openReview = () => {
+    setReviewNotice(null);
+    setReviewOpen(true);
   };
 
   const act = async (which: "cancel" | "ack") => {
@@ -825,8 +869,15 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
           ) : (
             <>
               {run.state !== "interrupted" && (
-                <Button variant="secondary" icon={RotateCcw} onPress={() => setReviewOpen(true)} data-testid="workflow-run-again">
-                  Review a new run…
+                <Button
+                  variant="secondary"
+                  icon={RotateCcw}
+                  isPending={busy === "again"}
+                  isDisabled={busy !== null}
+                  onPress={() => void runAgain()}
+                  data-testid="workflow-run-again"
+                >
+                  Run again
                 </Button>
               )}
               <Button variant="secondary" icon={History} onPress={() => setReproduceOpen(true)} data-testid="workflow-run-reproduce">
@@ -877,7 +928,7 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
                             Mark as reviewed
                           </Button>
                         )}
-                        <Button size="sm" icon={RotateCcw} onPress={() => setReviewOpen(true)} data-testid="workflow-run-review-new">
+                        <Button size="sm" icon={RotateCcw} onPress={openReview} data-testid="workflow-run-review-new">
                           Review a new run
                         </Button>
                       </>
@@ -996,6 +1047,7 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
         isOpen={reviewOpen}
         onOpenChange={setReviewOpen}
         onStarted={(next) => openRun(next)}
+        notice={reviewNotice ?? undefined}
       />
       <PlanReviewDialog
         workflow={run.workflow}

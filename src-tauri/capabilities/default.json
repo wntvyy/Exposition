@@ -176,6 +176,12 @@
     "allow-clipboard-files-read",
     "allow-clipboard-files-write",
     "allow-storage-overview",
-    "allow-document-save-copy"
+    "allow-document-save-copy",
+    "allow-research-setup-plan",
+    "allow-research-setup-start",
+    "allow-research-setup-cancel",
+    "allow-research-setup-status",
+    "allow-research-selection-get",
+    "allow-research-selection-set"
   ]
 }

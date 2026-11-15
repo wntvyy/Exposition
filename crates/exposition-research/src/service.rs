@@ -28,9 +28,9 @@ use crate::store::{
 };
 use crate::types::{
     Availability, CodeOrigin, CodeProvenance, EnvironmentReport, ExecuteRequest, InterpreterProvenance, KernelChoice,
-    KernelDescriptor, OutputItem, OutputSummary, ResearchEvent, RunErrorInfo, RunManifest, RunOutputPage, RunSource,
-    RunSummary, RuntimeEnvironment, RuntimeLanguage, SessionInfo, SessionOwner, SessionProvenance, SessionState,
-    StreamName, WorkspaceStatus,
+    KernelDescriptor, OutputItem, OutputSummary, ResearchEvent, RunAuthorization, RunErrorInfo, RunManifest,
+    RunOutputPage, RunSource, RunSummary, RuntimeEnvironment, RuntimeLanguage, SessionInfo, SessionOwner,
+    SessionProvenance, SessionState, StreamName, WorkspaceStatus,
 };
 
 /// Largest code accepted for one run.
@@ -489,6 +489,30 @@ impl ResearchService {
         request: ExecuteRequest,
         declared: &[WorkspacePath],
     ) -> Result<RunSummary, ResearchError> {
+        self.execute_authorized(request, declared, None)
+    }
+
+    /// [`Self::execute_with_inputs`] for an agent's run, recording the
+    /// authorization decision that allowed it in the run manifest. The
+    /// authorization must be valid and name the requesting task; the person's
+    /// own runs (the webview) never carry one.
+    pub fn execute_authorized(
+        &self,
+        request: ExecuteRequest,
+        declared: &[WorkspacePath],
+        authorization: Option<RunAuthorization>,
+    ) -> Result<RunSummary, ResearchError> {
+        if let Some(authorization) = &authorization {
+            authorization.validate().map_err(ResearchError::InvalidRequest)?;
+            match &request.requester {
+                SessionOwner::Agent { task_id } if *task_id == authorization.task_id => {}
+                _ => {
+                    return Err(ResearchError::InvalidRequest(
+                        "an authorization is recorded only for the agent task that requested the run".into(),
+                    ));
+                }
+            }
+        }
         if declared.len() > MAX_DECLARED_INPUTS {
             return Err(ResearchError::InvalidRequest(format!("at most {MAX_DECLARED_INPUTS} declared inputs")));
         }
@@ -517,7 +541,7 @@ impl ResearchService {
             inputs.push(self.pin_declared_input(&session, path)?);
         }
         let unsaved = inputs.iter().filter(|i| self.is_unsaved(&i.path, i.revision)).map(|i| i.path.clone()).collect();
-        session.enqueue(code, origin, inputs, unsaved)
+        session.enqueue(code, origin, inputs, unsaved, authorization)
     }
 
     /// Whether `path` at `revision` was an unsaved buffer.
@@ -1465,6 +1489,7 @@ impl Session {
         origin: CodeOrigin,
         inputs: Vec<RunInput>,
         unsaved_inputs: Vec<WorkspacePath>,
+        authorization: Option<RunAuthorization>,
     ) -> Result<RunSummary, ResearchError> {
         let shared = self.shared().ok_or(ResearchError::HelperGone)?;
         // The session lock is held until the run is registered and placed, so
@@ -1550,6 +1575,7 @@ impl Session {
             output: OutputSummary::default(),
             unsaved_inputs,
             execution: None,
+            authorization,
         };
         let run = RunState {
             manifest,

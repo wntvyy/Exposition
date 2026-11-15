@@ -14,8 +14,9 @@ import type { SessionInfo } from "../../bindings/SessionInfo";
 import type { TextRange } from "../../bindings/TextRange";
 import type { WorkspaceStatus } from "../../bindings/WorkspaceStatus";
 import { commands, errorMessage, events, isCommandError } from "../../lib/ipc";
-import { activeHandle } from "../editor";
+import { activeHandle, handleForPath } from "../editor";
 import { requestWorkspaceTrust } from "../jobs/trust";
+import { setupCommands } from "./ipc";
 import {
   EMPTY_RUN_OUTPUT,
   applyEvent,
@@ -25,6 +26,7 @@ import {
   mergeSnapshot,
   type RunOutput,
 } from "./model";
+import { activeUserRunId, lastUserRun, pickEnvironment } from "./runloop";
 
 export interface ResearchState {
   workspace: WorkspaceStatus | null;
@@ -181,11 +183,16 @@ export async function refreshAll(): Promise<void> {
   try {
     const since = eventSerial;
     const [workspace, sessions] = await Promise.all([commands.researchWorkspace(), commands.researchSessions()]);
+    const before = useResearch.getState();
+    const switched = before.workspace?.root !== workspace?.root;
+    // Another project has its own environments (its .venv) and remembered choice.
+    const reload = switched && workspace !== null && (before.environments !== null || before.environmentsLoading);
     useResearch.setState((state) =>
       state.workspace?.root === workspace?.root
         ? { workspace, sessions: mergeSnapshot(state.sessions, sessions, (s) => s.id, changedSince("session", since)) }
-        : { workspace, sessions, runs: [], outputs: {}, selectedRun: null },
+        : { workspace, sessions, runs: [], outputs: {}, selectedRun: null, environments: null, selectedEnvironment: null },
     );
+    if (reload) void loadEnvironments(false);
     if (workspace) await refreshRuns();
   } catch (e) {
     useResearch.setState({ error: errorMessage(e) });
@@ -206,18 +213,22 @@ export async function loadEnvironments(refresh = false): Promise<void> {
   useResearch.setState({ environmentsLoading: true, environmentsError: null });
   try {
     const environments = await commands.researchEnvironments(refresh);
-    useResearch.setState((state) => {
-      const usable = environments.runtimes.filter((r) => r.availability.kind === "available");
-      const keep = environments.runtimes.some((r) => r.id === state.selectedEnvironment);
-      return {
-        environments,
-        environmentsLoading: false,
-        selectedEnvironment: keep ? state.selectedEnvironment : (usable[0]?.id ?? environments.runtimes[0]?.id ?? null),
-      };
-    });
+    // The environment remembered for this project (app-local; may be stale).
+    const remembered = await setupCommands.selection().catch(() => null);
+    useResearch.setState((state) => ({
+      environments,
+      environmentsLoading: false,
+      selectedEnvironment: pickEnvironment(environments, state.selectedEnvironment, remembered),
+    }));
   } catch (e) {
     useResearch.setState({ environmentsLoading: false, environmentsError: errorMessage(e) });
   }
+}
+
+/** The person chose an environment: select it and remember it for this project. */
+export function chooseEnvironment(environmentId: string): void {
+  useResearch.setState({ selectedEnvironment: environmentId });
+  void setupCommands.select(environmentId).catch(() => undefined);
 }
 
 /** Research works in the folder opened by the workspace (Files view). */
@@ -367,6 +378,68 @@ async function sessionAction(action: (id: string) => Promise<unknown>, failure: 
 export const interruptSession = () => sessionAction(commands.researchSessionInterrupt, "Could not interrupt the kernel");
 export const restartSession = () => sessionAction(commands.researchSessionRestart, "Could not restart the kernel");
 export const stopSession = () => sessionAction(commands.researchSessionShutdown, "Could not stop the session");
+
+/** Stop: cancel the run the user's session executes now (interrupt, then restart if it ignores it). */
+export async function stopRun(): Promise<void> {
+  const state = useResearch.getState();
+  const runId = activeUserRunId(userSession(state), state.runs);
+  if (runId) await cancelRun(runId);
+}
+
+/** Run the selection of an open source (pinned to the revision the editor shows). */
+export async function runSourceSelection(path: string): Promise<boolean> {
+  const handle = handleForPath(path);
+  if (!handle) return false;
+  for (let i = 0; i < 40 && handle.sync.pendingCount > 0; i += 1) await new Promise((r) => setTimeout(r, 50));
+  const range = handle.selection[0];
+  if (!range || range.start === range.end || handle.sync.pendingCount > 0) return false;
+  const ordered = range.start <= range.end ? range : { start: range.end, end: range.start };
+  await execute({ kind: "selection", document: handle.id, revision: handle.sync.revision, range: ordered });
+  return true;
+}
+
+/**
+ * Rerun: the last run's kind of input against the current source — the same
+ * file as it is now (open buffer first), the current selection of the same
+ * document, or the Research input as it is now (the last input's code when
+ * the input is empty). A direct user action: no extra approval.
+ */
+export async function rerun(): Promise<void> {
+  const state = useResearch.getState();
+  const last = lastUserRun(state.runs);
+  if (!last) return;
+  const origin = last.origin;
+  switch (origin.kind) {
+    case "file":
+      await runFile(origin.path);
+      return;
+    case "selection": {
+      if (origin.path && (await runSourceSelection(origin.path))) return;
+      notify({
+        tone: "info",
+        title: "Nothing selected",
+        body: origin.path ? `Select code in ${origin.path} to rerun the selection.` : "Select the code to rerun.",
+      });
+      return;
+    }
+    case "input": {
+      if (state.code.trim()) {
+        await runCode(state.code);
+        return;
+      }
+      try {
+        const manifest = await commands.researchRun(last.id);
+        if (manifest.code.text?.trim()) {
+          await runCode(manifest.code.text);
+          return;
+        }
+      } catch {
+        // fall through
+      }
+      notify({ tone: "info", title: "Nothing to rerun", body: "Type code in the Research input, then run it." });
+    }
+  }
+}
 
 export async function cancelRun(runId: string): Promise<void> {
   try {

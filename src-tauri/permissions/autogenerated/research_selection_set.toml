@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-selection-set"
+description = "Enables the research_selection_set command without any pre-configured scope."
+commands.allow = ["research_selection_set"]
+
+[[permission]]
+identifier = "deny-research-selection-set"
+description = "Denies the research_selection_set command without any pre-configured scope."
+commands.deny = ["research_selection_set"]
