@@ -107,7 +107,7 @@ pub struct AttachRunArtifactRequest {
 /// Follow the workspace service's open folder: research runs in the open
 /// project (registered with the execution service by `workspace_open`); trust
 /// is always the execution service's decision.
-fn sync_workspace(state: &AppState) -> Result<(), CommandError> {
+pub(crate) fn sync_workspace(state: &AppState) -> Result<(), CommandError> {
     match state.workspace.current() {
         Some(info) => {
             let root = PathBuf::from(&info.root);

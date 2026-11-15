@@ -46,7 +46,7 @@ const COLUMNS: SimpleTableColumn<RuntimeEnvironment>[] = [
         {runtime.packages.length > 0 && <div className="ui-meta">{runtime.packages.map((p) => `${p.name} ${p.version}`).join(", ")}</div>}
         {runtime.availability.kind === "unavailable" && (
           <div className="ui-meta">
-            {runtime.availability.reason}. {runtime.availability.guidance}
+            {runtime.availability.reason} {runtime.availability.guidance}
           </div>
         )}
       </>
@@ -66,7 +66,7 @@ export function ResearchSection() {
     <SettingsPage
       title="Research"
       testId="settings-research"
-      description="Python, R, and Julia environments found on this computer. Exposition uses existing installations and never installs packages."
+      description="Python, R, and Julia environments found on this computer and in the open project. Exposition never installs runtimes; it installs packages only into a project environment, when you set one up on the Research page."
       actions={
         <Button size="sm" variant="ghost" icon={RefreshCw} isPending={loading} onPress={() => void loadEnvironments(true)}>
           {loading ? "Scanning…" : "Refresh"}

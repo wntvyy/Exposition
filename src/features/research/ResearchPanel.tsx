@@ -5,8 +5,10 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type Keybo
 import {
   FlaskConical,
   FolderOpen,
+  OctagonPause,
   Play,
   Power,
+  RefreshCcwDot,
   RefreshCw,
   RotateCcw,
   ShieldCheck,
@@ -35,7 +37,6 @@ import {
   StatusPill,
   StatusText,
   Toolbar,
-  UnavailableState,
   type KeyValueItem,
 } from "../../ui/components";
 import {
@@ -50,22 +51,28 @@ import {
   sessionPill,
   stripAnsi,
 } from "./model";
+import { SetupArea, SetupButton } from "./EnvironmentSetup";
 import { ExecutionLabel } from "./ExecutionLabel";
 import { PromotionControls, RetainControls } from "./Promotion";
+import { activeUserRunId, lastUserRun, rerunDescription } from "./runloop";
+import { startSetupTracking } from "./setup";
 import { startSpaceTracking } from "./space";
 import {
   artifactText,
   artifactUrl,
   cancelRun,
+  chooseEnvironment,
   interruptSession,
   loadEnvironments,
   openProjectFolder,
+  rerun,
   restartSession,
   runCode,
   selectRun,
   setPanelSelectionReader,
   startResearchTracking,
   startSession,
+  stopRun,
   stopSession,
   trustWorkspace,
   useResearch,
@@ -94,6 +101,7 @@ export function ResearchPanel() {
   useEffect(() => {
     startResearchTracking();
     startSpaceTracking();
+    startSetupTracking();
     if (!useResearch.getState().environments) void loadEnvironments(false);
   }, []);
 
@@ -221,7 +229,7 @@ export function SessionBar({ status = true }: { status?: boolean }) {
         options={options}
         value={live?.environmentId ?? selected}
         isDisabled={Boolean(live)}
-        onChange={(id) => useResearch.setState({ selectedEnvironment: id })}
+        onChange={(id) => chooseEnvironment(id)}
         placeholder="Choose environment"
       />
       <IconButton
@@ -231,6 +239,7 @@ export function SessionBar({ status = true }: { status?: boolean }) {
         isDisabled={environmentsLoading}
         onPress={() => void loadEnvironments(true)}
       />
+      <SetupButton />
       {status && <SessionStatus />}
       {!live && (
         <Button
@@ -246,13 +255,13 @@ export function SessionBar({ status = true }: { status?: boolean }) {
       )}
       {live && (
         <>
-          <Button size="sm" variant="ghost" icon={Square} isDisabled={!busy} onPress={() => void interruptSession()}>
+          <Button size="sm" variant="ghost" icon={OctagonPause} isDisabled={!busy} onPress={() => void interruptSession()}>
             Interrupt
           </Button>
           <Button
             size="sm"
             variant={crashed ? "primary" : "ghost"}
-            icon={RotateCcw}
+            icon={RefreshCcwDot}
             isDisabled={live.state.kind === "starting" || live.state.kind === "restarting"}
             onPress={() => void restartSession()}
           >
@@ -269,11 +278,18 @@ export function SessionBar({ status = true }: { status?: boolean }) {
   );
 }
 
+/** Session problems and environment setup above the run bar (page and panel). */
 export function EnvironmentNotice() {
-  const environments = useResearch((s) => s.environments);
-  const selected = useResearch((s) => s.selectedEnvironment);
+  return (
+    <>
+      <SessionNotice />
+      <SetupArea />
+    </>
+  );
+}
+
+function SessionNotice() {
   const session = useResearch((s) => userSession(s));
-  const env = environments?.runtimes.find((r) => r.id === selected);
   if (session?.state.kind === "detached") {
     return (
       <Banner
@@ -295,7 +311,7 @@ export function EnvironmentNotice() {
         tone="danger"
         title="The research session crashed"
         actions={
-          <Button size="sm" icon={RotateCcw} onPress={() => void restartSession()}>
+          <Button size="sm" icon={RefreshCcwDot} onPress={() => void restartSession()}>
             Restart with a fresh kernel
           </Button>
         }
@@ -304,30 +320,72 @@ export function EnvironmentNotice() {
       </Banner>
     );
   }
-  if (!session && env && env.availability.kind === "unavailable") {
-    return (
-      <div data-testid="research-unavailable" data-environment={env.id}>
-        <UnavailableState
-          fill={false}
-          title={`${env.displayName} is not available`}
-          description={
-            <>
-              <p>{env.availability.reason}</p>
-              <p className="exp-research__guidance">
-                <code>{env.availability.guidance}</code>
-              </p>
-            </>
-          }
-          actions={
-            <Button size="sm" icon={RefreshCw} onPress={() => void loadEnvironments(true)}>
-              Check again
-            </Button>
-          }
-        />
-      </div>
-    );
-  }
   return null;
+}
+
+/**
+ * The run loop with the same controls everywhere: Run (Play), Stop (Square:
+ * cancel the running code), Rerun (RotateCcw: the last run's kind of input
+ * against the current source). Direct user actions: no extra approval.
+ */
+export function RunControls({
+  onRun,
+  runDisabled,
+  runLabel = "Run",
+  runAccessibleName,
+}: {
+  onRun: () => void;
+  runDisabled?: boolean;
+  runLabel?: string;
+  runAccessibleName?: string;
+}) {
+  const active = useResearch((s) => activeUserRunId(userSession(s), s.runs));
+  const last = useResearch((s) => lastUserRun(s.runs));
+  const starting = useResearch((s) => s.starting);
+  // While the selected environment needs setup, its notice holds the one primary action.
+  const needsSetup = useResearch((s) => {
+    const env = s.environments?.runtimes.find((r) => r.id === s.selectedEnvironment);
+    return !userSession(s) && env?.availability.kind === "unavailable";
+  });
+  const rerunName = rerunDescription(last);
+  return (
+    <div className="exp-research__run-controls" role="group" aria-label="Run controls" data-testid="research-run-controls">
+      <Button
+        variant={needsSetup ? "secondary" : "primary"}
+        size="sm"
+        icon={Play}
+        onPress={onRun}
+        isDisabled={runDisabled}
+        aria-label={runAccessibleName}
+        data-testid="research-run"
+      >
+        {runLabel}
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        icon={Square}
+        isDisabled={!active}
+        onPress={() => void stopRun()}
+        aria-label="Stop the running code"
+        data-testid="research-stop"
+      >
+        Stop
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        icon={RotateCcw}
+        isDisabled={!last || starting}
+        onPress={() => void rerun()}
+        aria-label={rerunName}
+        data-testid="research-rerun"
+        data-origin={last?.origin.kind}
+      >
+        Rerun
+      </Button>
+    </div>
+  );
 }
 
 export function CodeInput() {
@@ -370,9 +428,7 @@ export function CodeInput() {
           }
         }}
       />
-      <Button variant="primary" size="sm" icon={Play} onPress={run} isDisabled={!code.trim()}>
-        Run
-      </Button>
+      <RunControls onRun={run} runDisabled={!code.trim()} runAccessibleName="Run the Research input" />
     </div>
   );
 }
@@ -407,7 +463,8 @@ export function RunOutputView() {
         </span>
         {run.executionCount !== null && <span className="ui-meta">In [{run.executionCount}]</span>}
         <code className="exp-research__preview">{run.codePreview}</code>
-        {isActiveRun(run) && (
+        {/* The running code stops with Stop in the run controls; a queued run can be dropped here. */}
+        {run.queued && isActiveRun(run) && (
           <Button size="sm" variant="ghost" icon={SquareX} onPress={() => void cancelRun(run.id)}>
             Cancel run
           </Button>

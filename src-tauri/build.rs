@@ -186,6 +186,13 @@ const COMMANDS: &[&str] = &[
     "storage_overview",
     // Save a copy of a document's current text (src/workspace.rs).
     "document_save_copy",
+    // A1 lane E: guided environment setup and the remembered environment choice (src/setup.rs).
+    "research_setup_plan",
+    "research_setup_start",
+    "research_setup_cancel",
+    "research_setup_status",
+    "research_selection_get",
+    "research_selection_set",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

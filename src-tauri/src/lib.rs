@@ -25,6 +25,8 @@ mod workflow_runs;
 mod workflow_triggers;
 mod workflows;
 mod workspace;
+// A1 lane E: guided environment setup and the remembered environment choice.
+mod setup;
 
 use tauri::{Manager, RunEvent};
 
@@ -57,6 +59,8 @@ pub fn run() {
             workflow_triggers::start(app.handle().clone());
             app.state::<AppState>().typesetting.start(app.handle().clone());
             project_ops::start(app.handle());
+            // A1 lane E: environment setup progress events.
+            setup::forward_events(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -237,6 +241,13 @@ pub fn run() {
             project_ops::clipboard_files_write,
             project_ops::storage_overview,
             workspace::document_save_copy,
+            // A1 lane E: guided environment setup and the remembered environment choice.
+            setup::research_setup_plan,
+            setup::research_setup_start,
+            setup::research_setup_cancel,
+            setup::research_setup_status,
+            setup::research_selection_get,
+            setup::research_selection_set,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

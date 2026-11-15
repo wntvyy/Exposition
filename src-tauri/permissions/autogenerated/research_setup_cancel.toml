@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-setup-cancel"
+description = "Enables the research_setup_cancel command without any pre-configured scope."
+commands.allow = ["research_setup_cancel"]
+
+[[permission]]
+identifier = "deny-research-setup-cancel"
+description = "Denies the research_setup_cancel command without any pre-configured scope."
+commands.deny = ["research_setup_cancel"]
