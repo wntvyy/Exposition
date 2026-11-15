@@ -173,7 +173,6 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
     };
     const agentsPage = page.getByTestId("agents-page");
 
-
     // ---------------------------------------------------------------- 1. stream the representative response
     await invoke(page, "agents_dev_load_script", { script: { turns: [{ chunkDelayMs: 12, steps: [{ text: SAMPLE }] }] } });
     await gotoPage("Agents");
@@ -238,11 +237,13 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
 
     // ---------------------------------------------------------------- 2. treatment screenshots: Agents page
     const fullResponse = async (name) => {
-      // The transcript box is limited to 55vh; lift it for a picture of the whole response only.
+      // The transcript box is limited to 55vh; a tall window and no height limit, for this picture only.
+      await page.setViewportSize({ width: 1440, height: 1900 });
       await page.addStyleTag({ content: ".agents-transcript { max-height: none !important; }" }).then((h) => h.evaluate((el) => (el.id = "a1-shot-style")));
-      await page.waitForTimeout(150);
+      await page.waitForTimeout(250);
       await shot(response, name);
       await page.evaluate(() => document.getElementById("a1-shot-style")?.remove());
+      await page.setViewportSize({ width: 1440, height: 1100 });
     };
     await page.setViewportSize({ width: 1440, height: 1100 });
     for (const theme of ["light", "dark"]) {
@@ -275,7 +276,6 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
     assert.ok(panelWidth >= 340 && panelWidth <= 460, `Agent panel width ${panelWidth}`);
     const panelResponse = panel.getByTestId("agents-assistant-text").last();
     await panelResponse.locator("[data-math=display] .katex-display").waitFor();
-    const region = page.locator('[data-region="auxiliary"]');
     for (const theme of ["light", "dark"]) {
       await setTheme(page, theme);
       for (const { id, letter } of VARIANTS) {
@@ -283,10 +283,13 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
         await panel.getByTestId("agents-transcript").evaluate((el) => (el.scrollTop = 0));
         await page.waitForTimeout(150);
         await shot(page, `${letter}-${id}-agent-panel-${theme}`);
+        // The whole response: a tall window and no transcript height limit, for this picture only.
+        await page.setViewportSize({ width: 1440, height: 1900 });
         await page.addStyleTag({ content: ".agents-transcript { max-height: none !important; }" }).then((h) => h.evaluate((el) => (el.id = "a1-shot-style")));
-        await page.waitForTimeout(150);
+        await page.waitForTimeout(250);
         await shot(panelResponse, `${letter}-${id}-agent-panel-${theme}-response`);
         await page.evaluate(() => document.getElementById("a1-shot-style")?.remove());
+        await page.setViewportSize({ width: 1440, height: 900 });
       }
     }
     step("treatment screenshots in the Agent panel", { panelWidth });
@@ -332,25 +335,38 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
     });
 
     // ---------------------------------------------------------------- 6. hostile response renders inert
-    // Record app_open_external instead of launching the system browser; every
-    // other IPC call passes through unchanged.
-    const hooked = await page.evaluate(() => {
-      const internals = window.__TAURI_INTERNALS__;
-      const original = internals.invoke.bind(internals);
+    // Record app_open_external instead of launching the system browser. Tauri's
+    // invoke is read-only, but its IPC transport is a fetch to
+    // http://ipc.localhost/<command>: answer that one command here and pass
+    // every other call through unchanged.
+    await page.evaluate(() => {
+      const original = window.fetch.bind(window);
       window.__opened = [];
-      const recorder = (cmd, args, options) => {
-        if (cmd === "app_open_external") {
-          window.__opened.push(args?.url);
-          return Promise.resolve(null);
+      window.fetch = (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (/^https?:\/\/ipc\.localhost\/app_open_external(\?|$)/.test(url)) {
+          let args = null;
+          try {
+            args = JSON.parse(init?.body ?? "null");
+          } catch {}
+          window.__opened.push(args?.url ?? null);
+          return Promise.resolve(
+            new Response("null", { status: 200, headers: { "Tauri-Response": "ok", "Content-Type": "application/json" } }),
+          );
         }
-        return original(cmd, args, options);
+        return original(input, init);
       };
-      try {
-        internals.invoke = recorder;
-      } catch {}
-      return internals.invoke === recorder;
     });
-    assert.ok(hooked, "app_open_external calls can be recorded (no browser is launched by this scenario)");
+    // Probe with an address the Rust side refuses anyway, so nothing could open if the recorder were bypassed.
+    const probeCall = await page.evaluate(async () => {
+      try {
+        await window.__TAURI_INTERNALS__.invoke("app_open_external", { url: "javascript:probe" });
+        return { ok: true, opened: window.__opened.splice(0) };
+      } catch (error) {
+        return { ok: false, error: String(error?.message ?? error) };
+      }
+    });
+    assert.deepEqual(probeCall, { ok: true, opened: ["javascript:probe"] }, "app_open_external calls are recorded (no browser is launched by this scenario)");
     const hostile = [
       "Hostile content follows.",
       "",

@@ -45,13 +45,12 @@ const ready = new Map<string, Promise<boolean>>();
 function ensureTokenizer(languageId: string): Promise<boolean> {
   let promise = ready.get(languageId);
   if (!promise) {
-    const registered = monaco.languages.getLanguages().some((l) => l.id === languageId);
-    promise = registered
-      ? monaco.editor.colorize("", languageId, {}).then(
-          () => true,
-          () => false,
-        )
-      : Promise.resolve(false);
+    // Exposition's own languages (Typst, LaTeX, Lean, …) exist once the editor has registered them.
+    if (!monaco.languages.getLanguages().some((l) => l.id === languageId)) return Promise.resolve(false);
+    promise = monaco.editor.colorize("", languageId, {}).then(
+      () => true,
+      () => false,
+    );
     ready.set(languageId, promise);
   }
   return promise;
