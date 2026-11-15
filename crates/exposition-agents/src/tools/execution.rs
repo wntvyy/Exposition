@@ -654,8 +654,8 @@ impl ToolServices for AppToolServices {
             }
             LeanStatus::Errors { count, .. } => format!("Not checked: Lean reported {count} error(s)."),
             LeanStatus::Unavailable { reason } => format!(
-                "Not checked: Lean did not run on this file. {reason} You cannot fix a package that is not prepared: \
-                 the user runs Set Up Mathlib… from the command palette."
+                "Not checked: Lean did not run on this file. {reason} If it names a Mathlib package that is not prepared, \
+                 you cannot fix that: the user runs Set Up Mathlib… from the command palette."
             ),
             _ => "Not checked: Lean did not finish checking this exact text.".to_owned(),
         };

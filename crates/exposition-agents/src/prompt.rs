@@ -103,6 +103,8 @@ user needs to decide or do next.";
 /// agent with stale directions.
 pub const INTERFACE_NAMES: &[(&str, &str)] = &[
     ("Save All", "src/features/editor/register.tsx"),
+    ("Record evidence", "src/features/lean/FormalEvidence.tsx"),
+    ("Set Up Mathlib…", "src/features/lean/register.tsx"),
     ("Review changes", "src/features/agents/TaskView.tsx"),
     ("Changes", "src/features/agents/AgentsPage.tsx"),
     ("Keep all", "src/features/agents/ReviewView.tsx"),
