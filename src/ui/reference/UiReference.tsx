@@ -88,7 +88,6 @@ import {
   UnavailableState,
   type CodeRunAction,
   type EditorTabItem,
-  type ResponseVariant,
   type Status,
 } from "../components";
 import { setThemePreference, useTheme, type ThemePreference } from "../theme";
@@ -265,41 +264,26 @@ export const SAMPLE_RESPONSE = [
   "| 10 000 | 1.644834 | 0.000100 |",
 ].join("\n");
 
-const RESPONSE_TREATMENTS: { variant: ResponseVariant; label: string }[] = [
-  { variant: "band", label: "A — Tinted band" },
-  { variant: "inset", label: "B — Inset block" },
-  { variant: "document", label: "C — Document surface" },
-];
-
 const sampleRun: CodeRunAction = {
   label: "Run in Research",
   run: () => notify({ tone: "info", title: "Sample only", body: "In a transcript, Run in Research hands the code to your research session." }),
 };
 
-function SampleResponse({ variant }: { variant: ResponseVariant }) {
-  return (
-    <ResponseSurface variant={variant} label="Agent" copyText={SAMPLE_RESPONSE}>
-      <Markdown source={SAMPLE_RESPONSE} runAction={sampleRun} />
-    </ResponseSurface>
-  );
-}
-
-/** A pane as the transcript sees it: its backdrop and the pane inset (the band reaches the edges). */
-function ResponsePane({ variant, region }: { variant: ResponseVariant; region: boolean }) {
+/** A pane as the transcript sees it: its backdrop (page white or region sunken) and the pane inset. */
+function ResponsePane({ region }: { region: boolean }) {
   return (
     <div
-      data-testid={`ref-response-${variant}-${region ? "panel" : "page"}`}
+      data-testid={`ref-response-${region ? "panel" : "page"}`}
       style={{
         padding: "var(--space-3) var(--pane-inset)",
         border: "var(--border-width) solid var(--color-border)",
         borderRadius: "var(--radius-md)",
         background: region ? "var(--color-surface-sunken)" : "var(--color-surface)",
-        overflow: "hidden",
       }}
     >
-      <div style={variant === "band" ? { marginInline: "calc(-1 * var(--pane-inset))" } : undefined}>
-        <SampleResponse variant={variant} />
-      </div>
+      <ResponseSurface label="Agent" copyText={SAMPLE_RESPONSE}>
+        <Markdown source={SAMPLE_RESPONSE} runAction={sampleRun} />
+      </ResponseSurface>
     </div>
   );
 }
@@ -307,21 +291,17 @@ function ResponsePane({ variant, region }: { variant: ResponseVariant; region: b
 function AgentResponseSpecimens() {
   return (
     <>
-      {RESPONSE_TREATMENTS.map(({ variant, label }) => (
-        <Specimen key={`page-${variant}`} label={`${label} · page`} wide>
-          <div style={{ width: "100%" }}>
-            <ResponsePane variant={variant} region={false} />
+      <Specimen label="Page (Agents page, comfortable)" wide>
+        <div style={{ width: "100%" }}>
+          <ResponsePane region={false} />
+        </div>
+      </Specimen>
+      <StateSizeProvider value="compact">
+        <Specimen label="Panel (Agent panel, compact)">
+          <div style={{ width: "100%", maxWidth: 400 }}>
+            <ResponsePane region />
           </div>
         </Specimen>
-      ))}
-      <StateSizeProvider value="compact">
-        {RESPONSE_TREATMENTS.map(({ variant, label }) => (
-          <Specimen key={`panel-${variant}`} label={`${label} · panel`}>
-            <div style={{ width: "100%", maxWidth: 400 }}>
-              <ResponsePane variant={variant} region />
-            </div>
-          </Specimen>
-        ))}
       </StateSizeProvider>
     </>
   );
@@ -837,7 +817,7 @@ export function UiReference() {
 
       <RefSection
         title="Agent responses"
-        description="One response in the three treatments under review (A1): A tinted band across the pane, B tinted block on the pane inset, C document surface. Page width, then the narrow Agent panel. Sample content."
+        description="ResponseSurface + Markdown: an inset block with a subtle fill on the pane inset, comfortable on pages and compact in panels. Prose, math, a code fence, a list, and a table. Sample content."
       >
         <AgentResponseSpecimens />
       </RefSection>

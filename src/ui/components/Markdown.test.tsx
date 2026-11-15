@@ -482,13 +482,12 @@ describe("copy and run actions", () => {
   it("frames a response: label, Copy, compact density inside regions", () => {
     const { container } = render(
       <StateSizeProvider value="compact">
-        <ResponseSurface variant="document" label="Agent" copyText="x">
+        <ResponseSurface label="Agent" copyText="x">
           <Markdown source="x" />
         </ResponseSurface>
       </StateSizeProvider>,
     );
     const surface = container.querySelector(".ui-response")!;
-    expect(surface.getAttribute("data-variant")).toBe("document");
     expect(surface.getAttribute("data-density")).toBe("compact");
     expect(surface.getAttribute("data-context")).toBe("region");
     expect(screen.getByText("Agent")).toBeTruthy();
@@ -499,6 +498,7 @@ describe("copy and run actions", () => {
       </ResponseSurface>,
     );
     expect(page.container.querySelector(".ui-response")?.getAttribute("data-density")).toBe("comfortable");
+    expect(page.container.querySelector(".ui-response")?.getAttribute("data-context")).toBe("page");
     expect(within(page.container).queryByRole("button")).toBeNull();
   });
 });

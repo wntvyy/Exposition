@@ -381,16 +381,9 @@ export const Markdown = memo(function Markdown({
 
 // ---------------------------------------------------------------- response surface
 
-/**
- * Visual treatment of a response surface (pending the user's choice, A1):
- * `band` tinted band across the pane, `inset` tinted block on the pane inset,
- * `document` document-white surface with a hairline border.
- */
-export type ResponseVariant = "band" | "inset" | "document";
 export type ResponseDensity = "comfortable" | "compact";
 
 export interface ResponseSurfaceProps {
-  variant?: ResponseVariant;
   /** Default: compact inside panels and sidebars (StateSizeProvider "compact"), comfortable on pages. */
   density?: ResponseDensity;
   /** Who wrote it (shown as a group label), e.g. "Agent". */
@@ -406,9 +399,14 @@ export interface ResponseSurfaceProps {
   "data-testid"?: string;
 }
 
-/** The surface that frames one response: label, Copy, content, optional status. */
+/**
+ * The surface that frames one response (A1, the user's choice: an inset
+ * block): a subtle neutral fill with a 5px radius on the pane inset, no
+ * border; header with the label and Copy, the content, an optional status.
+ * The fill is the neutral step next to the backdrop (sunken on pages, document
+ * white inside sunken regions), read from the region context.
+ */
 export function ResponseSurface({
-  variant = "inset",
   density,
   label,
   copyText,
@@ -422,7 +420,6 @@ export function ResponseSurface({
   return (
     <div
       className={cx("ui-response", className)}
-      data-variant={variant}
       data-density={density ?? (size === "compact" ? "compact" : "comfortable")}
       data-context={size === "compact" ? "region" : "page"}
       data-testid={testId}

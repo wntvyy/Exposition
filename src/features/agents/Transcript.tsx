@@ -3,82 +3,16 @@
 // results, reasoning summaries, and the user's own text stay plain text.
 import "./transcript.css";
 
-import { useEffect, useSyncExternalStore, type ReactNode, type RefObject } from "react";
+import { useEffect, type ReactNode, type RefObject } from "react";
 
 import { EDITOR_PAGE, pages } from "../../app/pages";
 import { notify } from "../../app/notifications";
 import { registry } from "../../app/registry";
 import type { TranscriptItem } from "../../bindings/TranscriptItem";
 import { commands, errorMessage } from "../../lib/ipc";
-import {
-  Markdown,
-  ResponseSurface,
-  StatusText,
-  type CodeRunAction,
-  type ResponseVariant,
-  type RunnableLanguage,
-} from "../../ui/components";
+import { Markdown, ResponseSurface, StatusText, type CodeRunAction, type RunnableLanguage } from "../../ui/components";
 import { activeToolLabel, toolStatusLabel, toolSummary } from "./format";
 import type { StreamDraft } from "./store";
-
-// ---------------------------------------------------------------- response treatment (review switch)
-
-/**
- * The response treatment under review (A1): debug builds read
- * `localStorage["exposition.debug.responseVariant"]` (band | inset | document)
- * so the three can be compared in the real app. Release builds never read it;
- * it is not a user setting and goes away once a treatment is chosen.
- */
-export const RESPONSE_VARIANT_KEY = "exposition.debug.responseVariant";
-const DEFAULT_VARIANT: ResponseVariant = "inset";
-const VARIANTS: readonly ResponseVariant[] = ["band", "inset", "document"];
-
-let debugAllowed: boolean | null = null;
-let variant: ResponseVariant = DEFAULT_VARIANT;
-const listeners = new Set<() => void>();
-
-function readVariant(): void {
-  let next = DEFAULT_VARIANT;
-  if (debugAllowed) {
-    try {
-      const stored = localStorage.getItem(RESPONSE_VARIANT_KEY);
-      if (stored && (VARIANTS as readonly string[]).includes(stored)) next = stored as ResponseVariant;
-    } catch {
-      // storage unavailable: default treatment
-    }
-  }
-  if (next !== variant) {
-    variant = next;
-    for (const listener of [...listeners]) listener();
-  }
-}
-
-function subscribeVariant(listener: () => void): () => void {
-  listeners.add(listener);
-  if (debugAllowed === null) {
-    debugAllowed = import.meta.env.DEV;
-    readVariant();
-    if (!debugAllowed && typeof commands.appInfo === "function") {
-      commands.appInfo().then(
-        (info) => {
-          if (info.debugBuild) {
-            debugAllowed = true;
-            readVariant();
-          }
-        },
-        () => {},
-      );
-    }
-    window.addEventListener("storage", (event) => {
-      if (event.key === RESPONSE_VARIANT_KEY || event.key === null) readVariant();
-    });
-  }
-  return () => listeners.delete(listener);
-}
-
-function useResponseVariant(): ResponseVariant {
-  return useSyncExternalStore(subscribeVariant, () => variant);
-}
 
 // ---------------------------------------------------------------- follow the bottom
 
@@ -156,19 +90,17 @@ function openExternal(url: string): void {
 
 function AgentResponse({
   text,
-  treatment,
   streaming = false,
   children,
   footer,
 }: {
   text: string;
-  treatment: ResponseVariant;
   streaming?: boolean;
   children?: ReactNode;
   footer?: ReactNode;
 }) {
   return (
-    <ResponseSurface variant={treatment} label="Agent" copyText={streaming ? undefined : text} footer={footer}>
+    <ResponseSurface label="Agent" copyText={streaming ? undefined : text} footer={footer}>
       {children}
       {text && (
         <Markdown source={text} streaming={streaming} runAction={RUN_IN_RESEARCH} onOpenExternal={openExternal} data-testid="agents-msg-markdown" />
@@ -187,7 +119,11 @@ export function TranscriptEntry({ item }: { item: TranscriptItem }) {
         </div>
       );
     case "assistantText":
-      return <AssistantMessage text={item.text} />;
+      return (
+        <div className="agents-msg" data-role="assistant" data-testid="agents-assistant-text">
+          <AgentResponse text={item.text} />
+        </div>
+      );
     case "thinking":
       return (
         <details className="agents-disclosure">
@@ -218,25 +154,15 @@ export function TranscriptEntry({ item }: { item: TranscriptItem }) {
   }
 }
 
-function AssistantMessage({ text }: { text: string }) {
-  const treatment = useResponseVariant();
-  return (
-    <div className="agents-msg" data-role="assistant" data-variant={treatment} data-testid="agents-assistant-text">
-      <AgentResponse text={text} treatment={treatment} />
-    </div>
-  );
-}
-
 export function Draft({ draft }: { draft: StreamDraft }) {
-  const treatment = useResponseVariant();
   const status = draft.activeTool ? (
     <StatusText {...activeToolLabel(draft.activeTool, draft.activeToolStatus ?? "running")} />
   ) : !draft.text && !draft.thinking ? (
     <StatusText status="running" label="Thinking" />
   ) : null;
   return (
-    <div className="agents-msg" data-role="assistant" data-variant={treatment} data-testid="agents-draft">
-      <AgentResponse text={draft.text} treatment={treatment} streaming footer={status}>
+    <div className="agents-msg" data-role="assistant" data-testid="agents-draft">
+      <AgentResponse text={draft.text} streaming footer={status}>
         {draft.thinking && (
           <details className="agents-disclosure">
             <summary>Reasoning summary (streaming)</summary>

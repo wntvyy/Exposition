@@ -31,13 +31,3 @@
 .agents-msg .ui-response .agents-disclosure + .ui-markdown {
   margin-top: var(--space-1-5);
 }
-
-/* Treatment A (band, under review): the transcript reaches the pane edges so
-   the band spans the pane; every other entry keeps the pane inset. */
-.agents-transcript:has(> .agents-msg[data-variant="band"]) {
-  margin-inline: calc(-1 * var(--pane-inset));
-}
-
-.agents-transcript:has(> .agents-msg[data-variant="band"]) > :not(.agents-msg[data-variant="band"]) {
-  margin-inline: var(--pane-inset);
-}

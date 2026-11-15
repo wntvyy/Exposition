@@ -2,12 +2,12 @@
 // development only; it replaces only the model: the task loop, persistence,
 // transcript, renderer, and shell are the real ones).
 //
-// 1. Treatments: one representative response (prose with emphasis and a link,
-//    inline and display math, a Python fence, a list, a table) streamed into a
-//    task, shown in the three response treatments under review (A band,
-//    B inset, C document) on the Agents page (1440 px) and in the narrow Agent
-//    panel (~400 px), light and dark. Screenshots go to test-results and, when
-//    A1_TREATMENTS_DIR is set, there too.
+// 1. Presentation: one representative response (prose with emphasis and a
+//    link, inline and display math, a Python fence, a list, a table) streamed
+//    into a task and shown in the response surface (inset block, the user's
+//    choice) on the Agents page (1440 px) and in the narrow Agent panel
+//    (~400 px), light and dark. Screenshots go to test-results and, when
+//    A1_TREATMENTS_DIR is set, there too (final-*.png).
 // 2. Behavior: streaming renders without errors; follow-the-bottom scrolling
 //    does not pull a reader who scrolled up; Copy on a fence and on the
 //    message puts the exact source on the OS clipboard; a hostile response
@@ -25,13 +25,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runCommand } from "../palette.mjs";
-
-const VARIANTS = [
-  { id: "band", letter: "A" },
-  { id: "inset", letter: "B" },
-  { id: "document", letter: "C" },
-];
-const VARIANT_KEY = "exposition.debug.responseVariant";
 
 // Same text as SAMPLE_RESPONSE in src/ui/reference/UiReference.tsx.
 const FENCE = [
@@ -77,24 +70,6 @@ async function setTheme(page, theme) {
   await runCommand(page, `color theme ${theme}`, theme === "dark" ? /Color Theme: Dark/ : /Color Theme: Light/);
   await page.waitForFunction((t) => document.documentElement.dataset.theme === t, theme);
   await page.waitForTimeout(250);
-}
-
-async function setVariant(page, variant) {
-  await page.evaluate(
-    ([key, value]) => {
-      localStorage.setItem(key, value);
-      window.dispatchEvent(new StorageEvent("storage", { key }));
-    },
-    [VARIANT_KEY, variant],
-  );
-  await page.waitForFunction(
-    (v) => {
-      const msgs = [...document.querySelectorAll("[data-testid=agents-assistant-text]")];
-      return msgs.length > 0 && msgs.every((m) => m.querySelector(`.ui-response[data-variant="${v}"]`));
-    },
-    variant,
-  );
-  await page.waitForTimeout(200);
 }
 
 async function createTask(page, root, prompt) {
@@ -231,11 +206,28 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
         em: "the partial sums increase monotonically",
       },
     );
+    // Keyboard and screen-reader semantics: the transcript stays a log; actions are named buttons;
+    // the link is a focusable link; the text is selectable.
+    const a11y = await response.evaluate((el) => ({
+      log: el.closest("[role=log]")?.getAttribute("aria-label") ?? null,
+      buttons: [...el.querySelectorAll("button")].map((b) => b.getAttribute("aria-label") ?? b.textContent),
+      linkFocusable: el.querySelector("[data-external-link]")?.tabIndex === 0,
+      selectable: getComputedStyle(el.querySelector(".ui-markdown")).userSelect,
+    }));
+    assert.deepEqual(a11y, {
+      log: "Transcript",
+      buttons: ["Copy response", "Run in Research", "Copy code"],
+      linkFocusable: true,
+      selectable: "text",
+    });
+    await response.locator("[data-external-link]").focus();
+    await page.keyboard.press("Tab");
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.textContent), "Run in Research", "Tab moves from the link to the fence's Run");
     step("representative response streamed and rendered (link + address, 6 inline / 1 display formulas with MathML, highlighted fence, list, table)", {
       draftSamples: seen.length,
     });
 
-    // ---------------------------------------------------------------- 2. treatment screenshots: Agents page
+    // ---------------------------------------------------------------- 2. screenshots: Agents page
     const fullResponse = async (name) => {
       // The transcript box is limited to 55vh; a tall window and no height limit, for this picture only.
       await page.setViewportSize({ width: 1440, height: 1900 });
@@ -248,17 +240,14 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
     await page.setViewportSize({ width: 1440, height: 1100 });
     for (const theme of ["light", "dark"]) {
       await setTheme(page, theme);
-      for (const { id, letter } of VARIANTS) {
-        await setVariant(page, id);
-        await agentsPage.getByTestId("agents-transcript").evaluate((el) => (el.scrollTop = 0));
-        await page.waitForTimeout(150);
-        await shot(page, `${letter}-${id}-agents-page-${theme}`);
-        await fullResponse(`${letter}-${id}-agents-page-${theme}-response`);
-      }
+      await agentsPage.getByTestId("agents-transcript").evaluate((el) => (el.scrollTop = 0));
+      await page.waitForTimeout(150);
+      await shot(page, `final-agents-page-${theme}`);
+      await fullResponse(`final-agents-page-${theme}-response`);
     }
-    step("treatment screenshots on the Agents page (1440 px), light and dark");
+    step("screenshots on the Agents page (1440 px), light and dark");
 
-    // ---------------------------------------------------------------- 3. treatment screenshots: Agent panel (narrow)
+    // ---------------------------------------------------------------- 3. screenshots: Agent panel (narrow)
     await setTheme(page, "light");
     await page.setViewportSize({ width: 1440, height: 900 });
     await agentsPage.getByTestId("agents-show-in-panel").click();
@@ -278,21 +267,18 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
     await panelResponse.locator("[data-math=display] .katex-display").waitFor();
     for (const theme of ["light", "dark"]) {
       await setTheme(page, theme);
-      for (const { id, letter } of VARIANTS) {
-        await setVariant(page, id);
-        await panel.getByTestId("agents-transcript").evaluate((el) => (el.scrollTop = 0));
-        await page.waitForTimeout(150);
-        await shot(page, `${letter}-${id}-agent-panel-${theme}`);
-        // The whole response: a tall window and no transcript height limit, for this picture only.
-        await page.setViewportSize({ width: 1440, height: 1900 });
-        await page.addStyleTag({ content: ".agents-transcript { max-height: none !important; }" }).then((h) => h.evaluate((el) => (el.id = "a1-shot-style")));
-        await page.waitForTimeout(250);
-        await shot(panelResponse, `${letter}-${id}-agent-panel-${theme}-response`);
-        await page.evaluate(() => document.getElementById("a1-shot-style")?.remove());
-        await page.setViewportSize({ width: 1440, height: 900 });
-      }
+      await panel.getByTestId("agents-transcript").evaluate((el) => (el.scrollTop = 0));
+      await page.waitForTimeout(150);
+      await shot(page, `final-agent-panel-${theme}`);
+      // The whole response: a tall window and no transcript height limit, for this picture only.
+      await page.setViewportSize({ width: 1440, height: 1900 });
+      await page.addStyleTag({ content: ".agents-transcript { max-height: none !important; }" }).then((h) => h.evaluate((el) => (el.id = "a1-shot-style")));
+      await page.waitForTimeout(250);
+      await shot(panelResponse, `final-agent-panel-${theme}-response`);
+      await page.evaluate(() => document.getElementById("a1-shot-style")?.remove());
+      await page.setViewportSize({ width: 1440, height: 900 });
     }
-    step("treatment screenshots in the Agent panel", { panelWidth });
+    step("screenshots in the Agent panel, light and dark", { panelWidth });
 
     // Narrow layout: no horizontal page scroll; wide content scrolls inside its own block.
     const overflow = await page.evaluate(() => {
@@ -308,7 +294,6 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
     assert.ok(overflow.panel <= 1, `no horizontal scroll in the Agent panel: ${JSON.stringify(overflow)}`);
     step("narrow panel: no horizontal page or panel scroll; the code block scrolls inside itself", overflow);
     await setTheme(page, "light");
-    await setVariant(page, "inset");
 
     // ---------------------------------------------------------------- 4. copy is exact
     if (process.platform === "win32") {
@@ -471,7 +456,7 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
     await reference.waitFor();
     const specimens = reference.getByRole("region", { name: "Agent responses" });
     await specimens.scrollIntoViewIfNeeded();
-    for (const pane of ["band", "inset", "document"].flatMap((v) => [`ref-response-${v}-page`, `ref-response-${v}-panel`])) {
+    for (const pane of ["ref-response-page", "ref-response-panel"]) {
       await specimens.getByTestId(pane).locator("[data-math=display] .katex").waitFor();
     }
     // The whole section: a window tall enough that the editor area does not clip it.
@@ -479,9 +464,9 @@ export default async function a1Responses({ launchApp, artifactsDir, assert }) {
     await page.setViewportSize({ width: 1440, height: Math.min(Math.ceil(sectionHeight) + 600, 9000) });
     await specimens.scrollIntoViewIfNeeded();
     await page.waitForTimeout(400);
-    await shot(specimens, "ui-reference-agent-responses-light");
+    await shot(specimens, "final-ui-reference-agent-responses-light");
     await page.setViewportSize({ width: 1440, height: 900 });
-    step("UI Reference shows the three treatments (page and panel)");
+    step("UI Reference shows the response surface at page and panel density");
 
     const errors = consoleErrors(app);
     assert.deepEqual(errors, [], "no console errors");

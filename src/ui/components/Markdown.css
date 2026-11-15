@@ -4,9 +4,11 @@
 
 /* ---------- Response surface ---------- */
 
-/* The surface fills with the neutral step next to its backdrop: sunken on a
-   page or document (white in light), document white inside a sunken region
-   (panels, sidebars). Code and table headers take the other step. */
+/* An inset block (A1, the user's choice): a subtle neutral fill with the
+   control radius, on the pane inset, no border. The fill is the neutral step
+   next to its backdrop: sunken on a page or document (white in light),
+   document white inside a sunken region (panels, sidebars). Code blocks and
+   inline code take the other step. */
 .ui-response {
   --ui-response-bg: var(--color-surface-sunken);
   --ui-response-inset-bg: var(--color-surface);
@@ -17,11 +19,11 @@
   gap: var(--space-1);
   min-width: 0;
   padding: var(--ui-response-pad-y) var(--ui-response-pad-x) var(--space-3);
+  border-radius: var(--radius-md);
   background: var(--ui-response-bg);
 }
 
-.ui-response[data-context="region"],
-.ui-response[data-variant="document"] {
+.ui-response[data-context="region"] {
   --ui-response-bg: var(--color-surface);
   --ui-response-inset-bg: var(--color-surface-sunken);
 }
@@ -29,24 +31,6 @@
 .ui-response[data-density="compact"] {
   --ui-response-pad-x: var(--space-2);
   --ui-response-pad-y: var(--space-1-5);
-}
-
-/* B: a tinted block on the pane inset. */
-.ui-response[data-variant="inset"] {
-  border-radius: var(--radius-md);
-}
-
-/* C: a document surface, like editors. */
-.ui-response[data-variant="document"] {
-  border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-md);
-}
-
-/* A: a band across the transcript; the host lets it reach the pane edges and
-   pads it with the pane inset (see the transcript CSS). */
-.ui-response[data-variant="band"] {
-  --ui-response-pad-x: var(--pane-inset);
-  border-radius: 0;
 }
 
 .ui-response__header {
