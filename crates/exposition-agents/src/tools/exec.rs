@@ -402,11 +402,13 @@ fn check_path(env: &ToolEnv<'_>, raw: &str, path_use: PathUse) -> Result<(), Too
 ///    task settings are the ceiling: they prohibit, never ask);
 /// 6. the service exists;
 /// 7. files the application executes automatically ([`super::autoexec`]):
-///    a change or copy that puts Lean source or Lean/Lake configuration
+///    a change or copy that puts Lean source, Lean/Lake configuration
 ///    (`lakefile.lean`, `lakefile.toml`, `lean-toolchain`,
-///    `lake-manifest.json`) into the project is native execution too (the
-///    Lean server elaborates Lean text; Lake may download and run packages,
-///    elan may download toolchains): it needs native authority as well as
+///    `lake-manifest.json`), or an R startup file (`.Rprofile`, `.Renviron`)
+///    into the project is native execution too (the Lean server elaborates
+///    Lean text; Lake may download and run packages, elan may download
+///    toolchains; R runs its startup files at every session start in the
+///    folder, Rscript included): it needs native authority as well as
 ///    change authority (D7), whether or not the folder is trusted yet — trust
 ///    decides only whether it runs now or once the folder is trusted, and
 ///    this authority does not itself require trust. Protected folders (`.git`, `.lake`,

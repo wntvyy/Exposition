@@ -9,10 +9,16 @@
 //!   in any folder: when the Lean server starts for a Lean file there, Lake
 //!   reads the nearest configuration, may clone the packages it requires and
 //!   elaborate their `lakefile.lean`, and elan may download the toolchain it
-//!   names). Putting such text into the project is native execution: the
-//!   gate requires native-code authority as well as change authority (D7),
-//!   whether or not the folder is trusted yet — trust only decides whether
-//!   Lean and Lake run it now or once the folder is trusted.
+//!   names), and R startup files (`.Rprofile`, `.Renviron` in any folder: R
+//!   reads them from its working directory at the start of every session —
+//!   the user's R research session and native R workflow steps start in the
+//!   project, and so does R started any other way there — and runs the
+//!   profile's code natively). Putting such text into the project is native
+//!   execution: the gate requires native-code authority as well as change
+//!   authority (D7), whether or not the folder is trusted yet — trust only
+//!   decides whether Exposition runs it now or once the folder is trusted.
+//!   Files such a startup file sources (for example `renv/activate.R`) are
+//!   ordinary files: their changes are reviewable but not gated here.
 //! - **Protected folders** ([`protected`]): `.git/` (hooks and configuration
 //!   run in the user's tools), `.lake/` (packages and build products Lake
 //!   loads), and the project environments `.venv/` and `venv/` (environment
@@ -37,10 +43,15 @@ pub enum AutoExec {
     LeanSource,
     /// Lean/Lake configuration Lake and elan act on (downloads and runs code).
     LakeConfig,
+    /// R startup files R reads at the start of every session in the folder.
+    RStartup,
 }
 
 /// Lean/Lake configuration file names (compared case-insensitively).
 pub const LAKE_CONFIG_FILES: [&str; 4] = ["lakefile.lean", "lakefile.toml", "lean-toolchain", "lake-manifest.json"];
+
+/// R startup file names (compared case-insensitively).
+pub const R_STARTUP_FILES: [&str; 2] = [".rprofile", ".renviron"];
 
 /// Whether `path` (a file) is auto-executed content, and how.
 pub fn auto_executed(path: &WorkspacePath) -> Option<AutoExec> {
@@ -51,6 +62,8 @@ fn auto_executed_name(name: &str) -> Option<AutoExec> {
     let lower = name.to_ascii_lowercase();
     if LAKE_CONFIG_FILES.contains(&lower.as_str()) {
         Some(AutoExec::LakeConfig)
+    } else if R_STARTUP_FILES.contains(&lower.as_str()) {
+        Some(AutoExec::RStartup)
     } else if lower.ends_with(".lean") {
         Some(AutoExec::LeanSource)
     } else {
@@ -83,6 +96,15 @@ impl AutoExec {
                  now; once it is trusted, Lake may download the packages it names and run their build code, and \
                  elan may download the toolchain it names, with your account's privileges."
             }
+            (AutoExec::RStartup, true) => {
+                "R runs this file at the start of every R session in this folder (also Rscript), natively with your \
+                 account's privileges."
+            }
+            (AutoExec::RStartup, false) => {
+                "R runs this file at the start of every R session in this folder (also Rscript), natively with your \
+                 account's privileges. This folder is not trusted yet, so Exposition starts no R session here now; \
+                 R started here any other way still runs it."
+            }
         }
     }
 
@@ -99,6 +121,11 @@ impl AutoExec {
             (AutoExec::LakeConfig, false) => {
                 "Lake will act on this configuration natively once the folder is trusted (it may download and run \
                  packages and toolchains)."
+            }
+            (AutoExec::RStartup, true) => "R runs this file natively at the start of every R session in this folder.",
+            (AutoExec::RStartup, false) => {
+                "R runs this file natively at the start of R sessions in this folder (Exposition's once the folder \
+                 is trusted)."
             }
         }
     }
@@ -229,7 +256,18 @@ mod tests {
         for name in ["lakefile.lean", "LakeFile.toml", "a/b/lean-toolchain", "x/LAKE-MANIFEST.JSON"] {
             assert_eq!(auto_executed(&p(name)), Some(AutoExec::LakeConfig), "{name}");
         }
-        for name in ["main.typ", "lean-toolchain.txt", "lakefile.toml.bak", "notes/lean"] {
+        for name in [".Rprofile", "sub/.RENVIRON", "a/b/.rprofile"] {
+            assert_eq!(auto_executed(&p(name)), Some(AutoExec::RStartup), "{name}");
+        }
+        for name in [
+            "main.typ",
+            "lean-toolchain.txt",
+            "lakefile.toml.bak",
+            "notes/lean",
+            "Rprofile",
+            ".Rprofile.bak",
+            "x.Rprofile",
+        ] {
             assert_eq!(auto_executed(&p(name)), None, "{name}");
         }
     }
@@ -261,12 +299,15 @@ mod tests {
         std::fs::write(root.join("plain/a.typ"), "").unwrap();
         std::fs::create_dir_all(root.join("lake/sub")).unwrap();
         std::fs::write(root.join("lake/sub/LAKEFILE.TOML"), "").unwrap();
+        std::fs::create_dir_all(root.join("rproj/analysis")).unwrap();
+        std::fs::write(root.join("rproj/analysis/.Rprofile"), "").unwrap();
         std::fs::create_dir_all(root.join("env/.venv/Lib")).unwrap();
         std::fs::write(root.join("env/.venv/Lib/x.pth"), "").unwrap();
         let mut budget = MAX_SCAN_ENTRIES;
         assert_eq!(scan_tree(root, &p("pkg"), &mut budget).auto, Some(AutoExec::LeanSource));
         assert_eq!(scan_tree(root, &p("plain"), &mut budget), TreeScan::default());
         assert_eq!(scan_tree(root, &p("lake"), &mut budget).auto, Some(AutoExec::LakeConfig));
+        assert_eq!(scan_tree(root, &p("rproj"), &mut budget).auto, Some(AutoExec::RStartup));
         let env = scan_tree(root, &p("env"), &mut budget);
         assert_eq!(env.protected.map(|(at, p)| (at, p.folder)), Some(("env/.venv".to_owned(), ".venv")));
         // Over the bound: reported, so the gate treats it as auto-executed.
