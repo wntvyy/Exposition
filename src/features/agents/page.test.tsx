@@ -61,6 +61,7 @@ function summary(overrides: Partial<TaskSummary> = {}): TaskSummary {
       consent: "metadataOnly",
       budgets: DEFAULT_BUDGETS,
       provider: { provider: "scripted", model: "claude-opus-5-5", effort: "medium" },
+      approvalMode: "ask",
     },
     usage: {
       turns: 1,
@@ -176,10 +177,12 @@ const approval = {
   tool: "graph_propose",
   title: "Propose 1 graph change",
   detail: "Effects:\n- Suggest: “Claim” depends on “Lemma”\n\nOperations (complete):\n[{\"op\": \"addRelation\"}]",
+  reason: null,
+  forTask: [],
 };
 
 function detail(overrides: Partial<TaskDetail> = {}): TaskDetail {
-  return { summary: summary(), transcript: [], approvals: [approval], graph, ...overrides };
+  return { summary: summary(), transcript: [], approvals: [approval], graph, allowances: [], ...overrides };
 }
 
 beforeEach(() => {

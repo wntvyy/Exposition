@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use exposition_agents::{
-    AgentService, Budgets, ContextConsent, CreateTaskRequest, ExecutionMode, PermissionProfile, ProviderKind, TaskId,
-    TaskScope, TaskStatus, TranscriptItem,
+    AgentService, ApprovalMode, Budgets, ContextConsent, CreateTaskRequest, ExecutionMode, PermissionProfile,
+    ProviderKind, TaskId, TaskScope, TaskStatus, TranscriptItem,
 };
 use exposition_core::path::WorkspacePath;
 use exposition_graph::OperationRef;
@@ -293,6 +293,9 @@ impl AgentReviewer for AgentServiceReviewer {
                 execution: ExecutionMode::Disabled,
                 consent: Some(ContextConsent::ScopeContent),
                 budgets: Some(budgets),
+                // A workflow's agent step keeps its own contract (read only,
+                // no execution) and never runs as Auto.
+                approval_mode: Some(ApprovalMode::Ask),
             })
             .map_err(|e| StepFailure::new(&e.code, e.message))?;
         let task = summary.id.clone();

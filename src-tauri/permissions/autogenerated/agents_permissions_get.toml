@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agents-permissions-get"
+description = "Enables the agents_permissions_get command without any pre-configured scope."
+commands.allow = ["agents_permissions_get"]
+
+[[permission]]
+identifier = "deny-agents-permissions-get"
+description = "Denies the agents_permissions_get command without any pre-configured scope."
+commands.deny = ["agents_permissions_get"]

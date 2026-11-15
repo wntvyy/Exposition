@@ -39,6 +39,7 @@ pub const GRAPH_PROPOSE: &str = "graph_propose";
 pub const WORKFLOW_PROPOSE: &str = "workflow_propose";
 pub const DELETE_PATHS: &str = "delete_paths";
 pub const COPY_PATHS: &str = "copy_paths";
+pub const INSTALL_PACKAGES: &str = "install_packages";
 /// Paths one delete/copy call may name.
 pub const MAX_OP_PATHS: usize = 100;
 
@@ -322,6 +323,27 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "destination": {"type": "string", "description": "An existing project folder to copy into; \"\" for the project root."}
                 },
                 "required": ["paths", "destination"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: INSTALL_PACKAGES,
+            // Non-strict, like the project-operation tools; Rust validates the
+            // input exactly (names and version clauses only).
+            strict: false,
+            description: "Install Python packages into this project's own environment (its .venv or venv; a new \
+                .venv is created from the newest Python on the computer when there is none) so run_python can import \
+                them. Packages come from PyPI as prebuilt wheels; each entry is a name with optional extras and \
+                version clauses (e.g. numpy, pandas>=2.2, scipy==1.14.1); URLs, paths, and options are refused. It \
+                needs the network and runs the installers natively, so it needs the project's setup permission or the \
+                user's approval of the complete plan, and it never runs in the restricted sandbox (which does not use \
+                the project's environment). The result says what was installed or why not.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "packages": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": exposition_research::setup::MAX_PACKAGES, "description": "Requirements, e.g. [\"numpy\", \"pandas>=2.2\"]."}
+                },
+                "required": ["packages"],
                 "additionalProperties": false
             }),
         },
@@ -628,6 +650,16 @@ pub struct CopyPathsInput {
     pub destination: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallPackagesInput {
+    pub packages: Vec<String>,
+    /// The setup plan, made by the application before the gate decides
+    /// (never read from the model: a `plan` field in the input is unknown).
+    #[serde(skip)]
+    pub plan: Option<Box<exposition_research::setup::SetupPlan>>,
+}
+
 /// A validated tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolCall {
@@ -645,6 +677,7 @@ pub enum ToolCall {
     RunCommand(RunCommandInput),
     DeletePaths(DeletePathsInput),
     CopyPaths(CopyPathsInput),
+    InstallPackages(InstallPackagesInput),
 }
 
 /// How a call uses a project path it names.
@@ -711,6 +744,9 @@ pub struct Effects<'a> {
     /// on: they are resolved to graph resource identities and must not be
     /// pending reconciliation or ambiguous in the graph.
     pub targets: bool,
+    /// Installs packages into the project's environment (network, installers
+    /// run natively): needs setup authority.
+    pub setup: bool,
 }
 
 impl ToolCall {
@@ -719,7 +755,7 @@ impl ToolCall {
         use services::ServiceKind;
         let effects = |paths: Vec<(&'a str, PathUse)>, exposes, launch, changes, service, what| {
             let targets = !paths.is_empty();
-            Effects { paths, exposes, launch, changes, service, what, targets }
+            Effects { paths, exposes, launch, changes, service, what, targets, setup: false }
         };
         match self {
             ToolCall::GraphQuery(input) => {
@@ -856,6 +892,19 @@ impl ToolCall {
                     )
                 }
             }
+            // Native installers with network access into the project's
+            // environment; their log comes back.
+            ToolCall::InstallPackages(_) => Effects {
+                setup: true,
+                ..effects(
+                    Vec::new(),
+                    Exposure::Unconfined,
+                    Launch::NativeOnly,
+                    false,
+                    Some(ServiceKind::Setup),
+                    "Package setup",
+                )
+            },
             ToolCall::RunCommand(input) => {
                 let paths = if is_root(&input.working_directory) {
                     Vec::new()
@@ -932,6 +981,15 @@ impl ToolCall {
                 }
                 ToolCall::CopyPaths(parsed)
             }
+            INSTALL_PACKAGES => {
+                let mut parsed: InstallPackagesInput = typed(input)?;
+                if parsed.packages.is_empty() {
+                    return Err("packages must name at least one package".into());
+                }
+                parsed.packages =
+                    exposition_research::setup::validate_packages(&parsed.packages).map_err(|e| e.to_string())?;
+                ToolCall::InstallPackages(parsed)
+            }
             other => return Err(format!("unknown tool {other:?}")),
         })
     }
@@ -1004,7 +1062,7 @@ mod tests {
         }
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 15);
     }
 
     #[test]
@@ -1021,6 +1079,16 @@ mod tests {
         let many: Vec<String> = (0..=MAX_OP_PATHS).map(|i| format!("f{i}")).collect();
         assert!(ToolCall::parse(DELETE_PATHS, &json!({"paths": many})).is_err());
         assert!(ToolCall::parse(COPY_PATHS, &json!({"paths": ["a"]})).is_err());
+        // Package setup: names and version clauses only; the plan never comes from the model.
+        assert!(ToolCall::parse(INSTALL_PACKAGES, &json!({"packages": []})).is_err());
+        for bad in
+            ["https://evil.example/x.whl", "../wheel.whl", "-r requirements.txt", "--index-url=x", "pkg @ file:///x"]
+        {
+            assert!(ToolCall::parse(INSTALL_PACKAGES, &json!({"packages": [bad]})).is_err(), "{bad}");
+        }
+        assert!(ToolCall::parse(INSTALL_PACKAGES, &json!({"packages": ["numpy"], "plan": {}})).is_err());
+        let many: Vec<String> = (0..=exposition_research::setup::MAX_PACKAGES).map(|i| format!("p{i}")).collect();
+        assert!(ToolCall::parse(INSTALL_PACKAGES, &json!({"packages": many})).is_err());
         // Every documented example input validates.
         let ok = [
             (LIST_FILES, json!({"path": "", "recursive": true})),
@@ -1036,6 +1104,7 @@ mod tests {
             (RUN_COMMAND, json!({"program": "latexmk", "args": ["-pdf"], "working_directory": ""})),
             (DELETE_PATHS, json!({"paths": ["notes/old.typ"]})),
             (COPY_PATHS, json!({"paths": ["figures/plot.png"], "destination": ""})),
+            (INSTALL_PACKAGES, json!({"packages": ["numpy", "pandas>=2.2"]})),
             (
                 GRAPH_QUERY,
                 json!({"query": "search", "text": "", "kinds": ["claim"], "entity": "", "path": "", "depth": 1, "limit": 20}),

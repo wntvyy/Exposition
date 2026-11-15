@@ -865,6 +865,7 @@ fn an_agent_deletion_can_be_reverted_after_a_restart() {
         consent: ContextConsent::MetadataOnly,
         budgets: Budgets::default(),
         provider: ProviderChoice { provider: ProviderKind::Scripted, model: "scripted".into(), effort: Effort::Low },
+        approval_mode: exposition_agents::ApprovalMode::Ask,
     };
     store
         .insert_task(&TaskRow {

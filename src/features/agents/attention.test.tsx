@@ -51,6 +51,7 @@ function summary(overrides: Partial<TaskSummary> = {}): TaskSummary {
       consent: "scopeContent",
       budgets: DEFAULT_BUDGETS,
       provider: { provider: "anthropic", model: "claude-opus-5-5", effort: "medium" },
+      approvalMode: "ask",
     },
     usage: {
       turns: 1,
@@ -76,6 +77,8 @@ const approval = {
   tool: "create_file",
   title: "Create notes/new.typ",
   detail: "= Draft",
+  reason: null,
+  forTask: [],
 };
 
 afterEach(() => {

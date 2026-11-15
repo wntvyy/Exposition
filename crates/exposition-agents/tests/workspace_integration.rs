@@ -70,6 +70,7 @@ fn request(root: &std::path::Path) -> CreateTaskRequest {
         execution: ExecutionMode::Disabled,
         consent: None,
         budgets: None,
+        approval_mode: None,
     }
 }
 

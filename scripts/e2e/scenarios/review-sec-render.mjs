@@ -769,7 +769,7 @@ export default async function reviewSecRender({ launchApp, artifactsDir, fixture
       const approvalText = await page.getByTestId("agents-approval").innerText();
       check(approvalText.includes("EDIT<img src=x"), "agents: approval detail shows the markup literally", approvalText.slice(0, 200));
       await sweep("agent approval card", "/k-agent");
-      await panel.getByRole("button", { name: "Approve" }).click();
+      await panel.getByRole("button", { name: "Approve", exact: true }).click();
       await waitForStatus("completed");
       // Open the review (Monaco diff) if offered.
       const review = panel.getByRole("button", { name: /Review/ }).first();

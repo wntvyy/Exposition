@@ -90,6 +90,7 @@ fn request(h: &Harness, permission: PermissionProfile, execution: ExecutionMode)
         execution,
         consent: None,
         budgets: None,
+        approval_mode: None,
     }
 }
 

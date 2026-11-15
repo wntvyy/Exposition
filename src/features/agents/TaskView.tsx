@@ -7,17 +7,9 @@ import type { TaskSummary } from "../../bindings/TaskSummary";
 import { commands } from "../../lib/ipc";
 import { Banner, Button, IconButton, LoadingState, ProgressBar, Section, StatusPill, StatusText, TextArea } from "../../ui/components";
 import { ApprovalCard } from "./ApprovalCard";
-import {
-  asSentence,
-  budgetRows,
-  CONSENT_LABELS,
-  EFFORT_LABELS,
-  EXECUTION_LABELS,
-  isActive,
-  PERMISSION_LABELS,
-  statusLabel,
-} from "./format";
+import { asSentence, budgetRows, EFFORT_LABELS, isActive, specLabels, statusLabel } from "./format";
 import { freshnessLabel, graphSummary } from "./GraphViews";
+import { TaskAllowances } from "./permissions";
 import { agents, useAgents } from "./store";
 import { Draft, TranscriptEntry, useFollowBottom } from "./Transcript";
 
@@ -185,10 +177,11 @@ export function TaskView({ id, variant = "panel" }: { id: TaskId; variant?: "pan
           </Button>
         </div>
       )}
-      <p className="ui-meta">
-        {PERMISSION_LABELS[task.spec.permission]} · {EXECUTION_LABELS[task.spec.execution]} · {CONSENT_LABELS[task.spec.consent]} · {provider}
+      <p className="ui-meta" data-testid="agents-task-spec">
+        {[...specLabels(task.spec), provider].join(" · ")}
         {servedBy}
       </p>
+      <TaskAllowances id={id} />
       <GraphSummaryLine id={id} variant={variant} />
       {!active && <OutcomeBanner status={task.status} />}
       {detail?.approvals.map((approval) => <ApprovalCard key={approval.id} approval={approval} />)}

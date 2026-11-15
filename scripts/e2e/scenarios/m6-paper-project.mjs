@@ -797,7 +797,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
         mark = Date.now();
         assert.match(await approval.innerText(), expected);
         if (expected.source.includes("Python")) await shot("02-agent-approval-light");
-        await agentPanel().getByRole("button", { name: "Approve" }).click();
+        await agentPanel().getByRole("button", { name: "Approve", exact: true }).click();
         await approval.waitFor({ state: "detached", timeout: 15_000 });
       }
       await waitForTaskStatus("completed", LEAN_TIMEOUT);

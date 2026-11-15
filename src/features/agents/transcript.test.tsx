@@ -57,12 +57,39 @@ describe("transcript entries", () => {
     expect(container.querySelector("[role=log]")).toBeNull(); // the log role belongs to the transcript (TaskView)
   });
 
+  it("says quietly how a tool call that ran was authorized, and nothing for reads", () => {
+    const call = (id: string, authorizedBy: Extract<TranscriptItem, { kind: "toolCall" }>["authorizedBy"]): TranscriptItem => ({
+      kind: "toolCall",
+      seq: 1,
+      toolUseId: id,
+      name: "run_python",
+      input: { code: "print(1)" },
+      status: "succeeded",
+      result: "{}",
+      isError: false,
+      authorizedBy,
+    });
+    const labels = (item: TranscriptItem) => {
+      const { container, unmount } = render(<TranscriptEntry item={item} />);
+      const text = container.querySelector("[data-testid=agents-tool-authorization]")?.textContent ?? null;
+      unmount();
+      return text;
+    };
+    expect(labels(call("a", { kind: "approved", forTask: false }))).toBe("Approved by you");
+    expect(labels(call("b", { kind: "approved", forTask: true }))).toBe("Approved by you for this task");
+    expect(labels(call("c", { kind: "taskAllowance", kinds: ["nativeCode"] }))).toBe("Allowed for this task");
+    expect(labels(call("d", { kind: "projectPermissions", version: 4 }))).toBe("Auto: project permissions");
+    expect(labels(call("e", { kind: "taskSettings" }))).toBe("Allowed by task settings");
+    expect(labels(call("f", { kind: "notRequired" }))).toBeNull();
+    expect(labels(call("g", null))).toBeNull();
+  });
+
   it("keeps tool payloads, results, user text, and reasoning as plain text", () => {
     const markdown = "**bold** <script>x</script> [l](javascript:alert(1)) $x$";
     const items: TranscriptItem[] = [
       { kind: "userText", seq: 1, text: markdown },
       { kind: "thinking", seq: 2, text: markdown },
-      { kind: "toolCall", seq: 3, toolUseId: "t", name: "read_file", input: { path: "a.md", note: markdown }, status: "succeeded", result: markdown, isError: false },
+      { kind: "toolCall", seq: 3, toolUseId: "t", name: "read_file", input: { path: "a.md", note: markdown }, status: "succeeded", result: markdown, isError: false, authorizedBy: null },
     ];
     const { container } = render(
       <>

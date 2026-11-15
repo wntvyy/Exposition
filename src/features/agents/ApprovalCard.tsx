@@ -1,10 +1,14 @@
-// One pending approval: what will run or change, complete, with Approve / Decline.
-import { Check, X } from "lucide-react";
+// One pending approval: what will run or change, complete, with Approve /
+// Approve for this task (repeatable kinds only) / Decline.
+import { Check, CheckCheck, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { ApprovalRequest } from "../../bindings/ApprovalRequest";
+import type { ApprovalScope } from "../../bindings/ApprovalScope";
 import { commands } from "../../lib/ipc";
 import { Banner, Button } from "../../ui/components";
+import { forTaskSentence } from "./format";
+import { agentPermissions } from "./permissionsIpc";
 import { agents } from "./store";
 
 /** Size of an approval payload, so the user knows how much there is to review. */
@@ -39,15 +43,25 @@ export function ApprovalCard({ approval }: { approval: ApprovalRequest }) {
   // A payload that scrolls is a tab stop, so it can be read with the keyboard;
   // a short one is not, and Tab goes straight to Approve.
   const [payloadRef, scrolls] = useOverflows(approval.detail);
-  async function resolve(approved: boolean) {
+  const repeatable = approval.forTask.length > 0;
+  async function resolve(approved: boolean, scope: ApprovalScope = "once") {
     setBusy(true);
-    await agents.run(() => commands.agentsApprovalResolve(approval.taskId, approval.id, approved));
+    await agents.run(() =>
+      scope === "task"
+        ? agentPermissions.resolveApproval(approval.taskId, approval.id, approved, scope)
+        : commands.agentsApprovalResolve(approval.taskId, approval.id, approved),
+    );
     setBusy(false);
   }
   return (
-    <section className="agents-stack agents-approval" aria-label={`Approval needed: ${approval.title}`} data-testid="agents-approval">
+    <section
+      className="agents-stack agents-approval"
+      aria-label={`Approval needed: ${approval.title}`}
+      data-testid="agents-approval"
+      data-repeatable={repeatable ? "true" : "false"}
+    >
       <Banner tone="warning" title={approval.title}>
-        Nothing is applied until you approve. Review the complete content below.
+        {approval.reason ? `${approval.reason} ` : ""}Nothing is applied until you approve. Review the complete content below.
       </Banner>
       <p className="ui-meta" data-testid="agents-approval-size">
         {payloadSize(approval.detail)} · complete, nothing omitted
@@ -66,10 +80,27 @@ export function ApprovalCard({ approval }: { approval: ApprovalRequest }) {
         <Button size="sm" variant="primary" icon={Check} isDisabled={busy} onPress={() => void resolve(true)} data-testid="agents-approve">
           Approve
         </Button>
-        <Button size="sm" variant="secondary" icon={X} isDisabled={busy} onPress={() => void resolve(false)}>
+        {repeatable && (
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={CheckCheck}
+            isDisabled={busy}
+            onPress={() => void resolve(true, "task")}
+            data-testid="agents-approve-task"
+          >
+            Approve for this task
+          </Button>
+        )}
+        <Button size="sm" variant="secondary" icon={X} isDisabled={busy} onPress={() => void resolve(false)} data-testid="agents-decline">
           Decline
         </Button>
       </div>
+      {repeatable && (
+        <p className="ui-meta" data-testid="agents-approval-scope">
+          {forTaskSentence(approval.forTask)}
+        </p>
+      )}
     </section>
   );
 }

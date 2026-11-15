@@ -46,9 +46,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::scope;
 use super::services::{
-    BuildRequest, CommandRequest, LatexEngine, LeanRequest, PythonRequest, ServiceError, ServiceKind, ToolServices,
+    BuildRequest, CommandRequest, LatexEngine, LeanRequest, PythonRequest, ServiceError, ServiceKind,
+    SetupInstallRequest, ToolServices,
 };
 use crate::model::TaskScope;
+use exposition_research::setup::{SetupPlan, SetupRequest, SetupState};
 
 /// Default wall-clock limit for one agent-launched process.
 const JOB_TIMEOUT_MS: u64 = 10 * 60 * 1000;
@@ -415,12 +417,17 @@ impl AppToolServices {
         let owner = SessionOwner::Agent { task_id: request.task_id.clone() };
         let session_id = self.agent_session(&research, &owner).await?;
         let mut events = research.subscribe();
+        // The run's provenance records how the agent's call was authorized.
         let queued = research
-            .execute(ExecuteRequest {
-                session_id: session_id.clone(),
-                source: RunSource::Input { code: request.code },
-                requester: owner,
-            })
+            .execute_authorized(
+                ExecuteRequest {
+                    session_id: session_id.clone(),
+                    source: RunSource::Input { code: request.code },
+                    requester: owner,
+                },
+                &[],
+                request.authorization.clone(),
+            )
             .map_err(|e| ServiceError::Failed(e.to_string()))?;
         let run_id = queued.id.0.clone();
         let finished: RunSummary = loop {
@@ -540,6 +547,7 @@ impl ToolServices for AppToolServices {
             ServiceKind::Typesetting => self.typesetting.is_some() || self.tex.is_some(),
             ServiceKind::Lean => self.lean.is_some(),
             ServiceKind::ProjectOps => self.project_operations().is_some(),
+            ServiceKind::Setup => self.research.is_some(),
         }
     }
 
@@ -677,8 +685,116 @@ impl ToolServices for AppToolServices {
     async fn task_finished(&self, task_id: &str) {
         let Some(research) = &self.research else { return };
         let owner = SessionOwner::Agent { task_id: task_id.to_owned() };
+        // A package setup the task started stops with it.
+        if let Some(status) = research.setup_status()
+            && status.owner == owner
+            && status.state == SetupState::Running
+        {
+            research.setup_cancel(&status.id);
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), research.setup_wait(&status.id)).await;
+        }
         for session in research.sessions().into_iter().filter(|s| s.owner == owner) {
             let _ = research.shutdown(&session.id).await;
         }
     }
+
+    async fn setup_plan(&self, root: &Path, packages: &[String]) -> Result<SetupPlan, ServiceError> {
+        let research = self.research.as_ref().ok_or(ServiceError::NotAvailable(ServiceKind::Setup))?;
+        self.sync_research_workspace(research, root)?;
+        let coded = |e: exposition_research::ResearchError| super::services::research_outcome(&e.code(), e.to_string());
+        let report = research.environments(false).await.map_err(coded)?;
+        let python: Vec<_> = report.runtimes.iter().filter(|r| r.language == RuntimeLanguage::Python).collect();
+        // Into the project's own environment when there is one; otherwise a
+        // new .venv from the newest Python installed on this computer.
+        let request = match python.iter().find(|r| r.project_folder.is_some()) {
+            Some(project) => {
+                SetupRequest::InstallPackages { environment: project.id.clone(), packages: packages.to_vec() }
+            }
+            None => {
+                let base = python
+                    .iter()
+                    .filter(|r| r.project_folder.is_none() && r.executable.is_some())
+                    .max_by_key(|r| version_key(r.version.as_deref()))
+                    .ok_or_else(|| {
+                        super::services::research_outcome(
+                            "setup.unsupported",
+                            "No Python is installed on this computer to create the project environment from.",
+                        )
+                    })?;
+                SetupRequest::CreateEnvironment { base_environment: base.id.clone(), packages: packages.to_vec() }
+            }
+        };
+        research.setup_plan(root, &request).await.map_err(coded)
+    }
+
+    async fn install_packages(
+        &self,
+        request: SetupInstallRequest,
+        cancel: CancellationToken,
+    ) -> Result<Value, ServiceError> {
+        let research = self.research.as_ref().ok_or(ServiceError::NotAvailable(ServiceKind::Setup))?;
+        self.sync_research_workspace(research, &request.root)?;
+        let coded = |e: exposition_research::ResearchError| super::services::research_outcome(&e.code(), e.to_string());
+        let owner = SessionOwner::Agent { task_id: request.task_id.clone() };
+        // Starting re-plans: a changed project or environment refuses it
+        // (`setup.planStale`), so exactly the approved plan runs.
+        let started = research.setup_start(&request.plan, owner).await.map_err(coded)?;
+        let status = tokio::select! {
+            status = research.setup_wait(&started.id) => status,
+            _ = cancel.cancelled() => {
+                research.setup_cancel(&started.id);
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(10), research.setup_wait(&started.id)).await;
+                return Err(ServiceError::Canceled);
+            }
+        };
+        let status =
+            status.ok_or_else(|| ServiceError::Failed("the setup ended without reporting its outcome".into()))?;
+        let value = json!({
+            "state": status.state,
+            "target": status.plan.target,
+            "createdEnvironment": status.plan.creates_environment,
+            "packages": status.plan.packages,
+            "environment": status.environment_id,
+            "ready": status.ready,
+            "removed": status.removed,
+            "message": status.message,
+            "log": status.log.iter().rev().take(40).rev().collect::<Vec<_>>(),
+        });
+        match status.state {
+            SetupState::Succeeded => Ok(value),
+            SetupState::Canceled => Err(ServiceError::Canceled),
+            _ => Err(ServiceError::Outcome(value)),
+        }
+    }
+
+    fn task_leftovers(&self, task_id: &str) -> Vec<String> {
+        let Some(research) = &self.research else { return Vec::new() };
+        let owner = SessionOwner::Agent { task_id: task_id.to_owned() };
+        let setup = research
+            .setup_status()
+            .filter(|status| status.owner == owner && status.state == SetupState::Running)
+            .map(|status| format!("its package setup ({}) is still running", status.plan.target_name));
+        research
+            .sessions()
+            .into_iter()
+            .filter(|s| {
+                s.owner == owner
+                    && !matches!(
+                        s.state,
+                        SessionState::Stopped | SessionState::Detached { .. } | SessionState::Crashed { .. }
+                    )
+            })
+            .map(|s| format!("its research session {} has not stopped", s.id))
+            .chain(setup)
+            .collect()
+    }
+}
+
+/// Sort key of a version string ("3.12.10" → [3, 12, 10]); unknown sorts first.
+fn version_key(version: Option<&str>) -> Vec<u64> {
+    version
+        .map(|v| {
+            v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect()
+        })
+        .unwrap_or_default()
 }

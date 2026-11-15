@@ -231,8 +231,12 @@ pub fn operations(spec: &TaskSpec, services: &dyn ToolServices) -> Vec<ContextOp
     };
     let content = spec.consent == ContextConsent::ScopeContent;
     let whole = spec.scope == TaskScope::Workspace;
+    let auto = spec.approval_mode == crate::model::ApprovalMode::Auto;
     let changes = match spec.permission {
         PermissionProfile::ReadOnly => (false, "refused: the task is read-only"),
+        _ if auto => {
+            (true, "Auto: applied directly when the project's permissions cover it; otherwise the user is asked")
+        }
         PermissionProfile::ReviewEdits => (true, "each change waits for the user's approval"),
         PermissionProfile::AutoApply => (true, "applied directly; the user reviews afterwards"),
     };
@@ -240,6 +244,9 @@ pub fn operations(spec: &TaskSpec, services: &dyn ToolServices) -> Vec<ContextOp
         (_, PermissionProfile::ReadOnly) | (ExecutionMode::Disabled, _) => (false, "refused: execution is disabled"),
         _ if !whole => (false, "refused: needs a task scoped to the whole project"),
         _ if !content => (false, "refused: needs content consent"),
+        (ExecutionMode::ApproveEach, _) if auto => {
+            (true, "Auto: runs when the project's permissions cover it; otherwise the user is asked")
+        }
         (ExecutionMode::ApproveEach, _) => (true, "each launch waits for the user's approval (runs natively)"),
         (ExecutionMode::Restricted, _) => match services.restricted_backend() {
             Some(_) => (true, "unattended, inside the restricted backend only"),
@@ -261,6 +268,10 @@ pub fn operations(spec: &TaskSpec, services: &dyn ToolServices) -> Vec<ContextOp
             changes.0,
             match spec.permission {
                 PermissionProfile::ReadOnly => "refused: the task is read-only",
+                _ if auto => {
+                    "Auto: applied directly when the project's permissions cover it, otherwise the user is asked; \
+                     relations you add are suggestions"
+                }
                 PermissionProfile::ReviewEdits => {
                     "each change waits for the user's approval; relations you add are suggestions"
                 }
@@ -278,6 +289,10 @@ pub fn operations(spec: &TaskSpec, services: &dyn ToolServices) -> Vec<ContextOp
             match spec.permission {
                 PermissionProfile::ReadOnly => "refused: the task is read-only",
                 _ if !whole => "refused: needs a task scoped to the whole project",
+                _ if auto => {
+                    "Auto: saves a workflow draft when the project's permissions cover changes, otherwise after the \
+                     user's approval; saving never runs it (only the user runs a workflow, from a reviewed run plan)"
+                }
                 PermissionProfile::ReviewEdits => {
                     "saves a workflow draft after the user's approval; saving never runs it (only the user runs a workflow, from a reviewed run plan)"
                 }
@@ -294,6 +309,18 @@ pub fn operations(spec: &TaskSpec, services: &dyn ToolServices) -> Vec<ContextOp
         op("run_python", processes.0, processes.1),
         op("check_lean", processes.0 && spec.execution != ExecutionMode::Restricted, processes.1),
         op("run_command", processes.0, processes.1),
+        op(
+            "install_packages",
+            processes.0 && spec.execution != ExecutionMode::Restricted,
+            match spec.execution {
+                ExecutionMode::Restricted => "refused: the restricted sandbox does not use the project's environment",
+                _ if !processes.0 => processes.1,
+                _ if auto => "Auto: installs when the project's permissions allow setup; otherwise the user is asked",
+                _ => {
+                    "each installation waits for the user's approval of the complete plan (runs natively, needs network)"
+                }
+            },
+        ),
     ]
 }
 

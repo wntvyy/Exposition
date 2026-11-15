@@ -37,7 +37,11 @@ use super::{
 };
 use crate::graph::propose::Prepared;
 use crate::graph::{GraphEnv, TargetUse};
-use crate::model::{ContextConsent, ExecutionMode, PermissionProfile, TaskId, TaskScope, TaskSpec};
+use crate::model::{
+    AllowanceKind, ApprovalMode, AuthorizedBy, ContextConsent, ExecutionMode, PermissionProfile, TaskId, TaskScope,
+    TaskSpec,
+};
+use crate::permissions::{CodeAccess, FilesAccess, ProjectPermissions};
 use crate::review::{self, EditRecord};
 use crate::store::Store;
 use crate::tools;
@@ -89,6 +93,53 @@ pub struct ToolEnv<'a> {
     /// service is present); every call then needs a usable graph and its
     /// targets resolve through it.
     pub graph: Option<GraphEnv<'a>>,
+    /// The live authority beyond the task's own settings: the project's
+    /// permissions (Auto) and the task's allowances, read when the call is
+    /// decided and again immediately before it runs.
+    pub authority: Authority,
+}
+
+/// What authorizes calls beyond the task's fixed settings, as read now.
+/// Only the user changes it (composer, approval card, Settings); nothing a
+/// model sends reaches it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Authority {
+    /// The project's permissions (used by Auto tasks); `None`: no record.
+    pub project: Option<ProjectPermissions>,
+    /// What the user approved for the rest of this task.
+    pub allowances: Allowances,
+}
+
+/// A task's allowances ("Approve for this task") and their version, which
+/// changes with every grant, revocation, or clearing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Allowances {
+    pub version: u64,
+    pub kinds: Vec<AllowanceKind>,
+}
+
+impl Allowances {
+    pub fn has(&self, kind: AllowanceKind) -> bool {
+        self.kinds.contains(&kind)
+    }
+}
+
+/// The authority an authorization was issued under. A call runs only while
+/// it is unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Basis {
+    /// Auto: the project's permission version (0 without a record); Ask: not used.
+    project_version: Option<u64>,
+    allowance_version: u64,
+}
+
+impl Authority {
+    fn basis(&self, mode: ApprovalMode) -> Basis {
+        Basis {
+            project_version: (mode == ApprovalMode::Auto).then(|| self.project.map_or(0, |p| p.version)),
+            allowance_version: self.allowances.version,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -178,6 +229,15 @@ pub mod codes {
     pub const NEEDS_DECISION: &str = "agents.needsDecision";
     /// Every item of a deletion or copy was refused by the project operations.
     pub const OPERATION_REFUSED: &str = "agents.operationRefused";
+    /// The project's permissions or the task's allowances changed between
+    /// the decision (or the approval) and the moment the call would run.
+    pub const PERMISSIONS_CHANGED: &str = "agents.permissionsChanged";
+    /// An Auto task needs the project's permissions, and the project has none.
+    pub const PERMISSIONS_REQUIRED: &str = "agents.permissionsRequired";
+    /// "Approve for this task" on an approval that can only be given once.
+    pub const NOT_REPEATABLE: &str = "agents.notRepeatable";
+    /// Project permissions that cannot be granted as asked.
+    pub const INVALID_PERMISSIONS: &str = "agents.invalidPermissions";
 }
 
 /// A refusal with its stable code.
@@ -203,6 +263,12 @@ pub struct Authorization {
     workflow: Option<Box<crate::graph::workflow::PreparedWorkflow>>,
     /// A project operation (delete/copy) planned (and shown) at the gate.
     project_op: Option<Box<PreparedOp>>,
+    /// A package setup planned (and shown) before the gate.
+    setup: Option<Box<exposition_research::setup::SetupPlan>>,
+    /// The project permission and allowance versions it was issued under.
+    basis: Basis,
+    /// How it is authorized (recorded with the call).
+    authorized_by: AuthorizedBy,
 }
 
 /// A deletion or copy planned by the application's project operations at
@@ -224,6 +290,20 @@ impl Authorization {
     pub fn proposal(&self) -> Option<&Prepared> {
         self.proposal.as_deref()
     }
+
+    /// How the call is authorized.
+    pub fn authorized_by(&self) -> &AuthorizedBy {
+        &self.authorized_by
+    }
+
+    /// The user approved the call (after [`confirm`]); with `for_task`, the
+    /// allowances the approval granted, now at that allowance version.
+    pub(crate) fn approve(&mut self, for_task: Option<u64>) {
+        self.authorized_by = AuthorizedBy::Approved { for_task: for_task.is_some() };
+        if let Some(version) = for_task {
+            self.basis.allowance_version = version;
+        }
+    }
 }
 
 /// An artifact insertion as planned when it was shown for approval.
@@ -243,6 +323,10 @@ pub enum Gate {
     NeedsApproval {
         title: String,
         detail: String,
+        /// Why it asks when the task's settings do not make that obvious.
+        reason: Option<String>,
+        /// What "Approve for this task" would allow (empty: once only).
+        for_task: Vec<AllowanceKind>,
         authorization: Authorization,
     },
     Refused(ToolOutput),
@@ -299,7 +383,8 @@ fn check_path(env: &ToolEnv<'_>, raw: &str, path_use: PathUse) -> Result<(), Too
     checked.map_err(|e| refusal(e.code(), e.message(scope)))
 }
 
-/// Decide whether `call` may run, and whether it needs the user's approval.
+/// Decide whether `call` may run, and whether it needs the user's approval:
+/// Allowed, NeedsApproval, or Refused (with a stable code).
 ///
 /// The rules apply to the call's declared [`Effects`], in this order:
 /// 1. the task's folder is the open project (calls act only on their own project);
@@ -309,13 +394,21 @@ fn check_path(env: &ToolEnv<'_>, raw: &str, path_use: PathUse) -> Result<(), Too
 ///    consent; content beyond the scope (processes, TeX, Lean) needs a task
 ///    scoped to the whole project as well;
 /// 5. processes never start with execution disabled or read-only, and
-///    native-only tools never start in a restricted-only task;
+///    native-only tools never start in a restricted-only task (in Auto these
+///    task settings are the ceiling: they prohibit, never ask);
 /// 6. the service exists;
-/// 7. tool-specific preparation (an inserted artifact's own scope check and
-///    the exact text shown for approval);
-/// 8. restricted launches need the restricted backend (never downgraded);
-///    native launches need a trusted folder and the user's approval of the
-///    complete payload; changes in a review-edits task need approval too.
+/// 7. a change that puts text into a Lean file the Lean server elaborates
+///    (a trusted folder) is native execution too: it needs native authority
+///    as well as change authority (D7);
+/// 8. authority: Ask — the task's settings and its allowances; Auto — the
+///    project's permissions, the task's allowances, and one approval for a
+///    legitimate expansion. Restricted launches need the restricted backend
+///    (never downgraded, never asked around); native launches need a trusted
+///    folder; consequential project operations always ask (once, never
+///    repeatable), or are refused in Ask tasks that apply changes directly;
+/// 9. tool-specific preparation (an inserted artifact's own scope check and
+///    the exact text shown for approval, graph and workflow validation, the
+///    project-operation plan).
 pub fn gate(call: &ToolCall, env: &ToolEnv<'_>) -> Gate {
     match decide(call, env) {
         Ok(gate) => gate,
@@ -323,7 +416,348 @@ pub fn gate(call: &ToolCall, env: &ToolEnv<'_>) -> Gate {
     }
 }
 
-fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
+/// Why a call needs the user now, and what approving it for the task allows.
+#[derive(Default)]
+struct Asks {
+    reasons: Vec<String>,
+    /// Kinds "Approve for this task" would allow.
+    kinds: Vec<AllowanceKind>,
+    /// Something only a one-off approval can cover.
+    once_only: bool,
+    asked: bool,
+}
+
+impl Asks {
+    fn ask(&mut self, reason: Option<String>, kind: Option<AllowanceKind>) {
+        self.asked = true;
+        if let Some(reason) = reason
+            && !self.reasons.contains(&reason)
+        {
+            self.reasons.push(reason);
+        }
+        match kind {
+            Some(kind) if !self.kinds.contains(&kind) => self.kinds.push(kind),
+            Some(_) => {}
+            None => self.once_only = true,
+        }
+    }
+
+    fn for_task(&self) -> Vec<AllowanceKind> {
+        if self.once_only {
+            return Vec::new();
+        }
+        let mut kinds = self.kinds.clone();
+        kinds.sort();
+        kinds
+    }
+
+    fn reason(&self) -> Option<String> {
+        (!self.reasons.is_empty()).then(|| self.reasons.join(" "))
+    }
+}
+
+/// What covered the parts of a call that needed authority.
+#[derive(Default)]
+struct Covered {
+    settings: bool,
+    project: bool,
+    allowances: Vec<AllowanceKind>,
+}
+
+impl Covered {
+    fn authorized_by(&self, authority: &Authority) -> AuthorizedBy {
+        if !self.allowances.is_empty() {
+            let mut kinds = self.allowances.clone();
+            kinds.sort();
+            kinds.dedup();
+            AuthorizedBy::TaskAllowance { kinds }
+        } else if self.project {
+            AuthorizedBy::ProjectPermissions { version: authority.project.map_or(0, |p| p.version) }
+        } else if self.settings {
+            AuthorizedBy::TaskSettings
+        } else {
+            AuthorizedBy::NotRequired
+        }
+    }
+}
+
+/// Covered by an allowance, or asked for (repeatable as `kind`).
+fn covered_or_ask(
+    env: &ToolEnv<'_>,
+    kind: AllowanceKind,
+    reason: Option<String>,
+    asks: &mut Asks,
+    covered: &mut Covered,
+) {
+    if env.authority.allowances.has(kind) {
+        covered.allowances.push(kind);
+    } else {
+        asks.ask(reason, Some(kind));
+    }
+}
+
+const NO_PROJECT_PERMISSIONS: &str = "This project has no Auto permissions.";
+
+/// The authority a document or file change needs.
+fn change_authority(env: &ToolEnv<'_>, asks: &mut Asks, covered: &mut Covered) {
+    let spec = env.spec;
+    match spec.approval_mode {
+        ApprovalMode::Ask => match spec.permission {
+            PermissionProfile::ReviewEdits => covered_or_ask(env, AllowanceKind::DocumentChanges, None, asks, covered),
+            // Read-only tasks were refused before; changes apply directly.
+            PermissionProfile::AutoApply | PermissionProfile::ReadOnly => covered.settings = true,
+        },
+        ApprovalMode::Auto => match env.authority.project {
+            Some(project) if project.files == FilesAccess::Edit => covered.project = true,
+            project => {
+                let reason = match project {
+                    Some(_) => "Changing files is beyond this project's permissions (Files: off).",
+                    None => NO_PROJECT_PERMISSIONS,
+                };
+                covered_or_ask(env, AllowanceKind::DocumentChanges, Some(reason.to_owned()), asks, covered);
+            }
+        },
+    }
+}
+
+fn code_reason(project: Option<&ProjectPermissions>, launch: Launch, what: &str) -> String {
+    match project.map(|p| p.code) {
+        None => NO_PROJECT_PERMISSIONS.to_owned(),
+        Some(CodeAccess::Restricted) if launch == Launch::NativeOnly => format!(
+            "{what} runs only natively on this computer, which is beyond this project's permissions (Code: \
+             restricted)."
+        ),
+        Some(CodeAccess::Restricted) => {
+            "Running code natively is beyond this project's permissions (Code: restricted).".to_owned()
+        }
+        Some(CodeAccess::Off) | Some(CodeAccess::Native) => {
+            "Running code is beyond this project's permissions (Code: off).".to_owned()
+        }
+    }
+}
+
+fn restricted_unavailable() -> ToolOutput {
+    refusal(
+        codes::RESTRICTED_UNAVAILABLE,
+        "This task only allows unattended execution inside the restricted (container) backend, which is not \
+         available. Exposition never falls back to running it natively; the user can choose per-command approval \
+         instead.",
+    )
+}
+
+/// The policy a process launch runs with, and the authority it needs. The
+/// task's contract (read-only, execution disabled, native-only tools in a
+/// restricted task) was checked before.
+fn launch_authority(
+    env: &ToolEnv<'_>,
+    launch: Launch,
+    what: &str,
+    asks: &mut Asks,
+    covered: &mut Covered,
+) -> Result<ExecutionPolicy, ToolOutput> {
+    let spec = env.spec;
+    let restricted = || match env.services.restricted_backend() {
+        Some(backend) => Ok(ExecutionPolicy::Restricted { backend, image_id: None }),
+        None => Err(restricted_unavailable()),
+    };
+    let native = || match env.services.native_refusal(env.files.root()) {
+        None => Ok(ExecutionPolicy::TrustedNative),
+        Some(reason) => Err(ToolOutput::error_with(
+            reason.clone(),
+            json!({"code": codes::NATIVE_REFUSED, "status": "refused", "reason": reason}),
+        )),
+    };
+    match (spec.approval_mode, spec.execution) {
+        (_, ExecutionMode::Disabled) => Err(execution_disabled()),
+        (ApprovalMode::Ask, ExecutionMode::Restricted) => {
+            let policy = restricted()?;
+            covered.settings = true;
+            Ok(policy)
+        }
+        (ApprovalMode::Ask, ExecutionMode::ApproveEach) => {
+            let policy = native()?;
+            covered_or_ask(env, AllowanceKind::NativeCode, None, asks, covered);
+            Ok(policy)
+        }
+        // Auto within a restricted ceiling: restricted only (native-only
+        // tools were refused by the contract).
+        (ApprovalMode::Auto, ExecutionMode::Restricted) => {
+            let policy = restricted()?;
+            match env.authority.project {
+                Some(p) if p.code >= CodeAccess::Restricted => covered.project = true,
+                project => asks.ask(Some(code_reason(project.as_ref(), launch, what)), None),
+            }
+            Ok(policy)
+        }
+        (ApprovalMode::Auto, ExecutionMode::ApproveEach) => {
+            let project = env.authority.project;
+            match project.map(|p| p.code) {
+                Some(CodeAccess::Native) => {
+                    let policy = native()?;
+                    covered.project = true;
+                    Ok(policy)
+                }
+                Some(CodeAccess::Restricted) if launch == Launch::NativeOrRestricted => {
+                    let policy = restricted()?;
+                    covered.project = true;
+                    Ok(policy)
+                }
+                // A legitimate expansion: native, asked once (repeatable).
+                _ => {
+                    let policy = native()?;
+                    let reason = code_reason(project.as_ref(), launch, what);
+                    covered_or_ask(env, AllowanceKind::NativeCode, Some(reason), asks, covered);
+                    Ok(policy)
+                }
+            }
+        }
+    }
+}
+
+/// The authority a package setup needs: setup authority (Ask: the user's
+/// approval of the complete plan, or "for this task"; Auto: the project's
+/// setup permission), natively in a trusted folder. The task's contract
+/// (read only, execution disabled, restricted only) was checked before.
+fn setup_authority(env: &ToolEnv<'_>, asks: &mut Asks, covered: &mut Covered) -> Result<ExecutionPolicy, ToolOutput> {
+    if let Some(reason) = env.services.native_refusal(env.files.root()) {
+        return Err(ToolOutput::error_with(
+            reason.clone(),
+            json!({"code": codes::NATIVE_REFUSED, "status": "refused", "reason": reason}),
+        ));
+    }
+    match (env.spec.approval_mode, env.authority.project) {
+        (ApprovalMode::Auto, Some(p)) if p.setup && p.code == CodeAccess::Native => covered.project = true,
+        (ApprovalMode::Auto, project) => {
+            let reason = match project {
+                Some(_) => "Installing packages is beyond this project's permissions (Setup: off).",
+                None => NO_PROJECT_PERMISSIONS,
+            };
+            covered_or_ask(env, AllowanceKind::PackageSetup, Some(reason.to_owned()), asks, covered);
+        }
+        (ApprovalMode::Ask, _) => covered_or_ask(env, AllowanceKind::PackageSetup, None, asks, covered),
+    }
+    Ok(ExecutionPolicy::TrustedNative)
+}
+
+/// Title and complete detail of a package setup: the plan's summary, target,
+/// index, packages, and every command exactly as it runs.
+fn describe_setup(plan: &exposition_research::setup::SetupPlan) -> (String, String) {
+    let title = if plan.creates_environment {
+        format!("Create {} and install packages", plan.target_name)
+    } else {
+        format!("Install packages into {}", plan.target_name)
+    };
+    let mut detail = format!(
+        "{}\n\nTarget environment: {}\nPackage index: {}\nPackages: {}\n",
+        shown(&plan.summary),
+        shown(&plan.target),
+        shown(&plan.index_url),
+        shown(&plan.packages.join(" "))
+    );
+    if let Some(base) = &plan.base_interpreter {
+        detail.push_str(&format!("Created from: {}\n", shown(base)));
+    }
+    detail.push_str(
+        "Needs network; installs into the project environment. Packages run code when they are imported later.\n",
+    );
+    if plan.removes_unfinished {
+        detail.push_str("An unfinished environment an earlier setup by Exposition left there is removed first.\n");
+    }
+    detail.push_str("\nCommands, exactly as they run (no shell):\n");
+    for (i, step) in plan.steps.iter().enumerate() {
+        let args: Vec<String> = step.args.iter().map(|a| format!("{a:?}")).collect();
+        detail.push_str(&format!(
+            "{}. {}{}\n   {:?} [{}]\n",
+            i + 1,
+            shown(&step.label),
+            if step.network { " (network)" } else { "" },
+            shown(&step.program),
+            shown(&args.join(", "))
+        ));
+    }
+    (title, detail.trim_end().to_owned())
+}
+
+/// A change that puts text into a Lean source the live Lean server can
+/// elaborate: an open `.lean` document (requested or resolved name) in a
+/// folder trusted for native execution, where the Lean service runs the
+/// project's toolchain on the unsaved text.
+fn lean_target(call: &ToolCall, env: &ToolEnv<'_>) -> bool {
+    let raw = match call {
+        ToolCall::EditDocument(input) => &input.path,
+        ToolCall::CreateFile(input) => &input.path,
+        ToolCall::InsertArtifact(input) => &input.path,
+        _ => return false,
+    };
+    let is_lean = |p: &WorkspacePath| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lean"));
+    let Ok(requested) = WorkspacePath::parse(raw.trim()) else { return false };
+    let resolved = scope::resolve(env.files.root(), &requested).ok().flatten();
+    (is_lean(&requested) || resolved.as_ref().is_some_and(is_lean))
+        && env.services.native_refusal(env.files.root()).is_none()
+}
+
+const LEAN_NATIVE: &str = "Lean elaborates the text of an open Lean file natively as soon as it changes: code in it \
+     (for example #eval) runs on this computer with your account's privileges.";
+
+/// D7: the task's contract for a Lean-file change.
+fn lean_contract(spec: &TaskSpec) -> Result<(), ToolOutput> {
+    match spec.execution {
+        ExecutionMode::Disabled => Err(refusal(
+            codes::EXECUTION_DISABLED,
+            format!(
+                "{LEAN_NATIVE} Process execution is disabled for this task by the user, so nothing was changed. \
+                 Describe the change instead."
+            ),
+        )),
+        ExecutionMode::Restricted => Err(refusal(
+            codes::NATIVE_NOT_ALLOWED,
+            format!(
+                "{LEAN_NATIVE} That runs natively, which this task does not allow (restricted sandbox only), so \
+                 nothing was changed. Describe the change instead."
+            ),
+        )),
+        ExecutionMode::ApproveEach => Ok(()),
+    }
+}
+
+/// D7: the native authority a Lean-file change needs besides change authority.
+fn lean_authority(env: &ToolEnv<'_>, asks: &mut Asks, covered: &mut Covered) {
+    let reason = "Lean elaborates this file's text natively as soon as it changes.";
+    match (env.spec.approval_mode, env.authority.project) {
+        (ApprovalMode::Auto, Some(p)) if p.code == CodeAccess::Native => covered.project = true,
+        (ApprovalMode::Auto, project) => {
+            let beyond = match project {
+                Some(p) => format!("{reason} Native code is beyond this project's permissions (Code: {}).", {
+                    crate::permissions::code_label(p.code)
+                }),
+                None => format!("{reason} {NO_PROJECT_PERMISSIONS}"),
+            };
+            covered_or_ask(env, AllowanceKind::NativeCode, Some(beyond), asks, covered);
+        }
+        (ApprovalMode::Ask, _) => {
+            covered_or_ask(env, AllowanceKind::NativeCode, Some(reason.to_owned()), asks, covered)
+        }
+    }
+}
+
+/// The rules that need nothing but the call and the task (rules 1–6): the
+/// project, read only, paths, consent and scope, the execution contract, the
+/// service, the project graph. The service checks them before it plans a
+/// package setup, so nothing is planned for a call that is refused anyway.
+pub fn precheck(call: &ToolCall, env: &ToolEnv<'_>) -> Result<(), ToolOutput> {
+    contract(call, env)
+}
+
+fn setup_refused_in_restricted() -> ToolOutput {
+    refusal(
+        codes::NATIVE_NOT_ALLOWED,
+        "Package setup installs into the project's own environment with installers that run natively; the restricted \
+         container does not use that environment, and this task allows only the restricted sandbox. Nothing was \
+         installed.",
+    )
+}
+
+fn contract(call: &ToolCall, env: &ToolEnv<'_>) -> Result<(), ToolOutput> {
     let spec = env.spec;
     let root = env.files.root();
     workspace::check_root(env.workspace, root).map_err(ToolOutput::error)?;
@@ -367,6 +801,19 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         if spec.permission == PermissionProfile::ReadOnly || spec.execution == ExecutionMode::Disabled {
             return Err(execution_disabled());
         }
+        if effects.setup && spec.execution == ExecutionMode::Restricted {
+            return Err(setup_refused_in_restricted());
+        }
+        // Setup always runs natively: an untrusted folder refuses it before
+        // anything is planned (never asked: approving cannot grant trust).
+        if effects.setup
+            && let Some(reason) = env.services.native_refusal(root)
+        {
+            return Err(ToolOutput::error_with(
+                reason.clone(),
+                json!({"code": codes::NATIVE_REFUSED, "status": "refused", "reason": reason}),
+            ));
+        }
         if effects.launch == Launch::NativeOnly && spec.execution == ExecutionMode::Restricted {
             return Err(refusal(
                 codes::NATIVE_NOT_ALLOWED,
@@ -395,8 +842,65 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         }
         None => {}
     }
+    Ok(())
+}
+
+fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
+    contract(call, env)?;
+    let spec = env.spec;
+    let root = env.files.root();
+    let effects = call.effects();
+    // D7: Lean-file text is executed by the Lean server.
+    let lean = effects.changes && lean_target(call, env);
+    if lean {
+        lean_contract(spec)?;
+    }
+    // Authority: who covers each part, and what asks the user.
+    let mut asks = Asks::default();
+    let mut covered = Covered::default();
+    if effects.changes {
+        change_authority(env, &mut asks, &mut covered);
+    }
+    if lean {
+        lean_authority(env, &mut asks, &mut covered);
+    }
+    let policy = match effects.launch {
+        Launch::None => None,
+        _ if effects.setup => Some(setup_authority(env, &mut asks, &mut covered)?),
+        launch => Some(launch_authority(env, launch, effects.what, &mut asks, &mut covered)?),
+    };
+    // Package setup: the plan the application made (exactly what will run).
+    let setup = match call {
+        ToolCall::InstallPackages(input) => match &input.plan {
+            Some(plan) => Some(plan.clone()),
+            None => {
+                return Err(refusal(
+                    codes::SERVICE_UNAVAILABLE,
+                    "The package setup could not be planned, so nothing was installed.",
+                ));
+            }
+        },
+        _ => None,
+    };
+    let project_op = match call {
+        ToolCall::DeletePaths(_) | ToolCall::CopyPaths(_) => {
+            let prepared = prepare_project_op(call, env)?;
+            if prepared.plan.needs_decision {
+                if spec.approval_mode == ApprovalMode::Ask && spec.permission != PermissionProfile::ReviewEdits {
+                    return Err(needs_decision(&prepared.plan));
+                }
+                // Consequences only the user decides: one approval, never repeatable.
+                asks.ask(
+                    Some("It has consequences beyond the files themselves; only you decide those.".to_owned()),
+                    None,
+                );
+            }
+            Some(prepared)
+        }
+        _ => None,
+    };
     let insertion = match call {
-        ToolCall::InsertArtifact(input) => prepare_insertion(env, input)?,
+        ToolCall::InsertArtifact(input) => prepare_insertion(env, input, asks.asked)?,
         _ => None,
     };
     let proposal = match (call, env.graph) {
@@ -411,39 +915,7 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         }
         _ => None,
     };
-    let project_op = match call {
-        ToolCall::DeletePaths(_) | ToolCall::CopyPaths(_) => {
-            let review = spec.permission == PermissionProfile::ReviewEdits;
-            Some(prepare_project_op(call, env, review)?)
-        }
-        _ => None,
-    };
-    let policy = match (effects.launch, spec.execution) {
-        (Launch::None, _) => None,
-        (_, ExecutionMode::Disabled) => return Err(execution_disabled()),
-        (_, ExecutionMode::Restricted) => match env.services.restricted_backend() {
-            Some(backend) => Some(ExecutionPolicy::Restricted { backend, image_id: None }),
-            None => {
-                return Err(refusal(
-                    codes::RESTRICTED_UNAVAILABLE,
-                    "This task only allows unattended execution inside the restricted (container) backend, which is \
-                     not available. Exposition never falls back to running it natively; the user can choose \
-                     per-command approval instead.",
-                ));
-            }
-        },
-        (_, ExecutionMode::ApproveEach) => {
-            if let Some(reason) = env.services.native_refusal(root) {
-                return Err(ToolOutput::error_with(
-                    reason.clone(),
-                    json!({"code": codes::NATIVE_REFUSED, "status": "refused", "reason": reason}),
-                ));
-            }
-            Some(ExecutionPolicy::TrustedNative)
-        }
-    };
     let native = policy == Some(ExecutionPolicy::TrustedNative);
-    let review = effects.changes && spec.permission == PermissionProfile::ReviewEdits;
     let mut authorization = Authorization {
         policy,
         root: root.to_path_buf(),
@@ -452,8 +924,11 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         proposal: None,
         workflow: None,
         project_op: None,
+        setup,
+        basis: env.authority.basis(spec.approval_mode),
+        authorized_by: covered.authorized_by(&env.authority),
     };
-    if !(native || review) {
+    if !asks.asked {
         authorization.insertion = insertion.map(|(planned, _)| planned);
         authorization.proposal = proposal.map(Box::new);
         authorization.workflow = workflow.map(Box::new);
@@ -472,9 +947,28 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     if native {
         detail.push_str("\n\nRuns natively with your account's privileges.");
     }
+    if lean {
+        detail.push_str(&format!("\n\n{LEAN_NATIVE}"));
+    }
     authorization.insertion = insertion.map(|(planned, _)| planned);
     authorization.approved = Some(detail.clone());
-    Ok(Gate::NeedsApproval { title, detail, authorization })
+    Ok(Gate::NeedsApproval { title, detail, reason: asks.reason(), for_task: asks.for_task(), authorization })
+}
+
+/// A consequential deletion or copy in an Ask task that applies changes
+/// directly: refused with the consequences (only the user decides those).
+fn needs_decision(plan: &exposition_core::ops::OpPlan) -> ToolOutput {
+    let impacts: Vec<Value> = plan
+        .impacts
+        .iter()
+        .filter(|i| i.kind.needs_decision())
+        .map(|i| json!({"path": target_label(&i.target), "kind": i.kind, "consequence": i.message}))
+        .collect();
+    ToolOutput::error_with(
+        "This needs the user's decision because it has consequences beyond the files themselves (listed in \
+         `impacts`). Nothing was changed; ask the user to do it, or to run the task with review of each change.",
+        json!({"code": codes::NEEDS_DECISION, "impacts": impacts}),
+    )
 }
 
 fn require_content_consent(spec: &TaskSpec, what: &str) -> Result<(), ToolOutput> {
@@ -490,10 +984,19 @@ fn require_content_consent(spec: &TaskSpec, what: &str) -> Result<(), ToolOutput
     Ok(())
 }
 
+fn permissions_changed() -> ToolOutput {
+    refusal(
+        codes::PERMISSIONS_CHANGED,
+        "The project's permissions or this task's allowances changed after this action was authorized, so it was \
+         not done. Call the tool again; it is decided under the current permissions.",
+    )
+}
+
 /// After the user approved: the call runs only as approved, in the task's own
-/// project. The gate is evaluated again; it must still ask for exactly the
-/// approval the user gave (an insertion re-planned on a changed document, a
-/// revoked trust, or a switched project refuses the call).
+/// project, under the same authority. The gate is evaluated again; it must
+/// still ask for exactly the approval the user gave (an insertion re-planned
+/// on a changed document, a revoked trust, a switched project, or changed
+/// project permissions or allowances refuse the call).
 pub fn confirm(call: &ToolCall, env: &ToolEnv<'_>, approved: Authorization) -> Result<Authorization, ToolOutput> {
     if let Err(reason) = workspace::check_root(env.workspace, &approved.root) {
         return Err(project_changed(&reason));
@@ -503,6 +1006,11 @@ pub fn confirm(call: &ToolCall, env: &ToolEnv<'_>, approved: Authorization) -> R
     }
     match gate(call, env) {
         Gate::Refused(output) => Err(output),
+        Gate::Allowed(authorization) | Gate::NeedsApproval { authorization, .. }
+            if authorization.basis != approved.basis =>
+        {
+            Err(permissions_changed())
+        }
         Gate::NeedsApproval { authorization, .. } if authorization.approved == approved.approved => Ok(authorization),
         Gate::Allowed(_) | Gate::NeedsApproval { .. } => Err(refusal(
             codes::CHANGED_SINCE_APPROVAL,
@@ -510,6 +1018,12 @@ pub fn confirm(call: &ToolCall, env: &ToolEnv<'_>, approved: Authorization) -> R
              artifact changed). Nothing was done; call the tool again so the user can approve the current version.",
         )),
     }
+}
+
+/// Immediately before a call runs: the project's permissions and the task's
+/// allowances are still the ones it was authorized under.
+pub fn check_basis(env: &ToolEnv<'_>, authorization: &Authorization) -> Result<(), ToolOutput> {
+    if env.authority.basis(env.spec.approval_mode) == authorization.basis { Ok(()) } else { Err(permissions_changed()) }
 }
 
 /// Characters that are invisible, or reorder the text around them, in the
@@ -630,6 +1144,10 @@ fn describe(call: &ToolCall, insertion: Option<&str>) -> (String, String) {
                 ),
             )
         }
+        ToolCall::InstallPackages(input) => match &input.plan {
+            Some(plan) => describe_setup(plan),
+            None => (String::new(), String::new()),
+        },
         ToolCall::ListFiles(_)
         | ToolCall::ReadFile(_)
         | ToolCall::GraphQuery(_)
@@ -673,10 +1191,12 @@ fn current_text(env: &ToolEnv<'_>, path: &WorkspacePath) -> Result<CurrentText, 
 }
 
 /// The artifact an insertion uses must itself be in the task's scope (it
-/// becomes readable in the document); for approval, plan the exact text now.
+/// becomes readable in the document); for approval (`shown`), plan the exact
+/// text now.
 fn prepare_insertion(
     env: &ToolEnv<'_>,
     input: &InsertArtifactInput,
+    shown_for_approval: bool,
 ) -> Result<Option<(PlannedInsertion, String)>, ToolOutput> {
     let artifact = env
         .services
@@ -696,7 +1216,7 @@ fn prepare_insertion(
             ),
         )
     })?;
-    if env.spec.permission != PermissionProfile::ReviewEdits {
+    if !shown_for_approval {
         return Ok(None);
     }
     let path = parse_path(&input.path)?;
@@ -792,7 +1312,10 @@ pub async fn run(
     if let Err(reason) = workspace::check_root(env.workspace, &authorization.root) {
         return project_changed(&reason);
     }
-    let Authorization { policy, insertion, proposal, workflow, project_op, .. } = authorization;
+    if let Err(refused) = check_basis(env, &authorization) {
+        return refused;
+    }
+    let Authorization { policy, insertion, proposal, workflow, project_op, setup, authorized_by, .. } = authorization;
     let result = match call {
         ToolCall::GraphQuery(input) => match env.graph {
             Some(graph) => crate::graph::query::run(graph, env.files.root(), env.spec, &input),
@@ -857,6 +1380,7 @@ pub async fn run(
                             working_directory: env.files.root().to_path_buf(),
                             policy,
                             session: format!("agent-{}", env.task_id.0),
+                            authorization: authorized_by.run_authorization(env.task_id, env.spec.approval_mode),
                         },
                         cancel,
                     )
@@ -877,6 +1401,21 @@ pub async fn run(
             }
         }
         ToolCall::RunCommand(input) => run_command(env, input, policy, cancel).await,
+        ToolCall::InstallPackages(_) => match (setup, policy) {
+            (Some(plan), Some(ExecutionPolicy::TrustedNative)) => service_result(
+                env.services
+                    .install_packages(
+                        super::services::SetupInstallRequest {
+                            root: env.files.root().to_path_buf(),
+                            task_id: env.task_id.0.clone(),
+                            plan: *plan,
+                        },
+                        cancel,
+                    )
+                    .await,
+            ),
+            _ => Err(ToolOutput::error("the package setup was not authorized by the gate")),
+        },
     };
     result.unwrap_or_else(|e| e)
 }
@@ -1503,9 +2042,9 @@ fn create_file_inner(
 /// orchestrator the interface uses, with this task as the actor). The gate
 /// has already checked every named path against the task's scope and the
 /// path policy. A plan with concrete consequences runs only after the user
-/// reviewed them (tasks that review edits); elsewhere it is refused with
-/// them, and nothing changes.
-fn prepare_project_op(call: &ToolCall, env: &ToolEnv<'_>, review: bool) -> Result<PreparedOp, ToolOutput> {
+/// reviewed them (one approval, never repeatable); Ask tasks that apply
+/// changes directly refuse it with them (the gate decides).
+fn prepare_project_op(call: &ToolCall, env: &ToolEnv<'_>) -> Result<PreparedOp, ToolOutput> {
     use exposition_core::ops::{OpActor, OpDestination, OpKind, OpRequest, OpTarget};
     let ops = env.services.project_operations().ok_or_else(|| {
         refusal(
@@ -1553,19 +2092,6 @@ fn prepare_project_op(call: &ToolCall, env: &ToolEnv<'_>, review: bool) -> Resul
         return Err(ToolOutput::error_with(
             "Nothing was changed: every item was refused.",
             json!({"code": codes::OPERATION_REFUSED, "refusals": reasons}),
-        ));
-    }
-    if plan.needs_decision && !review {
-        let impacts: Vec<Value> = plan
-            .impacts
-            .iter()
-            .filter(|i| i.kind.needs_decision())
-            .map(|i| json!({"path": target_label(&i.target), "kind": i.kind, "consequence": i.message}))
-            .collect();
-        return Err(ToolOutput::error_with(
-            "This needs the user's decision because it has consequences beyond the files themselves (listed in \
-             `impacts`). Nothing was changed; ask the user to do it, or to run the task with review of each change.",
-            json!({"code": codes::NEEDS_DECISION, "impacts": impacts}),
         ));
     }
     let n = plan.effects.len();
