@@ -830,9 +830,10 @@ retrieved text, tool output, or response changes permissions, allowances,
 the approval mode, or folder trust; only your composer, approval cards,
 task view, and Settings do. Auto never turns a restricted run into a native
 one, and a restricted run without a configured container image is refused,
-never run natively. Text an agent puts into a Lean file in a trusted folder
-counts as running code, because the Lean server elaborates it natively (an
-`#eval` runs): it needs native authority as well as permission to edit.
+never run natively. Text an agent puts into a Lean file counts as running
+code, because the Lean server elaborates it natively (an `#eval` runs) — at
+once in a trusted folder, or as soon as the folder is trusted — so it needs
+native authority as well as permission to edit, in any folder.
 The same holds for Lean/Lake configuration files
 (`lakefile.lean`, `lakefile.toml`, `lean-toolchain`, `lake-manifest.json`) in
 any folder, and agents never write, create, copy into, or delete anything
