@@ -204,12 +204,22 @@ async fn review_a1_f4_agent_pth_runs_on_environment_discovery() {
     eprintln!("cards: {:?}", cards.iter().map(|c| c.title.clone()).collect::<Vec<_>>());
     let during_planning = marker.exists();
     eprintln!("agent .pth ran during the setup planning (before/while the card was shown): {during_planning}");
+    if during_planning {
+        eprintln!("marker: {}", std::fs::read_to_string(&marker).unwrap_or_default().trim());
+    }
+    let _ = std::fs::remove_file(&marker);
     // The user opens the Research page (discovery with refresh).
-    let _ = h.research.environments(true).await;
+    let report = h.research.environments(true).await;
     let after_refresh = marker.exists();
     eprintln!("agent .pth ran at the user's next discovery: {after_refresh}");
-    if after_refresh {
-        eprintln!("marker: {}", std::fs::read_to_string(&marker).unwrap_or_default().trim());
+    if let Ok(report) = &report {
+        let venv: Vec<_> = report
+            .runtimes
+            .iter()
+            .filter(|r| r.project_folder.is_some())
+            .map(|r| (r.display_name.clone(), r.availability.clone()))
+            .collect();
+        eprintln!("project environments after refresh: {venv:?}");
     }
     assert!(
         !during_planning && !after_refresh,

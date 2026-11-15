@@ -157,7 +157,10 @@ export default async function reviewA1({ launchApp, artifactsDir, assert }) {
     note("A-auto-task-in-a-non-open-folder-is-refused", !!otherTask.error, otherTask.error ?? "created");
 
     // An Ask task that finished before the project had Auto permissions.
-    const askTask = await runTask(request(rootText, "ask", "approveEach", "say hi"), { turns: [{ steps: [{ text: "hi" }] }] });
+    // (The scripted provider keeps one script per task across runs: Continue serves its next turns.)
+    const askTask = await runTask(request(rootText, "ask", "approveEach", "say hi"), {
+      turns: [{ steps: [{ text: "hi" }] }, { steps: [tool("p", "run_python", { code: "print(40 + 2)" })] }, done],
+    });
     note("A-control-ask-task-completed", askTask.summary.status.kind === "completed", askTask.summary.status);
 
     const granted = await call("agents_permissions_set", { root: rootText, choice: { files: "edit", code: "native", setup: false } });
@@ -165,9 +168,6 @@ export default async function reviewA1({ launchApp, artifactsDir, assert }) {
     const version = granted.permissions.version;
 
     // Continue the Ask task: it must still ask (Ask stays Ask).
-    await call("agents_dev_load_script", {
-      script: { turns: [{ steps: [tool("p", "run_python", { code: "print(40 + 2)" })] }, done] },
-    });
     await call("agents_task_continue", { task: askTask.id, prompt: "now compute", budgets: null });
     const askCard = await waitFor(async () => (await detail(askTask.id)).approvals?.[0], { timeout: 60_000, message: "the Ask task's card" }).catch(() => null);
     note("A-continued-ask-task-still-asks-after-auto-grant", !!askCard, askCard ? askCard.title : "ran without a card");
