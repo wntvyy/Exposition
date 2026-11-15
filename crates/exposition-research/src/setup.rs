@@ -925,19 +925,22 @@ pub(crate) fn build_plan(context: &PlanContext<'_>, request: &SetupRequest) -> R
         }
         SetupRequest::InstallPackages { environment, packages } => {
             let packages = install_list(packages)?;
-            let env = find(environment).ok_or_else(|| ResearchError::UnknownEnvironment(environment.clone()))?;
-            let folder = PROJECT_ENVIRONMENT_FOLDERS
-                .iter()
-                .find(|name| environment_id_for(&root.join(name)) == env.id)
-                .ok_or_else(|| {
-                    refused(
+            // A project environment is recognized by its files (its id names
+            // `.venv` or `venv` in the project); planning never runs it.
+            let Some(folder) =
+                PROJECT_ENVIRONMENT_FOLDERS.iter().find(|name| environment_id_for(&root.join(name)) == *environment)
+            else {
+                return Err(match find(environment) {
+                    Some(env) => refused(
                         "setup.unsupported",
                         format!(
                             "{} is not a project environment. Packages are installed only into the project's .venv or venv, never into a Python installed for the whole computer.",
                             env.display_name
                         ),
-                    )
-                })?;
+                    ),
+                    None => ResearchError::UnknownEnvironment(environment.clone()),
+                });
+            };
             let target = root.join(folder);
             if is_link(&target) {
                 return Err(refused(
@@ -953,10 +956,10 @@ pub(crate) fn build_plan(context: &PlanContext<'_>, request: &SetupRequest) -> R
                     format!("The setup of {folder} did not finish; set up the environment again instead."),
                 ));
             }
-            if !is_virtual_environment(&target) {
+            if !is_virtual_environment(&target) || !venv_python(&target).is_file() {
                 return Err(refused(
                     "setup.unsupported",
-                    format!("{folder} is not a Python virtual environment (it has no pyvenv.cfg)."),
+                    format!("{folder} is not a Python virtual environment (it needs pyvenv.cfg and its interpreter)."),
                 ));
             }
             let python = venv_python(&target);
@@ -1072,7 +1075,8 @@ impl ResearchService {
         if let Some(running) = lock(&self.setup_slot().active).clone() {
             return Err(busy(&running));
         }
-        let report = self.environments(false).await?;
+        // Never runs a project interpreter (see `planning_environments`).
+        let report = self.planning_environments().await?;
         build_plan(
             &PlanContext { root: &canonical, trusted, report: &report, records: &self.setup_slot().records },
             request,
@@ -1091,7 +1095,7 @@ impl ResearchService {
         if let Some(running) = lock(&slot.active).clone() {
             return Err(busy(&running));
         }
-        let report = self.environments(false).await?;
+        let report = self.planning_environments().await?;
         let fresh = build_plan(
             &PlanContext { root: &canonical, trusted, report: &report, records: &slot.records },
             &plan.request,

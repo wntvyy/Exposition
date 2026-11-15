@@ -730,6 +730,31 @@ async fn a_changed_project_makes_the_plan_stale() {
     assert!(!f.target().exists());
 }
 
+/// R-a1 F7: planning (an agent's request is planned before its approval)
+/// never runs a project interpreter; the project environment is recognized
+/// by its files.
+#[tokio::test(flavor = "multi_thread")]
+async fn planning_never_probes_a_project_interpreter() {
+    let f = RunFixture::new();
+    let venv = f.plan.make_venv(".venv");
+    let root = f.service.workspace_root().unwrap();
+    let install = SetupRequest::InstallPackages { environment: venv.id.clone(), packages: vec![] };
+    let plan = f.service.setup_plan(&root, &install).await.unwrap();
+    assert_eq!(plan.target_name, ".venv");
+    assert!(!plan.creates_environment);
+    // Creating while .venv exists is refused from its files alone.
+    assert!(f.service.setup_plan(&root, &f.plan.create(&[])).await.is_err());
+    assert_eq!(f.launcher.project_probes.load(Ordering::SeqCst), 0, "no project interpreter ran");
+    // Without its interpreter the folder is not an environment to install into.
+    std::fs::remove_file(venv_python(&f.target())).unwrap();
+    assert_eq!(f.service.setup_plan(&root, &install).await.unwrap_err().code(), "setup.unsupported");
+    // A `venv` id that is not a folder of this project is unknown.
+    let elsewhere =
+        SetupRequest::InstallPackages { environment: "python:C:\\elsewhere\\python.exe".into(), packages: vec![] };
+    assert_eq!(f.service.setup_plan(&root, &elsewhere).await.unwrap_err().code(), "research.unknownEnvironment");
+    assert_eq!(f.launcher.project_probes.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn discovery_never_runs_an_unfinished_environment() {
     let f = RunFixture::new();
