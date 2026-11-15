@@ -758,6 +758,131 @@ fn gate_workflow_propose() {
 // service-owned results; no ceiling above the task's own.
 // ---------------------------------------------------------------------------
 
+/// The walkthrough's formal audit: audit a Lean file, then propose the
+/// evidence associations. `guess` adds a setting the association step does
+/// not have (what the agent did on 2026-11-15).
+fn audit_workflow(workflow_id: &str, expected_revision: Value, guess: bool) -> Value {
+    let parameters = if guess {
+        json!([{"name": "target", "kind": "text", "text": "the theorem in main.typ", "integer": 0, "boolean": false}])
+    } else {
+        json!([])
+    };
+    json!({
+        "workflow_id": workflow_id, "expected_revision": expected_revision,
+        "title": "Check Main.lean and attach the result", "description": "", "preset": "",
+        "inputs": [{"id": "lean", "label": "Lean file", "port_type": "formalSource", "path": "Main.lean", "pinned_hash": ""}],
+        "steps": [
+            {"id": "audit", "label": "Check the Lean file", "operation": "lean.audit", "version": 1, "parameters": [], "payload": {"kind": "none"}},
+            {"id": "associate", "label": "Propose the associations", "operation": "formal.associateEvidence", "version": 1,
+             "parameters": parameters, "payload": {"kind": "none"}}
+        ],
+        "connections": [
+            {"kind": "data", "from_step": "", "from_port": "", "from_input": "lean", "to_step": "audit", "to_port": "source"},
+            {"kind": "data", "from_step": "audit", "from_port": "evidence", "from_input": "", "to_step": "associate", "to_port": "evidence"}
+        ],
+        "outcomes": [
+            {"id": "evidence", "kind": "auditEvidence", "label": "Audited declarations", "step": "audit", "port": "evidence", "optional": false},
+            {"id": "associations", "kind": "reviewableProposal", "label": "Associations for review", "step": "associate", "port": "proposal", "optional": true}
+        ],
+        "ceiling": {"execution": "trustedNative", "model_requests": false, "retain_results": true, "propose_changes": true}
+    })
+}
+
+/// Two proposals in one task, as in the 2026-11-15 walkthrough: a first draft
+/// with a guessed setting, then the correction. The first is saved but
+/// INCOMPLETE and says so; the correction (with the returned id) is revision
+/// 2 of the same workflow, not a second workflow; each result states saved,
+/// valid, run, and where the user opens it as separate facts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_corrected_proposal_is_a_revision_and_results_separate_saved_from_valid() {
+    let f = fixture();
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+    let (id, _) = run(
+        &mut h,
+        req,
+        vec![
+            tool("w1", tools::WORKFLOW_PROPOSE, audit_workflow("", json!(-1), true)),
+            tool("w2", tools::WORKFLOW_PROPOSE, audit_workflow("$ref:w1/workflow", json!("$ref:w1/revision"), false)),
+            // The same content again: nothing new is saved, and the result says so.
+            tool("w3", tools::WORKFLOW_PROPOSE, audit_workflow("$ref:w1/workflow", json!("$ref:w2/revision"), false)),
+        ],
+        true,
+    )
+    .await;
+    let result = |tool_use: &str| -> Value {
+        let (status, err, text) = call(&h, &id, tool_use);
+        assert!(!err && status == ToolCallStatus::Succeeded, "{tool_use}: {text}");
+        serde_json::from_str(&text).unwrap()
+    };
+    let first = result("w1");
+    assert_eq!(first["saved"], json!(true));
+    assert_eq!(first["revision"], json!(1));
+    assert_eq!(first["state"], json!("incomplete"), "{first}");
+    assert_eq!(first["reviewable"], json!(false));
+    assert_eq!(first["ran"], json!(false));
+    assert!(
+        first["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == json!("workflow.unknownParameter") && d["step"] == json!("associate")),
+        "the setting the step does not have is diagnosed: {first}"
+    );
+    let summary = first["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("Saved as revision 1")
+            && summary.contains("INCOMPLETE")
+            && summary.contains("Nothing was run"),
+        "{summary}"
+    );
+    let workflow = first["workflow"].as_str().unwrap().to_owned();
+    assert!(
+        first["next"].as_str().unwrap().contains(&workflow),
+        "the correction is a revision of this workflow: {first}"
+    );
+
+    let second = result("w2");
+    assert_eq!(second["workflow"], json!(workflow), "the same workflow");
+    assert_eq!(second["revision"], json!(2));
+    assert_eq!(second["saved"], json!(true));
+    assert_eq!(second["state"], json!("wellFormed"), "{second}");
+    assert_eq!(second["errors"], json!(0));
+    assert_eq!(second["reviewable"], json!(true));
+    assert_eq!(second["ran"], json!(false));
+    assert_eq!(second["title"], json!("Check Main.lean and attach the result"));
+    let summary = second["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("Saved as revision 2")
+            && summary.contains("well-formed")
+            && summary.contains("Nothing was run"),
+        "{summary}"
+    );
+    assert!(summary.contains("was not checked here"), "runner availability is not claimed: {summary}");
+    assert!(second["open"].as_str().unwrap().contains("Show Workflows"), "{second}");
+    assert!(second["run"].as_str().unwrap().contains("Review and run…"), "{second}");
+    assert!(second.get("runnable").is_none(), "no runnability claim either way: {second}");
+
+    let third = result("w3");
+    assert_eq!(third["saved"], json!(false));
+    assert_eq!(third["unchanged"], json!(true));
+    assert_eq!(third["revision"], json!(2));
+    assert!(third["summary"].as_str().unwrap().contains("Nothing new was saved"), "{third}");
+
+    // One workflow, two revisions, one entity: no orphan or duplicate draft.
+    let workflows = f.graph.workflows().unwrap();
+    assert_eq!(workflows.len(), 1, "{workflows:?}");
+    let saved = f.graph.workflow(&WorkflowId::parse(&workflow).unwrap(), None).unwrap();
+    assert_eq!(saved.revision, 2);
+    assert_eq!(saved.revisions.len(), 2);
+    assert_eq!(
+        f.graph.workflow(&saved.id, Some(1)).unwrap().validation.state,
+        exposition_graph::DraftState::Incomplete
+    );
+    assert_eq!(first["entity"], second["entity"], "one Workflow entity");
+    assert!(h.recorder.take().is_empty(), "nothing was executed");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_drafts_are_saved_with_diagnostics_and_never_runnable() {
     let f = fixture();
@@ -770,8 +895,10 @@ async fn workflow_drafts_are_saved_with_diagnostics_and_never_runnable() {
     let result: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(result["saved"], json!(true));
     assert_eq!(result["state"], json!("incomplete"), "{result}");
-    assert_eq!(result["runnable"], json!(false));
-    assert!(result["runnableReason"].as_str().unwrap().contains("never runs it"));
+    assert_eq!(result["ran"], json!(false));
+    assert_eq!(result["reviewable"], json!(false), "an incomplete draft cannot be reviewed for a run");
+    assert!(result["run"].as_str().unwrap().contains("never runs it"));
+    assert!(result["summary"].as_str().unwrap().contains("INCOMPLETE"), "{result}");
     assert!(result["errors"].as_u64().unwrap() >= 1);
     assert!(
         result["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == json!("workflow.unboundInput")),

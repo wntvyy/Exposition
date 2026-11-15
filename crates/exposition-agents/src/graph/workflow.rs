@@ -322,10 +322,150 @@ fn ceiling_text(c: &AuthorityCeiling) -> String {
     parts.join(", ")
 }
 
-/// A validated draft, as shown for approval.
 /// Why a draft saved by an agent did not run (saving never runs anything).
 pub const SAVED_NOT_RUN: &str =
     "Saving a proposal never runs it; the user reviews a run plan and starts a run separately.";
+
+/// Where the user finds a saved draft (each place is exercised by the
+/// `workflow-identity` end-to-end scenario).
+pub const WHERE_TO_OPEN: &str = "The user opens it from the Workflows list (command palette: “Show Workflows”, then Open), from the Agents page under “Kept in the project graph” (Open workflow), or, when the project has a research space, from Research › Workflows (select it, then “Open in the workflow editor”).";
+
+/// How a saved draft is run (never by an agent).
+pub const HOW_TO_RUN: &str = "Only the user can run it: in the workflow editor, “Review and run…” shows the complete run plan for the saved revision, and the run starts when they press “Start run” there. The button is unavailable, with the reason, while the revision is incomplete or a step's runner is not available (for example the folder is not trusted for a native step).";
+
+fn json_name<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()
+}
+
+fn type_names(types: &[PortType]) -> String {
+    types.iter().map(json_name).collect::<Vec<_>>().join(" | ")
+}
+
+/// The registered operations exactly as the validator knows them (purpose,
+/// port and parameter names with their types, payload, the ceiling each
+/// needs), for the `workflow_propose` schema: generated from the registry,
+/// so a proposal never has to guess a name. The composite operation is left
+/// out (agents cannot name a saved workflow to run).
+pub fn operation_catalogue() -> String {
+    use exposition_graph::workflow::COMPOSITE_OPERATION;
+    use exposition_graph::workflow::registry::{ParameterKind, PayloadSpec, WorkflowEffect as E, operations};
+
+    let mut out = String::from(
+        "Each step names one registered operation and uses exactly that operation's port and parameter names \
+         (any other name is a validation error). Registered operations:\n",
+    );
+    for op in operations().into_iter().filter(|o| o.id != COMPOSITE_OPERATION) {
+        let inputs = op
+            .inputs
+            .iter()
+            .map(|p| {
+                format!(
+                    "{} [{}; {}{}]",
+                    p.name,
+                    type_names(&p.types),
+                    if p.required { "required" } else { "optional" },
+                    if p.multiple { "; accepts several connections" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>();
+        let outputs = op.outputs.iter().map(|p| format!("{} [{}]", p.name, type_names(&p.types))).collect::<Vec<_>>();
+        let parameters = op
+            .parameters
+            .iter()
+            .map(|p| {
+                let kind = match &p.kind {
+                    ParameterKind::Text { max_len } => format!("kind text, at most {max_len} characters"),
+                    ParameterKind::Integer { min, max } => format!("kind integer, {min} to {max}"),
+                    ParameterKind::Boolean => "kind boolean".to_owned(),
+                    ParameterKind::Path { extensions } => {
+                        format!("kind text holding a project file path ending in .{}", extensions.join(" or ."))
+                    }
+                };
+                format!("{} [{kind}; {}: {}]", p.name, if p.required { "required" } else { "optional" }, p.label)
+            })
+            .collect::<Vec<_>>();
+        let payload = match &op.payload {
+            None => "none".to_owned(),
+            Some(PayloadSpec::Prompt) => "prompt (required)".to_owned(),
+            Some(PayloadSpec::Code { language, unless_input }) => match unless_input {
+                Some(port) => format!(
+                    "code in {} (use payload none instead when a file is connected to input {port})",
+                    json_name(language)
+                ),
+                None => format!("code in {}", json_name(language)),
+            },
+        };
+        let has = |e: E| op.effects.contains(&e);
+        let mut ceiling = vec![format!(
+            "execution {}",
+            if has(E::ExecuteNative) {
+                "trustedNative"
+            } else if has(E::ExecuteRestricted) {
+                "restricted or trustedNative"
+            } else {
+                "any"
+            }
+        )];
+        if has(E::SendToModel) {
+            ceiling.push("model_requests true".to_owned());
+        }
+        if has(E::RetainArtifact) || has(E::RegisterFormalEvidence) {
+            ceiling.push("retain_results true".to_owned());
+        }
+        if has(E::ProposeDocumentChange) || has(E::ProposeGraphChange) {
+            ceiling.push("propose_changes true".to_owned());
+        }
+        let list = |items: Vec<String>| if items.is_empty() { "none".to_owned() } else { items.join(", ") };
+        out.push_str(&format!(
+            "- {} (version {}; {}): {} Inputs: {}. Outputs: {}. Parameters: {}. Payload: {}. Ceiling needed: {}.\n",
+            op.id,
+            op.version,
+            op.title,
+            op.purpose,
+            list(inputs),
+            list(outputs),
+            list(parameters),
+            payload,
+            ceiling.join(", ")
+        ));
+    }
+    out
+}
+
+/// Which step output types realize each outcome kind (the validator's rule).
+pub fn outcome_catalogue() -> String {
+    let kinds = [
+        OutcomeKind::TransformedDataset,
+        OutcomeKind::RetainedFigure,
+        OutcomeKind::RetainedTable,
+        OutcomeKind::InvestigationReport,
+        OutcomeKind::AuditEvidence,
+        OutcomeKind::ReviewableProposal,
+        OutcomeKind::ManuscriptPromotion,
+    ];
+    let rows = kinds.iter().map(|k| format!("{} from {}", json_name(k), type_names(k.accepts()))).collect::<Vec<_>>();
+    format!(
+        "At least one. Each outcome names a step output port (step + port) whose type its kind accepts: {}.",
+        rows.join("; ")
+    )
+}
+
+/// The port types an external input (a project file) can have, with their
+/// file extensions.
+pub fn input_catalogue() -> String {
+    let rows = PortType::ALL
+        .iter()
+        .filter(|t| t.is_file_input())
+        .map(|t| format!("{} (.{})", json_name(t), t.extensions().join(" .")))
+        .collect::<Vec<_>>();
+    format!(
+        "Project files the workflow reads. An input's port_type is one of: {}. Every other port type is produced \
+         by a step, never declared as an input.",
+        rows.join("; ")
+    )
+}
+
+/// A validated draft, as shown for approval.
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedWorkflow {
@@ -501,18 +641,65 @@ pub fn save(
         .service
         .save_workflow(&origin, &prepared.request, &context)
         .map_err(|e| refusal(codes::WORKFLOW_INVALID, format!("The workflow draft was not saved: {}", e.message)))?;
+    let validation = &saved.validation;
+    let title = saved.definition.title.trim().to_owned();
+    let well_formed = validation.state == exposition_graph::DraftState::WellFormed;
+    let counts = format!("{} error(s), {} warning(s)", validation.errors, validation.warnings);
+    // Four separate facts: saved, valid, run, and ready to be reviewed for a run.
+    let saved_text = if saved.unchanged {
+        format!(
+            "Nothing new was saved: the definition equals revision {} of workflow {} (“{}”).",
+            saved.revision,
+            saved.id,
+            shown(&title)
+        )
+    } else {
+        format!("Saved as revision {} of workflow {} (“{}”).", saved.revision, saved.id, shown(&title))
+    };
+    let validation_text = if well_formed {
+        format!("Validation: well-formed ({counts}).")
+    } else {
+        format!(
+            "Validation: INCOMPLETE ({counts}); the draft is kept and stays editable, but it cannot be reviewed or \
+             run until the errors in `diagnostics` are fixed."
+        )
+    };
+    let readiness = if well_formed {
+        "Whether it can run on this machine (folder trust, toolchains, the container backend) was not checked here; \
+         the run plan the user opens reports that."
+    } else {
+        "It cannot be reviewed for a run in this state."
+    };
+    let next = if well_formed {
+        format!(
+            "To change it, call workflow_propose again with workflow_id \"{}\" and expected_revision {} (a new \
+             revision of this workflow; an empty workflow_id creates a second workflow).",
+            saved.id, saved.revision
+        )
+    } else {
+        format!(
+            "Fix the diagnostics and call workflow_propose again with workflow_id \"{}\" and expected_revision {} \
+             (a corrected revision of this same workflow; an empty workflow_id would create a second workflow). Do \
+             not describe this draft as valid or ready.",
+            saved.id, saved.revision
+        )
+    };
     Ok(ToolOutput::ok(json!({
         "saved": !saved.unchanged,
         "unchanged": saved.unchanged,
         "workflow": saved.id,
         "revision": saved.revision,
         "entity": saved.entity,
-        "state": saved.validation.state,
-        "errors": saved.validation.errors,
-        "warnings": saved.validation.warnings,
-        "diagnostics": diagnostics_json(&saved.validation),
-        "runnable": false,
-        "runnableReason": SAVED_NOT_RUN,
-        "note": "Saved as a draft in the project graph; nothing was run. A run needs the user's review of its run plan and an explicit start.",
+        "title": title,
+        "state": validation.state,
+        "errors": validation.errors,
+        "warnings": validation.warnings,
+        "diagnostics": diagnostics_json(validation),
+        "ran": false,
+        "reviewable": well_formed,
+        "summary": format!("{saved_text} {validation_text} Nothing was run. {readiness}"),
+        "next": next,
+        "open": WHERE_TO_OPEN,
+        "run": format!("{HOW_TO_RUN} {SAVED_NOT_RUN}"),
     })))
 }

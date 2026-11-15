@@ -369,7 +369,8 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     detail = await invoke(page, "agents_task_detail", { task: taskW.id });
     const wfResult = resultOf(toolCall(detail, "wf"));
     assert.equal(wfResult.saved, true, JSON.stringify(wfResult));
-    assert.equal(wfResult.runnable, false);
+    assert.equal(wfResult.ran, false, "saving ran nothing");
+    assert.equal(wfResult.reviewable, false, "an incomplete draft cannot be reviewed for a run");
     assert.equal(wfResult.state, "incomplete", "saved as an incomplete draft with diagnostics");
     const listed = (await invoke(page, "workflow_list")).find((w) => w.id === wfResult.workflow);
     assert.ok(listed, "the draft is a saved workflow");

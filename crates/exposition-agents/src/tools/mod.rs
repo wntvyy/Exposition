@@ -284,7 +284,12 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 diagnostics (incomplete drafts are fine); after the user's approval in tasks that review each \
                 change, directly in tasks that apply changes. Saving never runs \
                 anything; only the user runs a workflow, from a reviewed run plan. Steps cannot stand in for service-owned results (formal evidence, retained artifacts). Use \
-                \"\", [] and -1 for unused fields.",
+                \"\", [] and -1 for unused fields. The schema lists every registered operation with its exact \
+                input/output ports, parameters, payload and the ceiling it needs: use those names, do not guess. \
+                The result states separately whether the draft was saved (workflow id and revision), whether it is \
+                well-formed or incomplete (with diagnostics), that nothing ran, and where the user opens and runs \
+                it; \"saved\" alone does not mean valid or ready to run. To correct or change a saved draft, pass \
+                its workflow_id and revision so the same workflow gets a new revision.",
             input_schema: workflow_schema(),
         },
         ToolDefinition {
@@ -403,20 +408,20 @@ fn workflow_schema() -> Value {
             "title": {"type": "string"},
             "description": {"type": "string"},
             "preset": {"type": "string", "description": "The workflow preset it starts from, or \"\"."},
-            "inputs": {"type": "array", "items": strict(json!({
+            "inputs": {"type": "array", "description": crate::graph::workflow::input_catalogue(), "items": strict(json!({
                 "id": id("Input"),
                 "label": {"type": "string"},
                 "port_type": {"type": "string", "enum": port_types},
                 "path": {"type": "string", "description": "Project file relative to the project root, or \"\" when not chosen yet."},
                 "pinned_hash": {"type": "string", "description": "SHA-256 (hex) to pin the input to, or \"\" for the version at run start."}
             }))},
-            "steps": {"type": "array", "items": strict(json!({
+            "steps": {"type": "array", "description": crate::graph::workflow::operation_catalogue(), "items": strict(json!({
                 "id": id("Step"),
                 "label": {"type": "string"},
                 "operation": {"type": "string", "enum": operations, "description": "A registered operation."},
                 "version": {"type": "integer", "description": "Operation version (1)."},
                 "parameters": {"type": "array", "items": strict(json!({
-                    "name": {"type": "string"},
+                    "name": {"type": "string", "description": "A parameter name of the step's operation, exactly as listed for it."},
                     "kind": {"type": "string", "enum": ["text", "integer", "boolean"]},
                     "text": {"type": "string"},
                     "integer": {"type": "integer"},
@@ -428,7 +433,7 @@ fn workflow_schema() -> Value {
                     strict(json!({"kind": {"type": "string", "enum": ["prompt"]}, "text": {"type": "string"}}))
                 ]}
             }))},
-            "connections": {"type": "array", "items": {"anyOf": [
+            "connections": {"type": "array", "description": "A data connection binds one step input port (to_step + to_port) to an external input (from_input) or to another step's output port (from_step + from_port); the source's type must be one the input port accepts, and every required input port must be bound. Port names are the operation's own, as listed under steps.", "items": {"anyOf": [
                 strict(json!({
                     "kind": {"type": "string", "enum": ["data"]},
                     "from_step": {"type": "string", "description": "Producing step (\"\" when from_input is set)."},
@@ -446,7 +451,7 @@ fn workflow_schema() -> Value {
                     "relation": {"type": "string", "enum": relations}
                 }))
             ]}},
-            "outcomes": {"type": "array", "items": strict(json!({
+            "outcomes": {"type": "array", "description": crate::graph::workflow::outcome_catalogue(), "items": strict(json!({
                 "id": id("Outcome"),
                 "kind": {"type": "string", "enum": outcome_kinds},
                 "label": {"type": "string"},
@@ -1164,6 +1169,60 @@ mod strict_tests {
         for t in tools.iter().filter(|t| !t.strict) {
             assert_eq!(t.input_schema["additionalProperties"], false, "{} still refuses unknown fields", t.name);
         }
+    }
+
+    /// The agent is told every registered operation's exact ports and
+    /// parameters (2026-11-15: an agent guessed port names and a setting the
+    /// step does not have, because the schema listed operation ids only).
+    #[test]
+    fn workflow_propose_names_every_operations_ports_and_parameters() {
+        let schema = workflow_schema();
+        let steps = schema["properties"]["steps"]["description"].as_str().unwrap_or_default().to_owned();
+        let offered: Vec<String> = schema["properties"]["steps"]["items"]["properties"]["operation"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        for op in exposition_graph::workflow::operations() {
+            if op.id == exposition_graph::workflow::COMPOSITE_OPERATION {
+                assert!(!steps.contains(&op.id), "the composite operation is not described to agents");
+                continue;
+            }
+            assert!(offered.contains(&op.id), "{} offered", op.id);
+            let line = steps
+                .lines()
+                .find(|l| l.starts_with(&format!("- {} (version {};", op.id, op.version)))
+                .unwrap_or_else(|| panic!("{} is not described: {steps}", op.id));
+            for port in op.inputs.iter().chain(&op.outputs) {
+                assert!(line.contains(&format!("{} [", port.name)), "{}: port {} missing in {line}", op.id, port.name);
+            }
+            for parameter in &op.parameters {
+                assert!(line.contains(&format!("{} [kind ", parameter.name)), "{}: {line}", op.id);
+            }
+            assert!(line.contains(&op.purpose), "{}: purpose", op.id);
+        }
+        // The walkthrough's two steps, exactly.
+        let audit = steps.lines().find(|l| l.starts_with("- lean.audit ")).unwrap();
+        assert!(
+            audit.contains("Inputs: source [formalSource; required]. Outputs: evidence [formalEvidence]."),
+            "{audit}"
+        );
+        assert!(audit.contains("Parameters: none. Payload: none."), "{audit}");
+        assert!(audit.contains("execution trustedNative, retain_results true"), "{audit}");
+        let associate = steps.lines().find(|l| l.starts_with("- formal.associateEvidence ")).unwrap();
+        assert!(
+            associate.contains("Inputs: evidence [formalEvidence; required]. Outputs: proposal [associationProposal]."),
+            "{associate}"
+        );
+        assert!(associate.contains("declarations [kind text"), "{associate}");
+        assert!(associate.contains("propose_changes true"), "{associate}");
+        let outcomes = schema["properties"]["outcomes"]["description"].as_str().unwrap_or_default();
+        assert!(outcomes.contains("auditEvidence from formalEvidence"), "{outcomes}");
+        assert!(outcomes.contains("reviewableProposal from associationProposal | promotionProposal"), "{outcomes}");
+        let inputs = schema["properties"]["inputs"]["description"].as_str().unwrap_or_default();
+        assert!(inputs.contains("formalSource (.lean)"), "{inputs}");
+        assert!(!inputs.contains("formalEvidence"), "service-owned types are never inputs: {inputs}");
     }
 
     /// A proposed workflow can use every registered operation, so its code
