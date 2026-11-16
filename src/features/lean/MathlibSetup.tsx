@@ -181,10 +181,11 @@ function PlanSources({ plan }: { plan: LeanSetupPlan }) {
         columns={[
           { id: "name", title: "Dependency", isRowHeader: true, render: (source) => source.name },
           { id: "from", title: "Fetched from", render: sourceOrigin },
-          { id: "revision", title: "Revision", render: sourceRevision },
+          { id: "revision", title: "Revision", width: "24%", render: sourceRevision },
           {
             id: "state",
             title: "State",
+            width: "20%",
             render: (source) => (source.present ? "Already downloaded" : plan.pinnedByManifest ? "Fetched by this setup" : "Resolved by Lake"),
           },
         ]}
