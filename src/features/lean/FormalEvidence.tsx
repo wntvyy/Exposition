@@ -91,6 +91,7 @@ export function DeclarationEvidenceControls({
   const environment = new Map(latest?.evidence.environment ?? []);
   const manifestDigest = environment.get("lake-manifest.json sha256") ?? null;
   const mathlibRevision = environment.get("mathlib revision") ?? null;
+  const mathlibSource = environment.get("mathlib source") ?? null;
   const recordedForAudit = Boolean(audit && latest && isRecordOfAudit(latest.evidence, audit));
   const record = async () => {
     setBusy(true);
@@ -122,7 +123,7 @@ export function DeclarationEvidenceControls({
           {evidence && evidence.evidence.length > 1 && <span className="ui-meta">{evidence.evidence.length - 1} older</span>}
           <span className="ui-meta">dependencies: {formal.dependencies.kind === "unavailable" ? "not reported by the audit" : formal.dependencies.names.join(", ")}</span>
           {manifestDigest && (
-            <span className="ui-meta" data-testid="lean-evidence-package" title={`lake-manifest.json sha256 ${manifestDigest}${mathlibRevision ? `, Mathlib ${mathlibRevision}` : ""}`}>
+            <span className="ui-meta" data-testid="lean-evidence-package" title={`lake-manifest.json sha256 ${manifestDigest}${mathlibRevision ? `, Mathlib ${mathlibRevision}${mathlibSource ? ` from ${mathlibSource}` : ""}` : ""}`}>
               {[mathlibRevision ? `Mathlib ${mathlibRevision.slice(0, 12)}` : null, `lake-manifest.json ${manifestDigest.slice(0, 12)}`].filter(Boolean).join(" · ")}
             </span>
           )}

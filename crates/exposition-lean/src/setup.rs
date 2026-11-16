@@ -541,7 +541,7 @@ pub(crate) fn lakefile_hint(name: &str, text: &str) -> LakefileHint {
 
 /// An address as it is shown and recorded: credentials written into an
 /// `http(s)://user:secret@host/…` address are left out.
-fn display_url(url: &str) -> String {
+pub(crate) fn display_url(url: &str) -> String {
     if let Some((scheme, rest)) = url.split_once("://")
         && matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
     {
@@ -560,6 +560,14 @@ pub fn is_official_mathlib(url: &str) -> bool {
     let url = url.strip_suffix(".git").unwrap_or(url).to_ascii_lowercase();
     [MATHLIB_URL, "git@github.com:leanprover-community/mathlib4", "ssh://git@github.com/leanprover-community/mathlib4"]
         .contains(&url.as_str())
+}
+
+/// A git address as it is compared: without credentials, surrounding space, a
+/// trailing `/`, or a `.git` suffix. Everything else is compared exactly.
+fn comparable_url(url: &str) -> String {
+    let url = display_url(url.trim());
+    let url = url.trim_end_matches('/');
+    url.strip_suffix(".git").unwrap_or(url).to_owned()
 }
 
 fn read_small(path: &Path, limit: u64) -> Option<String> {
@@ -897,6 +905,38 @@ pub struct LeanSetupSource {
     pub present: bool,
 }
 
+/// Where a setup takes Mathlib from, as the reviewed plan shows it. The cache
+/// step builds and runs the `cache` program of exactly this repository.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct LeanSetupMathlibSource {
+    /// It is the official repository (`leanprover-community/mathlib4`).
+    pub official: bool,
+    /// The git address: the official one, or for a fork exactly the address
+    /// the manifest or the lakefile gives (without credentials).
+    pub url: String,
+}
+
+impl LeanSetupMathlibSource {
+    fn official() -> Self {
+        Self { official: true, url: MATHLIB_URL.to_owned() }
+    }
+
+    fn of(url: &str) -> Self {
+        if is_official_mathlib(url) { Self::official() } else { Self { official: false, url: display_url(url.trim()) } }
+    }
+
+    /// `url` (as a manifest gives it) is the address this plan showed.
+    fn is(&self, url: &str) -> bool {
+        if self.official { is_official_mathlib(url) } else { comparable_url(url) == comparable_url(&self.url) }
+    }
+
+    fn shown(&self) -> String {
+        if self.official { format!("{} (the official repository)", self.url) } else { self.url.clone() }
+    }
+}
+
 /// Everything a setup will do. Nothing runs until it is started.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -917,6 +957,10 @@ pub struct LeanSetupPlan {
     /// The Mathlib revision: the release tag a new package requires, or the
     /// commit an existing manifest pins.
     pub mathlib_revision: String,
+    /// The repository Mathlib is fetched from. For anything but the official
+    /// one the plan says so; the setup stops before the cache step when the
+    /// resolved `mathlib` comes from another address than this one.
+    pub mathlib_source: LeanSetupMathlibSource,
     /// The existing manifest pins the revisions (nothing is resolved again).
     pub pinned_by_manifest: bool,
     /// SHA-256 (hex) of the existing lakefile this plan was made for.
@@ -1256,35 +1300,91 @@ fn plan_hash(plan: &LeanSetupPlan) -> String {
     hex(&Sha256::digest(serde_json::to_vec(&basis).unwrap_or_default()))
 }
 
-const RESOLVED_BY_LAKE: &str = "Lake resolves these and everything they require once and pins each revision in lake-manifest.json. The setup stops before the cache step unless `mathlib` then comes from https://github.com/leanprover-community/mathlib4.";
+/// What a plan without a manifest says about its sources.
+fn resolved_by_lake(mathlib: &LeanSetupMathlibSource) -> String {
+    format!(
+        "Lake resolves these and everything they require once and pins each revision in lake-manifest.json. The setup stops before the cache step unless `mathlib` then comes from {}.",
+        mathlib.url
+    )
+}
 
-fn unofficial_mathlib(shown: &str, from: &str) -> LeanError {
+/// A Mathlib that is not fetched from a git address the plan can show.
+fn unsupported_mathlib_source(shown: &str, from: &str, why: &str) -> LeanError {
     refused(
-        "unofficialMathlib",
+        "mathlibSourceUnsupported",
         format!(
-            "The package in {shown} takes `mathlib` from {from}, not from {MATHLIB_URL}. Set Up Mathlib prepares the official Mathlib only: its cache step builds and runs a program from the repository called mathlib, and {MATHLIB_CACHE_URL} holds outputs for official revisions. Nothing was changed. If you trust that source, prepare the package yourself in a terminal (`lake update`, `lake exe cache get` or `lake build`)."
+            "The package in {shown} takes `mathlib` from {from}. Set Up Mathlib prepares a Mathlib fetched from a git address the plan can show: the official repository ({MATHLIB_URL}) or a fork. {why} Nothing was changed."
         ),
     )
 }
 
-/// Refuse a lakefile requirement that takes `mathlib` from somewhere other
-/// than the official repository (as far as the lakefile says).
-fn check_declared_mathlib(shown: &str, declared: &[DeclaredRequire]) -> Result<(), LeanError> {
+const LOCAL_MATHLIB: &str = "A Mathlib in a local folder is built in that folder, outside what this setup downloads and cleans up: prepare it yourself in a terminal (`lake exe cache get` or `lake build`).";
+
+/// Where the lakefile takes `mathlib` from, as far as it says: the official
+/// repository unless a requirement gives another git address (a fork, which
+/// the plan then shows). A local folder or another registry entry is refused.
+fn declared_mathlib_source(shown: &str, declared: &[DeclaredRequire]) -> Result<LeanSetupMathlibSource, LeanError> {
+    let mut source = LeanSetupMathlibSource::official();
     for require in declared.iter().filter(|r| r.name.eq_ignore_ascii_case(MATHLIB)) {
         if let Some(path) = &require.path {
-            return Err(unofficial_mathlib(shown, &format!("the local folder `{path}`")));
+            return Err(unsupported_mathlib_source(shown, &format!("the local folder `{path}`"), LOCAL_MATHLIB));
         }
         match (&require.git, &require.scope) {
-            (Some(git), _) if !is_official_mathlib(git) => {
-                return Err(unofficial_mathlib(shown, &display_url(git)));
+            (Some(git), _) => {
+                let declared = LeanSetupMathlibSource::of(git);
+                if source.official {
+                    source = declared;
+                } else if !declared.official && !source.is(&declared.url) {
+                    return Err(unsupported_mathlib_source(
+                        shown,
+                        &format!("more than one address ({} and {})", source.url, declared.url),
+                        "The plan can show and check one address only: require `mathlib` once.",
+                    ));
+                }
             }
             (None, Some(scope)) if scope != MATHLIB_SCOPE => {
-                return Err(unofficial_mathlib(shown, &format!("the registry scope `{scope}`")));
+                return Err(unsupported_mathlib_source(
+                    shown,
+                    &format!("the registry entry `{scope}/{MATHLIB}`"),
+                    "The address behind a registry entry is known only when Lake asks the registry: write the fork's address in the lakefile (`git = \"…\"`) so the plan shows it.",
+                ));
             }
             _ => {}
         }
     }
-    Ok(())
+    Ok(source)
+}
+
+/// The resolved `mathlib` is fetched from the address the reviewed plan
+/// showed. The cache step builds and runs a program of the package called
+/// mathlib: it must be the repository the user reviewed, never another one.
+fn check_resolved_mathlib(plan: &LeanSetupPlan, dependencies: &[LeanDependencyInfo]) -> Result<(), String> {
+    let Some(mathlib) = dependencies.iter().find(|d| d.name.eq_ignore_ascii_case(MATHLIB)) else {
+        return Err("The resolved dependencies do not include `mathlib`, so there is no Mathlib cache to fetch.".into());
+    };
+    match &mathlib.url {
+        Some(url) if mathlib.kind == "git" && plan.mathlib_source.is(url) => Ok(()),
+        url => Err(format!(
+            "Lake resolved `mathlib` from {}, but the plan you reviewed takes it from {}. Its cache program was not run.",
+            match url {
+                Some(url) if mathlib.kind == "git" => url.clone(),
+                _ => format!("a `{}` dependency without a git address", mathlib.kind),
+            },
+            plan.mathlib_source.shown()
+        )),
+    }
+}
+
+/// What a plan's summary says about a Mathlib that is not the official one.
+fn fork_summary(mathlib: &LeanSetupMathlibSource) -> String {
+    if mathlib.official {
+        String::new()
+    } else {
+        format!(
+            " Mathlib comes from {}, not the official repository: the setup runs that repository's code, and the prebuilt cache may not cover it.",
+            mathlib.url
+        )
+    }
 }
 
 fn declared_source(require: &DeclaredRequire) -> LeanSetupSource {
@@ -1430,6 +1530,7 @@ pub fn build_plan(context: &PlanContext<'_>, request: &LeanSetupRequest) -> Resu
                 toolchain: toolchain::qualify(&toolchain_name),
                 toolchain_installed,
                 mathlib_revision: tag.clone(),
+                mathlib_source: LeanSetupMathlibSource::official(),
                 pinned_by_manifest: false,
                 lakefile_digest: None,
                 manifest_digest: None,
@@ -1442,7 +1543,7 @@ pub fn build_plan(context: &PlanContext<'_>, request: &LeanSetupRequest) -> Resu
                     input_rev: Some(tag.clone()),
                     present: false,
                 }],
-                sources_note: Some(RESOLVED_BY_LAKE.to_owned()),
+                sources_note: Some(resolved_by_lake(&LeanSetupMathlibSource::official())),
                 writes,
                 keeps,
                 removed_on_failure,
@@ -1516,20 +1617,29 @@ pub fn build_plan(context: &PlanContext<'_>, request: &LeanSetupRequest) -> Resu
                 ));
             };
             let pinned_by_manifest = inspection.manifest_digest.is_some();
-            let (sources, sources_note) = if pinned_by_manifest {
+            let (sources, sources_note, mathlib_source) = if pinned_by_manifest {
                 // Every address and commit the manifest pins: nothing else is fetched.
-                match inspection.dependencies.iter().find(|d| d.name.eq_ignore_ascii_case(MATHLIB)) {
-                    Some(mathlib) if mathlib.kind != "git" => {
-                        return Err(unofficial_mathlib(&shown, &format!("a `{}` dependency", mathlib.kind)));
+                let mathlib_source = match inspection.dependencies.iter().find(|d| d.name.eq_ignore_ascii_case(MATHLIB))
+                {
+                    Some(LeanDependencyInfo { kind, url: Some(url), .. }) if kind == "git" => {
+                        LeanSetupMathlibSource::of(url)
                     }
-                    Some(mathlib) if !mathlib.url.as_deref().is_some_and(is_official_mathlib) => {
-                        return Err(unofficial_mathlib(
+                    Some(mathlib) if mathlib.kind == "git" => {
+                        return Err(unsupported_mathlib_source(
                             &shown,
-                            mathlib.url.as_deref().unwrap_or("an address the manifest does not give"),
+                            "a git dependency whose address lake-manifest.json does not give",
+                            "Run `lake update` in the package folder in a terminal to rewrite the manifest.",
                         ));
                     }
-                    _ => {}
-                }
+                    Some(mathlib) => {
+                        return Err(unsupported_mathlib_source(
+                            &shown,
+                            &format!("a `{}` dependency", mathlib.kind),
+                            LOCAL_MATHLIB,
+                        ));
+                    }
+                    None => LeanSetupMathlibSource::official(),
+                };
                 let sources = inspection
                     .dependencies
                     .iter()
@@ -1543,20 +1653,21 @@ pub fn build_plan(context: &PlanContext<'_>, request: &LeanSetupRequest) -> Resu
                         present: d.present,
                     })
                     .collect();
-                (sources, None)
+                (sources, None, mathlib_source)
             } else {
                 let hint = read_small(&package_root.join(&lakefile), MAX_LAKEFILE_BYTES)
                     .map(|text| lakefile_hint(&lakefile, &text))
                     .unwrap_or_else(|| LakefileHint { opaque: true, ..LakefileHint::default() });
-                check_declared_mathlib(&shown, &hint.declared)?;
+                let mathlib_source = declared_mathlib_source(&shown, &hint.declared)?;
+                let resolved = resolved_by_lake(&mathlib_source);
                 let note = if hint.opaque {
                     format!(
-                        "{lakefile} is Lean code: the requirements listed are the ones written in it, and it can require more. {RESOLVED_BY_LAKE}"
+                        "{lakefile} is Lean code: the requirements listed are the ones written in it, and it can require more. {resolved}"
                     )
                 } else {
-                    RESOLVED_BY_LAKE.to_owned()
+                    resolved
                 };
-                (hint.declared.iter().map(declared_source).collect(), Some(note))
+                (hint.declared.iter().map(declared_source).collect(), Some(note), mathlib_source)
             };
             let revision = if pinned_by_manifest {
                 inspection.mathlib_revision.clone()
@@ -1599,6 +1710,7 @@ pub fn build_plan(context: &PlanContext<'_>, request: &LeanSetupRequest) -> Resu
                 toolchain: toolchain::qualify(&toolchain_name),
                 toolchain_installed: inspection.toolchain_installed,
                 mathlib_revision: revision.clone(),
+                mathlib_source: mathlib_source.clone(),
                 pinned_by_manifest,
                 lakefile_digest: Some(lakefile_digest),
                 manifest_digest: inspection.manifest_digest.clone(),
@@ -1609,12 +1721,13 @@ pub fn build_plan(context: &PlanContext<'_>, request: &LeanSetupRequest) -> Resu
                 removed_on_failure,
                 steps,
                 summary: format!(
-                    "Prepares the Lake package in {shown}: {} and downloads Mathlib's prebuilt cache (several GB) from {MATHLIB_CACHE_URL} for Mathlib {revision}. Nothing is upgraded and no configuration file is changed.",
+                    "Prepares the Lake package in {shown}: {} and downloads Mathlib's prebuilt cache (several GB) from {MATHLIB_CACHE_URL} for Mathlib {revision}. Nothing is upgraded and no configuration file is changed.{}",
                     if pinned_by_manifest {
                         "fetches exactly the revisions lake-manifest.json pins"
                     } else {
                         "resolves the dependencies the lakefile requires once (writing lake-manifest.json)"
-                    }
+                    },
+                    fork_summary(&mathlib_source)
                 ),
                 plan_hash: String::new(),
             };
@@ -1845,7 +1958,7 @@ impl LeanSetup {
             && before.dependencies.iter().all(|d| d.present)
             && before.dependencies.iter().any(|d| d.name.eq_ignore_ascii_case(MATHLIB));
         let outcome = self.run_steps(root, run, plan, &package_root, &mut progress);
-        let Progress { created, written, ran_step, sources_intact } = progress;
+        let Progress { created, written, ran_step, sources_intact, cache_failed } = progress;
 
         let mut cleanup = Cleanup::default();
         if outcome.is_err() {
@@ -1918,6 +2031,23 @@ impl LeanSetup {
                     ) {
                         message.push_str(" Building Mathlib from source stays possible.");
                     }
+                }
+                // A fork's cache is the likely cause, and building from
+                // source the way forward: say how it is reached from here.
+                if cache_failed && !plan.mathlib_source.official {
+                    message.push_str(&format!(
+                        " Mathlib here comes from {}, and the prebuilt cache may not cover a fork.",
+                        plan.mathlib_source.url
+                    ));
+                    message.push_str(&if inspection.blocks_checking(true).is_none() {
+                        " To build it from source instead (hours), choose Build from source instead… in the Lean view."
+                            .to_owned()
+                    } else {
+                        format!(
+                            " To build it from source instead (hours), first download the sources yourself: run `{}` in the package folder in a terminal, then choose Build from source instead… in the Lean view.",
+                            if plan.pinned_by_manifest { "lake exe cache get" } else { "lake --keep-toolchain update" }
+                        )
+                    });
                 }
                 (state, Some(message))
             }
@@ -2009,6 +2139,14 @@ impl LeanSetup {
 
         for (index, step) in plan.steps.iter().enumerate() {
             check_canceled()?;
+            // A manifest that pinned the sources at review still names the
+            // reviewed Mathlib when its cache program is about to run (an
+            // earlier step can take long).
+            if is_cache(step) && plan.pinned_by_manifest {
+                let now =
+                    inspect_package(root, package_root, self.inner.elan_home.as_deref(), &SetupRecords::new(None));
+                check_resolved_mathlib(plan, &now.dependencies).map_err(Stop::Failed)?;
+            }
             {
                 let mut status = lock(&run.status);
                 status.phase = LeanSetupPhase::Step;
@@ -2069,6 +2207,7 @@ impl LeanSetup {
             match result.map(|r| r.outcome) {
                 Some(JobOutcome::Exited { code: 0 }) => {}
                 Some(JobOutcome::Exited { code }) => {
+                    progress.cache_failed = is_cache(step) || is_verify(step);
                     let detail = tail.error_summary();
                     // Lake often cannot even load a Mathlib made for another
                     // Lean version: name that cause, not only Lake's error.
@@ -2150,24 +2289,9 @@ impl LeanSetup {
                 if after.manifest_digest.is_none() {
                     return Err(Stop::Failed("Lake did not write lake-manifest.json.".into()));
                 }
-                // The cache step builds and runs a program of the package
-                // called mathlib: only the official repository's.
-                match after.dependencies.iter().find(|d| d.name.eq_ignore_ascii_case(MATHLIB)) {
-                    Some(mathlib)
-                        if mathlib.kind == "git" && mathlib.url.as_deref().is_some_and(is_official_mathlib) => {}
-                    Some(mathlib) => {
-                        return Err(Stop::Failed(format!(
-                            "Lake resolved `mathlib` from {}, not from {MATHLIB_URL}. Its cache program was not run.",
-                            mathlib.url.as_deref().unwrap_or("a local folder")
-                        )));
-                    }
-                    None => {
-                        return Err(Stop::Failed(
-                            "The resolved dependencies do not include `mathlib`, so there is no Mathlib cache to fetch."
-                                .into(),
-                        ));
-                    }
-                }
+                // Only the Mathlib the reviewed plan showed: official stays
+                // official, a fork stays that fork.
+                check_resolved_mathlib(plan, &after.dependencies).map_err(Stop::Failed)?;
             }
         }
         check_canceled()?;
@@ -2179,6 +2303,15 @@ impl LeanSetup {
 
 fn is_update(step: &LeanSetupStep) -> bool {
     step.args.last().is_some_and(|a| a == "update")
+}
+
+fn is_cache(step: &LeanSetupStep) -> bool {
+    step.args == ["exe", "cache", "get"]
+}
+
+/// The last step: it fails when the cache did not provide every output.
+fn is_verify(step: &LeanSetupStep) -> bool {
+    step.args.first().is_some_and(|a| a == "build")
 }
 
 impl LeanSetup {
@@ -2242,6 +2375,8 @@ struct Progress {
     written: Vec<(String, [u8; 32])>,
     ran_step: bool,
     sources_intact: bool,
+    /// The cache step or the verification of its outputs failed.
+    cache_failed: bool,
 }
 
 /// What cleanup did after a failed or canceled run.
@@ -2767,18 +2902,28 @@ mod tests {
         assert_ne!(f.plan(&prepare("formal")).unwrap().plan_hash, plan.plan_hash);
         std::fs::write(dir.join("lakefile.toml"), LAKEFILE).unwrap();
 
-        // Mathlib from another repository, as pinned or as required: refused, with the address.
+        // Mathlib from another repository, as pinned: planned, and the plan
+        // says so with exactly that address, which its hash covers.
+        assert_eq!(plan.mathlib_source, LeanSetupMathlibSource { official: true, url: MATHLIB_URL.to_owned() });
+        assert!(!plan.summary.contains("not the official repository"));
+        let mut hashes = vec![plan.plan_hash.clone()];
         for url in [
             "https://github.com/elsewhere/mathlib4",
             "https://github.com/leanprover-community/mathlib4-fork",
             "http://github.com/leanprover-community/mathlib4",
         ] {
             std::fs::write(dir.join(LAKE_MANIFEST), MANIFEST.replace(MATHLIB_URL, url)).unwrap();
-            let error = f.plan(&prepare("formal")).unwrap_err();
-            assert_eq!(error.code, "lean.setup.unofficialMathlib", "{url}");
-            assert!(error.message.contains(url) && error.message.contains("Nothing was changed"), "{}", error.message);
+            let fork = f.plan(&prepare("formal")).unwrap_or_else(|e| panic!("{url}: {}", e.message));
+            assert_eq!(fork.mathlib_source, LeanSetupMathlibSource { official: false, url: url.to_owned() });
+            assert!(fork.summary.contains(&format!("Mathlib comes from {url}, not the official repository")));
+            assert!(!hashes.contains(&fork.plan_hash), "{url}: every source has its own plan");
+            hashes.push(fork.plan_hash.clone());
+            // The fact itself is under the hash: a plan edited to call the fork official is another plan.
+            let mut edited = fork.clone();
+            edited.mathlib_source = LeanSetupMathlibSource::official();
+            assert_ne!(plan_hash(&edited), fork.plan_hash);
         }
-        // Spellings of the official address are accepted; credentials in an address are never shown.
+        // Spellings of the official address are official; credentials in an address are never shown.
         for url in [
             "https://github.com/leanprover-community/mathlib4.git",
             "https://GitHub.com/leanprover-community/mathlib4/",
@@ -2787,8 +2932,26 @@ mod tests {
         ] {
             std::fs::write(dir.join(LAKE_MANIFEST), MANIFEST.replace(MATHLIB_URL, url)).unwrap();
             let plan = f.plan(&prepare("formal")).unwrap_or_else(|e| panic!("{url}: {}", e.message));
+            assert!(plan.mathlib_source.official, "{url}");
             assert!(!serde_json::to_string(&plan).unwrap().contains("secret-token"), "{url}");
         }
+        std::fs::write(
+            dir.join(LAKE_MANIFEST),
+            MANIFEST.replace(MATHLIB_URL, "https://user:secret-token@example.org/fork/mathlib4"),
+        )
+        .unwrap();
+        let fork = f.plan(&prepare("formal")).unwrap();
+        assert_eq!(fork.mathlib_source.url, "https://example.org/fork/mathlib4");
+        assert!(!serde_json::to_string(&fork).unwrap().contains("secret-token"));
+        // A Mathlib the manifest takes from a local folder has no address to show: refused.
+        std::fs::write(
+            dir.join(LAKE_MANIFEST),
+            r#"{"version": "1.1.0", "packages": [{"type": "path", "name": "mathlib", "dir": "../mathlib"}]}"#,
+        )
+        .unwrap();
+        let local = f.plan(&prepare("formal")).unwrap_err();
+        assert_eq!(local.code, "lean.setup.mathlibSourceUnsupported");
+        assert!(local.message.contains("Nothing was changed"), "{}", local.message);
         std::fs::remove_file(dir.join(LAKE_MANIFEST)).unwrap();
         let unresolved = f.plan(&prepare("formal")).unwrap();
         assert_eq!(unresolved.sources.len(), 1);
@@ -2801,16 +2964,65 @@ mod tests {
             ("reservoir", Some("leanprover-community"), Some("v4.35.0"))
         );
         assert!(unresolved.sources_note.as_deref().unwrap().contains(MATHLIB_URL));
-        for requirement in
-            ["git = \"https://github.com/elsewhere/mathlib4\"", "path = \"../mathlib\"", "scope = \"someone-else\""]
-        {
+        assert!(unresolved.mathlib_source.official);
+        let require = |requirement: &str| {
             std::fs::write(
                 dir.join("lakefile.toml"),
                 format!("name = \"Formal\"\n[[require]]\nname = \"mathlib\"\n{requirement}\n"),
             )
             .unwrap();
-            assert_eq!(code(f.plan(&prepare("formal"))), "lean.setup.unofficialMathlib", "{requirement}");
+            f.plan(&prepare("formal"))
+        };
+        // A fork the lakefile requires by address: planned, the address shown
+        // and named as the only one the cache step will run for.
+        let fork = require("git = \"https://github.com/elsewhere/mathlib4\"").unwrap();
+        assert_eq!(
+            fork.mathlib_source,
+            LeanSetupMathlibSource { official: false, url: "https://github.com/elsewhere/mathlib4".to_owned() }
+        );
+        let note = fork.sources_note.clone().unwrap();
+        assert!(note.ends_with("unless `mathlib` then comes from https://github.com/elsewhere/mathlib4."), "{note}");
+        assert_ne!(fork.plan_hash, unresolved.plan_hash);
+        assert!(
+            require("git = \"https://github.com/leanprover-community/mathlib4.git\"").unwrap().mathlib_source.official
+        );
+        // No address the plan could show: a local folder, another registry entry.
+        for requirement in ["path = \"../mathlib\"", "scope = \"someone-else\""] {
+            assert_eq!(code(require(requirement)), "lean.setup.mathlibSourceUnsupported", "{requirement}");
         }
+
+        // What Lake resolved is compared with what the plan showed.
+        let resolved = |url: Option<&str>, kind: &str| {
+            vec![LeanDependencyInfo {
+                name: "mathlib".into(),
+                kind: kind.into(),
+                rev: None,
+                input_rev: None,
+                present: true,
+                url: url.map(str::to_owned),
+            }]
+        };
+        let other = "https://github.com/other/mathlib4";
+        assert_eq!(check_resolved_mathlib(&unresolved, &resolved(Some(MATHLIB_URL), "git")), Ok(()));
+        assert_eq!(
+            check_resolved_mathlib(&fork, &resolved(Some("https://github.com/elsewhere/mathlib4.git"), "git")),
+            Ok(())
+        );
+        for (plan, url, kind) in [
+            (&unresolved, Some("https://github.com/elsewhere/mathlib4"), "git"),
+            (&fork, Some(other), "git"),
+            (&fork, Some(MATHLIB_URL), "git"),
+            (&fork, Some("https://github.com/Elsewhere/mathlib4"), "git"),
+            (&fork, None, "path"),
+            (&unresolved, None, "path"),
+        ] {
+            let stopped = check_resolved_mathlib(plan, &resolved(url, kind)).expect_err("another source");
+            assert!(
+                stopped.contains("Its cache program was not run") && stopped.contains(&plan.mathlib_source.url),
+                "{stopped}"
+            );
+        }
+        assert!(check_resolved_mathlib(&fork, &[]).unwrap_err().contains("do not include `mathlib`"));
         // A new package states its one requirement and what Lake decides.
         let new = f.plan(&new_package("lean", "Formal")).unwrap();
         assert_eq!(new.sources.len(), 1);

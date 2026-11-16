@@ -830,15 +830,44 @@ resolves them and everything they require when the setup runs (and, for a
 `lakefile.lean`, that the code can require more than is listed). Credentials
 written into an address are not shown.
 
-Only the official Mathlib is prepared. A `mathlib` taken from anywhere other
-than `https://github.com/leanprover-community/mathlib4` (another git address,
-a local folder, another registry scope, or a manifest entry that is not a git
-dependency from that address) is refused when the plan is built, with the
-source named, because the cache step builds and runs a program from the
-repository called mathlib. When the setup itself resolves the requirements,
-it checks the written manifest again after `lake update` and stops before the
-cache step if `mathlib` does not come from the official repository or is not
-among the resolved dependencies.
+A Mathlib fork is prepared too, never silently. When `mathlib` is fetched
+from a git address other than
+`https://github.com/leanprover-community/mathlib4`, the plan says so: a
+warning above the Sources list, "Mathlib is not from the official
+repository", names the address exactly and states that the setup downloads
+and runs that repository's code (its `cache` program runs on this computer
+with your account's privileges) and that the prebuilt cache may not cover a
+fork; the `mathlib` row is marked "Not official". There is one action, as for
+any plan, and no further question. A Mathlib that is not fetched from a git
+address the plan can show is refused when the plan is built, with the source
+named: a local folder (a `path` requirement or manifest entry), another
+registry entry than `leanprover-community/mathlib` in a lakefile without a
+manifest (write the fork's git address in the lakefile instead), a manifest
+git entry without an address, or two different fork addresses in one
+lakefile.
+
+The reviewed plan is what runs. The address is part of the plan, so a plan
+whose manifest or lakefile changed afterwards does not start. When the setup
+itself resolves the requirements, it reads the written manifest after
+`lake update` and stops before the cache step, removing what it created, if
+`mathlib` then comes from another address than the plan showed (the official
+repository where a fork was reviewed, a fork where the official repository
+was reviewed, another fork) or is not among the resolved dependencies. A
+manifest that already pins the sources is read again just before the cache
+step. Addresses are compared exactly, apart from a trailing `/` or `.git` and
+the accepted spellings of the official address.
+
+What a fork's cache step does was established by reading the `cache` program
+of Mathlib `v4.35.0`, not by running it against a fork: it looks first in the
+official cache by content hash and then in a separate store that Mathlib's
+own CI fills per fork commit, treats files it does not find as a normal
+outcome, and exits successfully without them. The setup's last step then
+finds the outputs incomplete and the setup fails. For a package whose sources
+were already downloaded, "Build from source instead…" in the Lean view stays
+available and the outcome says so. Otherwise the setup removes what it
+downloaded and the outcome names the command that downloads the sources in a
+terminal, after which building from source is offered. Other Mathlib versions
+may behave differently.
 
 - **New package** (a folder inside the project, or the project folder
   itself, and a library name such as `Formal`): pins an exact Lean release
@@ -953,14 +982,18 @@ download (a complete setup, and checking against a prepared Mathlib) are
 covered only by scenarios that run on request (`npm run e2e -- mathlib-setup`
 with `EXPOSITION_MATHLIB_SETUP=1`; `mathlib` with
 `EXPOSITION_MATHLIB_PACKAGE`); the default suite covers the unprepared
-package, the plan with its sources, the refusals, a stale plan, and a new
+package, the plan with its sources, the warning for a fork, the refusals, a
+stale plan, and a new
 package canceled in the first seconds of `lake update` with a file of the
 user's kept, without downloading anything large. The first
 check of a file that imports Mathlib takes noticeably longer than a
 standalone file (expect a minute or more). Only packages whose Mathlib comes
-from a Lean release tag can be created, only Mathlib from the official
-repository is prepared (a fork or a local copy is prepared by hand in a
-terminal), and there is no setting for a mirror or an offline cache. A
+from a Lean release tag can be created. A Mathlib fork is prepared with a
+warning, but whether a prebuilt cache exists for a fork is not verified (no
+setup of a fork was run against the network), the fork's code runs natively
+with your account's privileges, and a fork without a complete cache can only
+be built from source. A Mathlib in a local folder is prepared by hand in a
+terminal, and there is no setting for a mirror or an offline cache. A
 Mathlib requirement that a `lakefile.lean` computes without naming Mathlib
 in its text is not recognized before a manifest exists. Setup is verified on
 Windows only.

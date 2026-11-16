@@ -54,8 +54,23 @@ fn failing_program() -> PathBuf {
     }
 }
 
+/// The stand-in Lake of this crate: `update` writes the manifest the test
+/// laid out, `exe cache get` records that it ran and fails. No network.
+fn scripted_lake_program() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_exposition-fake-lake"))
+}
+
 impl Fixture {
     fn new(trusted: bool) -> Self {
+        Self::with_lake(trusted, false)
+    }
+
+    /// A trusted project whose toolchain's `lake` is the scripted stand-in.
+    fn scripted() -> Self {
+        Self::with_lake(true, true)
+    }
+
+    fn with_lake(trusted: bool, scripted_lake: bool) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(tmp.path()).unwrap();
         let project = base.join("project");
@@ -65,7 +80,11 @@ impl Fixture {
         std::fs::create_dir_all(&bin).unwrap();
         for name in ["lean", "lake"] {
             let file = bin.join(if cfg!(windows) { format!("{name}.exe") } else { name.to_owned() });
-            std::fs::copy(failing_program(), file).unwrap();
+            std::fs::copy(
+                if name == "lake" && scripted_lake { scripted_lake_program() } else { failing_program() },
+                file,
+            )
+            .unwrap();
         }
         let exec = ExecutionService::with_config(ExecutionConfig {
             data_dir: base.join("data"),
@@ -300,11 +319,13 @@ fn unresolved_requirements_in_a_lean_lakefile_do_not_start_the_server() {
 // The plan
 
 /// The plan lists where each dependency is fetched from, with the commit. A
-/// manifest that takes `mathlib` from another repository is refused with
-/// that address: `lake exe cache get` would build and run that repository's
-/// `cache` program.
+/// manifest that takes `mathlib` from another repository is planned too, and
+/// the plan says so with exactly that address: `lake exe cache get` builds
+/// and runs that repository's `cache` program. The fact is under the plan
+/// hash, so a plan reviewed for the official repository does not start once
+/// the manifest names a fork.
 #[test]
-fn the_plan_names_its_sources_and_refuses_a_mathlib_from_another_repository() {
+fn the_plan_names_its_sources_and_says_when_mathlib_is_a_fork() {
     let f = Fixture::new(false);
     let dir = f.package("lean");
     std::fs::remove_dir_all(dir.join(".lake")).unwrap();
@@ -319,18 +340,156 @@ fn the_plan_names_its_sources_and_refuses_a_mathlib_from_another_repository() {
         ]
     );
     assert!(official.manifest_digest.is_some() && official.lakefile_digest.is_some());
-    std::fs::write(
-        dir.join("lake-manifest.json"),
-        manifest("https://github.com/attacker-example/mathlib4", OFFICIAL_BATTERIES, BATTERIES_REV),
-    )
-    .unwrap();
-    let refused = f.setup.plan(&f.root, &Fixture::prepare("lean")).expect_err("not planned");
-    assert_eq!(refused.code, "lean.setup.unofficialMathlib");
-    assert!(refused.message.contains("https://github.com/attacker-example/mathlib4"), "{}", refused.message);
-    // The plan reviewed before the manifest changed does not start either.
+    assert!(official.mathlib_source.official);
+    assert_eq!(official.mathlib_source.url, OFFICIAL_MATHLIB);
+
+    std::fs::write(dir.join("lake-manifest.json"), manifest(FORK, OFFICIAL_BATTERIES, BATTERIES_REV)).unwrap();
+    let fork = f.setup.plan(&f.root, &Fixture::prepare("lean")).expect("a fork is planned");
+    assert!(!fork.mathlib_source.official);
+    assert_eq!(fork.mathlib_source.url, FORK, "the address exactly as the manifest gives it");
+    assert!(fork.sources.iter().any(|s| s.name == "mathlib" && s.url.as_deref() == Some(FORK)));
+    assert!(fork.summary.contains(FORK) && fork.summary.contains("not the official repository"), "{}", fork.summary);
+    assert_ne!(fork.plan_hash, official.plan_hash);
+    // The fact cannot be edited out of a plan: the hash covers it.
+    let mut hidden = fork.clone();
+    hidden.mathlib_source = official.mathlib_source.clone();
+    let code = f.setup.start(&f.root, &hidden).map(|s| s.id).map_err(|e| e.code);
+    assert_eq!(code, Err("lean.setup.planStale".to_owned()));
+    // The plan reviewed before the manifest named the fork does not start.
     let code = f.setup.start(&f.root, &official).map(|s| s.id).map_err(|e| e.code);
-    assert_eq!(code, Err("lean.setup.unofficialMathlib".to_owned()));
+    assert_eq!(code, Err("lean.setup.planStale".to_owned()));
     assert!(f.setup.status().is_none(), "nothing ran");
+
+    // The gate and the inspection see a fork as Mathlib, as before.
+    let inspection = f.inspect("lean");
+    assert!(inspection.uses_mathlib);
+    assert_eq!(inspection.mathlib_revision.as_deref(), Some(MATHLIB_REV));
+    assert!(inspection.blocks_checking(false).is_some_and(|reason| reason.contains("Set Up Mathlib")));
+}
+
+const FORK: &str = "https://github.com/attacker-example/mathlib4";
+const OTHER_FORK: &str = "https://github.com/someone-else/mathlib4";
+
+fn lakefile_from(git: &str) -> String {
+    format!(
+        "name = \"Formal\"\n\n[[require]]\nname = \"mathlib\"\ngit = \"{git}\"\nrev = \"v4.35.0\"\n\n[[lean_lib]]\nname = \"Formal\"\n"
+    )
+}
+
+/// The reviewed plan is what runs. Lake resolves the dependencies only when
+/// the setup runs it; when the `mathlib` it then pins comes from another
+/// address than the plan showed, the setup stops before `lake exe cache get`
+/// and removes what it created. A plan reviewed for the official repository
+/// never runs a fork's cache program, and a plan reviewed for one fork never
+/// runs another repository's.
+#[test]
+fn a_run_stops_before_the_cache_step_when_lake_resolves_another_mathlib() {
+    let f = Fixture::scripted();
+    // (folder, the lakefile the plan is made from, the address Lake resolves, the cache program may run)
+    let cases = [
+        ("official-to-fork", LAKEFILE.to_owned(), FORK, false),
+        ("fork-to-other-fork", lakefile_from(FORK), OTHER_FORK, false),
+        ("fork-to-official", lakefile_from(FORK), OFFICIAL_MATHLIB, false),
+        ("official-as-reviewed", LAKEFILE.to_owned(), "https://github.com/leanprover-community/mathlib4.git", true),
+        ("fork-as-reviewed", lakefile_from(FORK), FORK, true),
+    ];
+    for (folder, lakefile, resolved, cache_runs) in cases {
+        let dir = f.root.join(folder);
+        std::fs::create_dir_all(dir.join("fake-lake")).unwrap();
+        std::fs::write(dir.join("lakefile.toml"), &lakefile).unwrap();
+        std::fs::write(dir.join("lean-toolchain"), format!("{PIN}\n")).unwrap();
+        std::fs::write(
+            dir.join("fake-lake").join("manifest.json"),
+            manifest(resolved, OFFICIAL_BATTERIES, BATTERIES_REV),
+        )
+        .unwrap();
+
+        let plan = f.setup.plan(&f.root, &Fixture::prepare(folder)).unwrap();
+        let reviewed = if lakefile == LAKEFILE { OFFICIAL_MATHLIB } else { FORK };
+        assert_eq!(plan.mathlib_source.url, reviewed, "{folder}");
+        assert_eq!(plan.mathlib_source.official, lakefile == LAKEFILE, "{folder}");
+        assert!(plan.sources_note.as_deref().is_some_and(|note| note.contains(reviewed)), "{folder}");
+        let labels: Vec<&str> = plan.steps.iter().map(|s| s.args.last().map(String::as_str).unwrap_or("")).collect();
+        assert_eq!(labels, ["update", "get", "Mathlib"], "{folder}");
+
+        let status = f.run(&plan);
+        let message = status.message.clone().unwrap_or_default();
+        assert_eq!(status.state, LeanSetupState::Failed, "{folder}: {message}");
+        let cache_ran = dir.join("fake-lake").join("cache-ran").exists();
+        assert_eq!(cache_ran, cache_runs, "{folder}: {message}");
+        if cache_runs {
+            assert_eq!(status.jobs.len(), 2, "{folder}: update, then the cache step");
+        } else {
+            assert_eq!(status.jobs.len(), 1, "{folder}: only `lake update` ran");
+            assert!(
+                message.contains(&format!(
+                    "Lake resolved `mathlib` from {resolved}, but the plan you reviewed takes it from {reviewed}"
+                )) && message.contains("Its cache program was not run."),
+                "{folder}: {message}"
+            );
+        }
+        // The usual cleanup: the manifest the run wrote is gone, the user's files are as they were.
+        assert!(!dir.join("lake-manifest.json").exists(), "{folder}");
+        assert_eq!(std::fs::read_to_string(dir.join("lakefile.toml")).unwrap(), lakefile, "{folder}");
+        assert_eq!(f.inspect(folder).readiness, LeanPackageReadiness::DependenciesUnresolved, "{folder}");
+
+        // A fork whose cache step fails says where Mathlib comes from and how
+        // building from source is reached from here (the sources were removed again).
+        let fork_hint =
+            message.contains(&format!("Mathlib here comes from {FORK}, and the prebuilt cache may not cover a fork."));
+        assert_eq!(fork_hint, folder == "fork-as-reviewed", "{folder}: {message}");
+        if fork_hint {
+            assert!(
+                message.contains("run `lake --keep-toolchain update` in the package folder in a terminal, then choose Build from source instead…"),
+                "{message}"
+            );
+        }
+    }
+}
+
+/// A fork whose sources are already downloaded is prepared like any package:
+/// its cache program runs (the user reviewed that address), and when the
+/// cache does not cover the fork the failed setup leaves building from
+/// source available and says so.
+#[test]
+fn a_fork_without_a_cache_can_still_be_built_from_source() {
+    let f = Fixture::scripted();
+    let dir = f.package("lean");
+    std::fs::create_dir_all(dir.join("fake-lake")).unwrap();
+    std::fs::write(dir.join("lake-manifest.json"), manifest(FORK, OFFICIAL_BATTERIES, BATTERIES_REV)).unwrap();
+    let before = f.inspect("lean");
+    assert!(before.uses_mathlib);
+    assert_eq!(before.readiness, LeanPackageReadiness::CacheMissing);
+    assert!(before.blocks_checking(false).is_some() && before.blocks_checking(true).is_none());
+
+    let plan = f.setup.plan(&f.root, &Fixture::prepare("lean")).unwrap();
+    assert!(plan.pinned_by_manifest && !plan.mathlib_source.official);
+    let status = f.run(&plan);
+    let message = status.message.clone().unwrap_or_default();
+    assert_eq!(status.state, LeanSetupState::Failed, "{message}");
+    assert!(dir.join("fake-lake").join("cache-ran").exists(), "the reviewed fork's cache program ran");
+    assert!(
+        message.contains(&format!("Mathlib here comes from {FORK}, and the prebuilt cache may not cover a fork."))
+            && message.contains("choose Build from source instead… in the Lean view")
+            && !message.contains("first download the sources"),
+        "{message}"
+    );
+    let after = f.inspect("lean");
+    assert!(
+        matches!(after.readiness, LeanPackageReadiness::Unfinished { can_build_from_source: true, .. }),
+        "{:?}",
+        after.readiness
+    );
+    assert!(after.blocks_checking(false).is_some());
+    assert!(after.blocks_checking(true).is_none(), "{:?}", after.blocks_checking(true));
+
+    // The manifest redirected to another repository after the review: stale, nothing runs.
+    std::fs::remove_file(dir.join("fake-lake").join("cache-ran")).unwrap();
+    let plan = f.setup.plan(&f.root, &Fixture::prepare("lean")).unwrap();
+    std::fs::write(dir.join("lake-manifest.json"), manifest(OTHER_FORK, OFFICIAL_BATTERIES, BATTERIES_REV)).unwrap();
+    let code = f.setup.start(&f.root, &plan).map(|s| s.id).map_err(|e| e.code);
+    assert_eq!(code, Err("lean.setup.planStale".to_owned()));
+    assert!(!dir.join("fake-lake").join("cache-ran").exists());
 }
 
 /// Starting re-plans and refuses a plan that changed, and the plan covers the

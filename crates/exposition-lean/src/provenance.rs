@@ -112,11 +112,13 @@ pub fn audit_package(workspace_root: &Path, file: &Path) -> Option<crate::types:
     let packages = manifest_bytes.as_deref().and_then(|bytes| parse_packages(bytes).ok()).unwrap_or_default();
     let manifest =
         manifest_bytes.and_then(|bytes| Some(LeanAuditFile { path: inside(LAKE_MANIFEST)?, sha256: digest(&bytes) }));
+    let mathlib = packages.iter().find(|p| p.name.eq_ignore_ascii_case("mathlib"));
     Some(LeanAuditPackage {
         folder,
         toolchain_file,
         manifest,
-        mathlib_revision: packages.iter().find(|p| p.name.eq_ignore_ascii_case("mathlib")).and_then(|p| p.rev.clone()),
+        mathlib_revision: mathlib.and_then(|p| p.rev.clone()),
+        mathlib_source: mathlib.and_then(|p| p.url.as_deref()).map(crate::setup::display_url),
         dependency_count: packages.len() as u32,
     })
 }
@@ -304,6 +306,7 @@ mod tests {
         assert_eq!(pin.path.as_str(), "lean/lean-toolchain");
         assert_eq!(pin.sha256.len(), 64);
         assert_eq!(package.mathlib_revision.as_deref(), Some("0123456789abcdef0123456789abcdef01234567"));
+        assert_eq!(package.mathlib_source.as_deref(), Some("https://github.com/leanprover-community/mathlib4"));
         assert!(package.dependency_count >= 1);
         // A standalone file has no package context; a package at the project folder has the empty folder.
         assert_eq!(audit_package(&root, &root.join("notes").join("Scratch.lean")), None);
