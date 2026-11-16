@@ -133,7 +133,7 @@ describe("Lean evidence", () => {
     const inPackage = {
       ...audit,
       toolchainVersion: "Lean (version 4.35.0)",
-      package: { folder: "LeanBasic", toolchainFile: pin, manifest, mathlibRevision: null, dependencyCount: 1 },
+      package: { folder: "LeanBasic", toolchainFile: pin, manifest, mathlibRevision: null, mathlibSource: null, dependencyCount: 1 },
     } as unknown as LeanAuditRecord;
     const record = {
       ...recorded.evidence[0]!.evidence,

@@ -171,16 +171,45 @@ function sourceRevision(source: LeanSetupSource): React.ReactNode {
   return source.inputRev ? <code className="ui-code">{source.inputRev}</code> : "Chosen by Lake";
 }
 
+/** The row of the dependency whose `cache` program the setup runs. */
+function isMathlib(source: LeanSetupSource): boolean {
+  return source.name.toLowerCase() === "mathlib";
+}
+
 /** Every dependency of the plan with the address and revision it is fetched from. */
 function PlanSources({ plan }: { plan: LeanSetupPlan }) {
+  const fork = plan.mathlibSource.official ? null : plan.mathlibSource.url;
   return (
     <Section title="Sources" count={plan.sources.length}>
+      {fork && (
+        <Banner tone="warning" title="Mathlib is not from the official repository" data-testid="lean-setup-fork-warning">
+          Mathlib comes from <code className="ui-code">{fork}</code>, not the official repository (
+          <code className="ui-code">https://github.com/leanprover-community/mathlib4</code>). This setup downloads and runs that
+          repository&rsquo;s code: its <code className="ui-code">cache</code> program runs on this computer with your account&rsquo;s
+          privileges. The prebuilt cache may not cover a fork; then the cache step or the check after it fails, and Mathlib can
+          only be built from source (hours).
+        </Banner>
+      )}
       <SimpleTable<LeanSetupSource>
         aria-label="Where the dependencies are fetched from"
         data-testid="lean-setup-sources"
         columns={[
           { id: "name", title: "Dependency", isRowHeader: true, render: (source) => source.name },
-          { id: "from", title: "Fetched from", render: sourceOrigin },
+          {
+            id: "from",
+            title: "Fetched from",
+            render: (source) => (
+              <>
+                {sourceOrigin(source)}
+                {fork && isMathlib(source) && (
+                  <>
+                    {" "}
+                    <Badge tone="warning">Not official</Badge>
+                  </>
+                )}
+              </>
+            ),
+          },
           { id: "revision", title: "Revision", width: "24%", render: sourceRevision },
           {
             id: "state",
@@ -191,7 +220,11 @@ function PlanSources({ plan }: { plan: LeanSetupPlan }) {
         ]}
         rows={plan.sources}
         rowKey={(source) => source.name}
-        rowProps={(source) => ({ "data-source": source.name, "data-url": source.url ?? undefined })}
+        rowProps={(source) => ({
+          "data-source": source.name,
+          "data-url": source.url ?? undefined,
+          "data-official": isMathlib(source) ? String(plan.mathlibSource.official) : undefined,
+        })}
         empty="The lakefile names no requirement that could be read."
       />
       {plan.sourcesNote && (

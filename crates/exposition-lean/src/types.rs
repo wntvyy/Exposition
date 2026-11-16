@@ -152,6 +152,11 @@ pub struct LeanAuditPackage {
     pub manifest: Option<LeanAuditFile>,
     /// The Mathlib commit the manifest pins, when the package uses Mathlib.
     pub mathlib_revision: Option<String>,
+    /// The git address the manifest fetches Mathlib from (without
+    /// credentials): tells a fork from the official repository. Absent in
+    /// records made before it was kept.
+    #[serde(default)]
+    pub mathlib_source: Option<String>,
     /// Dependencies the manifest pins.
     pub dependency_count: u32,
 }
