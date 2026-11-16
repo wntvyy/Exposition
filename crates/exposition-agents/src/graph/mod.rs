@@ -139,6 +139,16 @@ pub struct ContextRelation {
     pub origin: OriginKind,
     /// Withheld under metadata-only consent.
     pub note: Option<String>,
+    /// Accepted `formalizes` links: whether the person's review still covers
+    /// the statement (`statementChanged` and `statementMissing` need the
+    /// user's re-review; `unrecorded`: what was reviewed is unknown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub review: Option<exposition_graph::LinkReviewState>,
+    /// Why the review does not plainly stand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub review_note: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

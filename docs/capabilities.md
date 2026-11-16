@@ -196,6 +196,36 @@ current verification on this computer. Associating a Lean declaration with
 a statement records your reviewed correspondence, not a machine proof of
 equivalence.
 
+A reviewed association is a review of the statement as it read at that
+time. When you accept or confirm one, the graph records which statement
+text it covered, and compares it with the statement after every saved
+change. If the statement changed, the association stops reading as reviewed:
+it shows "Needs re-review" with the reason in the Graph inspector, the
+Dependencies view, the Mathematics view ("Association needs re-review"),
+the Lean view, and agents' graph queries, until you choose Confirm link
+(which records the statement as it reads now) or reject the link. A
+statement that can no longer be located (text you bound by selecting it and
+then edited, or a deleted declaration) is reported as that, never as
+unchanged, and the reason says what to do: rebind the statement to its
+current text (the app has no control for this yet; an agent can propose the
+binding), then confirm the link. Until it is rebound, Confirm link is
+unavailable and a confirmation is refused with that explanation; the link
+can still be rejected. Editing around
+the statement, moving it, or re-wrapping a LaTeX or Typst declaration does
+not flag it. Nothing is re-reviewed automatically and agents cannot confirm
+a link. The Lean verdict and its freshness are not altered by any of this.
+An association reviewed before this was recorded says "reviewed statement
+not recorded": what was reviewed is unknown, so a change cannot be detected
+until you confirm it once. The comparison follows saved files, and for text
+bound by hand it is exact: any edit inside the bound text makes it
+unlocatable rather than "changed".
+
+A verdict shown beside a statement belongs to the associated declaration.
+While the association is only suggested, the verdict reads with the
+qualifier, for example "Checked (suggested link)"; while it needs re-review,
+"Checked (link needs re-review)". Only a verdict behind a reviewed
+association is shown unqualified.
+
 **Storage, backups, and recovery.** The graph database is treated as
 untrusted input: it is opened only if it is a regular file of at most 1 GB
 inside the project's own `.exposition` folder, with SQLite's defensive mode
@@ -1198,7 +1228,9 @@ in a graph proposal: such a relationship must cite a record a service
 wrote, and the refusal names the ways those records come to exist. Graph
 queries tell a task where evidence is: a query of a statement lists the
 formal evidence of its associated declarations separately
-(`formalEvidence`, with the state of each association), results that show
+(`formalEvidence`, with the state of each association, whether its review
+still covers the statement, and a note when the link is only suggested or
+needs re-review), results that show
 formal declarations or associations carry a note on how formal evidence is
 recorded, and the impact of a file lists the items located in it
 (`locatedIn`) with a note that their dependents were not followed. Agents

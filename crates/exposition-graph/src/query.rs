@@ -224,8 +224,29 @@ pub enum FormalAssociationState {
     /// A `formalizes` relation was suggested, not reviewed.
     Suggested,
     /// A person reviewed and accepted the correspondence (an assertion, not a
-    /// machine proof of equivalence).
+    /// machine proof of equivalence), and the statement is the one reviewed.
     Reviewed,
+    /// A reviewed link whose statement changed since, or can no longer be
+    /// located: not presented as reviewed until a person confirms it again.
+    NeedsReReview,
+    /// A reviewed link whose reviewed statement text was not recorded (it was
+    /// reviewed before that was recorded): what was reviewed is unknown.
+    ReviewUnrecorded,
+}
+
+impl FormalAssociationState {
+    /// The standing of one `formalizes` link (rejected links are not shown).
+    pub fn of(relation: &Relation) -> Self {
+        use crate::model::{AssertionStatus, LinkReviewState};
+        if relation.status != AssertionStatus::Accepted {
+            return Self::Suggested;
+        }
+        match relation.review.as_ref().map(|r| r.state) {
+            Some(LinkReviewState::StatementChanged | LinkReviewState::StatementMissing) => Self::NeedsReReview,
+            Some(LinkReviewState::Unrecorded) => Self::ReviewUnrecorded,
+            Some(LinkReviewState::Current) | None => Self::Reviewed,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -236,11 +257,19 @@ pub struct MathRow {
     pub binding: Option<SourceBinding>,
     pub informal: InformalState,
     pub formal_association: FormalAssociationState,
+    /// Why the association is not plainly reviewed (`needsReReview`,
+    /// `reviewUnrecorded`), in plain words.
+    pub association_reason: Option<String>,
     /// Associated formal declarations.
     pub formal_declarations: Vec<EntityId>,
     /// Exact verdict of the latest formal evidence of the associated
     /// declaration (or of this declaration). `None` = no evidence.
     pub verdict: Option<FormalVerdict>,
+    /// Standing of the `formalizes` link through which `verdict` reaches
+    /// this row (`None` for a declaration's own verdict, or no verdict). A
+    /// verdict shown through a link that is only suggested, or that needs
+    /// re-review, is labelled as such wherever it is shown.
+    pub verdict_association: Option<FormalAssociationState>,
     /// Whether that evidence still matches the current sources.
     pub freshness: Option<Freshness>,
     pub formal_dependencies: Option<FormalDependencies>,

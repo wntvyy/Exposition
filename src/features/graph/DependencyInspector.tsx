@@ -17,6 +17,7 @@ import { useActiveSourcePosition } from "../editor";
 import { useWorkspace } from "../workspace/store";
 import { graphApi } from "./api";
 import { evidenceKindLabel, FormalEvidencePointer, OutcomeText, RelationStatus, TypeLabel } from "./Inspector";
+import { RelationLine } from "./RelationStatus";
 import { entityDisplay, FAMILY_LABELS, FAMILY_ORDER, freshnessView, kindDisplay, relationDisplay, type VocabularyIndex } from "./model";
 import { openInGraph } from "./navigation";
 import { coverageStateLabel, FreshnessPill } from "./status";
@@ -81,10 +82,11 @@ function InspectedEntityView({ item, vocabulary, primary }: { item: InspectedEnt
             <ul className="xp-graph-rows">
               {groups.get(family)!.map(({ relation, outgoing, other }) => (
                 <li key={`${relation.id}-${outgoing}`} className="xp-graph-row" data-testid="deps-relation" data-kind={relation.kind} data-status={relation.status}>
-                  <p className="xp-graph-row__line xp-graph-row__main">
+                  <RelationLine review={relation.review}>
                     {outgoing ? relationDisplay(vocabulary, relation.kind).reading : relationDisplay(vocabulary, relation.kind).inverse} {other?.label ?? "an item"}
-                    {other && <span className="ui-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>} <RelationStatus status={relation.status} />
-                  </p>
+                    {other && <span className="ui-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>}{" "}
+                    <RelationStatus status={relation.status} review={relation.review} />
+                  </RelationLine>
                 </li>
               ))}
             </ul>

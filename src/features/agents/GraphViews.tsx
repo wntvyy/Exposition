@@ -167,11 +167,17 @@ function ContextRelations({ context }: { context: GraphContext }) {
             {relationDisplay(null, r.kind).reading}
           </span>{" "}
           <span>{entityName(byId.get(r.to), r.to)}</span>{" "}
-          <RelationStatus status={r.status} form="text" />{" "}
+          <RelationStatus status={r.status} review={r.review ? { state: r.review, reason: r.reviewNote ?? null } : null} form="text" />{" "}
           <span className="ui-meta">
             by {r.origin}
             {r.note ? ` — ${r.note}` : ""}
           </span>
+          {r.reviewNote && (
+            <span className="ui-meta" data-testid="graph-link-review" data-review={r.review}>
+              {" "}
+              · {r.reviewNote}
+            </span>
+          )}
         </li>
       ))}
     </ul>

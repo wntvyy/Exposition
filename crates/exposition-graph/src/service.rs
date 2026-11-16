@@ -1024,13 +1024,24 @@ impl GraphService {
                     .iter()
                     .filter(|r| r.kind == RelationKind::Formalizes && (r.to == entity.id || r.from == entity.id))
                     .collect();
-                let formal_association = if formal_links.iter().any(|r| r.status == AssertionStatus::Accepted) {
-                    FormalAssociationState::Reviewed
-                } else if !formal_links.is_empty() {
-                    FormalAssociationState::Suggested
-                } else {
-                    FormalAssociationState::None
-                };
+                // One state per row: a reviewed link that needs attention
+                // is never hidden behind another link that does not.
+                let standings: Vec<(FormalAssociationState, &Relation)> =
+                    formal_links.iter().map(|r| (FormalAssociationState::of(r), *r)).collect();
+                let (formal_association, association_reason) = [
+                    FormalAssociationState::NeedsReReview,
+                    FormalAssociationState::ReviewUnrecorded,
+                    FormalAssociationState::Reviewed,
+                    FormalAssociationState::Suggested,
+                ]
+                .into_iter()
+                .find_map(|state| {
+                    standings
+                        .iter()
+                        .find(|(s, _)| *s == state)
+                        .map(|(s, r)| (*s, r.review.as_ref().and_then(|v| v.reason.clone())))
+                })
+                .unwrap_or((FormalAssociationState::None, None));
                 let formal_declarations: Vec<EntityId> = if entity.kind == EntityKind::FormalDeclaration {
                     vec![entity.id.clone()]
                 } else {
@@ -1038,15 +1049,23 @@ impl GraphService {
                 };
                 // Latest formal evidence of the (associated) declaration(s).
                 let mut latest: Option<Evidence> = None;
+                let mut latest_of: Option<&EntityId> = None;
                 for d in &formal_declarations {
                     for ev in store.evidence_for_subject(d)? {
                         if ev.kind == EvidenceKind::FormalCheck
                             && latest.as_ref().is_none_or(|l| ev.recorded_at_ms > l.recorded_at_ms)
                         {
                             latest = Some(ev);
+                            latest_of = Some(d);
                         }
                     }
                 }
+                // The link the shown verdict comes through (none for a
+                // declaration's own evidence).
+                let verdict_association = latest_of
+                    .filter(|d| **d != entity.id)
+                    .and_then(|d| standings.iter().find(|(_, r)| &r.from == d && r.to == entity.id))
+                    .map(|(s, _)| *s);
                 let verdict = latest
                     .as_ref()
                     .and_then(|e| e.formal.as_ref())
@@ -1060,8 +1079,10 @@ impl GraphService {
                     binding,
                     informal,
                     formal_association,
+                    association_reason,
                     formal_declarations,
                     verdict,
+                    verdict_association,
                     freshness,
                     formal_dependencies,
                     evidence: latest,
@@ -1727,7 +1748,13 @@ fn impact_reason(r: &Relation, affected: &EntityId, store: &GraphStore) -> Resul
     let other = if &r.from == affected { &r.to } else { &r.from };
     let other_label = store.entity(other)?.map(|e| e.label).unwrap_or_else(|| other.to_string());
     let reverse = &r.from == affected;
-    let suggested = if r.status == AssertionStatus::Suggested { " (suggested relationship)" } else { "" };
+    let suggested = if r.status == AssertionStatus::Suggested {
+        " (suggested relationship)"
+    } else if r.review.as_ref().is_some_and(|v| v.needs_re_review()) {
+        " (reviewed link needs re-review)"
+    } else {
+        ""
+    };
     use RelationKind::*;
     let (action, text) = match (r.kind, reverse) {
         (DependsOn, _) => (

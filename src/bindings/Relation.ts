@@ -3,6 +3,7 @@ import type { AssertionStatus } from "./AssertionStatus";
 import type { EntityId } from "./EntityId";
 import type { EvidenceId } from "./EvidenceId";
 import type { EvidenceKind } from "./EvidenceKind";
+import type { LinkReview } from "./LinkReview";
 import type { Origin } from "./Origin";
 import type { RelationId } from "./RelationId";
 import type { RelationKind } from "./RelationKind";
@@ -26,4 +27,17 @@ fromVersion: string | null, toVersion: string | null,
 /**
  * Short note (never executable, never semantic).
  */
-note: string | null, revision: number, createdAtMs: number, updatedAtMs: number, };
+note: string | null, 
+/**
+ * `formalizes` only: digest of the statement (the `to` entity's bound
+ * text) a person reviewed the link against, recorded when the link is
+ * accepted or confirmed. `None` when the link is not reviewed, was
+ * reviewed before digests were recorded, or the statement could not be
+ * located when it was reviewed.
+ */
+reviewedStatement?: string | null, 
+/**
+ * Whether the review still covers the current statement. Computed when
+ * the relation is read (accepted `formalizes` links only); never stored.
+ */
+review?: LinkReview | null, revision: number, createdAtMs: number, updatedAtMs: number, };

@@ -1119,6 +1119,8 @@ mod source_items {
             from_version: None,
             to_version: None,
             note: None,
+            reviewed_statement: None,
+            review: None,
             revision: 1,
             created_at_ms: 0,
             updated_at_ms: 0,

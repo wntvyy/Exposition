@@ -67,6 +67,8 @@ export interface CanvasEdge {
   label: string;
   family: RelationFamily;
   status: AssertionStatus;
+  /** A reviewed formal link whose review no longer covers the statement ("needs re-review"). */
+  attention?: string;
   /** Number of relations this edge stands for (> 1 when folded into a collapsed group). */
   count?: number;
   /** Accessible description: "Lemma 2 depends on Definition 1, suggested". */

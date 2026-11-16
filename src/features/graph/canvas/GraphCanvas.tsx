@@ -151,6 +151,7 @@ export function toFlowEdges(edges: CanvasEdge[], selectedEdge: string | null): R
       label: edge.label,
       family: edge.family,
       status: edge.status,
+      attention: edge.attention,
       count: edge.count,
       description: edge.description,
       bow: bows.get(edge.id) ?? 0,

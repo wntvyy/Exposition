@@ -118,7 +118,7 @@ export function RelationTable({
     { id: "from", title: "From", isRowHeader: true, sortValue: (r) => r.from, render: (r) => r.from },
     { id: "relation", title: "Relationship", sortValue: (r) => r.reading, render: (r) => (r.count > 1 ? `${r.reading} (×${r.count}, collapsed)` : r.reading) },
     { id: "to", title: "To", sortValue: (r) => r.to, render: (r) => r.to },
-    { id: "status", title: "Status", sortValue: (r) => r.status, render: (r) => <RelationStatus status={r.status} form="text" />, width: "14%" },
+    { id: "status", title: "Status", sortValue: (r) => r.status, render: (r) => <RelationStatus status={r.status} review={r.relation?.review} form="text" />, width: "14%" },
   ];
   return (
     <DataTable

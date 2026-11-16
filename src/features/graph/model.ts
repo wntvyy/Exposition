@@ -37,6 +37,7 @@ import type { AssertionStatus } from "../../bindings/AssertionStatus";
 import type { Entity } from "../../bindings/Entity";
 import type { EntityFamily } from "../../bindings/EntityFamily";
 import type { EntityKind } from "../../bindings/EntityKind";
+import type { FormalAssociationState } from "../../bindings/FormalAssociationState";
 import type { FormalVerdict } from "../../bindings/FormalVerdict";
 import type { Freshness } from "../../bindings/Freshness";
 import type { Origin } from "../../bindings/Origin";
@@ -360,6 +361,33 @@ export const VERDICT_VIEW: Record<FormalVerdict, { label: string; status: Status
 };
 
 /** Freshness as a status: stale and unknown are never shown as success. */
+/**
+ * How a declaration's verdict reads beside the statement it is linked to. A
+ * verdict that arrives through a link nobody reviewed, or one whose review no
+ * longer covers the statement, keeps its exact word and says so; it is never
+ * presented like a verdict behind a reviewed link.
+ */
+export const VERDICT_LINK_QUALIFIER: Partial<Record<FormalAssociationState, { suffix: string; sentence: string }>> = {
+  suggested: {
+    suffix: "suggested link",
+    sentence: "This is the declaration's verdict. Its link to this item is only suggested: nobody has reviewed that they correspond.",
+  },
+  needsReReview: {
+    suffix: "link needs re-review",
+    sentence: "This is the declaration's verdict. Its link to this item needs re-review before the verdict is read as being about this item.",
+  },
+};
+
+export function verdictThroughLink(
+  verdict: FormalVerdict,
+  association: FormalAssociationState | null | undefined,
+): { label: string; status: Status; sentence: string; qualified: boolean } {
+  const view = VERDICT_VIEW[verdict];
+  const qualifier = association ? VERDICT_LINK_QUALIFIER[association] : undefined;
+  if (!qualifier) return { ...view, qualified: false };
+  return { label: `${view.label} (${qualifier.suffix})`, status: view.status, sentence: `${view.sentence} ${qualifier.sentence}`, qualified: true };
+}
+
 export function freshnessView(freshness: Freshness | null): { label: string; status: Status; detail: string } {
   if (!freshness) return { label: "No evidence", status: "idle", detail: "There is no evidence to be current or stale." };
   switch (freshness.kind) {

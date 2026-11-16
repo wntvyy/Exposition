@@ -120,7 +120,13 @@ function RelationRow({ relation, detail, outgoing }: { relation: Relation; detai
     : `${other?.label ?? otherId} ${READING[relation.kind] ?? relation.kind} ${self}`;
   return (
     <li data-testid="graph-relation" data-kind={relation.kind} data-direction={outgoing ? "out" : "in"} data-status={relation.status}>
-      <span className="exp-graph__relation">{text}</span> <RelationStatus status={relation.status} />
+      <span className="exp-graph__relation">{text}</span> <RelationStatus status={relation.status} review={relation.review} />
+      {relation.review?.reason && (
+        <span className="ui-meta" data-testid="graph-link-review" data-review={relation.review.state}>
+          {" "}
+          · {relation.review.reason}
+        </span>
+      )}
       {relation.note && <span className="ui-meta"> · {relation.note}</span>}
     </li>
   );

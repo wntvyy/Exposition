@@ -764,6 +764,8 @@ impl<'a> Planner<'a> {
             from_version: None,
             to_version: None,
             note: None,
+            reviewed_statement: None,
+            review: None,
             revision: 1,
             created_at_ms: self.now,
             updated_at_ms: self.now,
