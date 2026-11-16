@@ -57,7 +57,8 @@ import {
   RelationStatus,
   type InspectorActions,
 } from "./Inspector";
-import { entityDisplay, freshnessView, kindDisplay, VERDICT_VIEW, type VocabularyIndex } from "./model";
+import { entityDisplay, freshnessView, kindDisplay, verdictThroughLink, type VocabularyIndex } from "./model";
+import { RelationLine } from "./RelationStatus";
 import { countLabel, GraphDialogs, InspectorPanel, useInspectorOpen, type DialogState } from "./ProjectGraph";
 import { project } from "./projection";
 import { revealSource } from "./reveal";
@@ -102,9 +103,10 @@ export function mathBadges(row: MathRow | undefined): CanvasBadge[] {
   if (!row) return [];
   const badges: CanvasBadge[] = [];
   if (row.verdict) {
-    const v = VERDICT_VIEW[row.verdict];
+    // Through a suggested link, or one that needs re-review, the verdict is labelled and provisional (dashed).
+    const v = verdictThroughLink(row.verdict, row.verdictAssociation);
     const look = VERDICT_BADGE[v.status] ?? VERDICT_BADGE.idle!;
-    badges.push({ label: v.label, tone: look.tone, icon: look.icon, title: v.sentence });
+    badges.push({ label: v.label, tone: look.tone, icon: look.icon, title: v.sentence, ...(v.qualified ? { dashed: true } : {}) });
   }
   if (row.freshness && row.freshness.kind !== "current") {
     const f = freshnessView(row.freshness);
@@ -138,6 +140,23 @@ function matchesQuick(row: MathRow, quick: Quick): boolean {
 }
 
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/**
+ * A row's verifier verdict. Behind a reviewed link it is quiet status text;
+ * through a suggested link, or one that needs re-review, it keeps the exact
+ * verdict word, says which, and is a provisional (dashed) badge.
+ */
+export function RowVerdict({ row }: { row: MathRow }) {
+  if (!row.verdict) return <StatusText status="idle" label="No formal evidence" />;
+  const v = verdictThroughLink(row.verdict, row.verdictAssociation);
+  if (!v.qualified) return <StatusText status={v.status} label={v.label} />;
+  const look = VERDICT_BADGE[v.status] ?? VERDICT_BADGE.idle!;
+  return (
+    <Badge tone={look.tone} icon={look.icon} dashed data-testid="graph-verdict-qualified" data-link={row.verdictAssociation ?? undefined}>
+      {v.label}
+    </Badge>
+  );
+}
 
 export function VerificationTable({
   rows,
@@ -196,19 +215,22 @@ export function VerificationTable({
             );
           case "reviewed":
             return <span>Reviewed association{count}</span>;
+          case "needsReReview":
+            return <StatusText status="warning" label={`Association needs re-review${count}`} />;
+          case "reviewUnrecorded":
+            return (
+              <span>
+                Reviewed association{count} <span className="ui-muted">· statement not recorded</span>
+              </span>
+            );
         }
       },
     },
     {
       id: "verdict",
       title: "Verifier verdict",
-      sortValue: (r) => (r.verdict ? VERDICT_VIEW[r.verdict].label : "~"),
-      render: (r) =>
-        r.verdict ? (
-          <StatusText status={VERDICT_VIEW[r.verdict].status} label={VERDICT_VIEW[r.verdict].label} />
-        ) : (
-          <StatusText status="idle" label="No formal evidence" />
-        ),
+      sortValue: (r) => (r.verdict ? verdictThroughLink(r.verdict, r.verdictAssociation).label : "~"),
+      render: (r) => <RowVerdict row={r} />,
     },
     {
       id: "freshness",
@@ -249,7 +271,13 @@ export function VerificationTable({
       selectedKey={selected}
       onSelectionChange={onSelect}
       defaultSort={{ column: "statement", direction: "ascending" }}
-      rowProps={(r) => ({ "data-entity-id": r.entity.id, "data-verdict": r.verdict ?? "none", "data-freshness": r.freshness?.kind ?? "none" })}
+      rowProps={(r) => ({
+        "data-entity-id": r.entity.id,
+        "data-verdict": r.verdict ?? "none",
+        "data-freshness": r.freshness?.kind ?? "none",
+        "data-association": r.formalAssociation,
+        "data-verdict-link": r.verdictAssociation ?? "none",
+      })}
       empty="No mathematical items match. Declarations, statements, and proofs appear as they are extracted or created."
     />
   );
@@ -338,12 +366,12 @@ function MathSections({
         const other = neighbors.get(pick(r));
         return (
           <li key={r.id} className="xp-graph-row" data-testid={testId} data-entity-id={pick(r)}>
-            <p className="xp-graph-row__line xp-graph-row__main">
+            <RelationLine review={r.review}>
               <button type="button" className="xp-link" onClick={() => onSelectEntity(pick(r))}>
                 {other?.label ?? pick(r)}
               </button>{" "}
-              <RelationStatus status={r.status} />
-            </p>
+              <RelationStatus status={r.status} review={r.review} />
+            </RelationLine>
           </li>
         );
       })}
@@ -381,9 +409,9 @@ function MathSections({
             <AssociateDeclarationAction target={detail.entity} declarations={declarations} canWrite={canWrite} />
           )}
           {row?.verdict ? (
-            <p>
-              Verifier verdict: <StatusText status={VERDICT_VIEW[row.verdict].status} label={VERDICT_VIEW[row.verdict].label} />{" "}
-              <span className="ui-muted">{VERDICT_VIEW[row.verdict].sentence}</span>
+            <p data-testid="graph-verdict-line">
+              Verifier verdict: <RowVerdict row={row} />{" "}
+              <span className="ui-muted">{verdictThroughLink(row.verdict, row.verdictAssociation).sentence}</span>
             </p>
           ) : (
             <p className="ui-muted">No formal evidence: nothing about this item has been checked by Lean.</p>

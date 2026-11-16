@@ -98,7 +98,12 @@ pub const FORMAL_EVIDENCE_NOTE: &str = "\
     or accepts the association a workflow's Lean audit proposes. It is never recorded on the statement the \
     declaration formalizes: a formalizes relation, suggested or accepted, is a correspondence a person reviews, \
     not a proof that the two say the same. Query entity on a statement lists the evidence of its associated \
-    declarations under formalEvidence.";
+    declarations under formalEvidence. Each entry says how far its association can be relied on: association \
+    suggested is nobody's review yet; an accepted one carries review, and review statementChanged or \
+    statementMissing means the statement is no longer the text the user reviewed (or cannot be located), so the \
+    association needs the user's re-review and its verdict must not be reported as a reviewed correspondence; \
+    review unrecorded means the reviewed text is unknown. Only the user can accept, confirm, or reject an \
+    association.";
 
 /// What an impact result for a file covers.
 pub const FILE_IMPACT_NOTE: &str = "\
@@ -301,13 +306,34 @@ fn entity(graph: GraphEnv<'_>, vis: &Visibility<'_>, input: &GraphQueryInput) ->
                         .collect();
                     records.sort_by_key(|x| std::cmp::Reverse(x.recorded_at_ms));
                     let records: Vec<Value> = records.iter().take(5).map(|x| evidence_item(store, vis, x)).collect();
-                    formal_evidence.push(json!({
+                    let mut item = json!({
                         "declaration": declaration.id,
                         "label": vis.label(&declaration),
                         "relation": r.id,
                         "association": r.status,
                         "evidence": records,
-                    }));
+                    });
+                    // How the verdicts below reach this statement: through a
+                    // link nobody reviewed, or one whose review no longer
+                    // covers the statement, they are labelled as such.
+                    match (r.status, &r.review) {
+                        (AssertionStatus::Accepted, Some(review)) => {
+                            item["review"] = json!(review.state);
+                            if let Some(reason) = &review.reason {
+                                item["associationNote"] = json!(if review.needs_re_review() {
+                                    format!("Link needs re-review: {reason}")
+                                } else {
+                                    reason.clone()
+                                });
+                            }
+                        }
+                        (AssertionStatus::Accepted, None) => {}
+                        _ => {
+                            item["associationNote"] =
+                                json!("Suggested link: no person has reviewed this correspondence.");
+                        }
+                    }
+                    formal_evidence.push(item);
                 }
             }
             let formal = e.kind == EntityKind::FormalDeclaration

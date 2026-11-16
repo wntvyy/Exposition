@@ -75,7 +75,7 @@ import {
   VERDICT_VIEW,
   type VocabularyIndex,
 } from "./model";
-import { RelationStatus } from "./RelationStatus";
+import { RelationLine, RelationReviewNote, RelationStatus, reviewQualified } from "./RelationStatus";
 import { revealSource } from "./reveal";
 import { coverageStateLabel } from "./status";
 import { useGraphLoad } from "./useGraphData";
@@ -167,7 +167,7 @@ function RelationRow({
   const canEdit = actions.canWrite && info.manual && relation.status !== "observed";
   return (
     <li className="xp-graph-row" data-testid="graph-relation" data-relation-id={relation.id} data-kind={relation.kind} data-status={relation.status}>
-      <p className="xp-graph-row__line xp-graph-row__main">
+      <RelationLine review={relation.review}>
         {outgoing ? info.reading : info.inverse}{" "}
         {other && actions.onSelectEntity ? (
           <button type="button" className="xp-link" onClick={() => actions.onSelectEntity?.(other.id)}>
@@ -176,18 +176,39 @@ function RelationRow({
         ) : (
           <span>{otherLabel}</span>
         )}
-        {other && <span className="ui-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>} <RelationStatus status={relation.status} />
+        {other && <span className="ui-muted"> ({entityDisplay(vocabulary, other).typeLabel})</span>}{" "}
+        <RelationStatus status={relation.status} review={relation.review} />
         {relation.status === "observed" && <span className="ui-muted"> from {originLabel(relation.origin)}</span>}
-      </p>
+      </RelationLine>
       {canEdit && <RelationActions relation={relation} description={`${outgoing ? "" : otherLabel + " "}${info.reading}${outgoing ? " " + otherLabel : ""}`} />}
     </li>
   );
 }
 
-/** Accept/Reject a suggestion; remove a relationship (semantic, confirmed). */
+/**
+ * Accept/Reject a suggestion; confirm or reject a formal link whose review
+ * no longer plainly stands (confirming records the statement as it is now);
+ * remove a relationship (semantic, confirmed).
+ */
 export function RelationActions({ relation, description }: { relation: Relation; description: string }) {
   return (
     <Toolbar aria-label="Relationship actions" className="xp-graph-row__actions">
+      {reviewQualified(relation) && (
+        <>
+          <IconButton
+            icon={Check}
+            size="sm"
+            aria-label="Confirm link"
+            onPress={() => void runChange([{ op: "setRelationStatus", relation: relation.id, status: "accepted" }], "Confirm the link", "Link confirmed")}
+          />
+          <IconButton
+            icon={X}
+            size="sm"
+            aria-label="Reject link"
+            onPress={() => void runChange([{ op: "setRelationStatus", relation: relation.id, status: "rejected" }], "Reject the link", "Link rejected")}
+          />
+        </>
+      )}
       {relation.status === "suggested" && (
         <>
           <IconButton
@@ -339,8 +360,15 @@ export function FormalEvidencePointer({
         {formalizations.map((r) => {
           const label = neighbors.get(r.from)?.label ?? r.from;
           return (
-            <li key={r.id} className="xp-graph-row" data-testid="graph-evidence-formal-declaration" data-entity-id={r.from} data-status={r.status}>
-              <p className="xp-graph-row__line xp-graph-row__main">
+            <li
+              key={r.id}
+              className="xp-graph-row"
+              data-testid="graph-evidence-formal-declaration"
+              data-entity-id={r.from}
+              data-status={r.status}
+              data-review={r.review?.state}
+            >
+              <RelationLine review={r.review}>
                 {onSelectEntity ? (
                   <button type="button" className="xp-link" onClick={() => onSelectEntity(r.from)}>
                     {label}
@@ -348,8 +376,8 @@ export function FormalEvidencePointer({
                 ) : (
                   label
                 )}{" "}
-                <RelationStatus status={r.status} />
-              </p>
+                <RelationStatus status={r.status} review={r.review} />
+              </RelationLine>
             </li>
           );
         })}
@@ -708,7 +736,7 @@ export function RelationInspector({
         title={description}
         meta={
           <>
-            <RelationStatus status={relation.status} form="text" />
+            <RelationStatus status={relation.status} review={relation.review} form="text" />
             <span>Admitted by {originLabel(relation.origin)}</span>
           </>
         }
@@ -718,6 +746,7 @@ export function RelationInspector({
         <Section title="Details">
           <div className="xp-graph-stack">
             <KeyValueList items={facts} />
+            <RelationReviewNote review={relation.review} />
             {relation.status === "observed" ? (
               <p className="ui-muted">Observed in the sources: to change it, change the source.</p>
             ) : !info.manual ? (

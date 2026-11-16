@@ -7,6 +7,7 @@ import type { Entity } from "../../bindings/Entity";
 import type { Relation } from "../../bindings/Relation";
 import type { CanvasBadge, CanvasEdge, CanvasNode } from "./canvas/types";
 import { entityDisplay, relationDisplay, STATUS_LABELS, type SavedView, type VocabularyIndex } from "./model";
+import { needsReReview } from "./RelationStatus";
 
 /** Structure relations that make one entity a member of a group. */
 const MEMBERSHIP: Partial<Record<Relation["kind"], "groupToMember" | "memberToGroup">> = {
@@ -151,10 +152,12 @@ export function project(
     const info = relationDisplay(vocabulary, r.kind);
     const rerouted = from !== r.from || to !== r.to;
     const id = rerouted ? `folded:${from}:${to}:${r.kind}:${r.status}` : r.id;
+    const attention = needsReReview(r.review) ? "needs re-review" : undefined;
     const existing = edges.get(id);
     if (existing) {
       existing.count = (existing.count ?? 1) + 1;
-      existing.description = describe(kept, from, info.reading, to, r.status, existing.count);
+      existing.attention ??= attention;
+      existing.description = describe(kept, from, info.reading, to, r.status, existing.count, existing.attention);
       continue;
     }
     edges.set(id, {
@@ -165,8 +168,9 @@ export function project(
       label: info.reading,
       family: info.family,
       status: r.status,
+      ...(attention ? { attention } : {}),
       ...(rerouted ? { count: 1 } : {}),
-      description: describe(kept, from, info.reading, to, r.status, 1),
+      description: describe(kept, from, info.reading, to, r.status, 1, attention),
     });
   }
 
@@ -182,9 +186,10 @@ function describe(
   to: string,
   status: Relation["status"],
   count: number,
+  attention?: string,
 ): string {
   const name = (id: string) => entities.get(id)?.label ?? id;
-  const suffix = status === "accepted" ? "" : `, ${STATUS_LABELS[status].toLowerCase()}`;
+  const suffix = attention ? `, ${attention}` : status === "accepted" ? "" : `, ${STATUS_LABELS[status].toLowerCase()}`;
   const many = count > 1 ? ` (${count} relationships)` : "";
   return `${name(from)} ${reading} ${name(to)}${suffix}${many}`;
 }

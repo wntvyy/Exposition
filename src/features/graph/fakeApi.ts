@@ -334,7 +334,12 @@ export function createFakeGraph(seed: { entities?: Entity[]; relations?: Relatio
           relations.push(relation(id, op.kind, from, to));
         }
         if (op.op === "removeRelation") relations.splice(relations.findIndex((r) => r.id === op.relation), 1);
-        if (op.op === "setRelationStatus") relations.find((r) => r.id === op.relation)!.status = op.status;
+        if (op.op === "setRelationStatus") {
+          const target = relations.find((r) => r.id === op.relation)!;
+          target.status = op.status;
+          // As the service does: accepting or confirming a formal link reviews the statement as it is now.
+          target.review = target.kind === "formalizes" && op.status === "accepted" ? { state: "current", reason: null } : null;
+        }
         if (op.op === "setLifecycle") entities.find((e) => e.id === op.entity)!.lifecycle = op.lifecycle;
       }
       revision += 1;

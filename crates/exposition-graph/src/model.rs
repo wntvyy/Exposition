@@ -225,9 +225,61 @@ pub struct Relation {
     pub to_version: Option<String>,
     /// Short note (never executable, never semantic).
     pub note: Option<String>,
+    /// `formalizes` only: digest of the statement (the `to` entity's bound
+    /// text) a person reviewed the link against, recorded when the link is
+    /// accepted or confirmed. `None` when the link is not reviewed, was
+    /// reviewed before digests were recorded, or the statement could not be
+    /// located when it was reviewed.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub reviewed_statement: Option<String>,
+    /// Whether the review still covers the current statement. Computed when
+    /// the relation is read (accepted `formalizes` links only); never stored.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub review: Option<LinkReview>,
     pub revision: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+}
+
+/// Where a person's review of a `formalizes` link stands against the
+/// statement as it is now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum LinkReviewState {
+    /// The statement text is the one the review covered.
+    Current,
+    /// The statement text differs from the reviewed one: needs re-review.
+    StatementChanged,
+    /// The statement cannot be located in the sources now, so it cannot be
+    /// compared: needs re-review (never treated as unchanged).
+    StatementMissing,
+    /// The link was reviewed, but the statement text the review covered was
+    /// not recorded: what was reviewed is unknown, and a change cannot be
+    /// detected until the link is confirmed again.
+    Unrecorded,
+}
+
+/// The computed review standing of an accepted `formalizes` link. The Lean
+/// evidence of the declaration is unaffected; only the claim that the
+/// correspondence was reviewed is qualified.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkReview {
+    pub state: LinkReviewState,
+    /// Why, in plain words (none when current).
+    pub reason: Option<String>,
+}
+
+impl LinkReview {
+    /// The link must not be presented as reviewed until a person confirms it
+    /// again (or rejects it).
+    pub fn needs_re_review(&self) -> bool {
+        matches!(self.state, LinkReviewState::StatementChanged | LinkReviewState::StatementMissing)
+    }
 }
 
 /// An input a run/check consumed, pinned by version.

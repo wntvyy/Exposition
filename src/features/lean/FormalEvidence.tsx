@@ -41,6 +41,20 @@ const TARGET_KINDS: EntityKind[] = [
   "mathObject",
 ];
 
+/** How an association reads on its declaration: a suggestion, a reviewed correspondence, or one whose review no longer stands. */
+function associationStanding(a: { status: string; review: { state: string } | null }): string {
+  if (a.status !== "accepted") return a.status;
+  switch (a.review?.state) {
+    case "statementChanged":
+    case "statementMissing":
+      return "reviewed correspondence needs re-review";
+    case "unrecorded":
+      return "reviewed correspondence, reviewed statement not recorded";
+    default:
+      return "reviewed correspondence";
+  }
+}
+
 const KIND_TITLE: Record<string, string> = {
   theorem: "Theorem",
   lemma: "Lemma",
@@ -136,9 +150,17 @@ export function DeclarationEvidenceControls({
         </p>
       )}
       {evidence?.associations.map((a) => (
-        <p key={a.relation} className="exp-lean__association" data-testid="lean-decl-association" data-target={a.target.id} data-status={a.status}>
+        <p
+          key={a.relation}
+          className="exp-lean__association"
+          data-testid="lean-decl-association"
+          data-target={a.target.id}
+          data-status={a.status}
+          data-review={a.review?.state}
+        >
           <Link2 size={12} aria-hidden /> Formalizes {KIND_TITLE[a.target.kind] ?? a.target.kind} “{a.target.label}” ·{" "}
-          {a.status === "accepted" ? "reviewed correspondence" : a.status} (not a proof of equivalence)
+          {associationStanding(a)} (not a proof of equivalence)
+          {a.review?.reason && <span className="ui-meta"> {a.review.reason}</span>}
         </p>
       ))}
       <div className="exp-lean__evidence-actions">

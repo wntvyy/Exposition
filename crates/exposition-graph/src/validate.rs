@@ -396,12 +396,28 @@ pub fn run_operations(w: &Writer<'_>, origin: &Origin, ops: &[GraphOperation], a
                     );
                     continue;
                 }
+                // Accepting (or confirming again) a formal link records the
+                // statement the person reviewed it against; nothing else
+                // ever sets or clears that record.
+                let confirming = r.status == AssertionStatus::Accepted && *status == AssertionStatus::Accepted;
                 r.status = *status;
+                r.reviewed_statement = match status {
+                    // Confirming while the statement cannot be located
+                    // records nothing: the last statement actually reviewed
+                    // stays on record, so the link keeps needing re-review.
+                    AssertionStatus::Accepted => reviewed_statement(w, r.kind, &r.to)?
+                        .or_else(|| r.reviewed_statement.take().filter(|_| confirming)),
+                    _ => None,
+                };
                 r.revision += 1;
                 r.updated_at_ms = now;
                 cx.effects.push(format!(
                     "{} relationship {}",
-                    if *status == AssertionStatus::Accepted { "Accept" } else { "Reject" },
+                    match (status, confirming) {
+                        (AssertionStatus::Accepted, true) => "Confirm",
+                        (AssertionStatus::Accepted, false) => "Accept",
+                        _ => "Reject",
+                    },
                     r.kind.as_str()
                 ));
                 if apply {
@@ -471,6 +487,17 @@ fn dedup_roles(roles: &[ResourceRole]) -> Vec<ResourceRole> {
     v.sort();
     v.dedup();
     v
+}
+
+/// The digest of the statement a `formalizes` link is reviewed against, as
+/// it is located now (`None` for other kinds, and when the statement cannot
+/// be located: the review then covers an unknown text and reads as such).
+fn reviewed_statement(w: &Writer<'_>, kind: RelationKind, to: &EntityId) -> StoreResult<Option<String>> {
+    if kind != RelationKind::Formalizes {
+        return Ok(None);
+    }
+    let Some(entity) = w.entity(to)? else { return Ok(None) };
+    Ok(crate::review::statement_now(&entity, &w.bindings(to)?).digest())
 }
 
 /// Content hash of the first binding (endpoint version at assertion time).
@@ -632,6 +659,13 @@ fn add_relation(
             from_version: version_of(cx.w, &from.id)?,
             to_version: version_of(cx.w, &to.id)?,
             note: note.map(str::to_owned),
+            // A link a person asserts directly is reviewed as asserted.
+            reviewed_statement: if status == AssertionStatus::Accepted && cx.origin == Origin::User {
+                reviewed_statement(cx.w, kind, &to.id)?
+            } else {
+                None
+            },
+            review: None,
             revision: 1,
             created_at_ms: now,
             updated_at_ms: now,

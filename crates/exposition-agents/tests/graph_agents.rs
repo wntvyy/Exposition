@@ -730,6 +730,8 @@ async fn file_impact_and_formal_evidence_are_stated_not_left_to_guess() {
     assert_eq!(formal["declaration"], json!(declaration.as_str()), "{statement}");
     assert_eq!(formal["label"], json!("t"));
     assert_eq!(formal["association"], json!("accepted"));
+    assert_eq!(formal["review"], json!("current"), "the user reviewed the statement as it is: {statement}");
+    assert!(formal.get("associationNote").is_none(), "{statement}");
     assert_eq!(formal["evidence"][0]["id"], json!(evidence.as_str()));
     assert_eq!(formal["evidence"][0]["outcome"], json!({"verdict": "checked"}));
     assert_eq!(formal["evidence"][0]["freshness"], json!("unknown"), "formal evidence is never current");
@@ -747,6 +749,39 @@ async fn file_impact_and_formal_evidence_are_stated_not_left_to_guess() {
     assert_eq!(hit["id"], json!(evidence.as_str()), "{lean_impact}");
     assert_eq!(hit["subject"], json!(declaration.as_str()));
     assert!(hit["reason"].as_str().unwrap().contains("a change to the file makes this evidence historical"), "{hit}");
+
+    // The statement is no longer the one the user reviewed (here: another
+    // digest on record). The verdict is still listed, with the association
+    // qualified in the entry, in the relation, and in the note.
+    f.graph
+        .with_store(|store| {
+            store
+                .connection()
+                .execute(
+                    "UPDATE relations SET reviewed_statement = 'statement:v1:another' WHERE kind = 'formalizes'",
+                    [],
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let (id, _) = run(&mut h, req, vec![query("r-lemma", "entity", "", lemma, "", 1)], true).await;
+    let flagged = parse(&call(&h, &id, "r-lemma").2);
+    let formal = &flagged["formalEvidence"][0];
+    assert_eq!(formal["association"], json!("accepted"), "{flagged}");
+    assert_eq!(formal["review"], json!("statementChanged"));
+    assert!(
+        formal["associationNote"].as_str().unwrap().starts_with("Link needs re-review: The statement changed since"),
+        "{flagged}"
+    );
+    assert_eq!(formal["evidence"][0]["outcome"], json!({"verdict": "checked"}), "the evidence is not altered");
+    let link = flagged["relations"].as_array().unwrap().iter().find(|r| r["kind"] == json!("formalizes")).unwrap();
+    assert_eq!(link["review"], json!("statementChanged"), "{flagged}");
+    assert!(link["reviewNote"].as_str().unwrap().starts_with("The statement changed since this link was reviewed."));
+    assert!(
+        note.contains("needs the user's re-review") && note.contains("Only the user can accept, confirm, or reject")
+    );
 
     // Metadata-only consent: the same structure without labels, statements, or reasons.
     let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::MetadataOnly);

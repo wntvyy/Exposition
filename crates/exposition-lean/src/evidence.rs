@@ -428,7 +428,13 @@ pub fn associate(
         return Err(GraphError::new("lean.notDeclaration", "Only a formal declaration can formalize a statement."));
     }
     let operations = match &existing {
-        Some(r) if r.status == AssertionStatus::Accepted => {
+        // An accepted association whose statement is the reviewed one is
+        // kept as it is. One whose review no longer covers the statement is
+        // confirmed again: associating is the person's review of it now.
+        Some(r)
+            if r.status == AssertionStatus::Accepted
+                && r.review.as_ref().is_none_or(|v| v.state == exposition_graph::LinkReviewState::Current) =>
+        {
             return Ok(FormalAssociation {
                 declaration: declaration.clone(),
                 target: target.clone(),
@@ -437,7 +443,7 @@ pub fn associate(
                 existing: true,
             });
         }
-        Some(r) if r.status == AssertionStatus::Suggested => {
+        Some(r) if matches!(r.status, AssertionStatus::Suggested | AssertionStatus::Accepted) => {
             vec![GraphOperation::SetRelationStatus { relation: r.id.clone(), status: AssertionStatus::Accepted }]
         }
         _ => vec![GraphOperation::AddRelation {
@@ -530,6 +536,9 @@ pub struct AssociationView {
     pub relation: RelationId,
     pub target: exposition_graph::Entity,
     pub status: AssertionStatus,
+    /// Whether the review still covers the target's current statement
+    /// (accepted associations).
+    pub review: Option<exposition_graph::LinkReview>,
     pub note: Option<String>,
 }
 
@@ -635,7 +644,13 @@ pub fn declaration_evidence(
                     continue;
                 }
                 if let Some(target) = store.entity(&r.to)? {
-                    associations.push(AssociationView { relation: r.id, target, status: r.status, note: r.note });
+                    associations.push(AssociationView {
+                        relation: r.id,
+                        target,
+                        status: r.status,
+                        review: r.review,
+                        note: r.note,
+                    });
                 }
             }
             out.push(DeclarationEvidence {
@@ -1042,6 +1057,38 @@ mod tests {
         let again = associate(&graph, &decl_id, &theorem, None).unwrap();
         assert!(again.existing);
         assert_eq!(again.relation, a.relation);
+        // The statement changes (an unbound item is its label): the reviewed
+        // association needs re-review, and associating again — the person's
+        // review of the statement as it is now — confirms it.
+        let review = |graph: &GraphService| {
+            graph.with_store(|s| Ok(s.relation(&a.relation)?)).unwrap().and_then(|r| r.review).map(|r| r.state)
+        };
+        assert_eq!(review(&graph), Some(exposition_graph::LinkReviewState::Current));
+        let entity = graph.entity_detail(&theorem).unwrap().entity;
+        let (p, _) = graph
+            .propose_and_apply(
+                Origin::User,
+                &ChangeRequest {
+                    base_revision: graph.status().revision,
+                    operations: vec![GraphOperation::UpdateEntity {
+                        entity: theorem.clone(),
+                        expected_revision: entity.revision,
+                        label: Some("A different statement".into()),
+                        attributes: None,
+                    }],
+                    summary: None,
+                },
+            )
+            .unwrap();
+        assert!(p.valid, "{:?}", p.diagnostics);
+        assert_eq!(review(&graph), Some(exposition_graph::LinkReviewState::StatementChanged));
+        let listed = declaration_evidence(&graph, &r.path, Some(&r.content_hash)).unwrap();
+        let shown = listed.iter().flat_map(|d| d.associations.iter()).find(|v| v.relation == a.relation).unwrap();
+        assert!(shown.review.as_ref().is_some_and(|v| v.needs_re_review()), "the Lean panel is told: {shown:?}");
+        let confirmed = associate(&graph, &decl_id, &theorem, None).unwrap();
+        assert!(confirmed.existing);
+        assert_eq!(confirmed.relation, a.relation);
+        assert_eq!(review(&graph), Some(exposition_graph::LinkReviewState::Current));
         // Only formal declarations formalize.
         assert!(associate(&graph, &theorem, &decl_id, None).is_err());
         let math = graph.math_overview().unwrap();

@@ -139,6 +139,8 @@ impl<'a> Visibility<'a> {
             status: relation.status,
             origin: OriginKind::of(&relation.origin),
             note: relation.note.as_deref().filter(|_| self.content()).map(|n| truncate_chars(n, 240)),
+            review: relation.review.as_ref().map(|r| r.state),
+            review_note: relation.review.as_ref().and_then(|r| r.reason.clone()),
         }
     }
 

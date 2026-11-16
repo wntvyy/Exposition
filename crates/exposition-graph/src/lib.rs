@@ -46,6 +46,7 @@ pub mod ops;
 pub mod project_ops;
 pub mod query;
 pub mod reconcile;
+pub mod review;
 pub mod service;
 pub mod source_removal;
 pub mod store;

@@ -19,12 +19,19 @@
 //   4 the direct, service-backed path: the Lean panel's "Record evidence" for
 //     the declaration; the theorem then shows the declaration's verdict by
 //     association (Mathematics), never as evidence of its own, with
-//     freshness never "current"; graph_query lists it under formalEvidence
+//     freshness never "current"; graph_query lists it under formalEvidence;
+//     through a link that is only suggested the same verdict reads
+//     "Checked (suggested link)" (Mathematics) and the agent is told so
 //   5 the Lean source changes and is saved: the evidence is stale everywhere
 //     (declaration, theorem row, agent result, file impact); after a restart
 //     it is still stale and the association still accepted
 //   6 the manuscript statement changes and is saved: the theorem's binding no
-//     longer resolves; the formal evidence is untouched
+//     longer resolves and the reviewed association stops reading as reviewed
+//     ("Association needs re-review", verdict "Checked (link needs
+//     re-review)", the reason in the inspector, in graph_query, and in the
+//     Lean panel's data), also after a restart; the formal evidence is
+//     untouched; binding the theorem to the new text and choosing Confirm
+//     link records the new statement and the association is reviewed again
 //   7 a rejected relation drops out of impact
 //
 // Requires Lean through elan with leanprover/lean4:v4.35.0; without it the
@@ -286,17 +293,65 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     assert.match(pinned.reason, /records lean\/OddSums\.lean as an input; a change to the file makes this evidence historical/);
     note("Record evidence in the Lean panel records service evidence on the declaration", { evidence: evidence.id, digest: evidence.formal.sourceDigest });
 
+    // A second item linked to the same declaration only by an agent's
+    // suggestion: the verdict is shown, labelled as coming through a
+    // suggested link, and never like the reviewed association's.
+    const restated = (
+      await invoke(page, "graph_apply_change", {
+        request: await (async () => {
+          const s = await invoke(page, "graph_status");
+          const p = await invoke(page, "graph_propose_change", {
+            request: { baseRevision: s.revision, operations: [{ op: "createEntity", tempId: "c", kind: "claim", roles: [], label: "Odd sums, restated", key: null, attributes: {}, binding: null }], summary: null },
+          });
+          return { proposal: p.id, expectedRevision: p.baseRevision };
+        })(),
+      })
+    ).created[0].id;
+    const suggestedLink = await agent("Link the Lean theorem to the restated claim", "autoApply", [
+      query("inspect", "inspect", { path: LEAN }),
+      tool("link", "graph_propose", {
+        summary: "Link oddSum_eq_sq to the restated claim",
+        base_revision: "$ref:inspect/graph/revision",
+        operations: [{ op: "add_relation", relation: "formalizes", from: declaration, to: restated, evidence_kind: "", evidence: [], note: "" }],
+      }),
+      query("claim", "entity", { entity: restated }),
+    ]);
+    assert.equal(suggestedLink.link.value.applied, true, JSON.stringify(suggestedLink.link));
+    const rowSuggested = await mathRow(restated);
+    assert.equal(rowSuggested.formalAssociation, "suggested");
+    assert.equal(rowSuggested.verdict, "checked", "the verdict stays visible");
+    assert.equal(rowSuggested.verdictAssociation, "suggested");
+    assert.equal(row4.verdictAssociation, "reviewed");
+    const toldSuggested = suggestedLink.claim.value.formalEvidence[0];
+    assert.equal(toldSuggested.association, "suggested");
+    assert.equal(toldSuggested.associationNote, "Suggested link: no person has reviewed this correspondence.");
+    assert.equal(fourth.theorem.value.formalEvidence[0].review, "current");
+    assert.equal(fourth.theorem.value.formalEvidence[0].associationNote, undefined);
+    note("a verdict through a suggested link is labelled for the agent", toldSuggested.associationNote);
+
     // The Graph page says the same: Mathematics → Verification.
-    await page.keyboard.press("Control+4");
-    await page.getByTestId("graph-page").waitFor();
-    await page.getByRole("radio", { name: "Mathematics" }).click();
-    await page.getByRole("radio", { name: "Verification" }).click();
-    const grid = page.getByRole("grid", { name: "Verification" });
+    const openVerification = async () => {
+      await page.keyboard.press("Control+4");
+      await page.getByTestId("graph-page").waitFor();
+      await page.getByRole("radio", { name: "Mathematics" }).click();
+      await page.getByRole("radio", { name: "Verification" }).click();
+      return page.getByRole("grid", { name: "Verification" });
+    };
+    const grid = await openVerification();
     const theoremRow = grid.locator(`[data-entity-id="${theorem}"]`);
     await theoremRow.waitFor({ timeout: 15_000 });
     await waitFor(async () => (await theoremRow.getAttribute("data-verdict")) === "checked", { timeout: 15_000, message: "theorem row verdict" });
     assert.match(await theoremRow.innerText(), /Reviewed association/);
+    assert.match(await theoremRow.innerText(), /Checked(?! \()/, "a reviewed association's verdict is unqualified");
+    assert.equal(await theoremRow.getByTestId("graph-verdict-qualified").count(), 0);
     assert.notEqual(await theoremRow.getAttribute("data-freshness"), "current");
+    const restatedRow = grid.locator(`[data-entity-id="${restated}"]`);
+    await restatedRow.waitFor({ timeout: 15_000 });
+    assert.match(await restatedRow.innerText(), /Suggested association/);
+    assert.equal(await restatedRow.getByTestId("graph-verdict-qualified").innerText(), "Checked (suggested link)");
+    assert.equal(await restatedRow.getAttribute("data-verdict-link"), "suggested");
+    await shot("graph-verdict-suggested-link-light");
+    note("Mathematics labels a verdict shown through a suggested link", await restatedRow.getByTestId("graph-verdict-qualified").innerText());
     await theoremRow.click();
     assert.match(await page.getByTestId("graph-correspondence-note").innerText(), /not a machine proof/);
     await page.getByRole("button", { name: "What needs review if this changes?" }).click();
@@ -345,15 +400,123 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     assert.equal(changed.bindings[0].state, "missing", JSON.stringify(changed.bindings[0]));
     assert.equal(changed.bindings[0].detail, "The bound text was changed or removed.");
     assert.equal((await invoke(page, "graph_entity", { entity: proof })).bindings[0].state, "resolved", "a whole-file binding follows the file");
-    const row6 = await mathRow(theorem);
-    assert.equal(row6.formalAssociation, "reviewed");
-    assert.equal(row6.freshness.kind, "stale", "the formal evidence is about the Lean file, not the manuscript");
     const fileImpact = await impactOf(mainFile);
     assert.ok(fileImpact.unknownCoverage.includes("main.typ"), "an unresolved binding makes the file's impact unknown");
-    note("a changed manuscript statement unbinds the theorem; the reviewed association is not flagged by itself", {
-      binding: changed.bindings[0].state,
-      association: row6.formalAssociation,
+    // The reviewed association was reviewed against the old statement: it
+    // stops reading as reviewed, with the reason, on every surface.
+    const formalLink = async () => (await invoke(page, "graph_entity", { entity: theorem })).incoming.find((r) => r.kind === "formalizes");
+    const flagged = async (where, state, reason) => {
+      const l = await formalLink();
+      assert.equal(l.status, "accepted", `${where}: the assertion is kept`);
+      assert.equal(l.review.state, state, `${where}: ${JSON.stringify(l.review)}`);
+      assert.match(l.review.reason, reason, where);
+      const row = await mathRow(theorem);
+      assert.equal(row.formalAssociation, "needsReReview", where);
+      assert.equal(row.associationReason, l.review.reason, where);
+      assert.equal(row.verdict, "checked", `${where}: the verdict is what it was`);
+      assert.equal(row.verdictAssociation, "needsReReview", where);
+      assert.equal(row.evidence.id, evidence.id, `${where}: the evidence is untouched`);
+      assert.equal(row.freshness.kind, "stale", `${where}: the formal evidence is about the Lean file, not the manuscript`);
+      return l;
+    };
+    const missing = await flagged("after the statement changed", "statementMissing", /^The statement cannot be located, .*main\.typ: The bound text was changed or removed/);
+    assert.equal((await invoke(page, "graph_entity", { entity: declaration })).evidence.length, 1, "nothing was recorded or removed");
+    const sixth = await agent("Is the theorem still formally checked?", "readOnly", [
+      query("theorem", "entity", { entity: theorem }),
+      query("impact", "impact", { entity: theorem }),
+    ]);
+    const told = sixth.theorem.value.formalEvidence[0];
+    assert.equal(told.association, "accepted");
+    assert.equal(told.review, "statementMissing");
+    assert.match(told.associationNote, /^Link needs re-review: The statement cannot be located/);
+    assert.deepEqual(told.evidence[0].outcome, { verdict: "checked" }, "the verdict is still reported, with the note");
+    assert.equal(sixth.theorem.value.relations.find((r) => r.kind === "formalizes").review, "statementMissing");
+    assert.match(sixth.impact.value.items.find((i) => i.entity.id === declaration).reason, /\(reviewed link needs re-review\)$/);
+    assert.match(sixth.theorem.value.evidenceNote, /needs the user's re-review/);
+    note("a changed manuscript statement flags the reviewed association for re-review", { binding: changed.bindings[0].state, review: missing.review });
+
+    // It is not something an agent can clear: it cannot accept, and a fresh
+    // suggestion of the same link is a duplicate.
+    const clearing = await agent("Mark the link as reviewed again", "autoApply", [
+      query("inspect", "inspect", { path: LEAN }),
+      tool("again", "graph_propose", {
+        summary: "Link oddSum_eq_sq to the theorem again",
+        base_revision: "$ref:inspect/graph/revision",
+        operations: [{ op: "add_relation", relation: "formalizes", from: declaration, to: theorem, evidence_kind: "", evidence: [], note: "" }],
+      }),
+    ]);
+    assert.equal(clearing.again.isError, true, JSON.stringify(clearing.again));
+    assert.equal(clearing.again.value.diagnostics[0].code, "graph.duplicateRelation");
+    await flagged("after an agent tried", "statementMissing", /cannot be located/);
+
+    // The state is stored: it is the same after a restart.
+    await app.close();
+    app = await launchApp({ dataDir, env });
+    page = app.page;
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await invoke(page, "workspace_open", { path: root });
+    await page.locator('[data-testid="file-tree"] [data-path="main.typ"]').waitFor({ timeout: 15_000 });
+    await settle();
+    await flagged("after a restart", "statementMissing", /cannot be located/);
+
+    // Mathematics: the association and the verdict are both qualified.
+    const grid6 = await openVerification();
+    const row6 = grid6.locator(`[data-entity-id="${theorem}"]`);
+    await row6.waitFor({ timeout: 15_000 });
+    await waitFor(async () => (await row6.getAttribute("data-association")) === "needsReReview", { timeout: 15_000, message: "theorem row association" });
+    assert.match(await row6.innerText(), /Association needs re-review/);
+    assert.doesNotMatch(await row6.innerText(), /Reviewed association/);
+    assert.equal(await row6.getByTestId("graph-verdict-qualified").innerText(), "Checked (link needs re-review)");
+    await row6.click();
+    const inspector = page.locator('[data-region="graph-inspector"]');
+    const linkRow = inspector.locator('[data-testid="graph-relation"][data-kind="formalizes"]');
+    await linkRow.waitFor({ timeout: 15_000 });
+    assert.match(await linkRow.innerText(), /Needs re-review/);
+    assert.match(await linkRow.getByTestId("graph-link-review").innerText(), /^The statement cannot be located/);
+    const formalSection = inspector.getByTestId("graph-formal-section");
+    assert.match(await formalSection.getByTestId("graph-formalization").innerText(), /Needs re-review/);
+    assert.match(await formalSection.getByTestId("graph-verdict-line").innerText(), /Checked \(link needs re-review\)/);
+    await formalSection.scrollIntoViewIfNeeded();
+    await shot("graph-link-needs-re-review-light");
+
+    // The user binds the theorem to the statement as it reads now: it is
+    // located again, as a text nobody reviewed.
+    const NEW_STATEMENT = STATEMENT.replace("n squared", "n cubed");
+    const at = MAIN.replace("n squared", "n cubed").indexOf(NEW_STATEMENT);
+    assert.ok(at >= 0, "the edited statement is in main.typ");
+    const status6 = await invoke(page, "graph_status");
+    const rebind = await invoke(page, "graph_propose_change", {
+      request: {
+        baseRevision: status6.revision,
+        operations: [{ op: "bindSource", entity: { kind: "id", id: theorem }, binding: { path: "main.typ", selector: { kind: "region" }, range: { start: at, end: at + NEW_STATEMENT.length } } }],
+        summary: null,
+      },
     });
+    await invoke(page, "graph_apply_change", { request: { proposal: rebind.id, expectedRevision: rebind.baseRevision } });
+    await invoke(page, "graph_reconcile", { force: true });
+    assert.equal((await invoke(page, "graph_entity", { entity: theorem })).bindings[0].state, "resolved");
+    await flagged("after binding the new text", "statementChanged", /^The statement changed since this link was reviewed\./);
+    await waitFor(async () => /^The statement changed since/.test(await linkRow.getByTestId("graph-link-review").innerText()), { timeout: 15_000, message: "the inspector follows the graph" });
+    assert.match(await linkRow.innerText(), /Needs re-review/, "binding does not review the link");
+
+    // Only the user's Confirm clears it, and it records the new statement.
+    const before = (await formalLink()).reviewedStatement;
+    await linkRow.getByRole("button", { name: "Confirm link" }).click();
+    await waitFor(async () => (await formalLink()).review.state === "current", { timeout: 15_000, message: "the link is reviewed again" });
+    const confirmed = await formalLink();
+    assert.equal(confirmed.review.reason, null);
+    assert.ok(confirmed.reviewedStatement && confirmed.reviewedStatement !== before, "the new statement is the reviewed one");
+    await waitFor(async () => (await row6.getAttribute("data-association")) === "reviewed", { timeout: 15_000, message: "theorem row reviewed again" });
+    assert.match(await row6.innerText(), /Reviewed association/);
+    assert.equal(await row6.getByTestId("graph-verdict-qualified").count(), 0, "the verdict is unqualified again");
+    assert.equal(await linkRow.getByRole("button", { name: "Confirm link" }).count(), 0);
+    const rowConfirmed = await mathRow(theorem);
+    assert.equal(rowConfirmed.verdictAssociation, "reviewed");
+    assert.equal(rowConfirmed.evidence.id, evidence.id, "confirming records nothing about the Lean check");
+    assert.equal(rowConfirmed.freshness.kind, "stale");
+    await shot("graph-link-confirmed-light");
+    await page.keyboard.press("Control+1");
+    note("binding the new text and Confirm link make the association reviewed again", { reviewedStatement: confirmed.reviewedStatement });
 
     // ---- 7: a rejected relation drops out of impact -----------------------
     const reference = (await invoke(page, "graph_entity", { entity: finding })).outgoing.find((r) => r.kind === "references");

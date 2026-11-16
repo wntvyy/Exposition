@@ -30,7 +30,7 @@ use crate::query::{GraphView, GraphViewSummary, ViewScope};
 use crate::vocabulary::{EntityKind, EvidenceKind, RelationKind, ResourceRole, VOCABULARY_VERSION};
 
 /// Current schema version (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// File name of the graph database inside `.exposition/`.
 pub const DATABASE_FILE: &str = "graph.sqlite3";
@@ -180,6 +180,15 @@ const MIGRATIONS: &[(u32, &str)] = &[
     CREATE TABLE retired_workflows (id TEXT PRIMARY KEY, retired_at INTEGER NOT NULL);
     "#,
     ),
+    (
+        // The statement a person reviewed a `formalizes` link against (a
+        // digest of the bound text, see `review`). Existing relations keep
+        // NULL: what their review covered was never recorded.
+        5,
+        r#"
+    ALTER TABLE relations ADD COLUMN reviewed_statement TEXT;
+    "#,
+    ),
 ];
 
 /// Every schema object a valid database of `version` has (type, name).
@@ -291,6 +300,11 @@ fn expected_columns(version: u32) -> Vec<(&'static str, Vec<&'static str>)> {
     if version >= 4 {
         tables.push(("recoverable", vec!["id", "kind", "label", "body", "deleted_at"]));
         tables.push(("retired_workflows", vec!["id", "retired_at"]));
+    }
+    if version >= 5
+        && let Some((_, columns)) = tables.iter_mut().find(|(t, _)| *t == "relations")
+    {
+        columns.push("reviewed_statement");
     }
     tables
 }
@@ -885,9 +899,31 @@ impl GraphStore {
 
     // ----- relations -----
 
+    /// Fill in the computed review standing of an accepted `formalizes`
+    /// link (see [`crate::review`]). Every relation this store hands out
+    /// goes through here, so no reader can present a link as reviewed
+    /// without the comparison.
+    fn qualified(&self, mut r: Relation) -> StoreResult<Relation> {
+        r.review = None;
+        if r.kind == RelationKind::Formalizes && r.status == AssertionStatus::Accepted {
+            let entity = self.entity(&r.to)?;
+            let bindings = self.bindings(&r.to)?;
+            r.review = Some(crate::review::link_review(r.reviewed_statement.as_deref(), entity.as_ref(), &bindings));
+        }
+        Ok(r)
+    }
+
+    fn qualified_all(&self, relations: Vec<Relation>) -> StoreResult<Vec<Relation>> {
+        relations.into_iter().map(|r| self.qualified(r)).collect()
+    }
+
     pub fn relation(&self, id: &RelationId) -> StoreResult<Option<Relation>> {
-        let mut stmt = self.conn.prepare_cached(&format!("SELECT {RELATION_COLUMNS} FROM relations WHERE id = ?1"))?;
-        stmt.query_row([id.as_str()], read_relation).optional()?.transpose()
+        let found = {
+            let mut stmt =
+                self.conn.prepare_cached(&format!("SELECT {RELATION_COLUMNS} FROM relations WHERE id = ?1"))?;
+            stmt.query_row([id.as_str()], read_relation).optional()?.transpose()?
+        };
+        found.map(|r| self.qualified(r)).transpose()
     }
 
     pub fn relations_from(&self, entity: &EntityId) -> StoreResult<Vec<Relation>> {
@@ -895,7 +931,9 @@ impl GraphStore {
             "SELECT {RELATION_COLUMNS} FROM relations WHERE from_id = ?1 ORDER BY kind, id LIMIT {MAX_ROWS}"
         ))?;
         let rows = stmt.query_map([entity.as_str()], read_relation)?;
-        rows.map(|r| r?).collect()
+        let relations: Vec<Relation> = rows.map(|r| r?).collect::<StoreResult<_>>()?;
+        drop(stmt);
+        self.qualified_all(relations)
     }
 
     /// Every relation of one kind (bounded), e.g. the whole containment tree.
@@ -904,7 +942,9 @@ impl GraphStore {
             .conn
             .prepare_cached(&format!("SELECT {RELATION_COLUMNS} FROM relations WHERE kind = ?1 LIMIT 1000000"))?;
         let rows = stmt.query_map([kind.as_str()], read_relation)?;
-        rows.map(|r| r?).collect()
+        let relations: Vec<Relation> = rows.map(|r| r?).collect::<StoreResult<_>>()?;
+        drop(stmt);
+        self.qualified_all(relations)
     }
 
     pub fn relations_to(&self, entity: &EntityId) -> StoreResult<Vec<Relation>> {
@@ -912,7 +952,9 @@ impl GraphStore {
             "SELECT {RELATION_COLUMNS} FROM relations WHERE to_id = ?1 ORDER BY kind, id LIMIT {MAX_ROWS}"
         ))?;
         let rows = stmt.query_map([entity.as_str()], read_relation)?;
-        rows.map(|r| r?).collect()
+        let relations: Vec<Relation> = rows.map(|r| r?).collect::<StoreResult<_>>()?;
+        drop(stmt);
+        self.qualified_all(relations)
     }
 
     /// Relations whose both endpoints are in `ids`.
@@ -934,10 +976,13 @@ impl GraphStore {
 
     /// An existing relation of this kind between these endpoints (not rejected).
     pub fn find_relation(&self, kind: RelationKind, from: &EntityId, to: &EntityId) -> StoreResult<Option<Relation>> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {RELATION_COLUMNS} FROM relations WHERE kind = ?1 AND from_id = ?2 AND to_id = ?3 LIMIT 1"
-        ))?;
-        stmt.query_row(params![kind.as_str(), from.as_str(), to.as_str()], read_relation).optional()?.transpose()
+        let found = {
+            let mut stmt = self.conn.prepare_cached(&format!(
+                "SELECT {RELATION_COLUMNS} FROM relations WHERE kind = ?1 AND from_id = ?2 AND to_id = ?3 LIMIT 1"
+            ))?;
+            stmt.query_row(params![kind.as_str(), from.as_str(), to.as_str()], read_relation).optional()?.transpose()?
+        };
+        found.map(|r| self.qualified(r)).transpose()
     }
 
     // ----- evidence -----
@@ -1389,14 +1434,16 @@ impl<'a> Writer<'a> {
         check_field(r.note.as_deref(), MAX_FIELD, "the note")?;
         check_field(r.from_version.as_deref(), MAX_SHORT_FIELD, "a version")?;
         check_field(r.to_version.as_deref(), MAX_SHORT_FIELD, "a version")?;
+        check_field(r.reviewed_statement.as_deref(), MAX_SHORT_FIELD, "a reviewed statement digest")?;
         check_record(&serde_json::to_string(&r.origin)?, "the origin")?;
         check_record(&serde_json::to_string(&r.evidence)?, "the evidence list")?;
         self.tx.execute(
-            "INSERT INTO relations (id, kind, from_id, to_id, origin, status, evidence_kind, evidence, from_version, to_version, note, revision, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "INSERT INTO relations (id, kind, from_id, to_id, origin, status, evidence_kind, evidence, from_version, to_version, note, revision, created_at, updated_at, reviewed_statement)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET status = excluded.status, evidence_kind = excluded.evidence_kind,
              evidence = excluded.evidence, from_version = excluded.from_version, to_version = excluded.to_version,
-             note = excluded.note, revision = excluded.revision, origin = excluded.origin, updated_at = excluded.updated_at",
+             note = excluded.note, revision = excluded.revision, origin = excluded.origin, updated_at = excluded.updated_at,
+             reviewed_statement = excluded.reviewed_statement",
             params![
                 r.id.as_str(),
                 r.kind.as_str(),
@@ -1411,7 +1458,8 @@ impl<'a> Writer<'a> {
                 r.note,
                 r.revision as i64,
                 r.created_at_ms as i64,
-                r.updated_at_ms as i64
+                r.updated_at_ms as i64,
+                r.reviewed_statement
             ],
         )?;
         Ok(())
@@ -1651,7 +1699,7 @@ const ENTITY_COLUMNS: &str =
     "id, kind, roles, label, key, lifecycle, tombstone_reason, revision, origin, attributes, created_at, updated_at";
 const BINDING_COLUMNS: &str =
     "entity_id, path, selector, range_start, range_end, content_hash, revision, saved, fingerprint, state, detail";
-const RELATION_COLUMNS: &str = "id, kind, from_id, to_id, origin, status, evidence_kind, evidence, from_version, to_version, note, revision, created_at, updated_at";
+const RELATION_COLUMNS: &str = "id, kind, from_id, to_id, origin, status, evidence_kind, evidence, from_version, to_version, note, revision, created_at, updated_at, reviewed_statement";
 
 type Decoded<T> = StoreResult<T>;
 
@@ -1759,6 +1807,7 @@ fn read_relation(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<Relation>> {
     let revision: i64 = r.get(11)?;
     let created: i64 = r.get(12)?;
     let updated: i64 = r.get(13)?;
+    let reviewed_statement: Option<String> = r.get(14)?;
     Ok((|| {
         Ok(Relation {
             id: RelationId::parse(&id).map_err(|_| untrusted("relation id"))?,
@@ -1774,6 +1823,9 @@ fn read_relation(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<Relation>> {
             from_version: from_version.map(short).transpose()?,
             to_version: to_version.map(short).transpose()?,
             note: note.map(bounded).transpose()?,
+            reviewed_statement: reviewed_statement.map(short).transpose()?,
+            // Computed by `GraphStore::qualified` for what the store hands out.
+            review: None,
             revision: revision.max(0) as u64,
             created_at_ms: created.max(0) as u64,
             updated_at_ms: updated.max(0) as u64,
@@ -2144,7 +2196,7 @@ mod tests {
         }
         let store = GraphStore::open(&path, false).unwrap();
         let version: u32 = store.connection().pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(store.revision().unwrap(), 4);
         let claim = EntityId::parse("ent-00000000000000000000000000000001").unwrap();
         assert_eq!(store.entity(&claim).unwrap().unwrap().label, "A claim");
@@ -2157,6 +2209,53 @@ mod tests {
         drop(store);
         // Re-opening the upgraded file validates it like any other.
         GraphStore::open(&path, false).unwrap();
+    }
+
+    /// A schema-4 graph with a reviewed formal link stays readable when the
+    /// reviewed-statement column is added: the link is kept, and since what
+    /// its review covered was never recorded it reads as such, not as
+    /// current and not as changed.
+    #[test]
+    fn a_version_4_graph_keeps_its_reviewed_links_and_reads_their_review_as_unrecorded() {
+        let (dir, path) = temp_db();
+        {
+            let conn = Connection::open(&path).unwrap();
+            for (_, sql) in &MIGRATIONS[..4] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 4).unwrap();
+            conn.execute_batch(
+                "INSERT INTO meta (key, value) VALUES ('project_id', 'prj-old'), ('revision', '9'), ('vocabulary_version', '1');
+                 INSERT INTO entities (id, kind, roles, label, key, lifecycle, tombstone_reason, revision, origin, attributes, created_at, updated_at)
+                 VALUES ('ent-00000000000000000000000000000001', 'theorem', '[]', 'A theorem', NULL, 'active', NULL, 1, '{\"kind\":\"user\"}', '{}', 0, 0),
+                        ('ent-00000000000000000000000000000002', 'formalDeclaration', '[]', 'thm', 'thm', 'active', NULL, 1, '{\"kind\":\"service\",\"service\":\"lean\"}', '{}', 0, 0);
+                 INSERT INTO relations (id, kind, from_id, to_id, origin, status, evidence_kind, evidence, from_version, to_version, note, revision, created_at, updated_at)
+                 VALUES ('rel-00000000000000000000000000000001', 'formalizes', 'ent-00000000000000000000000000000002', 'ent-00000000000000000000000000000001',
+                         '{\"kind\":\"user\"}', 'accepted', NULL, '[]', NULL, NULL, 'reviewed in an older version', 2, 0, 0);",
+            )
+            .unwrap();
+        }
+        let store = GraphStore::open(&path, false).unwrap();
+        let version: u32 = store.connection().pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(store.revision().unwrap(), 9);
+        let id = RelationId::parse("rel-00000000000000000000000000000001").unwrap();
+        let link = store.relation(&id).unwrap().expect("the link survives the upgrade");
+        assert_eq!(link.status, AssertionStatus::Accepted);
+        assert_eq!(link.note.as_deref(), Some("reviewed in an older version"));
+        assert_eq!(link.reviewed_statement, None);
+        assert_eq!(link.review.map(|r| r.state), Some(crate::model::LinkReviewState::Unrecorded));
+        let backups = crate::backup::list(&dir.path().join(crate::backup::BACKUP_DIR));
+        assert!(backups.iter().any(|b| b.reason == "premigration" && b.revision == 9), "{backups:?}");
+        drop(store);
+        // The upgraded file validates like any other, and a planted digest
+        // beyond the field bound is refused like every other short field.
+        GraphStore::open(&path, false).unwrap();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute("UPDATE relations SET reviewed_statement = ?1", [&"x".repeat(MAX_SHORT_FIELD + 1)]).unwrap();
+        }
+        assert!(matches!(GraphStore::open(&path, false), Err(StoreError::Untrusted(_))));
     }
 
     #[test]

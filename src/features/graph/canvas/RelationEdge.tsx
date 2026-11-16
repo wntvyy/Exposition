@@ -41,8 +41,8 @@ const STATUS_SUFFIX: Record<AssertionStatus, string> = {
 };
 
 /** The chip text: reading, folded count, then the muted status. */
-export function EdgeLabelContent({ label, count, status }: { label: string; count?: number; status: AssertionStatus }) {
-  const suffix = STATUS_SUFFIX[status];
+export function EdgeLabelContent({ label, count, status, attention }: { label: string; count?: number; status: AssertionStatus; attention?: string }) {
+  const suffix = attention ?? STATUS_SUFFIX[status];
   return (
     <>
       <span className="xp-graph-edge-label__reading">{label}</span>
@@ -87,7 +87,7 @@ function RelationEdgeView({ id, source, target, data, selected }: EdgeProps<Rela
             onMouseLeave={() => clearInterest(interest, "hovered", self)}
             aria-label={data.description}
           >
-            <EdgeLabelContent label={data.label} count={data.count} status={data.status} />
+            <EdgeLabelContent label={data.label} count={data.count} status={data.status} attention={data.attention} />
           </button>
         </EdgeLabelRenderer>
       )}
