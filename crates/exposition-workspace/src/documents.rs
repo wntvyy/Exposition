@@ -87,6 +87,8 @@ struct DocState {
 struct HistoryEntry {
     revision: u64,
     patches: Vec<TextPatch>,
+    /// Who made the change (for an undo or redo: who stepped the history).
+    origin: EditOrigin,
 }
 
 struct UndoGroup {
@@ -202,6 +204,20 @@ impl DocumentService {
         self.lock().documents.values().map(DocState::snapshot).collect()
     }
 
+    /// Who made each change after `revision`, up to the current revision
+    /// (edits, undos and redos, oldest first). `None` when the document's
+    /// history no longer reaches back to `revision`, so it cannot be told.
+    pub fn origins_since(&self, id: &DocumentId, revision: u64) -> Result<Option<Vec<EditOrigin>>, TransactionError> {
+        let inner = self.lock();
+        let doc = get(&inner, id)?;
+        if revision > doc.revision {
+            return Err(TransactionError::FutureRevision { document: id.clone(), base_revision: revision });
+        }
+        let origins: Vec<EditOrigin> =
+            doc.history.iter().filter(|e| e.revision > revision).map(|e| e.origin.clone()).collect();
+        Ok((origins.len() as u64 == doc.revision - revision).then_some(origins))
+    }
+
     /// Record that `revision` was written to disk (or the buffer matches disk).
     pub fn mark_saved(&self, id: &DocumentId, revision: u64) -> Result<DocumentInfo, TransactionError> {
         let mut inner = self.lock();
@@ -269,7 +285,7 @@ impl DocumentService {
             let doc = get_mut(&mut inner, &plan.document).expect("validated above");
             let previous_revision = doc.revision;
             let inverse = inverse_patches(&doc.text, &plan.patches);
-            let line_ending_changed = doc.commit(plan.text, plan.patches.clone());
+            let line_ending_changed = doc.commit(plan.text, plan.patches.clone(), request.origin.clone());
             doc.redo.clear();
             record_undo(doc, &request, inverse, &plan.patches, previous_revision, &plan.before_text);
             let event = DocumentChanged {
@@ -341,7 +357,7 @@ impl DocumentService {
         let group = if kind == ChangeKind::Undo { doc.undo.pop() } else { doc.redo.pop() }.expect("checked above");
         let previous_revision = doc.revision;
         let inverse = inverse_patches(&doc.text, &patches);
-        let line_ending_changed = doc.commit(text, patches.clone());
+        let line_ending_changed = doc.commit(text, patches.clone(), origin.clone());
         let selection =
             if kind == ChangeKind::Undo { group.selection_before.clone() } else { group.selection_after.clone() };
         // The opposite group keeps the original selections: undo restores
@@ -408,10 +424,10 @@ impl DocState {
 
     /// Record a new revision. Returns true when the text's line-ending
     /// convention changed (the caller announces the new info).
-    fn commit(&mut self, text: String, patches: Vec<TextPatch>) -> bool {
+    fn commit(&mut self, text: String, patches: Vec<TextPatch>, origin: EditOrigin) -> bool {
         self.revision += 1;
         self.text = Arc::from(text);
-        self.history.push_back(HistoryEntry { revision: self.revision, patches });
+        self.history.push_back(HistoryEntry { revision: self.revision, patches, origin });
         while self.history.len() > HISTORY_LIMIT {
             self.history.pop_front();
         }
@@ -924,6 +940,35 @@ mod tests {
         assert!(service.apply(request).is_err());
         assert_eq!(text(&service, &a), "aaa");
         assert_eq!(text(&service, &b), "bbb");
+    }
+
+    #[test]
+    fn origins_since_lists_who_changed_the_text_or_says_it_cannot_tell() {
+        let (service, id) = service_with("abc");
+        assert_eq!(service.origins_since(&id, 1).unwrap(), Some(Vec::new()));
+        let agent = EditOrigin::Agent { task_id: "t1".into() };
+        let mut by_agent = tx(&id, 1, vec![TextPatch::insert(0, "x")], UndoBehavior::NewGroup, ConflictPolicy::Reject);
+        by_agent.origin = agent.clone();
+        service.apply(by_agent).unwrap();
+        service
+            .apply(tx(&id, 2, vec![TextPatch::insert(0, "y")], UndoBehavior::NewGroup, ConflictPolicy::Reject))
+            .unwrap();
+        // An undo is a change by whoever stepped the history.
+        service.undo(&id, EditOrigin::Page).unwrap();
+        assert_eq!(
+            service.origins_since(&id, 1).unwrap(),
+            Some(vec![agent.clone(), EditOrigin::Source, EditOrigin::Page])
+        );
+        assert_eq!(service.origins_since(&id, 3).unwrap(), Some(vec![EditOrigin::Page]));
+        assert!(service.origins_since(&id, 9).is_err(), "a revision the document never had");
+        // Past the history window it cannot be told.
+        for base in 4..(4 + HISTORY_LIMIT as u64) {
+            service
+                .apply(tx(&id, base, vec![TextPatch::insert(0, "z")], UndoBehavior::Skip, ConflictPolicy::Reject))
+                .unwrap();
+        }
+        assert_eq!(service.origins_since(&id, 1).unwrap(), None);
+        assert!(service.origins_since(&id, 10).unwrap().is_some());
     }
 
     #[test]

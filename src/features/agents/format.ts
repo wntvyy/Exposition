@@ -352,6 +352,7 @@ export function toolSummary(name: string, input: unknown): string {
       return `${str(obj.path)} (${edits} edit${edits === 1 ? "" : "s"})`;
     }
     case "create_file":
+    case "save_document":
       return str(obj.path);
     case "list_files":
       return str(obj.path) || "project root";

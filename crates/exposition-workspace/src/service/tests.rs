@@ -701,3 +701,79 @@ fn a_preserved_buffer_of_a_deleted_file_can_be_saved_as_a_copy() {
     // Not at its own deleted path: that would bring the file back.
     assert_eq!(f.service.save_document_copy(&id, "main.typ").unwrap_err().code, "document.exists");
 }
+
+/// The strict save for callers that are not the user: the user's save, minus
+/// everything only the user can decide.
+#[test]
+fn exact_save_writes_the_named_revision_and_refuses_what_only_the_user_decides() {
+    let f = fixture();
+    let id = f.service.open_document(&wp("crlf.tex")).unwrap().state.info.id;
+    assert!(!f.service.exact_save_preview(&id).unwrap().unsaved);
+    let revision = edit(&f.service, &id, vec![TextPatch::insert(0, "% note\r\n")]);
+    let preview = f.service.exact_save_preview(&id).unwrap();
+    assert!(preview.unsaved);
+    assert_eq!(preview.revision, revision);
+    assert_eq!(preview.disk_text.as_deref(), Some("\\section{A}\r\nText.\r\n"));
+    assert_eq!(fs::read(f.file("crlf.tex")).unwrap(), b"\\section{A}\r\nText.\r\n", "a preview writes nothing");
+
+    // Another revision than the buffer's is not saved.
+    assert_eq!(f.service.save_document_exact(&id, revision - 1).unwrap_err().code, "document.changed");
+    let saved = f.service.save_document_exact(&id, revision).unwrap();
+    let bytes = fs::read(f.file("crlf.tex")).unwrap();
+    assert_eq!(bytes, b"% note\r\n\\section{A}\r\nText.\r\n");
+    assert_eq!((saved.revision, saved.bytes), (revision, bytes.len() as u64));
+    assert_eq!(saved.content_hash, preview.content_hash);
+    assert_eq!(saved.content_hash, sha256_hex(&bytes));
+    assert!(!dirty(&f.service, &id));
+
+    // Changed on disk: never overwritten, before or after the conflict is recorded.
+    let revision = edit(&f.service, &id, vec![TextPatch::insert(0, "% more\r\n")]);
+    fs::write(f.file("crlf.tex"), b"theirs\r\n").unwrap();
+    assert_eq!(f.service.exact_save_preview(&id).unwrap_err().code, "file.modifiedOnDisk");
+    assert_eq!(f.service.save_document_exact(&id, revision).unwrap_err().code, "file.modifiedOnDisk");
+    f.service.check_document(&id);
+    assert_eq!(f.service.exact_save_preview(&id).unwrap_err().code, "document.conflict");
+    assert_eq!(f.service.save_document_exact(&id, revision).unwrap_err().code, "document.conflict");
+    assert_eq!(fs::read(f.file("crlf.tex")).unwrap(), b"theirs\r\n");
+    // The user decides; then it is an ordinary save again.
+    f.service.keep_buffer(&id).unwrap();
+    f.service.save_document_exact(&id, revision).unwrap();
+
+    // Deleted on disk: the user's save recreates the file, an exact save does not.
+    let revision = edit(&f.service, &id, vec![TextPatch::insert(0, "% again\r\n")]);
+    fs::remove_file(f.file("crlf.tex")).unwrap();
+    assert_eq!(f.service.exact_save_preview(&id).unwrap_err().code, "file.modifiedOnDisk");
+    assert_eq!(f.service.save_document_exact(&id, revision).unwrap_err().code, "file.modifiedOnDisk");
+    assert!(!f.file("crlf.tex").exists());
+    f.service.save_document(&id, false).unwrap();
+    assert!(f.file("crlf.tex").exists());
+}
+
+#[test]
+fn exact_save_refuses_recovered_text_and_pending_recovery_data() {
+    let f = fixture();
+    let id = f.service.open_document(&wp("main.typ")).unwrap().state.info.id;
+    edit(&f.service, &id, vec![TextPatch::insert(0, "unsaved ")]);
+    f.service.journal_documents(&HashSet::from([id]));
+    let service = f.restart();
+    let entries = service.recovery_entries().unwrap();
+    assert_eq!(entries.len(), 1);
+
+    // Recovery data of an earlier session waits for the user's decision.
+    let id = service.open_document(&wp("main.typ")).unwrap().state.info.id;
+    let revision = edit(&service, &id, vec![TextPatch::insert(0, "new ")]);
+    assert_eq!(service.exact_save_preview(&id).unwrap_err().code, "document.recoveryPending");
+    assert_eq!(service.save_document_exact(&id, revision).unwrap_err().code, "document.recoveryPending");
+    service.reload_document(&id).unwrap();
+
+    // Restored text is saved by the user only; their save ends the state.
+    service.restore_recovery(&entries[0].id).unwrap();
+    let revision = service.documents().info(&id).unwrap().revision;
+    assert_eq!(service.exact_save_preview(&id).unwrap_err().code, "document.recovered");
+    assert_eq!(service.save_document_exact(&id, revision).unwrap_err().code, "document.recovered");
+    assert_eq!(fs::read(f.file("main.typ")).unwrap(), b"= Title\n\nBody.\n");
+    service.save_document(&id, false).unwrap();
+    let revision = edit(&service, &id, vec![TextPatch::insert(0, "later ")]);
+    service.save_document_exact(&id, revision).unwrap();
+    assert_eq!(fs::read(f.file("main.typ")).unwrap(), b"later unsaved = Title\n\nBody.\n");
+}

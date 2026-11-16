@@ -1004,7 +1004,7 @@ reason. A task runs in one of two approval modes, chosen in the composer:
 | Tool (Ask) | Execution off | Ask before each | Restricted (container) | Scope and consent |
 |---|---|---|---|---|
 | List, read files | allowed | allowed | allowed | path in scope (links resolved); reading needs content consent |
-| Edit, create files; insert an artifact | allowed (approval when reviewing edits; never in a read-only task) | same | same | path in scope; for an artifact, its file too |
+| Edit, create files; insert an artifact; save an edited file | allowed (approval when reviewing edits; never in a read-only task) | same | same | path in scope; for an artifact, its file too |
 | The same into a Lean file in a trusted folder | refused | approval (Lean runs the text natively) | refused | as above |
 | Build Typst or Markdown (in-process) | allowed | allowed | allowed | entry in scope; the build reads only the scope; refused under "file names only" |
 | Build LaTeX, check Lean | refused | trusted folder + approval | refused | whole project + content consent |
@@ -1096,8 +1096,9 @@ answered once or for the task.
 
 Results also say where a change is. `create_file` writes the new file to
 disk. `edit_document` and `insert_artifact` change the editor text only: the
-file on disk keeps its last saved version until you save it, and agents
-cannot save (Keep in review accepts a change; it does not save the file).
+file on disk keeps its last saved version until it is saved, by you or by
+the agent with `save_document` (Keep in review accepts a change; it does not
+save the file).
 `read_file`, `build_document`, and `check_lean` use the editor text, unsaved
 changes included, and a Lean check reports which text it checked;
 `run_command`, `run_python`, and `copy_paths` see only what is saved, and a
@@ -1108,6 +1109,55 @@ instructions name the app's controls it may point you to (Save, Review
 changes, the Research panel, Review and run…, Record evidence, Set Up
 Mathlib…, and so on); a test fails when one of those names is no longer in
 the interface source that defines it.
+
+**Saving by an agent.** `save_document` saves one open document with the
+editor's own save (the same atomic save as Ctrl+S, in the file's encoding
+and line endings), so that a program the agent runs next reads the edited
+file. Nothing saves on its own: an edit stays in the editor until someone
+saves it, and no setting, project file, or tool output turns saving on. A
+save is a file change and is decided like one. In Ask it follows the task's
+Document changes setting: with "Ask before each change" it shows an approval
+card (Approve, Approve for this task, Decline), and an earlier "Approve for
+this task" for file changes covers it; with "Apply changes, review
+afterwards" it proceeds; a read-only task never saves. In Auto it proceeds
+within the project's Files permission and asks beyond it. Saving a Lean
+source, a Lean/Lake configuration file, or an R startup file needs
+native-code authority as well, exactly as editing one does, because that
+text runs on its own once it is on disk; a task without native execution
+cannot save one. Files under `.git/`, `.lake/`, `.venv/`, or `venv/`, the
+project graph's storage, and service-owned records are never saved by an
+agent.
+
+A save writes the whole editor text of the file at the revision the agent
+names; it cannot write a part of it. If you have unsaved changes of your own
+in that file, they are saved too, and you are told: the approval card and
+the result say whether every unsaved change was made by this task, whether
+the text was also changed outside it since the last save (your own edits,
+or another task's), or that Exposition cannot tell (then the whole current
+text is saved, whoever wrote it). The card shows the revision, size, and
+SHA-256 of what is written and every line that changes on disk. If the text
+changes while the card waits, approving saves nothing.
+
+An agent's save never overwrites anything you would have to decide about.
+It is refused, with nothing written, when the file was changed, deleted, or
+moved on disk since it was opened or last saved, when the document shows a
+disk conflict, when its text was restored from recovery and you have not
+saved it yourself, or when recovery data for the file still waits for your
+decision. You resolve those in the editor (Reload from Disk, Keep My
+Changes, restore or discard); after that the file can be saved normally. A
+file deleted through Exposition while its unsaved text was kept is not
+brought back by an agent's save either. Limitations: an agent saves only a
+file that is open with unsaved changes, one file per call, and only to the
+file's own path (no "save as", no "save all"); reverting an agent's change
+in review changes the editor text, and the file keeps what was saved until
+it is saved again. Once saved, the file has changed on disk as it would
+after any save: a build or a workflow trigger that watches the file reacts
+as it does to every change (the approval card does not list such
+watchers). The decisions are covered by gate tests over ordinary
+files and each kind of file that runs code, both modes, every task setting
+and project profile, folder trust, and allowances, and in the real
+application (development build, scripted provider in place of the model) by
+`npm run e2e -- agent-save`.
 
 An agent's Lean check returns its result to the task and records no
 evidence, and a task cannot assert computational, formal, or build evidence
