@@ -1,7 +1,6 @@
-//! R-pr: independent review probe of the dependency identity on formal
-//! evidence (change set e6eca9d..fa6c16e).
-//!
-//!   cargo test -p exposition-lean --test review_pr_evidence -- --include-ignored --nocapture --test-threads=1
+//! The identity of a Lean audit on formal evidence, through the public
+//! evidence API and a real graph store: the Lean toolchain an audit ran
+//! under is part of what identifies it.
 
 use exposition_core::document::DocumentId;
 use exposition_core::path::WorkspacePath;
@@ -27,7 +26,12 @@ fn package(toolchain_digest: &str, manifest_digest: &str) -> LeanAuditPackage {
     }
 }
 
-fn record(toolchain: &str, status: LeanStatus, verdict: DeclarationVerdict, package: LeanAuditPackage) -> LeanAuditRecord {
+fn record(
+    toolchain: &str,
+    status: LeanStatus,
+    verdict: DeclarationVerdict,
+    package: LeanAuditPackage,
+) -> LeanAuditRecord {
     LeanAuditRecord {
         document: DocumentId("doc-1".into()),
         path: WorkspacePath::parse("Proofs/Main.lean").unwrap(),
@@ -52,17 +56,12 @@ fn record(toolchain: &str, status: LeanStatus, verdict: DeclarationVerdict, pack
     }
 }
 
-/// R-pr-F6. The audit identifier gained the manifest digest ("the same text
-/// audited against other dependencies is another audit") but not the Lean
-/// toolchain, which the same change made an input of the record. The same
-/// text at the same revision audited after `lean-toolchain` changed is taken
-/// for the earlier audit: Record evidence answers "already recorded" with
-/// the record of the other Lean version (here a Checked record, although the
-/// audit being recorded found `sorry`), and the new verdict cannot be
-/// recorded until the text changes.
+/// The same text at the same revision, audited again after `lean-toolchain`
+/// changed, is another audit: recording it never answers "already recorded"
+/// with the record of the other Lean version (here a Checked record, while
+/// the audit being recorded found `sorry`).
 #[test]
-#[ignore = "R-pr-F6: an audit under another Lean toolchain reuses the earlier audit's evidence"]
-fn review_pr_f6_an_audit_under_another_toolchain_is_another_audit() {
+fn an_audit_under_another_toolchain_is_another_audit() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("project");
     std::fs::create_dir_all(root.join("Proofs")).unwrap();
@@ -96,14 +95,20 @@ fn review_pr_f6_an_audit_under_another_toolchain_is_another_audit() {
         DeclarationVerdict::Incomplete,
         package("22", "aa"),
     );
-    println!("audit ids: {} / {}", audit_id(&first), audit_id(&second));
+    assert_ne!(audit_id(&first), audit_id(&second));
     let a = record_evidence(&graph, &first, &["Main.a".into()], true, 1).unwrap();
     assert!(!a.recorded[0].existing);
     let b = record_evidence(&graph, &second, &["Main.a".into()], true, 2).unwrap();
-    println!("second recording: {:?} refused: {:?}", b.recorded, b.refused);
     assert!(
         b.recorded.first().is_some_and(|r| !r.existing && r.evidence != a.recorded[0].evidence),
         "the audit under the other toolchain (verdict: depends on sorry) was answered with the Checked record of \
-         the earlier toolchain"
+         the earlier toolchain: {:?} refused: {:?}",
+        b.recorded,
+        b.refused
     );
+    // Each audit recorded again is its own record.
+    let again = record_evidence(&graph, &first, &["Main.a".into()], true, 3).unwrap();
+    assert!(again.recorded[0].existing && again.recorded[0].evidence == a.recorded[0].evidence);
+    let again = record_evidence(&graph, &second, &["Main.a".into()], true, 4).unwrap();
+    assert!(again.recorded[0].existing && again.recorded[0].evidence == b.recorded[0].evidence);
 }
