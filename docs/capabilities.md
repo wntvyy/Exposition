@@ -1213,10 +1213,29 @@ brought back by an agent's save either. Limitations: an agent saves only a
 file that is open with unsaved changes, one file per call, and only to the
 file's own path (no "save as", no "save all"); reverting an agent's change
 in review changes the editor text, and the file keeps what was saved until
-it is saved again. Once saved, the file has changed on disk as it would
-after any save: a build or a workflow trigger that watches the file reacts
-as it does to every change (the approval card does not list such
-watchers). The decisions are covered by gate tests over ordinary
+it is saved again.
+
+Once saved, the file has changed on disk as it would after any save: a
+build that watches the file rebuilds, and an enabled workflow trigger that
+watches it still fires as it does for your own save, after its quiet period
+and within its run limits. The save tells you. When enabled triggers watch
+the file, the approval card names each trigger's workflow and says that
+saving can start a run of it, within the trigger's own limits (a trigger on
+a schedule is named too: saving does not start it, and its next run reads
+the file as saved). When the save needs no card (Auto within the Files
+permission, an Ask task that applies changes directly, or a save you
+approved for the task), the agent receives the same list in the result and
+is told to tell you. A trigger that is turned off or suspended is not
+listed: it does not react to a save. If the triggers cannot be read, the
+card says that Exposition could not determine whether a trigger watches the
+file; it never implies there is none. This is information only: it changes
+neither who may save nor what a trigger does, and it adds no approval.
+Limitations: only watched inputs are named. A save to a file that is
+another input of a trigger's standing plan (its script, for instance)
+suspends that trigger, as every such change does, and the card does not
+say so; watching builds are not listed.
+
+The decisions are covered by gate tests over ordinary
 files and each kind of file that runs code, both modes, every task setting
 and project profile, folder trust, and allowances, and in the real
 application (development build, scripted provider in place of the model) by

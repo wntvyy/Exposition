@@ -1292,6 +1292,10 @@ fn an_unreadable_store_is_never_overwritten() {
     let refused = restarted.enable(&f.request(&review, settings())).unwrap_err();
     assert_eq!(refused.code, "trigger.storeUnavailable", "{}", refused.message);
     assert_eq!(restarted.list(None).unwrap_err().code, "trigger.storeUnavailable", "shown, not an empty list");
+    // The lookup of triggers watching a file says it could not read them; it does not say "none".
+    let watched = [path("data/obs.csv")];
+    assert_eq!(restarted.try_watching(&watched).unwrap_err().code, "trigger.storeUnavailable");
+    assert_eq!(restarted.watching(&watched), vec![]);
     drop(lock);
     assert_eq!(std::fs::read(&f.store).unwrap(), original, "the unreadable store was changed");
     // Readable again: enabling keeps the trigger that was already there.

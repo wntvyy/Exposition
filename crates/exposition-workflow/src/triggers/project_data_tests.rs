@@ -377,6 +377,10 @@ fn a_watched_workflow_input_needs_one_decision_and_cancelling_changes_nothing() 
     let trigger = plan.impacts.iter().find(|i| i.kind == ImpactKind::EnabledTrigger).unwrap();
     assert_eq!(trigger.consumers[0].kind, "trigger");
     assert!(plan.choices.iter().any(|c| c.key == CHOICE_TRIGGERS && c.default == "disable"));
+    // The same lookup, for a disclosure: the trigger of the workflow, and only for the file it watches.
+    let watching = e.fx.triggers.try_watching(&[path("data/obs.csv")]).unwrap();
+    assert_eq!(watching.iter().map(|t| &t.workflow).collect::<Vec<_>>(), vec![&id]);
+    assert_eq!(e.fx.triggers.try_watching(&[path("notes.md")]).unwrap(), vec![]);
     // The user cancels: nothing was applied, nothing changed.
     assert_eq!(e.trigger_state(&id), TriggerState::Active);
     assert_eq!(e.fx.graph.status().revision, revision);

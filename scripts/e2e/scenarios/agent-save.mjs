@@ -16,8 +16,16 @@
 //   3. Follow-up: the file is changed by another program while the editor
 //      still holds the unsaved edit. The agent's save is refused without a
 //      card (`agents.saveConflict`); the other program's version stays.
+//   4. Follow-up (needs Docker with the local image python:3.13-slim, never
+//      pulled; reported as not run without it): a data file that an enabled
+//      workflow trigger watches. The save card names the trigger's workflow,
+//      the result carries the same list, and the trigger still fires: one
+//      run starts after its quiet period, as for a user's save. A trigger
+//      cannot watch a script (code never runs without review), so the
+//      watched file is the workflow's data input.
 // Evidence: test-results/e2e/agent-save/evidence.json (+ screenshots): the
 // approval card of the save and every tool result as sent to the provider.
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,17 +35,71 @@ const invoke = (page, cmd, args) =>
   page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args ?? {}]);
 
 const SCRIPT = "scripts/check.py";
+const DATA = "data/obs.csv";
+const IMAGE = "python:3.13-slim";
+const WATCHED = "Watched count";
 const tool = (id, name, input) => ({ toolUse: { id, name, input } });
 const done = { steps: [{ text: "done" }] };
-const read = (id) => tool(id, "read_file", { path: SCRIPT });
-const edit = (id, from, oldText, newText) =>
+const read = (id, path = SCRIPT) => tool(id, "read_file", { path });
+const edit = (id, from, oldText, newText, path = SCRIPT) =>
   tool(id, "edit_document", {
-    path: SCRIPT,
+    path,
     base_revision: `$ref:${from}/revision`,
     edits: [{ old_text: oldText, new_text: newText }],
   });
-const save = (id, from) => tool(id, "save_document", { path: SCRIPT, revision: `$ref:${from}/revision` });
+const save = (id, from, path = SCRIPT) => tool(id, "save_document", { path, revision: `$ref:${from}/revision` });
 const run = (id) => tool(id, "run_command", { program: "python", args: [SCRIPT], working_directory: "" });
+
+function dockerAvailable() {
+  try {
+    execFileSync("docker", ["image", "inspect", IMAGE], { stdio: "ignore", timeout: 60_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A restricted batch workflow over a script (code) and a data file (the input a trigger may watch). */
+function watchedWorkflow() {
+  const input = (id, label, portType, path) => ({
+    id,
+    label,
+    portType,
+    source: { kind: "resource", path, version: { kind: "atRunStart" } },
+  });
+  return {
+    schema: "exposition.workflow/1",
+    title: WATCHED,
+    description: "",
+    preset: null,
+    inputs: [input("script", "Python script", "codeSource", "count.py"), input("data", "Observations", "dataset", DATA)],
+    steps: [
+      {
+        id: "run",
+        label: "Run",
+        operation: { id: "research.pythonBatch", version: 1 },
+        parameters: { timeoutSeconds: { kind: "integer", value: 300 } },
+        payload: null,
+      },
+    ],
+    connections: [
+      { kind: "data", from: { kind: "input", input: "script" }, to: { step: "run", port: "script" } },
+      { kind: "data", from: { kind: "input", input: "data" }, to: { step: "run", port: "data" } },
+    ],
+    outcomes: [{ id: "out", kind: "transformedDataset", label: "Result", from: { step: "run", port: "dataset" }, optional: false }],
+    ceiling: { execution: "restricted", modelRequests: false, retainResults: false, proposeChanges: false },
+  };
+}
+
+async function waitFor(check, message, timeout = 120_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const value = await check();
+    if (value) return value;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`timed out: ${message}`);
+}
 
 async function waitDone(page, id, timeout = 240_000) {
   const deadline = Date.now() + timeout;
@@ -89,6 +151,15 @@ export default async function agentSave({ launchApp, artifactsDir, assert }) {
   await mkdir(join(project, "scripts"), { recursive: true });
   const onDisk = () => readFile(join(project, "scripts", "check.py"), "utf8");
   await writeFile(join(project, "scripts", "check.py"), "print('v1')\n");
+  await mkdir(join(project, "data"), { recursive: true });
+  await writeFile(join(project, "data", "obs.csv"), "x,y\n0,1\n1,3\n");
+  await writeFile(
+    join(project, "count.py"),
+    'import csv, os\nrows = list(csv.DictReader(open("data/obs.csv")))\n' +
+      'with open(os.path.join(os.environ["EXPOSITION_OUTPUT_DIR"], "dataset.csv"), "w") as f:\n' +
+      '    f.write("rows\\n%d\\n" % len(rows))\n',
+  );
+  const docker = dockerAvailable();
   const env = { EXPOSITION_CREDENTIAL_NAMESPACE: `e2e-agent-save-${Date.now()}` };
   const evidence = { project, results: {} };
   const app = await launchApp({ env });
@@ -123,6 +194,11 @@ export default async function agentSave({ launchApp, artifactsDir, assert }) {
           // 3: the file changed on disk meanwhile; the save is refused.
           { steps: [read("r3")] },
           { steps: [save("s3", "r3")] },
+          done,
+          // 4: a data file an enabled trigger watches.
+          { steps: [read("r4", DATA)] },
+          { steps: [edit("e4", "r4", "1,3", "1,4", DATA)] },
+          { steps: [save("s4", "e4", DATA)] },
           done,
         ],
       },
@@ -179,6 +255,11 @@ export default async function agentSave({ launchApp, artifactsDir, assert }) {
     assert.match(s1.contentHash, /^[0-9a-f]{64}$/);
     assert.equal(s1.unsavedChanges, false);
     assert.equal(s1.otherChanges, "none");
+    // No enabled trigger watches the script: the card and the result say nothing more.
+    assert.doesNotMatch(payload, /trigger/i);
+    assert.equal(s1.triggersKnown, true);
+    assert.deepEqual(s1.triggers, []);
+    assert.equal(s1.triggersNote, undefined);
     assert.match(s1.note, /Saved to disk with the editor's own save/);
     assert.match(s1.authorization, /The user approved this call in a prompt, once/);
     assert.match(c1.stdout, /v2/, "the program ran the saved, edited script");
@@ -237,6 +318,68 @@ export default async function agentSave({ launchApp, artifactsDir, assert }) {
     assert.equal(await onDisk(), "print('from another program')\n", "the other program's version is not overwritten");
     const kept = (await invoke(page, "document_list")).find((d) => d.path === SCRIPT);
     assert.notEqual(kept.savedRevision, kept.revision, "the editor keeps the unsaved text for the user to resolve");
+
+    // --- 4: a file an enabled trigger watches — the card names it, and the trigger still fires.
+    if (docker) {
+      await invoke(page, "execution_settings_update", { change: { kind: "dockerImage", image: IMAGE } });
+      const workflow = await invoke(page, "workflow_save", {
+        request: { id: null, expectedRevision: null, definition: watchedWorkflow() },
+      });
+      const review = await invoke(page, "workflow_trigger_plan", {
+        request: { workflow: workflow.id, kind: { kind: "inputsChanged", inputs: ["data"] } },
+      });
+      assert.deepEqual(review.blockers, [], JSON.stringify(review.blockers));
+      const settings = { debounceSeconds: 3, maxRunsPerHour: 12, maxRunsPerDay: 100, allowNative: false, maxModelRequestsPerDay: 0 };
+      const trigger = await invoke(page, "workflow_trigger_enable", {
+        request: { plan: review.plan.plan, standingHash: review.standingHash, settings },
+      });
+      await waitFor(
+        async () => (await invoke(page, "workflow_trigger_list", { workflow: workflow.id }))[0]?.listening,
+        "the trigger listens",
+      );
+      assert.deepEqual(await invoke(page, "workflow_runs", { workflow: workflow.id }), [], "enabling runs nothing");
+
+      await invoke(page, "agents_task_continue", { task: task.id, prompt: "Correct the second observation", budgets: null });
+      await card(page, `Apply edits to ${DATA}`);
+      await page.getByTestId("agents-approve").click();
+      await card(page, `Save ${DATA}`);
+      const watchedPayload = await page.getByTestId("agents-approval-payload").innerText();
+      evidence.watchedSaveCard = watchedPayload;
+      assert.ok(
+        watchedPayload.includes(
+          "An enabled workflow trigger watches this file:\n" +
+            `- “${WATCHED}”: saving this file can start a run of this workflow, within the trigger's own limits.`,
+        ),
+        watchedPayload,
+      );
+      assert.equal(await page.getByTestId("agents-approve-task").count(), 1, "still an ordinary, repeatable file change");
+      await page.screenshot({ path: join(artifactsDir, "agent-save-watched-approval.png") });
+      assert.deepEqual(await invoke(page, "workflow_runs", { workflow: workflow.id }), [], "nothing runs while the card waits");
+      await page.getByTestId("agents-approve").click();
+      task = await waitDone(page, task.id);
+      assert.equal(await readFile(join(project, "data", "obs.csv"), "utf8"), "x,y\n0,1\n1,4\n");
+      const s4 = resultOf(sentMessages(app.dataDir, task.id), "s4");
+      evidence.results.s4 = s4;
+      assert.equal(s4.saved, true);
+      assert.equal(s4.triggersKnown, true);
+      assert.deepEqual(s4.triggers, [{ workflow: WATCHED, startsOnSave: true }]);
+      assert.match(s4.triggersNote, /^An enabled workflow trigger watches the file you saved:\n- “Watched count”: this save can start a run/);
+      assert.match(s4.triggersNote, /Tell the user\.$/);
+      // The trigger behaves as for a user's save: one run after the quiet period.
+      const fired = await waitFor(async () => {
+        const runs = await invoke(page, "workflow_runs", { workflow: workflow.id });
+        if (runs.length === 0) return false;
+        const run = await invoke(page, "workflow_run_get", { run: runs[0].id });
+        return run.state !== "running" && { run, count: runs.length };
+      }, "the trigger's run ended", 240_000);
+      assert.equal(fired.count, 1, "exactly one run");
+      assert.equal(fired.run.state, "succeeded", `${fired.run.code}: ${fired.run.message}`);
+      evidence.triggered = { trigger: trigger.id, run: fired.run.id, state: fired.run.state };
+      await invoke(page, "workflow_trigger_disable", { trigger: trigger.id });
+    } else {
+      evidence.notRun = [`4 (watched file): Docker image ${IMAGE} not available`];
+      console.log(`agent-save: case 4 (a watched file) NOT RUN: Docker image ${IMAGE} is not available`);
+    }
 
     const errors = app.consoleMessages.filter((m) => m.startsWith("error:") || m.startsWith("pageerror:"));
     assert.deepEqual(errors, [], "no console errors");

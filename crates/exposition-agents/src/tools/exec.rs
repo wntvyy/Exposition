@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::autoexec::{self, AutoExec};
 use super::services::{
-    BuildRequest, CommandRequest, LatexEngine, LeanRequest, PythonRequest, ServiceError, ToolServices,
+    BuildRequest, CommandRequest, LatexEngine, LeanRequest, PythonRequest, ServiceError, ToolServices, WatchingTrigger,
 };
 use super::{
     CreateFileInput, EditDocumentInput, Exposure, InsertArtifactInput, Launch, ListFilesInput, PathUse, ReadFileInput,
@@ -370,6 +370,95 @@ impl OtherChanges {
                 "Exposition cannot tell which of the saved changes this task made: the whole current editor text \
                  was saved, whoever wrote it. Tell the user."
             }
+        }
+    }
+}
+
+/// The enabled workflow triggers that watch the file a save writes. Saving
+/// makes them react as they do to the user's save; the save states it (the
+/// approval card, and the result when no card was shown). Disclosure only:
+/// it changes neither who may save nor what a trigger does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SaveTriggers {
+    /// Read from the trigger service (sorted, without duplicates).
+    Known(Vec<WatchingTrigger>),
+    /// They could not be read: never stated as "none".
+    Unknown,
+}
+
+impl SaveTriggers {
+    /// One line per trigger; `saved`: after the save (the result) rather
+    /// than before it (the approval card).
+    fn lines(triggers: &[WatchingTrigger], saved: bool) -> String {
+        let mut out = String::new();
+        for trigger in triggers {
+            let title = shown(&trigger.workflow);
+            let what = match (trigger.starts_on_save, saved) {
+                (true, false) => "saving this file can start a run of this workflow, within the trigger's own limits.",
+                (true, true) => "this save can start a run of this workflow, within the trigger's own limits.",
+                (false, false) => {
+                    "it runs on a schedule; saving does not start it, and its next run reads the file as saved."
+                }
+                (false, true) => {
+                    "it runs on a schedule; this save did not start it, and its next run reads the file as saved."
+                }
+            };
+            out.push_str(&format!("\n- “{title}”: {what}"));
+        }
+        out
+    }
+
+    fn heading(triggers: &[WatchingTrigger], file: &str) -> String {
+        if triggers.len() == 1 {
+            format!("An enabled workflow trigger watches {file}:")
+        } else {
+            format!("Enabled workflow triggers watch {file}:")
+        }
+    }
+
+    /// The disclosure on the approval card (`None`: no enabled trigger
+    /// watches the file).
+    fn note(&self) -> Option<String> {
+        match self {
+            SaveTriggers::Known(triggers) if triggers.is_empty() => None,
+            SaveTriggers::Known(triggers) => {
+                Some(format!("{}{}", Self::heading(triggers, "this file"), Self::lines(triggers, false)))
+            }
+            SaveTriggers::Unknown => Some(
+                "Exposition could not determine whether an enabled workflow trigger watches this file. If one \
+                 does, saving can start a run of its workflow, within the trigger's own limits."
+                    .to_owned(),
+            ),
+        }
+    }
+
+    /// The same disclosure addressed to the agent (in the tool result).
+    fn result_note(&self) -> Option<String> {
+        match self {
+            SaveTriggers::Known(triggers) if triggers.is_empty() => None,
+            SaveTriggers::Known(triggers) => Some(format!(
+                "{}{}\nTell the user.",
+                Self::heading(triggers, "the file you saved"),
+                Self::lines(triggers, true)
+            )),
+            SaveTriggers::Unknown => Some(
+                "Exposition could not determine whether an enabled workflow trigger watches the file you saved. \
+                 If one does, this save can start a run of its workflow, within the trigger's own limits. Tell \
+                 the user."
+                    .to_owned(),
+            ),
+        }
+    }
+
+    /// In the result: `triggersKnown` and the list (empty when unknown).
+    fn list(&self) -> Value {
+        match self {
+            SaveTriggers::Known(triggers) => triggers
+                .iter()
+                .map(|t| json!({"workflow": t.workflow, "startsOnSave": t.starts_on_save}))
+                .collect::<Vec<_>>()
+                .into(),
+            SaveTriggers::Unknown => json!([]),
         }
     }
 }
@@ -1462,6 +1551,20 @@ fn other_changes(env: &ToolEnv<'_>, document: &DocumentId) -> OtherChanges {
     }
 }
 
+/// The enabled workflow triggers watching `path`, through the application's
+/// project operations (the lookup a deletion's consequences use). A missing
+/// service or a failed read is unknown, not none.
+fn save_triggers(env: &ToolEnv<'_>, path: &WorkspacePath) -> SaveTriggers {
+    match env.services.project_operations().map(|ops| ops.triggers_watching(path)) {
+        Some(Ok(mut triggers)) => {
+            triggers.sort();
+            triggers.dedup();
+            SaveTriggers::Known(triggers)
+        }
+        Some(Err(_)) | None => SaveTriggers::Unknown,
+    }
+}
+
 /// What a save changes in the file, complete: every line it removes from the
 /// version on disk and every line it adds, with two lines of context.
 fn save_changes(disk: &str, text: &str) -> String {
@@ -1542,6 +1645,9 @@ fn prepare_save(env: &ToolEnv<'_>, input: &SaveDocumentInput) -> Result<Prepared
         preview.content_hash,
         others.note()
     );
+    if let Some(note) = save_triggers(env, &path).note() {
+        detail.push_str(&format!("\n{note}\n"));
+    }
     match &preview.disk_text {
         Some(disk) => {
             detail.push_str("\nWhat changes in the file (- on disk now, + after the save):\n");
@@ -1590,6 +1696,8 @@ fn save_document(env: &ToolEnv<'_>, prepared: &PreparedSave) -> Result<ToolOutpu
     let path = &prepared.path;
     // Whose changes the text holds is read again: it is reported as saved.
     let others = other_changes(env, &prepared.document);
+    // So are the triggers watching the file: a save without a card states them here.
+    let triggers = save_triggers(env, path);
     let saved = workspace.save_document_exact(&prepared.document, prepared.revision).map_err(|e| match e.code {
         "document.changed" => ToolOutput::error_with(
             format!(
@@ -1612,7 +1720,12 @@ fn save_document(env: &ToolEnv<'_>, prepared: &PreparedSave) -> Result<ToolOutpu
         "otherChanges": others.key(),
         "otherChangesNote": others.result_note(),
         "note": SAVED_NOTE,
+        "triggersKnown": triggers != SaveTriggers::Unknown,
+        "triggers": triggers.list(),
     });
+    if let Some(note) = triggers.result_note() {
+        result["triggersNote"] = note.into();
+    }
     if let Some(graph) = graph_info {
         result["graph"] = graph;
     }
