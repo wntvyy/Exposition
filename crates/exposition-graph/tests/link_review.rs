@@ -344,10 +344,23 @@ fn a_statement_that_can_no_longer_be_located_is_reported_and_rebinding_then_conf
     assert!(reason.contains("main.typ: The bound text was changed or removed"), "{reason}");
     assert_eq!(p.row(&theorem).formal_association, FormalAssociationState::NeedsReReview);
 
-    // Confirming now records nothing (there is no statement to record): the
-    // last statement actually reviewed stays on record.
-    p.set_status(&link.id, AssertionStatus::Accepted);
+    assert!(reason.contains("Rebind the statement to its current text, then confirm the link."), "{reason}");
+
+    // Confirming now is refused, with what to do (there is no statement to
+    // record): nothing changes, and the last statement actually reviewed
+    // stays on record.
+    let before = p.link(&theorem);
+    let (proposal, out) = p.change(
+        Origin::User,
+        vec![GraphOperation::SetRelationStatus { relation: link.id.clone(), status: AssertionStatus::Accepted }],
+    );
+    assert!(!proposal.valid && !matches!(out, ApplyOutcome::Applied { .. }), "{out:?}");
+    assert_eq!(proposal.diagnostics[0].code, "graph.statementNotLocated");
+    let refusal = &proposal.diagnostics[0].message;
+    assert!(refusal.starts_with("Nothing was confirmed. The statement cannot be located"), "{refusal}");
+    assert!(refusal.contains("Rebind the statement to its current text, then confirm the link."), "{refusal}");
     let still = p.link(&theorem);
+    assert_eq!(still, before, "a refused confirmation changes nothing");
     assert_eq!(still.review.as_ref().unwrap().state, LinkReviewState::StatementMissing);
     assert_eq!(still.reviewed_statement.as_deref(), Some(first_digest.as_str()));
 

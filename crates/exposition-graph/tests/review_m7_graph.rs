@@ -383,7 +383,7 @@ fn review_held_hostile_databases_are_refused_and_left_unchanged() {
             "bad endpoint kinds",
             "INSERT INTO entities VALUES ('ent-00000000000000000000000000000001','resource','[\"manuscript\"]','a.tex','a.tex','active',NULL,1,'{\"kind\":\"user\"}','{}',1,1);\
              INSERT INTO entities VALUES ('ent-00000000000000000000000000000002','lemma','[]','L','k','active',NULL,1,'{\"kind\":\"user\"}','{}',1,1);\
-             INSERT INTO relations VALUES ('rel-00000000000000000000000000000001','proofOf','ent-00000000000000000000000000000001','ent-00000000000000000000000000000002','{\"kind\":\"user\"}','accepted',NULL,'[]',NULL,NULL,NULL,1,1,1);",
+             INSERT INTO relations VALUES ('rel-00000000000000000000000000000001','proofOf','ent-00000000000000000000000000000001','ent-00000000000000000000000000000002','{\"kind\":\"user\"}','accepted',NULL,'[]',NULL,NULL,NULL,1,1,1,NULL);",
         ),
         (
             "unknown kind",

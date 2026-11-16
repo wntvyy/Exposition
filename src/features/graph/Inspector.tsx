@@ -187,7 +187,9 @@ function RelationRow({
 
 /**
  * Accept/Reject a suggestion; confirm or reject a formal link whose review
- * no longer plainly stands (confirming records the statement as it is now);
+ * no longer plainly stands (confirming records the statement as it is now,
+ * so it is unavailable while the statement cannot be located: the reason
+ * line under the relationship says what to do first);
  * remove a relationship (semantic, confirmed).
  */
 export function RelationActions({ relation, description }: { relation: Relation; description: string }) {
@@ -199,6 +201,7 @@ export function RelationActions({ relation, description }: { relation: Relation;
             icon={Check}
             size="sm"
             aria-label="Confirm link"
+            isDisabled={relation.review?.state === "statementMissing"}
             onPress={() => void runChange([{ op: "setRelationStatus", relation: relation.id, status: "accepted" }], "Confirm the link", "Link confirmed")}
           />
           <IconButton

@@ -34,8 +34,10 @@ const PREFIX: &str = "statement:v1:";
 pub enum StatementNow {
     /// Located; the digest identifies its text.
     Located(String),
-    /// Cannot be located in the current sources (why, in plain words).
-    Unlocated(String),
+    /// Cannot be located in the current sources: why, in plain words, and
+    /// whether binding the item to its text again would locate it (a binding
+    /// that no longer resolves) or not (the item itself is gone).
+    Unlocated { why: String, rebindable: bool },
 }
 
 impl StatementNow {
@@ -44,14 +46,14 @@ impl StatementNow {
     pub fn digest(&self) -> Option<String> {
         match self {
             StatementNow::Located(d) => Some(d.clone()),
-            StatementNow::Unlocated(_) => None,
+            StatementNow::Unlocated { .. } => None,
         }
     }
 }
 
 fn unlocated(binding: &SourceBinding, fallback: &str) -> StatementNow {
     let detail = binding.detail.as_deref().map(str::trim).filter(|d| !d.is_empty()).unwrap_or(fallback);
-    StatementNow::Unlocated(format!("{}: {detail}", binding.path))
+    StatementNow::Unlocated { why: format!("{}: {detail}", binding.path), rebindable: true }
 }
 
 /// Identify the current statement of `entity` from its bindings.
@@ -59,7 +61,10 @@ pub fn statement_now(entity: &Entity, bindings: &[SourceBinding]) -> StatementNo
     const NOT_INDEXED: &str = "The source has not been indexed yet.";
     if entity.lifecycle == Lifecycle::Tombstoned {
         let reason = entity.tombstone_reason.as_deref().map(str::trim).filter(|r| !r.is_empty());
-        return StatementNow::Unlocated(reason.unwrap_or("It no longer exists in the project sources.").to_owned());
+        return StatementNow::Unlocated {
+            why: reason.unwrap_or("It no longer exists in the project sources.").to_owned(),
+            rebindable: false,
+        };
     }
     let mut h = Sha256::new();
     if bindings.is_empty() {
@@ -100,25 +105,39 @@ pub fn statement_now(entity: &Entity, bindings: &[SourceBinding]) -> StatementNo
     StatementNow::Located(format!("{PREFIX}{hex}"))
 }
 
+/// What a person is told when the statement of a formal link cannot be
+/// located: why, and what to do. Confirming needs a statement to record, so
+/// a binding that no longer resolves is bound again first.
+pub fn unlocated_reason(why: &str, rebindable: bool) -> String {
+    let why = why.trim_end_matches('.');
+    if rebindable {
+        format!(
+            "The statement cannot be located, so the review cannot be compared with it ({why}). Rebind the \
+             statement to its current text, then confirm the link. Until it is rebound the link cannot be \
+             confirmed, only rejected."
+        )
+    } else {
+        format!(
+            "The statement cannot be located, so the review cannot be compared with it ({why}). The link cannot \
+             be confirmed while the statement is not in the sources; reject it, or restore the statement."
+        )
+    }
+}
+
 /// The standing of an accepted `formalizes` link whose review recorded
 /// `reviewed` (if anything), against the statement `entity` stands for now.
 /// A missing entity reads as unlocatable.
 pub fn link_review(reviewed: Option<&str>, entity: Option<&Entity>, bindings: &[SourceBinding]) -> LinkReview {
     let now = match entity {
         Some(e) => statement_now(e, bindings),
-        None => StatementNow::Unlocated("It is no longer in the project graph.".into()),
+        None => StatementNow::Unlocated { why: "It is no longer in the project graph.".into(), rebindable: false },
     };
     match (reviewed, now) {
         // Unlocatable is reported as such whether or not a digest exists:
         // it is never taken for unchanged.
-        (_, StatementNow::Unlocated(why)) => LinkReview {
-            state: LinkReviewState::StatementMissing,
-            reason: Some(format!(
-                "The statement cannot be located, so the review cannot be compared with it ({}). Bind the item to \
-                 its current text, then confirm the link.",
-                why.trim_end_matches('.')
-            )),
-        },
+        (_, StatementNow::Unlocated { why, rebindable }) => {
+            LinkReview { state: LinkReviewState::StatementMissing, reason: Some(unlocated_reason(&why, rebindable)) }
+        }
         (Some(recorded), StatementNow::Located(current)) if recorded == current => {
             LinkReview { state: LinkReviewState::Current, reason: None }
         }
@@ -216,12 +235,15 @@ mod tests {
         b.detail = Some("The bound text was changed or removed.".into());
         assert_eq!(
             statement_now(&e, &[b]),
-            StatementNow::Unlocated("main.typ: The bound text was changed or removed.".into())
+            StatementNow::Unlocated {
+                why: "main.typ: The bound text was changed or removed.".into(),
+                rebindable: true
+            }
         );
         let first_sight = binding(&e, "main.typ", SourceSelector::Region, None);
-        assert!(matches!(statement_now(&e, &[first_sight]), StatementNow::Unlocated(_)));
+        assert!(matches!(statement_now(&e, &[first_sight]), StatementNow::Unlocated { rebindable: true, .. }));
         e.lifecycle = Lifecycle::Tombstoned;
-        assert!(matches!(statement_now(&e, &[]), StatementNow::Unlocated(_)));
+        assert!(matches!(statement_now(&e, &[]), StatementNow::Unlocated { rebindable: false, .. }));
     }
 
     #[test]
@@ -250,7 +272,11 @@ mod tests {
             let r = link_review(reviewed, Some(&e), std::slice::from_ref(&missing));
             assert_eq!(r.state, LinkReviewState::StatementMissing);
             assert!(r.needs_re_review());
+            let reason = r.reason.unwrap();
+            assert!(reason.contains("Rebind the statement to its current text, then confirm the link."), "{reason}");
         }
+        let gone = link_review(Some(&now), None, &[]).reason.unwrap();
+        assert!(gone.contains("reject it, or restore the statement") && !gone.contains("Rebind"), "{gone}");
         assert_eq!(link_review(Some(&now), None, &[]).state, LinkReviewState::StatementMissing);
     }
 }

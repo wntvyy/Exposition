@@ -206,7 +206,11 @@ the Lean view, and agents' graph queries, until you choose Confirm link
 (which records the statement as it reads now) or reject the link. A
 statement that can no longer be located (text you bound by selecting it and
 then edited, or a deleted declaration) is reported as that, never as
-unchanged; bind the item to its current text, then confirm. Editing around
+unchanged, and the reason says what to do: rebind the statement to its
+current text (the app has no control for this yet; an agent can propose the
+binding), then confirm the link. Until it is rebound, Confirm link is
+unavailable and a confirmation is refused with that explanation; the link
+can still be rejected. Editing around
 the statement, moving it, or re-wrapping a LaTeX or Typst declaration does
 not flag it. Nothing is re-reviewed automatically and agents cannot confirm
 a link. The Lean verdict and its freshness are not altered by any of this.

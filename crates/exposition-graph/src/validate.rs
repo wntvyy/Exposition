@@ -400,15 +400,26 @@ pub fn run_operations(w: &Writer<'_>, origin: &Origin, ops: &[GraphOperation], a
                 // statement the person reviewed it against; nothing else
                 // ever sets or clears that record.
                 let confirming = r.status == AssertionStatus::Accepted && *status == AssertionStatus::Accepted;
-                r.status = *status;
-                r.reviewed_statement = match status {
-                    // Confirming while the statement cannot be located
-                    // records nothing: the last statement actually reviewed
-                    // stays on record, so the link keeps needing re-review.
-                    AssertionStatus::Accepted => reviewed_statement(w, r.kind, &r.to)?
-                        .or_else(|| r.reviewed_statement.take().filter(|_| confirming)),
-                    _ => None,
+                let statement = if r.kind == RelationKind::Formalizes && *status == AssertionStatus::Accepted {
+                    Some(statement_of(w, &r.to)?)
+                } else {
+                    None
                 };
+                // Confirming a formal link records the statement as it is
+                // now. With no statement to record it would change nothing,
+                // so it is refused with what to do, never shown as done.
+                if confirming && let Some(crate::review::StatementNow::Unlocated { why, rebindable }) = &statement {
+                    cx.err(
+                        i,
+                        "graph.statementNotLocated",
+                        format!("Nothing was confirmed. {}", crate::review::unlocated_reason(why, *rebindable)),
+                    );
+                    continue;
+                }
+                r.status = *status;
+                // Accepting a suggestion whose statement cannot be located
+                // records none: the link then reads as needing re-review.
+                r.reviewed_statement = statement.and_then(|s| s.digest());
                 r.revision += 1;
                 r.updated_at_ms = now;
                 cx.effects.push(format!(
@@ -496,8 +507,18 @@ fn reviewed_statement(w: &Writer<'_>, kind: RelationKind, to: &EntityId) -> Stor
     if kind != RelationKind::Formalizes {
         return Ok(None);
     }
-    let Some(entity) = w.entity(to)? else { return Ok(None) };
-    Ok(crate::review::statement_now(&entity, &w.bindings(to)?).digest())
+    Ok(statement_of(w, to)?.digest())
+}
+
+/// The statement `to` stands for, as it is located now.
+fn statement_of(w: &Writer<'_>, to: &EntityId) -> StoreResult<crate::review::StatementNow> {
+    Ok(match w.entity(to)? {
+        Some(entity) => crate::review::statement_now(&entity, &w.bindings(to)?),
+        None => crate::review::StatementNow::Unlocated {
+            why: "It is no longer in the project graph.".into(),
+            rebindable: false,
+        },
+    })
 }
 
 /// Content hash of the first binding (endpoint version at assertion time).

@@ -29,7 +29,7 @@ const CHANGED: LinkReview = {
 };
 const MISSING: LinkReview = {
   state: "statementMissing",
-  reason: "The statement cannot be located, so the review cannot be compared with it (main.typ: The bound text was changed or removed). Bind the item to its current text, then confirm the link.",
+  reason: "The statement cannot be located, so the review cannot be compared with it (main.typ: The bound text was changed or removed). Rebind the statement to its current text, then confirm the link. Until it is rebound the link cannot be confirmed, only rejected.",
 };
 const UNRECORDED: LinkReview = {
   state: "unrecorded",
@@ -196,5 +196,22 @@ describe("the inspector of a statement whose reviewed link needs re-review", () 
     expect(proposed.operations).toEqual([{ op: "setRelationStatus", relation: "f1", status: "accepted" }]);
     await waitFor(() => expect(screen.queryByText("Needs re-review")).toBeNull());
     expect(screen.queryByRole("button", { name: "Confirm link" })).toBeNull();
+  });
+
+  it("does not offer to confirm a link whose statement cannot be located, and says what to do first", async () => {
+    fake = createFakeGraph({
+      entities: [thm, decl],
+      relations: [{ ...relation("f1", "formalizes", "decl", "thm", "accepted"), review: MISSING }],
+    });
+    setGraphApi(fake.api);
+    render(<EntityInspector entityId="thm" vocabulary={vocabulary} actions={actions} />);
+    const link = await screen.findByTestId("graph-relation", {}, { timeout: 3000 });
+    expect(within(link).getByText("Needs re-review")).toBeTruthy();
+    expect(within(link).getByTestId("graph-link-review").textContent).toMatch(/Rebind the statement to its current text, then confirm the link\./);
+    const confirm = within(link).getByRole("button", { name: "Confirm link" }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    fireEvent.click(confirm);
+    expect((within(link).getByRole("button", { name: "Reject link" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(fake.calls.some((c) => c.method === "propose")).toBe(false);
   });
 });

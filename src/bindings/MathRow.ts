@@ -11,6 +11,11 @@ import type { SourceBinding } from "./SourceBinding";
 
 export type MathRow = { entity: Entity, binding: SourceBinding | null, informal: InformalState, formalAssociation: FormalAssociationState, 
 /**
+ * Why the association is not plainly reviewed (`needsReReview`,
+ * `reviewUnrecorded`), in plain words.
+ */
+associationReason: string | null, 
+/**
  * Associated formal declarations.
  */
 formalDeclarations: Array<EntityId>, 
@@ -19,6 +24,13 @@ formalDeclarations: Array<EntityId>,
  * declaration (or of this declaration). `None` = no evidence.
  */
 verdict: FormalVerdict | null, 
+/**
+ * Standing of the `formalizes` link through which `verdict` reaches
+ * this row (`None` for a declaration's own verdict, or no verdict). A
+ * verdict shown through a link that is only suggested, or that needs
+ * re-review, is labelled as such wherever it is shown.
+ */
+verdictAssociation: FormalAssociationState | null, 
 /**
  * Whether that evidence still matches the current sources.
  */

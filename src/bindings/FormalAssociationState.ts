@@ -3,4 +3,4 @@
 /**
  * Formal association state, separate from the verifier's verdict.
  */
-export type FormalAssociationState = "none" | "suggested" | "reviewed";
+export type FormalAssociationState = "none" | "suggested" | "reviewed" | "needsReReview" | "reviewUnrecorded";

@@ -473,6 +473,19 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     await linkRow.waitFor({ timeout: 15_000 });
     assert.match(await linkRow.innerText(), /Needs re-review/);
     assert.match(await linkRow.getByTestId("graph-link-review").innerText(), /^The statement cannot be located/);
+    assert.match(await linkRow.getByTestId("graph-link-review").innerText(), /Rebind the statement to its current text, then confirm the link\./);
+    // There is no statement to confirm against: the action is unavailable,
+    // and a confirmation sent anyway is refused and changes nothing.
+    assert.equal(await linkRow.getByRole("button", { name: "Confirm link" }).isDisabled(), true, "Confirm link is disabled while the statement cannot be located");
+    assert.equal(await linkRow.getByRole("button", { name: "Reject link" }).isDisabled(), false);
+    const unlocated = await formalLink();
+    const refused = await invoke(page, "graph_propose_change", {
+      request: { baseRevision: (await invoke(page, "graph_status")).revision, operations: [{ op: "setRelationStatus", relation: unlocated.id, status: "accepted" }], summary: null },
+    });
+    assert.equal(refused.valid, false, JSON.stringify(refused));
+    assert.equal(refused.diagnostics[0].code, "graph.statementNotLocated");
+    assert.match(refused.diagnostics[0].message, /^Nothing was confirmed\. The statement cannot be located.*Rebind the statement to its current text, then confirm the link\./);
+    assert.deepEqual(await formalLink(), unlocated, "the refused confirmation changed nothing");
     const formalSection = inspector.getByTestId("graph-formal-section");
     assert.match(await formalSection.getByTestId("graph-formalization").innerText(), /Needs re-review/);
     assert.match(await formalSection.getByTestId("graph-verdict-line").innerText(), /Checked \(link needs re-review\)/);
