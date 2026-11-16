@@ -30,6 +30,8 @@ pub struct LakePackage {
     pub rev: Option<String>,
     /// The revision the lakefile asked for (branch, tag), if any.
     pub input_rev: Option<String>,
+    /// Where a git dependency is fetched from, exactly as the manifest says.
+    pub url: Option<String>,
 }
 
 /// What the files around a Lean file say about its toolchain and dependencies.
@@ -180,6 +182,7 @@ pub(crate) fn parse_packages(bytes: &[u8]) -> Result<Vec<LakePackage>, String> {
                 kind: field(p, "type").unwrap_or_else(|| "git".to_owned()),
                 rev: field(p, "rev"),
                 input_rev: field(p, "inputRev"),
+                url: field(p, "url"),
             })
         })
         .collect();

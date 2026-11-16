@@ -24,6 +24,7 @@ use exposition_graph::{
     SourceBinding, SourceSelector, SourceVersion, VersionedInput,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use ts_rs::TS;
 
 use crate::types::{AuditedDeclaration, DeclarationVerdict, LeanAuditRecord, LeanStatus};
@@ -65,16 +66,66 @@ pub const ENV_MANIFEST: &str = "lake-manifest.json sha256";
 /// Environment key of the Mathlib commit the manifest pins.
 pub const ENV_MATHLIB: &str = "mathlib revision";
 
-/// Identifier of an audit: path, revision, and digest of the text checked,
-/// and for a package with a manifest the digest of the pinned dependencies
-/// (the same text audited against other dependencies is another audit).
-pub fn audit_id(record: &LeanAuditRecord) -> String {
-    let short = |hash: &str| hash[..hash.len().min(16)].to_owned();
+fn short(hash: &str) -> String {
+    hash[..hash.len().min(16)].to_owned()
+}
+
+/// The identifier audits had before the Lean toolchain became part of it
+/// (path, revision, text digest, manifest digest). Records stored under it
+/// stay readable; see [`same_audit`].
+fn legacy_audit_id(record: &LeanAuditRecord) -> String {
     let base = format!("{}@{}:{}", record.path, record.revision, short(&record.content_hash));
     match record.package.as_ref().and_then(|p| p.manifest.as_ref()) {
         Some(manifest) => format!("{base}+{}", short(&manifest.sha256)),
         None => base,
     }
+}
+
+/// Identifier of an audit: path, revision, and digest of the text checked,
+/// for a package with a manifest the digest of the pinned dependencies, and
+/// the Lean environment (the exact toolchain, its `lean --version`, and the
+/// digest of the package's `lean-toolchain`). The same text audited against
+/// other dependencies or with another Lean is another audit.
+pub fn audit_id(record: &LeanAuditRecord) -> String {
+    let mut lean = Sha256::new();
+    for part in [
+        Some(record.toolchain.as_str()),
+        record.toolchain_version.as_deref(),
+        record.package.as_ref().and_then(|p| p.toolchain_file.as_ref()).map(|f| f.sha256.as_str()),
+    ] {
+        // Length-prefixed, so absent and empty parts differ and parts cannot run together.
+        match part {
+            Some(text) => lean.update(format!("{}:{text}", text.len())),
+            None => lean.update("-"),
+        }
+        lean.update([0u8]);
+    }
+    let lean: String = lean.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    format!("{}~{}", legacy_audit_id(record), short(&lean))
+}
+
+/// `evidence` was recorded for exactly the audit `record` describes. A record
+/// stored before the toolchain was part of the identifier counts only when
+/// everything the identifier now covers is the same in it: the toolchain,
+/// its version, and the digest of the package's `lean-toolchain`.
+fn same_audit(evidence: &Evidence, record: &LeanAuditRecord) -> bool {
+    if evidence.operation.kind != "leanAudit" {
+        return false;
+    }
+    if evidence.operation.id == audit_id(record) {
+        return true;
+    }
+    if evidence.operation.id != legacy_audit_id(record) {
+        return false;
+    }
+    let version = evidence.environment.iter().find(|(key, _)| key == "lean --version").map(|(_, v)| v.as_str());
+    let pin = record.package.as_ref().and_then(|p| p.toolchain_file.as_ref());
+    let recorded_pin = pin.and_then(|file| {
+        evidence.inputs.iter().find(|input| input.path == file.path).and_then(|input| input.content_hash.as_deref())
+    });
+    evidence.formal.as_ref().is_some_and(|f| f.toolchain == record.toolchain)
+        && version == record.toolchain_version.as_deref()
+        && recorded_pin == pin.map(|file| file.sha256.as_str())
 }
 
 /// The formal part of an evidence record for one audited declaration.
@@ -309,7 +360,6 @@ pub fn record_evidence(
 ) -> GraphResult<EvidenceOutcomeReport> {
     let mut report = EvidenceOutcomeReport::default();
     let origin = Origin::Service { service: SERVICE.into() };
-    let operation = audit_id(record);
     for name in names.iter().take(200) {
         if let Some(reason) = refusal(record, name) {
             report.refused.push(RefusedEvidence { declaration: name.clone(), reason });
@@ -320,8 +370,7 @@ pub fn record_evidence(
         let existing = graph.with_store(|store| {
             Ok(store.evidence_for_subject(&entity)?.into_iter().find(|e| {
                 e.kind == EvidenceKind::FormalCheck
-                    && e.operation.kind == "leanAudit"
-                    && e.operation.id == operation
+                    && same_audit(e, record)
                     && e.formal.as_ref().is_some_and(|f| f.declaration == decl.name)
             }))
         })?;
@@ -871,6 +920,68 @@ mod tests {
         // Without an index of the package files nothing is called stale or current.
         let views = declaration_evidence(&graph, &r.path, Some(&r.content_hash)).unwrap();
         assert!(views[0].evidence.iter().all(|e| matches!(e.freshness, Freshness::Unknown { .. })), "{views:?}");
+    }
+
+    /// The Lean environment is part of the audit's identity: another
+    /// toolchain, another `lean --version`, or another `lean-toolchain` file
+    /// is another audit, for a package and for a standalone file.
+    #[test]
+    fn the_lean_environment_identifies_the_audit() {
+        use crate::types::{LeanAuditFile, LeanAuditPackage};
+        let base = record(checked(), vec![decl("Main.a", DeclarationVerdict::Checked, &[])], false);
+        let mut toolchain = base.clone();
+        toolchain.toolchain = "leanprover/lean4:v4.36.0".into();
+        let mut version = base.clone();
+        version.toolchain_version = Some("Lean (version 4.35.0, commit 0000)".into());
+        let mut unprobed = base.clone();
+        unprobed.toolchain_version = None;
+        let pin = |digest: &str| {
+            let mut r = base.clone();
+            r.package = Some(LeanAuditPackage {
+                folder: "Proofs".into(),
+                toolchain_file: Some(LeanAuditFile {
+                    path: WorkspacePath::parse("Proofs/lean-toolchain").unwrap(),
+                    sha256: digest.repeat(32),
+                }),
+                manifest: None,
+                mathlib_revision: None,
+                dependency_count: 0,
+            });
+            r
+        };
+        let ids: Vec<String> =
+            [&base, &toolchain, &version, &unprobed, &pin("11"), &pin("22")].into_iter().map(audit_id).collect();
+        for (i, a) in ids.iter().enumerate() {
+            for b in &ids[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        assert_eq!(audit_id(&base), audit_id(&base.clone()));
+    }
+
+    /// Evidence stored before the toolchain was part of the identifier stays
+    /// readable and is still the record of the same audit, but never of an
+    /// audit with another Lean.
+    #[test]
+    fn evidence_stored_under_the_earlier_identifier_is_reused_only_for_the_same_lean() {
+        let (_dir, graph) = graph();
+        let r = record(checked(), vec![decl("Main.a", DeclarationVerdict::Checked, &[])], false);
+        let entity = ensure_declaration(&graph, &r, &r.declarations[0], true).unwrap();
+        let mut stored = evidence_record(&r, &r.declarations[0], &entity, true, 1).unwrap();
+        stored.operation.id = legacy_audit_id(&r);
+        assert_ne!(stored.operation.id, audit_id(&r));
+        let stored_id = graph.register_evidence(&Origin::Service { service: SERVICE.into() }, stored).unwrap();
+        let views = declaration_evidence(&graph, &r.path, Some(&r.content_hash)).unwrap();
+        assert_eq!(views[0].evidence.len(), 1, "the stored record is listed");
+
+        let same = record_evidence(&graph, &r, &["Main.a".into()], true, 2).unwrap();
+        assert!(same.recorded[0].existing && same.recorded[0].evidence == stored_id);
+        let mut other = r.clone();
+        other.toolchain = "leanprover/lean4:v4.36.0".into();
+        other.toolchain_version = Some("Lean (version 4.36.0)".into());
+        let new = record_evidence(&graph, &other, &["Main.a".into()], true, 3).unwrap();
+        assert!(!new.recorded[0].existing && new.recorded[0].evidence != stored_id);
+        assert_eq!(declaration_evidence(&graph, &r.path, Some(&r.content_hash)).unwrap()[0].evidence.len(), 2);
     }
 
     #[test]

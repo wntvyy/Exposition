@@ -30,9 +30,17 @@
 //! - The prebuilt cache (`lake exe cache get`) is a performance capability.
 //!   It does not check anything: verdicts come only from the Lean service's
 //!   audit of a file.
+//! - The plan names where every dependency is fetched from, and carries the
+//!   digests of the lakefile and the manifest: a change to either after the
+//!   review makes the plan stale. The guided setup prepares the official
+//!   Mathlib only; a `mathlib` from another repository is refused, because
+//!   the cache step builds and runs a program of that repository.
 //! - A setup that fails or is canceled removes what it created (recorded
-//!   before each creation); whatever existed stays. A package a setup may have
-//!   left incomplete keeps an application-owned record and is never reported
+//!   before each creation): the files it wrote while they still hold what it
+//!   wrote, the folders it made once they are empty, and Lake's own outputs.
+//!   A file the user added or changed meanwhile stays and is named in the
+//!   outcome; whatever existed stays. A package a setup may have left
+//!   incomplete keeps an application-owned record and is never reported
 //!   ready until a setup of it succeeds.
 //!
 //! `lake update` and `lake exe cache get` run Lake configuration and programs
@@ -62,6 +70,8 @@ use crate::types::LeanError;
 /// The Lake package name of Mathlib.
 pub const MATHLIB: &str = "mathlib";
 const MATHLIB_SCOPE: &str = "leanprover-community";
+/// The repository the guided setup accepts as Mathlib.
+pub const MATHLIB_URL: &str = "https://github.com/leanprover-community/mathlib4";
 const MATHLIB_CACHE_URL: &str = "https://cache.mathlib.org";
 const LAKE_DIR: &str = ".lake";
 const DEFAULT_PACKAGES_DIR: &str = ".lake/packages";
@@ -78,6 +88,8 @@ const LOG_LINE_CHARS: usize = 500;
 const OUTPUT_EVENT_CHARS: usize = 16 * 1024;
 const MAX_NAME_LEN: usize = 40;
 const MAX_LAKEFILE_BYTES: u64 = 1024 * 1024;
+const MAX_FIELD_CHARS: usize = 200;
+const MAX_KEPT_LISTED: usize = 20;
 
 // ==========================================================================
 // Inspection (files only)
@@ -96,6 +108,9 @@ pub struct LeanDependencyInfo {
     pub input_rev: Option<String>,
     /// Its checkout is in the package's packages folder.
     pub present: bool,
+    /// Where a git dependency is fetched from, as the manifest says (without
+    /// any credentials written into the address).
+    pub url: Option<String>,
 }
 
 /// Whether a package can be checked as it is. Decided from files only.
@@ -109,6 +124,10 @@ pub enum LeanPackageReadiness {
     /// downloads; preparing the package again completes or replaces them.
     Unfinished {
         message: String,
+        /// The setup did not touch the dependency sources (they were complete
+        /// and pinned before it began), so the user's explicit choice to
+        /// build Mathlib from source can still be taken.
+        can_build_from_source: bool,
     },
     /// No `lean-toolchain` pins the Lean version.
     ToolchainUnpinned,
@@ -144,6 +163,12 @@ pub struct LeanPackageInspection {
     pub root: String,
     /// `lakefile.lean` or `lakefile.toml`, when the folder is a package.
     pub lakefile: Option<String>,
+    /// SHA-256 (hex) of the lakefile.
+    pub lakefile_digest: Option<String>,
+    /// The lakefile declares requirements that cannot be read as data (a
+    /// `lakefile.lean` is code): what they resolve to is known only from a
+    /// manifest.
+    pub requirements_in_code: bool,
     /// The toolchain `lean-toolchain` pins, exactly as written.
     pub toolchain: Option<String>,
     pub toolchain_installed: bool,
@@ -172,27 +197,55 @@ impl LeanPackageInspection {
     /// from source inside the language server, or run on a package a setup
     /// left incomplete. `local_build` is the user's explicit choice to build
     /// Mathlib from source instead of using the prebuilt cache.
+    ///
+    /// Decided from what the files show, not from the headline readiness: a
+    /// missing toolchain pin or an unfinished-setup record never hides that
+    /// the dependencies are unresolved or not downloaded.
     pub fn blocks_checking(&self, local_build: bool) -> Option<String> {
-        match &self.readiness {
-            LeanPackageReadiness::Unfinished { message } => Some(message.clone()),
-            _ if !self.uses_mathlib => None,
-            LeanPackageReadiness::DependenciesUnresolved => Some(
+        let lakefile = self.lakefile.as_deref()?;
+        let unresolved = self.manifest_digest.is_none();
+        if !self.uses_mathlib {
+            // Requirements written as code may name anything, Mathlib included.
+            return (unresolved && self.requirements_in_code).then(|| {
+                format!(
+                    "This package's {} is Lean code that requires dependencies, and they have not been resolved (there is no lake-manifest.json), so Exposition cannot tell what Lean would download and build here. Run `lake update` in the package folder in a terminal to resolve them; if the package requires Mathlib, use Set Up Mathlib instead.",
+                    lakefile
+                )
+            });
+        }
+        if let LeanPackageReadiness::Unfinished { message, can_build_from_source } = &self.readiness
+            && !(local_build && *can_build_from_source)
+        {
+            return Some(message.clone());
+        }
+        if unresolved {
+            return Some(
                 "This package requires Mathlib, but its dependencies have not been resolved (there is no lake-manifest.json). Set Up Mathlib pins the revisions and downloads Mathlib's prebuilt cache."
                     .into(),
-            ),
-            LeanPackageReadiness::DependenciesMissing { names } => Some(format!(
+            );
+        }
+        let missing: Vec<String> = self.dependencies.iter().filter(|d| !d.present).map(|d| d.name.clone()).collect();
+        if !missing.is_empty() {
+            return Some(format!(
                 "The dependencies this package pins are not downloaded ({}). Set Up Mathlib fetches exactly the pinned revisions and Mathlib's prebuilt cache; nothing is upgraded.",
-                list(names)
-            )),
-            LeanPackageReadiness::ToolchainMismatch { package, mathlib } => Some(format!(
+                list(&missing)
+            ));
+        }
+        if let (Some(package), Some(mathlib)) = (&self.toolchain, &self.mathlib_toolchain)
+            && toolchain::qualify(package) != toolchain::qualify(mathlib)
+        {
+            return Some(format!(
                 "This package pins Lean {package}, but its Mathlib revision is built for {mathlib}. Checking would rebuild Mathlib with another Lean version. Change lean-toolchain to {mathlib}, or require a Mathlib revision made for {package}."
-            )),
-            LeanPackageReadiness::CacheMissing if !local_build => Some(
+            ));
+        }
+        let pinned = self.dependencies.iter().any(|d| d.name.eq_ignore_ascii_case(MATHLIB));
+        if pinned && !self.cache_present && !local_build {
+            return Some(
                 "Mathlib's prebuilt cache is not in this package, so Lean would build Mathlib from source (hours, several GB of memory). Set Up Mathlib downloads the cache for the pinned revision; building from source stays possible."
                     .into(),
-            ),
-            _ => None,
+            );
         }
+        None
     }
 }
 
@@ -209,77 +262,303 @@ fn lakefile_in(dir: &Path) -> Option<String> {
     LAKEFILES.iter().find(|name| dir.join(name).is_file()).map(|name| (*name).to_owned())
 }
 
-/// What a lakefile says about Mathlib (a hint only: the manifest decides when
-/// there is one). `lakefile.toml` is read as data; a `lakefile.lean` is code
-/// and is only searched for a `require` of Mathlib.
+/// One requirement a lakefile declares, as far as it can be read without
+/// running anything.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeclaredRequire {
+    pub name: String,
+    pub scope: Option<String>,
+    /// The git address it is taken from, when the lakefile gives one.
+    pub git: Option<String>,
+    /// The local folder it is taken from, when the lakefile gives one.
+    pub path: Option<String>,
+    pub rev: Option<String>,
+}
+
+/// What a lakefile says it requires (a hint only: the manifest decides when
+/// there is one). `lakefile.toml` is parsed as TOML; a `lakefile.lean` is
+/// code, read for its `require` commands with comments removed, and what it
+/// requires is never taken as certain.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LakefileHint {
     /// Some `require` is declared.
     pub requires: bool,
     pub mathlib: bool,
     pub mathlib_rev: Option<String>,
+    /// The requirements are code, or could not be parsed: `declared` may be
+    /// incomplete.
+    pub opaque: bool,
+    pub declared: Vec<DeclaredRequire>,
 }
 
-fn toml_string(value: &str) -> Option<String> {
-    let value = value.trim();
-    let inner = value.strip_prefix('"')?;
-    let end = inner.find('"')?;
-    Some(inner[..end].to_owned())
+fn clean_field(text: &str) -> Option<String> {
+    let text: String = text.chars().filter(|c| !c.is_control()).take(MAX_FIELD_CHARS).collect();
+    (!text.is_empty()).then_some(text)
+}
+
+fn toml_text(value: Option<&toml::Value>) -> Option<String> {
+    value.and_then(|v| v.as_str()).and_then(clean_field)
+}
+
+/// The `require` entries of a `lakefile.toml` (`[[require]]` tables, an
+/// inline array of tables, or one table). `None` when the file is not TOML
+/// or `require` has another shape.
+fn toml_requires(text: &str) -> Option<Vec<DeclaredRequire>> {
+    let table: toml::Table = text.parse().ok()?;
+    let entries: Vec<&toml::Value> = match table.get("require") {
+        None => Vec::new(),
+        Some(toml::Value::Array(entries)) => entries.iter().collect(),
+        Some(other) => vec![other],
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.as_table()?;
+        let source = entry.get("source").and_then(|s| s.as_table());
+        let from_source = |key: &str| toml_text(source.and_then(|s| s.get(key)));
+        let git = entry.get("git");
+        out.push(DeclaredRequire {
+            name: toml_text(entry.get("name")).unwrap_or_default(),
+            scope: toml_text(entry.get("scope")),
+            git: toml_text(git)
+                .or_else(|| toml_text(git.and_then(|g| g.as_table()).and_then(|g| g.get("url"))))
+                .or_else(|| from_source("url")),
+            path: toml_text(entry.get("path")).or_else(|| from_source("path")).or_else(|| from_source("dir")),
+            rev: toml_text(entry.get("rev")).or_else(|| from_source("rev")),
+        });
+    }
+    Some(out)
+}
+
+/// Lean source without comments (`--` to the end of the line, nested
+/// `/- … -/` including doc comments). String literals are kept whole.
+fn without_lean_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let next = chars.get(i + 1).copied();
+        match chars[i] {
+            '"' => {
+                out.push('"');
+                i += 1;
+                while i < chars.len() {
+                    out.push(chars[i]);
+                    match chars[i] {
+                        '\\' if i + 1 < chars.len() => {
+                            out.push(chars[i + 1]);
+                            i += 1;
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            '-' if next == Some('-') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if next == Some('-') => {
+                let mut depth = 1;
+                i += 2;
+                while i < chars.len() && depth > 0 {
+                    if chars[i] == '/' && chars.get(i + 1) == Some(&'-') {
+                        depth += 1;
+                        i += 2;
+                    } else if chars[i] == '-' && chars.get(i + 1) == Some(&'/') {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                out.push(' ');
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Tokens of comment-free Lean source: string literals (quotes kept), `/`,
+/// `@`, and words.
+fn lean_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    let mut chars = text.chars();
+    let mut guillemets = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if !guillemets => {
+                if !word.is_empty() {
+                    tokens.push(std::mem::take(&mut word));
+                }
+                let mut literal = String::from('"');
+                while let Some(d) = chars.next() {
+                    if d == '\\' {
+                        if let Some(escaped) = chars.next() {
+                            literal.push(escaped);
+                        }
+                        continue;
+                    }
+                    literal.push(d);
+                    if d == '"' {
+                        break;
+                    }
+                }
+                tokens.push(literal);
+            }
+            '/' | '@' if !guillemets => {
+                if !word.is_empty() {
+                    tokens.push(std::mem::take(&mut word));
+                }
+                tokens.push(c.to_string());
+            }
+            c if c.is_whitespace() && !guillemets => {
+                if !word.is_empty() {
+                    tokens.push(std::mem::take(&mut word));
+                }
+            }
+            c => {
+                guillemets = match c {
+                    '«' => true,
+                    '»' => false,
+                    _ => guillemets,
+                };
+                word.push(c);
+            }
+        }
+    }
+    if !word.is_empty() {
+        tokens.push(word);
+    }
+    tokens
+}
+
+/// Commands that end a `require` command in a lakefile.
+const LEAN_COMMANDS: &[&str] = &[
+    "require",
+    "package",
+    "lean_lib",
+    "lean_exe",
+    "target",
+    "script",
+    "def",
+    "open",
+    "import",
+    "namespace",
+    "end",
+    "section",
+    "abbrev",
+    "instance",
+    "theorem",
+    "post_update",
+    "meta",
+    "module_facet",
+    "package_facet",
+    "library_facet",
+    "extern_lib",
+    "input_file",
+    "input_dir",
+];
+
+/// The `require` commands of a `lakefile.lean`, as written. Lean code can
+/// require packages in ways this does not see.
+fn lean_requires(text: &str) -> Vec<DeclaredRequire> {
+    let tokens = lean_tokens(&without_lean_comments(text));
+    let unquote = |token: &str| token.trim_matches(['"', '«', '»']).to_owned();
+    let is_text = |token: &&String| token.starts_with('"');
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i] != "require" {
+            i += 1;
+            continue;
+        }
+        let end = tokens[i + 1..]
+            .iter()
+            .position(|t| LEAN_COMMANDS.contains(&t.as_str()))
+            .map_or(tokens.len(), |n| i + 1 + n);
+        let statement = &tokens[i + 1..end];
+        let mut require = DeclaredRequire::default();
+        match statement {
+            [scope, slash, name, ..] if slash == "/" => {
+                require.scope = clean_field(&unquote(scope));
+                require.name = unquote(name);
+            }
+            [name, ..] => require.name = unquote(name),
+            [] => {}
+        }
+        if let Some(at) = statement.iter().position(|t| t == "@") {
+            require.rev = statement[at + 1..].iter().take(2).find(is_text).and_then(|t| clean_field(&unquote(t)));
+        }
+        if let Some(from) = statement.iter().position(|t| t == "from") {
+            let rest = &statement[from + 1..];
+            let address = rest.iter().take(2).find(is_text).and_then(|t| clean_field(&unquote(t)));
+            if rest.first().is_some_and(|t| t == "git") {
+                require.git = address;
+                // `from git "address" @ "rev"`.
+            } else {
+                require.path = address;
+            }
+        }
+        out.push(require);
+        i = end.max(i + 1);
+    }
+    out
 }
 
 pub(crate) fn lakefile_hint(name: &str, text: &str) -> LakefileHint {
     let mut hint = LakefileHint::default();
     if name.ends_with(".toml") {
-        // `[[require]]` tables: name, rev (declarative; no code).
-        let mut in_require = false;
-        let mut current: (Option<String>, Option<String>) = (None, None);
-        let finish = |current: &mut (Option<String>, Option<String>), hint: &mut LakefileHint| {
-            if current.0.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(MATHLIB)) {
-                hint.mathlib = true;
-                hint.mathlib_rev = current.1.take();
+        match toml_requires(text) {
+            Some(declared) => hint.declared = declared,
+            None => {
+                // Not understood: assume the most the text could mean.
+                let lowered = text.to_ascii_lowercase();
+                hint.opaque = true;
+                hint.requires = lowered.contains("require");
+                hint.mathlib = hint.requires && lowered.contains(MATHLIB);
             }
-            *current = (None, None);
-        };
-        for line in text.lines() {
-            let line = line.split('#').next().unwrap_or("").trim();
-            if line.starts_with('[') {
-                if in_require {
-                    finish(&mut current, &mut hint);
-                }
-                in_require = line.replace(' ', "") == "[[require]]";
-                hint.requires |= in_require;
-                continue;
-            }
-            if !in_require {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once('=') {
-                match key.trim() {
-                    "name" => current.0 = toml_string(value),
-                    "rev" => current.1 = toml_string(value),
-                    _ => {}
-                }
-            }
-        }
-        if in_require {
-            finish(&mut current, &mut hint);
         }
     } else {
-        for line in text.lines() {
-            let line = line.trim_start();
-            if let Some(rest) = line.strip_prefix("require ") {
-                hint.requires = true;
-                let lowered = rest.to_ascii_lowercase();
-                let first = lowered.split_whitespace().next().unwrap_or("");
-                if first.trim_matches(['"', '«', '»']) == MATHLIB || lowered.contains("/ \"mathlib\"") {
-                    hint.mathlib = true;
-                    hint.mathlib_rev =
-                        rest.split_once('@').and_then(|(_, r)| toml_string(r.trim_start_matches([' ', 'g', 'i', 't'])));
-                }
-            }
-        }
+        hint.opaque = true;
+        hint.declared = lean_requires(text);
+    }
+    hint.requires |= !hint.declared.is_empty();
+    if let Some(mathlib) = hint.declared.iter().find(|r| r.name.eq_ignore_ascii_case(MATHLIB)) {
+        hint.mathlib = true;
+        hint.mathlib_rev = mathlib.rev.clone();
     }
     hint
+}
+
+/// An address as it is shown and recorded: credentials written into an
+/// `http(s)://user:secret@host/…` address are left out.
+fn display_url(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://")
+        && matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
+    {
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        if let Some(at) = rest[..authority_end].rfind('@') {
+            return format!("{scheme}://{}", &rest[at + 1..]);
+        }
+    }
+    url.to_owned()
+}
+
+/// `url` is the official Mathlib repository on GitHub.
+pub fn is_official_mathlib(url: &str) -> bool {
+    let url = display_url(url.trim());
+    let url = url.trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url).to_ascii_lowercase();
+    [MATHLIB_URL, "git@github.com:leanprover-community/mathlib4", "ssh://git@github.com/leanprover-community/mathlib4"]
+        .contains(&url.as_str())
 }
 
 fn read_small(path: &Path, limit: u64) -> Option<String> {
@@ -288,6 +567,14 @@ fn read_small(path: &Path, limit: u64) -> Option<String> {
         return None;
     }
     std::fs::read_to_string(path).ok()
+}
+
+fn read_small_bytes(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > limit {
+        return None;
+    }
+    std::fs::read(path).ok()
 }
 
 /// A manifest's `packagesDir` when it is a plain relative folder.
@@ -329,6 +616,8 @@ pub fn inspect_package(
         folder,
         root: package_root.display().to_string(),
         lakefile: lakefile_in(package_root),
+        lakefile_digest: None,
+        requirements_in_code: false,
         toolchain: None,
         toolchain_installed: false,
         toolchain_problem: None,
@@ -351,9 +640,14 @@ pub fn inspect_package(
         Err(e) => out.toolchain_problem = Some(e),
     }
     let Some(lakefile) = out.lakefile.clone() else { return out };
-    let hint = read_small(&package_root.join(&lakefile), MAX_LAKEFILE_BYTES)
-        .map(|text| lakefile_hint(&lakefile, &text))
-        .unwrap_or_default();
+    let lakefile_bytes = read_small_bytes(&package_root.join(&lakefile), MAX_LAKEFILE_BYTES);
+    out.lakefile_digest = lakefile_bytes.as_deref().map(|bytes| hex(&Sha256::digest(bytes)));
+    let hint = match lakefile_bytes.map(String::from_utf8) {
+        Some(Ok(text)) => lakefile_hint(&lakefile, &text),
+        // A lakefile that cannot be read as text says nothing certain.
+        _ => LakefileHint { opaque: true, requires: true, ..LakefileHint::default() },
+    };
+    out.requirements_in_code = hint.opaque && hint.requires;
 
     let mut has_manifest = false;
     let mut packages_folder = DEFAULT_PACKAGES_DIR.to_owned();
@@ -379,6 +673,7 @@ pub fn inspect_package(
                                 rev: p.rev,
                                 input_rev: p.input_rev,
                                 present,
+                                url: p.url.as_deref().map(display_url),
                             }
                         })
                         .collect();
@@ -402,8 +697,24 @@ pub fn inspect_package(
     }
 
     let missing: Vec<String> = out.dependencies.iter().filter(|d| !d.present).map(|d| d.name.clone()).collect();
-    out.readiness = if let Some(record) = records.unfinished(package_root) {
-        LeanPackageReadiness::Unfinished { message: record }
+    let mismatch = matches!(
+        (&out.toolchain, &out.mathlib_toolchain),
+        (Some(package), Some(theirs)) if toolchain::qualify(package) != toolchain::qualify(theirs)
+    );
+    // The record of an unfinished setup concerns Mathlib's downloads: a
+    // package that does not use Mathlib (any more) is not held by it.
+    out.readiness = if let Some(unfinished) = records.unfinished(package_root).filter(|_| out.uses_mathlib) {
+        let can_build_from_source =
+            unfinished.sources_intact && mathlib.is_some() && has_manifest && missing.is_empty() && !mismatch;
+        let mut message =
+            "A Mathlib setup did not finish in this package and may have left partial downloads. Set Up Mathlib prepares it again."
+                .to_owned();
+        if can_build_from_source {
+            message.push_str(
+                " The dependency sources were complete before that setup and it did not change them, so building Mathlib from source stays possible.",
+            );
+        }
+        LeanPackageReadiness::Unfinished { message, can_build_from_source }
     } else if out.toolchain_problem.is_none() && out.toolchain.is_none() {
         LeanPackageReadiness::ToolchainUnpinned
     } else if let (Some(toolchain), false) = (&out.toolchain, out.toolchain_installed) {
@@ -452,6 +763,17 @@ struct Record {
     created: Vec<String>,
     /// The setup ended without completing or removing what it started.
     interrupted: bool,
+    /// The manifest pinned every dependency and every checkout was there
+    /// before the setup began: its steps wrote build outputs only.
+    #[serde(default)]
+    sources_intact: bool,
+}
+
+/// A recorded setup that did not finish in a package.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnfinishedSetup {
+    /// The setup did not touch the dependency sources.
+    pub sources_intact: bool,
 }
 
 /// `<data>/lean/setup-records.json`: never in the project, never imported.
@@ -510,14 +832,11 @@ impl SetupRecords {
         self.read().records.into_iter().find(|r| path_key(Path::new(&r.root)) == key)
     }
 
-    /// The message of an unfinished setup of `root`, if one is recorded and
-    /// the package folder still exists.
-    pub fn unfinished(&self, root: &Path) -> Option<String> {
+    /// The unfinished setup of `root`, if one is recorded and the package
+    /// folder still exists.
+    pub fn unfinished(&self, root: &Path) -> Option<UnfinishedSetup> {
         let record = self.get(root)?;
-        (record.interrupted && root.is_dir()).then(|| {
-            "A Mathlib setup did not finish in this package and may have left partial downloads. Set Up Mathlib prepares it again."
-                .to_owned()
-        })
+        (record.interrupted && root.is_dir()).then_some(UnfinishedSetup { sources_intact: record.sources_intact })
     }
 }
 
@@ -552,6 +871,26 @@ pub struct LeanSetupStep {
     pub timeout_ms: u64,
 }
 
+/// One dependency a setup fetches or relies on, with where it comes from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct LeanSetupSource {
+    pub name: String,
+    /// `git` (fetched from `url`), `path` (a local folder), or `reservoir`
+    /// (Lake asks the Lean package registry for the address of `scope/name`).
+    pub kind: String,
+    pub scope: Option<String>,
+    /// The git address, without credentials.
+    pub url: Option<String>,
+    /// The exact commit the manifest pins.
+    pub rev: Option<String>,
+    /// The revision the lakefile asks for (a tag or branch).
+    pub input_rev: Option<String>,
+    /// Its checkout is already in the package (nothing is fetched for it).
+    pub present: bool,
+}
+
 /// Everything a setup will do. Nothing runs until it is started.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -574,6 +913,16 @@ pub struct LeanSetupPlan {
     pub mathlib_revision: String,
     /// The existing manifest pins the revisions (nothing is resolved again).
     pub pinned_by_manifest: bool,
+    /// SHA-256 (hex) of the existing lakefile this plan was made for.
+    pub lakefile_digest: Option<String>,
+    /// SHA-256 (hex) of the existing `lake-manifest.json` this plan was made for.
+    pub manifest_digest: Option<String>,
+    /// The dependencies and where each is fetched from: every one the
+    /// manifest pins, or (before a manifest exists) the ones the lakefile
+    /// names.
+    pub sources: Vec<LeanSetupSource>,
+    /// What about the sources is decided only when Lake resolves them.
+    pub sources_note: Option<String>,
     /// Files the setup writes itself, relative to the package folder.
     pub writes: Vec<String>,
     /// Existing configuration the setup leaves untouched.
@@ -584,8 +933,9 @@ pub struct LeanSetupPlan {
     pub steps: Vec<LeanSetupStep>,
     /// Plain description of the change.
     pub summary: String,
-    /// SHA-256 over the roots, toolchain, revision, files, and steps:
-    /// starting re-plans and refuses a plan whose hash no longer matches.
+    /// SHA-256 over everything else in the plan (roots, toolchain, revision,
+    /// lakefile and manifest digests, sources, files, steps): starting
+    /// re-plans and refuses a plan whose hash no longer matches.
     pub plan_hash: String,
 }
 
@@ -629,6 +979,9 @@ pub struct LeanSetupStatus {
     pub message: Option<String>,
     /// Paths (relative to the package folder) this setup removed again.
     pub removed: Vec<String>,
+    /// Paths in what this setup created that it did not remove, because they
+    /// were added or changed while it ran (the user's own files).
+    pub kept: Vec<String>,
     /// The package as inspected after the setup ended.
     pub inspection: Option<LeanPackageInspection>,
     /// The package is ready for checking.
@@ -816,6 +1169,20 @@ fn lake_program(elan_home: Option<&Path>, toolchain_name: &str) -> Result<String
             "elan, the Lean toolchain manager, was not found. Install it from https://lean-lang.org/install/.",
         )
     })?;
+    // A channel names no toolchain folder and no Mathlib revision is made
+    // for "the newest release": the commands of a plan must exist as planned.
+    if toolchain::is_channel(toolchain_name) {
+        return Err(refused(
+            "channelPin",
+            format!(
+                "lean-toolchain names the channel `{toolchain_name}`, not one Lean version, so the version this package's Mathlib is built for is not pinned. Write the exact release in lean-toolchain (the lean-toolchain file of the Mathlib revision names it, for example leanprover/lean4:v4.35.0), then set up again. Nothing was changed."
+            ),
+        ));
+    }
+    if let Resolution::Installed(installed) = toolchain::resolve(Some(home), toolchain_name) {
+        return Ok(installed.lake.display().to_string());
+    }
+    // Not installed yet: where the plan's own install step puts it.
     let dir = home.join("toolchains").join(toolchain::dir_name(&toolchain::qualify(toolchain_name)));
     Ok(dir.join("bin").join(if cfg!(windows) { "lake.exe" } else { "lake" }).display().to_string())
 }
@@ -877,19 +1244,60 @@ fn cache_step(lake: &str) -> LeanSetupStep {
 }
 
 fn plan_hash(plan: &LeanSetupPlan) -> String {
-    let basis = serde_json::json!({
-        "root": plan.root,
-        "packageRoot": plan.package_root,
-        "createsPackage": plan.creates_package,
-        "toolchain": plan.toolchain,
-        "toolchainInstalled": plan.toolchain_installed,
-        "mathlibRevision": plan.mathlib_revision,
-        "pinnedByManifest": plan.pinned_by_manifest,
-        "writes": plan.writes,
-        "removedOnFailure": plan.removed_on_failure,
-        "steps": plan.steps,
-    });
-    hex(&Sha256::digest(basis.to_string().as_bytes()))
+    // Everything in the plan except the hash itself.
+    let mut basis = plan.clone();
+    basis.plan_hash = String::new();
+    hex(&Sha256::digest(serde_json::to_vec(&basis).unwrap_or_default()))
+}
+
+const RESOLVED_BY_LAKE: &str = "Lake resolves these and everything they require once and pins each revision in lake-manifest.json. The setup stops before the cache step unless `mathlib` then comes from https://github.com/leanprover-community/mathlib4.";
+
+fn unofficial_mathlib(shown: &str, from: &str) -> LeanError {
+    refused(
+        "unofficialMathlib",
+        format!(
+            "The package in {shown} takes `mathlib` from {from}, not from {MATHLIB_URL}. Set Up Mathlib prepares the official Mathlib only: its cache step builds and runs a program from the repository called mathlib, and {MATHLIB_CACHE_URL} holds outputs for official revisions. Nothing was changed. If you trust that source, prepare the package yourself in a terminal (`lake update`, `lake exe cache get` or `lake build`)."
+        ),
+    )
+}
+
+/// Refuse a lakefile requirement that takes `mathlib` from somewhere other
+/// than the official repository (as far as the lakefile says).
+fn check_declared_mathlib(shown: &str, declared: &[DeclaredRequire]) -> Result<(), LeanError> {
+    for require in declared.iter().filter(|r| r.name.eq_ignore_ascii_case(MATHLIB)) {
+        if let Some(path) = &require.path {
+            return Err(unofficial_mathlib(shown, &format!("the local folder `{path}`")));
+        }
+        match (&require.git, &require.scope) {
+            (Some(git), _) if !is_official_mathlib(git) => {
+                return Err(unofficial_mathlib(shown, &display_url(git)));
+            }
+            (None, Some(scope)) if scope != MATHLIB_SCOPE => {
+                return Err(unofficial_mathlib(shown, &format!("the registry scope `{scope}`")));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn declared_source(require: &DeclaredRequire) -> LeanSetupSource {
+    LeanSetupSource {
+        name: require.name.clone(),
+        kind: if require.path.is_some() {
+            "path"
+        } else if require.git.is_some() {
+            "git"
+        } else {
+            "reservoir"
+        }
+        .to_owned(),
+        scope: require.scope.clone(),
+        url: require.git.as_deref().map(display_url),
+        rev: None,
+        input_rev: require.rev.clone(),
+        present: false,
+    }
 }
 
 /// Inputs of planning.
@@ -1017,6 +1425,18 @@ pub fn build_plan(context: &PlanContext<'_>, request: &LeanSetupRequest) -> Resu
                 toolchain_installed,
                 mathlib_revision: tag.clone(),
                 pinned_by_manifest: false,
+                lakefile_digest: None,
+                manifest_digest: None,
+                sources: vec![LeanSetupSource {
+                    name: MATHLIB.to_owned(),
+                    kind: "reservoir".to_owned(),
+                    scope: Some(MATHLIB_SCOPE.to_owned()),
+                    url: None,
+                    rev: None,
+                    input_rev: Some(tag.clone()),
+                    present: false,
+                }],
+                sources_note: Some(RESOLVED_BY_LAKE.to_owned()),
                 writes,
                 keeps,
                 removed_on_failure,
@@ -1083,7 +1503,55 @@ pub fn build_plan(context: &PlanContext<'_>, request: &LeanSetupRequest) -> Resu
                 }
                 _ => {}
             }
+            let Some(lakefile_digest) = inspection.lakefile_digest.clone() else {
+                return Err(refused(
+                    "invalidLakefile",
+                    format!("{lakefile} in {shown} could not be read (it is not a regular file of at most 1 MB)."),
+                ));
+            };
             let pinned_by_manifest = inspection.manifest_digest.is_some();
+            let (sources, sources_note) = if pinned_by_manifest {
+                // Every address and commit the manifest pins: nothing else is fetched.
+                match inspection.dependencies.iter().find(|d| d.name.eq_ignore_ascii_case(MATHLIB)) {
+                    Some(mathlib) if mathlib.kind != "git" => {
+                        return Err(unofficial_mathlib(&shown, &format!("a `{}` dependency", mathlib.kind)));
+                    }
+                    Some(mathlib) if !mathlib.url.as_deref().is_some_and(is_official_mathlib) => {
+                        return Err(unofficial_mathlib(
+                            &shown,
+                            mathlib.url.as_deref().unwrap_or("an address the manifest does not give"),
+                        ));
+                    }
+                    _ => {}
+                }
+                let sources = inspection
+                    .dependencies
+                    .iter()
+                    .map(|d| LeanSetupSource {
+                        name: d.name.clone(),
+                        kind: d.kind.clone(),
+                        scope: None,
+                        url: d.url.clone(),
+                        rev: d.rev.clone(),
+                        input_rev: d.input_rev.clone(),
+                        present: d.present,
+                    })
+                    .collect();
+                (sources, None)
+            } else {
+                let hint = read_small(&package_root.join(&lakefile), MAX_LAKEFILE_BYTES)
+                    .map(|text| lakefile_hint(&lakefile, &text))
+                    .unwrap_or_else(|| LakefileHint { opaque: true, ..LakefileHint::default() });
+                check_declared_mathlib(&shown, &hint.declared)?;
+                let note = if hint.opaque {
+                    format!(
+                        "{lakefile} is Lean code: the requirements listed are the ones written in it, and it can require more. {RESOLVED_BY_LAKE}"
+                    )
+                } else {
+                    RESOLVED_BY_LAKE.to_owned()
+                };
+                (hint.declared.iter().map(declared_source).collect(), Some(note))
+            };
             let revision = if pinned_by_manifest {
                 inspection.mathlib_revision.clone()
             } else {
@@ -1126,6 +1594,10 @@ pub fn build_plan(context: &PlanContext<'_>, request: &LeanSetupRequest) -> Resu
                 toolchain_installed: inspection.toolchain_installed,
                 mathlib_revision: revision.clone(),
                 pinned_by_manifest,
+                lakefile_digest: Some(lakefile_digest),
+                manifest_digest: inspection.manifest_digest.clone(),
+                sources,
+                sources_note,
                 writes: Vec::new(),
                 keeps,
                 removed_on_failure,
@@ -1327,6 +1799,7 @@ impl LeanSetup {
                     step: None,
                     message: None,
                     removed: Vec::new(),
+                    kept: Vec::new(),
                     inspection: None,
                     ready: false,
                     jobs: Vec::new(),
@@ -1357,32 +1830,24 @@ impl LeanSetup {
 
     fn execute(&self, root: &Path, run: &Arc<Run>, plan: &LeanSetupPlan) {
         let package_root = PathBuf::from(&plan.package_root);
-        let mut created: Vec<String> = Vec::new();
-        let mut ran_step = false;
-        let outcome = self.run_steps(root, run, plan, &package_root, &mut created, &mut ran_step);
+        let mut progress = Progress::default();
+        // The dependency sources are complete and pinned before anything
+        // runs: the steps then write build outputs only.
+        let before = inspect_package(root, &package_root, self.inner.elan_home.as_deref(), &SetupRecords::new(None));
+        progress.sources_intact = !plan.creates_package
+            && plan.pinned_by_manifest
+            && before.dependencies.iter().all(|d| d.present)
+            && before.dependencies.iter().any(|d| d.name.eq_ignore_ascii_case(MATHLIB));
+        let outcome = self.run_steps(root, run, plan, &package_root, &mut progress);
+        let Progress { created, written, ran_step, sources_intact } = progress;
 
-        let mut removed = Vec::new();
-        let mut cleanup_problem = None;
+        let mut cleanup = Cleanup::default();
         if outcome.is_err() {
             lock(&run.status).phase = LeanSetupPhase::CleaningUp;
             self.changed(run);
-            // Newest first, so files go before the folders that hold them.
-            for relative in created.iter().rev() {
-                let target = join_relative(&package_root, relative);
-                match remove_created(&package_root, &target) {
-                    Ok(true) => removed.push(relative.clone()),
-                    Ok(false) => {}
-                    Err(e) => {
-                        cleanup_problem.get_or_insert_with(|| {
-                            format!(
-                                "`{}` could not be removed ({e}).",
-                                if relative.is_empty() { "." } else { relative.as_str() }
-                            )
-                        });
-                    }
-                }
-            }
+            cleanup = clean_up(&package_root, &created, &written);
         }
+        let Cleanup { removed, kept, problem: cleanup_problem } = cleanup;
         // A package whose `.lake` existed before may hold partial downloads
         // this run cannot tell from what was there: it stays recorded as
         // unfinished. A run whose own `.lake` was removed again leaves no
@@ -1391,7 +1856,12 @@ impl LeanSetup {
         let leftovers =
             outcome.is_err() && (cleanup_problem.is_some() || (ran_step && !plan.creates_package && lake_existed));
         let record = self.inner.records.update(&package_root, |_| {
-            leftovers.then(|| Record { root: plan.package_root.clone(), created: Vec::new(), interrupted: true })
+            leftovers.then(|| Record {
+                root: plan.package_root.clone(),
+                created: Vec::new(),
+                interrupted: true,
+                sources_intact,
+            })
         });
         let inspection = inspect_package(root, &package_root, self.inner.elan_home.as_deref(), &self.inner.records);
         let ready = outcome.is_ok() && inspection.readiness == LeanPackageReadiness::Ready;
@@ -1409,12 +1879,23 @@ impl LeanSetup {
                     Stop::Canceled(m) => (LeanSetupState::Canceled, m),
                     Stop::Failed(m) => (LeanSetupState::Failed, m),
                 };
-                if plan.creates_package && cleanup_problem.is_none() {
+                if plan.creates_package && cleanup_problem.is_none() && kept.is_empty() {
                     message.push_str(" The new package's files were removed; nothing else in the project changed.");
+                } else if cleanup_problem.is_none() && !kept.is_empty() {
+                    message.push_str(&format!(
+                        " The files this setup created were removed. Kept, because they were added or changed while it ran: {}. Nothing else in the project changed.",
+                        list(&kept.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>())
+                    ));
                 } else if let Some(problem) = &cleanup_problem {
                     message.push_str(&format!(
                         " {problem} The package is not offered as ready; set it up again to finish or replace it."
                     ));
+                    if !kept.is_empty() {
+                        message.push_str(&format!(
+                            " Kept, because they were added or changed while it ran: {}.",
+                            list(&kept.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>())
+                        ));
+                    }
                 } else if !ran_step {
                     message.push_str(" Nothing was changed.");
                 } else if !leftovers {
@@ -1425,6 +1906,12 @@ impl LeanSetup {
                     message.push_str(
                         " Your configuration files were not changed. Downloads that were already complete stay; the package is not offered as ready until a setup of it succeeds.",
                     );
+                    if matches!(
+                        inspection.readiness,
+                        LeanPackageReadiness::Unfinished { can_build_from_source: true, .. }
+                    ) {
+                        message.push_str(" Building Mathlib from source stays possible.");
+                    }
                 }
                 (state, Some(message))
             }
@@ -1439,6 +1926,7 @@ impl LeanSetup {
             status.phase = LeanSetupPhase::Finished;
             status.message = message;
             status.removed = removed;
+            status.kept = kept;
             status.ready = ready;
             status.inspection = Some(inspection);
             status.finished_at_ms = Some(now_ms());
@@ -1463,8 +1951,7 @@ impl LeanSetup {
         run: &Arc<Run>,
         plan: &LeanSetupPlan,
         package_root: &Path,
-        created: &mut Vec<String>,
-        ran_step: &mut bool,
+        progress: &mut Progress,
     ) -> Result<(), Stop> {
         let canceled = || Stop::Canceled("Setup was canceled.".into());
         let check_canceled = || if run.canceled.load(Ordering::SeqCst) { Err(canceled()) } else { Ok(()) };
@@ -1480,13 +1967,18 @@ impl LeanSetup {
         self.inner
             .records
             .update(package_root, |_| {
-                Some(Record { root: plan.package_root.clone(), created: will_create.clone(), interrupted: true })
+                Some(Record {
+                    root: plan.package_root.clone(),
+                    created: will_create.clone(),
+                    interrupted: true,
+                    sources_intact: progress.sources_intact,
+                })
             })
             .map_err(|e| Stop::Failed(format!("The setup record could not be written: {e}.")))?;
         // Outermost first: removal goes in reverse.
         let mut ordered = will_create;
         ordered.sort_by_key(|p| (if p.is_empty() { 0 } else { 1 }, p.matches('/').count(), p.clone()));
-        *created = ordered;
+        progress.created = ordered;
 
         if plan.creates_package {
             let LeanSetupRequest::NewMathlibPackage { name, .. } = &plan.request else {
@@ -1503,6 +1995,8 @@ impl LeanSetup {
                     r if r.ends_with("/Basic.lean") => STARTER.to_owned(),
                     _ => format!("import {name}.Basic\n"),
                 };
+                // Recorded first: cleanup removes the file only while it holds exactly this.
+                progress.written.push((relative.clone(), Sha256::digest(text.as_bytes()).into()));
                 write_new(&join_relative(package_root, relative), &text).map_err(|e| io(relative, e))?;
             }
         }
@@ -1529,7 +2023,7 @@ impl LeanSetup {
                 stdin: None,
             };
             let job = self.inner.exec.launch(spec);
-            *ran_step = true;
+            progress.ran_step = true;
             *lock(&run.job) = Some(job.clone());
             lock(&run.status).jobs.push(job.0.clone());
             self.changed(run);
@@ -1618,7 +2112,7 @@ impl LeanSetup {
                     let refusal = self.inner.exec.summary(&job).and_then(|s| s.refusal);
                     let untrusted = refusal.as_ref().is_some_and(|r| r.code == RefusalCode::UntrustedWorkspace);
                     if index == 0 {
-                        *ran_step = false;
+                        progress.ran_step = false;
                     }
                     return Err(Stop::Failed(if untrusted {
                         "The project folder is not trusted; trust it, then set up again.".into()
@@ -1649,6 +2143,24 @@ impl LeanSetup {
                 }
                 if after.manifest_digest.is_none() {
                     return Err(Stop::Failed("Lake did not write lake-manifest.json.".into()));
+                }
+                // The cache step builds and runs a program of the package
+                // called mathlib: only the official repository's.
+                match after.dependencies.iter().find(|d| d.name.eq_ignore_ascii_case(MATHLIB)) {
+                    Some(mathlib)
+                        if mathlib.kind == "git" && mathlib.url.as_deref().is_some_and(is_official_mathlib) => {}
+                    Some(mathlib) => {
+                        return Err(Stop::Failed(format!(
+                            "Lake resolved `mathlib` from {}, not from {MATHLIB_URL}. Its cache program was not run.",
+                            mathlib.url.as_deref().unwrap_or("a local folder")
+                        )));
+                    }
+                    None => {
+                        return Err(Stop::Failed(
+                            "The resolved dependencies do not include `mathlib`, so there is no Mathlib cache to fetch."
+                                .into(),
+                        ));
+                    }
                 }
             }
         }
@@ -1714,29 +2226,119 @@ fn write_new(path: &Path, text: &str) -> std::io::Result<()> {
     file.write_all(text.as_bytes())
 }
 
-/// Remove something a setup created inside `package_root`. `Ok(false)` when
-/// it is not there. The package folder itself goes only when it is empty.
-fn remove_created(package_root: &Path, target: &Path) -> std::io::Result<bool> {
-    if !target.starts_with(package_root) {
-        return Ok(false);
+/// What a run did so far (for cleanup and the record).
+#[derive(Default)]
+struct Progress {
+    /// Paths (relative to the package folder) that did not exist when the
+    /// run began, outermost first.
+    created: Vec<String>,
+    /// Files the setup wrote itself, with the SHA-256 of what it wrote.
+    written: Vec<(String, [u8; 32])>,
+    ran_step: bool,
+    sources_intact: bool,
+}
+
+/// What cleanup did after a failed or canceled run.
+#[derive(Debug, Default)]
+struct Cleanup {
+    removed: Vec<String>,
+    /// Paths left in place because the setup did not write them, or they no
+    /// longer hold what it wrote.
+    kept: Vec<String>,
+    problem: Option<String>,
+}
+
+/// What is left under `dir` (paths relative to the package folder, `prefix`
+/// being `dir`'s own): files, links, and empty folders (with a trailing `/`).
+fn remaining(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        if out.len() >= MAX_KEPT_LISTED {
+            return;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let relative = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let before = out.len();
+            remaining(&entry.path(), &relative, out);
+            if out.len() == before {
+                out.push(format!("{relative}/"));
+            }
+        } else {
+            out.push(relative);
+        }
     }
-    let Ok(meta) = std::fs::symlink_metadata(target) else { return Ok(false) };
-    if target == package_root {
-        return match std::fs::remove_dir(target) {
-            Ok(()) => Ok(true),
-            // The folder holds something this setup did not create: it stays.
-            Err(_) if std::fs::read_dir(target).is_ok_and(|mut d| d.next().is_some()) => Ok(false),
-            Err(e) => Err(e),
+}
+
+/// Remove what a failed or canceled setup created inside `package_root`:
+/// - Lake's own outputs (`.lake`, `lake-manifest.json`), whole;
+/// - a file the setup wrote, while it still holds exactly what was written;
+/// - a folder the setup made (the package folder included), once it is empty.
+///
+/// Anything else found there was added or changed by someone else while the
+/// setup ran: it stays and is listed in `kept`. `created` is outermost first.
+fn clean_up(package_root: &Path, created: &[String], written: &[(String, [u8; 32])]) -> Cleanup {
+    let mut cleanup = Cleanup::default();
+    // Innermost first, so files go before the folders that hold them.
+    for relative in created.iter().rev() {
+        let target = join_relative(package_root, relative);
+        if !target.starts_with(package_root) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&target) else { continue };
+        let real_folder = meta.is_dir() && !meta.file_type().is_symlink();
+        let result = if relative == LAKE_DIR || relative == LAKE_MANIFEST {
+            let whole = if real_folder {
+                // Git marks pack files read-only; clear that so they can be removed.
+                clear_readonly(&target);
+                std::fs::remove_dir_all(&target)
+            } else {
+                std::fs::remove_file(&target)
+            };
+            whole.map(|()| true)
+        } else if real_folder {
+            match std::fs::remove_dir(&target) {
+                Ok(()) => Ok(true),
+                Err(e) => {
+                    // It holds something this setup did not create: it stays.
+                    let before = cleanup.kept.len();
+                    let mut left = Vec::new();
+                    remaining(&target, relative, &mut left);
+                    cleanup.kept.extend(left);
+                    if cleanup.kept.len() == before { Err(e) } else { Ok(false) }
+                }
+            }
+        } else {
+            let ours = written.iter().find(|(path, _)| path == relative).is_some_and(|(_, digest)| {
+                read_small_bytes(&target, MAX_LAKEFILE_BYTES)
+                    .is_some_and(|bytes| Sha256::digest(&bytes).as_slice() == digest.as_slice())
+            });
+            if ours {
+                std::fs::remove_file(&target).map(|()| true)
+            } else {
+                cleanup.kept.push(relative.clone());
+                Ok(false)
+            }
         };
+        match result {
+            Ok(true) => cleanup.removed.push(relative.clone()),
+            Ok(false) => {}
+            Err(e) => {
+                cleanup.problem.get_or_insert_with(|| {
+                    format!(
+                        "`{}` could not be removed ({e}).",
+                        if relative.is_empty() { "." } else { relative.as_str() }
+                    )
+                });
+            }
+        }
     }
-    if meta.is_dir() && !meta.file_type().is_symlink() {
-        // Git marks pack files read-only; clear that so they can be removed.
-        clear_readonly(target);
-        std::fs::remove_dir_all(target)?;
-    } else {
-        std::fs::remove_file(target)?;
-    }
-    Ok(true)
+    cleanup.kept.sort();
+    cleanup.kept.dedup();
+    cleanup.kept.truncate(MAX_KEPT_LISTED);
+    cleanup
 }
 
 fn clear_readonly(dir: &Path) {
@@ -1994,12 +2596,14 @@ mod tests {
     #[test]
     fn lakefiles_are_read_for_a_mathlib_requirement_without_running_them() {
         let toml = lakefile_hint("lakefile.toml", LAKEFILE);
-        assert_eq!(toml, LakefileHint { requires: true, mathlib: true, mathlib_rev: Some("v4.35.0".into()) });
+        assert!(toml.requires && toml.mathlib && !toml.opaque);
+        assert_eq!(toml.mathlib_rev.as_deref(), Some("v4.35.0"));
+        assert_eq!(toml.declared[0].scope.as_deref(), Some("leanprover-community"));
         let other = lakefile_hint(
             "lakefile.toml",
             "name = \"x\"\n[[require]]\nname = \"batteries\" # mathlib\nrev = \"main\"\n[[lean_lib]]\nname = \"mathlib\"\n",
         );
-        assert_eq!(other, LakefileHint { requires: true, mathlib: false, mathlib_rev: None });
+        assert!(other.requires && !other.mathlib && !other.opaque && other.mathlib_rev.is_none());
         assert_eq!(lakefile_hint("lakefile.toml", "name = \"x\"\n"), LakefileHint::default());
         let lean = lakefile_hint(
             "lakefile.lean",
@@ -2011,6 +2615,213 @@ mod tests {
         assert!(scoped.mathlib);
         assert_eq!(scoped.mathlib_rev.as_deref(), Some("v4.35.0"));
         assert!(!lakefile_hint("lakefile.lean", "require batteries from git \"x\"\n").mathlib);
+    }
+
+    /// Every spelling of a Mathlib requirement Lake accepts is seen: TOML is
+    /// parsed, and Lean lakefiles are read without their comments.
+    #[test]
+    fn mathlib_requirements_are_seen_in_every_spelling_lake_accepts() {
+        let toml = [
+            "name = 'F'\n[[require]]\nname = 'mathlib'\nscope = 'leanprover-community'\nrev = 'v4.35.0'\n",
+            "name = \"F\"\nrequire = [{name = \"mathlib\", scope = \"leanprover-community\", rev = \"v4.35.0\"}]\n",
+            "name = \"F\"\n[[require]]\n\"name\" = \"\"\"mathlib\"\"\"\nrev = \"v4.35.0\"\n",
+            "name = \"F\"\n[[ require ]]\nrev = \"v4.35.0\"\nname = \"math\\u006Cib\"\n",
+        ];
+        for text in toml {
+            let hint = lakefile_hint("lakefile.toml", text);
+            assert!(hint.requires && hint.mathlib && !hint.opaque, "{text}");
+            assert_eq!(hint.mathlib_rev.as_deref(), Some("v4.35.0"), "{text}");
+        }
+        let git = lakefile_hint(
+            "lakefile.toml",
+            "[[require]]\nname = \"mathlib\"\ngit = \"https://example.org/fork/mathlib4\"\nrev = \"main\"\n",
+        );
+        assert_eq!(git.declared[0].git.as_deref(), Some("https://example.org/fork/mathlib4"));
+        // A key in a comment or in another table is not a requirement.
+        let none =
+            lakefile_hint("lakefile.toml", "# [[require]]\n# name = \"mathlib\"\n[package]\nname = \"mathlib\"\n");
+        assert!(!none.requires && !none.mathlib);
+        // Not TOML: nothing certain, so the most the text could mean.
+        let broken = lakefile_hint("lakefile.toml", "[[require]\nname = mathlib\n");
+        assert!(broken.opaque && broken.requires && broken.mathlib);
+
+        let lean = [
+            "import Lake\nopen Lake DSL\npackage F\nrequire\n  mathlib from git \"https://github.com/leanprover-community/mathlib4\"\n",
+            "package F\n/-- the library -/ require mathlib from git \"https://github.com/leanprover-community/mathlib4\"\n",
+            "package F\nrequire /- which -/ «mathlib» from git\n  \"https://github.com/leanprover-community/mathlib4\" @ \"v4.35.0\"\n",
+            "package F\nrequire \"leanprover-community\"/\"mathlib\"\nlean_lib F\n",
+            "package F\n@[default_target] lean_lib F\nrequire batteries from git \"b\"\nrequire Mathlib from git \"m\"\n",
+        ];
+        for text in lean {
+            let hint = lakefile_hint("lakefile.lean", text);
+            assert!(hint.requires && hint.mathlib && hint.opaque, "{text}");
+        }
+        let with_source = lakefile_hint("lakefile.lean", lean[2]);
+        assert_eq!(with_source.declared[0].git.as_deref(), Some("https://github.com/leanprover-community/mathlib4"));
+        assert_eq!(with_source.mathlib_rev.as_deref(), Some("v4.35.0"));
+        // A requirement in a comment or a string is none; another package is not Mathlib.
+        for text in [
+            "package F\n-- require mathlib from git \"x\"\n",
+            "package F\n/- require mathlib\n/- nested -/ require mathlib -/\nlean_lib F\n",
+            "package F\ndef note := \"require mathlib\"\n",
+        ] {
+            let hint = lakefile_hint("lakefile.lean", text);
+            assert!(!hint.requires && !hint.mathlib, "{text}");
+        }
+        let other = lakefile_hint("lakefile.lean", "require batteries from git \"https://example.org/mathlib\"\n");
+        assert!(other.requires && !other.mathlib);
+    }
+
+    /// Without a manifest, a package whose lakefile is code and requires
+    /// anything is not started: what Lake would fetch is not known. A
+    /// declarative lakefile that names no Mathlib is not held back.
+    #[test]
+    fn unresolved_requirements_written_as_code_keep_the_server_from_starting() {
+        let f = Fixture::new();
+        let package = |folder: &str, lakefile: &str, text: &str| {
+            let dir = f.root.join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(lakefile), text).unwrap();
+            std::fs::write(dir.join("lean-toolchain"), PIN).unwrap();
+            dir
+        };
+        let code = package(
+            "code",
+            "lakefile.lean",
+            "import Lake\nopen Lake DSL\npackage P\nrequire helper from git \"https://example.org/helper\"\n",
+        );
+        let blocked = f.inspect("code");
+        assert!(!blocked.uses_mathlib && blocked.requirements_in_code);
+        let reason = blocked.blocks_checking(true).expect("blocked whatever the build choice");
+        assert!(
+            reason.contains("lakefile.lean") && reason.contains("lake update") && reason.contains("lake-manifest.json"),
+            "{reason}"
+        );
+        // Resolved (a manifest exists): the manifest decides, and it names no Mathlib.
+        std::fs::write(code.join(LAKE_MANIFEST), r#"{"version": "1.1.0", "packages": []}"#).unwrap();
+        assert_eq!(f.inspect("code").blocks_checking(false), None);
+        // No requirement at all: never held back.
+        package("alone", "lakefile.lean", "import Lake\nopen Lake DSL\npackage P\nlean_lib P\n");
+        assert_eq!(f.inspect("alone").blocks_checking(false), None);
+        // Mathlib named in code: the Mathlib route, even with no toolchain pin.
+        let unpinned = package(
+            "math",
+            "lakefile.lean",
+            "package P\nrequire\n  mathlib from git \"https://github.com/leanprover-community/mathlib4\"\n",
+        );
+        std::fs::remove_file(unpinned.join("lean-toolchain")).unwrap();
+        let math = f.inspect("math");
+        assert_eq!(math.readiness, LeanPackageReadiness::ToolchainUnpinned);
+        assert!(math.uses_mathlib && math.blocks_checking(true).unwrap().contains("Set Up Mathlib"));
+    }
+
+    /// The plan names where each dependency is fetched from and is bound to
+    /// the lakefile and the manifest; a `mathlib` from anywhere but the
+    /// official repository is refused.
+    #[test]
+    fn the_plan_names_every_source_and_refuses_a_mathlib_from_elsewhere() {
+        let f = Fixture::new();
+        let dir = f.package("formal", true, false, false);
+        let plan = f.plan(&prepare("formal")).unwrap();
+        assert_eq!(plan.manifest_digest, f.inspect("formal").manifest_digest);
+        assert_eq!(plan.lakefile_digest.as_deref().map(str::len), Some(64));
+        assert_eq!(plan.sources_note, None);
+        let listed: Vec<(&str, Option<&str>, Option<&str>)> =
+            plan.sources.iter().map(|s| (s.name.as_str(), s.url.as_deref(), s.rev.as_deref())).collect();
+        assert_eq!(
+            listed,
+            [
+                (
+                    "batteries",
+                    Some("https://github.com/leanprover-community/batteries"),
+                    Some("66e469188fe07963e5cf666c7d4433f45b8131c5")
+                ),
+                ("mathlib", Some(MATHLIB_URL), Some("56a005855ea17e0b0958f73ec801ae140b0a1679")),
+            ]
+        );
+        // Another dependency's address, or the lakefile, changed: another plan.
+        std::fs::write(
+            dir.join(LAKE_MANIFEST),
+            MANIFEST.replace("leanprover-community/batteries", "elsewhere/batteries"),
+        )
+        .unwrap();
+        let moved = f.plan(&prepare("formal")).unwrap();
+        assert_ne!(moved.plan_hash, plan.plan_hash);
+        assert!(moved.sources.iter().any(|s| s.url.as_deref() == Some("https://github.com/elsewhere/batteries")));
+        std::fs::write(dir.join(LAKE_MANIFEST), MANIFEST).unwrap();
+        assert_eq!(f.plan(&prepare("formal")).unwrap().plan_hash, plan.plan_hash);
+        std::fs::write(dir.join("lakefile.toml"), format!("{LAKEFILE}\n# changed\n")).unwrap();
+        assert_ne!(f.plan(&prepare("formal")).unwrap().plan_hash, plan.plan_hash);
+        std::fs::write(dir.join("lakefile.toml"), LAKEFILE).unwrap();
+
+        // Mathlib from another repository, as pinned or as required: refused, with the address.
+        for url in [
+            "https://github.com/elsewhere/mathlib4",
+            "https://github.com/leanprover-community/mathlib4-fork",
+            "http://github.com/leanprover-community/mathlib4",
+        ] {
+            std::fs::write(dir.join(LAKE_MANIFEST), MANIFEST.replace(MATHLIB_URL, url)).unwrap();
+            let error = f.plan(&prepare("formal")).unwrap_err();
+            assert_eq!(error.code, "lean.setup.unofficialMathlib", "{url}");
+            assert!(error.message.contains(url) && error.message.contains("Nothing was changed"), "{}", error.message);
+        }
+        // Spellings of the official address are accepted; credentials in an address are never shown.
+        for url in [
+            "https://github.com/leanprover-community/mathlib4.git",
+            "https://GitHub.com/leanprover-community/mathlib4/",
+            "git@github.com:leanprover-community/mathlib4.git",
+            "https://user:secret-token@github.com/leanprover-community/mathlib4",
+        ] {
+            std::fs::write(dir.join(LAKE_MANIFEST), MANIFEST.replace(MATHLIB_URL, url)).unwrap();
+            let plan = f.plan(&prepare("formal")).unwrap_or_else(|e| panic!("{url}: {}", e.message));
+            assert!(!serde_json::to_string(&plan).unwrap().contains("secret-token"), "{url}");
+        }
+        std::fs::remove_file(dir.join(LAKE_MANIFEST)).unwrap();
+        let unresolved = f.plan(&prepare("formal")).unwrap();
+        assert_eq!(unresolved.sources.len(), 1);
+        assert_eq!(
+            (
+                unresolved.sources[0].kind.as_str(),
+                unresolved.sources[0].scope.as_deref(),
+                unresolved.sources[0].input_rev.as_deref()
+            ),
+            ("reservoir", Some("leanprover-community"), Some("v4.35.0"))
+        );
+        assert!(unresolved.sources_note.as_deref().unwrap().contains(MATHLIB_URL));
+        for requirement in
+            ["git = \"https://github.com/elsewhere/mathlib4\"", "path = \"../mathlib\"", "scope = \"someone-else\""]
+        {
+            std::fs::write(
+                dir.join("lakefile.toml"),
+                format!("name = \"Formal\"\n[[require]]\nname = \"mathlib\"\n{requirement}\n"),
+            )
+            .unwrap();
+            assert_eq!(code(f.plan(&prepare("formal"))), "lean.setup.unofficialMathlib", "{requirement}");
+        }
+        // A new package states its one requirement and what Lake decides.
+        let new = f.plan(&new_package("lean", "Formal")).unwrap();
+        assert_eq!(new.sources.len(), 1);
+        assert_eq!(new.sources[0].input_rev.as_deref(), Some("v4.35.0"));
+        assert!(new.sources_note.is_some() && new.lakefile_digest.is_none() && new.manifest_digest.is_none());
+    }
+
+    /// A channel in lean-toolchain names no toolchain folder: the plan is
+    /// refused with guidance instead of naming a `lake` that does not exist.
+    #[test]
+    fn a_channel_pin_is_refused_when_planning() {
+        let f = Fixture::new();
+        let dir = f.package("formal", true, true, false);
+        std::fs::write(dir.join("lean-toolchain"), "stable\n").unwrap();
+        std::fs::write(dir.join(".lake").join("packages").join("mathlib").join("lean-toolchain"), "stable\n").unwrap();
+        assert!(f.inspect("formal").toolchain_installed, "the channel resolves to the installed release for checking");
+        let error = f.plan(&prepare("formal")).unwrap_err();
+        assert_eq!(error.code, "lean.setup.channelPin");
+        assert!(error.message.contains("`stable`") && error.message.contains("exact release"), "{}", error.message);
+        // An exact pin plans the installed toolchain's own lake.
+        std::fs::write(dir.join("lean-toolchain"), "v4.35.0\n").unwrap();
+        std::fs::write(dir.join(".lake").join("packages").join("mathlib").join("lean-toolchain"), PIN).unwrap();
+        let plan = f.plan(&prepare("formal")).unwrap();
+        assert!(plan.steps.iter().all(|s| Path::new(&s.program).is_file()), "{:?}", plan.steps);
     }
 
     #[test]
@@ -2264,12 +3075,38 @@ mod tests {
         let f = Fixture::new();
         let dir = f.package("formal", true, true, true);
         assert_eq!(f.inspect("formal").readiness, LeanPackageReadiness::Ready);
-        f.records
-            .update(&dir, |_| Some(Record { root: dir.display().to_string(), created: vec![], interrupted: true }))
-            .unwrap();
+        let record = |sources_intact: bool| {
+            f.records
+                .update(&dir, |_| {
+                    Some(Record { root: dir.display().to_string(), created: vec![], interrupted: true, sources_intact })
+                })
+                .unwrap();
+        };
+        record(false);
         let unfinished = f.inspect("formal");
-        assert!(matches!(unfinished.readiness, LeanPackageReadiness::Unfinished { .. }));
+        assert!(matches!(unfinished.readiness, LeanPackageReadiness::Unfinished { can_build_from_source: false, .. }));
         assert!(unfinished.blocks_checking(true).is_some());
+        // The setup wrote build outputs only: the explicit choice to build from source still lifts the gate.
+        record(true);
+        let intact = f.inspect("formal");
+        assert!(matches!(intact.readiness, LeanPackageReadiness::Unfinished { can_build_from_source: true, .. }));
+        assert!(intact.blocks_checking(false).unwrap().contains("building Mathlib from source stays possible"));
+        assert_eq!(intact.blocks_checking(true), None);
+        // Not when a checkout is gone meanwhile.
+        std::fs::rename(dir.join(".lake/packages/batteries"), dir.join(".lake/packages/away")).unwrap();
+        assert!(f.inspect("formal").blocks_checking(true).is_some());
+        std::fs::rename(dir.join(".lake/packages/away"), dir.join(".lake/packages/batteries")).unwrap();
+        // A package that no longer uses Mathlib is not held by the record.
+        let lakefile = std::fs::read(dir.join("lakefile.toml")).unwrap();
+        let manifest = std::fs::read(dir.join(LAKE_MANIFEST)).unwrap();
+        std::fs::write(dir.join("lakefile.toml"), "name = \"Formal\"\n\n[[lean_lib]]\nname = \"Formal\"\n").unwrap();
+        std::fs::remove_file(dir.join(LAKE_MANIFEST)).unwrap();
+        let plain = f.inspect("formal");
+        assert!(!plain.uses_mathlib && !matches!(plain.readiness, LeanPackageReadiness::Unfinished { .. }));
+        assert_eq!(plain.blocks_checking(false), None);
+        std::fs::write(dir.join("lakefile.toml"), lakefile).unwrap();
+        std::fs::write(dir.join(LAKE_MANIFEST), manifest).unwrap();
+        record(false);
         // Preparing again is offered (it is not "already prepared").
         f.plan(&prepare("formal")).unwrap();
         // Another instance reading the same file sees it; a copy of the project elsewhere has no record.
@@ -2286,21 +3123,67 @@ mod tests {
     fn cleanup_removes_only_what_the_setup_created() {
         let tmp = tempfile::tempdir().unwrap();
         let package = tmp.path().join("pkg");
-        std::fs::create_dir_all(package.join(".lake").join("packages")).unwrap();
-        std::fs::write(package.join("mine.lean"), "-- user file").unwrap();
-        std::fs::write(package.join("lakefile.toml"), "x").unwrap();
-        assert!(remove_created(&package, &package.join(".lake")).unwrap());
-        assert!(remove_created(&package, &package.join("lakefile.toml")).unwrap());
-        assert!(!remove_created(&package, &package.join("absent")).unwrap());
-        // The folder still holds the user's file: it stays.
-        assert!(!remove_created(&package, &package).unwrap());
-        assert!(package.join("mine.lean").is_file());
+        let digest = |text: &str| -> [u8; 32] { Sha256::digest(text.as_bytes()).into() };
+        // What a new-package setup creates, as it records it (outermost first).
+        let created: Vec<String> =
+            ["", ".gitignore", ".lake", "Formal", "Formal.lean", LAKE_MANIFEST, "lakefile.toml", "Formal/Basic.lean"]
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect();
+        let written = vec![
+            ("lakefile.toml".to_owned(), digest("lakefile")),
+            ("Formal.lean".to_owned(), digest("import Formal.Basic\n")),
+            ("Formal/Basic.lean".to_owned(), digest("starter")),
+            (".gitignore".to_owned(), digest("/.lake\n")),
+        ];
+        let make = || {
+            std::fs::create_dir_all(package.join(".lake").join("packages").join("mathlib")).unwrap();
+            std::fs::create_dir_all(package.join("Formal")).unwrap();
+            std::fs::write(package.join(".lake").join("packages").join("mathlib").join("pack"), "x").unwrap();
+            std::fs::write(package.join("lakefile.toml"), "lakefile").unwrap();
+            std::fs::write(package.join("Formal.lean"), "import Formal.Basic\n").unwrap();
+            std::fs::write(package.join("Formal").join("Basic.lean"), "starter").unwrap();
+            std::fs::write(package.join(".gitignore"), "/.lake\n").unwrap();
+            std::fs::write(package.join(LAKE_MANIFEST), "{}").unwrap();
+        };
+
+        // Nothing else there: everything goes, the folder included.
+        make();
+        let all = clean_up(&package, &created, &written);
+        assert!(all.kept.is_empty() && all.problem.is_none(), "{all:?}");
+        assert_eq!(all.removed.len(), created.len());
+        assert!(!package.exists());
+
+        // The user added a file to the library folder, another beside it, an
+        // empty folder, and changed a file the setup wrote: all of that stays.
+        make();
+        std::fs::write(package.join("Formal").join("Mine.lean"), "theorem mine : True := trivial\n").unwrap();
+        std::fs::write(package.join("notes.md"), "mine").unwrap();
+        std::fs::create_dir_all(package.join("Drafts")).unwrap();
+        std::fs::write(package.join("Formal.lean"), "import Formal.Basic\nimport Formal.Mine\n").unwrap();
+        let some = clean_up(&package, &created, &written);
+        assert_eq!(some.problem, None);
+        assert_eq!(some.kept, ["Drafts/", "Formal.lean", "Formal/Mine.lean", "notes.md"]);
+        for kept in ["Formal/Mine.lean", "notes.md", "Formal.lean", "Drafts"] {
+            assert!(package.join(kept).exists(), "{kept} stays");
+        }
+        for removed in [".lake", "lakefile.toml", "Formal/Basic.lean", ".gitignore", LAKE_MANIFEST] {
+            assert!(!package.join(removed).exists(), "{removed} is removed");
+            assert!(some.removed.contains(&removed.to_owned()), "{removed} is reported removed");
+        }
+        assert!(!some.removed.contains(&String::new()) && !some.removed.contains(&"Formal".to_owned()));
+
+        // A file the setup planned but had not written yet is not its own.
+        let early = tmp.path().join("early");
+        std::fs::create_dir_all(&early).unwrap();
+        std::fs::write(early.join("lakefile.toml"), "the user's own").unwrap();
+        let none = clean_up(&early, &["".to_owned(), "lakefile.toml".to_owned()], &[]);
+        assert_eq!(none.kept, ["lakefile.toml"]);
+        assert!(none.removed.is_empty() && early.join("lakefile.toml").is_file());
         // Outside the package: never touched.
         std::fs::write(tmp.path().join("outside"), "").unwrap();
-        assert!(!remove_created(&package, &tmp.path().join("outside")).unwrap());
-        assert!(tmp.path().join("outside").exists());
-        std::fs::remove_file(package.join("mine.lean")).unwrap();
-        assert!(remove_created(&package, &package).unwrap());
+        let outside = clean_up(&early, &["../outside".to_owned()], &[]);
+        assert!(outside.removed.is_empty() && tmp.path().join("outside").exists());
         // `write_new` never replaces a file.
         let file = tmp.path().join("existing");
         std::fs::write(&file, "keep").unwrap();

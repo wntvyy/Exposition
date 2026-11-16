@@ -92,6 +92,14 @@ pub fn qualify(requested: &str) -> String {
     }
 }
 
+/// `requested` names a release channel (`stable`, `beta`, `nightly`), which
+/// elan resolves online, and not one Lean version.
+pub fn is_channel(requested: &str) -> bool {
+    let qualified = qualify(requested);
+    let release = qualified.split_once(':').map_or(qualified.as_str(), |(_, release)| release);
+    CHANNELS.contains(&release)
+}
+
 /// elan's directory name for a qualified toolchain
 /// (`leanprover/lean4:v4.35.0` → `leanprover--lean4---v4.35.0`).
 pub fn dir_name(qualified: &str) -> String {

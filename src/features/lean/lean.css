@@ -220,7 +220,8 @@
 .exp-lean-setup__commands,
 .exp-lean-setup__log {
   margin: 0;
-  max-height: 12rem;
+  /* Ten lines of the listing, then it scrolls. */
+  max-height: calc(10 * var(--line-height-code));
   overflow: auto;
   font-family: var(--font-code);
   font-size: var(--font-size-code);
@@ -232,7 +233,7 @@
 
 .exp-lean-setup__log {
   margin-top: var(--space-2);
-  max-height: 9rem;
+  max-height: calc(7 * var(--line-height-code));
   color: var(--color-text-muted);
 }
 
@@ -241,10 +242,13 @@
   flex: 1;
 }
 
-/* Actions under a long explanation in the narrow infoview. */
-.exp-lean-setup__actions {
-  display: flex;
+/* Layout only, for the narrow infoview: the banner's own actions move under
+   a long explanation instead of squeezing it. */
+.exp-lean-setup__preparation .ui-banner,
+.exp-lean-setup__preparation .ui-banner__actions {
   flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
+}
+
+.exp-lean-setup__preparation .ui-banner__body {
+  flex-basis: calc(var(--inspector-width) / 2);
 }

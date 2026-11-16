@@ -69,6 +69,10 @@ function newPlan(overrides: Partial<LeanSetupPlan> = {}): LeanSetupPlan {
     toolchainInstalled: true,
     mathlibRevision: "v4.35.0",
     pinnedByManifest: false,
+    lakefileDigest: null,
+    manifestDigest: null,
+    sources: [{ name: "mathlib", kind: "reservoir", scope: "leanprover-community", url: null, rev: null, inputRev: "v4.35.0", present: false }],
+    sourcesNote: "Lake resolves these and everything they require once and pins each revision in lake-manifest.json.",
     writes: ["lakefile.toml", "lean-toolchain", "Formal.lean", "Formal/Basic.lean", ".gitignore"],
     keeps: [],
     removedOnFailure: ["lakefile.toml", ".lake", ""],
@@ -89,6 +93,13 @@ function preparePlan(): LeanSetupPlan {
     createsPackage: false,
     mathlibRevision: "56a005855ea17e0b0958f73ec801ae140b0a1679",
     pinnedByManifest: true,
+    lakefileDigest: "cd".repeat(32),
+    manifestDigest: "ab".repeat(32),
+    sources: [
+      { name: "batteries", kind: "git", scope: null, url: "https://github.com/leanprover-community/batteries", rev: "66e469188fe07963e5cf666c7d4433f45b8131c5", inputRev: "main", present: true },
+      { name: "mathlib", kind: "git", scope: null, url: "https://github.com/leanprover-community/mathlib4", rev: "56a005855ea17e0b0958f73ec801ae140b0a1679", inputRev: "v4.35.0", present: false },
+    ],
+    sourcesNote: null,
     writes: [],
     keeps: ["lakefile.toml", "lean-toolchain", "lake-manifest.json"],
     removedOnFailure: [".lake"],
@@ -109,6 +120,7 @@ function status(plan: LeanSetupPlan, overrides: Partial<LeanSetupStatus> = {}): 
     step: 1,
     message: null,
     removed: [],
+    kept: [],
     inspection: null,
     ready: false,
     jobs: [],
@@ -124,6 +136,8 @@ function inspection(readiness: LeanPackageInspection["readiness"], overrides: Pa
     folder: "lean",
     root: "C:\\p\\lean",
     lakefile: "lakefile.toml",
+    lakefileDigest: "cd".repeat(32),
+    requirementsInCode: false,
     toolchain: "leanprover/lean4:v4.35.0",
     toolchainInstalled: true,
     toolchainProblem: null,
@@ -174,6 +188,13 @@ describe("Mathlib setup", () => {
     expect(summary).toContain("several GB");
     expect(summary).toContain("On this computer with your account’s privileges");
     expect(summary).toContain("The new package's files are removed");
+    expect(summary).toContain("A file you add or change in the new folder meanwhile is kept");
+    // Where the one requirement comes from, and what is decided only when Lake resolves.
+    const sources = screen.getByTestId("lean-setup-sources").textContent ?? "";
+    expect(sources).toContain("leanprover-community/mathlib");
+    expect(sources).toContain("v4.35.0");
+    expect(sources).toContain("Resolved by Lake");
+    expect(screen.getByTestId("lean-setup-sources-note").textContent).toContain("pins each revision in lake-manifest.json");
     // Every command, exactly as launched, with the variable it sets and which ones download.
     const commands = screen.getByTestId("lean-setup-commands").textContent ?? "";
     expect(commands).toContain(`MATHLIB_NO_CACHE_ON_UPDATE=1 ${LAKE} --keep-toolchain update`);
@@ -213,6 +234,18 @@ describe("Mathlib setup", () => {
     expect(summary).not.toContain("Creates");
     expect(screen.getByTestId("lean-setup-commands").textContent).not.toContain("update");
     expect(screen.getByTestId("lean-setup-start").textContent).toContain("Prepare package");
+    // Each dependency with the address and the commit it is fetched from, and which are already there.
+    const rows = [...screen.getByTestId("lean-setup-sources").querySelectorAll("tbody tr")].map((row) => row.textContent ?? "");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain("batteries");
+    expect(rows[0]).toContain("https://github.com/leanprover-community/batteries");
+    expect(rows[0]).toContain("66e469188fe0 (main)");
+    expect(rows[0]).toContain("Already downloaded");
+    expect(rows[1]).toContain("https://github.com/leanprover-community/mathlib4");
+    expect(rows[1]).toContain("56a005855ea1 (v4.35.0)");
+    expect(rows[1]).toContain("Fetched by this setup");
+    expect(screen.queryByTestId("lean-setup-sources-note")).toBeNull();
+    expect(summary).toContain("from the addresses listed under Sources");
   });
 
   it("says a prepared package needs nothing and a changed project needs a new plan", async () => {
@@ -293,6 +326,22 @@ describe("Mathlib setup", () => {
     await waitFor(() => expect(screen.getByTestId("lean-package-preparation").getAttribute("data-readiness")).toBe("dependenciesMissing"));
     expect(screen.queryByTestId("lean-build-from-source")).toBeNull();
     expect(screen.getByTestId("lean-prepare-open")).toBeTruthy();
+    cleanup();
+
+    // An unfinished setup: preparing again always; building from source only when the setup left the sources intact.
+    ipc.leanPackageFor.mockResolvedValue(inspection({ kind: "unfinished", message: "A Mathlib setup did not finish.", canBuildFromSource: false }));
+    render(<PackagePreparation state={unavailable("A Mathlib setup did not finish.")} />);
+    await waitFor(() => expect(screen.getByTestId("lean-package-preparation").getAttribute("data-readiness")).toBe("unfinished"));
+    expect(screen.getByTestId("lean-prepare-open")).toBeTruthy();
+    expect(screen.queryByTestId("lean-build-from-source")).toBeNull();
+    cleanup();
+    ipc.leanPackageFor.mockResolvedValue(inspection({ kind: "unfinished", message: "A Mathlib setup did not finish.", canBuildFromSource: true }));
+    render(<PackagePreparation state={unavailable("A Mathlib setup did not finish.")} />);
+    await waitFor(() => expect(screen.getByTestId("lean-package-preparation").getAttribute("data-readiness")).toBe("unfinished"));
+    expect(screen.getByTestId("lean-prepare-open")).toBeTruthy();
+    expect(screen.getByTestId("lean-build-from-source")).toBeTruthy();
+    // The actions are the banner's own (the shared component's actions slot).
+    expect(screen.getByTestId("lean-build-from-source").closest(".ui-banner__actions")).not.toBeNull();
     cleanup();
 
     // A mismatch is the user's configuration decision: explained, with nothing to run.

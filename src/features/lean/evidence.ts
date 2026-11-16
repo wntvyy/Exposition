@@ -14,6 +14,7 @@ import type { DeclarationEvidence } from "../../bindings/DeclarationEvidence";
 import type { DeclarationVerdict } from "../../bindings/DeclarationVerdict";
 import type { DocumentId } from "../../bindings/DocumentId";
 import type { EntityId } from "../../bindings/EntityId";
+import type { Evidence } from "../../bindings/Evidence";
 import type { EvidenceOutcomeReport } from "../../bindings/EvidenceOutcomeReport";
 import type { FormalVerdict } from "../../bindings/FormalVerdict";
 import type { LeanAssociateRequest } from "../../bindings/LeanAssociateRequest";
@@ -38,6 +39,29 @@ export const leanEvidenceCommands = {
   declarationEvidence: (document: DocumentId) =>
     invoke<DeclarationEvidence[]>("lean_declaration_evidence", { document }),
 };
+
+/**
+ * `evidence` is the record of exactly this audit: the same text and revision,
+ * the same pinned dependencies, and the same Lean (toolchain, its version,
+ * and the package's lean-toolchain file). The audit's identifier in Rust
+ * covers the same things; an audit under another Lean is another audit and
+ * can be recorded.
+ */
+export function isRecordOfAudit(evidence: Evidence, audit: LeanAuditRecord): boolean {
+  const formal = evidence.formal;
+  if (!formal) return false;
+  const environment = new Map(evidence.environment ?? []);
+  const pin = audit.package?.toolchainFile ?? null;
+  const recordedPin = pin ? ((evidence.inputs ?? []).find((input) => input.path === pin.path)?.contentHash ?? null) : null;
+  return (
+    formal.sourceDigest === audit.contentHash &&
+    formal.revision === audit.revision &&
+    formal.toolchain === audit.toolchain &&
+    (environment.get("lean --version") ?? null) === (audit.toolchainVersion ?? null) &&
+    (environment.get("lake-manifest.json sha256") ?? null) === (audit.package?.manifest?.sha256 ?? null) &&
+    recordedPin === (pin?.sha256 ?? null)
+  );
+}
 
 export function verdictView(verdict: FormalVerdict | DeclarationVerdict): { status: Status; label: string } {
   switch (verdict) {

@@ -17,7 +17,16 @@ import { errorMessage } from "../../lib/ipc";
 import { graphCommands } from "../../lib/graphIpc";
 import { Badge, Banner, Button, Dialog, Section, Select, Spinner, StatusText, TextField } from "../../ui/components";
 import { freshnessStatus } from "../research/GraphInspect";
-import { associate, evidenceFor, leanEvidenceCommands, refreshEvidence, useLeanEvidence, verdictTone, verdictView } from "./evidence";
+import {
+  associate,
+  evidenceFor,
+  isRecordOfAudit,
+  leanEvidenceCommands,
+  refreshEvidence,
+  useLeanEvidence,
+  verdictTone,
+  verdictView,
+} from "./evidence";
 import { revealInEditor } from "./leanMonaco";
 
 const TARGET_KINDS: EntityKind[] = [
@@ -82,13 +91,7 @@ export function DeclarationEvidenceControls({
   const environment = new Map(latest?.evidence.environment ?? []);
   const manifestDigest = environment.get("lake-manifest.json sha256") ?? null;
   const mathlibRevision = environment.get("mathlib revision") ?? null;
-  const recordedForAudit = Boolean(
-    audit &&
-      formal &&
-      formal.sourceDigest === audit.contentHash &&
-      formal.revision === audit.revision &&
-      (audit.package?.manifest?.sha256 ?? null) === manifestDigest,
-  );
+  const recordedForAudit = Boolean(audit && latest && isRecordOfAudit(latest.evidence, audit));
   const record = async () => {
     setBusy(true);
     try {

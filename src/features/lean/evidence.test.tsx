@@ -6,13 +6,14 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DeclarationEvidence } from "../../bindings/DeclarationEvidence";
+import type { Evidence } from "../../bindings/Evidence";
 import type { LeanAuditRecord } from "../../bindings/LeanAuditRecord";
 import type { LeanDocumentState } from "../../bindings/LeanDocumentState";
 
 vi.mock("./leanMonaco", () => ({ revealInEditor: vi.fn() }));
 vi.mock("../../lib/graphIpc", () => ({ graphCommands: { snapshot: vi.fn() }, graphEvents: {} }));
 
-const { verdictTone, verdictView } = await import("./evidence");
+const { isRecordOfAudit, verdictTone, verdictView } = await import("./evidence");
 const { DeclarationEvidenceControls } = await import("./FormalEvidence");
 
 const state = { document: "doc-1", path: "LeanBasic/Defs.lean", revision: 2 } as unknown as LeanDocumentState;
@@ -117,5 +118,44 @@ describe("Lean evidence", () => {
     render(<DeclarationEvidenceControls state={state} name="LeanBasic.other" audit={audit} evidence={undefined} />);
     expect(screen.queryByRole("button", { name: "Record evidence" })).toBeNull();
     expect(screen.getByRole("button", { name: "Associate with…" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("offers recording again when the same text was audited with another Lean", () => {
+    const recorded = evidence(2, "b".repeat(64), { kind: "stale", reasons: ["lean-toolchain changed"] });
+    const other = { ...audit, toolchain: "leanprover/lean4:v4.36.0" } as LeanAuditRecord;
+    const { unmount } = render(<DeclarationEvidenceControls state={state} name="LeanBasic.double_zero" audit={other} evidence={recorded} />);
+    expect(screen.getByRole("button", { name: "Record evidence" })).toBeTruthy();
+    unmount();
+
+    // The record of exactly this audit: same text, dependencies, toolchain, version, and lean-toolchain file.
+    const pin = { path: "LeanBasic/lean-toolchain", sha256: "1".repeat(64) };
+    const manifest = { path: "LeanBasic/lake-manifest.json", sha256: "2".repeat(64) };
+    const inPackage = {
+      ...audit,
+      toolchainVersion: "Lean (version 4.35.0)",
+      package: { folder: "LeanBasic", toolchainFile: pin, manifest, mathlibRevision: null, dependencyCount: 1 },
+    } as unknown as LeanAuditRecord;
+    const record = {
+      ...recorded.evidence[0]!.evidence,
+      environment: [
+        ["lean toolchain", "leanprover/lean4:v4.35.0"],
+        ["lean --version", "Lean (version 4.35.0)"],
+        ["lake-manifest.json sha256", manifest.sha256],
+      ],
+      inputs: [
+        { path: "LeanBasic/Defs.lean", contentHash: "b".repeat(64), revision: 2, unsaved: false },
+        { path: pin.path, contentHash: pin.sha256, revision: null, unsaved: false },
+        { path: manifest.path, contentHash: manifest.sha256, revision: null, unsaved: false },
+      ],
+    } as unknown as Evidence;
+    expect(isRecordOfAudit(record, inPackage)).toBe(true);
+    const changed = (patch: object) => ({ ...inPackage, ...patch }) as unknown as LeanAuditRecord;
+    expect(isRecordOfAudit(record, changed({ toolchain: "leanprover/lean4:v4.36.0" }))).toBe(false);
+    expect(isRecordOfAudit(record, changed({ toolchainVersion: "Lean (version 4.35.0, commit 1)" }))).toBe(false);
+    expect(isRecordOfAudit(record, changed({ revision: 3 }))).toBe(false);
+    expect(isRecordOfAudit(record, changed({ contentHash: "c".repeat(64) }))).toBe(false);
+    const withPackage = (patch: object) => changed({ package: { ...inPackage.package!, ...patch } });
+    expect(isRecordOfAudit(record, withPackage({ toolchainFile: { ...pin, sha256: "9".repeat(64) } }))).toBe(false);
+    expect(isRecordOfAudit(record, withPackage({ manifest: { ...manifest, sha256: "9".repeat(64) } }))).toBe(false);
   });
 });
