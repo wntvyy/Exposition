@@ -856,15 +856,44 @@ resolves them and everything they require when the setup runs (and, for a
 `lakefile.lean`, that the code can require more than is listed). Credentials
 written into an address are not shown.
 
-Only the official Mathlib is prepared. A `mathlib` taken from anywhere other
-than `https://github.com/leanprover-community/mathlib4` (another git address,
-a local folder, another registry scope, or a manifest entry that is not a git
-dependency from that address) is refused when the plan is built, with the
-source named, because the cache step builds and runs a program from the
-repository called mathlib. When the setup itself resolves the requirements,
-it checks the written manifest again after `lake update` and stops before the
-cache step if `mathlib` does not come from the official repository or is not
-among the resolved dependencies.
+A Mathlib fork is prepared too, never silently. When `mathlib` is fetched
+from a git address other than
+`https://github.com/leanprover-community/mathlib4`, the plan says so: a
+warning above the Sources list, "Mathlib is not from the official
+repository", names the address exactly and states that the setup downloads
+and runs that repository's code (its `cache` program runs on this computer
+with your account's privileges) and that the prebuilt cache may not cover a
+fork; the `mathlib` row is marked "Not official". There is one action, as for
+any plan, and no further question. A Mathlib that is not fetched from a git
+address the plan can show is refused when the plan is built, with the source
+named: a local folder (a `path` requirement or manifest entry), another
+registry entry than `leanprover-community/mathlib` in a lakefile without a
+manifest (write the fork's git address in the lakefile instead), a manifest
+git entry without an address, or two different fork addresses in one
+lakefile.
+
+The reviewed plan is what runs. The address is part of the plan, so a plan
+whose manifest or lakefile changed afterwards does not start. When the setup
+itself resolves the requirements, it reads the written manifest after
+`lake update` and stops before the cache step, removing what it created, if
+`mathlib` then comes from another address than the plan showed (the official
+repository where a fork was reviewed, a fork where the official repository
+was reviewed, another fork) or is not among the resolved dependencies. A
+manifest that already pins the sources is read again just before the cache
+step. Addresses are compared exactly, apart from a trailing `/` or `.git` and
+the accepted spellings of the official address.
+
+What a fork's cache step does was established by reading the `cache` program
+of Mathlib `v4.35.0`, not by running it against a fork: it looks first in the
+official cache by content hash and then in a separate store that Mathlib's
+own CI fills per fork commit, treats files it does not find as a normal
+outcome, and exits successfully without them. The setup's last step then
+finds the outputs incomplete and the setup fails. For a package whose sources
+were already downloaded, "Build from source instead…" in the Lean view stays
+available and the outcome says so. Otherwise the setup removes what it
+downloaded and the outcome names the command that downloads the sources in a
+terminal, after which building from source is offered. Other Mathlib versions
+may behave differently.
 
 - **New package** (a folder inside the project, or the project folder
   itself, and a library name such as `Formal`): pins an exact Lean release
@@ -979,14 +1008,18 @@ download (a complete setup, and checking against a prepared Mathlib) are
 covered only by scenarios that run on request (`npm run e2e -- mathlib-setup`
 with `EXPOSITION_MATHLIB_SETUP=1`; `mathlib` with
 `EXPOSITION_MATHLIB_PACKAGE`); the default suite covers the unprepared
-package, the plan with its sources, the refusals, a stale plan, and a new
+package, the plan with its sources, the warning for a fork, the refusals, a
+stale plan, and a new
 package canceled in the first seconds of `lake update` with a file of the
 user's kept, without downloading anything large. The first
 check of a file that imports Mathlib takes noticeably longer than a
 standalone file (expect a minute or more). Only packages whose Mathlib comes
-from a Lean release tag can be created, only Mathlib from the official
-repository is prepared (a fork or a local copy is prepared by hand in a
-terminal), and there is no setting for a mirror or an offline cache. A
+from a Lean release tag can be created. A Mathlib fork is prepared with a
+warning, but whether a prebuilt cache exists for a fork is not verified (no
+setup of a fork was run against the network), the fork's code runs natively
+with your account's privileges, and a fork without a complete cache can only
+be built from source. A Mathlib in a local folder is prepared by hand in a
+terminal, and there is no setting for a mirror or an offline cache. A
 Mathlib requirement that a `lakefile.lean` computes without naming Mathlib
 in its text is not recognized before a manifest exists. Setup is verified on
 Windows only.
@@ -1030,7 +1063,7 @@ reason. A task runs in one of two approval modes, chosen in the composer:
 | Tool (Ask) | Execution off | Ask before each | Restricted (container) | Scope and consent |
 |---|---|---|---|---|
 | List, read files | allowed | allowed | allowed | path in scope (links resolved); reading needs content consent |
-| Edit, create files; insert an artifact | allowed (approval when reviewing edits; never in a read-only task) | same | same | path in scope; for an artifact, its file too |
+| Edit, create files; insert an artifact; save an edited file | allowed (approval when reviewing edits; never in a read-only task) | same | same | path in scope; for an artifact, its file too |
 | The same into a Lean file in a trusted folder | refused | approval (Lean runs the text natively) | refused | as above |
 | Build Typst or Markdown (in-process) | allowed | allowed | allowed | entry in scope; the build reads only the scope; refused under "file names only" |
 | Build LaTeX, check Lean | refused | trusted folder + approval | refused | whole project + content consent |
@@ -1122,8 +1155,9 @@ answered once or for the task.
 
 Results also say where a change is. `create_file` writes the new file to
 disk. `edit_document` and `insert_artifact` change the editor text only: the
-file on disk keeps its last saved version until you save it, and agents
-cannot save (Keep in review accepts a change; it does not save the file).
+file on disk keeps its last saved version until it is saved, by you or by
+the agent with `save_document` (Keep in review accepts a change; it does not
+save the file).
 `read_file`, `build_document`, and `check_lean` use the editor text, unsaved
 changes included, and a Lean check reports which text it checked;
 `run_command`, `run_python`, and `copy_paths` see only what is saved, and a
@@ -1134,6 +1168,55 @@ instructions name the app's controls it may point you to (Save, Review
 changes, the Research panel, Review and run…, Record evidence, Set Up
 Mathlib…, and so on); a test fails when one of those names is no longer in
 the interface source that defines it.
+
+**Saving by an agent.** `save_document` saves one open document with the
+editor's own save (the same atomic save as Ctrl+S, in the file's encoding
+and line endings), so that a program the agent runs next reads the edited
+file. Nothing saves on its own: an edit stays in the editor until someone
+saves it, and no setting, project file, or tool output turns saving on. A
+save is a file change and is decided like one. In Ask it follows the task's
+Document changes setting: with "Ask before each change" it shows an approval
+card (Approve, Approve for this task, Decline), and an earlier "Approve for
+this task" for file changes covers it; with "Apply changes, review
+afterwards" it proceeds; a read-only task never saves. In Auto it proceeds
+within the project's Files permission and asks beyond it. Saving a Lean
+source, a Lean/Lake configuration file, or an R startup file needs
+native-code authority as well, exactly as editing one does, because that
+text runs on its own once it is on disk; a task without native execution
+cannot save one. Files under `.git/`, `.lake/`, `.venv/`, or `venv/`, the
+project graph's storage, and service-owned records are never saved by an
+agent.
+
+A save writes the whole editor text of the file at the revision the agent
+names; it cannot write a part of it. If you have unsaved changes of your own
+in that file, they are saved too, and you are told: the approval card and
+the result say whether every unsaved change was made by this task, whether
+the text was also changed outside it since the last save (your own edits,
+or another task's), or that Exposition cannot tell (then the whole current
+text is saved, whoever wrote it). The card shows the revision, size, and
+SHA-256 of what is written and every line that changes on disk. If the text
+changes while the card waits, approving saves nothing.
+
+An agent's save never overwrites anything you would have to decide about.
+It is refused, with nothing written, when the file was changed, deleted, or
+moved on disk since it was opened or last saved, when the document shows a
+disk conflict, when its text was restored from recovery and you have not
+saved it yourself, or when recovery data for the file still waits for your
+decision. You resolve those in the editor (Reload from Disk, Keep My
+Changes, restore or discard); after that the file can be saved normally. A
+file deleted through Exposition while its unsaved text was kept is not
+brought back by an agent's save either. Limitations: an agent saves only a
+file that is open with unsaved changes, one file per call, and only to the
+file's own path (no "save as", no "save all"); reverting an agent's change
+in review changes the editor text, and the file keeps what was saved until
+it is saved again. Once saved, the file has changed on disk as it would
+after any save: a build or a workflow trigger that watches the file reacts
+as it does to every change (the approval card does not list such
+watchers). The decisions are covered by gate tests over ordinary
+files and each kind of file that runs code, both modes, every task setting
+and project profile, folder trust, and allowances, and in the real
+application (development build, scripted provider in place of the model) by
+`npm run e2e -- agent-save`.
 
 An agent's Lean check returns its result to the task and records no
 evidence, and a task cannot assert computational, formal, or build evidence

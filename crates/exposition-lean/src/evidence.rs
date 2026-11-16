@@ -65,6 +65,8 @@ pub const ENV_PACKAGE: &str = "lake package";
 pub const ENV_MANIFEST: &str = "lake-manifest.json sha256";
 /// Environment key of the Mathlib commit the manifest pins.
 pub const ENV_MATHLIB: &str = "mathlib revision";
+/// Environment key of the git address the manifest fetches Mathlib from.
+pub const ENV_MATHLIB_SOURCE: &str = "mathlib source";
 
 fn short(hash: &str) -> String {
     hash[..hash.len().min(16)].to_owned()
@@ -180,6 +182,9 @@ pub fn evidence_record(
         }
         if let Some(revision) = &package.mathlib_revision {
             environment.push((ENV_MATHLIB.to_owned(), revision.clone()));
+        }
+        if let Some(source) = &package.mathlib_source {
+            environment.push((ENV_MATHLIB_SOURCE.to_owned(), source.clone()));
         }
         for file in [&package.toolchain_file, &package.manifest].into_iter().flatten() {
             inputs.push(VersionedInput {
@@ -899,6 +904,7 @@ mod tests {
                 sha256: manifest.repeat(32),
             }),
             mathlib_revision: Some("56a005855ea17e0b0958f73ec801ae140b0a1679".into()),
+            mathlib_source: Some("https://github.com/leanprover-community/mathlib4".into()),
             dependency_count: 9,
         };
         let mut r = record(checked(), vec![decl("Main.a", DeclarationVerdict::Checked, &["propext"])], false);
@@ -911,6 +917,26 @@ mod tests {
         assert_eq!(environment[ENV_PACKAGE], "Proofs");
         assert_eq!(environment[ENV_MANIFEST], "aa".repeat(32));
         assert_eq!(environment[ENV_MATHLIB], "56a005855ea17e0b0958f73ec801ae140b0a1679");
+        assert_eq!(environment[ENV_MATHLIB_SOURCE], "https://github.com/leanprover-community/mathlib4");
+        // The same revision fetched from a fork is told apart by its address.
+        let mut forked = r.clone();
+        forked.package.as_mut().unwrap().mathlib_source = Some("https://github.com/attacker-example/mathlib4".into());
+        let from_fork = evidence_record(&forked, &forked.declarations[0], &subject, true, 1).unwrap();
+        assert!(
+            from_fork
+                .environment
+                .contains(&(ENV_MATHLIB_SOURCE.to_owned(), "https://github.com/attacker-example/mathlib4".to_owned()))
+        );
+        // A package recorded before the address was kept still reads, without one.
+        let mut old = serde_json::to_value(r.package.as_ref().unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("mathlibSource");
+        let old: LeanAuditPackage = serde_json::from_value(old).unwrap();
+        assert_eq!(old.mathlib_source, None);
+        let mut earlier = r.clone();
+        earlier.package = Some(old);
+        let evidence_without = evidence_record(&earlier, &earlier.declarations[0], &subject, true, 1).unwrap();
+        assert!(evidence_without.environment.iter().all(|(key, _)| key != ENV_MATHLIB_SOURCE));
+        assert_eq!(audit_id(&earlier), audit_id(&r), "the address is recorded, not part of the audit's identifier");
         assert_eq!(environment["lean toolchain"], "leanprover/lean4:v4.35.0");
         // The source first, then the files that pin the Lean version and the dependencies.
         let inputs: Vec<(&str, Option<&str>)> =
@@ -960,6 +986,7 @@ mod tests {
                 }),
                 manifest: None,
                 mathlib_revision: None,
+                mathlib_source: None,
                 dependency_count: 0,
             });
             r

@@ -197,6 +197,10 @@ struct OpenWorkspace {
     /// to keep the unsaved text in the editor: never journaled for recovery
     /// and never saved back to that path (no resurrection).
     suspended: HashSet<DocumentId>,
+    /// Documents whose buffer holds text restored from a recovery journal
+    /// that the user has not saved or reloaded since: only the user decides
+    /// whether that text replaces the file.
+    recovered: HashSet<DocumentId>,
     _watcher: Option<RecommendedWatcher>,
 }
 
@@ -212,6 +216,55 @@ enum DiskRead {
     Missing,
     Text { hash: String, decoded: Decoded },
     Unreadable { hash: Option<String>, error: WorkspaceError },
+}
+
+/// A completed save: what was written.
+#[derive(Debug, Clone)]
+pub struct SavedDocument {
+    pub info: DocumentInfo,
+    pub path: WorkspacePath,
+    /// The buffer revision that was written.
+    pub revision: u64,
+    /// Bytes written (the buffer in its encoding).
+    pub bytes: u64,
+    /// SHA-256 of the bytes written.
+    pub content_hash: String,
+}
+
+/// What an exact save would write now (see [`WorkspaceService::exact_save_preview`]).
+#[derive(Debug, Clone)]
+pub struct SavePreview {
+    pub path: WorkspacePath,
+    pub revision: u64,
+    /// The buffer differs from the file as last saved.
+    pub unsaved: bool,
+    pub bytes: u64,
+    /// SHA-256 of the bytes a save would write.
+    pub content_hash: String,
+    /// The buffer text.
+    pub text: String,
+    /// The file's text on disk now (`None`: no file, or not readable as text).
+    pub disk_text: Option<String>,
+}
+
+fn suspended_error(path: &WorkspacePath) -> WorkspaceError {
+    WorkspaceError::new(
+        "document.fileDeleted",
+        format!(
+            "{path} was deleted, and its unsaved text is kept in the editor only. Saving would bring the deleted file back, so it was not saved; copy the text elsewhere to keep it."
+        ),
+    )
+}
+
+fn modified_on_disk(path: &WorkspacePath) -> WorkspaceError {
+    WorkspaceError::new("file.modifiedOnDisk", format!("{path} changed on disk since it was opened or last saved."))
+}
+
+fn deleted_on_disk(path: &WorkspacePath) -> WorkspaceError {
+    WorkspaceError::new(
+        "file.modifiedOnDisk",
+        format!("{path} was deleted or moved on disk since it was opened or last saved."),
+    )
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -374,6 +427,7 @@ impl WorkspaceService {
                 identities: HashMap::new(),
                 conflicts: HashMap::new(),
                 suspended: HashSet::new(),
+                recovered: HashSet::new(),
                 _watcher: watcher,
             });
         }
@@ -566,6 +620,7 @@ impl WorkspaceService {
                 open.identities.remove(id);
                 open.conflicts.remove(id);
                 open.suspended.remove(id);
+                open.recovered.remove(id);
                 open.recovery.clone()
             })
         };
@@ -640,6 +695,27 @@ impl WorkspaceService {
     /// untouched and the buffer stays dirty.
     pub fn save_document(&self, id: &DocumentId, overwrite: bool) -> WorkspaceResult<DocumentInfo> {
         let _io = lock(&self.io);
+        self.save_locked(id, overwrite, None).map(|saved| saved.info)
+    }
+
+    /// Save exactly revision `revision` of a document to its file, for a
+    /// caller that is not the user (an agent task): the same save as
+    /// [`Self::save_document`] without overwrite, and it also refuses
+    /// whenever only the user can decide what the file should hold — the
+    /// document is in a disk conflict, its buffer holds text restored from
+    /// recovery (or recovery data for the file waits for a decision), the
+    /// file was changed, deleted or moved on disk since it was opened or
+    /// last saved, or the buffer is no longer at `revision`. Nothing is
+    /// written on a refusal.
+    pub fn save_document_exact(&self, id: &DocumentId, revision: u64) -> WorkspaceResult<SavedDocument> {
+        let _io = lock(&self.io);
+        self.save_locked(id, false, Some(revision))
+    }
+
+    /// What [`Self::save_document_exact`] would write now for a document, or
+    /// why it would refuse (the same checks; nothing is written).
+    pub fn exact_save_preview(&self, id: &DocumentId) -> WorkspaceResult<SavePreview> {
+        let _io = lock(&self.io);
         let state = self.documents.state(id)?;
         let path = state
             .info
@@ -647,12 +723,104 @@ impl WorkspaceService {
             .clone()
             .ok_or_else(|| WorkspaceError::new("document.noPath", "This document has no file to save to."))?;
         if self.is_suspended(id) {
+            return Err(suspended_error(&path));
+        }
+        self.exact_refusal(id, &path, state.info.revision, state.info.revision)?;
+        let root = self.root()?;
+        let target = root.resolve_for_write(&path)?;
+        let base = self.disk_base(id).unwrap_or(None);
+        let disk_text = match fs::metadata(&target) {
+            Ok(meta) if meta.is_dir() => {
+                return Err(WorkspaceError::new("file.isDirectory", format!("{path} is a folder.")));
+            }
+            Ok(_) => {
+                let current = hash_file(&target).map_err(|e| WorkspaceError::io(&path, &e))?;
+                if Some(&current) != base.as_ref() {
+                    return Err(modified_on_disk(&path));
+                }
+                match read_disk(&root, &path) {
+                    DiskRead::Text { decoded, .. } => Some(decoded.text),
+                    _ => None,
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if base.is_some() {
+                    return Err(deleted_on_disk(&path));
+                }
+                None
+            }
+            Err(e) => return Err(WorkspaceError::io(&path, &e)),
+        };
+        let bytes = encode(&state.text, state.info.encoding);
+        Ok(SavePreview {
+            path,
+            revision: state.info.revision,
+            unsaved: state.info.saved_revision != Some(state.info.revision),
+            bytes: bytes.len() as u64,
+            content_hash: sha256_hex(&bytes),
+            text: state.text,
+            disk_text,
+        })
+    }
+
+    /// Why a save that is not the user's own must not happen now (see
+    /// [`Self::save_document_exact`]); the file's state on disk is checked by
+    /// the save itself.
+    fn exact_refusal(&self, id: &DocumentId, path: &WorkspacePath, current: u64, revision: u64) -> WorkspaceResult<()> {
+        let (conflict, recovered) = {
+            let state = lock(&self.state);
+            let open = state.open.as_ref().ok_or_else(WorkspaceError::no_workspace)?;
+            (open.conflicts.get(id).map(|c| c.public.message.clone()), open.recovered.contains(id))
+        };
+        if let Some(message) = conflict {
             return Err(WorkspaceError::new(
-                "document.fileDeleted",
+                "document.conflict",
+                format!("{message} The user decides in the editor which version to keep; until then it is not saved."),
+            ));
+        }
+        if recovered {
+            return Err(WorkspaceError::new(
+                "document.recovered",
                 format!(
-                    "{path} was deleted, and its unsaved text is kept in the editor only. Saving would bring the deleted file back, so it was not saved; copy the text elsewhere to keep it."
+                    "{path} holds unsaved text restored from recovery. Only the user saves it (or discards it), so it was not saved."
                 ),
             ));
+        }
+        let pending = self.recovery_store()?.entries().into_iter().any(|entry| match entry {
+            StoredEntry::Valid { journal, .. } => journal.path == *path,
+            StoredEntry::Unreadable { path: entry_path, .. } => entry_path.as_ref() == Some(path),
+        });
+        if pending {
+            return Err(WorkspaceError::new(
+                "document.recoveryPending",
+                format!(
+                    "Unsaved changes to {path} from an earlier session wait for the user's decision (restore or discard), so it was not saved."
+                ),
+            ));
+        }
+        if current != revision {
+            return Err(WorkspaceError::new(
+                "document.changed",
+                format!("{path} is at revision {current}, not revision {revision}; it was not saved."),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The save itself (the caller holds the I/O lock). With `exact`, the
+    /// stricter rules of [`Self::save_document_exact`] apply.
+    fn save_locked(&self, id: &DocumentId, overwrite: bool, exact: Option<u64>) -> WorkspaceResult<SavedDocument> {
+        let state = self.documents.state(id)?;
+        let path = state
+            .info
+            .path
+            .clone()
+            .ok_or_else(|| WorkspaceError::new("document.noPath", "This document has no file to save to."))?;
+        if self.is_suspended(id) {
+            return Err(suspended_error(&path));
+        }
+        if let Some(revision) = exact {
+            self.exact_refusal(id, &path, state.info.revision, revision)?;
         }
         let root = self.root()?;
         let base = self.disk_base(id).unwrap_or(None);
@@ -671,12 +839,14 @@ impl WorkspaceService {
                 if !overwrite {
                     let current = hash_file(&target).map_err(|e| WorkspaceError::io(&path, &e))?;
                     if Some(&current) != base.as_ref() {
-                        return Err(WorkspaceError::new(
-                            "file.modifiedOnDisk",
-                            format!("{path} changed on disk since it was opened or last saved."),
-                        ));
+                        return Err(modified_on_disk(&path));
                     }
                 }
+            }
+            // The user's save recreates a file that is gone; an exact save
+            // does not decide that for them.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && exact.is_some() && base.is_some() => {
+                return Err(deleted_on_disk(&path));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Deleted on disk (or new): recreate it, including missing folders
@@ -712,15 +882,19 @@ impl WorkspaceService {
             ),
             _ => WorkspaceError::new("file.writeFailed", format!("{path} could not be saved: {e}.")),
         })?;
-        self.set_disk_base(id, Some(sha256_hex(&bytes)));
+        let content_hash = sha256_hex(&bytes);
+        self.set_disk_base(id, Some(content_hash.clone()));
         let info = self.documents.mark_saved(id, state.info.revision)?;
         self.resolve_conflict(id);
+        if let Some(open) = lock(&self.state).open.as_mut() {
+            open.recovered.remove(id);
+        }
         if info.saved_revision == Some(info.revision)
             && let Ok(store) = self.recovery_store()
         {
             let _ = store.remove_live(&path);
         }
-        Ok(info)
+        Ok(SavedDocument { info, path, revision: state.info.revision, bytes: bytes.len() as u64, content_hash })
     }
 
     /// Save the document's CURRENT text (unsaved edits included, in its
@@ -925,6 +1099,9 @@ impl WorkspaceService {
         self.set_disk_base(id, Some(hash));
         let info = self.documents.mark_saved(id, revision)?;
         self.resolve_conflict(id);
+        if let Some(open) = lock(&self.state).open.as_mut() {
+            open.recovered.remove(id);
+        }
         Ok(info)
     }
 
@@ -1194,6 +1371,9 @@ impl WorkspaceService {
                 label: Some("Restore unsaved changes".into()),
                 selection: None,
             })?;
+        }
+        if let Some(open) = lock(&self.state).open.as_mut() {
+            open.recovered.insert(id.clone());
         }
         // Journal the restored buffer before dropping the entry, so a crash in
         // between cannot lose it.

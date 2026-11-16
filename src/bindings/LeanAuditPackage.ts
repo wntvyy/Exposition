@@ -23,6 +23,12 @@ manifest: LeanAuditFile | null,
  */
 mathlibRevision: string | null, 
 /**
+ * The git address the manifest fetches Mathlib from (without
+ * credentials): tells a fork from the official repository. Absent in
+ * records made before it was kept.
+ */
+mathlibSource: string | null, 
+/**
  * Dependencies the manifest pins.
  */
 dependencyCount: number, };

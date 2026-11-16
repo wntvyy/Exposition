@@ -30,6 +30,7 @@ pub const LIST_FILES: &str = "list_files";
 pub const READ_FILE: &str = "read_file";
 pub const EDIT_DOCUMENT: &str = "edit_document";
 pub const CREATE_FILE: &str = "create_file";
+pub const SAVE_DOCUMENT: &str = "save_document";
 pub const BUILD_DOCUMENT: &str = "build_document";
 pub const RUN_PYTHON: &str = "run_python";
 pub const CHECK_LEAN: &str = "check_lean";
@@ -86,9 +87,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 must occur exactly once in that revision (copy it exactly, with enough surrounding text to be unique) \
                 and edits must not overlap; to insert, include neighbouring text in old_text and new_text. All edits \
                 apply together as one transaction to the editor text of the document; the file on disk keeps its \
-                last saved version until the user saves it (you cannot save), so programs you run afterwards do not \
-                see the edit. The user reviews and can revert it. If the user changed the same text meanwhile, the \
-                call fails with the current \
+                last saved version until it is saved (by the user, or by you with save_document), so programs you \
+                run before that do not see the edit. The user reviews and can revert it. If the user changed the \
+                same text meanwhile, the call fails with the current \
                 revision: read the file again and redo the edit on the new text.",
             input_schema: json!({
                 "type": "object",
@@ -130,6 +131,31 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: SAVE_DOCUMENT,
+            // Non-strict, like the later tools: the strict grammar stays the
+            // proven set; Rust validates the input.
+            strict: false,
+            description: "Save an open document to its file on disk, with the same save the user's Ctrl+S uses, so \
+                that programs you run (run_command, run_python) and copy_paths see its text. It writes the whole \
+                editor text at the revision you name, never a part of it: unsaved changes the user made in that \
+                file are saved too, and the result says whether the text held changes this task did not make. \
+                Saving is a file change: it needs the same authority as an edit (the task context says whether \
+                that asks the user), and for files that run code (Lean sources, Lean/Lake configuration, R startup \
+                files) native-code authority as well. It is refused, with nothing written, when the file changed \
+                on disk since it was opened or last saved, when the document is in a conflict or holds recovered \
+                text (the user resolves those in the editor), or when the document is no longer at that revision \
+                (read it again). Save only what the task needs on disk.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Open file to save, relative to the project root."},
+                    "revision": {"type": "integer", "description": "The revision to save: the current one, as returned by read_file or your last edit."}
+                },
+                "required": ["path", "revision"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
             name: BUILD_DOCUMENT,
             strict: true,
             description: "Typeset a document (Typst .typ, Markdown .md or .markdown through its print profile, or \
@@ -154,7 +180,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
             description: "Insert a figure or table produced by a research run (an artifact listed in a run_python \
                 result) into a Typst, LaTeX, or Markdown document using the format's own figure/table markup and a \
                 stable attachment key, or update an earlier insertion by its key. The change is applied to the \
-                editor text like an edit (not saved to disk) and is reviewable.",
+                editor text like an edit (not saved to disk until save_document or the user saves) and is reviewable.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -174,7 +200,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
             strict: true,
             description: "Run Python code in a separate process for this task (never the user's own sessions) and \
                 return its real exit code and output. Use it for calculations and data analysis the user asked for. \
-                Code that reads project files sees them as saved on disk, not unsaved editor text. \
+                Code that reads project files sees them as saved on disk, not unsaved editor text (save_document \
+                saves a file you edited first). \
                 In the restricted sandbox the project is read-only at /workspace and files can be written to /out. \
                 Available only for tasks scoped to the whole project.",
             input_schema: json!({
@@ -209,7 +236,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
             description: "Run one program with an argument list (no shell, no pipes or redirection) in the project \
                 folder and return its exit code and bounded output. Use only when no dedicated tool fits. The \
                 program reads files as saved on disk, not unsaved editor text (the result lists open files with \
-                unsaved changes it did not see). In the \
+                unsaved changes it did not see; save_document saves a file you edited first). In the \
                 restricted sandbox the project is read-only at /workspace and files can be written to /out. \
                 Available only for tasks scoped to the whole project.",
             input_schema: json!({
@@ -618,6 +645,13 @@ pub struct CreateFileInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SaveDocumentInput {
+    pub path: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildDocumentInput {
     pub entry: String,
     pub engine: String,
@@ -687,6 +721,7 @@ pub enum ToolCall {
     ReadFile(ReadFileInput),
     EditDocument(EditDocumentInput),
     CreateFile(CreateFileInput),
+    SaveDocument(SaveDocumentInput),
     BuildDocument(BuildDocumentInput),
     InsertArtifact(InsertArtifactInput),
     RunPython(RunPythonInput),
@@ -830,6 +865,17 @@ impl ToolCall {
                 None,
                 "Creating a file",
             ),
+            // A save writes the document's file: a change to that path like
+            // an edit (scope, path policy, change authority, and the rules
+            // for files the application executes), with no content returned.
+            ToolCall::SaveDocument(input) => effects(
+                vec![(input.path.as_str(), PathUse::Write)],
+                Exposure::Metadata,
+                Launch::None,
+                true,
+                None,
+                "Saving a document",
+            ),
             ToolCall::BuildDocument(input) if is_latex(&input.entry) => effects(
                 vec![(input.entry.as_str(), PathUse::Read)],
                 // TeX can read any file the user can (an absolute \input path)
@@ -956,6 +1002,7 @@ impl ToolCall {
                 ToolCall::EditDocument(parsed)
             }
             CREATE_FILE => ToolCall::CreateFile(typed(input)?),
+            SAVE_DOCUMENT => ToolCall::SaveDocument(typed(input)?),
             BUILD_DOCUMENT => {
                 let parsed: BuildDocumentInput = typed(input)?;
                 if !matches!(parsed.engine.as_str(), "auto" | "pdflatex" | "lualatex") {
@@ -1079,7 +1126,7 @@ mod tests {
         }
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 16);
     }
 
     #[test]
@@ -1091,6 +1138,14 @@ mod tests {
         assert!(ToolCall::parse(EDIT_DOCUMENT, &json!({"path": "a", "base_revision": -1, "edits": []})).is_err());
         assert!(ToolCall::parse(EDIT_DOCUMENT, &json!({"path": "a", "base_revision": 2, "edits": []})).is_err());
         assert!(ToolCall::parse("delete_everything", &json!({})).is_err());
+        // A save names one path and its revision: nothing else (no overwrite, no "all").
+        assert!(ToolCall::parse(SAVE_DOCUMENT, &json!({"path": "a.py"})).is_err());
+        assert!(ToolCall::parse(SAVE_DOCUMENT, &json!({"path": "a.py", "revision": -1})).is_err());
+        for extra in ["overwrite", "force", "all"] {
+            let mut input = json!({"path": "a.py", "revision": 2});
+            input[extra] = json!(true);
+            assert!(ToolCall::parse(SAVE_DOCUMENT, &input).is_err(), "{extra}");
+        }
         assert!(ToolCall::parse(DELETE_PATHS, &json!({"paths": []})).is_err());
         assert!(ToolCall::parse(DELETE_PATHS, &json!({"paths": ["a"], "permanent": true})).is_err(), "never permanent");
         let many: Vec<String> = (0..=MAX_OP_PATHS).map(|i| format!("f{i}")).collect();
@@ -1111,6 +1166,7 @@ mod tests {
             (LIST_FILES, json!({"path": "", "recursive": true})),
             (EDIT_DOCUMENT, json!({"path": "a", "base_revision": 2, "edits": [{"old_text": "x", "new_text": "y"}]})),
             (CREATE_FILE, json!({"path": "a", "content": ""})),
+            (SAVE_DOCUMENT, json!({"path": "analysis.py", "revision": 3})),
             (BUILD_DOCUMENT, json!({"entry": "main.typ", "engine": "auto"})),
             (
                 INSERT_ARTIFACT,

@@ -6,7 +6,9 @@
 //    written with TOML literal strings is seen (the Lean server does not
 //    start there), the plan names where every dependency is fetched from, a
 //    manifest changed between review and start is a stale plan, a `mathlib`
-//    from another repository is refused, the build-from-source choice does
+//    from another repository is planned with a warning that names the
+//    address (in the plan, under its hash, and in the dialog), the
+//    build-from-source choice does
 //    not start Lake on a package that is not resolved, and an untrusted
 //    folder starts nothing.
 // B. The setup actually run, briefly: a new package in a folder that does
@@ -24,11 +26,13 @@ import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { runCommand } from "../palette.mjs";
 import { invoke, invokeError, openInEditor, waitFor } from "../workspace-helpers.mjs";
 
 const TOOLCHAIN_DIR = "leanprover--lean4---v4.35.0";
 const REV = "56a005855ea17e0b0958f73ec801ae140b0a1679";
 const MATHLIB_URL = "https://github.com/leanprover-community/mathlib4";
+const FORK_URL = "https://github.com/attacker-example/mathlib4";
 const BATTERIES_URL = "https://github.com/leanprover-community/batteries";
 const BATTERIES_REV = "66e469188fe07963e5cf666c7d4433f45b8131c5";
 const manifest = (mathlibUrl, batteriesUrl, batteriesRev) =>
@@ -131,14 +135,64 @@ export default async function mathlibSetupGuard({ launchApp, artifactsDir, asser
     await writeFile(join(root, "pinned", "lakefile.toml"), 'name = "Pinned"\n\n[[require]]\nname = "mathlib"\nscope = "leanprover-community"\nrev = "v4.35.0"\n\n[[lean_lib]]\nname = "Pinned"\n# edited\n');
     const edited = await invokeError(page, "lean_setup_start", { plan: again });
     note("A-changed-lakefile-is-a-stale-plan", edited.error?.code === "lean.setup.planStale", edited.error ?? edited);
-    // `mathlib` taken from another repository: no plan at all, and the reason names the address.
-    await writeFile(join(root, "pinned", "lake-manifest.json"), manifest("https://github.com/attacker-example/mathlib4", BATTERIES_URL, BATTERIES_REV));
-    const unofficial = await invokeError(page, "lean_setup_plan", { request: { kind: "prepareMathlibPackage", folder: "pinned" } });
+    // `mathlib` taken from another repository: planned, and the plan says so
+    // with exactly that address. The fact is under the plan hash.
+    const officialNow = await invoke(page, "lean_setup_plan", { request: { kind: "prepareMathlibPackage", folder: "pinned" } });
+    await writeFile(join(root, "pinned", "lake-manifest.json"), manifest(FORK_URL, BATTERIES_URL, BATTERIES_REV));
+    const fork = await invoke(page, "lean_setup_plan", { request: { kind: "prepareMathlibPackage", folder: "pinned" } });
     note(
-      "A-mathlib-from-another-repository-is-refused",
-      unofficial.error?.code === "lean.setup.unofficialMathlib" && /attacker-example\/mathlib4/.test(unofficial.error?.message ?? ""),
-      unofficial.error ?? unofficial,
+      "A-mathlib-from-a-fork-is-planned-and-named",
+      fork.mathlibSource?.official === false &&
+        fork.mathlibSource?.url === FORK_URL &&
+        fork.sources.some((s) => s.name === "mathlib" && s.url === FORK_URL) &&
+        fork.summary.includes(`Mathlib comes from ${FORK_URL}, not the official repository`) &&
+        fork.planHash !== officialNow.planHash &&
+        officialNow.mathlibSource?.official === true &&
+        officialNow.mathlibSource?.url === MATHLIB_URL,
+      { mathlibSource: fork.mathlibSource, official: officialNow.mathlibSource, summary: fork.summary },
     );
+    const hidden = await invokeError(page, "lean_setup_start", { plan: { ...fork, mathlibSource: officialNow.mathlibSource } });
+    note("A-a-fork-plan-edited-to-official-is-stale", hidden.error?.code === "lean.setup.planStale", hidden.error ?? hidden);
+    // The plan reviewed for the official repository does not start on the fork's manifest.
+    const official = await invokeError(page, "lean_setup_start", { plan: officialNow });
+    note("A-official-plan-does-not-start-on-a-fork", official.error?.code === "lean.setup.planStale", official.error ?? official);
+    // The gate sees a fork as Mathlib, as before.
+    const forked = await invoke(page, "lean_package_inspect", { folder: "pinned" });
+    note(
+      "A-a-fork-is-still-a-mathlib-package",
+      forked.usesMathlib && forked.mathlibRevision === REV && forked.readiness.kind === "dependenciesMissing",
+      { usesMathlib: forked.usesMathlib, readiness: forked.readiness },
+    );
+    // The dialog shows the warning with the Sources table and marks the row; one primary action.
+    await page.setViewportSize({ width: 1440, height: 1000 }).catch(() => {});
+    await runCommand(page, "set up mathlib", /Set Up Mathlib/);
+    const dialog = page.getByRole("dialog", { name: "Set up Mathlib" });
+    await dialog.getByRole("button", { name: /Package/ }).click();
+    await page.getByRole("option", { name: /pinned/ }).click();
+    const planView = page.getByTestId("lean-setup-plan");
+    await waitFor(async () => (await planView.getAttribute("data-plan-hash")) === fork.planHash, { timeout: 20_000, message: "the fork's plan in the dialog" });
+    const warning = (await page.getByTestId("lean-setup-fork-warning").innerText()).replace(/\s+/g, " ");
+    const row = page.locator('[data-testid="lean-setup-sources"] [data-source="mathlib"]');
+    note(
+      "A-dialog-warns-about-the-fork-with-its-address",
+      warning.includes("Mathlib is not from the official repository") &&
+        warning.includes(`Mathlib comes from ${FORK_URL}, not the official repository`) &&
+        /its cache program runs on this computer with your account.s privileges/.test(warning) &&
+        warning.includes("The prebuilt cache may not cover a fork") &&
+        (await row.getAttribute("data-official")) === "false" &&
+        /Not official/.test(await row.innerText()) &&
+        (await dialog.getByTestId("lean-setup-start").count()) === 1 &&
+        (await page.getByRole("dialog").count()) === 1,
+      { warning, row: await row.innerText() },
+    );
+    await page.screenshot({ path: join(artifactsDir, "mathlib-setup-plan-fork-light.png") });
+    if (process.env.EXPOSITION_DEV_HOME) {
+      const dir = join(process.env.EXPOSITION_DEV_HOME, "ui-reference", "research");
+      await mkdir(dir, { recursive: true });
+      await cp(join(artifactsDir, "mathlib-setup-plan-fork-light.png"), join(dir, "mathlib-setup-plan-fork-light.png"));
+    }
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await dialog.waitFor({ state: "hidden", timeout: 10_000 });
     note("A-no-setup-ran", (await invoke(page, "lean_setup_status")) === null, await invoke(page, "lean_setup_status"));
 
     // Trusted: the build-from-source choice does not start Lake on a package

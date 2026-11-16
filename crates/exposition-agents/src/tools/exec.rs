@@ -10,7 +10,11 @@
 //!
 //! Agent document changes go through the document service as transactions
 //! with `EditOrigin::Agent` and `ConflictPolicy::RebaseDisjoint`; reads prefer
-//! open buffers over disk. Nothing here bypasses an open buffer.
+//! open buffers over disk. Nothing here bypasses an open buffer. An agent
+//! save (`save_document`) is the workspace service's own save of one open
+//! document, in its strict form ([`WorkspaceService::save_document_exact`]):
+//! never a file write of its own, never an overwrite of a file that changed
+//! on disk, and gated as a change to that path.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -34,7 +38,7 @@ use super::services::{
 };
 use super::{
     CreateFileInput, EditDocumentInput, Exposure, InsertArtifactInput, Launch, ListFilesInput, PathUse, ReadFileInput,
-    RunCommandInput, ToolCall, scope,
+    RunCommandInput, SaveDocumentInput, ToolCall, scope,
 };
 use crate::graph::propose::Prepared;
 use crate::graph::{GraphEnv, TargetUse};
@@ -242,6 +246,12 @@ pub mod codes {
     /// A folder agents never change (`.git`, `.lake`, `.venv`, `venv`): the
     /// application or the user's tools run what is in it.
     pub const PROTECTED_TARGET: &str = "agents.protectedTarget";
+    /// A save that only the user can decide: the file changed, was deleted
+    /// or moved on disk since the document was opened or last saved, the
+    /// document is in a disk conflict, or it holds recovered text.
+    pub const SAVE_CONFLICT: &str = "agents.saveConflict";
+    /// A save of a document that has no unsaved changes.
+    pub const NOTHING_TO_SAVE: &str = "agents.nothingToSave";
 }
 
 /// A refusal with its stable code.
@@ -269,6 +279,8 @@ pub struct Authorization {
     project_op: Option<Box<PreparedOp>>,
     /// A package setup planned (and shown) before the gate.
     setup: Option<Box<exposition_research::setup::SetupPlan>>,
+    /// A save prepared (and shown) at the gate: exactly this revision.
+    save: Option<Box<PreparedSave>>,
     /// The project permission and allowance versions it was issued under.
     basis: Basis,
     /// How it is authorized (recorded with the call).
@@ -308,6 +320,71 @@ impl Authorization {
             self.basis.allowance_version = version;
         }
     }
+}
+
+/// Whether the text a save writes holds changes this task did not make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OtherChanges {
+    /// Every change since the last save is this task's own.
+    None,
+    /// The text was also changed outside this task since the last save.
+    Included,
+    /// It cannot be told (no saved revision, or the history does not reach it).
+    Unknown,
+}
+
+impl OtherChanges {
+    fn key(self) -> &'static str {
+        match self {
+            OtherChanges::None => "none",
+            OtherChanges::Included => "included",
+            OtherChanges::Unknown => "unknown",
+        }
+    }
+
+    /// The disclosure, as the approval card and the result state it.
+    fn note(self) -> &'static str {
+        match self {
+            OtherChanges::None => "Every unsaved change in this file was made by this task.",
+            OtherChanges::Included => {
+                "Since the last save, this file's editor text was also changed outside this task (your own unsaved \
+                 edits, or another task's). Those changes are saved with it: a save writes the whole current text."
+            }
+            OtherChanges::Unknown => {
+                "Exposition cannot tell which of the unsaved changes this task made. The whole current editor text \
+                 is saved, whoever wrote it."
+            }
+        }
+    }
+
+    /// The same disclosure addressed to the agent (in the tool result).
+    fn result_note(self) -> &'static str {
+        match self {
+            OtherChanges::None => "Every unsaved change that was saved was made by this task.",
+            OtherChanges::Included => {
+                "Since the last save, the editor text had also been changed outside this task (the user's own \
+                 unsaved edits, or another task's). Those changes were saved with yours: a save writes the whole \
+                 current text. Tell the user."
+            }
+            OtherChanges::Unknown => {
+                "Exposition cannot tell which of the saved changes this task made: the whole current editor text \
+                 was saved, whoever wrote it. Tell the user."
+            }
+        }
+    }
+}
+
+/// A save prepared at the gate: the document and the exact revision that
+/// may be written, what it holds, and its complete description for approval.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedSave {
+    path: WorkspacePath,
+    document: DocumentId,
+    revision: u64,
+    content_hash: String,
+    others: OtherChanges,
+    title: String,
+    detail: String,
 }
 
 /// An artifact insertion as planned when it was shown for approval.
@@ -704,6 +781,9 @@ fn auto_exec_target(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Option<AutoExe
     let found = match call {
         ToolCall::EditDocument(input) => path_kind(env, &input.path),
         ToolCall::CreateFile(input) => path_kind(env, &input.path),
+        // A save puts the buffer's text on disk under this name: the same
+        // rule as the edits that wrote it, whoever wrote it.
+        ToolCall::SaveDocument(input) => path_kind(env, &input.path),
         ToolCall::InsertArtifact(input) => path_kind(env, &input.path),
         ToolCall::CopyPaths(input) => {
             let mut budget = autoexec::MAX_SCAN_ENTRIES;
@@ -1068,6 +1148,12 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         ToolCall::InsertArtifact(input) => prepare_insertion(env, input, asks.asked)?,
         _ => None,
     };
+    // A save: the document's state decides before anyone is asked (a
+    // conflict, recovered text, or a stale revision is refused, not shown).
+    let save = match call {
+        ToolCall::SaveDocument(input) => Some(prepare_save(env, input)?),
+        _ => None,
+    };
     let proposal = match (call, env.graph) {
         (ToolCall::GraphPropose(input), Some(graph)) => {
             Some(crate::graph::propose::prepare(graph, root, spec, env.task_id, input)?)
@@ -1090,6 +1176,7 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         workflow: None,
         project_op: None,
         setup,
+        save: None,
         basis: env.authority.basis(spec.approval_mode),
         authorized_by: covered.authorized_by(&env.authority),
     };
@@ -1098,14 +1185,17 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
         authorization.proposal = proposal.map(Box::new);
         authorization.workflow = workflow.map(Box::new);
         authorization.project_op = project_op.map(Box::new);
+        authorization.save = save.map(Box::new);
         return Ok(Gate::Allowed(authorization));
     }
-    let (title, mut detail) = match (&proposal, &workflow, &project_op) {
-        (Some(prepared), _, _) => (prepared.title.clone(), prepared.detail.clone()),
-        (_, Some(prepared), _) => (prepared.title.clone(), prepared.detail.clone()),
-        (_, _, Some(prepared)) => (prepared.title.clone(), prepared.detail.clone()),
+    let (title, mut detail) = match (&proposal, &workflow, &project_op, &save) {
+        (Some(prepared), _, _, _) => (prepared.title.clone(), prepared.detail.clone()),
+        (_, Some(prepared), _, _) => (prepared.title.clone(), prepared.detail.clone()),
+        (_, _, Some(prepared), _) => (prepared.title.clone(), prepared.detail.clone()),
+        (_, _, _, Some(prepared)) => (prepared.title.clone(), prepared.detail.clone()),
         _ => describe(call, insertion.as_ref().map(|(_, shown)| shown.as_str())),
     };
+    authorization.save = save.map(Box::new);
     authorization.project_op = project_op.map(Box::new);
     authorization.proposal = proposal.map(Box::new);
     authorization.workflow = workflow.map(Box::new);
@@ -1318,6 +1408,7 @@ fn describe(call: &ToolCall, insertion: Option<&str>) -> (String, String) {
         | ToolCall::GraphQuery(_)
         | ToolCall::GraphPropose(_)
         | ToolCall::WorkflowPropose(_)
+        | ToolCall::SaveDocument(_)
         | ToolCall::DeletePaths(_)
         | ToolCall::CopyPaths(_) => (String::new(), String::new()),
     };
@@ -1330,6 +1421,202 @@ fn describe(call: &ToolCall, insertion: Option<&str>) -> (String, String) {
         detail
     };
     (title, detail)
+}
+
+/// A workspace refusal of a save, as the tool result states it: conflicts
+/// and recovered text are the user's to resolve.
+fn save_refusal(e: exposition_workspace::WorkspaceError) -> ToolOutput {
+    match e.code {
+        "file.modifiedOnDisk"
+        | "document.conflict"
+        | "document.recovered"
+        | "document.recoveryPending"
+        | "document.fileDeleted" => ToolOutput::error_with(
+            format!(
+                "{} Nothing was saved and the file on disk was not changed. Only the user resolves this, in the \
+                 editor; tell them, and do not work around it.",
+                e.message
+            ),
+            json!({"code": codes::SAVE_CONFLICT, "saved": false, "reason": e.code}),
+        ),
+        code => {
+            ToolOutput::error_with(format!("{} Nothing was saved.", e.message), json!({"saved": false, "reason": code}))
+        }
+    }
+}
+
+/// Whether the text a save of `document` writes holds changes this task did
+/// not make: every change since the saved revision is read from the document
+/// service's history.
+fn other_changes(env: &ToolEnv<'_>, document: &DocumentId) -> OtherChanges {
+    let Some(saved) = env.documents.info(document).ok().and_then(|info| info.saved_revision) else {
+        return OtherChanges::Unknown;
+    };
+    match env.documents.origins_since(document, saved) {
+        Ok(Some(origins)) => {
+            let own =
+                |origin: &EditOrigin| matches!(origin, EditOrigin::Agent { task_id } if *task_id == env.task_id.0);
+            if origins.iter().all(own) { OtherChanges::None } else { OtherChanges::Included }
+        }
+        _ => OtherChanges::Unknown,
+    }
+}
+
+/// What a save changes in the file, complete: every line it removes from the
+/// version on disk and every line it adds, with two lines of context.
+fn save_changes(disk: &str, text: &str) -> String {
+    let diff = similar::TextDiff::configure().timeout(std::time::Duration::from_millis(500)).diff_lines(disk, text);
+    let mut out = String::new();
+    for group in diff.grouped_ops(2) {
+        let Some(first) = group.first() else { continue };
+        out.push_str(&format!("\n@@ from line {} @@\n", first.old_range().start + 1));
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                let sign = match change.tag() {
+                    similar::ChangeTag::Delete => '-',
+                    similar::ChangeTag::Insert => '+',
+                    similar::ChangeTag::Equal => ' ',
+                };
+                let line = change.value();
+                out.push_str(&format!("{sign} {}", shown(line.strip_suffix('\n').unwrap_or(line))));
+                out.push('\n');
+                if !line.ends_with('\n') {
+                    out.push_str("  (no line break at the end of the file)\n");
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Prepare a save at the gate: the document must be open, at the revision
+/// the agent named, with unsaved changes, and in a state the workspace
+/// service's strict save accepts (no disk conflict, no recovered text, the
+/// file unchanged on disk since it was opened or last saved). The
+/// description is complete: what is written, whose changes it holds, and
+/// every line that changes on disk.
+fn prepare_save(env: &ToolEnv<'_>, input: &SaveDocumentInput) -> Result<PreparedSave, ToolOutput> {
+    let path = parse_path(&input.path)?;
+    let Some(workspace) = env.workspace else {
+        return Err(refusal(
+            codes::SERVICE_UNAVAILABLE,
+            "Saving goes through the editor's document service, which is not available here. Nothing was saved.",
+        ));
+    };
+    let Some(id) = env.documents.find_by_path(&path) else {
+        return Err(ToolOutput::error_with(
+            format!(
+                "{path} is not open in the editor, so it has no unsaved text: the file on disk is its saved version. \
+                 Nothing was saved."
+            ),
+            json!({"saved": false}),
+        ));
+    };
+    let preview = workspace.exact_save_preview(&id).map_err(save_refusal)?;
+    if preview.revision != input.revision {
+        return Err(ToolOutput::error_with(
+            format!(
+                "{path} is at revision {}, not revision {}: it changed since you read or edited it. Nothing was \
+                 saved. Read the file again and save the revision you mean.",
+                preview.revision, input.revision
+            ),
+            json!({"saved": false, "currentRevision": preview.revision}),
+        ));
+    }
+    if !preview.unsaved {
+        return Err(ToolOutput::error_with(
+            format!(
+                "{path} has no unsaved changes: the file on disk already holds revision {} of the editor text. \
+                 Nothing was written.",
+                preview.revision
+            ),
+            json!({"code": codes::NOTHING_TO_SAVE, "saved": false, "unsavedChanges": false}),
+        ));
+    }
+    let others = other_changes(env, &id);
+    let mut detail = format!(
+        "Save {path} to disk: revision {} of the editor text ({} bytes, sha256 {}) replaces the file's saved \
+         version.\n{}\n",
+        preview.revision,
+        preview.bytes,
+        preview.content_hash,
+        others.note()
+    );
+    match &preview.disk_text {
+        Some(disk) => {
+            detail.push_str("\nWhat changes in the file (- on disk now, + after the save):\n");
+            detail.push_str(&save_changes(disk, &preview.text));
+        }
+        None => {
+            detail.push_str("\nThere is no file on disk to compare with. The text that is written:\n\n");
+            detail.push_str(&shown(&preview.text));
+        }
+    }
+    let mut detail = detail.trim_end().to_owned();
+    if detail.contains("⟨U+") {
+        detail.push_str(
+            "\n\nNote: invisible or direction-changing characters are shown as ⟨U+XXXX⟩; they are part of what is \
+             saved.",
+        );
+    }
+    Ok(PreparedSave {
+        title: format!("Save {path}"),
+        detail,
+        path,
+        document: id,
+        revision: preview.revision,
+        content_hash: preview.content_hash,
+        others,
+    })
+}
+
+/// Where a saved document is (in every such result).
+const SAVED_NOTE: &str = "Saved to disk with the editor's own save: the file now holds this revision of the editor \
+    text, so programs you run and copy_paths see it. The user still reviews your changes (Keep or Revert); a revert \
+    changes the editor text, and the file keeps what was saved until it is saved again.";
+
+/// Save the prepared revision with the workspace service's strict save (the
+/// user's save, which also refuses whatever only the user can decide). The
+/// checks of [`prepare_save`] are made again by the save itself, under its
+/// lock: a document that changed since the gate is not saved.
+fn save_document(env: &ToolEnv<'_>, prepared: &PreparedSave) -> Result<ToolOutput, ToolOutput> {
+    let Some(workspace) = env.workspace else {
+        return Err(refusal(
+            codes::SERVICE_UNAVAILABLE,
+            "Saving goes through the editor's document service, which is not available here. Nothing was saved.",
+        ));
+    };
+    workspace::check_root(Some(workspace), env.files.root()).map_err(|reason| project_changed(&reason))?;
+    let path = &prepared.path;
+    // Whose changes the text holds is read again: it is reported as saved.
+    let others = other_changes(env, &prepared.document);
+    let saved = workspace.save_document_exact(&prepared.document, prepared.revision).map_err(|e| match e.code {
+        "document.changed" => ToolOutput::error_with(
+            format!(
+                "{path} changed after this save was authorized (it is no longer at revision {}). Nothing was saved. \
+                 Read the file again and save the revision you mean.",
+                prepared.revision
+            ),
+            json!({"code": codes::CHANGED_SINCE_APPROVAL, "saved": false}),
+        ),
+        _ => save_refusal(e),
+    })?;
+    let graph_info = resolve_target(env, path, TargetUse::Edit);
+    let mut result = json!({
+        "path": path.as_str(),
+        "saved": true,
+        "revision": saved.revision,
+        "bytes": saved.bytes,
+        "contentHash": saved.content_hash,
+        "unsavedChanges": saved.info.saved_revision != Some(saved.info.revision),
+        "otherChanges": others.key(),
+        "otherChangesNote": others.result_note(),
+        "note": SAVED_NOTE,
+    });
+    if let Some(graph) = graph_info {
+        result["graph"] = graph;
+    }
+    Ok(ToolOutput::ok(result))
 }
 
 /// The text of `path` now: its open buffer, or the file on disk (without
@@ -1480,7 +1767,8 @@ pub async fn run(
     if let Err(refused) = check_basis(env, &authorization) {
         return refused;
     }
-    let Authorization { policy, insertion, proposal, workflow, project_op, setup, authorized_by, .. } = authorization;
+    let Authorization { policy, insertion, proposal, workflow, project_op, setup, save, authorized_by, .. } =
+        authorization;
     let result = match call {
         ToolCall::GraphQuery(input) => match env.graph {
             Some(graph) => crate::graph::query::run(graph, env.files.root(), env.spec, &input),
@@ -1512,6 +1800,10 @@ pub async fn run(
         ToolCall::ReadFile(input) => read_file(env, seen, input),
         ToolCall::EditDocument(input) => edit_document(env, seen, tool_use_id, input),
         ToolCall::CreateFile(input) => create_file(env, seen, tool_use_id, input),
+        ToolCall::SaveDocument(_) => match save {
+            Some(prepared) => save_document(env, &prepared),
+            None => Err(ToolOutput::error("the save was not prepared by the gate")),
+        },
         ToolCall::BuildDocument(input) => match parse_path(&input.entry) {
             Ok(entry) => {
                 let engine = match input.engine.as_str() {
@@ -1621,7 +1913,8 @@ fn with_disk_note(result: Result<ToolOutput, ToolOutput>, unsaved: Vec<String>) 
                 "filesNote".into(),
                 json!(
                     "The process read files as saved on disk. The files in unsavedNotSeen had unsaved editor changes \
-                     when it started, which it did not see; only the user saves them."
+                     when it started, which it did not see. save_document saves one of them when this task needs it \
+                     on disk (the whole editor text, the user's unsaved changes included); otherwise the user saves."
                 ),
             );
         }
@@ -1653,8 +1946,8 @@ fn with_checked_text(
                 format!("the editor text at revision {revision}, which is the saved file (no unsaved changes)")
             }
             (Some(revision), Some(_)) => format!(
-                "the editor text at revision {revision}, which has unsaved changes: the file on disk differs until the \
-                 user saves it"
+                "the editor text at revision {revision}, which has unsaved changes: the file on disk differs until it \
+                 is saved"
             ),
             _ => "the saved file on disk".to_owned(),
         };
@@ -1897,8 +2190,9 @@ fn read_file(env: &ToolEnv<'_>, seen: &mut SeenTexts, input: ReadFileInput) -> R
 
 /// Where an applied edit or insertion is (in every such result).
 const EDITED_NOTE: &str = "Applied to the editor text, not saved to disk: the file on disk keeps its last saved \
-    version until the user saves it (you cannot save). read_file, build_document, and check_lean use the editor text; \
-    programs you run and copy_paths read the saved file. The user reviews the change (Keep or Revert).";
+    version until it is saved (save_document saves it, with the authority a file change needs; so can the user). \
+    read_file, build_document, and check_lean use the editor text; programs you run and copy_paths read the saved \
+    file. The user reviews the change (Keep or Revert).";
 /// Where a created file is (in every such result).
 const CREATED_NOTE: &str =
     "Written to disk (saved) and opened in the editor. The user reviews the creation (Keep or Revert).";

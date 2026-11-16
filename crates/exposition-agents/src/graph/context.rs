@@ -293,6 +293,18 @@ pub fn operations(spec: &TaskSpec, services: &dyn ToolServices) -> Vec<ContextOp
         op("read_file", content, if content { "files in scope" } else { "refused: metadata-only consent" }),
         op("edit_document", changes.0, changes.1),
         op("create_file", changes.0, changes.1),
+        op(
+            "save_document",
+            changes.0,
+            &if changes.0 {
+                format!(
+                    "saves one open file's whole editor text to disk, as a file change ({}); never over a file                      that changed on disk or is in a conflict",
+                    changes.1
+                )
+            } else {
+                changes.1.to_owned()
+            },
+        ),
         op("insert_artifact", changes.0, changes.1),
         op(
             "workflow_propose",

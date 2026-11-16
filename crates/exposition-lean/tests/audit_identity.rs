@@ -22,6 +22,7 @@ fn package(toolchain_digest: &str, manifest_digest: &str) -> LeanAuditPackage {
             sha256: manifest_digest.repeat(32),
         }),
         mathlib_revision: Some("56a005855ea17e0b0958f73ec801ae140b0a1679".into()),
+        mathlib_source: Some("https://github.com/leanprover-community/mathlib4".into()),
         dependency_count: 9,
     }
 }

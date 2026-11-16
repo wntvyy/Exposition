@@ -68,6 +68,7 @@ function newPlan(overrides: Partial<LeanSetupPlan> = {}): LeanSetupPlan {
     toolchain: "leanprover/lean4:v4.35.0",
     toolchainInstalled: true,
     mathlibRevision: "v4.35.0",
+    mathlibSource: { official: true, url: "https://github.com/leanprover-community/mathlib4" },
     pinnedByManifest: false,
     lakefileDigest: null,
     manifestDigest: null,
@@ -246,6 +247,42 @@ describe("Mathlib setup", () => {
     expect(rows[1]).toContain("Fetched by this setup");
     expect(screen.queryByTestId("lean-setup-sources-note")).toBeNull();
     expect(summary).toContain("from the addresses listed under Sources");
+    // The official repository: no warning, nothing marked.
+    expect(screen.queryByTestId("lean-setup-fork-warning")).toBeNull();
+    expect(rows[1]).not.toContain("Not official");
+  });
+
+  it("says in the plan when Mathlib comes from a fork, with the address, and keeps the one action", async () => {
+    const fork = "https://github.com/someone/mathlib4";
+    const base = preparePlan();
+    const plan = {
+      ...base,
+      mathlibSource: { official: false, url: fork },
+      sources: base.sources.map((source) => (source.name === "mathlib" ? { ...source, url: fork } : source)),
+      planHash: "h3",
+    };
+    ipc.leanProjects.mockResolvedValue([lakeProject]);
+    ipc.leanSetupPlan.mockResolvedValue(plan);
+    ipc.leanSetupStart.mockResolvedValue(status(plan, { step: 0 }));
+    render(<MathlibSetupDialog />);
+    act(() => openMathlibSetup({ kind: "prepare", folder: "lean" }));
+    const warning = await screen.findByTestId("lean-setup-fork-warning");
+    expect(warning.getAttribute("data-tone")).toBe("warning");
+    const text = (warning.textContent ?? "").replace(/\s+/g, " ");
+    expect(text).toContain("Mathlib is not from the official repository");
+    expect(text).toContain(`Mathlib comes from ${fork}, not the official repository (https://github.com/leanprover-community/mathlib4).`);
+    expect(text).toContain("its cache program runs on this computer with your account’s privileges");
+    expect(text).toContain("The prebuilt cache may not cover a fork; then the cache step or the check after it fails, and Mathlib can only be built from source (hours).");
+    // The warning sits with the Sources table, and the mathlib row is marked.
+    expect(warning.parentElement?.querySelector("[data-testid=lean-setup-sources]")).toBeTruthy();
+    const rows = [...screen.getByTestId("lean-setup-sources").querySelectorAll("tbody tr")];
+    expect(rows[0]?.textContent).not.toContain("Not official");
+    expect(rows[1]?.textContent).toContain(fork);
+    expect(rows[1]?.textContent).toContain("Not official");
+    expect(rows[1]?.getAttribute("data-official")).toBe("false");
+    // One primary action and no further question: it starts exactly the plan shown.
+    fireEvent.click(screen.getByTestId("lean-setup-start"));
+    await waitFor(() => expect(ipc.leanSetupStart).toHaveBeenCalledWith(plan));
   });
 
   it("says a prepared package needs nothing and a changed project needs a new plan", async () => {

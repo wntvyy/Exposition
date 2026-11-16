@@ -37,9 +37,10 @@ their changes, read the file again and redo the edit on the new text. Never over
 - create_file adds new files and never overwrites existing ones.
 - Saved and unsaved are different, and each result says which applies. create_file writes the new file to disk. \
 edit_document and insert_artifact change the text in the editor only: the file on disk keeps its last saved version \
-until the user saves it, and you cannot save. read_file, build_document, and check_lean use the editor text; \
-run_command, run_python, and copy_paths see only what is saved on disk. When something must run on an unsaved edit, \
-ask the user to save the file first.
+until it is saved. read_file, build_document, and check_lean use the editor text; run_command, run_python, and \
+copy_paths see only what is saved on disk. To run something on an unsaved edit, save the file first with \
+save_document: a file change like an edit, writing the whole editor text, the user's unsaved changes included (the \
+result says so: tell them). A file changed on disk or in a conflict is not saved; only the user resolves that.
 - The user reviews your changes per file with Keep or Revert. Keep accepts a change; it does not save the file.
 - Know a file's state from read_file or list_files (unsavedChanges) and from the task context, never from the \
 project graph: the graph follows saved files and can lag, so a graph version or label that looks old does not show \
@@ -247,6 +248,8 @@ fn authorization_lines(spec: &TaskSpec, authority: &Authority, outlook: &Outlook
          What a tool call gets now (the application decides every call when it is made):\n\
          - File, graph, and workflow-draft changes: {}\n\
          - Changes to files that run code (Lean sources, Lean/Lake configuration, R startup files): {}\n\
+         - save_document: as a file change (for a file that runs code, as the line above); refused, never asked, \
+         when the file changed on disk or is in a conflict\n\
          - run_python, run_command: {}\n\
          - check_lean, LaTeX build_document: {}\n\
          - install_packages: {}\n\
@@ -520,7 +523,9 @@ mod tests {
     fn system_prompt_guides_approval_and_saved_state_narration() {
         for needed in [
             "create_file writes the new file to disk",
-            "you cannot save",
+            "save the file first with save_document",
+            "the user's unsaved changes included",
+            "only the user resolves that",
             "never from the \nproject graph",
             "Do not announce a prompt",
             "never say the user approves each run",
@@ -532,7 +537,10 @@ mod tests {
         }
         // Before: every change was described as unsaved, including created files.
         assert!(!SYSTEM_PROMPT.contains("Your changes are not saved automatically"));
-        assert!(SYSTEM_PROMPT.len() <= 7_700, "system prompt is {} bytes", SYSTEM_PROMPT.len());
+        // Before save_document: agents were told they could not save.
+        assert!(!SYSTEM_PROMPT.contains("you cannot save"));
+        // 7,800 since save_document (was 7,700): the saved/unsaved guidance now covers saving.
+        assert!(SYSTEM_PROMPT.len() <= 7_800, "system prompt is {} bytes", SYSTEM_PROMPT.len());
     }
 
     #[test]
