@@ -12,6 +12,7 @@ import type { LeanPackageInspection } from "../../bindings/LeanPackageInspection
 import type { LeanProjectInfo } from "../../bindings/LeanProjectInfo";
 import type { LeanSetupPlan } from "../../bindings/LeanSetupPlan";
 import type { LeanSetupRequest } from "../../bindings/LeanSetupRequest";
+import type { LeanSetupSource } from "../../bindings/LeanSetupSource";
 import type { LeanSetupStatus } from "../../bindings/LeanSetupStatus";
 import { commands, errorMessage, isCommandError } from "../../lib/ipc";
 import {
@@ -24,6 +25,7 @@ import {
   ProgressBar,
   Section,
   Select,
+  SimpleTable,
   StatusPill,
   TextField,
   confirm,
@@ -114,7 +116,8 @@ function planFacts(plan: LeanSetupPlan): KeyValueItem[] {
     {
       key: "downloads",
       label: "Downloads",
-      value: "Mathlib and its dependencies from GitHub and Mathlib's prebuilt cache from cache.mathlib.org: several GB, into the package's .lake folder.",
+      value:
+        "The dependencies from the addresses listed under Sources, and Mathlib's prebuilt cache from cache.mathlib.org: several GB, into the package's .lake folder.",
     },
     {
       key: "runs",
@@ -132,11 +135,71 @@ function planFacts(plan: LeanSetupPlan): KeyValueItem[] {
       key: "recovery",
       label: "If it fails",
       value: plan.createsPackage
-        ? "The new package's files are removed; nothing else in the project changes."
+        ? "The new package's files are removed; nothing else in the project changes. A file you add or change in the new folder meanwhile is kept."
         : "Your configuration files stay as they are. The package is not shown as ready until a setup of it succeeds.",
     },
   );
   return facts;
+}
+
+/** Where a dependency comes from, in words. */
+function sourceOrigin(source: LeanSetupSource): React.ReactNode {
+  if (source.url) return <code className="ui-code">{source.url}</code>;
+  if (source.kind === "path") return "A local folder";
+  if (source.kind === "reservoir") {
+    return (
+      <>
+        The Lean package registry (Reservoir) entry{" "}
+        <code className="ui-code">{source.scope ? `${source.scope}/${source.name}` : source.name}</code>
+      </>
+    );
+  }
+  return "Not stated";
+}
+
+function sourceRevision(source: LeanSetupSource): React.ReactNode {
+  if (source.rev) {
+    return (
+      <>
+        <code className="ui-code" title={source.rev}>
+          {source.rev.slice(0, 12)}
+        </code>
+        {source.inputRev ? ` (${source.inputRev})` : ""}
+      </>
+    );
+  }
+  return source.inputRev ? <code className="ui-code">{source.inputRev}</code> : "Chosen by Lake";
+}
+
+/** Every dependency of the plan with the address and revision it is fetched from. */
+function PlanSources({ plan }: { plan: LeanSetupPlan }) {
+  return (
+    <Section title="Sources" count={plan.sources.length}>
+      <SimpleTable<LeanSetupSource>
+        aria-label="Where the dependencies are fetched from"
+        data-testid="lean-setup-sources"
+        columns={[
+          { id: "name", title: "Dependency", isRowHeader: true, render: (source) => source.name },
+          { id: "from", title: "Fetched from", render: sourceOrigin },
+          { id: "revision", title: "Revision", render: sourceRevision },
+          {
+            id: "state",
+            title: "State",
+            render: (source) => (source.present ? "Already downloaded" : plan.pinnedByManifest ? "Fetched by this setup" : "Resolved by Lake"),
+          },
+        ]}
+        rows={plan.sources}
+        rowKey={(source) => source.name}
+        rowProps={(source) => ({ "data-source": source.name, "data-url": source.url ?? undefined })}
+        empty="The lakefile names no requirement that could be read."
+      />
+      {plan.sourcesNote && (
+        <p className="ui-meta" data-testid="lean-setup-sources-note">
+          {plan.sourcesNote}
+        </p>
+      )}
+    </Section>
+  );
 }
 
 /** A running setup: step, live output, Cancel. */
@@ -197,7 +260,7 @@ export function MathlibSetupOutcome({ status, onRetry }: { status: LeanSetupStat
   }
   const canceled = status.state === "canceled";
   return (
-    <div data-testid="lean-setup-outcome" data-state={status.state} data-removed={status.removed.length}>
+    <div data-testid="lean-setup-outcome" data-state={status.state} data-removed={status.removed.length} data-kept={status.kept.length}>
       <Banner
         tone={canceled ? "canceled" : "danger"}
         title={canceled ? "Setup canceled" : "Setup failed"}
@@ -352,6 +415,7 @@ function usePlanView(target: MathlibSetupTarget, active: boolean, onStarted: () 
                 <KeyValueList items={planFacts(plan)} />
               </div>
             )}
+            {plan && <PlanSources plan={plan} />}
             {prepared && (
               <Banner tone="success" title="Already prepared">
                 <span data-testid="lean-setup-plan-error" data-code="lean.setup.alreadyPrepared">
@@ -519,7 +583,11 @@ function preparation(inspection: LeanPackageInspection): { title: string; canPre
     case "dependenciesUnresolved":
       return { title: "The dependencies are not resolved", canPrepare: true, canBuild: false };
     case "unfinished":
-      return { title: "A Mathlib setup did not finish here", canPrepare: true, canBuild: false };
+      // Building from source stays possible when the setup did not touch the dependency sources.
+      return { title: "A Mathlib setup did not finish here", canPrepare: true, canBuild: inspection.readiness.canBuildFromSource };
+    case "toolchainUnpinned":
+      // Set Up Mathlib explains which lean-toolchain the package needs.
+      return { title: "The Lean version is not pinned", canPrepare: true, canBuild: false };
     case "toolchainMismatch":
       return { title: "The Lean version does not match this Mathlib revision", canPrepare: false, canBuild: false };
     default:
@@ -579,29 +647,39 @@ export function PackagePreparation({ state }: { state: LeanDocumentState }) {
     );
   }
   return (
-    <div data-testid="lean-package-preparation" data-readiness={inspection.readiness.kind} data-folder={inspection.folder}>
-      <Banner tone="warning" title={view.title}>
+    <div
+      className="exp-lean-setup__preparation"
+      data-testid="lean-package-preparation"
+      data-readiness={inspection.readiness.kind}
+      data-folder={inspection.folder}
+    >
+      <Banner
+        tone="warning"
+        title={view.title}
+        actions={
+          view.canPrepare || view.canBuild ? (
+            <>
+              {view.canPrepare && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  icon={PackageCheck}
+                  onPress={() => openMathlibSetup({ kind: "prepare", folder: inspection.folder })}
+                  data-testid="lean-prepare-open"
+                >
+                  Set Up Mathlib…
+                </Button>
+              )}
+              {view.canBuild && (
+                <Button size="sm" icon={Hammer} onPress={() => void buildFromSource(state)} data-testid="lean-build-from-source">
+                  Build from source instead…
+                </Button>
+              )}
+            </>
+          ) : undefined
+        }
+      >
         {reason}
-        {(view.canPrepare || view.canBuild) && (
-          <div className="exp-lean-setup__actions">
-            {view.canPrepare && (
-              <Button
-                size="sm"
-                variant="primary"
-                icon={PackageCheck}
-                onPress={() => openMathlibSetup({ kind: "prepare", folder: inspection.folder })}
-                data-testid="lean-prepare-open"
-              >
-                Set Up Mathlib…
-              </Button>
-            )}
-            {view.canBuild && (
-              <Button size="sm" icon={Hammer} onPress={() => void buildFromSource(state)} data-testid="lean-build-from-source">
-                Build from source instead…
-              </Button>
-            )}
-          </div>
-        )}
       </Banner>
     </div>
   );

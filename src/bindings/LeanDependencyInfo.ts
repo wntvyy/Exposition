@@ -19,4 +19,9 @@ inputRev: string | null,
 /**
  * Its checkout is in the package's packages folder.
  */
-present: boolean, };
+present: boolean, 
+/**
+ * Where a git dependency is fetched from, as the manifest says (without
+ * any credentials written into the address).
+ */
+url: string | null, };

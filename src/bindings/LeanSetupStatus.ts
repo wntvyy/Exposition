@@ -21,6 +21,11 @@ message: string | null,
  */
 removed: Array<string>, 
 /**
+ * Paths in what this setup created that it did not remove, because they
+ * were added or changed while it ran (the user's own files).
+ */
+kept: Array<string>, 
+/**
  * The package as inspected after the setup ended.
  */
 inspection: LeanPackageInspection | null, 

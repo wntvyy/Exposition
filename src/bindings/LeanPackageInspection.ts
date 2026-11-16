@@ -19,6 +19,16 @@ root: string,
  */
 lakefile: string | null, 
 /**
+ * SHA-256 (hex) of the lakefile.
+ */
+lakefileDigest: string | null, 
+/**
+ * The lakefile declares requirements that cannot be read as data (a
+ * `lakefile.lean` is code): what they resolve to is known only from a
+ * manifest.
+ */
+requirementsInCode: boolean, 
+/**
  * The toolchain `lean-toolchain` pins, exactly as written.
  */
 toolchain: string | null, toolchainInstalled: boolean, 

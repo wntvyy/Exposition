@@ -3,4 +3,10 @@
 /**
  * Whether a package can be checked as it is. Decided from files only.
  */
-export type LeanPackageReadiness = { "kind": "notAPackage" } | { "kind": "unfinished", message: string, } | { "kind": "toolchainUnpinned" } | { "kind": "toolchainMissing", toolchain: string, } | { "kind": "dependenciesUnresolved" } | { "kind": "dependenciesMissing", names: Array<string>, } | { "kind": "toolchainMismatch", package: string, mathlib: string, } | { "kind": "cacheMissing" } | { "kind": "ready" };
+export type LeanPackageReadiness = { "kind": "notAPackage" } | { "kind": "unfinished", message: string, 
+/**
+ * The setup did not touch the dependency sources (they were complete
+ * and pinned before it began), so the user's explicit choice to
+ * build Mathlib from source can still be taken.
+ */
+canBuildFromSource: boolean, } | { "kind": "toolchainUnpinned" } | { "kind": "toolchainMissing", toolchain: string, } | { "kind": "dependenciesUnresolved" } | { "kind": "dependenciesMissing", names: Array<string>, } | { "kind": "toolchainMismatch", package: string, mathlib: string, } | { "kind": "cacheMissing" } | { "kind": "ready" };

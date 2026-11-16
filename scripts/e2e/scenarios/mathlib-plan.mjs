@@ -144,6 +144,20 @@ export default async function mathlibPlan({ launchApp, artifactsDir, assert, fix
         !/elan(\.exe)? default/.test(commands),
       commands,
     );
+    // Where the dependencies come from: the lakefile's one requirement, and
+    // what is decided only when Lake resolves it.
+    const sourcesText = await page.getByTestId("lean-setup-sources").innerText();
+    const sourcesNote = await page.getByTestId("lean-setup-sources-note").innerText();
+    note(
+      "prepare-plan-names-where-the-dependencies-come-from",
+      /mathlib/.test(sourcesText) &&
+        /leanprover-community\/mathlib/.test(sourcesText) &&
+        /v4\.35\.0/.test(sourcesText) &&
+        /Resolved by Lake/.test(sourcesText) &&
+        /stops before the cache step unless `mathlib` then comes from https:\/\/github\.com\/leanprover-community\/mathlib4/.test(sourcesNote) &&
+        /from the addresses listed under Sources/.test(summary),
+      { sourcesText, sourcesNote },
+    );
     await shot("mathlib-setup-plan-existing-light");
     if (process.env.EXPOSITION_DEV_HOME) {
       const dir = join(process.env.EXPOSITION_DEV_HOME, "ui-reference", "research");

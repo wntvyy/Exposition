@@ -1,19 +1,24 @@
-// R-pr (independent review of e6eca9d..fa6c16e) against the built app: real
-// IPC from the webview, the real Lean service, the real execution service,
-// and the installed Lean toolchain. No model is used.
+// The guards of the Mathlib setup against the built app: real IPC from the
+// webview, the real Lean service, the real execution service, and the
+// installed Lean toolchain. No model is used.
 //
-// A. The Mathlib setup commands over IPC: what an unprepared package is taken
-//    for, the build-from-source choice on a package that is not resolved, a
-//    manifest changed between review and start, a start in an untrusted
-//    folder.
-// B. The setup actually run, briefly: a new package is started from IPC and
-//    canceled as soon as its first command runs (`lake update`, the first
-//    seconds of a clone; nothing large is downloaded). While it runs, the
-//    user adds a file of their own in the new library folder. Afterwards:
-//    what was removed, what stayed, whether anything keeps writing.
+// A. The setup commands over IPC, nothing runs: a Mathlib requirement
+//    written with TOML literal strings is seen (the Lean server does not
+//    start there), the plan names where every dependency is fetched from, a
+//    manifest changed between review and start is a stale plan, a `mathlib`
+//    from another repository is refused, the build-from-source choice does
+//    not start Lake on a package that is not resolved, and an untrusted
+//    folder starts nothing.
+// B. The setup actually run, briefly: a new package in a folder that does
+//    not exist yet is started from IPC and canceled as soon as its first
+//    command runs (`lake update`, the first seconds of a clone; nothing
+//    large is downloaded). While it runs, the user adds a file of their own
+//    in the new library folder. Afterwards: everything the setup created is
+//    removed, the user's file is kept and named in the outcome, nothing else
+//    changed, and nothing keeps writing.
 //
-// Product defects are reported as `DEFECT` lines (the scenario still passes);
-// held checks fail the scenario.
+// Self-skips without Lean 4.35 installed through elan (set
+// EXPOSITION_REQUIRE_LEAN=1 to fail instead).
 import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -23,12 +28,15 @@ import { invoke, invokeError, openInEditor, waitFor } from "../workspace-helpers
 
 const TOOLCHAIN_DIR = "leanprover--lean4---v4.35.0";
 const REV = "56a005855ea17e0b0958f73ec801ae140b0a1679";
-const manifest = (batteriesUrl, batteriesRev) =>
+const MATHLIB_URL = "https://github.com/leanprover-community/mathlib4";
+const BATTERIES_URL = "https://github.com/leanprover-community/batteries";
+const BATTERIES_REV = "66e469188fe07963e5cf666c7d4433f45b8131c5";
+const manifest = (mathlibUrl, batteriesUrl, batteriesRev) =>
   JSON.stringify({
     version: "1.3.0",
     packagesDir: ".lake/packages",
     packages: [
-      { url: "https://github.com/leanprover-community/mathlib4", type: "git", rev: REV, name: "mathlib", inputRev: "v4.35.0" },
+      { url: mathlibUrl, type: "git", rev: REV, name: "mathlib", inputRev: "v4.35.0" },
       { url: batteriesUrl, type: "git", rev: batteriesRev, name: "batteries", inputRev: "main" },
     ],
   });
@@ -44,7 +52,7 @@ async function tree(dir, prefix = "") {
   return out;
 }
 
-export default async function reviewPr({ launchApp, artifactsDir, assert, fixture }) {
+export default async function mathlibSetupGuard({ launchApp, artifactsDir, assert, fixture }) {
   const elanHome = process.env.ELAN_HOME || join(homedir(), ".elan");
   if (!existsSync(join(elanHome, "toolchains", TOOLCHAIN_DIR, "bin"))) {
     const message = `SKIPPED: Lean toolchain ${TOOLCHAIN_DIR} is not installed through elan`;
@@ -52,10 +60,10 @@ export default async function reviewPr({ launchApp, artifactsDir, assert, fixtur
     console.log(message);
     return;
   }
-  const base = await mkdtemp(join(tmpdir(), "xp-review-pr-"));
+  const base = await mkdtemp(join(tmpdir(), "xp-mathlib-guard-"));
   const root = join(base, "project");
   const dataDir = join(base, "data");
-  await mkdir(join(root, "literal"), { recursive: true });
+  await mkdir(join(root, "literal", "Literal"), { recursive: true });
   await mkdir(join(root, "pinned"), { recursive: true });
   await mkdir(dataDir, { recursive: true });
   await cp(fixture("lean-mathlib"), join(root, "formal"), { recursive: true });
@@ -63,16 +71,16 @@ export default async function reviewPr({ launchApp, artifactsDir, assert, fixtur
   // The same requirement as the fixture's, written with TOML literal strings.
   await writeFile(join(root, "literal", "lakefile.toml"), "name = 'Literal'\n\n[[require]]\nname = 'mathlib'\nscope = 'leanprover-community'\nrev = 'v4.35.0'\n\n[[lean_lib]]\nname = 'Literal'\n");
   await writeFile(join(root, "literal", "lean-toolchain"), "leanprover/lean4:v4.35.0\n");
+  await writeFile(join(root, "literal", "Literal", "Basic.lean"), "theorem literal : 1 + 1 = 2 := rfl\n");
   // An existing package whose manifest pins its dependencies (not downloaded).
   await writeFile(join(root, "pinned", "lakefile.toml"), 'name = "Pinned"\n\n[[require]]\nname = "mathlib"\nscope = "leanprover-community"\nrev = "v4.35.0"\n\n[[lean_lib]]\nname = "Pinned"\n');
   await writeFile(join(root, "pinned", "lean-toolchain"), "leanprover/lean4:v4.35.0\n");
-  await writeFile(join(root, "pinned", "lake-manifest.json"), manifest("https://github.com/leanprover-community/batteries", "66e469188fe07963e5cf666c7d4433f45b8131c5"));
+  await writeFile(join(root, "pinned", "lake-manifest.json"), manifest(MATHLIB_URL, BATTERIES_URL, BATTERIES_REV));
 
   const observations = [];
-  const note = (id, ok, detail, defect = false) => {
-    observations.push({ id, ok: !!ok, defect, detail });
-    const tag = ok ? "ok    " : defect ? "DEFECT" : "FAIL  ";
-    console.log(`${tag} ${id}: ${typeof detail === "string" ? detail : JSON.stringify(detail)?.slice(0, 900)}`);
+  const note = (id, ok, detail) => {
+    observations.push({ id, ok: !!ok, detail });
+    console.log(`${ok ? "ok    " : "FAIL  "} ${id}: ${typeof detail === "string" ? detail : JSON.stringify(detail)?.slice(0, 900)}`);
   };
   const app = await launchApp({ dataDir });
   const { page } = app;
@@ -86,40 +94,75 @@ export default async function reviewPr({ launchApp, artifactsDir, assert, fixtur
     const literal = await invoke(page, "lean_package_inspect", { folder: "literal" });
     note("A-fixture-requirement-is-seen", quoted.usesMathlib && quoted.readiness.kind === "dependenciesUnresolved", quoted.readiness);
     note(
-      "A-literal-string-requirement-is-seen (R-pr-F3)",
-      literal.usesMathlib,
-      { usesMathlib: literal.usesMathlib, readiness: literal.readiness, note: "the Lean server would start here and Lake would clone and build Mathlib" },
-      true,
+      "A-literal-string-requirement-is-seen",
+      literal.usesMathlib && literal.readiness.kind === "dependenciesUnresolved" && literal.mathlibInputRevision === "v4.35.0",
+      { usesMathlib: literal.usesMathlib, readiness: literal.readiness },
     );
 
-    // Untrusted: a reviewed plan does not start; a manifest changed after the
-    // review should be a stale plan (checked before trust).
+    // The plan names every source with its address and commit.
     const reviewed = await invoke(page, "lean_setup_plan", { request: { kind: "prepareMathlibPackage", folder: "pinned" } });
+    const sources = Object.fromEntries(reviewed.sources.map((s) => [s.name, s]));
+    note(
+      "A-plan-names-every-source-with-address-and-commit",
+      reviewed.sources.length === 2 &&
+        sources.mathlib?.url === MATHLIB_URL &&
+        sources.mathlib?.rev === REV &&
+        sources.batteries?.url === BATTERIES_URL &&
+        sources.batteries?.rev === BATTERIES_REV &&
+        typeof reviewed.manifestDigest === "string" &&
+        typeof reviewed.lakefileDigest === "string",
+      reviewed.sources,
+    );
+    // Untrusted: a reviewed plan does not start.
     const untrusted = await invokeError(page, "lean_setup_start", { plan: reviewed });
     note("A-untrusted-folder-starts-nothing", untrusted.error?.code === "lean.untrusted", untrusted.error ?? untrusted);
-    await writeFile(join(root, "pinned", "lake-manifest.json"), manifest("https://github.com/attacker-example/batteries", "0000000000000000000000000000000000000001"));
+    // Another dependency redirected after the review: a stale plan (checked before trust), and the new plan says so.
+    await writeFile(join(root, "pinned", "lake-manifest.json"), manifest(MATHLIB_URL, "https://github.com/attacker-example/batteries", "0000000000000000000000000000000000000001"));
     const again = await invoke(page, "lean_setup_plan", { request: { kind: "prepareMathlibPackage", folder: "pinned" } });
     const swapped = await invokeError(page, "lean_setup_start", { plan: reviewed });
     note(
-      "A-changed-manifest-is-a-stale-plan (R-pr-F4)",
-      swapped.error?.code === "lean.setup.planStale",
-      { start: swapped.error?.code ?? swapped, samePlanHash: again.planHash === reviewed.planHash, planNamesTheSource: JSON.stringify(again).includes("attacker-example") },
-      true,
+      "A-changed-manifest-is-a-stale-plan",
+      swapped.error?.code === "lean.setup.planStale" &&
+        again.planHash !== reviewed.planHash &&
+        again.sources.some((s) => s.url === "https://github.com/attacker-example/batteries" && s.rev === "0000000000000000000000000000000000000001"),
+      { start: swapped.error?.code ?? swapped, samePlanHash: again.planHash === reviewed.planHash, sources: again.sources },
+    );
+    // The lakefile edited after the review: stale as well.
+    await writeFile(join(root, "pinned", "lakefile.toml"), 'name = "Pinned"\n\n[[require]]\nname = "mathlib"\nscope = "leanprover-community"\nrev = "v4.35.0"\n\n[[lean_lib]]\nname = "Pinned"\n# edited\n');
+    const edited = await invokeError(page, "lean_setup_start", { plan: again });
+    note("A-changed-lakefile-is-a-stale-plan", edited.error?.code === "lean.setup.planStale", edited.error ?? edited);
+    // `mathlib` taken from another repository: no plan at all, and the reason names the address.
+    await writeFile(join(root, "pinned", "lake-manifest.json"), manifest("https://github.com/attacker-example/mathlib4", BATTERIES_URL, BATTERIES_REV));
+    const unofficial = await invokeError(page, "lean_setup_plan", { request: { kind: "prepareMathlibPackage", folder: "pinned" } });
+    note(
+      "A-mathlib-from-another-repository-is-refused",
+      unofficial.error?.code === "lean.setup.unofficialMathlib" && /attacker-example\/mathlib4/.test(unofficial.error?.message ?? ""),
+      unofficial.error ?? unofficial,
     );
     note("A-no-setup-ran", (await invoke(page, "lean_setup_status")) === null, await invoke(page, "lean_setup_status"));
 
     // Trusted: the build-from-source choice does not start Lake on a package
-    // whose dependencies are not resolved.
+    // whose dependencies are not resolved, in either spelling.
     await invoke(page, "trust_grant", { root: info.root });
     const doc = await openInEditor(page, "formal/OddSums/Basic.lean");
-    const state = async () => (await invoke(page, "lean_documents")).find((d) => d.document === doc);
-    await waitFor(async () => (await state())?.status.kind === "unavailable", { timeout: 60_000, interval: 250, message: "the unprepared package is not started" });
+    const state = async (id) => (await invoke(page, "lean_documents")).find((d) => d.document === id);
+    await waitFor(async () => (await state(doc))?.status.kind === "unavailable", { timeout: 60_000, interval: 250, message: "the unprepared package is not started" });
     await invoke(page, "lean_allow_local_build", { document: doc });
+    const literalDoc = await openInEditor(page, "literal/Literal/Basic.lean");
+    await waitFor(async () => (await state(literalDoc))?.status.kind === "unavailable", { timeout: 60_000, interval: 250, message: "the literal-string package is not started" });
     await new Promise((r) => setTimeout(r, 4000));
     note(
       "A-build-from-source-does-not-lift-unresolved-dependencies",
-      (await state())?.status.kind === "unavailable" && !existsSync(join(root, "formal", ".lake")) && !existsSync(join(root, "formal", "lake-manifest.json")),
-      { status: (await state())?.status, lake: existsSync(join(root, "formal", ".lake")) },
+      (await state(doc))?.status.kind === "unavailable" && !existsSync(join(root, "formal", ".lake")) && !existsSync(join(root, "formal", "lake-manifest.json")),
+      { status: (await state(doc))?.status, lake: existsSync(join(root, "formal", ".lake")) },
+    );
+    note(
+      "A-literal-string-package-starts-no-server",
+      (await state(literalDoc))?.status.kind === "unavailable" &&
+        /Set Up Mathlib/.test((await state(literalDoc))?.status.reason ?? "") &&
+        !existsSync(join(root, "literal", ".lake")) &&
+        !existsSync(join(root, "literal", "lake-manifest.json")),
+      { status: (await state(literalDoc))?.status, lake: existsSync(join(root, "literal", ".lake")) },
     );
     const bogus = await invokeError(page, "lean_allow_local_build", { document: "doc-does-not-exist" });
     note("A-build-from-source-needs-a-lean-document", !!bogus.error, bogus.error ?? bogus);
@@ -131,20 +174,9 @@ export default async function reviewPr({ launchApp, artifactsDir, assert, fixtur
     note("B-plan-creates-in-the-named-folder", plan.packageRoot.replace(/\\/g, "/").endsWith("/project/fresh") && plan.createsPackage && plan.steps[0].args.join(" ") === "--keep-toolchain update", { packageRoot: plan.packageRoot, steps: plan.steps.map((s) => s.args.join(" ")) });
     // The package folder does not exist yet (the dialog's default case).
     const first = await invokeError(page, "lean_setup_start", { plan });
-    note(
-      "B-a-new-package-in-a-new-folder-starts (R-pr-F0)",
-      "unexpectedSuccess" in first,
-      first.error ?? "started",
-      true,
-    );
-    let started = first.unexpectedSuccess;
-    if (!started) {
-      // Control: with the (empty) folder made first, the same request starts.
-      await mkdir(join(root, "fresh"));
-      const replanned = await invoke(page, "lean_setup_plan", { request: { kind: "newMathlibPackage", folder: "fresh", name: "Formal" } });
-      started = await invoke(page, "lean_setup_start", { plan: replanned });
-    }
-    setupId = started.id;
+    note("B-a-new-package-in-a-new-folder-starts", "unexpectedSuccess" in first && !existsSync(join(root, "fresh", "lakefile.lean")), first.error ?? "started");
+    if (!("unexpectedSuccess" in first)) throw new Error(`the setup did not start: ${JSON.stringify(first.error)}`);
+    setupId = first.unexpectedSuccess.id;
     await waitFor(async () => (await invoke(page, "lean_setup_status"))?.phase === "step", { timeout: 30_000, interval: 50, message: "the first command runs" });
     // The user's own file, added to the new library folder while the setup runs.
     const mine = join(root, "fresh", "Formal", "Mine.lean");
@@ -160,33 +192,37 @@ export default async function reviewPr({ launchApp, artifactsDir, assert, fixtur
     );
     setupId = null;
     note("B-cancel-ends-the-setup-as-canceled", canceled === true && status.state === "canceled" && status.ready === false, { state: status.state, message: status.message, removed: status.removed });
-    const mineKept = existsSync(mine);
     note(
-      "B-the-users-own-file-survives-cleanup (R-pr-F5)",
-      mineKept,
-      { kept: mineKept, message: status.message, removed: status.removed },
-      true,
+      "B-the-users-own-file-survives-cleanup",
+      existsSync(mine) && JSON.stringify(status.kept) === JSON.stringify(["Formal/Mine.lean"]),
+      { kept: status.kept, removed: status.removed },
+    );
+    note(
+      "B-the-outcome-says-what-was-kept",
+      /Kept, because they were added or changed while it ran: `Formal\/Mine\.lean`/.test(status.message ?? "") &&
+        !/The new package's files were removed; nothing else/.test(status.message ?? ""),
+      status.message,
     );
     // Nothing keeps writing after cleanup, and nothing else changed.
     const after1 = await tree(root);
     await new Promise((r) => setTimeout(r, 5000));
     const after2 = await tree(root);
     note("B-nothing-writes-after-cleanup", JSON.stringify(after1) === JSON.stringify(after2), { extra: after2.filter((p) => !after1.includes(p)).slice(0, 10) });
-    const leftovers = after2.filter((p) => !before.includes(p) && p !== "fresh/" && p !== "fresh/Formal/" && p !== "fresh/Formal/Mine.lean");
-    note("B-what-the-setup-created-is-removed", leftovers.length === 0, { leftovers: leftovers.slice(0, 20) });
+    const added = after2.filter((p) => !before.includes(p));
+    note("B-what-the-setup-created-is-removed", JSON.stringify(added) === JSON.stringify(["fresh/", "fresh/Formal/", "fresh/Formal/Mine.lean"]), { added: added.slice(0, 20) });
     const missing = before.filter((p) => !after2.includes(p));
     note("B-nothing-else-was-removed", missing.length === 0, { missing });
     const fresh = await invoke(page, "lean_package_inspect", { folder: "fresh" });
-    note("B-the-canceled-package-is-not-ready", fresh.readiness.kind !== "ready", fresh.readiness);
+    note("B-the-canceled-package-is-not-ready", fresh.readiness.kind === "notAPackage", fresh.readiness);
     const texts = [status.message ?? "", ...(status.log ?? [])].join("\n");
-    note("B-status-leaks-no-home-path-of-another-user-or-key", !/sk-ant-|ANTHROPIC_API_KEY/.test(texts), "");
+    note("B-status-shows-no-credential", !/sk-ant-|ANTHROPIC_API_KEY/.test(texts), "");
   } finally {
     if (setupId) await invoke(page, "lean_setup_cancel", { setupId }).catch(() => {});
     await writeFile(join(artifactsDir, "observations.json"), JSON.stringify(observations, null, 2)).catch(() => {});
     await app.close();
     await rm(base, { recursive: true, force: true }).catch(() => {});
   }
-  const failed = observations.filter((o) => !o.ok && !o.defect);
-  assert.deepEqual(failed.map((o) => o.id), [], `held checks failed: ${JSON.stringify(failed).slice(0, 1200)}`);
-  console.log(`review-pr: ${observations.filter((o) => o.ok).length} ok, ${observations.filter((o) => o.defect && !o.ok).length} DEFECT`);
+  const failed = observations.filter((o) => !o.ok);
+  assert.deepEqual(failed.map((o) => o.id), [], `checks failed: ${JSON.stringify(failed).slice(0, 1500)}`);
+  console.log(`mathlib-setup-guard: ${observations.length} ok`);
 }
