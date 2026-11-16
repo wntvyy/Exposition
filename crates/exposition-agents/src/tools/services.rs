@@ -222,6 +222,24 @@ pub trait ProjectOperations: Send + Sync {
     /// Restore a trashed item by its restore token (reverting an agent's
     /// deletion from the review).
     fn restore(&self, token: &str) -> Result<OpResult, OpError>;
+
+    /// The enabled workflow triggers of the open project that watch the file
+    /// at `path` (the lookup a deletion's consequences use). A trigger that
+    /// is turned off or suspended is not listed: it does not react to a
+    /// save. `Err`: they could not be read, which is never reported as none.
+    fn triggers_watching(&self, _path: &WorkspacePath) -> Result<Vec<WatchingTrigger>, String> {
+        Err("workflow triggers are not available here".into())
+    }
+}
+
+/// An enabled workflow trigger that watches a file.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WatchingTrigger {
+    /// Title of the trigger's workflow.
+    pub workflow: String,
+    /// It starts a run when the file is saved (a trigger on saved changes);
+    /// `false`: it runs on its schedule and reads the file as saved then.
+    pub starts_on_save: bool,
 }
 
 /// A research-side refusal (with its stable code) as a service outcome.

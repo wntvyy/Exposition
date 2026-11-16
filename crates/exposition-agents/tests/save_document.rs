@@ -24,7 +24,8 @@ use exposition_agents::permissions::{CodeAccess, FilesAccess, PermissionChoice, 
 use exposition_agents::store::Store;
 use exposition_agents::tools::exec::{self, Allowances, Authority, Gate, SeenTexts, ToolEnv, ToolOutput, codes};
 use exposition_agents::tools::services::{
-    BuildRequest, CommandRequest, LeanRequest, PythonRequest, ServiceError, ServiceKind, ToolServices,
+    BuildRequest, CommandRequest, LeanRequest, ProjectOperations, PythonRequest, ServiceError, ServiceKind,
+    ToolServices, WatchingTrigger,
 };
 use exposition_agents::tools::{self, ToolCall};
 use exposition_agents::workspace::{LocalProjectFiles, ProjectFiles};
@@ -32,6 +33,7 @@ use exposition_agents::*;
 use exposition_core::document::{
     ConflictPolicy, DocumentEdit, DocumentId, EditOrigin, TextPatch, TransactionId, TransactionRequest, UndoBehavior,
 };
+use exposition_core::ops::{OpError, OpPlan, OpRequest, OpResult};
 use exposition_core::path::WorkspacePath;
 use exposition_workspace::{DocumentService, WorkspaceService};
 use serde_json::{Value, json};
@@ -77,11 +79,43 @@ fn project() -> TempDir {
 struct Services {
     trusted: AtomicBool,
     commands: Mutex<Vec<String>>,
+    /// What the trigger lookup answers for each path (`None`: the build has
+    /// no project operations, so no lookup).
+    triggers: Mutex<Option<TriggerLookup>>,
 }
+
+type TriggerLookup = Result<Vec<(&'static str, WatchingTrigger)>, String>;
 
 impl Services {
     fn new() -> Arc<Self> {
-        Arc::new(Self { trusted: AtomicBool::new(true), commands: Mutex::new(Vec::new()) })
+        Arc::new(Self { trusted: AtomicBool::new(true), commands: Mutex::new(Vec::new()), triggers: Mutex::new(None) })
+    }
+
+    fn set_triggers(&self, lookup: Option<TriggerLookup>) {
+        *self.triggers.lock().unwrap() = lookup;
+    }
+}
+
+fn watching(path: &'static str, workflow: &str, starts_on_save: bool) -> (&'static str, WatchingTrigger) {
+    (path, WatchingTrigger { workflow: workflow.to_owned(), starts_on_save })
+}
+
+/// Project operations that only answer the trigger lookup.
+struct TriggerOps(TriggerLookup);
+
+impl ProjectOperations for TriggerOps {
+    fn plan(&self, _: OpRequest) -> Result<OpPlan, OpError> {
+        Err(OpError::new("ops.failed", "not used by these tests"))
+    }
+    fn apply(&self, _: &OpPlan) -> Result<OpResult, OpError> {
+        Err(OpError::new("ops.failed", "not used by these tests"))
+    }
+    fn restore(&self, _: &str) -> Result<OpResult, OpError> {
+        Err(OpError::new("ops.failed", "not used by these tests"))
+    }
+    fn triggers_watching(&self, path: &WorkspacePath) -> Result<Vec<WatchingTrigger>, String> {
+        let all = self.0.clone()?;
+        Ok(all.into_iter().filter(|(watched, _)| *watched == path.as_str()).map(|(_, t)| t).collect())
     }
 }
 
@@ -96,6 +130,10 @@ impl ToolServices for Services {
     fn native_refusal(&self, _root: &Path) -> Option<String> {
         (!self.trusted.load(Ordering::SeqCst))
             .then(|| "This project folder is not trusted for native execution.".into())
+    }
+    fn project_operations(&self) -> Option<Arc<dyn ProjectOperations>> {
+        let lookup = self.triggers.lock().unwrap().clone()?;
+        Some(Arc::new(TriggerOps(lookup)))
     }
     async fn build_document(&self, _: BuildRequest, _: CancellationToken) -> Result<Value, ServiceError> {
         Ok(json!({"status": "succeeded"}))
@@ -808,6 +846,107 @@ async fn save_discloses_changes_the_task_did_not_make() {
     assert_eq!(out.content["otherChanges"], "unknown", "{out:?}");
 }
 
+/// The enabled workflow triggers that watch the file are named: on the
+/// approval card, and in the result (which is all there is when no card was
+/// shown). A lookup that fails is said to have failed, never read as "none".
+#[tokio::test]
+async fn save_names_the_enabled_triggers_that_watch_the_file() {
+    let f = fixture();
+    let review = spec(f.files.root(), ApprovalMode::Ask, PermissionProfile::ReviewEdits, ExecutionMode::ApproveEach);
+    let direct = direct(f.files.root());
+    let detail =
+        |path: &str, revision: u64| match exec::gate(&save_call(path, revision), &f.env(&review, authority(None, &[])))
+        {
+            Gate::NeedsApproval { detail, .. } => detail,
+            other => panic!("expected an approval, got {other:?}"),
+        };
+    let id = f.open("analysis.py");
+    let other = f.open("main.typ");
+
+    // Not watched: the card says nothing about triggers; the result says none, as known.
+    f.services.set_triggers(Some(Ok(vec![watching("main.typ", "Typeset the notes", true)])));
+    let revision = f.agent_edit(&id, "# 1\n");
+    let shown = detail("analysis.py", revision);
+    assert!(!shown.contains("trigger"), "{shown}");
+    let out = run(&f, &direct, authority(None, &[]), save_call("analysis.py", revision)).await;
+    assert_eq!(out.content["saved"], true, "{out:?}");
+    assert_eq!(out.content["triggersKnown"], true, "{out:?}");
+    assert_eq!(out.content["triggers"], json!([]), "{out:?}");
+    assert_eq!(out.content.get("triggersNote"), None, "{out:?}");
+
+    // Watched by one trigger that runs on saved changes.
+    f.services.set_triggers(Some(Ok(vec![
+        watching("analysis.py", "Fit and report", true),
+        watching("main.typ", "Typeset the notes", true),
+    ])));
+    let revision = f.agent_edit(&id, "# 2\n");
+    let shown = detail("analysis.py", revision);
+    let one = "An enabled workflow trigger watches this file:\n\
+        - “Fit and report”: saving this file can start a run of this workflow, within the trigger's own limits.\n";
+    assert!(shown.contains(one), "{shown}");
+    assert!(!shown.contains("Typeset the notes"), "only the triggers of this file: {shown}");
+    let before = shown.find("made by this task.").unwrap();
+    let after = shown.find("What changes in the file").unwrap();
+    let at = shown.find(one).unwrap();
+    assert!(before < at && at < after, "after whose changes it holds, before the changes: {shown}");
+    let out = run(&f, &direct, authority(None, &[]), save_call("analysis.py", revision)).await;
+    assert_eq!(out.content["saved"], true, "disclosure only, the save is not held back: {out:?}");
+    assert_eq!(out.content["triggersKnown"], true, "{out:?}");
+    assert_eq!(out.content["triggers"], json!([{"workflow": "Fit and report", "startsOnSave": true}]), "{out:?}");
+    assert_eq!(
+        out.content["triggersNote"],
+        "An enabled workflow trigger watches the file you saved:\n\
+         - “Fit and report”: this save can start a run of this workflow, within the trigger's own limits.\n\
+         Tell the user."
+    );
+
+    // Several, one of them scheduled, one listed twice by the lookup, one with a hidden character in its title.
+    f.services.set_triggers(Some(Ok(vec![
+        watching("analysis.py", "Nightly\u{202E} audit", false),
+        watching("analysis.py", "Fit and report", true),
+        watching("analysis.py", "Fit and report", true),
+    ])));
+    let revision = f.agent_edit(&id, "# 3\n");
+    let shown = detail("analysis.py", revision);
+    let several = "Enabled workflow triggers watch this file:\n\
+        - “Fit and report”: saving this file can start a run of this workflow, within the trigger's own limits.\n\
+        - “Nightly⟨U+202E⟩ audit”: it runs on a schedule; saving does not start it, and its next run reads the file \
+        as saved.\n";
+    assert!(shown.contains(several), "{shown}");
+    let out = run(&f, &direct, authority(None, &[]), save_call("analysis.py", revision)).await;
+    assert_eq!(
+        out.content["triggers"],
+        json!([
+            {"workflow": "Fit and report", "startsOnSave": true},
+            {"workflow": "Nightly\u{202E} audit", "startsOnSave": false}
+        ]),
+        "{out:?}"
+    );
+    let note = out.content["triggersNote"].as_str().unwrap();
+    assert!(note.starts_with("Enabled workflow triggers watch the file you saved:\n"), "{note}");
+    assert!(note.contains("this save did not start it") && note.ends_with("Tell the user."), "{note}");
+
+    // The lookup fails: the card and the result say it could not be determined.
+    let unknown = "Exposition could not determine whether an enabled workflow trigger watches this file. If one does, \
+        saving can start a run of its workflow, within the trigger's own limits.";
+    for lookup in [Some(Err("the trigger store cannot be read".to_owned())), None] {
+        f.services.set_triggers(lookup);
+        let revision = f.agent_edit(&other, "x");
+        let shown = detail("main.typ", revision);
+        assert!(shown.contains(unknown), "{shown}");
+        assert!(!shown.contains("cannot be read"), "no internals: {shown}");
+        let out = run(&f, &direct, authority(None, &[]), save_call("main.typ", revision)).await;
+        assert_eq!(out.content["saved"], true, "{out:?}");
+        assert_eq!(out.content["triggersKnown"], false, "{out:?}");
+        assert_eq!(out.content["triggers"], json!([]), "{out:?}");
+        let note = out.content["triggersNote"].as_str().unwrap();
+        assert!(
+            note.starts_with("Exposition could not determine whether an enabled workflow trigger watches the file")
+        );
+        assert!(note.ends_with("Tell the user."), "{note}");
+    }
+}
+
 /// Invisible and direction-changing characters in what is saved are shown.
 #[test]
 fn gate_approval_shows_hidden_characters_in_the_saved_text() {
@@ -1062,6 +1201,38 @@ async fn loop_ask_direct_changes_save_without_a_card_and_never_on_their_own() {
     assert!(result["authorization"].as_str().unwrap().starts_with("No prompt: this task's settings allow it"));
     assert_eq!(h.disk("analysis.py"), "print(2)\n");
     assert_eq!(h.disk("main.typ"), "= Notes\n", "the other task's edit is still only in the editor");
+}
+
+/// Through the loop: a watched file's save names the trigger on the card
+/// when one is shown, and in the result the agent receives when none is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_a_watched_file_names_its_trigger_on_the_card_and_in_the_result() {
+    let mut h = harness();
+    h.services.set_triggers(Some(Ok(vec![watching("analysis.py", "Fit and report", true)])));
+    let named = "- “Fit and report”: saving this file can start a run of this workflow";
+    let task = h.start(
+        edit_save_run("analysis.py", "print(1)", "print(2)"),
+        ApprovalMode::Ask,
+        PermissionProfile::ReviewEdits,
+    );
+    let cards = h.drive(&task.id, |_| Some(ApprovalScope::Once)).await;
+    let card = cards.iter().find(|c| c.tool == "save_document").expect("the save asks");
+    assert!(card.detail.contains(named), "{}", card.detail);
+    let (status, _, result) = h.call(&task.id, "s");
+    assert_eq!(status, ToolCallStatus::Succeeded);
+    assert_eq!(result["triggers"], json!([{"workflow": "Fit and report", "startsOnSave": true}]));
+
+    // No card (the task applies changes directly): the result carries the list.
+    let task =
+        h.start(edit_save_run("analysis.py", "print(2)", "print(3)"), ApprovalMode::Ask, PermissionProfile::AutoApply);
+    let cards = h.drive(&task.id, |_| Some(ApprovalScope::Once)).await;
+    assert!(cards.iter().all(|c| c.tool != "save_document"), "no card for the save");
+    let (status, by, result) = h.call(&task.id, "s");
+    assert_eq!(status, ToolCallStatus::Succeeded);
+    assert_eq!(by, Some(AuthorizedBy::TaskSettings));
+    assert_eq!(result["triggers"], json!([{"workflow": "Fit and report", "startsOnSave": true}]));
+    assert!(result["triggersNote"].as_str().unwrap().contains("“Fit and report”: this save can start a run"));
+    assert_eq!(h.disk("analysis.py"), "print(3)\n");
 }
 
 /// Auto: within the project's Files permission a save proceeds; beyond it,

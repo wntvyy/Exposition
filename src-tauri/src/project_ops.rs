@@ -1068,6 +1068,23 @@ impl exposition_agents::tools::services::ProjectOperations for AgentOps {
         let _ = self.app.emit(PROJECT_OP_EVENT, &result);
         Ok(result)
     }
+
+    fn triggers_watching(
+        &self,
+        path: &exposition_core::path::WorkspacePath,
+    ) -> Result<Vec<exposition_agents::tools::services::WatchingTrigger>, String> {
+        use exposition_workflow::triggers::model::TriggerKind;
+        let state = self.app.state::<AppState>();
+        // The lookup a deletion's consequences use (active triggers only).
+        let triggers = state.workflow_triggers.try_watching(std::slice::from_ref(path)).map_err(|e| e.message)?;
+        Ok(triggers
+            .into_iter()
+            .map(|t| exposition_agents::tools::services::WatchingTrigger {
+                workflow: t.title,
+                starts_on_save: matches!(t.kind, TriggerKind::InputsChanged { .. }),
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]

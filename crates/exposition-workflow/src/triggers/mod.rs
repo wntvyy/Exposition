@@ -1298,13 +1298,20 @@ impl TriggerService {
     /// covers everything beneath it): deleting those inputs would make them
     /// fire or suspend.
     pub fn watching(&self, paths: &[WorkspacePath]) -> Vec<WorkflowTrigger> {
-        let Ok(triggers) = self.list(None) else { return Vec::new() };
-        triggers
+        self.try_watching(paths).unwrap_or_default()
+    }
+
+    /// [`Self::watching`], for callers that must tell "none" from "could not
+    /// be read" (no open project, or a trigger store that cannot be read):
+    /// a disclosure never states the first when it is the second.
+    pub fn try_watching(&self, paths: &[WorkspacePath]) -> Result<Vec<WorkflowTrigger>, WorkflowRunError> {
+        Ok(self
+            .list(None)?
             .into_iter()
             .filter(|t| {
                 t.state == TriggerState::Active && t.watched.iter().any(|w| paths.iter().any(|p| touches(p, &w.path)))
             })
-            .collect()
+            .collect())
     }
 
     /// Turn off every trigger of `workflow` in the open project (one saved
