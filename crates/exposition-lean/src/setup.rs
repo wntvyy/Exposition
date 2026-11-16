@@ -166,8 +166,9 @@ pub struct LeanPackageInspection {
     /// SHA-256 (hex) of the lakefile.
     pub lakefile_digest: Option<String>,
     /// The lakefile declares requirements that cannot be read as data (a
-    /// `lakefile.lean` is code): what they resolve to is known only from a
-    /// manifest.
+    /// `lakefile.lean` is code) and mentions Mathlib without a `require` of
+    /// it being recognized: whether it resolves to Mathlib is known only from
+    /// a manifest.
     pub requirements_in_code: bool,
     /// The toolchain `lean-toolchain` pins, exactly as written.
     pub toolchain: Option<String>,
@@ -205,10 +206,10 @@ impl LeanPackageInspection {
         let lakefile = self.lakefile.as_deref()?;
         let unresolved = self.manifest_digest.is_none();
         if !self.uses_mathlib {
-            // Requirements written as code may name anything, Mathlib included.
+            // Requirements written as code that mentions Mathlib may require it.
             return (unresolved && self.requirements_in_code).then(|| {
                 format!(
-                    "This package's {} is Lean code that requires dependencies, and they have not been resolved (there is no lake-manifest.json), so Exposition cannot tell what Lean would download and build here. Run `lake update` in the package folder in a terminal to resolve them; if the package requires Mathlib, use Set Up Mathlib instead.",
+                    "This package's {} is Lean code that requires dependencies and mentions Mathlib, and they have not been resolved (there is no lake-manifest.json), so Exposition cannot tell whether Lean would download and build Mathlib here. If the package requires Mathlib, use Set Up Mathlib; otherwise run `lake update` in the package folder in a terminal.",
                     lakefile
                 )
             });
@@ -642,12 +643,17 @@ pub fn inspect_package(
     let Some(lakefile) = out.lakefile.clone() else { return out };
     let lakefile_bytes = read_small_bytes(&package_root.join(&lakefile), MAX_LAKEFILE_BYTES);
     out.lakefile_digest = lakefile_bytes.as_deref().map(|bytes| hex(&Sha256::digest(bytes)));
-    let hint = match lakefile_bytes.map(String::from_utf8) {
-        Some(Ok(text)) => lakefile_hint(&lakefile, &text),
+    // Requirements written as code are held back only when the code mentions
+    // Mathlib somewhere: a package that requires other libraries is checked as
+    // before (Lake resolves them when the server starts).
+    let (hint, may_name_mathlib) = match lakefile_bytes.map(String::from_utf8) {
+        Some(Ok(text)) => {
+            (lakefile_hint(&lakefile, &text), without_lean_comments(&text).to_ascii_lowercase().contains(MATHLIB))
+        }
         // A lakefile that cannot be read as text says nothing certain.
-        _ => LakefileHint { opaque: true, requires: true, ..LakefileHint::default() },
+        _ => (LakefileHint { opaque: true, requires: true, ..LakefileHint::default() }, true),
     };
-    out.requirements_in_code = hint.opaque && hint.requires;
+    out.requirements_in_code = hint.opaque && hint.requires && may_name_mathlib;
 
     let mut has_manifest = false;
     let mut packages_folder = DEFAULT_PACKAGES_DIR.to_owned();
@@ -2672,9 +2678,9 @@ mod tests {
         assert!(other.requires && !other.mathlib);
     }
 
-    /// Without a manifest, a package whose lakefile is code and requires
-    /// anything is not started: what Lake would fetch is not known. A
-    /// declarative lakefile that names no Mathlib is not held back.
+    /// Without a manifest, a package whose lakefile is code that requires
+    /// something and mentions Mathlib is not started: whether Lake would fetch
+    /// Mathlib is not known. A lakefile that names no Mathlib is not held back.
     #[test]
     fn unresolved_requirements_written_as_code_keep_the_server_from_starting() {
         let f = Fixture::new();
@@ -2688,13 +2694,20 @@ mod tests {
         let code = package(
             "code",
             "lakefile.lean",
-            "import Lake\nopen Lake DSL\npackage P\nrequire helper from git \"https://example.org/helper\"\n",
+            "import Lake\nopen Lake DSL\npackage P\ndef lib := \"Mathlib\"\nrequire helper from git \"https://example.org/helper\"\n",
         );
+        // Requirements in code with no mention of Mathlib (a comment does not count): checked as before.
+        package(
+            "plain",
+            "lakefile.lean",
+            "import Lake\nopen Lake DSL\npackage P\n-- not mathlib\nrequire helper from git \"https://example.org/helper\"\n",
+        );
+        assert_eq!(f.inspect("plain").blocks_checking(false), None);
         let blocked = f.inspect("code");
         assert!(!blocked.uses_mathlib && blocked.requirements_in_code);
         let reason = blocked.blocks_checking(true).expect("blocked whatever the build choice");
         assert!(
-            reason.contains("lakefile.lean") && reason.contains("lake update") && reason.contains("lake-manifest.json"),
+            reason.contains("lakefile.lean") && reason.contains("lake update") && reason.contains("Set Up Mathlib"),
             "{reason}"
         );
         // Resolved (a manifest exists): the manifest decides, and it names no Mathlib.

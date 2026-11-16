@@ -261,7 +261,7 @@ fn unresolved_requirements_in_a_lean_lakefile_do_not_start_the_server() {
         &[
             (
                 "lakefile.lean",
-                "import Lake\nopen Lake DSL\npackage Formal\nrequire helper from git \"https://example.org/helper\"\n",
+                "import Lake\nopen Lake DSL\npackage Formal\ndef lib := \"mathlib\"\nrequire helper from git \"https://example.org/helper\"\n",
             ),
             ("lean-toolchain", "leanprover/lean4:v4.35.0\n"),
         ],
@@ -269,6 +269,20 @@ fn unresolved_requirements_in_a_lean_lakefile_do_not_start_the_server() {
     assert!(!inspection.uses_mathlib);
     let reason = inspection.blocks_checking(false).expect("not started");
     assert!(reason.contains("lake update") && reason.contains("lakefile.lean"), "{reason}");
+    // Requirements in code that never mention Mathlib are checked as before.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let other = unprepared(
+        &root,
+        &[
+            (
+                "lakefile.lean",
+                "import Lake\nopen Lake DSL\npackage Formal\nrequire helper from git \"https://example.org/helper\"\n",
+            ),
+            ("lean-toolchain", "leanprover/lean4:v4.35.0\n"),
+        ],
+    );
+    assert_eq!(other.blocks_checking(false), None);
     // A package that requires nothing is checked as before.
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();

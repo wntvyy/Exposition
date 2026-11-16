@@ -24,8 +24,9 @@ lakefile: string | null,
 lakefileDigest: string | null, 
 /**
  * The lakefile declares requirements that cannot be read as data (a
- * `lakefile.lean` is code): what they resolve to is known only from a
- * manifest.
+ * `lakefile.lean` is code) and mentions Mathlib without a `require` of
+ * it being recognized: whether it resolves to Mathlib is known only from
+ * a manifest.
  */
 requirementsInCode: boolean, 
 /**

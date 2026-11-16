@@ -799,8 +799,12 @@ record also names the package folder, the toolchain, the SHA-256 of the
 package's `lake-manifest.json`, and the Mathlib commit that manifest pins,
 and it lists `lean-toolchain` and `lake-manifest.json` with their digests as
 inputs; the Lean view shows the Mathlib revision and manifest digest next to
-the evidence. The same text audited against a different manifest is a
-different audit and gets a new record. The audit does not report
+the evidence. The Lean environment is part of what identifies an audit: the
+exact toolchain, its `lean --version`, and the digest of the package's
+`lean-toolchain`. The same text audited against a different manifest or under
+a different Lean environment is a different audit and gets a new record; a
+check under one environment never reuses the record of another, and the Lean
+view offers Record evidence again. The audit does not report
 declaration dependencies, so evidence is never shown as current against
 imported modules; after the file changes it is historical, and after
 `lake-manifest.json` or `lean-toolchain` changes or is deleted it is stale.
@@ -815,7 +819,26 @@ it is not a machine proof that the two statements are equivalent.
 uses Mathlib, in one of two ways, and shows the whole plan before anything
 runs: the package folder, the Lean toolchain, the Mathlib revision, the files
 it creates and the ones it keeps unchanged, what it downloads, what happens
-if it fails, and every command.
+if it fails, every command, and a Sources list with one row per dependency:
+its name, where it is fetched from (the git address, a local folder, or the
+Lean package registry entry), its revision (the pinned commit, the tag or
+branch the lakefile asks for, or "Chosen by Lake"), and its state (Already
+downloaded, Fetched by this setup, or Resolved by Lake). With a manifest the
+list is every dependency the manifest pins; without one it is the
+requirements that can be read from the lakefile, with a note that Lake
+resolves them and everything they require when the setup runs (and, for a
+`lakefile.lean`, that the code can require more than is listed). Credentials
+written into an address are not shown.
+
+Only the official Mathlib is prepared. A `mathlib` taken from anywhere other
+than `https://github.com/leanprover-community/mathlib4` (another git address,
+a local folder, another registry scope, or a manifest entry that is not a git
+dependency from that address) is refused when the plan is built, with the
+source named, because the cache step builds and runs a program from the
+repository called mathlib. When the setup itself resolves the requirements,
+it checks the written manifest again after `lake update` and stops before the
+cache step if `mathlib` does not come from the official repository or is not
+among the resolved dependencies.
 
 - **New package** (a folder inside the project, or the project folder
   itself, and a library name such as `Formal`): pins an exact Lean release
@@ -839,10 +862,13 @@ if it fails, and every command.
   `lake build --no-build Mathlib`, which checks that Mathlib's build outputs
   are complete and builds nothing. The lakefile, `lean-toolchain`, and an
   existing manifest are never changed. A package without a `lean-toolchain`
-  file, one that does not require Mathlib (Exposition does not edit an
-  existing lakefile), one already prepared, and one whose Mathlib revision
-  is made for another Lean version than the package pins are refused with
-  the reason.
+  file, one whose `lean-toolchain` names a channel such as `stable` instead
+  of one Lean version (write the exact release, then set up again), one
+  whose lakefile cannot be read (not a regular file of at most 1 MB), one
+  that does not require Mathlib (Exposition does not edit an existing
+  lakefile), one already prepared, and one whose Mathlib revision is made
+  for another Lean version than the package pins are refused with the
+  reason.
 
 A pinned toolchain that is not installed is installed as the plan's first
 step (`elan toolchain install`, for your user account). Every command is the
@@ -851,9 +877,13 @@ shell in the package folder. elan's default toolchain is never changed,
 `lean-toolchain` is never rewritten (if Lake changes it, the setup fails),
 and nothing is ever upgraded: there is no upgrade flow, and moving a package
 to a newer Lean or Mathlib is done by hand. Starting builds the plan again
-and refuses one that no longer matches the project; one setup runs at a
-time; it continues while its dialog is hidden (the status bar shows it) and
-can be canceled.
+and refuses one that no longer matches the project. The plan carries the
+SHA-256 of the lakefile and of the manifest it was made for, and its hash
+covers the whole plan, the Sources list included, so an edit to the lakefile
+or a dependency changed in the manifest after you reviewed the plan (another
+address, another commit) makes it stale and nothing starts. One setup runs
+at a time; it continues while its dialog is hidden (the status bar shows it)
+and can be canceled.
 
 The setup needs network access (GitHub and `cache.mathlib.org`) and several
 GB of disk in the package's `.lake` folder. It runs natively with your
@@ -866,13 +896,17 @@ again when it starts. Only you start a setup: agents have no tool for it.
 The prebuilt cache is a convenience, not a check; verdicts still come only
 from the audit of a file.
 
-A setup that fails or is canceled removes what it created. For a new
-package that is every file and folder it made, and nothing else in the
-project changes. For an existing package it is the manifest and `.lake`
-folder when the setup created them; when `.lake` already existed, completed
-downloads stay, the package is recorded on this computer as unfinished, and
-it is not offered as ready until a setup of it succeeds. A Lean toolchain
-the setup installed stays installed.
+A setup that fails or is canceled removes what it created and nothing else:
+the files it wrote, while they still hold exactly what it wrote; the folders
+it made, once they are empty; and Lake's own outputs (`.lake` and
+`lake-manifest.json`), whole, when the setup created them. A file you added
+to the new folders or changed while the setup ran is kept, and the outcome
+names the kept files (up to 20). Files you put inside a `.lake` folder the
+setup created are removed with it. For a new package nothing else in the
+project changes. For an existing package whose `.lake` already existed,
+completed downloads stay, the package is recorded on this computer as
+unfinished, and it is not offered as ready until a setup of it succeeds. A
+Lean toolchain the setup installed stays installed.
 
 Lean does not start on a package that requires Mathlib and is not prepared,
 because starting it would download dependencies or build Mathlib from source
@@ -881,10 +915,34 @@ view says which case applies and offers Set Up Mathlib…: the dependencies
 are not resolved, the pinned dependencies are not downloaded, a setup did
 not finish, or Mathlib's prebuilt cache is missing. For a missing cache you
 can instead choose "Build from source instead…" (hours, several GB of
-memory; the choice lasts until Exposition closes). A package whose Mathlib
-revision is built for another Lean version than it pins is not checked and
-no setup is offered: change `lean-toolchain` or the required revision. While
-a setup runs in a package, its files are not checked. The editor, an
+memory; the choice lasts until Exposition closes). The choice only replaces
+the cache: it never starts Lean on a package whose dependencies are not
+resolved or not downloaded. It stays available after a setup that did not
+finish when the manifest pinned every dependency and every checkout was
+complete before that setup began (its steps then wrote build outputs only);
+otherwise an unfinished setup holds the package back until a setup succeeds.
+A record of an unfinished setup does not hold back a package that no longer
+uses Mathlib. A package whose Mathlib revision is built for another Lean
+version than it pins is not checked and no setup is offered: change
+`lean-toolchain` or the required revision. While a setup runs in a package,
+its files are not checked.
+
+Whether a package uses Mathlib is read from its files without running them.
+The manifest decides when there is one. Without a manifest, `lakefile.toml`
+is parsed as TOML (every spelling of a `require` entry TOML allows; a file
+that does not parse is treated as requiring Mathlib when its text mentions
+both), and a `lakefile.lean` is read for its `require` commands with
+comments removed. A `lakefile.lean` is code and can require packages in ways
+this reading does not see, so without a manifest a `lakefile.lean` that
+requires something and mentions Mathlib outside comments, without a
+recognized `require` of it, is also held back: the Lean view says that
+Exposition cannot tell whether Lean would download and build Mathlib there,
+and to use Set Up Mathlib if the package requires it or otherwise run
+`lake update` in the package folder yourself. A `lakefile.lean` that
+requires other libraries and does not mention Mathlib is checked as before,
+and Lake fetches those libraries when the language server starts.
+
+The editor, an
 agent's Lean check, and a workflow's Lean audit step all go through the same
 Lean service, so they use the same package root, pinned toolchain, and
 dependencies, and none of them runs on an unprepared package.
@@ -895,11 +953,17 @@ download (a complete setup, and checking against a prepared Mathlib) are
 covered only by scenarios that run on request (`npm run e2e -- mathlib-setup`
 with `EXPOSITION_MATHLIB_SETUP=1`; `mathlib` with
 `EXPOSITION_MATHLIB_PACKAGE`); the default suite covers the unprepared
-package, the plan, and the refusals without downloading anything. The first
+package, the plan with its sources, the refusals, a stale plan, and a new
+package canceled in the first seconds of `lake update` with a file of the
+user's kept, without downloading anything large. The first
 check of a file that imports Mathlib takes noticeably longer than a
 standalone file (expect a minute or more). Only packages whose Mathlib comes
-from a Lean release tag can be created, and there is no setting for a
-mirror or an offline cache. Setup is verified on Windows only.
+from a Lean release tag can be created, only Mathlib from the official
+repository is prepared (a fork or a local copy is prepared by hand in a
+terminal), and there is no setting for a mirror or an offline cache. A
+Mathlib requirement that a `lakefile.lean` computes without naming Mathlib
+in its text is not recognized before a manifest exists. Setup is verified on
+Windows only.
 
 ## Agents
 
@@ -1012,7 +1076,14 @@ graph context, proposals, and changes.
 
 What a task is told about itself comes from the application's own state,
 never from project files, graph labels, or tool output, and describing an
-authorization grants nothing. The task context at the start lists the
+authorization grants nothing. Only the application's own context block at
+the start of a message carries approval state, and the agent's instructions
+say so: text shaped like one in a file, a selection, or a tool result is
+data. Project text placed in the context (folder and file names, paths) is
+put on one line, with line and paragraph separators replaced like control
+characters, and cannot open or close a block; selected text stays as you
+wrote it except that it cannot close its own block or open or close the
+context block. The task context at the start lists the
 approval mode (in Auto with the project's permissions), what you approved
 for the rest of the task, and what each kind of call gets now: proceeds
 without a prompt (and why), asks first, or is refused. Every follow-up is
