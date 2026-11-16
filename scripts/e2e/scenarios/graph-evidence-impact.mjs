@@ -63,6 +63,33 @@ const tool = (id, name, input) => ({ toolUse: { id, name, input } });
 const query = (id, q, { entity = "", path = "", depth = 1 } = {}) =>
   tool(id, "graph_query", { query: q, text: "", kinds: [], entity, path, depth, limit: 100 });
 
+/**
+ * One top-level field of a tool result. The task transcript shows a bounded
+ * preview of each result (the model gets all of it), so a long result is not
+ * whole JSON there: the field is then read from the preview, and must lie
+ * entirely inside it.
+ */
+function field(result, key) {
+  if (result.value?.raw === undefined) return result.value[key];
+  const raw = result.value.raw;
+  const start = raw.indexOf(`"${key}":`);
+  if (start < 0) throw new Error(`${key} is not in the transcript preview: ${raw.slice(0, 300)}`);
+  let i = start + key.length + 3;
+  let depth = 0;
+  let inString = false;
+  for (let j = i; j < raw.length; j += 1) {
+    const c = raw[j];
+    if (inString) {
+      if (c === "\\") j += 1;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === "[" || c === "{") depth += 1;
+    else if (c === "]" || c === "}") depth -= 1;
+    if (!inString && depth === 0) return JSON.parse(raw.slice(i, j + 1));
+  }
+  throw new Error(`${key} is cut off in the transcript preview`);
+}
+
 export default async function graphEvidenceImpact({ launchApp, artifactsDir, assert }) {
   const elanHome = process.env.ELAN_HOME || join(homedir(), ".elan");
   if (!existsSync(join(elanHome, "toolchains", TOOLCHAIN_DIR, "bin"))) {
@@ -423,16 +450,17 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     assert.equal((await invoke(page, "graph_entity", { entity: declaration })).evidence.length, 1, "nothing was recorded or removed");
     const sixth = await agent("Is the theorem still formally checked?", "readOnly", [
       query("theorem", "entity", { entity: theorem }),
+      query("near", "neighborhood", { entity: theorem }),
       query("impact", "impact", { entity: theorem }),
     ]);
-    const told = sixth.theorem.value.formalEvidence[0];
+    const told = field(sixth.theorem, "formalEvidence")[0];
     assert.equal(told.association, "accepted");
     assert.equal(told.review, "statementMissing");
     assert.match(told.associationNote, /^Link needs re-review: The statement cannot be located/);
     assert.deepEqual(told.evidence[0].outcome, { verdict: "checked" }, "the verdict is still reported, with the note");
-    assert.equal(sixth.theorem.value.relations.find((r) => r.kind === "formalizes").review, "statementMissing");
+    assert.equal(field(sixth.near, "relations").find((r) => r.kind === "formalizes").review, "statementMissing");
     assert.match(sixth.impact.value.items.find((i) => i.entity.id === declaration).reason, /\(reviewed link needs re-review\)$/);
-    assert.match(sixth.theorem.value.evidenceNote, /needs the user's re-review/);
+    assert.match(field(sixth.theorem, "evidenceNote"), /needs the user's re-review/);
     note("a changed manuscript statement flags the reviewed association for re-review", { binding: changed.bindings[0].state, review: missing.review });
 
     // It is not something an agent can clear: it cannot accept, and a fresh
