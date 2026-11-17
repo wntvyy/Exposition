@@ -1,0 +1,138 @@
+/* Image editor tab and inline source image previews: layout and the image
+   surfaces only. Controls, states, and text come from the shared components. */
+
+.xp-image-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--color-surface-sunken);
+}
+
+/* The toolbar continues the active tab's surface (as the page editor's). */
+.xp-image-viewer__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--pane-header-height);
+  padding: 0 var(--space-1) 0 var(--pane-inset);
+  border-bottom: var(--border-width) solid var(--color-border);
+  background: var(--color-surface);
+  flex: none;
+  min-width: 0;
+}
+
+.xp-image-viewer__zoom {
+  min-width: 3.5em;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.xp-image-viewer__facts {
+  margin-left: auto;
+  padding-left: var(--space-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.xp-image-viewer__state {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.xp-image-viewer__stage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+}
+.xp-image-viewer__stage[data-pannable] {
+  cursor: grab;
+}
+.xp-image-viewer__stage[data-dragging] {
+  cursor: grabbing;
+}
+.xp-image-viewer__stage:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--color-focus-ring);
+}
+
+/* Centers a smaller image; a larger one scrolls from its top-left corner. */
+.xp-image-viewer__canvas {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 100%;
+  min-height: 100%;
+  width: max-content;
+  padding: var(--space-4);
+  box-sizing: border-box;
+}
+
+.xp-image-viewer__image {
+  display: block;
+  flex: none;
+  max-width: none;
+  user-select: none;
+}
+.xp-image-viewer__image[data-pixelated] {
+  image-rendering: pixelated;
+}
+
+/* ----- inline previews in Monaco source (view zones) ----- */
+
+.xp-source-image {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  height: 100%;
+  padding: var(--space-1) 0;
+  font-family: var(--font-ui);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-tight);
+  color: var(--color-text-muted);
+  overflow: hidden;
+}
+
+.xp-source-image__line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  min-width: 0;
+  height: var(--control-height-sm);
+}
+
+.xp-source-image__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xp-source-image__frame {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+}
+
+.xp-source-image__image {
+  display: block;
+  max-width: min(100%, 480px);
+  max-height: 100%;
+  object-fit: contain;
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-sunken);
+}
+
+/* Monaco draws its text layer above the view zones; previews hold controls
+   (Show/Hide), so their zone sits above it. A zone has no text under it. */
+.monaco-editor .xp-source-image-zone {
+  z-index: 1;
+}

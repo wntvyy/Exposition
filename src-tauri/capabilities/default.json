@@ -195,6 +195,8 @@
     "allow-lean-setup-status",
     "allow-lean-allow-local-build",
     "allow-research-selection-get",
-    "allow-research-selection-set"
+    "allow-research-selection-set",
+    "allow-media-read-image",
+    "allow-media-image-references"
   ]
 }

@@ -34,6 +34,7 @@ import type { ExecutionSettingsState } from "../bindings/ExecutionSettingsState"
 import type { ExportArtifact } from "../bindings/ExportArtifact";
 import type { FileDiff } from "../bindings/FileDiff";
 import type { FileEntry } from "../bindings/FileEntry";
+import type { ImageReference } from "../bindings/ImageReference";
 import type { JobEvent } from "../bindings/JobEvent";
 import type { JobId } from "../bindings/JobId";
 import type { JobSummary } from "../bindings/JobSummary";
@@ -281,6 +282,13 @@ export const commands = {
   pageImage: (renderRef: string) => invoke<ArrayBuffer>("page_image", { renderRef }),
   /** Outline of an open document's current text (transient; nothing is stored). */
   documentOutline: (document: DocumentId) => invoke<DocumentOutline>("document_outline_get", { document }),
+
+  // QOL q/media: project images for display only (read-only, scoped to the open folder).
+  /** The bytes of a project image file (image extensions only, at most 32 MiB). */
+  mediaReadImage: (path: string) => invoke<ArrayBuffer>("media_read_image", { path }),
+  /** Image references in the current text of a source file, located in the open folder. */
+  mediaImageReferences: (path: string, text: string) =>
+    invoke<ImageReference[]>("media_image_references", { path, text }),
 };
 
 export const events = {

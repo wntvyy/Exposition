@@ -1,7 +1,7 @@
 // Files sidebar: open-folder empty state with recent projects, recovery
 // entries from an earlier session, and the lazily loaded, keyboard-accessible
 // file tree (shared Tree component).
-import { File, FilePlus2, FileWarning, Folder, FolderOpen, FolderPlus, Link2, RefreshCw, Unlink, X } from "lucide-react";
+import { FilePlus2, FileWarning, Folder, FolderOpen, FolderPlus, Link2, RefreshCw, Unlink, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 
 import type { FileEntry } from "../../bindings/FileEntry";
@@ -16,6 +16,7 @@ import {
   Button,
   EmptyState,
   ErrorState,
+  fileIconFor,
   IconButton,
   ListRow,
   LoadingState,
@@ -189,7 +190,7 @@ function RecoveryList({ entries }: { entries: RecoveryEntry[] }) {
 function entryIcon(entry: FileEntry, expanded: boolean) {
   if (entry.unavailable) return entry.link ? Unlink : FileWarning;
   if (entry.kind === "directory") return expanded ? FolderOpen : Folder;
-  return File;
+  return fileIconFor(entry.name);
 }
 
 let lastPointerToggle = 0;

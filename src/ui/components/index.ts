@@ -14,6 +14,8 @@ export type { ConfirmAction, ConfirmOptions, DialogProps, PopoverDialogProps, Un
 export { Checkbox, SearchField, Select, Switch, TextArea, TextField } from "./Fields";
 export type { CheckboxProps, SearchFieldProps, SelectOption, SelectProps, SwitchProps, TextAreaProps, TextFieldProps } from "./Fields";
 export { ContextMenu, useContextMenu } from "./ContextMenu";
+export { FileIcon, fileExtension, fileIconFor, fileTypeOf } from "./FileIcon";
+export type { FileIconProps, FileTypeId, FileTypeInfo } from "./FileIcon";
 export type { ContextMenuController, ContextMenuProps } from "./ContextMenu";
 export { Kbd, Keybinding, keybindingLabel } from "./Kbd";
 export { Menu, MenuItem, MenuSection, MenuSeparator, MenuTrigger, Popover, SubmenuTrigger } from "./Menu";

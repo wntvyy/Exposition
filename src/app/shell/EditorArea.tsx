@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import { Group, Panel as ResizablePanel } from "react-resizable-panels";
 
 import { Button, IconButton, SegmentedControl } from "../../ui/components/Button";
+import { fileIconFor } from "../../ui/components/FileIcon";
 import { Keybinding } from "../../ui/components/Kbd";
 import { ResizeHandle } from "../../ui/components/ResizeHandle";
 import { EmptyState, UnavailableState } from "../../ui/components/States";
@@ -146,6 +147,8 @@ function EditorGroupView({ id }: { id: EditorGroupId }) {
               dirty: e.dirty,
               preview: e.preview,
               description: e.resource.path ?? e.resource.title,
+              // Project files show their file-type icon (it follows the current name).
+              icon: e.resource.path ? fileIconFor(e.resource.path) : undefined,
             }))}
             onClose={(key) => void editors.closeInGroup(key, id)}
             onDoubleClick={(key) => {

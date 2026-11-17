@@ -6,6 +6,7 @@ import "./editor/register";
 import "./graph/register";
 import "./jobs/register";
 import "./lean/register";
+import "./media/register";
 import "./operations/register";
 import "./outline/register";
 import "./research/register";

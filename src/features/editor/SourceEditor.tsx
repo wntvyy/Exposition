@@ -12,6 +12,7 @@ import { registry } from "../../app/registry";
 import { errorMessage, isCommandError } from "../../lib/ipc";
 import { editorDefaults, monaco } from "../../lib/monaco";
 import { Banner, Button, ErrorState, UnavailableState } from "../../ui/components";
+import { attachSourceEditorContributions } from "./contributions";
 import {
   attachDocument,
   keepBuffer,
@@ -147,6 +148,8 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
         }),
       );
     });
+    // View-only feature contributions (e.g. inline image previews).
+    disposables.push(...attachSourceEditorContributions(editor, handle));
     onEditor?.(editor, handle);
     return () => {
       offSelection();

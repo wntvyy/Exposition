@@ -5,14 +5,11 @@
 import {
   Archive,
   Beaker,
-  FileCode2,
   FileInput,
   FilePlus2,
-  FileText,
   FlaskConical,
   Image,
   Link2,
-  NotebookText,
   Plus,
   Table2,
   Workflow,
@@ -24,6 +21,7 @@ import type { SpaceGroup } from "../../bindings/SpaceGroup";
 import {
   Button,
   Dialog,
+  fileIconFor,
   IconButton,
   MenuItem,
   Menu,
@@ -48,14 +46,6 @@ const GROUPS: { id: SpaceGroup; title: string }[] = [
   { id: "data", title: "Data" },
   { id: "notes", title: "Notes" },
 ];
-
-function fileIcon(name: string) {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (["py", "r", "jl", "ipy"].includes(ext)) return FileCode2;
-  if (["csv", "tsv", "json", "parquet", "xlsx"].includes(ext)) return Table2;
-  if (["md", "txt", "org", "rst"].includes(ext)) return NotebookText;
-  return FileText;
-}
 
 function NewFileDialog({ onClose }: { onClose: () => void }) {
   const [group, setGroup] = useState<SpaceGroup>("sources");
@@ -202,7 +192,7 @@ export function ResearchExplorer() {
                     key={f.path}
                     id={itemKey({ kind: "file", path: f.path })}
                     title={f.name}
-                    icon={fileIcon(f.name)}
+                    icon={fileIconFor(f.name)}
                     data-path={f.path}
                     data-item-key={itemKey({ kind: "file", path: f.path })}
                     data-entity={f.entity ?? undefined}

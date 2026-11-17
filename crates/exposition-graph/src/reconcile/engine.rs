@@ -139,7 +139,7 @@ impl ProjectIndex {
         self.latex_mains.remove(path);
     }
 
-    fn load(&mut self, store: &GraphStore) -> StoreResult<()> {
+    pub(crate) fn load(&mut self, store: &GraphStore) -> StoreResult<()> {
         #[derive(Deserialize)]
         struct Labels {
             extraction: LabelsOnly,

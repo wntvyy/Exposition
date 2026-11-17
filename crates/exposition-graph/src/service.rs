@@ -473,6 +473,25 @@ impl GraphService {
     }
 
     /// The attached project folder (not a failed one).
+    /// The LaTeX main files the reconciler knows for the attached project,
+    /// without waiting for a running pass (then read from the store). Empty
+    /// when no graph is attached.
+    pub(crate) fn latex_mains(&self) -> std::collections::BTreeSet<WorkspacePath> {
+        let generation = self.generation();
+        if let Ok(state) = self.reconcile.try_lock()
+            && state.generation == generation
+            && state.index.loaded
+        {
+            return state.index.latex_mains.clone();
+        }
+        self.with_store(|store| {
+            let mut index = crate::reconcile::engine::ProjectIndex::default();
+            index.load(store)?;
+            Ok(index.latex_mains)
+        })
+        .unwrap_or_default()
+    }
+
     pub(crate) fn attached_root(&self) -> Option<PathBuf> {
         self.lock().open.as_ref().map(|o| o.root.clone())
     }
