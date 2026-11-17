@@ -33,7 +33,7 @@ const runIpc = vi.hoisted(() => ({
   exportManifest: vi.fn(),
 }));
 const triggerIpc = vi.hoisted(() => ({ list: vi.fn(), plan: vi.fn(), enable: vi.fn(), disable: vi.fn() }));
-const editorsMock = vi.hoisted(() => ({ open: vi.fn(), setTitle: vi.fn(), setDirty: vi.fn(), registerCloseGuard: vi.fn(() => () => {}) }));
+const editorsMock = vi.hoisted(() => ({ open: vi.fn(), setTitle: vi.fn(), setDirty: vi.fn(), registerCloseGuard: vi.fn(() => () => {}), registerSaver: vi.fn(() => () => {}) }));
 const notifyMock = vi.hoisted(() => vi.fn());
 vi.mock("./ipc", () => ({
   workflowCommands: {},

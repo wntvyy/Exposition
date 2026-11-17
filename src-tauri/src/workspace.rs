@@ -47,16 +47,46 @@ where
 
 /// Opening a folder also registers it as the execution service's workspace
 /// root (so jobs there follow its trust); the previous folder is unregistered.
+///
+/// With a folder already open this is a project switch, ordered so that a
+/// destination that cannot be opened changes nothing: the destination is
+/// checked and registered for jobs first, then the `discard` documents (the
+/// user chose to discard their unsaved changes) are closed and the previous
+/// folder is closed (its other unsaved buffers keep their recovery journals),
+/// its workflow runs are canceled, and it is unregistered.
 #[tauri::command]
-pub async fn workspace_open(state: State<'_, AppState>, path: String) -> Result<WorkspaceInfo, CommandError> {
+pub async fn workspace_open(
+    state: State<'_, AppState>,
+    path: String,
+    discard: Option<Vec<DocumentId>>,
+) -> Result<WorkspaceInfo, CommandError> {
     let execution = state.execution.clone();
     let graph = Arc::clone(&state.graph);
     let runs = state.workflow_runs.clone();
+    let discard = discard.unwrap_or_default();
     let info = blocking(&state, move |ws| {
         let previous = ws.current().map(|info| info.root);
         let previous_root = ws.open_root();
-        let info = ws.open_workspace(&PathBuf::from(path))?;
-        if previous.as_deref() != Some(info.root.as_str()) {
+        let destination = ws.check_workspace(&PathBuf::from(&path))?;
+        let switching = previous.as_deref() != Some(destination.as_str());
+        if switching {
+            execution.register_workspace_root(Path::new(&destination)).map_err(|e| {
+                WorkspaceError::new(
+                    "workspace.executionRoot",
+                    format!("The folder could not be prepared for jobs: {e}"),
+                )
+            })?;
+        }
+        let info = match ws.switch_workspace(&PathBuf::from(&path), &discard) {
+            Ok(info) => info,
+            Err(error) => {
+                if switching {
+                    execution.unregister_root(Path::new(&destination));
+                }
+                return Err(error);
+            }
+        };
+        if switching {
             // Switching projects cancels the previous project's workflow run
             // (nothing resumes when it is reopened).
             if let Some(root) = previous_root {
@@ -66,12 +96,6 @@ pub async fn workspace_open(state: State<'_, AppState>, path: String) -> Result<
             if let Some(previous) = previous {
                 execution.unregister_root(Path::new(&previous));
             }
-            execution.register_workspace_root(Path::new(&info.root)).map_err(|e| {
-                WorkspaceError::new(
-                    "workspace.executionRoot",
-                    format!("The folder could not be prepared for jobs: {e}"),
-                )
-            })?;
         }
         Ok(info)
     })

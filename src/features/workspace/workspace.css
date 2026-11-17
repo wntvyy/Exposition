@@ -126,3 +126,20 @@
   display: flex;
   gap: var(--space-1-5);
 }
+
+/* Page bar project menu button: the name shortens with an ellipsis. */
+.xp-pagebar-project {
+  min-width: 0;
+  max-width: 100%;
+}
+.xp-pagebar-project .ui-button__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Project switch decision: one paragraph per consequence. */
+.xp-switch {
+  display: grid;
+  gap: var(--space-2);
+}

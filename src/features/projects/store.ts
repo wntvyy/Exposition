@@ -25,7 +25,9 @@ import type { ResearchRuntime } from "../../bindings/ResearchRuntime";
 import { errorMessage, events } from "../../lib/ipc";
 import { startProjectGeneration } from "../agents/generation";
 import { fileKey } from "../editor/documentClient";
-import { FILES_VIEW_ID, loadDir, openWorkspace, ROOT, useWorkspace } from "../workspace/store";
+import { switchDeps } from "../workspace/projectSwitch";
+import { adoptOpenedWorkspace, FILES_VIEW_ID, loadDir, ROOT, useWorkspace } from "../workspace/store";
+import { notSavedMessage, switchProject } from "../workspace/switch";
 import { projectCommands } from "./ipc";
 import {
   EMPTY_PRESET,
@@ -242,14 +244,6 @@ export async function browseLocation(): Promise<void> {
   scheduleDestinationCheck();
 }
 
-/** Close the open project's file editors first (asking about unsaved changes). */
-async function closeFileEditors(): Promise<boolean> {
-  for (const editor of editors.all()) {
-    if (editor.resource.key.startsWith("file:") && !(await editors.close(editor.resource.key))) return false;
-  }
-  return true;
-}
-
 function notesFile(blueprint: ProjectBlueprint | null): string | null {
   const folder = blueprint?.research ? `.exposition/research/${blueprint.research.id}/` : null;
   return (folder && blueprint?.files.find((f) => f.path.startsWith(folder) && f.path.endsWith("notes.md"))?.path) ?? null;
@@ -282,25 +276,62 @@ function describeCreated(created: ProjectCreated): string {
   return `${created.root}: ${parts.join(", ")}. ${trust}`;
 }
 
-async function createProject(blueprint: ProjectBlueprint): Promise<ProjectCreated | null> {
+/**
+ * Create the project and open it. With a project open this is a project
+ * switch (workspace/switch.ts): the form already resolved the destination; one
+ * decision covers the open project's unsaved and running work; Rust creates
+ * the files and opens the new folder, and only then closes the current one
+ * (discarding what the user chose not to save). A refused creation leaves the
+ * open project, its buffers, and its recovery information as they were.
+ */
+async function createProject(blueprint: ProjectBlueprint, title: string): Promise<ProjectCreated | null> {
   const state = useProjects.getState();
-  if (!(await closeFileEditors())) return null;
+  const current = useWorkspace.getState().info;
   set({ creating: true, error: null });
   try {
-    const created = await projectCommands.create({
-      destination: state.location.trim(),
-      blueprint: JSON.stringify(blueprint),
-      acceptTrustedLocation: state.acceptTrusted,
-    });
-    await openWorkspace(created.root);
-    return created;
-  } catch (error) {
-    const message = errorMessage(error);
-    set({ error: message });
-    notify({ tone: "danger", title: "The project was not created", body: message });
-    // A partly created project is reported when its folder is opened.
-    void checkSetups();
-    return null;
+    const result = await switchProject(
+      {
+        action: "create",
+        name: title,
+        commit: (discard) =>
+          projectCommands.create({
+            destination: state.location.trim(),
+            blueprint: JSON.stringify(blueprint),
+            acceptTrustedLocation: state.acceptTrusted,
+            ...(discard.length > 0 ? { discard } : {}),
+          }),
+      },
+      switchDeps(() => current?.name ?? null),
+    );
+    switch (result.status) {
+      case "switched":
+        // Rust opened the new folder; the store follows it.
+        await adoptOpenedWorkspace();
+        return result.value;
+      case "canceled":
+        return null;
+      case "notSaved":
+        notify({
+          id: "project-switch",
+          tone: "warning",
+          title: `Did not create ${title}`,
+          body: notSavedMessage(result, current?.name ?? ""),
+          timeoutMs: null,
+        });
+        return null;
+      case "failed": {
+        const message = errorMessage(result.error);
+        set({ error: message });
+        notify({
+          tone: "danger",
+          title: "The project was not created",
+          body: current ? `${message} ${current.name} is still open; nothing was closed or discarded.` : message,
+        });
+        // A partly created project is reported when its folder is opened.
+        void checkSetups();
+        return null;
+      }
+    }
   } finally {
     set({ creating: false });
   }
@@ -310,7 +341,7 @@ async function createProject(blueprint: ProjectBlueprint): Promise<ProjectCreate
 export async function createFromPreset(): Promise<ProjectCreated | null> {
   const { blueprint, preview } = useProjects.getState();
   if (!blueprint || !preview?.valid) return null;
-  const created = await createProject(blueprint);
+  const created = await createProject(blueprint, blueprint.title || defaultTitle());
   if (!created) return null;
   await editors.close(NEW_PROJECT_KEY);
   openEntry(created.entry, blueprint);
@@ -347,7 +378,7 @@ export async function createFromObjective(): Promise<ProjectCreated | null> {
     set({ error: errorMessage(error) });
     return null;
   }
-  const created = await createProject(blueprint);
+  const created = await createProject(blueprint, blueprint.title || defaultTitle());
   if (!created) return null;
   await editors.close(NEW_PROJECT_KEY);
   try {

@@ -110,8 +110,13 @@ export const commands = {
     invoke<DocumentChanged>("document_redo", { document, origin }),
 
   // Workspace (folder, files, saves, recovery, settings). Errors are `CommandError`s.
-  /** Open an absolute folder path (from the folder dialog) as the workspace. */
-  workspaceOpen: (path: string) => invoke<WorkspaceInfo>("workspace_open", { path }),
+  /**
+   * Open an absolute folder path (from the folder dialog) as the workspace. With
+   * a folder open this switches projects: `discard` names documents whose
+   * unsaved changes are discarded, only once the destination opened.
+   */
+  workspaceOpen: (path: string, discard: DocumentId[] = []) =>
+    invoke<WorkspaceInfo>("workspace_open", { path, discard }),
   workspaceClose: () => invoke<void>("workspace_close"),
   workspaceCurrent: () => invoke<WorkspaceInfo | null>("workspace_current"),
   workspaceRecent: () => invoke<RecentProject[]>("workspace_recent"),

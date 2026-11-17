@@ -36,7 +36,7 @@ const runIpc = vi.hoisted(() => ({
   exportManifest: vi.fn(),
 }));
 const triggerIpc = vi.hoisted(() => ({ list: vi.fn(async () => []), plan: vi.fn(), enable: vi.fn(), disable: vi.fn() }));
-const editorsMock = vi.hoisted(() => ({ open: vi.fn(), setDirty: vi.fn(), setTitle: vi.fn(), registerCloseGuard: vi.fn(() => () => {}), active: vi.fn(() => null) }));
+const editorsMock = vi.hoisted(() => ({ open: vi.fn(), setDirty: vi.fn(), setTitle: vi.fn(), registerCloseGuard: vi.fn(() => () => {}), registerSaver: vi.fn(() => () => {}), active: vi.fn(() => null) }));
 vi.mock("./ipc", () => ({
   workflowCommands: wfIpc,
   workflowRunCommands: runIpc,
