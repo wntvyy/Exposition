@@ -13,6 +13,7 @@ import type { BuildResult } from "../../bindings/BuildResult";
 import type { CaretGeometry } from "../../bindings/CaretGeometry";
 import type { DocumentChanged } from "../../bindings/DocumentChanged";
 import type { DocumentEvent } from "../../bindings/DocumentEvent";
+import type { EditMode } from "../../bindings/EditMode";
 import type { EditRefusal } from "../../bindings/EditRefusal";
 import type { Motion } from "../../bindings/Motion";
 import type { NonEditableReason } from "../../bindings/NonEditableReason";
@@ -780,6 +781,24 @@ export class PageSession {
     if (!build) throw new Error("Nothing to export yet");
     const artifact = await commands.typesettingExportPdf(build.id);
     return artifact.path;
+  }
+
+  /**
+   * The caret and selection anchor in the document's current revision, for
+   * tools that write source at the caret (the equation editor; see
+   * `activePage.ts`). Null when there is no caret, typing is paused after a
+   * refusal, or the caret cannot be mapped to the current revision (a change
+   * it must be mapped over has not been received yet): never an older
+   * revision's offset.
+   */
+  currentCaret(): { offset: number; anchor: number | null; revision: number; mode: EditMode | null } | null {
+    if (!this.caret || this.unapplied !== null || this.disposed) return null;
+    if (!this.syncPositions() || this.caret.revision !== this.docRevision) return null;
+    const anchor =
+      this.anchor && this.anchor.revision === this.caret.revision && this.anchor.offset !== this.caret.offset
+        ? this.anchor.offset
+        : null;
+    return { offset: this.caret.offset, anchor, revision: this.caret.revision, mode: this.model.caret?.mode ?? null };
   }
 
   /** Test/automation hook: the caret in the current revision. */

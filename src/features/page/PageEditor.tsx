@@ -6,7 +6,7 @@
 // the pages from the page map. All source changes are page transactions.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, KeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
-import { FileDown, FileWarning, RefreshCw, Search, ZoomIn, ZoomOut } from "lucide-react";
+import { FileDown, FileWarning, RefreshCw, Search, Sigma, ZoomIn, ZoomOut } from "lucide-react";
 
 import { notify } from "../../app/notifications";
 import { registry, type EditorProps } from "../../app/registry";
@@ -34,7 +34,12 @@ import {
 } from "../typesetting/store";
 import { handleForPath, MIXED_EOL_REASON, normalizeLineEndings } from "../editor";
 import { FIND_KEYBINDING, findInSource } from "../editor/find";
+import { notePageFocus, releasePageSurface, type PageSurface } from "./activePage";
 import { PageSession } from "./session";
+
+/** The equation editor's insert-or-edit command (registered by the math feature). */
+const EQUATION_COMMAND = "equation.insertOrEdit";
+const EQUATION_KEYBINDING = "Mod+Shift+M";
 import "./page.css";
 
 /** CSS pixels per typographic point at 100 % zoom. */
@@ -89,6 +94,17 @@ export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps
     void session.attach();
     return () => session.detach();
   }, [session]);
+
+  // Caret-based tools (the equation editor) find this view's caret, in the
+  // current revision, through the page-surface registry.
+  const surface = useMemo<PageSurface>(
+    () => ({ path, currentCaret: () => session.currentCaret(), focus: () => input.current?.focus({ preventScroll: true }) }),
+    [path, session],
+  );
+  useEffect(() => () => releasePageSurface(surface), [surface]);
+  useEffect(() => {
+    if (active) notePageFocus(surface);
+  }, [active, surface]);
 
   // A reveal already pending when this view mounted (e.g. a mode switch) only
   // places the caret; a miss is reported for later requests alone.
@@ -312,6 +328,17 @@ export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps
           data-testid="page-find-in-source"
           onPress={() => void findInSource()}
         />
+        {registry.command(EQUATION_COMMAND) && (
+          <IconButton
+            aria-label={caret?.mode === "math" ? "Edit Equation" : "Insert Equation"}
+            icon={Sigma}
+            size="sm"
+            keybinding={EQUATION_KEYBINDING}
+            data-testid="page-equation"
+            isDisabled={!caret || model.readOnly !== null}
+            onPress={() => void registry.runCommand(EQUATION_COMMAND)}
+          />
+        )}
       </Toolbar>
 
       {model.readOnly && (
@@ -458,7 +485,10 @@ export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps
           data-testid="page-input"
           onKeyDown={onKeyDown}
           onInput={flushInput}
-          onFocus={() => setFocused(true)}
+          onFocus={() => {
+            setFocused(true);
+            notePageFocus(surface);
+          }}
           onBlur={() => setFocused(false)}
           onCompositionStart={() => {
             composing.current = true;

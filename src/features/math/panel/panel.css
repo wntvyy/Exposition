@@ -1,0 +1,277 @@
+/* Equation panel: layout, plus the structural editor's rendered math
+   (specialized content). Headers, sections, banners, fields, buttons, and
+   states are the shared components; colors and spacing are tokens. */
+.xp-eq {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  padding: var(--space-2) 0 var(--space-3);
+}
+.xp-eq > .ui-banner,
+.xp-eq > .xp-eq__target,
+.xp-eq > .xp-eq-editor,
+.xp-eq > .xp-eq__actions,
+.xp-eq > .ui-toolbar {
+  margin: 0 var(--pane-inset);
+}
+.xp-eq__target {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+.xp-eq__target p {
+  margin: 0;
+}
+.xp-eq__title {
+  font-weight: var(--font-weight-semibold);
+}
+.xp-eq__list {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-4);
+}
+.xp-eq__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.xp-eq__preview-note {
+  margin: 0 0 var(--space-1);
+}
+.xp-eq-templates,
+.xp-eq-grid-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-0-5);
+}
+.xp-eq-glyph-icon {
+  display: inline-block;
+  min-width: 16px;
+  font-family: var(--font-ui);
+  font-size: var(--font-size-sm);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* ---- the structural editor (rendered math) */
+.xp-eq-editor {
+  min-height: calc(var(--control-height-lg) * 2);
+  padding: var(--space-3);
+  overflow-x: auto;
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-field);
+  color: var(--color-text);
+  font-family: "Cambria Math", "STIX Two Math", "Latin Modern Math", serif;
+  font-size: 18px;
+  line-height: 1.2;
+  cursor: text;
+}
+.xp-eq-editor:focus-visible,
+.xp-eq-editor:focus {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+.xp-eq-row {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0.5em;
+  min-height: 1.2em;
+  vertical-align: middle;
+}
+.xp-eq-row[data-empty] {
+  min-width: 0.8em;
+  border: var(--border-width) dashed var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+.xp-eq-row[data-empty][data-active] {
+  border-color: var(--color-accent);
+}
+.xp-eq-item {
+  display: inline-flex;
+  align-items: center;
+}
+.xp-eq-item[data-selected] {
+  background: var(--color-selection);
+}
+.xp-eq-caret {
+  display: inline-block;
+  align-self: stretch;
+  width: 0;
+  margin: 0 -1px;
+  border-left: 2px solid var(--color-text-muted);
+}
+.xp-eq-editor:focus .xp-eq-caret {
+  border-left-color: var(--color-accent);
+}
+.xp-eq-ident {
+  font-style: italic;
+}
+.xp-eq-symbol,
+.xp-eq-number {
+  padding: 0 0.08em;
+}
+.xp-eq-text,
+.xp-eq-func {
+  font-family: var(--font-ui);
+  font-size: 0.8em;
+  font-style: normal;
+}
+.xp-eq-func {
+  padding-right: 0.15em;
+}
+.xp-eq-frac {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 0 0.15em;
+  font-size: 0.9em;
+}
+.xp-eq-frac__num {
+  padding: 0 0.15em 0.1em;
+  border-bottom: 1px solid currentColor;
+}
+.xp-eq-frac__den {
+  padding: 0.1em 0.15em 0;
+}
+.xp-eq-sqrt {
+  display: inline-flex;
+  align-items: flex-end;
+}
+.xp-eq-sqrt__index {
+  align-self: flex-start;
+  font-size: 0.6em;
+}
+.xp-eq-sqrt__body {
+  padding: 0.05em 0.1em 0;
+  border-top: 1px solid currentColor;
+}
+.xp-eq-scripts {
+  display: inline-flex;
+  align-items: center;
+}
+.xp-eq-scripts__stack {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 0.65em;
+  gap: 0.4em;
+}
+.xp-eq-bigop {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 0 0.1em;
+}
+.xp-eq-bigop__op {
+  font-size: 1.4em;
+  line-height: 1;
+}
+.xp-eq-bigop__upper,
+.xp-eq-bigop__lower {
+  font-size: 0.6em;
+}
+.xp-eq-delim,
+.xp-eq-grid-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+.xp-eq-delim__fence {
+  font-size: 1.3em;
+  padding: 0 0.05em;
+}
+.xp-eq-accent {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+}
+.xp-eq-accent__mark {
+  font-size: 0.7em;
+  line-height: 0.6;
+}
+.xp-eq-font {
+  display: inline-flex;
+  align-items: flex-end;
+}
+.xp-eq-font__tag {
+  font-family: var(--font-ui);
+  font-size: 0.5em;
+  color: var(--color-text-muted);
+}
+.xp-eq-grid-wrap[data-fence]:not([data-fence="none"]) .xp-eq-grid {
+  border-left: 1px solid currentColor;
+  border-right: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+}
+.xp-eq-grid {
+  display: inline-grid;
+  gap: 0.2em 0.6em;
+  padding: 0.1em 0.3em;
+}
+.xp-eq-grid__cell {
+  display: inline-flex;
+  justify-content: center;
+}
+.xp-eq-opaque {
+  font-size: var(--font-size-code);
+}
+
+/* ---- symbol browser */
+.xp-eq-symbols {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 0 var(--pane-inset);
+}
+.xp-eq-symbols__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.xp-eq-symbols__filters > * {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+.xp-eq-symbols__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--control-height-lg), 1fr));
+  gap: var(--space-0-5);
+  max-height: 240px;
+  overflow-y: auto;
+  border-radius: var(--radius-md);
+}
+.xp-eq-symbols__grid:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+.xp-eq-symbols__option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height-lg);
+  border-radius: var(--radius-sm);
+  font-family: "Cambria Math", "STIX Two Math", serif;
+  font-size: var(--font-size-xl);
+  cursor: pointer;
+}
+.xp-eq-symbols__option:hover {
+  background: var(--color-surface-hover);
+}
+.xp-eq-symbols__option[data-active] {
+  background: var(--color-surface-selected);
+}
+.xp-eq-symbols__grid:focus .xp-eq-symbols__option[data-active] {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-width));
+}
+.xp-eq-symbols__option[data-unavailable] {
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+}
+.xp-eq-symbols__detail,
+.xp-eq-symbols__more {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
