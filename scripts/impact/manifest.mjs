@@ -435,6 +435,18 @@ export const AREAS = [
     visual: ["page-typst", "pages-review"],
   },
   {
+    // Visual equation editor (core: math tree, language adapters, catalog;
+    // panel: UI and source/page integration). It edits documents of every
+    // typesetting language through both surfaces, so its scenarios are the
+    // page-editing ones plus the editor's.
+    id: "equation",
+    paths: ["src/features/math/**"],
+    level: "local",
+    e2e: [...SCENARIOS.pages, "editor-find-outline"],
+    visual: ["page-typst", "editor-find-outline"],
+    note: "Equation editor: compiled output from each language is authoritative; KaTeX preview is approximate.",
+  },
+  {
     id: "research",
     paths: ["crates/exposition-research/**", "crates/exposition-attach/**", "workers/**", "src/features/research/**", "src-tauri/src/research.rs"],
     level: "local",
