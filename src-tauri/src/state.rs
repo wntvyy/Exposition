@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use exposition_agents::credentials::{KeyringStore, ObservedStore, PROVIDER_KEY_SECRET, SecretStore};
+use exposition_agents::credentials::{
+    KeyringStore, OPENAI_KEY_SECRET, OPENAI_KEYRING_USER, ObservedStore, PROVIDER_KEY_SECRET, SecretStore,
+};
 use exposition_agents::tools::execution::AppToolServices;
 use exposition_agents::{AgentConfig, AgentService};
 use exposition_core::path::WorkspacePath;
@@ -153,12 +155,26 @@ impl AppState {
             ),
             runtime: tauri::async_runtime::handle().inner().clone(),
             allow_scripted: cfg!(debug_assertions),
-            anthropic_base_url: None,
+            anthropic_base_url: dev_provider_base_url("EXPOSITION_DEV_ANTHROPIC_BASE_URL"),
             retry: None,
             // Every project task gets a scoped graph context and resolves its
             // targets through the project graph.
             graph: Some(Arc::clone(&graph)),
         })?;
+        // The OpenAI connection: its own credential entry (never mixed with
+        // the Anthropic key), redacted like it.
+        {
+            let redactor = execution.clone();
+            let openai: Arc<dyn SecretStore> = Arc::new(ObservedStore::new(
+                KeyringStore::for_entry(credential_namespace().as_deref(), OPENAI_KEYRING_USER),
+                Box::new(move |key| redactor.register_secret(OPENAI_KEY_SECRET, key)),
+            ));
+            let loaded = Arc::clone(&openai);
+            std::thread::spawn(move || {
+                let _ = loaded.get();
+            });
+            agents.configure_openai(openai, dev_provider_base_url("EXPOSITION_DEV_OPENAI_BASE_URL"));
+        }
         // Workflow runs. The research batch runner (restricted Docker and
         // trusted-native Python batches) is wired here; without one, Python
         // workflow steps report themselves unavailable (never downgraded).
@@ -255,6 +271,29 @@ fn namespace_for(var: impl Fn(&str) -> Option<String>) -> Option<String> {
         return None;
     }
     Some(DEVELOPMENT_NAMESPACE.to_owned())
+}
+
+/// A model-provider endpoint override for end-to-end tests: development
+/// builds only, and only a loopback `http://127.0.0.1:<port>` address (a
+/// local mock server), so no build can be pointed at another host to receive
+/// a key. Release builds always use the official endpoints.
+fn dev_provider_base_url(var: &str) -> Option<String> {
+    #[cfg(debug_assertions)]
+    {
+        loopback_url(std::env::var(var).ok()?.trim())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = var;
+        None
+    }
+}
+
+#[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
+fn loopback_url(raw: &str) -> Option<String> {
+    let port = raw.strip_prefix("http://127.0.0.1:")?.trim_end_matches('/');
+    (!port.is_empty() && port.len() <= 5 && port.chars().all(|c| c.is_ascii_digit()))
+        .then(|| raw.trim_end_matches('/').to_owned())
 }
 
 /// Research reads run inputs through the workspace snapshot, like builds do.
@@ -496,5 +535,20 @@ mod tests {
             Some(DEVELOPMENT_NAMESPACE),
             "an invalid namespace never falls back to the real entry"
         );
+    }
+
+    #[test]
+    fn provider_endpoint_overrides_are_loopback_only() {
+        assert_eq!(loopback_url("http://127.0.0.1:18080/").as_deref(), Some("http://127.0.0.1:18080"));
+        for bad in [
+            "https://api.example.com",
+            "http://127.0.0.1",
+            "http://127.0.0.1:80@evil.example",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080/path",
+            "http://127.0.0.10:8080",
+        ] {
+            assert_eq!(loopback_url(bad), None, "{bad}");
+        }
     }
 }

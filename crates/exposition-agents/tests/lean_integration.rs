@@ -116,6 +116,8 @@ async fn run(
             consent: None,
             budgets: None,
             approval_mode: None,
+            provider: None,
+            attachments: None,
         })
         .unwrap();
     let mut approvals = Vec::new();
@@ -358,6 +360,8 @@ async fn run_mode(
             consent: Some(ContextConsent::ScopeContent),
             budgets: None,
             approval_mode: Some(mode),
+            provider: None,
+            attachments: None,
         })
         .unwrap();
     let mut approvals = Vec::new();

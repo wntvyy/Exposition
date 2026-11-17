@@ -193,6 +193,7 @@ describe("provider chip", () => {
   const status = (overrides: Partial<ProviderStatus> = {}): ProviderStatus => ({
     settings: { provider: "anthropic", model: "claude-opus-5-5", effort: "medium", consent: "scopeContent" },
     configured: false,
+    connections: [],
     credentialStore: "Windows Credential Manager",
     credentialError: null,
     scriptedAvailable: true,

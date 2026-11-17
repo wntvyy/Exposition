@@ -16,13 +16,14 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::attachments::{AttachmentId, AttachmentInfo, AttachmentKind};
 use crate::model::{
     AllowanceKind, AuthorizedBy, Checkpoint, NoticeLevel, ReviewChangeKind, ReviewState, TaskId, TaskSpec, TaskStatus,
     TaskUsage, ToolCallStatus,
 };
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (
@@ -169,6 +170,25 @@ const MIGRATIONS: &[(i64, &str)] = &[
         approved TEXT NOT NULL,
         granted_at INTEGER NOT NULL,
         PRIMARY KEY (task_id, kind)
+    );
+    "#,
+    ),
+    // Chat attachments: metadata of immutable snapshots (content files live
+    // beside the database under agents/attachments/<sha256>). Messages refer
+    // to them by id with `exposition_attachment` blocks in their content.
+    (
+        6,
+        r#"
+    CREATE TABLE attachments (
+        id TEXT PRIMARY KEY,
+        sha256 TEXT NOT NULL,
+        name TEXT NOT NULL,
+        media_type TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        width INTEGER,
+        height INTEGER,
+        created_at INTEGER NOT NULL
     );
     "#,
     ),
@@ -343,6 +363,101 @@ impl Store {
             "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, value],
         )?;
+        Ok(())
+    }
+
+    // ---- attachments
+
+    pub fn insert_attachment(&self, info: &AttachmentInfo) -> StoreResult<()> {
+        self.lock().execute(
+            "INSERT INTO attachments (id, sha256, name, media_type, kind, size, width, height, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                info.id.0,
+                info.sha256,
+                info.name,
+                info.media_type,
+                info.kind.as_str(),
+                i(info.size_bytes),
+                info.width,
+                info.height,
+                i(now_ms()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn attachment(&self, id: &AttachmentId) -> StoreResult<Option<AttachmentInfo>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT id, sha256, name, media_type, kind, size, width, height FROM attachments WHERE id = ?1",
+                [&id.0],
+                |r| {
+                    Ok(AttachmentInfo {
+                        id: AttachmentId(r.get(0)?),
+                        sha256: r.get(1)?,
+                        name: r.get(2)?,
+                        media_type: r.get(3)?,
+                        kind: AttachmentKind::parse(&r.get::<_, String>(4)?).unwrap_or(AttachmentKind::Text),
+                        size_bytes: u(r.get(5)?),
+                        width: r.get(6)?,
+                        height: r.get(7)?,
+                        missing: false,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Attachment ids referenced by any stored message (deleted tasks included
+    /// until purged).
+    pub fn referenced_attachments(&self) -> StoreResult<std::collections::HashSet<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT content FROM transcript WHERE kind = 'message' AND role = 'user' AND content LIKE '%exposition_attachment%'",
+        )?;
+        let mut ids = std::collections::HashSet::new();
+        for raw in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            let blocks: Vec<Value> = from_json(&raw?)?;
+            for block in blocks {
+                if block.get("type").and_then(Value::as_str) == Some("exposition_attachment")
+                    && let Some(id) = block.get("attachment_id").and_then(Value::as_str)
+                {
+                    ids.insert(id.to_owned());
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Remove attachment records not referenced by a message and created
+    /// before `before_ms` (abandoned drafts). Returns the digests still in use.
+    pub fn collect_attachments(&self, before_ms: u64) -> StoreResult<std::collections::HashSet<String>> {
+        let referenced = self.referenced_attachments()?;
+        let conn = self.lock();
+        let rows: Vec<(String, String, i64)> = conn
+            .prepare("SELECT id, sha256, created_at FROM attachments")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+        let mut keep = std::collections::HashSet::new();
+        for (id, sha, created) in rows {
+            if referenced.contains(&id) || u(created) >= before_ms {
+                keep.insert(sha);
+            } else {
+                conn.execute("DELETE FROM attachments WHERE id = ?1", [&id])?;
+            }
+        }
+        Ok(keep)
+    }
+
+    /// Forget draft attachments (never sent). Referenced ones are kept.
+    pub fn discard_attachments(&self, ids: &[AttachmentId]) -> StoreResult<()> {
+        let referenced = self.referenced_attachments()?;
+        let conn = self.lock();
+        for id in ids.iter().filter(|id| !referenced.contains(&id.0)) {
+            conn.execute("DELETE FROM attachments WHERE id = ?1", [&id.0])?;
+        }
         Ok(())
     }
 
@@ -1279,7 +1394,7 @@ mod tests {
             .unwrap();
         }
         let store = Store::open(&db).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         let task = store.task(&id).unwrap().unwrap();
         assert_eq!(task.spec.approval_mode, ApprovalMode::Ask, "old tasks read as Ask");
         assert_eq!(store.tool_calls(&id).unwrap()[0].authorized_by, None);

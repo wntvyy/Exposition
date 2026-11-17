@@ -57,6 +57,8 @@ fn request(h: &Harness, budgets: Option<Budgets>) -> CreateTaskRequest {
         consent: None,
         budgets,
         approval_mode: None,
+        provider: None,
+        attachments: None,
     }
 }
 

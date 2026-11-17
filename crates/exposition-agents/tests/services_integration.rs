@@ -101,6 +101,8 @@ fn request(h: &Harness, execution: ExecutionMode) -> CreateTaskRequest {
         consent: None,
         budgets: None,
         approval_mode: None,
+        provider: None,
+        attachments: None,
     }
 }
 

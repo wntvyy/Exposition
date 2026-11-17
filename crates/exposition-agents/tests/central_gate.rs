@@ -631,6 +631,8 @@ async fn observe(
             consent: Some(consent),
             budgets: None,
             approval_mode: None,
+            provider: None,
+            attachments: None,
         })
         .unwrap();
     let id = task.id.clone();
@@ -1013,6 +1015,8 @@ async fn a_scoped_typst_build_cannot_read_files_outside_the_scope() {
                 consent: Some(ContextConsent::ScopeContent),
                 budgets: None,
                 approval_mode: None,
+                provider: None,
+                attachments: None,
             })
             .unwrap()
     };
@@ -1126,6 +1130,8 @@ async fn approvals_answered_after_a_project_switch_do_nothing() {
                 consent: Some(ContextConsent::ScopeContent),
                 budgets: None,
                 approval_mode: None,
+                provider: None,
+                attachments: None,
             })
             .unwrap();
         let approval = tokio::time::timeout(Duration::from_secs(20), async {
@@ -1187,6 +1193,8 @@ async fn approval_shows_hidden_characters_and_long_payloads_completely() {
             consent: Some(ContextConsent::ScopeContent),
             budgets: None,
             approval_mode: None,
+            provider: None,
+            attachments: None,
         })
         .unwrap();
     let approval = tokio::time::timeout(Duration::from_secs(20), async {
@@ -1320,6 +1328,8 @@ async fn a_call_refused_when_its_approval_is_checked_again_is_recorded_failed_wi
                 consent: Some(ContextConsent::ScopeContent),
                 budgets: None,
                 approval_mode: None,
+                provider: None,
+                attachments: None,
             })
             .unwrap();
         let approval = tokio::time::timeout(Duration::from_secs(20), async {

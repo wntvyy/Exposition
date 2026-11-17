@@ -1023,6 +1023,8 @@ impl Harness {
                 consent: Some(ContextConsent::ScopeContent),
                 budgets: None,
                 approval_mode: Some(mode),
+                provider: None,
+                attachments: None,
             })
             .unwrap()
     }
@@ -1415,6 +1417,8 @@ async fn loop_agent_text_reaches_an_r_startup_file_only_with_native_authority() 
             consent: Some(ContextConsent::ScopeContent),
             budgets: None,
             approval_mode: Some(ApprovalMode::Ask),
+            provider: None,
+            attachments: None,
         })
         .unwrap();
     assert!(h.drive(&task.id, |_| Some(ApprovalScope::Task)).await.is_empty());

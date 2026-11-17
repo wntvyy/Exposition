@@ -6,6 +6,7 @@
 //! keeping the history append-only.
 
 pub mod anthropic;
+pub mod openai;
 #[cfg(debug_assertions)]
 pub mod scripted;
 pub mod sse;

@@ -5,16 +5,20 @@
 //! key crosses this boundary once, inbound, when the user saves it; nothing
 //! here ever returns it.
 
+use exposition_agents::attachments::{AttachmentId, IngestOutcome};
+use exposition_agents::catalog::ModelCatalog;
 use exposition_agents::permissions::{
     PermissionChoice, PermissionsChange, ProjectPermissionsEntry, ProjectPermissionsState,
 };
 use exposition_agents::{
-    AgentError, AllowanceKind, ApprovalScope, Budgets, CreateTaskRequest, FileDiff, GenerationTaskRequest,
-    ProviderSettings, ProviderStatus, ReviewActionResult, TaskDetail, TaskId, TaskReview, TaskSummary,
+    AgentError, AllowanceKind, ApprovalScope, Budgets, ContinueTaskRequest, CreateTaskRequest, FileDiff,
+    GenerationTaskRequest, ProviderChoice, ProviderKind, ProviderSettings, ProviderStatus, ReviewActionResult,
+    TaskDetail, TaskId, TaskReview, TaskSummary,
 };
 use exposition_core::path::WorkspacePath;
 use exposition_graph::EntityId;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::CommandError;
@@ -48,18 +52,95 @@ pub async fn agents_provider_update(
     state.agents.update_settings(settings).map_err(command_error)
 }
 
-/// Store the API key in OS credential storage. Returns only whether a key is configured.
+/// Store a provider's API key in OS credential storage (Anthropic when no
+/// provider is named). Returns only whether keys are configured.
 #[tauri::command]
-pub async fn agents_provider_set_key(state: State<'_, AppState>, key: String) -> Result<ProviderStatus, CommandError> {
+pub async fn agents_provider_set_key(
+    state: State<'_, AppState>,
+    key: String,
+    provider: Option<ProviderKind>,
+) -> Result<ProviderStatus, CommandError> {
     if key.len() > 1024 {
         return Err(CommandError::new("agents.invalidKey", "the API key is too long"));
     }
-    state.agents.set_api_key(&key).map_err(command_error)
+    state.agents.set_provider_key(provider.unwrap_or(ProviderKind::Anthropic), &key).map_err(command_error)
 }
 
 #[tauri::command]
-pub async fn agents_provider_clear_key(state: State<'_, AppState>) -> Result<ProviderStatus, CommandError> {
-    state.agents.clear_api_key().map_err(command_error)
+pub async fn agents_provider_clear_key(
+    state: State<'_, AppState>,
+    provider: Option<ProviderKind>,
+) -> Result<ProviderStatus, CommandError> {
+    state.agents.clear_provider_key(provider.unwrap_or(ProviderKind::Anthropic)).map_err(command_error)
+}
+
+/// The models a connection offers (fetched with its credential in Rust).
+#[tauri::command]
+pub async fn agents_models_list(
+    state: State<'_, AppState>,
+    provider: ProviderKind,
+    refresh: Option<bool>,
+) -> Result<ModelCatalog, CommandError> {
+    state.agents.models(provider, refresh.unwrap_or(false)).await.map_err(command_error)
+}
+
+fn attachment_id(raw: AttachmentId) -> Result<AttachmentId, CommandError> {
+    if raw.is_valid() {
+        Ok(raw)
+    } else {
+        Err(CommandError::new("attachments.invalid", "invalid attachment identifier"))
+    }
+}
+
+/// Attach files: the backend opens the native file dialog, so the webview
+/// never names a path; only the files the user picks are read (snapshotted).
+#[tauri::command]
+pub async fn agents_attachments_pick(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<IngestOutcome>, CommandError> {
+    let agents = state.agents.clone();
+    tokio::task::spawn_blocking(move || {
+        let picked = app.dialog().file().set_title("Attach files").blocking_pick_files().unwrap_or_default();
+        let paths: Vec<std::path::PathBuf> =
+            picked.iter().filter_map(|p| p.as_path().map(|p| p.to_path_buf())).collect();
+        agents.add_attachment_files(&paths)
+    })
+    .await
+    .map_err(|e| CommandError::new("attachments.failed", e.to_string()))
+}
+
+/// Attach pasted bytes (an image from the clipboard), base64-encoded.
+#[tauri::command]
+pub async fn agents_attachments_add_bytes(
+    state: State<'_, AppState>,
+    name: Option<String>,
+    media_type: Option<String>,
+    data: String,
+) -> Result<IngestOutcome, CommandError> {
+    let agents = state.agents.clone();
+    tokio::task::spawn_blocking(move || agents.add_attachment_bytes(name.as_deref(), media_type.as_deref(), &data))
+        .await
+        .map_err(|e| CommandError::new("attachments.failed", e.to_string()))
+}
+
+/// A thumbnail data URL for an image attachment.
+#[tauri::command]
+pub async fn agents_attachment_preview(
+    state: State<'_, AppState>,
+    id: AttachmentId,
+) -> Result<Option<String>, CommandError> {
+    state.agents.attachment_preview(&attachment_id(id)?).map_err(command_error)
+}
+
+/// Forget draft attachments removed before sending.
+#[tauri::command]
+pub async fn agents_attachments_discard(
+    state: State<'_, AppState>,
+    ids: Vec<AttachmentId>,
+) -> Result<(), CommandError> {
+    let ids = ids.into_iter().map(attachment_id).collect::<Result<Vec<_>, _>>()?;
+    state.agents.discard_attachments(&ids).map_err(command_error)
 }
 
 #[tauri::command]
@@ -86,8 +167,14 @@ pub async fn agents_task_continue(
     task: TaskId,
     prompt: String,
     budgets: Option<Budgets>,
+    attachments: Option<Vec<AttachmentId>>,
+    provider: Option<ProviderChoice>,
 ) -> Result<TaskSummary, CommandError> {
-    state.agents.continue_task(&task_id(task)?, &prompt, budgets).map_err(command_error)
+    let attachments = attachments.unwrap_or_default().into_iter().map(attachment_id).collect::<Result<Vec<_>, _>>()?;
+    state
+        .agents
+        .continue_task_with(&task_id(task)?, ContinueTaskRequest { prompt, budgets, attachments, provider })
+        .map_err(command_error)
 }
 
 #[tauri::command]

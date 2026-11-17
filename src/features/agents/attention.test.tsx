@@ -240,6 +240,7 @@ describe("provider settings", () => {
   const status: ProviderStatus = {
     settings: { provider: "anthropic", model: "claude-opus-5-5", effort: "medium", consent: "scopeContent" },
     configured: true,
+    connections: [],
     credentialStore: "Windows Credential Manager",
     credentialError: null,
     scriptedAvailable: false,

@@ -145,7 +145,7 @@ describe("task view", () => {
     const detail: TaskDetail = {
       summary: summary({ status: { kind: "awaitingApproval" } }),
       transcript: [
-        { kind: "userText", seq: 1, text: "Fix the intro" },
+        { kind: "userText", seq: 1, text: "Fix the intro", attachments: [] },
         { kind: "assistantText", seq: 2, text: "Reading main.typ." },
         {
           kind: "toolCall",
