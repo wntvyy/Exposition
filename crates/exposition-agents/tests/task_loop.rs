@@ -474,6 +474,35 @@ async fn budgets_stop_the_loop_outside_model_prose() {
     assert!(services.calls.lock().unwrap().is_empty(), "nothing ran");
 }
 
+/// XR-F-02: the task stops before another request when the remaining output
+/// allowance is below what one request needs; the explanation names the
+/// remainder (as the meter shows it) instead of claiming the budget was used up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_output_remainder_below_one_request_is_explained_not_called_used_up() {
+    let h = harness();
+    let script = json!({"turns": [
+        {"steps": [{"toolUse": {"id": "a", "name": "list_files", "input": {"path": "", "recursive": false}}}]},
+        {"steps": [{"text": "never sent"}]}
+    ]});
+    let mut req = request(&h, PermissionProfile::ReadOnly);
+    req.budgets = Some(Budgets { max_output_tokens: 1024, ..Budgets::default() });
+    let task = run(&h, script, req).await;
+    let TaskStatus::BudgetExceeded { budget: BudgetKind::OutputTokens, detail } = &task.status else {
+        panic!("expected an output-token budget stop: {:?}", task.status);
+    };
+    assert_eq!(task.usage.turns, 1, "the second request is never sent");
+    let used = task.usage.output_tokens;
+    assert!(used > 0 && used < 1024, "{used}");
+    assert_eq!(
+        detail,
+        &format!(
+            "{} output tokens of the budget (1024) remain, fewer than one more model request needs (1024).",
+            1024 - used
+        )
+    );
+    assert!(!detail.contains("used up"), "{detail}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_mid_stream_aborts_and_keeps_history_valid() {
     let mut h = harness();
