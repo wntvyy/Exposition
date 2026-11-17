@@ -121,6 +121,23 @@ describe("run history as an operation surface", () => {
     expect(ops.runUserOperation).toHaveBeenCalledWith({ kind: "delete", permanent: false }, [RECORD], expect.anything());
   });
 
+  // Found by the p1-research-runs e2e: after a right click (no click event),
+  // keyboard focus on another run did not select it, so the palette (focus
+  // in its input) offered no Delete for it.
+  it("selects a run focused from the keyboard after a right click elsewhere", () => {
+    render(<RunHistory />);
+    const history = screen.getByTestId("research-history");
+    const first = history.querySelector<HTMLElement>('[data-op-item="run-1"]')!;
+    const second = history.querySelector<HTMLElement>('[data-op-item="run-2"]')!;
+    fireEvent.mouseDown(first);
+    fireEvent.mouseUp(first);
+    fireEvent.contextMenu(first);
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    act(() => second.focus());
+    expect(second.getAttribute("data-op-selected")).toBe("true");
+    expect(first.getAttribute("data-op-selected")).toBeNull();
+  });
+
   it("deletes the focused run with the Delete key (workbench shortcut) and shows it on click", async () => {
     render(<RunHistory />);
     const row = screen.getByTestId("research-history").querySelector<HTMLElement>('[data-op-item="run-2"]')!;

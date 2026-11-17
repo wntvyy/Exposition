@@ -63,6 +63,11 @@ export function useOpList<T>(options: OpListOptions<T>) {
     onMouseDown: () => {
       pointerDown.current = true;
     },
+    // A press that ends without a click (right click, a drag) must not leave
+    // later keyboard focus unselected: the palette acts on the selection.
+    onMouseUp: () => {
+      pointerDown.current = false;
+    },
     onClick: (event: MouseEvent) => {
       pointerDown.current = false;
       // Buttons and links inside the card keep their own action (and select the card alone).
