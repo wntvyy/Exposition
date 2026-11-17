@@ -5,11 +5,11 @@ import type { TextRange } from "./TextRange";
 /**
  * One image reference in a source buffer and where it leads.
  */
-export type ImageReference = {
+export type ImageReference = { 
 /**
  * UTF-16 range of the referencing syntax in the text that was sent.
  */
-range: TextRange,
+range: TextRange, 
 /**
  * The path as written in the source.
  */

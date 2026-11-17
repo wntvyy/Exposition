@@ -130,3 +130,9 @@
   border-radius: var(--radius-sm);
   background: var(--color-surface-sunken);
 }
+
+/* Monaco draws its text layer above the view zones; previews hold controls
+   (Show/Hide), so their zone sits above it. A zone has no text under it. */
+.monaco-editor .xp-source-image-zone {
+  z-index: 1;
+}

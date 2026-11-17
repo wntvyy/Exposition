@@ -42,7 +42,7 @@ beforeEach(() => {
   let n = 0;
   URL.createObjectURL = vi.fn((blob: Blob) => `blob:v-${++n}-${blob.type}`);
   URL.revokeObjectURL = vi.fn();
-  setImageDecoderForTests(async (url, format) => (format === "svg" ? { width: 40, height: 20, preview: null } : { width: 800, height: 600, preview: null }));
+  setImageDecoderForTests(async (_url, format) => (format === "svg" ? { width: 40, height: 20, preview: null } : { width: 800, height: 600, preview: null }));
   ipc.mediaReadImage.mockReset();
 });
 afterEach(() => {

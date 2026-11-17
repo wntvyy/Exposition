@@ -210,7 +210,7 @@ export function ImageViewer({ resource, active }: EditorProps) {
         </Button>
         <IconButton aria-label="Zoom out" icon={ZoomOut} size="sm" isDisabled={!ready || scale <= MIN_ZOOM} onPress={zoomOut} />
         <span className="xp-image-viewer__zoom" data-testid="image-zoom" aria-live="polite">
-          {Math.round(scale * 100)}%
+          {ready ? `${Math.round(scale * 100)}%` : ""}
         </span>
         <IconButton aria-label="Zoom in" icon={ZoomIn} size="sm" isDisabled={!ready || scale >= MAX_ZOOM} onPress={zoomIn} />
         {facts && (
