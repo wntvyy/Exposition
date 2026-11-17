@@ -390,3 +390,151 @@ describe("page caret resolution", () => {
     expect(doc.model.applyEditsCalls).toBe(0);
   });
 });
+
+// Review findings (independent review of the merged panel): wrong-place
+// writes after the context around a target changed, and source the panel
+// must not produce.
+describe("equation draft: review regressions", () => {
+  const DOC = (body: string) => `\\documentclass{article}\n\\usepackage{amsmath}\n\\begin{document}\n${body}\n\\end{document}\n`;
+  const line = (s: ReturnType<typeof setup>) => s.text().split("\n")[3];
+
+  it("(1a) a math insertion point whose opening $ was deleted elsewhere is a conflict, not a write into text", async () => {
+    const t = DOC("Let $x+ y$ hold.");
+    const s = setup(t);
+    s.at(t.indexOf("+") + 1);
+    await s.store.open("inline");
+    expect(s.store.getState().draft!.context).toBe("math");
+    s.store.edit((st) => insertSymbol(st, "greek.alpha"));
+    s.doc.model.edit([{ rangeOffset: t.indexOf("$x"), rangeLength: 1, text: "" }]);
+    expect(s.store.targetConflict()).not.toBeNull();
+    expect(await s.store.apply()).toBe("conflict");
+    expect(line(s)).toBe("Let x+ y$ hold.");
+    expect(s.store.getState().draft).not.toBeNull();
+  });
+
+  it("(1b) a text insertion point that math now surrounds is a conflict, not nested math", async () => {
+    const t = DOC("A x B");
+    const s = setup(t);
+    s.at(t.indexOf("x B") + 2);
+    await s.store.open("inline");
+    s.store.edit((st) => typeText(st, "y"));
+    s.doc.model.edit([
+      { rangeOffset: t.indexOf("A x"), rangeLength: 0, text: "$" },
+      { rangeOffset: t.indexOf(" B") + 2, rangeLength: 0, text: "$" },
+    ]);
+    expect(s.store.targetConflict()).toEqual({ kind: "context" });
+    expect(await s.store.apply()).toBe("conflict");
+    expect(line(s)).toBe("$A x B$");
+  });
+
+  it("(1c) an edited equation that stopped being an equation (escaped $) is a conflict", async () => {
+    const t = DOC("Pay $x$ now.");
+    const s = setup(t);
+    s.at(t.indexOf("x$"));
+    await s.store.open("edit");
+    s.store.edit((st) => typeText(move(st, "end"), "+1"));
+    s.doc.model.edit([{ rangeOffset: t.indexOf("$x"), rangeLength: 0, text: "\\" }]);
+    expect(s.store.targetConflict()).toEqual({ kind: "context" });
+    expect(await s.store.apply()).toBe("conflict");
+    expect(line(s)).toBe("Pay \\$x$ now.");
+  });
+
+  it("(1) shows the conflict shortly after the change, before Apply", async () => {
+    const t = DOC("A x B");
+    const s = setup(t);
+    s.at(t.indexOf("x B") + 2);
+    await s.store.open("inline");
+    s.doc.model.edit([{ rangeOffset: t.indexOf("A x"), rangeLength: 0, text: "$" }]);
+    s.doc.model.edit([{ rangeOffset: t.indexOf(" B") + 3, rangeLength: 0, text: "$" }]);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(s.store.getState().draft!.conflict).toEqual({ kind: "context" });
+  });
+
+  it("(1) edits elsewhere in the same equation keep a math insertion point valid", async () => {
+    const t = DOC("Let $x+ y$ hold.");
+    const s = setup(t);
+    s.at(t.indexOf("+") + 1);
+    await s.store.open("inline");
+    s.store.edit((st) => insertSymbol(st, "greek.alpha"));
+    s.doc.model.edit([{ rangeOffset: t.indexOf("y$") + 1, rangeLength: 0, text: "z" }]);
+    expect(await s.store.apply()).toBe("written");
+    expect(line(s)).toBe("Let $x+\\alpha yz$ hold.");
+  });
+
+  it("(2) a symbol chosen at another document's caret never goes into this draft", async () => {
+    const t = DOC("A $x$ B");
+    const s = setup(t);
+    const other = fakeDocument(DOC("C $y$ D"), { id: "doc-2", path: "other.tex" });
+    s.docs.push(other);
+    s.at(t.indexOf("x$"));
+    await s.store.open("edit");
+    const before = s.store.getState().draft!.editor;
+    s.at(other.model.getValue().indexOf("y$"), undefined, other);
+    expect(await s.store.insertSymbolAtCaret("greek.alpha")).toBe("blocked");
+    expect(s.store.getState().draft!.editor).toBe(before);
+    expect(s.store.getState().notice?.text).toMatch(/belongs to main\.tex/);
+    expect(other.requests).toHaveLength(0);
+  });
+
+  it("(3) refuses a selection that cuts a control word", async () => {
+    const t = DOC("Let $\\alpha+\\beta$ hold.");
+    const s = setup(t);
+    const at = t.indexOf("pha");
+    s.at(at, at + 5);
+    expect(await s.store.open("inline")).toBe(false);
+    expect(s.store.getState().notice?.text).toMatch(/cuts through a command/);
+    s.at(t.indexOf("\\alpha"), t.indexOf("\\alpha") + "\\alpha".length);
+    expect(await s.store.open("inline")).toBe(true);
+  });
+
+  it("(3) an unchanged selection inside math is not re-serialized; an unchanged text selection keeps its source", async () => {
+    const t = DOC("Let $a+b+c$ and a+b hold.");
+    const s = setup(t);
+    const inMath = t.indexOf("a+b+c");
+    s.at(inMath, inMath + 3);
+    await s.store.open("inline");
+    expect(await s.store.apply()).toBe("unchanged");
+    const inText = t.indexOf("a+b hold");
+    s.at(inText, inText + 3);
+    await s.store.open("inline");
+    expect(await s.store.apply()).toBe("written");
+    expect(line(s)).toBe("Let $a+b+c$ and $a+b$ hold.");
+    expect(s.doc.requests).toHaveLength(1);
+  });
+
+  it("(4) groups content inserted at a script position; in front of a script argument opens the whole equation", async () => {
+    const t = DOC("Let $x^$ hold.");
+    const s = setup(t);
+    s.at(t.indexOf("^") + 1);
+    await s.store.open("inline");
+    s.store.edit((st) => typeText(st, "ab"));
+    await s.store.apply();
+    expect(line(s)).toBe("Let $x^{ab}$ hold.");
+    const typ = setup("Let $x^$ hold.", "main.typ");
+    typ.at(7);
+    await typ.store.open("inline");
+    typ.store.edit((st) => typeText(st, "ab"));
+    await typ.store.apply();
+    expect(typ.text()).toBe("Let $x^(a b)$ hold.");
+    const u = DOC("Let $x^2$ hold.");
+    const w = setup(u);
+    w.at(u.indexOf("^") + 1);
+    await w.store.open("inline");
+    expect(w.store.getState().draft!.kind).toBe("edit");
+    expect(w.store.getState().notice?.text).toMatch(/whole equation/);
+  });
+
+  it("(5) refuses to put a new equation right after a lone backslash, in every language", async () => {
+    for (const [text, path] of [
+      ["\\begin{document}\nA \\ B\n\\end{document}", "main.tex"],
+      ["A \\ B", "main.typ"],
+      ["A \\ B", "notes.md"],
+    ] as const) {
+      const s = setup(text, path);
+      s.at(text.indexOf("\\ B") + 1);
+      expect(await s.store.open("inline")).toBe(false);
+      expect(s.store.getState().notice?.text).toMatch(/follows a backslash/);
+      expect(s.doc.requests).toHaveLength(0);
+    }
+  });
+});
