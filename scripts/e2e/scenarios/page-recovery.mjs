@@ -83,25 +83,55 @@ export default async function pageRecovery({ launchApp, artifactsDir, assert, fi
       return el?.dataset.stale === "false" && el.dataset.build && img?.complete;
     }, null, { timeout: 30_000 });
     const doc = (await invoke(page, "document_list")).find((d) => d.path === "main.typ").id;
-    const state = await invoke(page, "document_state", { document: doc });
-    const end = state.text.length;
-    await invoke(page, "document_apply", {
-      request: {
-        id: "e2e-unclosed",
-        origin: { kind: "source" },
-        edits: [{ document: doc, baseRevision: state.info.revision, patches: [{ range: { start: end, end }, text: "\n#let broken = (\n" }] }],
-        undo: { kind: "newGroup" },
-        conflict: "reject",
-        label: null,
-        selection: null,
-      },
+    const apply = async (id, patches) => {
+      const current = await invoke(page, "document_state", { document: doc });
+      await invoke(page, "document_apply", {
+        request: {
+          id,
+          origin: { kind: "source" },
+          edits: [{ document: doc, baseRevision: current.info.revision, patches: patches(current.text) }],
+          undo: { kind: "newGroup" },
+          conflict: "reject",
+          label: null,
+          selection: null,
+        },
+      });
+    };
+    const failed = (value) =>
+      page.waitForFunction((v) => document.querySelector('[data-testid="page-editor"]')?.dataset.failed === v, value, { timeout: 15_000 });
+    await page.getByRole("tab", { name: "Problems" }).click();
+
+    // (a) A diagnostic the shown pages contain keeps Page mode: the escaped
+    // "\#tag" becomes code ("unknown variable: tag") in text the last good
+    // pages show; this page view has followed every edit since that build.
+    await apply("e2e-break-shown-text", (text) => {
+      const escape = text.indexOf("\\#tag");
+      assert.ok(escape > 0, "fixture text");
+      return [{ range: { start: escape, end: escape + 1 }, text: "" }];
     });
-    await page.waitForFunction(() => document.querySelector('[data-testid="page-editor"]')?.dataset.failed === "true", null, { timeout: 15_000 });
-    // The pages shown now are the last good build (a second good build may
-    // have landed before the edit, so it is read after the failure).
+    await failed("true");
+    const inside = page.locator('[data-testid="problem"][data-source="build"]').filter({ hasText: /tag/ }).first();
+    await inside.waitFor({ timeout: 15_000 });
+    const insideText = await inside.innerText();
+    await inside.click();
+    await page.locator('[data-testid="page-caret"]').first().waitFor({ timeout: 5_000 });
+    await page.waitForTimeout(800);
+    assert.equal(await page.getByTestId("typst-split").count(), 0, `a position on the shown pages keeps Page mode (${insideText})`);
+    await shot("03-diagnostic-on-page-keeps-page-mode");
+    evidence.push(`XR-B-01: a diagnostic inside the shown pages ("${insideText.replace(/\s+/g, " ")}") keeps Page mode with the page caret`);
+    // Fixed again: a good build.
+    await apply("e2e-fix-shown-text", (text) => {
+      const at = text.indexOf("#tag");
+      return [{ range: { start: at, end: at }, text: "\\" }];
+    });
+    await failed("false");
+
+    // (b) The reviewer's case: an unclosed delimiter appended after the last good pages.
+    await apply("e2e-unclosed", (text) => [{ range: { start: text.length, end: text.length }, text: "\n#let broken = (\n" }]);
+    await failed("true");
+    // The pages shown now are the last good build (read after the failure).
     const goodBuild = await editor.getAttribute("data-build");
     assert.ok(goodBuild && (await page.locator('[data-testid="page"]').count()) > 0, "the last good pages stay visible");
-    await page.getByRole("tab", { name: "Problems" }).click();
     const problem = page.locator('[data-testid="problem"][data-source="build"]').filter({ hasText: /unclosed/i }).first();
     await problem.waitFor({ timeout: 10_000 });
     const location = await waitFor(async () => {
@@ -110,7 +140,7 @@ export default async function pageRecovery({ launchApp, artifactsDir, assert, fi
     }, { message: "diagnostic position" });
     const errorLine = Number(/main\.typ:(\d+):/.exec(location)[1]);
     assert.equal(await page.getByTestId("typst-split").count(), 0, "Page mode before the click");
-    await shot("03-failed-build-page-mode");
+    await shot("04-failed-build-page-mode");
 
     // One click: the source is shown beside the pages, caret on the error line, focused.
     await problem.click();
@@ -131,46 +161,8 @@ export default async function pageRecovery({ launchApp, artifactsDir, assert, fi
       message: "the last good pages shown beside the source",
     });
     await page.waitForTimeout(300);
-    await shot("04-diagnostic-shown-in-split");
+    await shot("05-diagnostic-shown-in-split");
     evidence.push(`XR-B-01: Problems click on "${location}" switched Page → Split, Monaco active line ${activeLine}, focus in source`);
-
-    // A diagnostic the pages can show keeps Page mode: remove the appended
-    // error and break text the last good pages contain (the escaped "\#tag"
-    // becomes code: "unknown variable: tag"), so the error is on the pages.
-    await modeButton("Page").click();
-    await page.getByTestId("typst-split").waitFor({ state: "detached", timeout: 10_000 });
-    const broken = await invoke(page, "document_state", { document: doc });
-    const appended = "\n#let broken = (\n";
-    const at = broken.text.indexOf(appended);
-    const escape = broken.text.indexOf("\\#tag");
-    assert.ok(at > 0 && escape > 0, "fixture text");
-    await invoke(page, "document_apply", {
-      request: {
-        id: "e2e-break-shown-text",
-        origin: { kind: "source" },
-        edits: [{
-          document: doc,
-          baseRevision: broken.info.revision,
-          patches: [
-            { range: { start: escape, end: escape + 1 }, text: "" },
-            { range: { start: at, end: at + appended.length }, text: "" },
-          ],
-        }],
-        undo: { kind: "newGroup" },
-        conflict: "reject",
-        label: null,
-        selection: null,
-      },
-    });
-    const inside = page.locator('[data-testid="problem"][data-source="build"]').filter({ hasText: /tag/ }).first();
-    await inside.waitFor({ timeout: 15_000 });
-    const insideText = await inside.innerText();
-    await inside.click();
-    await page.locator('[data-testid="page-caret"]').first().waitFor({ timeout: 5_000 });
-    await page.waitForTimeout(800);
-    assert.equal(await page.getByTestId("typst-split").count(), 0, `a position on the shown pages keeps Page mode (${insideText})`);
-    await shot("05-diagnostic-on-page-keeps-page-mode");
-    evidence.push("XR-B-01: a diagnostic inside the shown pages keeps Page mode");
 
     const errors = app.consoleMessages.filter((m) => m.startsWith("error:") || m.startsWith("pageerror:"));
     assert.deepEqual(errors, [], "no console errors");
