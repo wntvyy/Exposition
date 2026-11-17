@@ -377,12 +377,15 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     assert.equal(listed.runnable, false);
     assert.equal(listed.origin.kind, "agent");
     assert.equal(listed.origin.taskId, taskW.id);
-    // The Agents page lists it among what is kept in the project graph.
-    await gotoPage("Editor");
+    // The Agents page lists it among what is kept in the project graph while
+    // it stays visible: no page revisit (XR-F-01: "Nothing kept yet" stayed
+    // until the page was shown again), and it opens the saved workflow.
+    const keptRow = agentsPage.locator(`[data-testid=agents-kept-entity][data-kind=workflow][data-entity-id="${wfResult.entity}"]`);
+    await keptRow.waitFor({ timeout: 10_000 });
+    await shot(page, "agents-graph-kept-workflow-light");
+    await keptRow.getByTestId("agents-kept-open-workflow").click();
+    await page.locator(`[data-editor-key="workflow:${wfResult.workflow}"]`).first().waitFor({ timeout: 10_000 });
     await gotoPage("Agents");
-    await agentsPage.locator(`[data-testid=agents-kept-entity][data-kind=workflow][data-entity-id="${wfResult.entity}"]`).waitFor({
-      timeout: 10_000,
-    });
     step("workflow_propose: approval showed the complete definition; saved as an incomplete draft, not runnable; listed as kept", {
       workflow: wfResult.workflow,
       errors: wfResult.errors,
