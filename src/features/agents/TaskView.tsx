@@ -93,7 +93,12 @@ function ContinueForm({ id, current }: { id: TaskId; current: ProviderChoice }) 
   const canSend = hasContent && !busy && draft.ingesting === 0 && (draft.model === null || modelProblem === null);
   async function submit() {
     if (!canSend) return;
-    const sent = { text: draft.text, attachments: draft.attachments.map((a) => a.id), model: draft.model };
+    const sent = {
+      text: draft.text,
+      attachments: draft.attachments.map((a) => a.id),
+      model: draft.model,
+      rejections: draft.rejections.map((r) => r.id),
+    };
     const switchTo = sent.model && !sameChoice(sent.model, current) ? sent.model : null;
     setBusy(true);
     setFailure(null);
@@ -112,7 +117,7 @@ function ContinueForm({ id, current }: { id: TaskId; current: ProviderChoice }) 
       <div onPaste={pasteHandler(id)}>
         <TextArea label="Follow-up" rows={2} value={draft.text} onChange={(text) => drafts.setText(id, text)} testId="agents-follow-up-text" />
       </div>
-      <DraftAttachments draftKey={id} />
+      <DraftAttachments draftKey={id} sending={busy} />
       <ModelChoice
         value={draft.model}
         inherited={current}

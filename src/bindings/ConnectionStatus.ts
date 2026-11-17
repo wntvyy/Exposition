@@ -17,4 +17,9 @@ credentialError: string | null,
 /**
  * Non-secret context shown with the connection (e.g. "Project proj_…").
  */
-context: string | null, };
+context: string | null, 
+/**
+ * Changes whenever this connection's key is saved or removed (the key
+ * itself is never exposed): views refetch the connection's models.
+ */
+version: number, };

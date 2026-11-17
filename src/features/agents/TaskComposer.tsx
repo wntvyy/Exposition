@@ -121,7 +121,12 @@ export function TaskComposer({
     setBusy(true);
     setFailure(null);
     // Exactly what is sent now; additions made while the request runs stay.
-    const sent = { text: prompt, attachments: draft.attachments.map((a) => a.id), model: draft.model };
+    const sent = {
+      text: prompt,
+      attachments: draft.attachments.map((a) => a.id),
+      model: draft.model,
+      rejections: draft.rejections.map((r) => r.id),
+    };
     // In Auto the project's permissions decide; the task's own settings are
     // the widest ceiling (the backend still refuses what the project or the
     // task prohibits).
@@ -179,7 +184,7 @@ export function TaskComposer({
           testId="agents-prompt"
         />
       </div>
-      <DraftAttachments draftKey={NEW_TASK_DRAFT} />
+      <DraftAttachments draftKey={NEW_TASK_DRAFT} sending={busy} />
       <ModelChoice
         value={draft.model}
         inherited={inherited}

@@ -21,16 +21,22 @@ use ts_rs::TS;
 
 /// Largest text/source attachment (bytes).
 pub const MAX_TEXT_BYTES: u64 = 1024 * 1024;
-/// Largest image (bytes); providers reject larger inline images.
-pub const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+/// Largest image (bytes). Providers limit an inline image to 5 MiB of
+/// base64 data, which is 3.75 MiB of image bytes.
+pub const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024 / 4 * 3;
 /// Largest image side (pixels).
 pub const MAX_IMAGE_SIDE: u32 = 8000;
-/// Largest PDF (bytes).
-pub const MAX_PDF_BYTES: u64 = 32 * 1024 * 1024;
+/// Largest PDF (bytes): one always fits a request once encoded
+/// (see [`MAX_REQUEST_BYTES`]).
+pub const MAX_PDF_BYTES: u64 = 20 * 1024 * 1024;
 /// Attachments per message.
 pub const MAX_PER_MESSAGE: usize = 20;
 /// Encoded attachment bytes in one request, the replayed history included.
 pub const MAX_REQUEST_BYTES: u64 = 30 * 1024 * 1024;
+/// Anthropic: with more than this many images in one request, each image may
+/// be at most [`MANY_IMAGES_MAX_SIDE`] pixels on a side.
+pub const MANY_IMAGES: usize = 20;
+pub const MANY_IMAGES_MAX_SIDE: u32 = 2000;
 /// Longest display name kept.
 const MAX_NAME_CHARS: usize = 120;
 

@@ -55,8 +55,8 @@ function providerStatus(overrides: Partial<ProviderStatus> = {}): ProviderStatus
     settings: { provider: "anthropic", model: "claude-opus-5-5", effort: "medium", consent: "scopeContent" },
     configured: true,
     connections: [
-      { provider: "anthropic", auth: "apiKey", configured: true, credentialError: null, context: null },
-      { provider: "openai", auth: "apiKey", configured: true, credentialError: null, context: null },
+      { provider: "anthropic", auth: "apiKey", configured: true, credentialError: null, context: null, version: 1 },
+      { provider: "openai", auth: "apiKey", configured: true, credentialError: null, context: null, version: 1 },
     ],
     credentialStore: "Windows Credential Manager",
     credentialError: null,
@@ -275,8 +275,8 @@ describe("model picker", () => {
   it("asks for a key instead of listing a connection that has none", () => {
     const status = providerStatus({
       connections: [
-        { provider: "anthropic", auth: "apiKey", configured: true, credentialError: null, context: null },
-        { provider: "openai", auth: "apiKey", configured: false, credentialError: null, context: null },
+        { provider: "anthropic", auth: "apiKey", configured: true, credentialError: null, context: null, version: 1 },
+        { provider: "openai", auth: "apiKey", configured: false, credentialError: null, context: null, version: 1 },
       ],
     });
     const configure = vi.fn();
@@ -318,8 +318,8 @@ describe("model picker", () => {
     ipc.agentsModelsList.mockReset().mockReturnValueOnce(before.promise).mockReturnValueOnce(after.promise);
     const other = providerStatus({
       connections: [
-        { provider: "anthropic", auth: "apiKey", configured: true, credentialError: null, context: null },
-        { provider: "openai", auth: "apiKey", configured: true, credentialError: null, context: "Project proj_b" },
+        { provider: "anthropic", auth: "apiKey", configured: true, credentialError: null, context: null, version: 1 },
+        { provider: "openai", auth: "apiKey", configured: true, credentialError: null, context: "Project proj_b", version: 1 },
       ],
     });
     rerender(<ModelPicker value={{ provider: "openai", model: "gpt-6.2-sol", effort: "medium" }} onChange={() => {}} status={other} revision={1} />);

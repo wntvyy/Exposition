@@ -152,7 +152,9 @@ export function ModelPicker({ value, onChange, status, onProblemChange, onConfig
 
   const provider = value.provider;
   const connection = connectionOf(status, provider);
-  const identity = `${connection.configured}|${connection.context ?? ""}|${connection.credentialError ?? ""}|${revision}`;
+  // `version` changes with every key save/removal (another account's key
+  // has the same `configured`), so the catalog is fetched again.
+  const identity = `${connection.configured}|${connection.version}|${connection.context ?? ""}|${connection.credentialError ?? ""}|${revision}`;
   const listing = provider !== "scripted" && connection.configured;
   const { catalog, loading, error, refresh } = useModelCatalog(provider, identity, listing);
   const { rows, selected } = catalogRows(catalog, value);

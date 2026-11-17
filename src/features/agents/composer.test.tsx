@@ -69,8 +69,8 @@ const status: ProviderStatus = {
   settings: { provider: "anthropic", model: "claude-opus-5-5", effort: "medium", consent: "scopeContent" },
   configured: true,
   connections: [
-    { provider: "anthropic", auth: "apiKey", configured: true, credentialError: null, context: null },
-    { provider: "openai", auth: "apiKey", configured: true, credentialError: null, context: null },
+    { provider: "anthropic", auth: "apiKey", configured: true, credentialError: null, context: null, version: 1 },
+    { provider: "openai", auth: "apiKey", configured: true, credentialError: null, context: null, version: 1 },
   ],
   credentialStore: "test store",
   credentialError: null,

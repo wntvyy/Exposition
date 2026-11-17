@@ -27,6 +27,8 @@ export interface ConnectionState {
   credentialError: string | null;
   /** Non-secret context, e.g. "Project proj_…". */
   context: string | null;
+  /** Changes whenever the connection's key is saved or removed. */
+  version: number;
 }
 
 /**
@@ -36,14 +38,16 @@ export interface ConnectionState {
  */
 export function connectionOf(status: ProviderStatus | null, provider: ProviderKind): ConnectionState {
   if (provider === "scripted") {
-    return { provider, configured: status?.scriptedAvailable ?? false, credentialError: null, context: null };
+    return { provider, configured: status?.scriptedAvailable ?? false, credentialError: null, context: null, version: 0 };
   }
   const entry = status?.connections?.find((c) => c.provider === provider);
-  if (entry) return { provider, configured: entry.configured, credentialError: entry.credentialError, context: entry.context };
-  if (status && status.settings.provider === provider) {
-    return { provider, configured: status.configured, credentialError: status.credentialError, context: null };
+  if (entry) {
+    return { provider, configured: entry.configured, credentialError: entry.credentialError, context: entry.context, version: entry.version };
   }
-  return { provider, configured: false, credentialError: null, context: null };
+  if (status && status.settings.provider === provider) {
+    return { provider, configured: status.configured, credentialError: status.credentialError, context: null, version: 0 };
+  }
+  return { provider, configured: false, credentialError: null, context: null, version: 0 };
 }
 
 /** The providers a picker offers (the scripted one only where it exists). */

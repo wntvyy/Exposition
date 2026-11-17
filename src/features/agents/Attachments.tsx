@@ -29,7 +29,9 @@ export function attachmentMeta(info: AttachmentInfo): string {
   return [kind, humanSize(info.sizeBytes), dimensions].filter((part): part is string => part !== null).join(" · ");
 }
 
+/** Recently used thumbnails (data URLs can be several MB): oldest dropped first. */
 const previews = new Map<string, Promise<string | null>>();
+const PREVIEW_CACHE = 24;
 
 /** An image attachment's thumbnail (data URL), read once per attachment. */
 export function useAttachmentPreview(info: AttachmentInfo): string | null {
@@ -44,6 +46,7 @@ export function useAttachmentPreview(info: AttachmentInfo): string | null {
         .then(() => commands.agentsAttachmentPreview(info.id))
         .catch(() => null);
       previews.set(info.id, request);
+      while (previews.size > PREVIEW_CACHE) previews.delete(previews.keys().next().value as string);
     }
     void request.then((value) => {
       if (live) setUrl(value);
@@ -105,7 +108,7 @@ export function MessageAttachments({ items }: { items: AttachmentInfo[] }) {
  * A composer's attachments: the Attach files control, the attached files
  * (each removable), ingestion in progress, and why files were not attached.
  */
-export function DraftAttachments({ draftKey }: { draftKey: string }) {
+export function DraftAttachments({ draftKey, sending = false }: { draftKey: string; sending?: boolean }) {
   const draft = useDraft(draftKey);
   return (
     <div className="agents-stack" data-testid="agents-draft-attachments" data-ingesting={draft.ingesting > 0 || undefined}>
@@ -148,7 +151,12 @@ export function DraftAttachments({ draftKey }: { draftKey: string }) {
       {draft.attachments.length > 0 && (
         <div role="list" aria-label="Attachments" className="agents-attachments" data-testid="agents-draft-attachment-list">
           {draft.attachments.map((info) => (
-            <AttachmentRow key={info.id} info={info} onRemove={() => drafts.remove(draftKey, info.id)} />
+            <AttachmentRow
+              key={info.id}
+              info={info}
+              // An attachment in a send that is still running cannot be removed.
+              onRemove={sending ? undefined : () => drafts.remove(draftKey, info.id)}
+            />
           ))}
         </div>
       )}

@@ -55,6 +55,8 @@ pub struct OpenAiProvider {
     effort: Option<Effort>,
     connection: OpenAiConnection,
     retry: RetryPolicy,
+    /// The model's output limit when it is below the agent's per-turn ceiling.
+    output_cap: Option<u64>,
 }
 
 impl std::fmt::Debug for OpenAiProvider {
@@ -121,7 +123,14 @@ impl OpenAiProvider {
             effort,
             connection,
             retry,
+            output_cap: None,
         })
+    }
+
+    /// Cap `max_output_tokens` at the model's own limit.
+    pub fn with_output_cap(mut self, cap: Option<u64>) -> Self {
+        self.output_cap = cap;
+        self
     }
 
     /// The JSON body for one streamed request.
@@ -139,16 +148,25 @@ impl OpenAiProvider {
                 })
             })
             .collect();
+        let mut input =
+            to_input(&request.messages.iter().map(|m| (m.role.as_str(), m.content.as_slice())).collect::<Vec<_>>());
+        if self.effort.is_none() {
+            // A model without reasoning rejects reasoning input items (e.g.
+            // after switching from a reasoning model in the same task).
+            input.retain(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"));
+        }
+        let ceiling = u64::from(request.max_tokens.min(MAX_OUTPUT_TOKENS));
+        let max_output = self.output_cap.map_or(ceiling, |cap| ceiling.min(cap));
         let mut body = json!({
             "model": self.model,
             "instructions": request.system,
-            "input": to_input(&request.messages.iter().map(|m| (m.role.as_str(), m.content.as_slice())).collect::<Vec<_>>()),
+            "input": input,
             "tools": tools,
             "tool_choice": "auto",
             "parallel_tool_calls": true,
             "store": false,
             "stream": true,
-            "max_output_tokens": request.max_tokens.min(MAX_OUTPUT_TOKENS),
+            "max_output_tokens": max_output,
         });
         if let Some(effort) = self.effort {
             body["reasoning"] = json!({"effort": effort.as_str(), "summary": "auto"});
@@ -693,6 +711,23 @@ mod tests {
         assert!(!body.to_string().contains(KEY) && !format!("{p:?}").contains(KEY));
         let plain = provider(API_BASE, None).request_body(&request(vec![user("hi")]));
         assert!(plain.get("reasoning").is_none() && plain.get("include").is_none());
+        // A model without reasoning gets no reasoning items, and its own output limit.
+        let history = vec![
+            user("hi"),
+            ProviderMessage {
+                role: "assistant".into(),
+                content: vec![
+                    json!({"type": REASONING_BLOCK, "id": "rs_1", "encrypted_content": "enc", "summary": []}),
+                    json!({"type": "text", "text": "Hello."}),
+                ],
+            },
+            user("again"),
+        ];
+        let capped = provider(API_BASE, None).with_output_cap(Some(16_384)).request_body(&request(history.clone()));
+        assert!(capped["input"].as_array().unwrap().iter().all(|i| i["type"] != "reasoning"));
+        assert_eq!(capped["max_output_tokens"], 16_384);
+        let reasoning = provider(API_BASE, Some(Effort::Low)).request_body(&request(history));
+        assert!(reasoning["input"].as_array().unwrap().iter().any(|i| i["type"] == "reasoning"));
     }
 
     #[test]

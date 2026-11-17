@@ -27,8 +27,8 @@ function status(openaiConfigured: boolean, overrides: Partial<ProviderStatus> = 
     settings: { provider: "anthropic", model: "claude-opus-5-5", effort: "high", consent: "scopeContent", openai: { organization: null, project: "proj_abc" } },
     configured: true,
     connections: [
-      { provider: "anthropic", auth: "apiKey", configured: true, credentialError: null, context: null },
-      { provider: "openai", auth: "apiKey", configured: openaiConfigured, credentialError: null, context: openaiConfigured ? "Project proj_abc" : null },
+      { provider: "anthropic", auth: "apiKey", configured: true, credentialError: null, context: null, version: 1 },
+      { provider: "openai", auth: "apiKey", configured: openaiConfigured, credentialError: null, context: openaiConfigured ? "Project proj_abc" : null, version: 1 },
     ],
     credentialStore: "Windows Credential Manager",
     credentialError: null,

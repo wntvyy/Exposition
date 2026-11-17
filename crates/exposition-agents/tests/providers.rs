@@ -587,3 +587,98 @@ async fn settings_saved_before_connections_keep_the_exact_model() {
     assert_eq!(settings.openai, None);
     assert_eq!(service.provider_status().connections.len(), 3);
 }
+
+fn text_reply(text: &str) -> String {
+    openai_response(json!([{"type": "message", "content": [{"type": "output_text", "text": text}]}]))
+}
+
+fn header(seen: &Seen, name: &str) -> Option<String> {
+    seen.head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+    })
+}
+
+#[tokio::test]
+async fn switching_to_a_model_without_reasoning_sends_no_reasoning_items_and_respects_its_output_limit() {
+    let mock = Mock::start().await;
+    let h = harness(&mock).await;
+    use_openai(&h, "gpt-6.2-sol");
+    let reasoning = json!({"type": "reasoning", "id": "rs_1", "encrypted_content": "enc-1", "summary": []});
+    let message = json!({"type": "message", "content": [{"type": "output_text", "text": "First."}]});
+    mock.reply("/v1/responses", openai_response(json!([reasoning, message])));
+    let task = h.service.create_task(request(&h, "One")).unwrap();
+    assert_eq!(finish(&h, &task.id).await.status, TaskStatus::Completed);
+    mock.reply("/v1/responses", text_reply("Second."));
+    let to = ProviderChoice { provider: ProviderKind::OpenAi, model: "gpt-4.1".into(), effort: Effort::Medium };
+    h.service
+        .continue_task_with(
+            &task.id,
+            ContinueTaskRequest { prompt: "Two".into(), budgets: None, attachments: vec![], provider: Some(to) },
+        )
+        .unwrap();
+    assert_eq!(finish(&h, &task.id).await.status, TaskStatus::Completed);
+    let second = &mock.seen()[1].body;
+    assert_eq!(second["model"], "gpt-4.1");
+    assert!(second.get("reasoning").is_none() && second.get("include").is_none());
+    assert!(second["input"].as_array().unwrap().iter().all(|i| i["type"] != "reasoning"));
+    assert_eq!(second["max_output_tokens"], 16_384);
+}
+
+#[tokio::test]
+async fn a_task_keeps_the_connection_context_it_started_with_until_it_switches() {
+    let mock = Mock::start().await;
+    let h = harness(&mock).await;
+    use_openai(&h, "gpt-6.2-sol");
+    let with_project = |project: &str| {
+        let mut settings = h.service.settings().unwrap();
+        settings.openai = Some(OpenAiConnection { organization: None, project: Some(project.into()) });
+        h.service.update_settings(settings).unwrap();
+    };
+    with_project("proj_a");
+    mock.reply("/v1/responses", text_reply("one"));
+    let task = h.service.create_task(request(&h, "One")).unwrap();
+    finish(&h, &task.id).await;
+    with_project("proj_b");
+    mock.reply("/v1/responses", text_reply("two"));
+    h.service.continue_task(&task.id, "Two", None).unwrap();
+    finish(&h, &task.id).await;
+    mock.reply("/v1/responses", text_reply("three"));
+    let to = ProviderChoice { provider: ProviderKind::OpenAi, model: "gpt-6.2-astra".into(), effort: Effort::Medium };
+    h.service
+        .continue_task_with(
+            &task.id,
+            ContinueTaskRequest { prompt: "Three".into(), budgets: None, attachments: vec![], provider: Some(to) },
+        )
+        .unwrap();
+    finish(&h, &task.id).await;
+    let projects: Vec<Option<String>> = mock.seen().iter().map(|s| header(s, "OpenAI-Project")).collect();
+    assert_eq!(projects, [Some("proj_a".to_owned()), Some("proj_a".to_owned()), Some("proj_b".to_owned())]);
+}
+
+#[tokio::test]
+async fn key_changes_change_the_connection_version_and_attachment_only_messages_show_no_placeholder() {
+    let mock = Mock::start().await;
+    let h = harness(&mock).await;
+    let version = |h: &Harness| {
+        h.service.provider_status().connections.iter().find(|c| c.provider == ProviderKind::OpenAi).unwrap().version
+    };
+    let before = version(&h);
+    h.service.set_provider_key(ProviderKind::OpenAi, OPENAI_KEY).unwrap();
+    let after_set = version(&h);
+    h.service.set_provider_key(ProviderKind::OpenAi, "sk-proj-second-account-0123456789").unwrap();
+    assert!(before < after_set && after_set < version(&h), "every key change is visible to views");
+
+    use_openai(&h, "gpt-6.2-sol");
+    let note = added(h.service.add_attachment_bytes(Some("n.txt"), None, &attachments::base64_encode(b"note\n")));
+    mock.reply("/v1/responses", text_reply("ok"));
+    let mut req = request(&h, "");
+    req.attachments = Some(vec![note.id.clone()]);
+    let task = h.service.create_task(req).unwrap();
+    finish(&h, &task.id).await;
+    let shown = h.service.task_detail(&task.id).unwrap().transcript.into_iter().find_map(|i| match i {
+        TranscriptItem::UserText { text, attachments, .. } if !attachments.is_empty() => Some(text),
+        _ => None,
+    });
+    assert_eq!(shown.as_deref(), Some(""), "the request text of an attachment-only message is not shown as the user's");
+}

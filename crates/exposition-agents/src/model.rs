@@ -434,6 +434,9 @@ pub struct ConnectionStatus {
     pub credential_error: Option<String>,
     /// Non-secret context shown with the connection (e.g. "Project proj_…").
     pub context: Option<String>,
+    /// Changes whenever this connection's key is saved or removed (the key
+    /// itself is never exposed): views refetch the connection's models.
+    pub version: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

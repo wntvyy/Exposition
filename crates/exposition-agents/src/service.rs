@@ -134,6 +134,11 @@ struct Inner {
     attachments: ContentStore,
     /// Cached model catalogs by provider and connection fingerprint.
     catalogs: Mutex<HashMap<String, (u64, Vec<catalog::ModelDescriptor>)>>,
+    /// Attachments being sent (validated, not yet stored in a message):
+    /// a concurrent discard leaves them alone.
+    reserved: Mutex<std::collections::HashSet<String>>,
+    /// Per connection (Anthropic, OpenAI): bumped on every key save/removal.
+    credential_versions: [std::sync::atomic::AtomicU64; 2],
     retry: RetryPolicy,
     events: broadcast::Sender<AgentEvent>,
     running: Mutex<HashMap<TaskId, Running>>,
@@ -183,6 +188,9 @@ struct Running {
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
+
+/// The request text of an attachment-only message (not shown as the user's).
+const ATTACHMENTS_ONLY: &str = "Use the attached files.";
 
 /// Bytes of an attachment once base64-encoded in a request.
 fn encoded_size(bytes: u64) -> u64 {
@@ -260,6 +268,7 @@ fn catalog_error(status: u16, body: &str, key: &str) -> String {
         .and_then(|v| v.pointer("/error/message").and_then(Value::as_str).map(str::to_owned))
         .unwrap_or_else(|| format!("HTTP {status}"))
         .replace(key, "<redacted>");
+    let message = crate::provider::sse::bounded(&message);
     match status {
         401 | 403 => format!("The provider rejected the API key ({message})."),
         _ => format!("The model list could not be loaded ({message})."),
@@ -334,15 +343,51 @@ async fn fetch_anthropic_models(
     Ok(models)
 }
 
-/// Whether a model choice can run the agent with the given attachment kinds.
-/// Unknown support is not proof of support: such attachments are refused
-/// with an explanation instead of being dropped.
-pub fn preflight(choice: &ProviderChoice, kinds: &[AttachmentKind]) -> std::result::Result<Option<Effort>, AgentError> {
-    let (agent, caps) = match choice.provider {
-        ProviderKind::OpenAi => catalog::openai_rules(&choice.model),
-        ProviderKind::Anthropic => catalog::anthropic_rules(&choice.model),
-        ProviderKind::Scripted => return Ok(Some(choice.effort)),
+/// What a model choice resolves to for a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Resolved {
+    /// Effort to send (`None`: the model takes no effort/reasoning parameters).
+    pub effort: Option<Effort>,
+    /// The model's output limit when known.
+    pub max_output_tokens: Option<u64>,
+}
+
+/// Whether a model choice can run the agent with the given attachments
+/// (the new message's plus the history's). `known` is the connection's
+/// catalog entry for the model when one was fetched: its evidence comes
+/// before the maintained rules. Unknown support is not proof of support:
+/// such attachments are refused with an explanation instead of being dropped.
+pub fn preflight(
+    choice: &ProviderChoice,
+    attachments: &[AttachmentInfo],
+    known: Option<&catalog::ModelDescriptor>,
+) -> std::result::Result<Resolved, AgentError> {
+    let kinds: Vec<AttachmentKind> = attachments.iter().map(|a| a.kind).collect();
+    let (agent, caps) = match (choice.provider, known) {
+        (ProviderKind::Scripted, _) => {
+            return Ok(Resolved { effort: Some(choice.effort), max_output_tokens: None });
+        }
+        (_, Some(descriptor)) => (descriptor.agent.clone(), descriptor.capabilities.clone()),
+        (ProviderKind::OpenAi, None) => catalog::openai_rules(&choice.model),
+        (ProviderKind::Anthropic, None) => catalog::anthropic_rules(&choice.model),
     };
+    let images: Vec<&AttachmentInfo> = attachments.iter().filter(|a| a.kind == AttachmentKind::Image).collect();
+    if choice.provider == ProviderKind::Anthropic
+        && images.len() > att::MANY_IMAGES
+        && images.iter().any(|a| a.width.max(a.height).unwrap_or(0) > att::MANY_IMAGES_MAX_SIDE)
+    {
+        return Err(AgentError::new(
+            "attachments.tooManyLargeImages",
+            format!(
+                "With more than {} images in a conversation, Anthropic accepts images of at most {} pixels on a side; \
+                 start a new task or attach smaller images.",
+                att::MANY_IMAGES,
+                att::MANY_IMAGES_MAX_SIDE
+            ),
+        ));
+    }
+    let max_output_tokens = caps.max_output_tokens;
+    let kinds = kinds.as_slice();
     if let AgentSupport::Unsupported { reason } = agent {
         return Err(AgentError::new(
             "agents.modelUnsupported",
@@ -369,7 +414,8 @@ pub fn preflight(choice: &ProviderChoice, kinds: &[AttachmentKind]) -> std::resu
         // OpenAI: no reasoning parameters for a model not known to take them.
         // Anthropic requests always carry the effort (unverified models are
         // the user's explicit choice).
-        return Ok((choice.provider != ProviderKind::OpenAi).then_some(choice.effort));
+        let effort = (choice.provider != ProviderKind::OpenAi).then_some(choice.effort);
+        return Ok(Resolved { effort, max_output_tokens });
     }
     if !caps.efforts.contains(&choice.effort) {
         return Err(AgentError::new(
@@ -377,7 +423,22 @@ pub fn preflight(choice: &ProviderChoice, kinds: &[AttachmentKind]) -> std::resu
             format!("{} does not accept the {} effort level.", choice.model, choice.effort.as_str()),
         ));
     }
-    Ok(Some(choice.effort))
+    Ok(Resolved { effort: Some(choice.effort), max_output_tokens })
+}
+
+/// Releases attachment reservations when a send finishes (or fails).
+struct Reservation<'a> {
+    set: &'a Mutex<std::collections::HashSet<String>>,
+    ids: Vec<String>,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        let mut set = lock(self.set);
+        for id in &self.ids {
+            set.remove(id);
+        }
+    }
 }
 
 impl AgentService {
@@ -434,6 +495,8 @@ impl AgentService {
                 openai: Mutex::new(OpenAiSetup { credentials: None, base_url: openai_provider::API_BASE.to_owned() }),
                 attachments,
                 catalogs: Mutex::new(HashMap::new()),
+                reserved: Mutex::new(std::collections::HashSet::new()),
+                credential_versions: Default::default(),
                 retry: config.retry.unwrap_or_default(),
                 events,
                 running: Mutex::new(HashMap::new()),
@@ -485,6 +548,7 @@ impl AgentService {
             configured: anthropic_configured,
             credential_error: anthropic_error.clone(),
             context: None,
+            version: self.inner.credential_version(ProviderKind::Anthropic),
         }];
         let openai_store = lock(&self.inner.openai).credentials.clone();
         let (openai_configured, openai_error) = match &openai_store {
@@ -507,6 +571,7 @@ impl AgentService {
             configured: openai_configured,
             credential_error: openai_error.clone(),
             context: openai_context,
+            version: self.inner.credential_version(ProviderKind::OpenAi),
         });
         if self.inner.allow_scripted {
             connections.push(ConnectionStatus {
@@ -515,6 +580,7 @@ impl AgentService {
                 configured: true,
                 credential_error: None,
                 context: None,
+                version: 0,
             });
         }
         let (configured, credential_error) = match settings.provider {
@@ -559,6 +625,7 @@ impl AgentService {
         let key = normalize_api_key(raw).map_err(|e| AgentError::new("agents.invalidKey", e.to_string()))?;
         store.set(&key).map_err(|e| AgentError::new("agents.credentials", e.to_string()))?;
         lock(&self.inner.catalogs).retain(|k, _| !k.starts_with(provider_key(provider)));
+        self.inner.bump_credential_version(provider);
         Ok(self.provider_changed())
     }
 
@@ -566,6 +633,7 @@ impl AgentService {
         let store = self.inner.credential_store(provider)?;
         store.delete().map_err(|e| AgentError::new("agents.credentials", e.to_string()))?;
         lock(&self.inner.catalogs).retain(|k, _| !k.starts_with(provider_key(provider)));
+        self.inner.bump_credential_version(provider);
         Ok(self.provider_changed())
     }
 
@@ -739,7 +807,11 @@ impl AgentService {
 
     /// Forget draft attachments the user removed before sending.
     pub fn discard_attachments(&self, ids: &[AttachmentId]) -> Result<()> {
-        Ok(self.inner.store.discard_attachments(ids)?)
+        // Attachments of a send in progress are kept (the message is about
+        // to refer to them).
+        let reserved = lock(&self.inner.reserved).clone();
+        let ids: Vec<AttachmentId> = ids.iter().filter(|id| !reserved.contains(&id.0)).cloned().collect();
+        Ok(self.inner.store.discard_attachments(&ids)?)
     }
 
     /// The current provider status, announced to every view.
@@ -838,8 +910,8 @@ impl AgentService {
             }
             None => ProviderChoice { provider: settings.provider, model: settings.model, effort: settings.effort },
         };
-        let kinds: Vec<AttachmentKind> = attachments.iter().map(|a| a.kind).collect();
-        preflight(&choice, &kinds)?;
+        preflight(&choice, &attachments, self.inner.known_model(&choice).as_ref())?;
+        let _reserved = self.inner.reserve(&attachments);
         let bytes: u64 = attachments.iter().map(|a| encoded_size(a.size_bytes)).sum();
         if bytes > att::MAX_REQUEST_BYTES {
             return Err(AgentError::new(
@@ -847,7 +919,7 @@ impl AgentService {
                 format!("The attachments total more than {} per request.", att::human_size(att::MAX_REQUEST_BYTES)),
             ));
         }
-        let prompt = if prompt.is_empty() { "Use the attached files." } else { prompt };
+        let prompt = if prompt.is_empty() { ATTACHMENTS_ONLY } else { prompt };
         let spec = TaskSpec {
             prompt: prompt.to_owned(),
             workspace_root: files.display_root(),
@@ -874,6 +946,11 @@ impl AgentService {
             usage: TaskUsage::default(),
         };
         self.inner.store.insert_task(&row)?;
+        if spec.provider.provider == ProviderKind::OpenAi {
+            // The billing context this task resolved at start (kept for continuations).
+            let current = self.inner.settings()?.openai.unwrap_or_default();
+            self.inner.store.set_task_connection(&id, &serde_json::to_value(&current).unwrap_or(Value::Null))?;
+        }
         let selection = selection_text.filter(|_| consent == ContextConsent::ScopeContent);
         // What the gate would decide now (a new task has no allowances yet).
         let authority = Authority { project: grant, ..Authority::default() };
@@ -924,8 +1001,9 @@ impl AgentService {
             _ => None,
         };
         let target = switched.clone().unwrap_or_else(|| row.spec.provider.clone());
-        let (kinds, bytes) = self.inner.history_attachment_kinds(id, &attachments)?;
-        preflight(&target, &kinds).map_err(|e| match &switched {
+        let _reserved = self.inner.reserve(&attachments);
+        let (all, bytes) = self.inner.history_attachments(id, &attachments)?;
+        preflight(&target, &all, self.inner.known_model(&target).as_ref()).map_err(|e| match &switched {
             Some(_) => AgentError::new(
                 &e.code,
                 format!("This conversation cannot continue on {}: {}", target.model, e.message),
@@ -966,6 +1044,11 @@ impl AgentService {
         }
         let recorded = self.inner.store.graph_project(id)?;
         let graph_context = self.inner.graph_context(files.root(), &row.spec, recorded.as_ref())?;
+        if switched.is_some() && target.provider == ProviderKind::OpenAi {
+            // A switch resolves the connection context again (the current settings).
+            let current = self.inner.settings()?.openai.unwrap_or_default();
+            self.inner.store.set_task_connection(id, &serde_json::to_value(&current).unwrap_or(Value::Null))?;
+        }
         let provider = self.inner.make_provider(&target, id)?;
         if let Some(choice) = &switched {
             let previous = row.spec.provider.clone();
@@ -999,8 +1082,7 @@ impl AgentService {
             self.inner.store.insert_graph_context(id, graph_context)?;
             content.push(json!({"type": "text", "text": graph::context::block(graph_context)}));
         }
-        content
-            .push(json!({"type": "text", "text": if prompt.is_empty() { "Use the attached files." } else { prompt }}));
+        content.push(json!({"type": "text", "text": if prompt.is_empty() { ATTACHMENTS_ONLY } else { prompt }}));
         content.extend(attachments.iter().map(att::reference_block));
         self.inner.store.append_message(id, "user", &content)?;
         self.inner.store.update_task(id, &TaskStatus::Queued, &row.usage)?;
@@ -1865,6 +1947,44 @@ impl Inner {
         Ok((key, connection))
     }
 
+    fn credential_version(&self, provider: ProviderKind) -> u64 {
+        match provider {
+            ProviderKind::Anthropic => self.credential_versions[0].load(std::sync::atomic::Ordering::SeqCst),
+            ProviderKind::OpenAi => self.credential_versions[1].load(std::sync::atomic::Ordering::SeqCst),
+            ProviderKind::Scripted => 0,
+        }
+    }
+
+    fn bump_credential_version(&self, provider: ProviderKind) {
+        let index = match provider {
+            ProviderKind::Anthropic => 0,
+            ProviderKind::OpenAi => 1,
+            ProviderKind::Scripted => return,
+        };
+        self.credential_versions[index].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The current connection's catalog entry for a model, when its catalog
+    /// was fetched (the provider's own evidence comes before the rules).
+    fn known_model(&self, choice: &ProviderChoice) -> Option<catalog::ModelDescriptor> {
+        if choice.provider == ProviderKind::Scripted {
+            return None;
+        }
+        let (key, connection) = self.connection_key(choice.provider).ok()?;
+        let fingerprint = connection_fingerprint(choice.provider, &key, &connection);
+        let catalogs = lock(&self.catalogs);
+        let (_, models) = catalogs.get(&fingerprint)?;
+        models.iter().find(|m| m.id == choice.model).cloned()
+    }
+
+    /// Keep these attachments from being discarded until the guard drops
+    /// (after the message referring to them is stored, or the send failed).
+    fn reserve(&self, attachments: &[AttachmentInfo]) -> Reservation<'_> {
+        let ids: Vec<String> = attachments.iter().map(|a| a.id.0.clone()).collect();
+        lock(&self.reserved).extend(ids.iter().cloned());
+        Reservation { set: &self.reserved, ids }
+    }
+
     /// An attachment's record, marked missing when its snapshot is gone.
     fn attachment(&self, id: &AttachmentId) -> Result<AttachmentInfo> {
         if !id.is_valid() {
@@ -1900,21 +2020,20 @@ impl Inner {
         Ok(out)
     }
 
-    /// Kinds of every attachment in a task's history plus `extra`.
-    fn history_attachment_kinds(&self, id: &TaskId, extra: &[AttachmentInfo]) -> Result<(Vec<AttachmentKind>, u64)> {
-        let mut kinds: Vec<AttachmentKind> = extra.iter().map(|a| a.kind).collect();
-        let mut bytes: u64 = extra.iter().map(|a| encoded_size(a.size_bytes)).sum();
+    /// Every attachment in a task's history plus `extra`, and their encoded size.
+    fn history_attachments(&self, id: &TaskId, extra: &[AttachmentInfo]) -> Result<(Vec<AttachmentInfo>, u64)> {
+        let mut all: Vec<AttachmentInfo> = extra.to_vec();
         for (_, content) in self.store.messages(id)? {
             for block in content.iter().filter(|b| block_type(b) == "exposition_attachment") {
                 if let Some(aid) = block.get("attachment_id").and_then(Value::as_str)
                     && let Ok(Some(info)) = self.store.attachment(&AttachmentId(aid.to_owned()))
                 {
-                    kinds.push(info.kind);
-                    bytes += encoded_size(info.size_bytes);
+                    all.push(info);
                 }
             }
         }
-        Ok((kinds, bytes))
+        let bytes = all.iter().map(|a| encoded_size(a.size_bytes)).sum();
+        Ok((all, bytes))
     }
 
     /// The history as a provider receives it: attachment references become
@@ -1977,12 +2096,32 @@ impl Inner {
     fn make_provider(&self, choice: &ProviderChoice, task: &TaskId) -> Result<Arc<dyn Provider>> {
         match choice.provider {
             ProviderKind::OpenAi => {
-                let (key, connection) = self.connection_key(ProviderKind::OpenAi)?;
-                let effort = preflight(choice, &[])?;
+                let (key, current) = self.connection_key(ProviderKind::OpenAi)?;
+                // The context the task resolved when it started (or switched)
+                // stays its billing context; a new task records the current one.
+                let connection = match self.store.task_connection(task)? {
+                    Some(recorded) => serde_json::from_value(recorded).unwrap_or(current),
+                    None => {
+                        let value = serde_json::to_value(&current).unwrap_or(Value::Null);
+                        if self.store.task(task)?.is_some() {
+                            self.store.set_task_connection(task, &value)?;
+                        }
+                        current
+                    }
+                };
+                let known = self.known_model(choice);
+                let resolved = preflight(choice, &[], known.as_ref())?;
                 let base_url = lock(&self.openai).base_url.clone();
-                let provider =
-                    OpenAiProvider::with_base_url(&base_url, key, choice.model.clone(), effort, connection, self.retry)
-                        .map_err(|e| AgentError::new("agents.provider", e.to_string()))?;
+                let provider = OpenAiProvider::with_base_url(
+                    &base_url,
+                    key,
+                    choice.model.clone(),
+                    resolved.effort,
+                    connection,
+                    self.retry,
+                )
+                .map_err(|e| AgentError::new("agents.provider", e.to_string()))?
+                .with_output_cap(resolved.max_output_tokens);
                 Ok(Arc::new(provider))
             }
             ProviderKind::Anthropic => {
@@ -2143,9 +2282,10 @@ impl Inner {
                             ("user", "text")
                                 if !text.starts_with("<task_context>") && !text.starts_with("<graph_context>") =>
                             {
+                                let shown = if text == ATTACHMENTS_ONLY && !attached.is_empty() { "" } else { text };
                                 items.push(TranscriptItem::UserText {
                                     seq,
-                                    text: text.to_owned(),
+                                    text: shown.to_owned(),
                                     attachments: Vec::new(),
                                 })
                             }
@@ -3132,5 +3272,83 @@ mod tests {
         if !cfg!(debug_assertions) {
             assert_eq!(service.settings().unwrap().provider, ProviderKind::Anthropic);
         }
+    }
+
+    fn image(id: &str, side: u32) -> AttachmentInfo {
+        AttachmentInfo {
+            id: AttachmentId(id.into()),
+            name: format!("{id}.png"),
+            media_type: "image/png".into(),
+            kind: AttachmentKind::Image,
+            size_bytes: 10,
+            width: Some(side),
+            height: Some(side),
+            sha256: String::new(),
+            missing: false,
+        }
+    }
+
+    fn choice(provider: ProviderKind, model: &str, effort: Effort) -> ProviderChoice {
+        ProviderChoice { provider, model: model.into(), effort }
+    }
+
+    #[test]
+    fn preflight_uses_catalog_evidence_and_anthropic_image_rules() {
+        let claude = choice(ProviderKind::Anthropic, "claude-opus-5-5", Effort::High);
+        let pdf = AttachmentInfo { kind: AttachmentKind::Pdf, ..image("p", 0) };
+        assert!(preflight(&claude, std::slice::from_ref(&pdf), None).is_ok());
+        // The connection's catalog says this model reads no PDFs: refused.
+        let mut known = catalog::saved_descriptor(ProviderKind::Anthropic, "claude-opus-5-5");
+        known.capabilities.pdf = Support::No;
+        assert_eq!(preflight(&claude, &[pdf], Some(&known)).unwrap_err().code, "agents.attachmentUnsupported");
+        // More than 20 images: each at most 2000 px.
+        let small: Vec<AttachmentInfo> = (0..21).map(|i| image(&format!("s{i}"), 1500)).collect();
+        assert!(preflight(&claude, &small, None).is_ok());
+        let mut large = small.clone();
+        large[3] = image("big", 2400);
+        assert_eq!(preflight(&claude, &large, None).unwrap_err().code, "attachments.tooManyLargeImages");
+        assert!(preflight(&claude, &large[..20], None).is_ok(), "20 images may be larger");
+        // Earlier non-reasoning OpenAI models: no effort, smaller output limit.
+        let gpt41 = preflight(&choice(ProviderKind::OpenAi, "gpt-4.1", Effort::High), &[], None).unwrap();
+        assert_eq!(gpt41, Resolved { effort: None, max_output_tokens: Some(16_384) });
+    }
+
+    #[test]
+    fn attachment_limits_fit_one_request() {
+        // A file the ingestion accepts always fits the request limit once encoded.
+        for limit in [att::MAX_PDF_BYTES, att::MAX_IMAGE_BYTES, att::MAX_TEXT_BYTES] {
+            assert!(encoded_size(limit) <= att::MAX_REQUEST_BYTES, "{limit}");
+        }
+        assert!(encoded_size(att::MAX_IMAGE_BYTES) <= 5 * 1024 * 1024, "an image's base64 stays within 5 MiB");
+    }
+
+    #[test]
+    fn attachments_in_a_send_survive_a_concurrent_discard() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let service = AgentService::new(AgentConfig {
+            database: None,
+            documents: Arc::new(DocumentService::new()),
+            workspace: None,
+            credentials: Arc::new(MemoryStore::default()),
+            services: Arc::new(UnavailableServices),
+            runtime: runtime.handle().clone(),
+            allow_scripted: true,
+            anthropic_base_url: None,
+            retry: None,
+            graph: None,
+        })
+        .unwrap();
+        let IngestOutcome::Added { attachment } =
+            service.add_attachment_bytes(Some("a.txt"), None, &att::base64_encode(b"hello\n"))
+        else {
+            panic!("not added")
+        };
+        {
+            let _sending = service.inner.reserve(std::slice::from_ref(&attachment));
+            service.discard_attachments(std::slice::from_ref(&attachment.id)).unwrap();
+            assert!(service.inner.attachment(&attachment.id).is_ok(), "kept while its send is in progress");
+        }
+        service.discard_attachments(std::slice::from_ref(&attachment.id)).unwrap();
+        assert!(service.inner.attachment(&attachment.id).is_err(), "a draft removed afterwards is forgotten");
     }
 }

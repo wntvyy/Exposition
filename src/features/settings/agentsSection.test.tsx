@@ -26,8 +26,8 @@ const status: ProviderStatus = {
   settings: { provider: "openai", model: "gpt-6.2-sol", effort: "high", consent: "scopeContent", openai: { organization: null, project: "proj_abc" } },
   configured: true,
   connections: [
-    { provider: "anthropic", auth: "apiKey", configured: false, credentialError: null, context: null },
-    { provider: "openai", auth: "apiKey", configured: true, credentialError: null, context: "Project proj_abc" },
+    { provider: "anthropic", auth: "apiKey", configured: false, credentialError: null, context: null, version: 1 },
+    { provider: "openai", auth: "apiKey", configured: true, credentialError: null, context: "Project proj_abc", version: 1 },
   ],
   credentialStore: "Windows Credential Manager",
   credentialError: null,

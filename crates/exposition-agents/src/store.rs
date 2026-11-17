@@ -23,7 +23,7 @@ use crate::model::{
 };
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (
@@ -190,6 +190,15 @@ const MIGRATIONS: &[(i64, &str)] = &[
         height INTEGER,
         created_at INTEGER NOT NULL
     );
+    "#,
+    ),
+    // The connection context a task resolved when it started (OpenAI
+    // organization/project), so a continuation is billed where the task ran
+    // unless the user switches model explicitly.
+    (
+        7,
+        r#"
+    ALTER TABLE tasks ADD COLUMN connection TEXT;
     "#,
     ),
 ];
@@ -486,6 +495,18 @@ impl Store {
             params![id.0, to_json(status)?, to_json(usage)?, i(now)],
         )?;
         Ok(now)
+    }
+
+    /// The connection context recorded when the task resolved its provider.
+    pub fn task_connection(&self, id: &TaskId) -> StoreResult<Option<Value>> {
+        let raw: Option<Option<String>> =
+            self.lock().query_row("SELECT connection FROM tasks WHERE id = ?1", [&id.0], |r| r.get(0)).optional()?;
+        raw.flatten().map(|r| from_json(&r)).transpose()
+    }
+
+    pub fn set_task_connection(&self, id: &TaskId, connection: &Value) -> StoreResult<()> {
+        self.lock().execute("UPDATE tasks SET connection = ?2 WHERE id = ?1", params![id.0, to_json(connection)?])?;
+        Ok(())
     }
 
     pub fn update_task_spec(&self, id: &TaskId, spec: &TaskSpec) -> StoreResult<()> {

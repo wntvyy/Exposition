@@ -188,7 +188,12 @@ pub fn openai_rules(id: &str) -> (AgentSupport, ModelCapabilities) {
         return (AgentSupport::Supported, caps(Yes, Yes, Yes, OPENAI_EARLIER_EFFORTS));
     }
     if id.starts_with("gpt-4.1") || id.starts_with("gpt-4o") {
-        return (AgentSupport::Supported, caps(Yes, Yes, Yes, &[]));
+        // Earlier non-reasoning models have smaller output limits than the
+        // agent's per-turn ceiling: a conservative cap that every member of
+        // the family accepts.
+        let mut c = caps(Yes, Yes, Yes, &[]);
+        c.max_output_tokens = Some(16_384);
+        return (AgentSupport::Supported, c);
     }
     (
         AgentSupport::Unverified {

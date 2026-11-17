@@ -193,11 +193,15 @@ export const drafts = {
    * After a successful send, clear only what was sent: text typed and
    * attachments added while the request ran stay in the draft.
    */
-  completeSend(key: string, sent: { text: string; attachments: AttachmentId[]; model: ProviderChoice | null }) {
+  completeSend(
+    key: string,
+    sent: { text: string; attachments: AttachmentId[]; model: ProviderChoice | null; rejections?: number[] },
+  ) {
     update(key, (d) => ({
-      text: d.text === sent.text ? "" : d.text.startsWith(sent.text) ? d.text.slice(sent.text.length).replace(/^\s+/, "") : d.text,
+      text: remainingText(d.text, sent.text),
       attachments: d.attachments.filter((a) => !sent.attachments.includes(a.id)),
-      rejections: [],
+      // Only the rejections shown when the message was sent are cleared.
+      rejections: d.rejections.filter((r) => !(sent.rejections ?? []).includes(r.id)),
       model: d.model === sent.model ? null : d.model,
     }));
   },
@@ -207,3 +211,16 @@ export const drafts = {
     useDrafts.setState({ drafts: {} });
   },
 };
+
+/**
+ * The draft text left after `sent` was sent: empty when unchanged; the text
+ * typed after it when the sent text is followed by a line or word break (so
+ * a word is never cut); otherwise the whole current text, kept as is.
+ */
+export function remainingText(current: string, sent: string): string {
+  if (current === sent) return "";
+  if (sent && current.startsWith(sent) && /^\s/.test(current.slice(sent.length))) {
+    return current.slice(sent.length).replace(/^\s+/, "");
+  }
+  return current;
+}
