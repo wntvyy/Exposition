@@ -53,6 +53,12 @@ export class DocumentHandle {
   private releaseTimer: ReturnType<typeof setTimeout> | null = null;
   /** Bumped on every observable change (for `useSyncExternalStore`). */
   version = 0;
+  /**
+   * The last source view's cursor, selections and scroll, kept when it
+   * unmounts (a renamed file's tab remounts under its new key) and restored
+   * by the next view of this document.
+   */
+  viewState: monaco.editor.ICodeEditorViewState | null = null;
   /** Selection before the next local edit, for undo/redo restoration. */
   selection: TextRange[] = [];
   private applying = false;
@@ -173,7 +179,13 @@ export class DocumentHandle {
   }
 
   setInfo(info: DocumentInfo) {
+    const before = this.info;
     this.info = info;
+    if (info.language !== before.language && !this.model.isDisposed()) {
+      // A rename changed the file's kind: highlighting follows the new name.
+      monaco.editor.setModelLanguage(this.model, ensureLanguage(info.language));
+    }
+    if (info.path !== before.path) onPathChanged(this, before.path);
     this.changed();
   }
 
@@ -461,6 +473,23 @@ function disposeHandle(handle: DocumentHandle) {
     if (editors.all().some((e) => e.resource.key === key)) void editors.close(key);
   }
   handle.dispose();
+}
+
+/**
+ * A document's file was renamed or moved (its path changed in the service):
+ * the same handle, model and history continue; its tabs, close guard and
+ * open-tab bookkeeping follow the new key. Idempotent (the rename result and
+ * the service event may both report it).
+ */
+function onPathChanged(handle: DocumentHandle, oldPath: string | null) {
+  const oldKey = oldPath ? fileKey(oldPath) : null;
+  const newKey = handle.key;
+  if (!oldKey || !newKey || oldKey === newKey || handles.get(handle.id) !== handle) return;
+  guardDisposers.get(handle.id)?.();
+  guardDisposers.set(handle.id, editors.registerCloseGuard(newKey, () => closeGuard(handle)));
+  // Rename the tab before the open-tab check sees the new key missing.
+  if (seenKeys.delete(oldKey)) seenKeys.add(newKey);
+  editors.rekey(oldKey, { key: newKey, path: handle.path ?? undefined, title: handle.name });
 }
 
 /** Forget every workspace-file handle (the service closed the folder's documents). */

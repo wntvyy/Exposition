@@ -8,6 +8,8 @@ mod clipboard;
 mod documents;
 mod error;
 mod execution;
+// QOL q/files: explorer New File, Rename, and OS drop import.
+mod files;
 mod graph;
 mod lean;
 mod media;
@@ -67,6 +69,10 @@ pub fn run() {
             setup::forward_events(app.handle().clone());
             // Mathlib lane: Mathlib setup progress events.
             lean::forward_setup_events(app.handle().clone());
+            // QOL q/files: explorer file actions (import registry; debug fault injection).
+            files::start(app.handle());
+            #[cfg(debug_assertions)]
+            files::add_dev_capability(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -272,6 +278,14 @@ pub fn run() {
             // QOL q/media: project images for the image tab and inline previews (src/media.rs).
             media::media_read_image,
             media::media_image_references,
+            // QOL q/files: explorer New File, Rename, and OS drop import.
+            files::file_create,
+            files::file_rename_check,
+            files::file_rename,
+            files::file_import_start,
+            files::file_import_cancel,
+            #[cfg(debug_assertions)]
+            files::files_dev_fail_next_graph_record,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")

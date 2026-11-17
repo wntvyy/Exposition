@@ -1,14 +1,14 @@
 // Files sidebar: open-folder empty state with recent projects, recovery
 // entries from an earlier session, and the lazily loaded, keyboard-accessible
 // file tree (shared Tree component).
-import { FilePlus2, FileWarning, Folder, FolderOpen, FolderPlus, Link2, RefreshCw, Unlink, X } from "lucide-react";
+import { FilePen, FilePlus, FilePlus2, FileWarning, Folder, FolderOpen, FolderPlus, Link2, RefreshCw, Unlink, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 
 import type { FileEntry } from "../../bindings/FileEntry";
 import { notify } from "../../app/notifications";
 import { registry } from "../../app/registry";
 import type { RecoveryEntry } from "../../bindings/RecoveryEntry";
-import { OpContextMenu } from "../operations/OpMenu";
+import { OpContextMenu, type ExtraItem } from "../operations/OpMenu";
 import { useOpSurface } from "../operations/surfaces";
 import { ResearchFilesSection } from "../research/FilesSection";
 import {
@@ -26,6 +26,15 @@ import {
   TreeItem,
   useContextMenu,
 } from "../../ui/components";
+import { useDropTarget } from "./dropTarget";
+import {
+  FileNameDialogHost,
+  newFileFolder,
+  openNewFileDialog,
+  openRenameDialog,
+  setFilesSelection,
+  useTreeReveal,
+} from "./explorerActions";
 import { fileActions, type FileSelectionItem } from "./fileOps";
 import {
   ROOT,
@@ -277,6 +286,50 @@ function FileTree({ name, rootPath, entries }: { name: string; rootPath: string;
     const entry = index.get(path);
     return entry && !entry.unavailable ? [{ path, kind: entry.kind === "directory" ? ("directory" as const) : ("file" as const), name: entry.name }] : [];
   });
+  // New File and Rename (commands, F2) read the selection.
+  setFilesSelection(items);
+  useEffect(() => () => setFilesSelection([]), []);
+  // Created, renamed or imported entries are selected once their listing shows them.
+  const reveal = useTreeReveal((s) => s.nonce);
+  useEffect(() => {
+    const { paths } = useTreeReveal.getState();
+    if (reveal === 0 || paths.length === 0) return;
+    pending.current = new Set(paths);
+    setSelected(new Set(paths));
+  }, [reveal]);
+  const drop = useDropTarget((s) => s.target);
+  // The drop highlight is set on the rendered rows directly (collection items
+  // keep the props they were built with until their content changes).
+  useEffect(() => {
+    const tree = ref.current?.querySelector<HTMLElement>("[data-testid='file-tree']");
+    if (!tree) return;
+    for (const el of tree.querySelectorAll("[data-drop-target]")) el.removeAttribute("data-drop-target");
+    tree.removeAttribute("data-drop-target");
+    if (!drop) return;
+    if (drop.folder === null) tree.setAttribute("data-drop-target", "");
+    else tree.querySelector(`[data-path="${CSS.escape(drop.folder)}"]`)?.setAttribute("data-drop-target", "");
+  }, [drop, dirs, expanded]);
+  const extras = (): ExtraItem[] => [
+    {
+      id: "new-file",
+      label: "New File…",
+      icon: FilePlus,
+      keybinding: "Mod+N",
+      description: `In ${newFileFolder(items) ?? "the project folder"}`,
+      run: () => openNewFileDialog(newFileFolder(items)),
+    },
+    {
+      id: "rename",
+      label: "Rename…",
+      icon: FilePen,
+      keybinding: "F2",
+      isDisabled: items.length !== 1,
+      description: items.length === 1 ? undefined : "Select one file or folder",
+      run: () => {
+        if (items[0]) openRenameDialog(items[0]);
+      },
+    },
+  ];
   const actions = () =>
     fileActions(items, {
       root: rootPath,
@@ -329,7 +382,9 @@ function FileTree({ name, rootPath, entries }: { name: string; rootPath: string;
       >
         {renderEntries(entries, dirs, expanded)}
       </Tree>
-      {menu.position && <OpContextMenu controller={menu} label="File actions" actions={actions()} testId="files-context-menu" />}
+      {menu.position && (
+        <OpContextMenu controller={menu} label="File actions" actions={actions()} extras={extras()} testId="files-context-menu" />
+      )}
     </div>
   );
 }
@@ -347,6 +402,14 @@ export function FilesView() {
           {info.name}
         </span>
         <Toolbar aria-label="Folder actions">
+          <IconButton
+            icon={FilePlus}
+            size="sm"
+            aria-label="New File…"
+            keybinding="Mod+N"
+            data-testid="files-new-file"
+            onPress={() => openNewFileDialog()}
+          />
           <IconButton icon={RefreshCw} size="sm" aria-label="Refresh" onPress={() => void loadDir(ROOT)} />
           <IconButton
             icon={FolderPlus}
@@ -370,6 +433,7 @@ export function FilesView() {
         <FileTree name={info.name} rootPath={info.root} entries={root.entries} />
       )}
       <ResearchFilesSection />
+      <FileNameDialogHost surface="files" />
     </div>
   );
 }

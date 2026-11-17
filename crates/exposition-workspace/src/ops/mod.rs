@@ -237,18 +237,18 @@ fn real_name(parent: &Path, name: &str, kind: EntryKind) -> String {
     name.to_owned()
 }
 
-struct Located {
-    path: WorkspacePath,
-    abs: PathBuf,
-    parent: Option<WorkspacePath>,
-    parent_abs: PathBuf,
-    info: fsops::EntryInfo,
+pub(crate) struct Located {
+    pub(crate) path: WorkspacePath,
+    pub(crate) abs: PathBuf,
+    pub(crate) parent: Option<WorkspacePath>,
+    pub(crate) parent_abs: PathBuf,
+    pub(crate) info: fsops::EntryInfo,
 }
 
 /// Find a project entry without following its final component; the folders
 /// above it are resolved (links inside the project allowed) and must stay
 /// inside the project.
-fn locate(root: &WorkspaceRoot, path: &WorkspacePath) -> Result<Located, (&'static str, String)> {
+pub(crate) fn locate(root: &WorkspaceRoot, path: &WorkspacePath) -> Result<Located, (&'static str, String)> {
     let (parent, parent_abs) = match path.parent() {
         None => (None, root.path().to_path_buf()),
         Some(parent) => {

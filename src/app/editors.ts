@@ -244,6 +244,31 @@ export const editors = {
     }
   },
 
+  /**
+   * The resource behind open tabs got a new key (a renamed file): every tab
+   * of `oldKey` keeps its place, group, mode, dirty state and active state
+   * under `resource`, and its close guard moves with it.
+   */
+  rekey(oldKey: string, resource: EditorResource): void {
+    if (oldKey === resource.key) return;
+    const guard = guards.get(oldKey);
+    if (guard) {
+      guards.delete(oldKey);
+      guards.set(resource.key, guard);
+    }
+    change((state) => {
+      const move = (group: EditorGroup): EditorGroup => {
+        if (!group.editors.some((e) => e.resource.key === oldKey)) return group;
+        // A tab already showing the new key (unlikely) is merged into the renamed one.
+        const editors = group.editors
+          .filter((e) => e.resource.key !== resource.key)
+          .map((e) => (e.resource.key === oldKey ? { ...e, resource: { ...e.resource, ...resource }, preview: false } : e));
+        return { ...group, editors, activeKey: group.activeKey === oldKey ? resource.key : group.activeKey };
+      };
+      return { groups: { primary: move(state.groups.primary), secondary: move(state.groups.secondary) } };
+    });
+  },
+
   /** Register a guard consulted before the resource's editor closes. */
   registerCloseGuard(key: string, guard: CloseGuard): () => void {
     guards.set(key, guard);

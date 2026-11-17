@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-files-dev-fail-next-graph-record"
+description = "Enables the files_dev_fail_next_graph_record command without any pre-configured scope."
+commands.allow = ["files_dev_fail_next_graph_record"]
+
+[[permission]]
+identifier = "deny-files-dev-fail-next-graph-record"
+description = "Denies the files_dev_fail_next_graph_record command without any pre-configured scope."
+commands.deny = ["files_dev_fail_next_graph_record"]

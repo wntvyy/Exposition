@@ -1640,5 +1640,8 @@ fn line_ending_patches(text: &str, target: &str) -> Vec<TextPatch> {
     patches
 }
 
+mod files;
+pub use files::{RenamePlan, Renamed};
+
 #[cfg(test)]
 mod tests;

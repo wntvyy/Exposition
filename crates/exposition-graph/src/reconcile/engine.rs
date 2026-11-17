@@ -181,8 +181,18 @@ pub(crate) struct Fresh {
 /// Run one pass. Serialized with other passes; file I/O happens without the
 /// graph lock; the graph is written in one transaction.
 pub fn run(graph: &GraphService, options: &ReconcileOptions) -> GraphResult<ReconcileReport> {
-    let started = Instant::now();
     let mut state = graph.reconcile_state();
+    run_locked(graph, &mut state, options)
+}
+
+/// One pass by a caller that already holds the reconciliation state (see
+/// [`GraphService::reconcile_after`]).
+pub(crate) fn run_locked(
+    graph: &GraphService,
+    state: &mut ReconcileState,
+    options: &ReconcileOptions,
+) -> GraphResult<ReconcileReport> {
+    let started = Instant::now();
     let root =
         graph.attached_root().ok_or_else(|| GraphError::new("graph.noProject", "No project graph is attached."))?;
     if state.root.as_deref() != Some(root.as_path()) {

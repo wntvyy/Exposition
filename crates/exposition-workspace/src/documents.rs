@@ -260,6 +260,24 @@ impl DocumentService {
         Ok(info)
     }
 
+    /// A renamed or moved file: the same document (text, revisions, undo
+    /// history, saved state) under its new path, with the language of its new
+    /// name. One `InfoChanged` event.
+    pub fn relocate(
+        &self,
+        id: &DocumentId,
+        path: WorkspacePath,
+        language: String,
+    ) -> Result<DocumentInfo, TransactionError> {
+        let mut inner = self.lock();
+        let doc = get_mut(&mut inner, id)?;
+        doc.path = Some(path);
+        doc.language = language;
+        let info = doc.info();
+        self.emit(DocumentEvent::InfoChanged { info: info.clone() });
+        Ok(info)
+    }
+
     /// Validate and apply a transaction. Either every edit applies or none does.
     pub fn apply(&self, request: TransactionRequest) -> Result<TransactionOutcome, TransactionError> {
         if request.edits.is_empty() || request.edits.iter().all(|e| e.patches.is_empty()) {

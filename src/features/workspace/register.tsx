@@ -5,6 +5,8 @@ import { FilePlus2, Files, FolderInput, FolderOpen, FolderX, History } from "luc
 import { registry } from "../../app/registry";
 import { Button } from "../../ui/components/Button";
 import { Menu, MenuItem, MenuSeparator, MenuTrigger, SubmenuTrigger } from "../../ui/components/Menu";
+import { startDropTarget } from "./dropTarget";
+import { activeRenameTarget, openNewFileDialog, openRenameDialog, startImportEvents } from "./explorerActions";
 import { FilesView } from "./FilesView";
 import {
   closeWorkspace,
@@ -18,6 +20,9 @@ import {
 import "./workspace.css";
 
 startWorkspaceEvents();
+// Files dropped from the operating system onto the Files tree are imported (QOL G).
+startDropTarget();
+startImportEvents();
 
 registry.registerView({
   id: FILES_VIEW_ID,
@@ -116,4 +121,30 @@ registry.registerCommand({
   category: "File",
   enabled: () => useWorkspace.getState().info !== null,
   run: closeWorkspace,
+});
+
+// QOL E: New File (in the Files tree's selected folder, else the project
+// folder) and Rename of the item selected in the focused explorer. F2 acts
+// only while an explorer item has focus ("workbench" scope: never in Monaco,
+// whose F2 renames a symbol, or in a text field).
+registry.registerCommand({
+  id: "files.newFile",
+  title: "New File…",
+  category: "File",
+  keybinding: "Mod+N",
+  enabled: () => useWorkspace.getState().info !== null,
+  run: () => openNewFileDialog(),
+});
+
+registry.registerCommand({
+  id: "files.rename",
+  title: "Rename…",
+  category: "File",
+  keybinding: "F2",
+  keybindingScope: "workbench",
+  enabled: () => activeRenameTarget() !== null,
+  run: () => {
+    const found = activeRenameTarget();
+    if (found) openRenameDialog(found.target, found.surface);
+  },
 });
