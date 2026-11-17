@@ -49,8 +49,8 @@ function ProjectMenu() {
         aria-label="Project"
         onAction={(key) => {
           const id = String(key);
-          if (id.startsWith(RECENT_PREFIX)) void openWorkspace(id.slice(RECENT_PREFIX.length));
-          else void registry.runCommand(id);
+          // Recent entries act in their submenu (below).
+          if (!id.startsWith(RECENT_PREFIX)) void registry.runCommand(id);
         }}
       >
         <MenuItem id="workspace.openFolder" icon={FolderInput} keybinding="Mod+O">
@@ -61,7 +61,11 @@ function ProjectMenu() {
             <MenuItem id="recent" icon={History} hasSubmenu>
               Open Recent
             </MenuItem>
-            <Menu isSubmenu aria-label="Open Recent">
+            <Menu
+              isSubmenu
+              aria-label="Open Recent"
+              onAction={(key) => void openWorkspace(String(key).slice(RECENT_PREFIX.length))}
+            >
               {recent.slice(0, 10).map((project) => (
                 <MenuItem
                   key={project.path}
