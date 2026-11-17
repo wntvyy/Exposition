@@ -1,7 +1,7 @@
-// Agents: provider status and a way into the existing provider settings dialog
-// (which owns key handling), and the projects' Auto permissions (inspect,
-// change the open project's, revoke any). The key itself is never shown or
-// handled here.
+// Agents: the default for new tasks, each provider connection's state, a way
+// into the provider settings dialog (which owns key handling and the model
+// picker), and the projects' Auto permissions (inspect, change the open
+// project's, revoke any). Keys themselves are never shown or handled here.
 import { useEffect, useState } from "react";
 import { Settings2 } from "lucide-react";
 
@@ -10,16 +10,12 @@ import type { ProjectPermissionsEntry } from "../../bindings/ProjectPermissionsE
 import { registry } from "../../app/registry";
 import { errorMessage } from "../../lib/ipc";
 import { Banner, Button, Dialog, ListRow, LoadingState, StatusText } from "../../ui/components";
-import { profileSummary } from "../agents/format";
+import { EFFORT_LABELS, profileSummary } from "../agents/format";
+import { connectionOf, KEYED_PROVIDERS, PROVIDER_NAMES } from "../agents/models";
 import { EnvironmentNotes, PermissionsEditor, useProjectPermissions } from "../agents/permissions";
 import { agentPermissions } from "../agents/permissionsIpc";
 import { agents, useAgents } from "../agents/store";
 import { SettingRow, SettingsGroup, SettingsPage } from "./parts";
-
-const PROVIDER_LABELS: Record<string, string> = {
-  anthropic: "Anthropic Claude",
-  scripted: "Scripted provider — development only",
-};
 
 /** Change the open project's permissions (same editor as the composer). */
 function ChangeDialog({ root, onClose }: { root: string; onClose: () => void }) {
@@ -200,30 +196,50 @@ export function AgentsSection() {
       {!status ? (
         <LoadingState title="Loading provider status…" />
       ) : (
-        <SettingsGroup title="Provider">
-          <SettingRow label="Provider">
-            <span>{PROVIDER_LABELS[status.settings.provider] ?? status.settings.provider}</span>
-          </SettingRow>
-          <SettingRow label="Model">
-            <code className="ui-code exp-settings__path">{status.settings.model}</code>
-          </SettingRow>
-          <SettingRow
-            label="API key"
-            description={
-              status.configured
-                ? `Stored only in ${status.credentialStore}; never shown.`
-                : `Set it in Provider settings; it is stored only in ${status.credentialStore}.`
-            }
+        <>
+          <SettingsGroup title="Default for new tasks" testId="agents-default">
+            <SettingRow label="Provider">
+              <span>{PROVIDER_NAMES[status.settings.provider] ?? status.settings.provider}</span>
+            </SettingRow>
+            {status.settings.provider !== "scripted" && (
+              <SettingRow label="Model" description={`${EFFORT_LABELS[status.settings.effort]} effort`} testId="agents-default-model">
+                <code className="ui-code exp-settings__path">{status.settings.model}</code>
+              </SettingRow>
+            )}
+          </SettingsGroup>
+          <SettingsGroup
+            title="Connections"
+            description={`API keys are stored only in ${status.credentialStore} and never shown.`}
             testId="agents-key"
           >
-            <StatusText status={status.configured ? "succeeded" : "unavailable"} label={status.configured ? "Configured" : "Not configured"} />
-          </SettingRow>
-          {status.credentialError && (
-            <Banner tone="danger" title="Credential storage error" className="exp-settings__notice">
-              {status.credentialError}
-            </Banner>
-          )}
-        </SettingsGroup>
+            {KEYED_PROVIDERS.map((provider) => {
+              const connection = connectionOf(status, provider);
+              const description = [
+                status.settings.provider === provider ? "Used by new tasks." : null,
+                connection.context ? `${connection.context}.` : null,
+                connection.configured ? null : "Add a key in Provider settings.",
+              ].filter((part): part is string => part !== null);
+              return (
+                <SettingRow
+                  key={provider}
+                  label={`${PROVIDER_NAMES[provider]} API key`}
+                  description={description.length ? description.join(" ") : undefined}
+                  testId={`agents-connection-${provider}`}
+                >
+                  <StatusText
+                    status={connection.credentialError ? "failed" : connection.configured ? "succeeded" : "unavailable"}
+                    label={connection.credentialError ? "Credential storage error" : connection.configured ? "Configured" : "Not configured"}
+                  />
+                </SettingRow>
+              );
+            })}
+            {status.credentialError && (
+              <Banner tone="danger" title="Credential storage error" className="exp-settings__notice">
+                {status.credentialError}
+              </Banner>
+            )}
+          </SettingsGroup>
+        </>
       )}
       <ProjectPermissionsGroup />
     </SettingsPage>

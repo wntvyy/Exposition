@@ -10,6 +10,7 @@ const ipc = vi.hoisted(() => ({
   agentsTaskDetail: vi.fn(),
   agentsProviderClearKey: vi.fn(),
   agentsProviderSetKey: vi.fn(),
+  agentsModelsList: vi.fn(() => new Promise(() => {})),
   agentsReview: vi.fn(),
   agentsReviewDiff: vi.fn(),
 }));
@@ -263,11 +264,11 @@ describe("provider settings", () => {
     fireEvent.click(screen.getByTestId("agents-key-save"));
     // The provider event can report "Configured" before the save call returns:
     // by then the key must already be gone from the form and the DOM.
-    expect(ipc.agentsProviderSetKey).toHaveBeenCalledWith(key);
+    expect(ipc.agentsProviderSetKey).toHaveBeenCalledWith(key, "anthropic");
     expect((screen.getByLabelText(/API key/) as HTMLInputElement).value).toBe("");
     expect(document.documentElement.outerHTML.includes(key)).toBe(false);
     await act(async () => finish({ ...status, configured: true }));
-    await screen.findByText("API key saved to the credential store.");
+    await screen.findByText("Anthropic API key saved to the credential store.");
     expect(document.documentElement.outerHTML.includes(key)).toBe(false);
 
     // A failed save gives the key back so the user can retry.
@@ -297,7 +298,7 @@ describe("provider settings", () => {
 
     fireEvent.click(screen.getByTestId("agents-key-remove"));
     fireEvent.click(await screen.findByRole("button", { name: "Remove key" }));
-    await waitFor(() => expect(ipc.agentsProviderClearKey).toHaveBeenCalledTimes(1));
-    await screen.findByText("API key removed.");
+    await waitFor(() => expect(ipc.agentsProviderClearKey).toHaveBeenCalledWith("anthropic"));
+    await screen.findByText("Anthropic API key removed.");
   });
 });

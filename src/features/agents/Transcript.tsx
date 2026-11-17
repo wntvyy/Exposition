@@ -11,6 +11,7 @@ import { registry } from "../../app/registry";
 import type { TranscriptItem } from "../../bindings/TranscriptItem";
 import { commands, errorMessage } from "../../lib/ipc";
 import { Markdown, ResponseSurface, StatusText, type CodeRunAction, type RunnableLanguage } from "../../ui/components";
+import { MessageAttachments } from "./Attachments";
 import { activeToolLabel, authorizationLabel, toolStatusLabel, toolSummary } from "./format";
 import type { StreamDraft } from "./store";
 
@@ -127,6 +128,7 @@ export function TranscriptEntry({ item }: { item: TranscriptItem }) {
         <div className="agents-msg" data-role="user">
           <span className="ui-group-label">You</span>
           <p className="agents-msg__text">{item.text}</p>
+          <MessageAttachments items={item.attachments ?? []} />
         </div>
       );
     case "assistantText":
