@@ -640,6 +640,19 @@ export class EquationPanelStore {
     return copied;
   }
 
+  /**
+   * Why the draft's target can no longer be written, including a document
+   * closed since the last change (shown before Apply is tried).
+   */
+  targetConflict(): TargetProblem | null {
+    const draft = this.state.draft;
+    if (!draft) return null;
+    if (draft.conflict) return draft.conflict;
+    const document = this.env.document(draft.documentId);
+    if (!document || document.closed) return { kind: "closed" };
+    return this.tracked?.conflict ?? null;
+  }
+
   /** The draft's tracked target range now (for "Edit in Source"). */
   targetRange(): { start: number; end: number } | null {
     return this.tracked ? { start: this.tracked.start, end: this.tracked.end } : null;

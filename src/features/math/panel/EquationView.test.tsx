@@ -244,6 +244,27 @@ describe("Equation panel", () => {
     expect(within(banner).getByRole("button", { name: "Move to caret" })).toBeTruthy();
   });
 
+  it("places the caret in a slot with the mouse", async () => {
+    const s = setup();
+    s.view();
+    await openAt(s, TEXT.indexOf("."), "inline");
+    fireEvent.click(screen.getByRole("button", { name: "Fraction" }));
+    expect(s.store.getState().draft!.editor.caret.path).toEqual([0, "num"]);
+    fireEvent.mouseDown(document.querySelector('.xp-eq-row[data-slot="den"]')!, { button: 0 });
+    expect(s.store.getState().draft!.editor.caret).toEqual({ path: [0, "den"], offset: 0 });
+  });
+
+  it("shows a closed document as a conflict before Apply is tried", async () => {
+    const s = setup();
+    const { rerender } = s.view();
+    await openAt(s, TEXT.indexOf("x+1"));
+    s.doc.closed = true;
+    s.doc.model.dispose();
+    rerender(<EquationView store={s.store} activePath={null} onEditInSource={s.onEditInSource} />);
+    expect(screen.getByTestId("equation-conflict").textContent).toContain("main.tex was closed");
+    expect(screen.getByTestId("equation-view").getAttribute("data-conflict")).toBe("closed");
+  });
+
   it("toggles inline/display for a new equation in text", async () => {
     const s = setup();
     s.view();

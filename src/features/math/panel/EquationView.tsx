@@ -8,6 +8,7 @@ import { Banner, Button, Checkbox, EmptyState, SegmentedControl, Section } from 
 import { MathTeX } from "../../../ui/components/MarkdownMath";
 import { editGrid, insertSymbol, insertTemplate, languageForPath, type CatalogEntry } from "../core";
 import { requirementLabel, type Draft, type EquationPanelStore } from "./draft";
+import type { TargetProblem } from "./tracking";
 import { MathEditor } from "./MathEditor";
 import { SymbolBrowser } from "./SymbolBrowser";
 import { TemplateBar } from "./TemplateBar";
@@ -27,8 +28,8 @@ function targetTitle(draft: Draft): string {
   return `New ${draft.display ? "display" : "inline"} equation at line ${draft.line}`;
 }
 
-function conflictText(draft: Draft): string {
-  switch (draft.conflict?.kind) {
+function conflictText(draft: Draft, conflict: TargetProblem): string {
+  switch (conflict.kind) {
     case "closed":
       return `${draft.name} was closed. Nothing was written; the draft is kept.`;
     case "replaced":
@@ -107,12 +108,13 @@ export function EquationView({ store, activePath, onEditInSource }: EquationView
   }
 
   const unsupported = analysis.serialized?.unsupported ?? [];
-  const blocked = draft.conflict !== null || unsupported.length > 0 || analysis.error !== null;
+  const conflict = store.targetConflict();
+  const blocked = conflict !== null || unsupported.length > 0 || analysis.error !== null;
   const caretNodes = nodesOnPath(draft.editor.root, draft.editor.caret.path);
   const gridNode = [...caretNodes].reverse().find((n) => n.kind === "matrix" || n.kind === "cases" || n.kind === "aligned");
   const enterApplies = !blocked && !inGrid(draft.editor.root, draft.editor.caret.path);
   const otherDocument = activePath !== draft.path;
-  const currentEquation = draft.conflict?.kind === "changed" ? store.currentEquation() : null;
+  const currentEquation = conflict?.kind === "changed" ? store.currentEquation() : null;
   const facts = [draft.name, LANGUAGE_LABELS[draft.language], draft.surface === "page" ? "from the page" : "from the source"];
   if (draft.kind === "edit") facts.push(draft.display ? "display" : "inline");
   const missingLabels = analysis.missing.map((m) => requirementLabel(m.requirement)).join(", ");
@@ -127,7 +129,7 @@ export function EquationView({ store, activePath, onEditInSource }: EquationView
       data-context={draft.context}
       data-language={draft.language}
       data-path={draft.path}
-      data-conflict={draft.conflict?.kind ?? ""}
+      data-conflict={conflict?.kind ?? ""}
       data-unchanged={analysis.unchanged ? "true" : "false"}
     >
       <div className="xp-eq__target" data-testid="equation-target">
@@ -149,7 +151,7 @@ export function EquationView({ store, activePath, onEditInSource }: EquationView
 
       {noticeBanner}
 
-      {draft.conflict && (
+      {conflict && (
         <Banner
           tone="warning"
           title="The target changed"
@@ -171,11 +173,11 @@ export function EquationView({ store, activePath, onEditInSource }: EquationView
             </>
           }
         >
-          {conflictText(draft)}
+          {conflictText(draft, conflict)}
         </Banner>
       )}
 
-      {otherDocument && !draft.conflict && (
+      {otherDocument && !conflict && (
         <Banner
           tone="info"
           title={`This draft belongs to ${draft.name}`}
