@@ -11,19 +11,23 @@ import { openFromTree } from "./workspace-helpers.mjs";
 import { waitForAsync } from "./wait.mjs";
 import { runCommand } from "./palette.mjs";
 
+/** Document and fixture subfolder per language (under the `equations` fixture). */
 export const LANGUAGES = {
-  latex: { path: "main.tex", fixture: "equations/latex" },
-  typst: { path: "main.typ", fixture: "equations/typst" },
-  markdown: { path: "main.md", fixture: "equations/markdown" },
+  latex: { path: "main.tex", folder: "latex" },
+  typst: { path: "main.typ", folder: "typst" },
+  markdown: { path: "main.md", folder: "markdown" },
 };
 
 /** Remove all whitespace (serializers may space operators differently). */
 export const squash = (text) => text.replace(/\s+/g, "");
 
-/** A fresh temporary project for `language` (LaTeX: with the chosen engine as default target). */
-export async function makeEquationProject(fixture, language, engine = "pdfLatex") {
+/**
+ * A fresh temporary project for `language` from `fixtureRoot` (the scenario's
+ * `fixture("equations")`); LaTeX: with the chosen engine as default target.
+ */
+export async function makeEquationProject(fixtureRoot, language, engine = "pdfLatex") {
   const root = join(await mkdtemp(join(tmpdir(), `exposition-eq-${language}-`)), "project");
-  await cp(fixture(LANGUAGES[language].fixture), root, { recursive: true });
+  await cp(join(fixtureRoot, LANGUAGES[language].folder), root, { recursive: true });
   if (language === "latex") {
     await mkdir(join(root, ".exposition"), { recursive: true });
     await writeFile(

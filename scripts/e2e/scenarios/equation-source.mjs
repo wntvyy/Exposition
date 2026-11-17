@@ -46,7 +46,7 @@ export default async function equationSource({ launchApp, artifactsDir, assert, 
   async function run(language, { engine = "pdfLatex", short = false } = {}) {
     const tag = language === "latex" ? `${language}-${engine}` : language;
     const { path } = LANGUAGES[language];
-    const root = await makeEquationProject(fixture, language, engine);
+    const root = await makeEquationProject(fixture("equations"), language, engine);
     await page.evaluate((p) => window.__TAURI_INTERNALS__.invoke("workspace_open", { path: p }), root);
     await openDocumentIn(page, path, "Split");
     const s = equationSession(page, path);

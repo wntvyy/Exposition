@@ -40,7 +40,7 @@ export default async function equationPage({ launchApp, artifactsDir, assert, fi
 
   async function run(language) {
     const { path } = LANGUAGES[language];
-    const root = await makeEquationProject(fixture, language);
+    const root = await makeEquationProject(fixture("equations"), language);
     await page.evaluate((p) => window.__TAURI_INTERNALS__.invoke("workspace_open", { path: p }), root);
     await openDocumentIn(page, path, "Page");
     const s = equationSession(page, path);
