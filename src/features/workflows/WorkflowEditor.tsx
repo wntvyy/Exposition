@@ -550,21 +550,29 @@ export function WorkflowEditor({ resource }: EditorProps) {
     [savedSchema],
   );
   // Settings, trust, and project changes can make a runner (un)available while
-  // this tab is open: re-read the runner catalog and the draft's runnability.
+  // this tab is open: re-read the runner catalog and the draft's runnability,
+  // and show both answers together, so a step's "available" text never sits
+  // beside a status that says it cannot run (or the reverse).
   const availability = useRunnerAvailabilityEpoch();
   const contractsEpoch = useRef(availability);
+  const validationTicket = useRef(0);
+  const current = useRef<{ draft: WorkflowDefinition | null; savedId: string | null }>({ draft: null, savedId: null });
+  current.current = { draft, savedId: saved?.id ?? null };
   useEffect(() => {
     if (contractsEpoch.current === availability) return;
     contractsEpoch.current = availability;
     let live = true;
-    workflowCommands.operations().then(
-      (ops) => {
-        if (live) setContracts(ops);
-      },
-      () => {
-        // Keep the catalog shown; the next change or reopening reads it again.
-      },
-    );
+    const { draft: shown, savedId } = current.current;
+    const ticket = ++validationTicket.current;
+    Promise.all([
+      workflowCommands.operations().catch(() => null),
+      shown ? workflowCommands.validate(shown, savedId).catch(() => null) : Promise.resolve(null),
+    ]).then(([ops, next]) => {
+      if (!live) return;
+      // A failed read keeps what is shown; the next change or reopening reads it again.
+      if (ops) setContracts(ops);
+      if (next && ticket === validationTicket.current) setValidation(next);
+    });
     return () => {
       live = false;
     };
@@ -587,9 +595,8 @@ export function WorkflowEditor({ resource }: EditorProps) {
   dirtyRef.current = dirty;
   useEffect(() => editors.setDirty(resource.key, dirty), [dirty, resource.key]);
 
-  // Live validation in Rust (debounced), again whenever runner availability
-  // may have changed; only the newest answer is shown.
-  const validationTicket = useRef(0);
+  // Live validation in Rust (debounced) as the draft is edited (availability
+  // changes re-validate above); only the newest answer is shown.
   useEffect(() => {
     if (!draft) return;
     const timer = setTimeout(() => {
@@ -602,7 +609,7 @@ export function WorkflowEditor({ resource }: EditorProps) {
       );
     }, 200);
     return () => clearTimeout(timer);
-  }, [draft, saved?.id, availability]);
+  }, [draft, saved?.id]);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (!draft || !saved) return false;

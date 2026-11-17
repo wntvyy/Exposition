@@ -398,6 +398,30 @@ describe("XR-K-03: an open workflow editor follows runner availability", () => {
     await waitFor(() => expect(screen.getByTestId("workflow-step-run").textContent).toContain("no container image is configured"));
   });
 
+  it("shows the status and the step's runner text from the same re-read, even when the catalog answers later", async () => {
+    const def = definition("Experiment");
+    const blocked = validation({ runnable: false, runnableReason: "Run the code: Restricted execution is unavailable: no container image is configured." });
+    wfIpc.get.mockResolvedValue(saved("wf-1", 1, def, 1, blocked));
+    wfIpc.operations.mockResolvedValue([restricted(false)]);
+    wfIpc.validate.mockResolvedValue(blocked);
+    render(<WorkflowEditor resource={{ key: "workflow:wf-1", title: "Experiment" }} mode="source" active />);
+    await waitFor(() => expect(wfIpc.validate).toHaveBeenCalled());
+    // The validation answers at once; the whole catalog (every runner) later.
+    let answerCatalog: (ops: unknown) => void = () => {};
+    wfIpc.operations.mockReturnValueOnce(new Promise((resolve) => (answerCatalog = resolve)));
+    wfIpc.validate.mockResolvedValue(validation());
+    configureImage("python:3.13-slim");
+    await waitFor(() => expect(wfIpc.validate).toHaveBeenCalledTimes(2));
+    await new Promise((r) => setTimeout(r, 50));
+    const status = () => screen.getByTestId("workflow-status").getAttribute("data-can-review");
+    const step = () => screen.getByTestId("workflow-step-run").textContent ?? "";
+    expect(status()).toBe("false");
+    expect(step()).toContain("no container image is configured");
+    act(() => answerCatalog([restricted(true)]));
+    await waitFor(() => expect(status()).toBe("true"));
+    expect(step()).toContain("— available.");
+  });
+
   it("follows a language image (R) and a trust change the same way", async () => {
     const def = definition("R experiment", "research.rBatch");
     const reason = "Restricted execution is unavailable: no R image is configured. It never falls back to native execution.";
