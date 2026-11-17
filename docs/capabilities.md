@@ -44,8 +44,10 @@ rather than guessed.
 LaTeX character mapping is inferred (SyncTeX line windows, a model of the
 LaTeX source, and alignment with the PDF's glyphs) and checked glyph by glyph;
 text it cannot map is not editable on the page. Exotic catcode changes and
-packages that rewrite text (e.g. `siunitx`, `cleveref` names, TikZ) stay
-source-only.
+the output that text-rewriting packages generate (e.g. `siunitx` unit and
+number formatting, `cleveref` names, TikZ) stay source-only. A literal
+argument that is typeset unchanged and maps glyph by glyph, such as the digits
+of `\qty{12.5}{\metre}`, is edited on the page like other text.
 
 When you type a character that is special in LaTeX, the page editor inserts
 its escaped form (`\&`, `\textless{}`, `\textasciitilde{}`, ...). pdfLaTeX's
@@ -72,7 +74,7 @@ Settings › Project or with the palette commands "LaTeX: Build This File with
 LuaLaTeX" / "...with pdfLaTeX".
 
 Builds, their pages, and their exports are available only while the folder
-that built them is open. Only `.typ`, `.md`, and `.tex` files are built. LaTeX
+that built them is open. Only `.typ`, `.md` (or `.markdown`), and `.tex` files are built. LaTeX
 page images are capped at about 32 million pixels; larger pages are shown at
 a lower resolution.
 
@@ -92,7 +94,7 @@ Lean declarations, bibliography entries, experiments, findings,
 investigations, and workflow drafts (23 kinds), joined by 12 typed
 relationships with endpoint rules.
 
-**What is indexed.** Manuscripts (`.tex`, `.typ`, `.md`), notes, BibTeX,
+**What is indexed.** Manuscripts (`.tex`, `.typ`, `.md`, `.markdown`), notes, BibTeX,
 scripts (Python, R, Julia, notebooks), Lean files, datasets, images and
 PDFs, and configuration files become resources with one stable identity per
 file. Version-control, tool, environment, and cache folders (`.git`,
@@ -1455,11 +1457,13 @@ explicit choice, and clipboard text is never treated as a command. A copy is
 a new, independent item: it carries no evidence, verification status,
 trigger, approval, or run history, and nothing runs. Workflow copies are new
 drafts with fresh step ids; a finished run or task is never duplicated as a
-new result. Graph items extracted from a source (a theorem, proof, section,
-Lean declaration, or reference) are deleted or duplicated only by editing
-the source; Exposition offers Copy Reference and Copy Text instead, and
-deletes a file-backed item's source file only as an explicit Delete Source
-File.
+new result. Graph items extracted from a source (a theorem, proof, Lean
+declaration, or reference) are never deleted from the graph alone or
+duplicated: Delete from Source removes their text from the source as one
+unsaved edit you review, undo or save (the graph follows on save), Delete
+Permanently is refused, Copy Reference and Copy Text are offered instead of a
+duplicate, and a file-backed item's source file is deleted only as an
+explicit Delete Source File.
 
 **Storage & History.** Settings › Storage & History lists the open
 project's run records, generated outputs, agent task records, earlier
