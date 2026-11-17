@@ -1032,7 +1032,32 @@ Windows only.
 
 ## Agents
 
-The first provider is Anthropic's Messages API (`claude-opus-5-5` by default).
+Agents run on Anthropic's Messages API (`claude-opus-5-5` by default) or on
+OpenAI's Responses API, each with your own API key stored in the system
+credential store (one entry per provider; keys never mix). OpenAI's "Sign in
+with ChatGPT" is not offered: OpenAI documents it for open-source clients and
+Exposition's eligibility has not been established, so OpenAI use is always
+API-key access billed to that key's API account. Models are chosen from the
+connection's own model list in a searchable picker (names, exact IDs,
+lifecycle, what Exposition has verified: tool use, images, PDF, effort);
+a model the provider lists but Exposition has not verified must be confirmed
+explicitly, and a saved model the list no longer shows stays as it is. Each
+task records its provider and model when it starts; changing the default
+affects later tasks only. A follow-up can switch model: the task, its
+instructions, permissions, project graph record, and changes stay, and the
+switch is refused with an explanation when the new model cannot read the
+conversation's attachments. Every provider goes through the same approvals,
+sandbox rules, budgets, cancellation, and review; one provider's private
+reasoning is never sent to the other.
+
+Requests can carry attachments: text and source files, PNG/JPEG/GIF/WebP
+images (also pasted from the clipboard into the request field), and PDF
+documents for models that read them. Each attachment is a snapshot taken
+when you add it (later edits to the file do not change the message), sent
+as its real content, shown with the message, and never imported into the
+project. Unsupported files and combinations are refused with a reason; nothing
+is dropped silently.
+
 Agents use the same services as people: they read and edit documents through
 the shared document service (every change is reviewable and revertible), build
 documents, run Python (in their own research sessions when native runs are
@@ -1394,6 +1419,21 @@ open document's current text, unsaved edits included, to a new file; it
 never replaces an existing one.
 
 ## Editor and explorer
+
+**Equations.** The Equation panel (Ctrl+Shift+M, the editor's context menu,
+or Σ on the page toolbar) creates and edits LaTeX, Typst, and Markdown math
+without typing commands: structures with editable slots (fractions, roots,
+scripts, integrals and sums with bounds, delimiters, matrices with row and
+column editing, cases, aligned lines, text), a searchable catalog of 536
+symbols (by name, synonym, glyph, or command), and a preview labelled
+approximate — the document's own build is what counts. It works from the
+source editor and from the page view on the same document, applies each
+edit as one undoable change (adding a needed `\usepackage` line in the same
+change when you leave that option on), keeps labels, comments, and macros it
+does not understand exactly as written, and writes nothing when you cancel,
+change nothing, or the equation changed underneath the draft (you choose how
+to continue). Advanced constructs outside the supported subset stay as they
+are and can be edited in the source.
 
 **Find.** Edit: Find (Ctrl+F in the source editor, the palette, or the
 editor's context menu) opens the editor's find bar on the open text, unsaved
