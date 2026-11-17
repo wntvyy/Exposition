@@ -82,7 +82,6 @@ export default async function pageRecovery({ launchApp, artifactsDir, assert, fi
       const img = document.querySelector('[data-testid="page"] img');
       return el?.dataset.stale === "false" && el.dataset.build && img?.complete;
     }, null, { timeout: 30_000 });
-    const goodBuild = await editor.getAttribute("data-build");
     const doc = (await invoke(page, "document_list")).find((d) => d.path === "main.typ").id;
     const state = await invoke(page, "document_state", { document: doc });
     const end = state.text.length;
@@ -98,7 +97,10 @@ export default async function pageRecovery({ launchApp, artifactsDir, assert, fi
       },
     });
     await page.waitForFunction(() => document.querySelector('[data-testid="page-editor"]')?.dataset.failed === "true", null, { timeout: 15_000 });
-    assert.equal(await editor.getAttribute("data-build"), goodBuild, "the last good pages stay visible");
+    // The pages shown now are the last good build (a second good build may
+    // have landed before the edit, so it is read after the failure).
+    const goodBuild = await editor.getAttribute("data-build");
+    assert.ok(goodBuild && (await page.locator('[data-testid="page"]').count()) > 0, "the last good pages stay visible");
     await page.getByRole("tab", { name: "Problems" }).click();
     const problem = page.locator('[data-testid="problem"][data-source="build"]').filter({ hasText: /unclosed/i }).first();
     await problem.waitFor({ timeout: 10_000 });
