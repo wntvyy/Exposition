@@ -473,7 +473,8 @@ const PARTNER = (id: SymbolId): SymbolId | null => {
 
 export function insertSymbol(state: EditorState, id: SymbolId): EditorState {
   const e = entryById(id);
-  if (!e) return state;
+  // "No delimiter" only exists as a side of a delimiter pair (`\left.`).
+  if (!e || id === "delim.none") return state;
   if (textNodeAt(state.root, state.caret.path)) return typeTextChar(state, e.glyph);
   switch (e.role) {
     case "bigop":

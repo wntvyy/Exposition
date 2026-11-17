@@ -144,7 +144,7 @@ describe("LaTeX parser", () => {
     expect(only("\\widehat{xy}")).toMatchObject({ kind: "accent", accent: "accent.widehat" });
     expect(only("\\underbrace{a+b}")).toMatchObject({ kind: "accent", accent: "accent.underbrace" });
     for (const [cmd, id] of [["mathbb", "font.bb"], ["mathcal", "font.cal"], ["mathbf", "font.bf"], ["mathrm", "font.rm"], ["mathfrak", "font.frak"], ["mathsf", "font.sf"], ["mathit", "font.it"], ["mathscr", "font.scr"], ["boldsymbol", "font.boldsymbol"]]) {
-      expect(only(`\\${cmd}{A}`)).toMatchObject({ kind: "font", font: id });
+      expect(only(`\\${cmd}{x}`)).toMatchObject({ kind: "font", font: id });
     }
     expect(only("\\text{ if }")).toEqual({ kind: "text", text: " if " });
     expect(only("\\textrm{a\\&b}")).toEqual({ kind: "text", text: "a&b", command: "\\textrm" });

@@ -98,9 +98,9 @@ describe("Typst parser", () => {
     expect(only("lr((x))")).toMatchObject({ kind: "delim", left: "delim.paren.l", right: "delim.paren.r" });
     expect(only("(x)")).toMatchObject({ kind: "delim", left: "delim.paren.l", right: "delim.paren.r" });
     expect(only("[0, 1)")).toMatchObject({ kind: "delim", left: "delim.bracket.l", right: "delim.paren.r" });
-    expect(only("abs(x)")).toMatchObject({ kind: "delim", left: "delim.vert", right: "delim.vert", form: "func" });
-    expect(only("norm(x)")).toMatchObject({ kind: "delim", left: "delim.Vert", form: "func" });
-    expect(only("floor(x)")).toMatchObject({ kind: "delim", left: "delim.floor.l", form: "func" });
+    expect(only("abs(x)")).toEqual({ kind: "delim", left: "delim.vert", right: "delim.vert", body: { kind: "row", children: [{ kind: "ident", text: "x" }] } });
+    expect(only("norm(x)")).toMatchObject({ kind: "delim", left: "delim.Vert", });
+    expect(only("floor(x)")).toMatchObject({ kind: "delim", left: "delim.floor.l", });
     expect(only("mat(delim: \"[\", 1, 2; 3, 4)")).toMatchObject({ kind: "matrix", fence: "delim.bracket", rows: [[{}, {}], [{}, {}]] });
     expect(only("mat(delim: #none, a)")).toMatchObject({ kind: "matrix", fence: "none" });
     expect(only("mat(1, 2; 3, 4)")).toMatchObject({ kind: "matrix", fence: "delim.paren" });
@@ -193,7 +193,7 @@ describe("Typst serializer", () => {
       ["\\mathbf{v} \\cdot \\vec{w}", "bold(upright(v)) dot.op arrow(w)"],
       ["\\int_0^1 f(x)\\,dx", "integral_0^1 f(x) thin d x"],
       ["\\left| x \\right| + \\left\\| y \\right\\|", "abs(x) + norm(y)"],
-      ["\\{x \\mid x \\in \\mathbb{N}\\}", "{x divides x in bb(N)}"],
+      ["\\{x \\mid x \\in \\mathbb{N}\\}", "{x divides x in NN}"],
       ["\\text{if } a, b", '"if " a, b'],
       ["\\frac{(a)}{b}", "frac((a), b)"],
       ["\\alpha2 + x2", "alpha 2 + x 2"],
