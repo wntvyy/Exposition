@@ -34,6 +34,12 @@ function conflictText(draft: Draft, conflict: TargetProblem): string {
       return `${draft.name} was closed. Nothing was written; the draft is kept.`;
     case "replaced":
       return `${draft.name} was reloaded or refreshed. Nothing was written; the draft is kept.`;
+    case "context":
+      return draft.kind === "edit"
+        ? "The source around the equation changed, so it is no longer the same equation. Nothing was written; the draft is kept."
+        : draft.context === "math"
+          ? "The insertion point is no longer inside the same equation. Nothing was written; the draft is kept."
+          : "The insertion point is no longer in plain text (math or an escape now surrounds it). Nothing was written; the draft is kept.";
     default:
       return draft.kind === "edit"
         ? "The equation was changed in the document after this draft opened. Nothing was written; the draft is kept."
@@ -55,10 +61,13 @@ export function EquationView({ store, activePath, onEditInSource }: EquationView
   }, [serial]);
 
   const onInsertSymbol = (entry: CatalogEntry, keyboard: boolean) => {
-    if (store.getState().draft) {
+    const open = store.getState().draft;
+    if (open && open.path === activePath) {
       store.edit((s) => insertSymbol(s, entry.id));
       if (!keyboard) editorRef.current?.focus();
     } else {
+      // No draft: at the document caret. A draft of another document is never
+      // added to from here (the store refuses and says why).
       void store.insertSymbolAtCaret(entry.id);
     }
   };
@@ -114,7 +123,7 @@ export function EquationView({ store, activePath, onEditInSource }: EquationView
   const gridNode = [...caretNodes].reverse().find((n) => n.kind === "matrix" || n.kind === "cases" || n.kind === "aligned");
   const enterApplies = !blocked && !inGrid(draft.editor.root, draft.editor.caret.path);
   const otherDocument = activePath !== draft.path;
-  const currentEquation = conflict?.kind === "changed" ? store.currentEquation() : null;
+  const currentEquation = conflict?.kind === "changed" || conflict?.kind === "context" ? store.currentEquation() : null;
   const facts = [draft.name, LANGUAGE_LABELS[draft.language], draft.surface === "page" ? "from the page" : "from the source"];
   if (draft.kind === "edit") facts.push(draft.display ? "display" : "inline");
   const missingLabels = analysis.missing.map((m) => requirementLabel(m.requirement)).join(", ");

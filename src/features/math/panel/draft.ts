@@ -117,13 +117,72 @@ const errorText = (error: unknown): string => (error instanceof Error ? error.me
 
 export const requirementLabel = (requirement: Requirement): string => `\\usepackage{${requirement.name}}`;
 
+const otherDocumentNotice = (draft: Draft): Notice => ({
+  tone: "info",
+  text: `The open draft belongs to ${draft.name}. Apply or discard it, or move it to the caret, before inserting here.`,
+});
+
+/** An odd number of backslashes ends right before `offset` (the next character is escaped). */
+export function escapedAt(text: string, offset: number): boolean {
+  let count = 0;
+  for (let i = offset - 1; i >= 0 && text.charCodeAt(i) === 92; i--) count++;
+  return count % 2 === 1;
+}
+
+/** The caret follows an unescaped `^` or `_`: it is the start of a script argument. */
+export function inScriptPosition(text: string, offset: number): boolean {
+  const ch = text[offset - 1];
+  return (ch === "^" || ch === "_") && !escapedAt(text, offset - 1);
+}
+
+/** Unbalanced `{}` (TeX) or `()` / `[]` (Typst) in a piece of math source. */
+function unbalanced(language: MathLanguage, source: string): boolean {
+  const pairs: [string, string][] = language === "typst" ? [["(", ")"], ["[", "]"]] : [["{", "}"]];
+  for (const [open, close] of pairs) {
+    let depth = 0;
+    for (let i = 0; i < source.length; i++) {
+      if (language !== "typst" && escapedAt(source, i)) continue;
+      if (source[i] === open) depth++;
+      else if (source[i] === close && --depth < 0) return true;
+    }
+    if (depth !== 0) return true;
+  }
+  return false;
+}
+
 /**
- * Math inserted into existing equation source must not fuse with its
- * neighbours: `\alpha` + `x` would read as `\alphax` in TeX, and `x` +
- * `alpha` as the identifier `xalpha` in Typst. A space keeps the tokens apart.
+ * A selection inside equation source that cuts a token: part of a control
+ * word (`pha+\b` in `\alpha+\beta`), an escaped character, a Typst name, a
+ * script argument, or half of a group. Such a selection cannot become a
+ * draft without changing what the source means.
  */
-export function separated(language: MathLanguage, text: string, start: number, end: number, source: string): string {
+export function cutsToken(language: MathLanguage, text: string, start: number, end: number): boolean {
+  const before = text.slice(Math.max(0, start - 64), start);
+  const selected = text.slice(start, end);
+  const after = text.slice(end, end + 1);
+  if (unbalanced(language, selected) || inScriptPosition(text, start)) return true;
+  if (language === "typst") {
+    return (/[\p{L}\p{N}]$/u.test(before) && /^[\p{L}\p{N}]/u.test(selected)) || (/[\p{L}\p{N}]$/u.test(selected) && /^[\p{L}\p{N}]/u.test(after));
+  }
+  return (
+    escapedAt(text, start) ||
+    escapedAt(text, end) ||
+    (/\\[A-Za-z]*$/.test(before) && /^[A-Za-z]/.test(selected)) ||
+    (/\\[A-Za-z]*$/.test(selected) && /^[A-Za-z]/.test(after))
+  );
+}
+
+/**
+ * Fit math inserted into existing equation source to its neighbours: a space
+ * where tokens would fuse (`\alpha` + `x` reads as `\alphax` in TeX, `x` +
+ * `alpha` as the name `xalpha` in Typst), and a group in a script position
+ * (`x^` + `ab` must be `x^{ab}` / Typst `x^(a b)`).
+ */
+export function fitToContext(language: MathLanguage, text: string, start: number, end: number, source: string): string {
   if (!source) return source;
+  if (inScriptPosition(text, start) && !/^[\p{L}\p{N}]$/u.test(source)) {
+    return language === "typst" ? `(${source})` : `{${source}}`;
+  }
   const before = text.slice(Math.max(0, start - 64), start);
   const after = text.slice(end, end + 1);
   const fusesBefore =
@@ -133,11 +192,30 @@ export function separated(language: MathLanguage, text: string, start: number, e
   return `${fusesBefore ? " " : ""}${source}${fusesAfter ? " " : ""}`;
 }
 
+/** A draft built for a target, with what tracks that target. */
+interface Opened {
+  draft: Draft;
+  /** The range the draft replaces. */
+  tracked: TrackedRange;
+  /** Ranges that must stay unchanged for the target to stay valid (the equation's delimiters). */
+  guards: TrackedRange[];
+  notice: Notice | null;
+}
+
+/** Delay of the context re-check after document changes (Apply always re-checks at once). */
+const CONTEXT_CHECK_MS = 120;
+
+const ESCAPED_CARET = "The caret follows a backslash, which would escape what is inserted. Move the caret or remove the backslash first.";
+const CUT_SELECTION = "The selection cuts through a command, name, script, or group. Select whole symbols, or edit the whole equation.";
+
 export class EquationPanelStore {
   private state: PanelState = { draft: null, notice: null };
   private readonly listeners = new Set<() => void>();
   private serial = 0;
   private tracked: TrackedRange | null = null;
+  private guards: TrackedRange[] = [];
+  private watch: { dispose(): void } | null = null;
+  private contextTimer: ReturnType<typeof setTimeout> | null = null;
   private target: CaretTarget | null = null;
 
   constructor(private readonly env: DraftEnvironment) {}
@@ -187,7 +265,7 @@ export class EquationPanelStore {
       this.set({ notice: { tone: "info", text: opened.error } });
       return false;
     }
-    this.install(opened.draft, opened.tracked, resolved);
+    this.install(opened, resolved);
     return true;
   }
 
@@ -196,14 +274,21 @@ export class EquationPanelStore {
    * draft (inside math: the symbol; in text: a new inline equation holding
    * it). A symbol that needs document configuration, or that the language
    * cannot express, opens a draft instead so the user sees and decides.
-   * With a draft open, the symbol goes into the draft at its caret.
+   * With a draft open, the symbol goes into the draft at its caret — but only
+   * when the caret is in the draft's own document: a caret in another
+   * document never adds to that draft (move the draft first).
    */
   async insertSymbolAtCaret(id: SymbolId, preferred?: Surface): Promise<ApplyOutcome | "draft"> {
-    if (this.state.draft) {
+    const resolved = await this.env.resolve(preferred);
+    const open = this.state.draft;
+    if (open) {
+      if ("error" in resolved || resolved.document.id !== open.documentId) {
+        this.set({ notice: otherDocumentNotice(open) });
+        return "blocked";
+      }
       this.edit((s) => insertSymbol(s, id));
       return "draft";
     }
-    const resolved = await this.env.resolve(preferred);
     if ("error" in resolved) {
       this.set({ notice: { tone: "info", text: resolved.error } });
       return "blocked";
@@ -213,8 +298,12 @@ export class EquationPanelStore {
       this.set({ notice: { tone: "info", text: opened.error } });
       return "blocked";
     }
-    const draft = { ...opened.draft, editor: insertSymbol(opened.draft.editor, id) };
-    this.install(draft, opened.tracked, resolved);
+    if (opened.draft.kind === "edit") {
+      // The caret was at a script: show the whole equation instead of guessing.
+      this.install(opened, resolved);
+      return "draft";
+    }
+    this.install({ ...opened, draft: { ...opened.draft, editor: insertSymbol(opened.draft.editor, id) } }, resolved);
     const analysis = this.analyze();
     if (analysis && !analysis.error && analysis.missing.length === 0 && analysis.serialized?.unsupported.length === 0) {
       return this.apply();
@@ -223,19 +312,108 @@ export class EquationPanelStore {
     return "draft";
   }
 
-  private install(draft: Draft, tracked: TrackedRange, target: CaretTarget): void {
-    this.tracked?.dispose();
-    this.tracked = tracked;
+  private install(opened: Opened, target: CaretTarget): void {
+    this.release();
+    this.tracked = opened.tracked;
+    this.guards = opened.guards;
     this.target = target;
-    this.set({ draft, notice: null });
+    // Re-check the target's context shortly after every document change, so a
+    // conflict shows before Apply is tried (Apply re-checks at once anyway).
+    const serial = opened.draft.serial;
+    const model = target.document.model;
+    const subscription = model.onDidChangeContent(() => {
+      if (this.contextTimer) clearTimeout(this.contextTimer);
+      this.contextTimer = setTimeout(() => {
+        this.contextTimer = null;
+        const draft = this.state.draft;
+        if (draft?.serial !== serial || draft.conflict || model.isDisposed()) return;
+        const problem = this.contextProblem(draft, model.getValue());
+        if (problem) this.setDraft({ conflict: problem });
+      }, CONTEXT_CHECK_MS);
+    });
+    this.watch = subscription;
+    this.set({ draft: opened.draft, notice: opened.notice });
+  }
+
+  /** Stop tracking the current target. */
+  private release(): void {
+    this.tracked?.dispose();
+    for (const guard of this.guards) guard.dispose();
+    this.watch?.dispose();
+    if (this.contextTimer) clearTimeout(this.contextTimer);
+    this.tracked = null;
+    this.guards = [];
+    this.watch = null;
+    this.contextTimer = null;
+  }
+
+  /**
+   * Whether the target is still the same place in the CURRENT text, read
+   * again with the language adapter: an edit's range must still be exactly
+   * an equation with the same delimiters; an insertion point must still be
+   * in text, or inside the same equation (same delimiter positions), and not
+   * escaped by a backslash typed before it.
+   */
+  private contextProblem(draft: Draft, text: string): TargetProblem | null {
+    const tracked = this.tracked;
+    if (!tracked) return { kind: "changed" };
+    for (const range of [tracked, ...this.guards]) {
+      const problem = range.check(text);
+      if (problem) return problem;
+    }
+    let adapter;
+    try {
+      adapter = adapterFor(draft.language);
+    } catch {
+      return { kind: "context" };
+    }
+    const context: TargetProblem = { kind: "context" };
+    try {
+      if (draft.kind === "edit") {
+        const eq = draft.equation;
+        const found = adapter.equations(text).find((e) => e.start === tracked.start && e.end === tracked.end);
+        if (
+          !eq ||
+          !found ||
+          found.style !== eq.style ||
+          found.contentStart - found.start !== eq.contentStart - eq.start ||
+          found.end - found.contentEnd !== eq.end - eq.contentEnd
+        ) {
+          return context;
+        }
+        return null;
+      }
+      if (escapedAt(text, tracked.start)) return context;
+      const points = tracked.start === tracked.end ? [tracked.start] : [tracked.start, tracked.end];
+      for (const point of points) {
+        const at = adapter.contextAt(text, point);
+        if (draft.context === "text") {
+          if (at.kind !== "text") return context;
+          continue;
+        }
+        const [open, close] = this.guards;
+        const e = at.kind === "math" ? at.equation : null;
+        if (
+          !e ||
+          !open ||
+          !close ||
+          e.style !== draft.equation?.style ||
+          e.start !== open.start ||
+          e.contentStart !== open.end ||
+          e.contentEnd !== close.start ||
+          e.end !== close.end
+        ) {
+          return context;
+        }
+      }
+      return null;
+    } catch {
+      return context;
+    }
   }
 
   /** Build a draft for a caret target (and optionally keep `keep`'s editing state). */
-  private draftAt(
-    target: CaretTarget,
-    mode: OpenMode,
-    keep: Draft | null,
-  ): { draft: Draft; tracked: TrackedRange } | { error: string } {
+  private draftAt(target: CaretTarget, mode: OpenMode, keep: Draft | null): Opened | { error: string } {
     const path = target.path;
     const language = languageForPath(path);
     if (!language) return { error: "Equations can be edited in LaTeX, Typst, and Markdown documents." };
@@ -262,8 +440,20 @@ export class EquationPanelStore {
     if (endContext.kind === "unavailable") return { error: `No equation can go here: ${endContext.reason}.` };
 
     const equation = context.kind === "math" ? context.equation : null;
-    const editWhole = mode === "edit" || (mode === "auto" && equation !== null);
+    let editWhole = mode === "edit" || (mode === "auto" && equation !== null);
     if (mode === "edit" && !equation) return { error: "The caret is not inside an equation." };
+    let notice: Notice | null = null;
+    if (!editWhole) {
+      // Never insert where the source would read it differently.
+      if (escapedAt(text, start)) return { error: ESCAPED_CARET };
+      if (equation && start !== end && cutsToken(language, text, start, end)) return { error: CUT_SELECTION };
+      // In front of an existing script argument (`x^|2`) an insertion would
+      // change which part is the script: edit the whole equation instead.
+      if (equation && start === end && inScriptPosition(text, start) && /^[\p{L}\p{N}\\{("]/u.test(text.slice(start, start + 1))) {
+        editWhole = true;
+        notice = { tone: "info", text: "The caret is at a script; the whole equation is open for editing." };
+      }
+    }
 
     const base = {
       serial: ++this.serial,
@@ -291,6 +481,8 @@ export class EquationPanelStore {
       tracked.onProblem = (problem) => this.onTargetProblem(base.serial, problem);
       return {
         tracked,
+        guards: [],
+        notice,
         draft: {
           ...base,
           kind: "edit",
@@ -327,8 +519,18 @@ export class EquationPanelStore {
     }
     const tracked = new TrackedRange(document.model, start, end, selected);
     tracked.onProblem = (problem) => this.onTargetProblem(base.serial, problem);
+    // Inside math, the equation's delimiters must stay where and what they were.
+    const guards = equation
+      ? [
+          new TrackedRange(document.model, equation.start, equation.contentStart, text.slice(equation.start, equation.contentStart)),
+          new TrackedRange(document.model, equation.contentEnd, equation.end, text.slice(equation.contentEnd, equation.end)),
+        ]
+      : [];
+    for (const guard of guards) guard.onProblem = (problem) => this.onTargetProblem(base.serial, problem);
     return {
       tracked,
+      guards,
+      notice,
       draft: {
         ...base,
         kind: "insert",
@@ -434,7 +636,12 @@ export class EquationPanelStore {
     } catch {
       preview = "";
     }
-    const unchanged = draft.kind === "edit" ? !this.isDirty(draft) : isEmptyRow(draft.editor.root);
+    // Nothing to write: an unchanged edit, an empty new equation, or math
+    // selected inside an equation and left as it was (never re-serialized).
+    const unchanged =
+      draft.kind === "edit"
+        ? !this.isDirty(draft)
+        : isEmptyRow(draft.editor.root) || (draft.context === "math" && !isEmptyRow(draft.initial) && !this.isDirty(draft));
     return { serialized, error, missing, unchanged, preview, opaque };
   }
 
@@ -448,7 +655,9 @@ export class EquationPanelStore {
     const analysis = this.analyze(draft)!;
     if (analysis.unchanged) {
       // Nothing to write: close quietly (an unchanged equation is never reformatted).
-      this.close(draft.kind === "insert" ? { tone: "info", text: "Nothing to insert: the equation is empty." } : null);
+      this.close(
+        draft.kind === "insert" && isEmptyRow(draft.editor.root) ? { tone: "info", text: "Nothing to insert: the equation is empty." } : null,
+      );
       return "unchanged";
     }
     if (analysis.error || !analysis.serialized) {
@@ -475,7 +684,7 @@ export class EquationPanelStore {
       return "blocked";
     }
     const text = document.model.getValue();
-    const problem = tracked.verify(text);
+    const problem = this.contextProblem(draft, text);
     if (problem) {
       this.setDraft({ conflict: problem });
       return "conflict";
@@ -498,9 +707,11 @@ export class EquationPanelStore {
       const end = tracked.end - (eq.end - eq.contentEnd);
       main = { start, end, text: withContentLayout(text.slice(start, end), source) };
     } else if (draft.context === "math") {
-      main = { start: tracked.start, end: tracked.end, text: separated(draft.language, text, tracked.start, tracked.end, source) };
+      main = { start: tracked.start, end: tracked.end, text: fitToContext(draft.language, text, tracked.start, tracked.end, source) };
     } else {
-      main = { start: tracked.start, end: tracked.end, text: adapter.wrap(source, draft.display) };
+      // A selection made into an equation unchanged keeps its exact source.
+      const content = tracked.original && !this.isDirty(draft) ? tracked.original : source;
+      main = { start: tracked.start, end: tracked.end, text: adapter.wrap(content, draft.display) };
     }
     const patches: Patch[] = [main];
     if (draft.addRequirements) {
@@ -525,19 +736,25 @@ export class EquationPanelStore {
     }
     // The target is verified and the patches are computed from the same
     // text: write now, as one edit, before anything else can change it.
-    tracked.dispose();
+    // Stop tracking first: the write itself changes the target.
+    const guards = this.guards.map((g) => ({ start: g.start, end: g.end, original: g.original }));
+    const target = this.target;
+    this.release();
     try {
       writePatches(document, patches, { start: main.start, end: main.end }, draft.surface);
     } catch (error) {
-      // Nothing was written (the model refuses invalid edits before changing).
-      this.tracked = new TrackedRange(document.model, tracked.start, tracked.end, tracked.original);
-      this.tracked.onProblem = (p) => this.onTargetProblem(draft.serial, p);
+      // Nothing was written (the model refuses invalid edits before changing): keep tracking.
+      const again = (r: { start: number; end: number; original: string }) => {
+        const range = new TrackedRange(document.model, r.start, r.end, r.original);
+        range.onProblem = (p) => this.onTargetProblem(draft.serial, p);
+        return range;
+      };
+      if (target) this.install({ draft, tracked: again(tracked), guards: guards.map(again), notice: null }, target);
       this.set({ notice: { tone: "warning", text: `The equation was not written: ${errorText(error)}` } });
       return "blocked";
     }
     const shift = patches.filter((p) => p.start < main.start).reduce((n, p) => n + p.text.length - (p.end - p.start), 0);
     const after = main.start + shift + main.text.length;
-    const target = this.target;
     this.close(null, false);
     target?.focus(after);
     return "written";
@@ -553,8 +770,7 @@ export class EquationPanelStore {
 
   private close(notice: Notice | null, refocus = false): void {
     const target = this.target;
-    this.tracked?.dispose();
-    this.tracked = null;
+    this.release();
     this.target = null;
     this.set({ draft: null, notice });
     if (refocus) target?.focus();
@@ -580,12 +796,13 @@ export class EquationPanelStore {
     }
     if (opened.draft.language !== draft.language) {
       opened.tracked.dispose();
+      for (const guard of opened.guards) guard.dispose();
       this.set({
         notice: { tone: "info", text: `This draft is ${LANGUAGE_LABELS[draft.language]}; the caret is in a ${LANGUAGE_LABELS[opened.draft.language]} document.` },
       });
       return false;
     }
-    this.install({ ...opened.draft, past: draft.past, future: draft.future }, opened.tracked, resolved);
+    this.install({ ...opened, draft: { ...opened.draft, past: draft.past, future: draft.future } }, resolved);
     return true;
   }
 
@@ -617,7 +834,7 @@ export class EquationPanelStore {
       this.set({ notice: { tone: "info", text: opened.error } });
       return false;
     }
-    this.install({ ...opened.draft, past: draft.past, future: draft.future }, opened.tracked, target);
+    this.install({ ...opened, draft: { ...opened.draft, past: draft.past, future: draft.future } }, target);
     return true;
   }
 
@@ -669,8 +886,9 @@ export class EquationPanelStore {
     if (!draft) return null;
     if (draft.conflict) return draft.conflict;
     const document = this.env.document(draft.documentId);
-    if (!document || document.closed) return { kind: "closed" };
-    return this.tracked?.conflict ?? null;
+    if (!document || document.closed || document.model.isDisposed()) return { kind: "closed" };
+    // Read again from the current text (pure: nothing is recorded here).
+    return this.contextProblem(draft, document.model.getValue());
   }
 
   /** The draft's tracked target range now (for "Edit in Source"). */

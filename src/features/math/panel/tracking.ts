@@ -27,6 +27,8 @@ export interface TrackedModel {
 
 export type TargetProblem =
   | { kind: "changed" }
+  /** The text is intact but no longer in the same place: not the same equation, or math/text changed around it. */
+  | { kind: "context" }
   | { kind: "replaced" }
   | { kind: "closed" };
 
@@ -69,12 +71,16 @@ export class TrackedRange {
    * model's current value). Returns the problem otherwise.
    */
   verify(text: string = this.model.isDisposed() ? "" : this.model.getValue()): TargetProblem | null {
+    const problem = this.check(text);
+    if (problem && !this.problem && problem.kind === "changed") this.fail(problem);
+    return problem;
+  }
+
+  /** Like `verify`, without recording the problem (safe while rendering). */
+  check(text: string): TargetProblem | null {
     const problem = this.conflict;
     if (problem) return problem;
-    if (this.endOffset > text.length || text.slice(this.startOffset, this.endOffset) !== this.original) {
-      this.fail({ kind: "changed" });
-      return this.problem;
-    }
+    if (this.endOffset > text.length || text.slice(this.startOffset, this.endOffset) !== this.original) return { kind: "changed" };
     return null;
   }
 

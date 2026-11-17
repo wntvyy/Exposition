@@ -30,7 +30,10 @@ function setup(text = TEXT, path = "main.tex") {
   const onEditInSource = vi.fn();
   const view = (activePath: string | null = path) =>
     render(<EquationView store={store} activePath={activePath} onEditInSource={onEditInSource} />);
-  return { doc, store, at, view, onEditInSource };
+  const unresolve = () => {
+    next = { error: "Equations can be edited in LaTeX, Typst, and Markdown documents." };
+  };
+  return { doc, store, at, view, onEditInSource, unresolve };
 }
 
 const editor = () => screen.getByTestId("equation-editor");
@@ -270,6 +273,20 @@ describe("Equation panel", () => {
     rerender(<EquationView store={s.store} activePath={null} onEditInSource={s.onEditInSource} />);
     expect(screen.getByTestId("equation-conflict").textContent).toContain("main.tex was closed");
     expect(screen.getByTestId("equation-view").getAttribute("data-conflict")).toBe("closed");
+  });
+
+  it("does not add a symbol to another document's draft", async () => {
+    const s = setup();
+    const { rerender } = s.view();
+    await openAt(s, TEXT.indexOf("x+1"));
+    const before = s.store.getState().draft!.editor;
+    // The active document is another file (its caret does not resolve to this document).
+    s.unresolve();
+    rerender(<EquationView store={s.store} activePath="other.tex" onEditInSource={s.onEditInSource} />);
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search symbols" }), { target: { value: "alpha" } });
+    fireEvent.click(await screen.findByRole("option", { name: "alpha" }));
+    await waitFor(() => expect(screen.getByTestId("equation-notice").textContent).toMatch(/belongs to main\.tex/));
+    expect(s.store.getState().draft!.editor).toBe(before);
   });
 
   it("toggles inline/display for a new equation in text", async () => {
