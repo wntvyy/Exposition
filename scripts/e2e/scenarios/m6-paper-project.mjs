@@ -915,8 +915,10 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       await waitForMirror(page, PAPER, paperId, "Monaco shows the page-side undo");
       assert.equal(await rendered(PAPER, denominator - 1, denominator), "2");
 
-      // Ctrl+Z in Monaco undoes the page's prose edit; Ctrl+Y redoes it.
-      await monaco.locator(".monaco-editor .view-lines").click();
+      // Ctrl+Z in Monaco undoes the page's prose edit; Ctrl+Y redoes it. Focus Monaco
+      // on a text line: the middle of the editor can hold the figure's image preview
+      // (a view zone), and a click on a preview does not move the caret.
+      await monaco.locator(".monaco-editor .view-line").first().click();
       await page.keyboard.press("Control+z");
       await waitFor(async () => !(await textOf(PAPER)).includes("rapid growth"), { message: "Monaco undo of the page edit" });
       await settled(PAPER, "Monaco undo");
