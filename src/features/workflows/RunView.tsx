@@ -56,11 +56,13 @@ import {
   StateSizeProvider,
   StatusPill,
   StatusText,
+  UnavailableState,
 } from "../../ui/components";
 import { onProjectOp } from "../operations/client";
 import { useOpList } from "../operations/useOpList";
 import { researchCommands } from "../research/ipc";
 import { PreviewView } from "../research/Promotion";
+import { useWorkspace } from "../workspace/store";
 import { workflowEvents, workflowRunCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
 import { describeRepeat, describeTest } from "./orchestration";
@@ -768,7 +770,18 @@ const ACTION_FAILED: Record<MonitorAction, string> = {
   again: "Run not started",
 };
 
-export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: WorkflowRun) => void }) {
+export function RunMonitor({
+  run,
+  onRun,
+  refreshError = null,
+  onRetry,
+}: {
+  run: WorkflowRun;
+  onRun: (run: WorkflowRun) => void;
+  /** Why the latest re-read of this run failed (what is shown is the state read before). */
+  refreshError?: string | null;
+  onRetry?: () => void;
+}) {
   const [busy, setBusy] = useState<MonitorAction | null>(null);
   const [error, setError] = useState<{ action: MonitorAction; message: string } | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -907,6 +920,23 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
         <div className="xp-wf__page">
           <StateSizeProvider value="compact">
             <div className="xp-wf__lead">
+              {refreshError && (
+                <div data-testid="workflow-run-refresh-error">
+                  <Banner
+                    tone="warning"
+                    title="Could not refresh this run"
+                    actions={
+                      onRetry && (
+                        <Button size="sm" onPress={onRetry}>
+                          Retry
+                        </Button>
+                      )
+                    }
+                  >
+                    {refreshError} The state below was read earlier and may have changed.
+                  </Banner>
+                </div>
+              )}
               <CauseView cause={run.cause} run={run} />
               {manifest && (
                 <div data-testid="workflow-run-manifest" data-path={manifest.path}>
@@ -1062,28 +1092,48 @@ export function RunMonitor({ run, onRun }: { run: WorkflowRun; onRun: (run: Work
   );
 }
 
-/** Editor tab for one run, kept current by `workflow-run` events. */
+/**
+ * Editor tab for one run, kept current by `workflow-run` events. A run is
+ * read through its project: while that project is closed or another one is
+ * open (closing or switching cancels its runs), the tab says so instead of
+ * showing the last state it read, and it re-reads the run when the project
+ * opens again.
+ */
 export function WorkflowRunView({ resource }: EditorProps) {
   const id = resource.key.slice(WORKFLOW_RUN_KEY_PREFIX.length);
   const [run, setRun] = useState<WorkflowRun | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** The project the shown run was read from. */
+  const [runRoot, setRunRoot] = useState<string | null>(null);
+  /** The project open when the latest read finished (succeeded or not). */
+  const [checkedRoot, setCheckedRoot] = useState<string | null>(null);
+  const root = useWorkspace((s) => s.info?.root ?? null);
   const latest = useRef(0);
 
   const refresh = useCallback(async () => {
     const ticket = ++latest.current;
+    const readFrom = useWorkspace.getState().info?.root ?? null;
     try {
       const next = await workflowRunCommands.get(id);
       if (ticket !== latest.current) return;
       setRun(next);
+      setRunRoot(readFrom);
+      setCheckedRoot(readFrom);
       setError(null);
       editors.setTitle(resource.key, `Run: ${next.title}`);
     } catch (e) {
-      if (ticket === latest.current) setError(errorMessage(e));
+      if (ticket !== latest.current) return;
+      setCheckedRoot(readFrom);
+      setError(errorMessage(e));
     }
   }, [id, resource.key]);
 
+  // Opening, closing, or switching the project re-reads the run.
   useEffect(() => {
     void refresh();
+  }, [root, refresh]);
+
+  useEffect(() => {
     let unlisten: (() => void) | null = null;
     let disposed = false;
     void workflowEvents
@@ -1109,8 +1159,27 @@ export function WorkflowRunView({ resource }: EditorProps) {
       </div>
     );
   }
-  if (!run) return <LoadingState title="Loading the run…" />;
-  return <RunMonitor run={run} onRun={(next) => setRun(next)} />;
+  // Its project reopened: the run is re-read before it is shown again.
+  if (!run || (runRoot === root && checkedRoot !== root)) return <LoadingState title="Loading the run…" />;
+  if (runRoot !== null && root !== runRoot) {
+    return (
+      <div className="xp-wf" data-testid="workflow-run-detached" data-run={run.id} data-last-state={run.state}>
+        <UnavailableState
+          title="This run's project is not open"
+          description={`“${run.title}” belongs to ${runRoot}. Closing or switching a project cancels its runs; reopen that project to see this run's final state.`}
+          actions={<Button onPress={() => void editors.close(resource.key)}>Close</Button>}
+        />
+      </div>
+    );
+  }
+  return (
+    <RunMonitor
+      run={run}
+      onRun={(next) => setRun(next)}
+      refreshError={error}
+      onRetry={() => void refresh()}
+    />
+  );
 }
 
 // ----- history -----------------------------------------------------------------------------
@@ -1119,19 +1188,29 @@ export function WorkflowRunView({ resource }: EditorProps) {
 export function RunHistory({ workflow, title = "Runs" }: { workflow: string | null; title?: string }) {
   const [runs, setRuns] = useState<WorkflowRunSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Runs belong to the open project: another project never shows these.
+  const root = useWorkspace((s) => s.info?.root ?? null);
+  const latest = useRef(0);
 
   const refresh = useCallback(async () => {
+    const ticket = ++latest.current;
     try {
       const list = await workflowRunCommands.list(workflow);
+      if (ticket !== latest.current) return;
       setRuns([...list].sort((a, b) => b.startedAtMs - a.startedAtMs));
       setError(null);
     } catch (e) {
-      setError(errorMessage(e));
+      if (ticket === latest.current) setError(errorMessage(e));
     }
   }, [workflow]);
 
   useEffect(() => {
+    setRuns(null);
+    setError(null);
     void refresh();
+  }, [root, refresh]);
+
+  useEffect(() => {
     let unlisten: (() => void) | null = null;
     let disposed = false;
     void workflowEvents

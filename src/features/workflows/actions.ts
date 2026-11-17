@@ -5,6 +5,7 @@ import { editors } from "../../app/editors";
 import { notify } from "../../app/notifications";
 import type { WorkflowPresetRequest } from "../../bindings/WorkflowPresetRequest";
 import { errorMessage, isCommandError } from "../../lib/ipc";
+import { workflowsChanged } from "./changes";
 import { workflowCommands } from "./ipc";
 import { workflowKey } from "./model";
 
@@ -28,6 +29,7 @@ export async function newDraftFromPreset(preset: string): Promise<string | null>
     const active = editors.active()?.resource.path ?? null;
     const definition = await workflowCommands.fromPreset(presetRequestFor(preset, active));
     const saved = await workflowCommands.save({ id: null, expectedRevision: null, definition });
+    workflowsChanged();
     editors.open({ key: workflowKey(saved.id), title: saved.definition.title });
     notify({
       tone: "info",
@@ -49,6 +51,7 @@ export async function newDraftFromPreset(preset: string): Promise<string | null>
 export async function importDraft(text: string): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
   try {
     const saved = await workflowCommands.import(text);
+    workflowsChanged();
     editors.open({ key: workflowKey(saved.id), title: saved.definition.title });
     return { ok: true, id: saved.id };
   } catch (error) {
@@ -66,6 +69,7 @@ export async function importBundle(): Promise<{ ok: true; id: string; children: 
   if (typeof picked !== "string") return null;
   try {
     const imported = await workflowCommands.bundleImport(picked);
+    workflowsChanged();
     editors.open({ key: workflowKey(imported.root.id), title: imported.root.definition.title });
     notify({
       tone: "info",

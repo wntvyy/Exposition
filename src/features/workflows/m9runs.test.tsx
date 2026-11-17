@@ -50,6 +50,11 @@ vi.mock("../../app/editors", () => ({ editors: editorsMock }));
 vi.mock("../../app/notifications", () => ({ notify: notifyMock, dismiss: vi.fn() }));
 vi.mock("../research/ipc", () => ({ researchCommands: {} }));
 vi.mock("../research/Promotion", () => ({ PreviewView: () => null }));
+// Runs are read through the open project (no project changes here).
+vi.mock("../workspace/store", async () => {
+  const { create } = await import("zustand");
+  return { useWorkspace: create(() => ({ info: { root: "/work/thesis", name: "thesis", recovery: [] } })) };
+});
 
 const { PlanReviewDialog, groupByComposite } = await import("./PlanReview");
 const { RunMonitor, RunHistory, notRunReason } = await import("./RunView");

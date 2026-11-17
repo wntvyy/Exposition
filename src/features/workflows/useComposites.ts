@@ -2,9 +2,11 @@
 // revisions, nested up to the depth Rust allows) and the latest revision of
 // each, so the editor can derive composite ports, show the child's steps
 // read-only, and offer "Use latest revision" as an explicit parent edit.
+// Re-read whenever a saved workflow changes (see changes.ts).
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { errorMessage } from "../../lib/ipc";
+import { onWorkflowsChanged } from "./changes";
 import type { CompositeRef, SavedWorkflow, WorkflowDefinition } from "./contract";
 import { workflowCommands } from "./ipc";
 import { compositeKey, compositeRefs } from "./orchestration";
@@ -86,5 +88,8 @@ export function useCompositeChildren(def: WorkflowDefinition | null): CompositeC
   }, [infos]);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
+  // A child saved again (another tab, an import, an agent) may have a newer
+  // revision to offer; the pin itself changes only by an explicit edit.
+  useEffect(() => (signature ? onWorkflowsChanged(refresh) : undefined), [signature, refresh]);
   return { infos, definitions, loading, refresh };
 }

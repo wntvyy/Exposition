@@ -85,7 +85,7 @@ export default async function researchWorkspace({ launchApp, artifactsDir, asser
     await page.getByRole("toolbar", { name: "Pages" }).getByRole("button", { name: "Research", exact: true }).click();
     await rp.locator('[data-testid="research-page"][data-state="disabled"]').waitFor({ timeout: 15_000 });
     const mode = await rp.getByTestId("research-execution-mode").first().getAttribute("aria-label");
-    note("execution-labelled-trusted-native", /Trusted native/.test(mode) && /privileges/.test(mode) && /only for workflow Python batch steps/.test(mode), mode);
+    note("execution-labelled-trusted-native", /Trusted native/.test(mode) && /privileges/.test(mode) && /only for workflow batch steps in Python, R, and Julia/.test(mode), mode);
     const restricted = rp.locator('[data-testid="research-execution-modes"] [data-mode="restricted"]');
     note("restricted-research-not-available-without-image", (await restricted.getAttribute("data-available")) === "false" && /declared inputs/.test(await restricted.innerText()), await restricted.innerText());
     await shot("research-page-disabled-light");
