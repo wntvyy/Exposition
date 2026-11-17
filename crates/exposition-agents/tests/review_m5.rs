@@ -137,6 +137,8 @@ fn request(
         consent: Some(ContextConsent::ScopeContent),
         budgets: None,
         approval_mode: None,
+        provider: None,
+        attachments: None,
     }
 }
 

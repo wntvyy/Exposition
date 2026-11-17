@@ -271,7 +271,7 @@ impl AnthropicProvider {
     }
 }
 
-fn describe_reqwest(error: &reqwest::Error) -> String {
+pub(crate) fn describe_reqwest(error: &reqwest::Error) -> String {
     if error.is_timeout() {
         "the connection timed out".into()
     } else if error.is_connect() {

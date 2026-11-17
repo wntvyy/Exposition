@@ -55,6 +55,9 @@ pub trait SecretStore: Send + Sync {
 
 pub const KEYRING_SERVICE: &str = "org.exposition.desktop";
 pub const KEYRING_USER: &str = "anthropic-api-key";
+/// The OpenAI connection's entry (separate from Anthropic's: switching
+/// providers never mixes credentials).
+pub const OPENAI_KEYRING_USER: &str = "openai-api-key";
 
 /// Validate and normalize a pasted API key without revealing it in errors.
 pub fn normalize_api_key(raw: &str) -> Result<String, CredentialError> {
@@ -83,13 +86,18 @@ pub struct KeyringStore {
 impl KeyringStore {
     /// `namespace` isolates development/test entries from the real one.
     pub fn new(namespace: Option<&str>) -> Self {
+        Self::for_entry(namespace, KEYRING_USER)
+    }
+
+    /// The store for one named entry (e.g. [`OPENAI_KEYRING_USER`]).
+    pub fn for_entry(namespace: Option<&str>, user: &str) -> Self {
         let service = match namespace {
             Some(ns) if !ns.is_empty() => format!("{KEYRING_SERVICE}.{ns}"),
             _ => KEYRING_SERVICE.to_owned(),
         };
         Self {
             service,
-            user: KEYRING_USER.to_owned(),
+            user: user.to_owned(),
             #[cfg(windows)]
             persistence_checked: AtomicBool::new(false),
         }
@@ -187,6 +195,8 @@ impl SecretStore for KeyringStore {
 
 /// Name under which the stored provider key is registered for redaction.
 pub const PROVIDER_KEY_SECRET: &str = "agents.provider-api-key";
+/// Redaction name of the stored OpenAI key.
+pub const OPENAI_KEY_SECRET: &str = "agents.openai-api-key";
 
 /// Called with the stored key whenever it is loaded or saved (`Some`) and
 /// when it is gone (`None`).

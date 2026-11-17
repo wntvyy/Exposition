@@ -260,6 +260,8 @@ fn request(root: &Path, scope: TaskScope, permission: PermissionProfile, consent
         consent: Some(consent),
         budgets: None,
         approval_mode: None,
+        provider: None,
+        attachments: None,
     }
 }
 

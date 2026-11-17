@@ -158,6 +158,7 @@ describe("composer Ask / Auto", () => {
       status: {
         settings: { provider: "scripted", model: "m", effort: "low", consent: "scopeContent" },
         configured: false,
+        connections: [],
         credentialStore: "test",
         credentialError: null,
         scriptedAvailable: true,

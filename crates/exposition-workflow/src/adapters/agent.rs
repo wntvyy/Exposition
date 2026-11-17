@@ -263,8 +263,8 @@ impl AgentReviewer for AgentServiceReviewer {
         match status.settings.provider {
             ProviderKind::Scripted if status.scripted_available => Ok(()),
             ProviderKind::Scripted => Err("The scripted provider is not available in this build.".into()),
-            ProviderKind::Anthropic if status.configured => Ok(()),
-            ProviderKind::Anthropic => Err(status
+            ProviderKind::Anthropic | ProviderKind::OpenAi if status.configured => Ok(()),
+            ProviderKind::Anthropic | ProviderKind::OpenAi => Err(status
                 .credential_error
                 .unwrap_or_else(|| "No model provider key is configured; add one in Settings.".into())),
         }
@@ -296,6 +296,8 @@ impl AgentReviewer for AgentServiceReviewer {
                 // A workflow's agent step keeps its own contract (read only,
                 // no execution) and never runs as Auto.
                 approval_mode: Some(ApprovalMode::Ask),
+                provider: None,
+                attachments: None,
             })
             .map_err(|e| StepFailure::new(&e.code, e.message))?;
         let task = summary.id.clone();

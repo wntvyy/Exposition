@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agents-attachments-discard"
+description = "Enables the agents_attachments_discard command without any pre-configured scope."
+commands.allow = ["agents_attachments_discard"]
+
+[[permission]]
+identifier = "deny-agents-attachments-discard"
+description = "Denies the agents_attachments_discard command without any pre-configured scope."
+commands.deny = ["agents_attachments_discard"]

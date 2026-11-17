@@ -84,6 +84,8 @@ fn request(h: &Harness, permission: PermissionProfile) -> CreateTaskRequest {
         consent: None,
         budgets: None,
         approval_mode: None,
+        provider: None,
+        attachments: None,
     }
 }
 
@@ -801,6 +803,8 @@ async fn tasks_persist_and_interrupted_runs_are_marked_after_restart() {
         consent: None,
         budgets: None,
         approval_mode: None,
+        provider: None,
+        attachments: None,
     };
     let done = first.create_task(req.clone()).unwrap();
     first.join(&done.id).await;

@@ -61,6 +61,8 @@ async fn accept_and_revert_are_refused_while_the_task_runs() {
             consent: Some(ContextConsent::ScopeContent),
             budgets: None,
             approval_mode: None,
+            provider: None,
+            attachments: None,
         })
         .unwrap();
     // The first file is created; the task then waits for the second approval.

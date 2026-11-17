@@ -91,6 +91,8 @@ fn request(h: &Harness, permission: PermissionProfile, execution: ExecutionMode)
         consent: None,
         budgets: None,
         approval_mode: None,
+        provider: None,
+        attachments: None,
     }
 }
 
@@ -236,7 +238,9 @@ async fn provider_changes_are_announced_without_the_key() {
     while let Ok(event) = h.events.try_recv() {
         if let AgentEvent::ProviderChanged { status } = event {
             assert!(!serde_json::to_string(&status).unwrap().contains(key));
-            configured.push(status.configured);
+            // The Anthropic connection (the default provider here is scripted).
+            let anthropic = status.connections.iter().find(|c| c.provider == ProviderKind::Anthropic).unwrap();
+            configured.push(anthropic.configured);
         }
     }
     assert_eq!(configured, vec![true, false]);

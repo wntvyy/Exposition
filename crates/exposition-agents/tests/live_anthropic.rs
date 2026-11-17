@@ -61,6 +61,8 @@ async fn live_anthropic_task_fixes_a_typo_through_a_transaction() {
                 max_commands: 0,
             }),
             approval_mode: None,
+            provider: None,
+            attachments: None,
         })
         .unwrap();
     tokio::time::timeout(Duration::from_secs(330), service.join(&task.id)).await.expect("task finished");

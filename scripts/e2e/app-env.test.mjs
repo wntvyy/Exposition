@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { appEnvironment, REAL_CREDENTIAL_OPT_IN, scenarioUsesRealCredential } from "./app-env.mjs";
+import {
+  appEnvironment,
+  CLOSED_LOOPBACK,
+  PROVIDER_ENDPOINTS,
+  REAL_CREDENTIAL_OPT_IN,
+  scenarioUsesRealCredential,
+} from "./app-env.mjs";
 
 const fixed = { EXPOSITION_DATA_DIR: "C:/data" };
 
@@ -16,6 +22,17 @@ describe("e2e app environment", () => {
     expect(appEnvironment({}, fixed, { realCredential: true })[REAL_CREDENTIAL_OPT_IN]).toBe("1");
     expect(appEnvironment({}, fixed, { realCredential: false })[REAL_CREDENTIAL_OPT_IN]).toBeUndefined();
     expect(appEnvironment({}, fixed)[REAL_CREDENTIAL_OPT_IN]).toBeUndefined();
+  });
+
+  it("keeps development keys away from real providers unless a scenario mocks them or runs live", () => {
+    const inherited = { EXPOSITION_DEV_OPENAI_BASE_URL: "http://127.0.0.1:5555" };
+    const plain = appEnvironment(inherited, fixed);
+    for (const name of PROVIDER_ENDPOINTS) expect(plain[name]).toBe(CLOSED_LOOPBACK);
+    const mocked = appEnvironment({}, fixed, { env: { EXPOSITION_DEV_OPENAI_BASE_URL: "http://127.0.0.1:4242" } });
+    expect(mocked.EXPOSITION_DEV_OPENAI_BASE_URL).toBe("http://127.0.0.1:4242");
+    expect(mocked.EXPOSITION_DEV_ANTHROPIC_BASE_URL).toBe(CLOSED_LOOPBACK);
+    const live = appEnvironment(inherited, fixed, { realCredential: true });
+    for (const name of PROVIDER_ENDPOINTS) expect(live[name]).toBeUndefined();
   });
 
   it("only live-* scenarios use the real credential", () => {

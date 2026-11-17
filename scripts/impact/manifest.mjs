@@ -69,6 +69,7 @@ export const SCENARIOS = {
   agents: [
     "agents-harness",
     "agents-attention",
+    "agents-composer",
     "agents-graph",
     "agent-save",
     "agentctx-narration",

@@ -4,15 +4,22 @@ import { useState, type FormEvent } from "react";
 import type { ApprovalMode } from "../../bindings/ApprovalMode";
 import type { Budgets } from "../../bindings/Budgets";
 import type { ContextConsent } from "../../bindings/ContextConsent";
+import type { CreateTaskRequest } from "../../bindings/CreateTaskRequest";
 import type { ExecutionMode } from "../../bindings/ExecutionMode";
 import type { PermissionProfile } from "../../bindings/PermissionProfile";
+import type { ProviderChoice } from "../../bindings/ProviderChoice";
 import type { TaskId } from "../../bindings/TaskId";
 import type { TaskScope } from "../../bindings/TaskScope";
+import type { TaskSummary } from "../../bindings/TaskSummary";
 import { editors } from "../../app/editors";
 import { registry } from "../../app/registry";
-import { commands } from "../../lib/ipc";
+import { commands, errorMessage } from "../../lib/ipc";
 import { Banner, Button, SegmentedControl, Section, Select, TextArea, TextField } from "../../ui/components";
+import { DraftAttachments, pasteHandler } from "./Attachments";
+import { drafts, NEW_TASK_DRAFT, useDraft } from "./drafts";
 import { APPROVAL_MODE_LABELS, CONSENT_LABELS, EXECUTION_LABELS, PERMISSION_LABELS } from "./format";
+import { ModelChoice } from "./ModelPicker";
+import { connectionOf } from "./models";
 import { AutoProfile, useProjectPermissions } from "./permissions";
 import { agents, useAgents } from "./store";
 
@@ -64,7 +71,13 @@ export function TaskComposer({
   const status = useAgents((s) => s.status);
   const workspace = useAgents((s) => s.workspace);
   const folder = workspace?.root ?? "";
-  const [prompt, setPrompt] = useState("");
+  // Text, attachments, and an explicit model live in the new-task draft
+  // (kept while the person looks elsewhere; never mixed with a follow-up's).
+  const draft = useDraft(NEW_TASK_DRAFT);
+  const prompt = draft.text;
+  const setPrompt = (text: string) => drafts.setText(NEW_TASK_DRAFT, text);
+  const [modelProblem, setModelProblem] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
   const [scopeKind, setScopeKind] = useState<ScopeKind>("workspace");
   const [files, setFiles] = useState("");
   const [document, setDocument] = useState(() => editors.active()?.resource.path ?? "");
@@ -85,27 +98,59 @@ export function TaskComposer({
   const autoReady = !auto || projectPermissions.state?.permissions != null;
 
   const scope = buildScope(scopeKind, files, document);
-  const providerReady = status !== null && (status.settings.provider === "scripted" || status.configured);
+  const inherited: ProviderChoice = status
+    ? { provider: status.settings.provider, model: status.settings.model, effort: status.settings.effort }
+    : { provider: "anthropic", model: "", effort: "medium" };
+  // The provider this task would run on: the explicit choice, else the default.
+  const effective = draft.model ?? inherited;
+  const providerReady = status !== null && connectionOf(status, effective.provider).configured;
+  const hasContent = prompt.trim().length > 0 || draft.attachments.length > 0;
   const canStart =
-    prompt.trim().length > 0 && folder.trim().length > 0 && scope !== null && providerReady && autoReady && !busy;
+    hasContent &&
+    folder.trim().length > 0 &&
+    scope !== null &&
+    providerReady &&
+    autoReady &&
+    !busy &&
+    draft.ingesting === 0 &&
+    (draft.model === null || modelProblem === null);
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     if (!canStart || !scope) return;
     setBusy(true);
+    setFailure(null);
+    // Exactly what is sent now; additions made while the request runs stay.
+    const sent = { text: prompt, attachments: draft.attachments.map((a) => a.id), model: draft.model };
     // In Auto the project's permissions decide; the task's own settings are
     // the widest ceiling (the backend still refuses what the project or the
     // task prohibits).
-    const request = auto
-      ? { prompt, workspaceRoot: folder, scope, permission: "autoApply" as const, execution: "approveEach" as const, consent, budgets, approvalMode }
-      : { prompt, workspaceRoot: folder, scope, permission, execution: effectiveExecution, consent, budgets, approvalMode };
-    const task = await agents.run(() => commands.agentsTaskCreate(request));
-    setBusy(false);
-    if (task) {
-      setPrompt("");
-      if (onCreated) onCreated(task.id);
-      else agents.show("task", task.id);
+    const request: CreateTaskRequest = {
+      prompt: sent.text,
+      workspaceRoot: folder,
+      scope,
+      ...(auto
+        ? { permission: "autoApply" as const, execution: "approveEach" as const }
+        : { permission, execution: effectiveExecution }),
+      consent,
+      budgets,
+      approvalMode,
+      ...(sent.model ? { provider: sent.model } : {}),
+      ...(sent.attachments.length ? { attachments: sent.attachments } : {}),
+    };
+    let task: TaskSummary;
+    try {
+      task = await commands.agentsTaskCreate(request);
+    } catch (e) {
+      // Nothing is lost: the text and attachments stay for another try.
+      setFailure(errorMessage(e));
+      return;
+    } finally {
+      setBusy(false);
     }
+    drafts.completeSend(NEW_TASK_DRAFT, sent);
+    if (onCreated) onCreated(task.id);
+    else agents.show("task", task.id);
   }
 
   return (
@@ -120,16 +165,32 @@ export function TaskComposer({
             </Button>
           }
         >
-          Add an Anthropic API key before starting a task. It is stored only in {status.credentialStore}.
+          Add {effective.provider === "openai" ? "an OpenAI" : "an Anthropic"} API key before starting a task. It is stored only
+          in {status.credentialStore}.
         </Banner>
       )}
-      <TextArea
-        label="Request"
-        rows={5}
-        value={prompt}
-        placeholder="Describe what the agent should do in this project."
-        onChange={setPrompt}
-        testId="agents-prompt"
+      <div onPaste={pasteHandler(NEW_TASK_DRAFT)}>
+        <TextArea
+          label="Request"
+          rows={5}
+          value={prompt}
+          placeholder="Describe what the agent should do in this project."
+          onChange={setPrompt}
+          testId="agents-prompt"
+        />
+      </div>
+      <DraftAttachments draftKey={NEW_TASK_DRAFT} />
+      <ModelChoice
+        value={draft.model}
+        inherited={inherited}
+        inheritedLabel="Default"
+        chooseLabel="Choose…"
+        resetLabel="Use default"
+        onChange={(model) => drafts.setModel(NEW_TASK_DRAFT, model)}
+        status={status}
+        onProblemChange={setModelProblem}
+        onConfigure={() => agents.openSettings(true)}
+        testId="agents-model-choice"
       />
       {workspace ? (
         <p className="ui-meta" data-testid="agents-folder">
@@ -223,6 +284,16 @@ export function TaskComposer({
           />
         </div>
       </Section>
+      {failure && (
+        <Banner tone="danger" title="The task was not started" live data-testid="agents-composer-error">
+          {failure}
+        </Banner>
+      )}
+      {draft.model !== null && modelProblem && (
+        <p className="ui-meta" data-testid="agents-model-problem">
+          {modelProblem}
+        </p>
+      )}
       <div className="agents-row">
         <Button variant="ghost" onPress={() => (onCancel ? onCancel() : agents.show("tasks"))}>
           Cancel

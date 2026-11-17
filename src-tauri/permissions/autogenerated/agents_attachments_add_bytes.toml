@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agents-attachments-add-bytes"
+description = "Enables the agents_attachments_add_bytes command without any pre-configured scope."
+commands.allow = ["agents_attachments_add_bytes"]
+
+[[permission]]
+identifier = "deny-agents-attachments-add-bytes"
+description = "Denies the agents_attachments_add_bytes command without any pre-configured scope."
+commands.deny = ["agents_attachments_add_bytes"]

@@ -10,6 +10,7 @@ import type { AppInfo } from "../bindings/AppInfo";
 import type { AppSettings } from "../bindings/AppSettings";
 import type { AppSettingsState } from "../bindings/AppSettingsState";
 import type { AttachArtifactResult } from "../bindings/AttachArtifactResult";
+import type { AttachmentId } from "../bindings/AttachmentId";
 import type { AttachRunArtifactRequest } from "../bindings/AttachRunArtifactRequest";
 import type { Budgets } from "../bindings/Budgets";
 import type { BuildEvent } from "../bindings/BuildEvent";
@@ -61,6 +62,10 @@ import type { PageEditRequest } from "../bindings/PageEditRequest";
 import type { PageHit } from "../bindings/PageHit";
 import type { ProjectSettings } from "../bindings/ProjectSettings";
 import type { ProjectSettingsState } from "../bindings/ProjectSettingsState";
+import type { IngestOutcome } from "../bindings/IngestOutcome";
+import type { ModelCatalog } from "../bindings/ModelCatalog";
+import type { ProviderChoice } from "../bindings/ProviderChoice";
+import type { ProviderKind } from "../bindings/ProviderKind";
 import type { ProviderSettings } from "../bindings/ProviderSettings";
 import type { ProviderStatus } from "../bindings/ProviderStatus";
 import type { RecentProject } from "../bindings/RecentProject";
@@ -222,13 +227,31 @@ export const commands = {
   // no command ever returns it.
   agentsProviderStatus: () => invoke<ProviderStatus>("agents_provider_status"),
   agentsProviderUpdate: (settings: ProviderSettings) => invoke<ProviderStatus>("agents_provider_update", { settings }),
-  agentsProviderSetKey: (key: string) => invoke<ProviderStatus>("agents_provider_set_key", { key }),
-  agentsProviderClearKey: () => invoke<ProviderStatus>("agents_provider_clear_key"),
+  /** Store a provider's API key (Anthropic when `provider` is omitted). */
+  agentsProviderSetKey: (key: string, provider?: ProviderKind) =>
+    invoke<ProviderStatus>("agents_provider_set_key", { key, provider: provider ?? null }),
+  agentsProviderClearKey: (provider?: ProviderKind) =>
+    invoke<ProviderStatus>("agents_provider_clear_key", { provider: provider ?? null }),
+  /** Models a connection offers (fetched in Rust with its credential); `refresh` fetches now. */
+  agentsModelsList: (provider: ProviderKind, refresh = false) =>
+    invoke<ModelCatalog>("agents_models_list", { provider, refresh }),
+  /** Opens the native file dialog in the backend and snapshots the chosen files. */
+  agentsAttachmentsPick: () => invoke<IngestOutcome[]>("agents_attachments_pick"),
+  /** Snapshot pasted bytes (base64). */
+  agentsAttachmentsAddBytes: (name: string | null, mediaType: string | null, data: string) =>
+    invoke<IngestOutcome>("agents_attachments_add_bytes", { name, mediaType, data }),
+  agentsAttachmentPreview: (id: AttachmentId) => invoke<string | null>("agents_attachment_preview", { id }),
+  agentsAttachmentsDiscard: (ids: AttachmentId[]) => invoke<void>("agents_attachments_discard", { ids }),
   agentsTaskList: () => invoke<TaskSummary[]>("agents_task_list"),
   agentsTaskDetail: (task: TaskId) => invoke<TaskDetail>("agents_task_detail", { task }),
   agentsTaskCreate: (request: CreateTaskRequest) => invoke<TaskSummary>("agents_task_create", { request }),
-  agentsTaskContinue: (task: TaskId, prompt: string, budgets: Budgets | null) =>
-    invoke<TaskSummary>("agents_task_continue", { task, prompt, budgets }),
+  agentsTaskContinue: (
+    task: TaskId,
+    prompt: string,
+    budgets: Budgets | null,
+    attachments: AttachmentId[] = [],
+    provider: ProviderChoice | null = null,
+  ) => invoke<TaskSummary>("agents_task_continue", { task, prompt, budgets, attachments, provider }),
   agentsTaskCancel: (task: TaskId) => invoke<TaskSummary>("agents_task_cancel", { task }),
   agentsApprovalResolve: (task: TaskId, approval: string, approved: boolean) =>
     invoke<void>("agents_approval_resolve", { task, approval, approved }),

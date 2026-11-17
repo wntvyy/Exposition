@@ -81,6 +81,7 @@ const app: AppInfo = {
 const provider = (configured: boolean): ProviderStatus => ({
   settings: { provider: "anthropic", model: "claude-opus-5-5", effort: "medium", consent: "scopeContent" },
   configured,
+  connections: [],
   credentialStore: "Windows Credential Manager",
   credentialError: null,
   scriptedAvailable: false,

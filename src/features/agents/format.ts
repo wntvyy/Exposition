@@ -134,10 +134,11 @@ export function providerLabel(status: ProviderStatus): { text: string; ready: bo
   if (status.settings.provider === "scripted") {
     return { text: "Scripted provider — development only", ready: true };
   }
-  if (status.credentialError) return { text: "Claude · credential store error", ready: false };
+  const name = status.settings.provider === "openai" ? "OpenAI" : "Claude";
+  if (status.credentialError) return { text: `${name} · credential store error`, ready: false };
   return status.configured
-    ? { text: `Claude · ${status.settings.model}`, ready: true }
-    : { text: "Claude · no API key configured", ready: false };
+    ? { text: `${name} · ${status.settings.model}`, ready: true }
+    : { text: `${name} · no API key configured`, ready: false };
 }
 
 export const PERMISSION_LABELS: Record<PermissionProfile, string> = {

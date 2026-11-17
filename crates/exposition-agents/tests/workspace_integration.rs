@@ -71,6 +71,8 @@ fn request(root: &std::path::Path) -> CreateTaskRequest {
         consent: None,
         budgets: None,
         approval_mode: None,
+        provider: None,
+        attachments: None,
     }
 }
 

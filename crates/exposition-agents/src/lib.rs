@@ -7,6 +7,8 @@
 //! code, cancellation, persistence in SQLite, and change review with
 //! checkpoints and conflict-aware revert.
 
+pub mod attachments;
+pub mod catalog;
 pub mod credentials;
 pub mod graph;
 pub mod model;

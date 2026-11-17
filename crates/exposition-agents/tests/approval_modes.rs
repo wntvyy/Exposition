@@ -1098,6 +1098,8 @@ fn request(
         consent: Some(ContextConsent::ScopeContent),
         budgets: None,
         approval_mode: mode,
+        provider: None,
+        attachments: None,
     }
 }
 

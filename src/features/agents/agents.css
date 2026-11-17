@@ -142,6 +142,38 @@
   display: contents;
 }
 
+/* ---------- Model picker ---------- */
+
+/* The model list scrolls inside its field-like frame (rows are shared ListRows). */
+.agents-model-list {
+  max-height: 288px;
+  overflow: auto;
+  border: var(--border-width) solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-field);
+}
+
+/* The meta line's parts stay flex items of the ListRow meta line. */
+.agents-model-row__meta {
+  display: contents;
+}
+
+.agents-model-row__note {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Attachments ---------- */
+
+/* An image attachment's thumbnail (its own bytes; decorative beside the name). */
+.agents-attachment__thumb {
+  display: block;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+
 /* ---------- Transcript and approvals ---------- */
 
 .agents-transcript {

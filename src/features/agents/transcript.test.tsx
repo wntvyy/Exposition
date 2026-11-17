@@ -87,7 +87,7 @@ describe("transcript entries", () => {
   it("keeps tool payloads, results, user text, and reasoning as plain text", () => {
     const markdown = "**bold** <script>x</script> [l](javascript:alert(1)) $x$";
     const items: TranscriptItem[] = [
-      { kind: "userText", seq: 1, text: markdown },
+      { kind: "userText", seq: 1, text: markdown, attachments: [] },
       { kind: "thinking", seq: 2, text: markdown },
       { kind: "toolCall", seq: 3, toolUseId: "t", name: "read_file", input: { path: "a.md", note: markdown }, status: "succeeded", result: markdown, isError: false, authorizedBy: null },
     ];

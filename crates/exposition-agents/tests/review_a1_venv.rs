@@ -123,6 +123,8 @@ async fn run(h: &mut Harness, script: Value, mode: ApprovalMode) -> (Vec<(bool, 
             consent: Some(ContextConsent::ScopeContent),
             budgets: None,
             approval_mode: Some(mode),
+            provider: None,
+            attachments: None,
         })
         .unwrap();
     let mut cards = Vec::new();

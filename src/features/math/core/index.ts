@@ -1,5 +1,11 @@
 // Public surface of the equation core (contract; lane EQ-A implements every
 // function, lane EQ-B and the editor/page integration only import from here).
+import { allEntries, entryById, search } from "./catalog";
+import * as editor from "./editor";
+import { latexAdapter } from "./latex";
+import { markdownAdapter } from "./markdown";
+import { sameMath as sameMathImpl } from "./tree";
+import { typstAdapter } from "./typst";
 import type {
   CatalogEntry,
   EditorState,
@@ -13,10 +19,6 @@ import type {
 
 export type * from "./types";
 
-const pending = (name: string): never => {
-  throw new Error(`math core: ${name} is not implemented yet`);
-};
-
 // ---- languages
 
 /** The math language of a document path, or null when it has no equation support. */
@@ -28,18 +30,39 @@ export function languageForPath(path: string): MathLanguage | null {
   return null;
 }
 
+const ADAPTERS: Record<MathLanguage, MathLanguageAdapter> = {
+  latex: latexAdapter,
+  typst: typstAdapter,
+  markdown: markdownAdapter,
+};
+
 export function adapterFor(language: MathLanguage): MathLanguageAdapter {
-  return pending(`adapterFor(${language})`);
+  return ADAPTERS[language];
+}
+
+/**
+ * New equation content that keeps the old content's surrounding layout: its
+ * leading and trailing whitespace, and the indentation of its first line on
+ * every following line (for `\begin{align} ... \end{align}` bodies, `$ ... $`
+ * Typst blocks, `$$` blocks on their own lines).
+ */
+export function withContentLayout(oldContent: string, newSource: string): string {
+  const lead = /^\s*/.exec(oldContent)?.[0] ?? "";
+  const trail = lead.length === oldContent.length ? "" : (/\s*$/.exec(oldContent)?.[0] ?? "");
+  const indent = lead.includes("\n") ? lead.slice(lead.lastIndexOf("\n") + 1) : "";
+  const nl = oldContent.includes("\r\n") ? "\r\n" : "\n";
+  const body = newSource.replace(/\r?\n/g, `${nl}${indent}`);
+  return `${lead}${body}${trail}`;
 }
 
 // ---- symbol catalog
 
 export function catalog(): readonly CatalogEntry[] {
-  return pending("catalog");
+  return allEntries();
 }
 
 export function catalogEntry(id: SymbolId): CatalogEntry | undefined {
-  return pending(`catalogEntry(${id})`);
+  return entryById(id);
 }
 
 export interface SearchHit {
@@ -55,60 +78,60 @@ export interface SearchHit {
  * exact matches first, then prefixes, then substrings; ties by catalog order.
  */
 export function searchCatalog(query: string, options: { language?: MathLanguage; limit?: number; category?: string }): SearchHit[] {
-  return pending(`searchCatalog(${query}, ${JSON.stringify(options)})`);
+  return search(query, options);
 }
 
 // ---- editing model (pure: every operation returns a new state)
 
 export function createState(root?: MathRow): EditorState {
-  return pending(`createState(${root ? "row" : ""})`);
+  return editor.createState(root);
 }
 
 export type Motion = "left" | "right" | "up" | "down" | "nextSlot" | "prevSlot" | "home" | "end";
 
 export function move(state: EditorState, motion: Motion, extend?: boolean): EditorState {
-  return pending(`move(${motion}, ${extend}, ${state.caret.offset})`);
+  return editor.move(state, motion, extend);
 }
 
 /** Type characters: letters become identifiers, digits numbers; `^`, `_`, `/` start templates. */
 export function typeText(state: EditorState, text: string): EditorState {
-  return pending(`typeText(${text}, ${state.caret.offset})`);
+  return editor.typeText(state, text);
 }
 
 export function insertSymbol(state: EditorState, id: SymbolId): EditorState {
-  return pending(`insertSymbol(${id}, ${state.caret.offset})`);
+  return editor.insertSymbol(state, id);
 }
 
 /** Insert a structure at the caret; a selection becomes its first slot where structurally valid. */
 export function insertTemplate(state: EditorState, template: TemplateId, options?: { rows?: number; cols?: number }): EditorState {
-  return pending(`insertTemplate(${template}, ${JSON.stringify(options)}, ${state.caret.offset})`);
+  return editor.insertTemplate(state, template, options);
 }
 
 export function deleteBackward(state: EditorState): EditorState {
-  return pending(`deleteBackward(${state.caret.offset})`);
+  return editor.deleteBackward(state);
 }
 
 export function deleteForward(state: EditorState): EditorState {
-  return pending(`deleteForward(${state.caret.offset})`);
+  return editor.deleteForward(state);
 }
 
 export type GridEdit = "addRowAfter" | "addRowBefore" | "addColAfter" | "addColBefore" | "removeRow" | "removeCol";
 
 /** Row/column editing when the caret is inside a matrix, cases, or aligned cell. */
 export function editGrid(state: EditorState, edit: GridEdit): EditorState {
-  return pending(`editGrid(${edit}, ${state.caret.offset})`);
+  return editor.editGrid(state, edit);
 }
 
 export function setCaret(state: EditorState, caret: MathCaret): EditorState {
-  return pending(`setCaret(${caret.offset}, ${state.caret.offset})`);
+  return editor.setCaret(state, caret);
 }
 
 /** Structural equality ignoring caret: used to skip applying unchanged drafts. */
 export function sameMath(a: MathRow, b: MathRow): boolean {
-  return pending(`sameMath(${a.children.length}, ${b.children.length})`);
+  return sameMathImpl(a, b);
 }
 
 /** LaTeX for the local KaTeX preview (approximate; the document's compile is authoritative). */
 export function previewLatex(row: MathRow): string {
-  return pending(`previewLatex(${row.children.length})`);
+  return editor.previewLatex(row);
 }

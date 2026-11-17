@@ -1,12 +1,16 @@
 import { ArrowLeft, FileDiff, PanelTop, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import type { ProviderChoice } from "../../bindings/ProviderChoice";
 import type { TaskId } from "../../bindings/TaskId";
 import type { TaskStatus } from "../../bindings/TaskStatus";
 import type { TaskSummary } from "../../bindings/TaskSummary";
-import { commands } from "../../lib/ipc";
+import { commands, errorMessage } from "../../lib/ipc";
 import { Banner, Button, IconButton, LoadingState, ProgressBar, Section, StatusPill, StatusText, TextArea } from "../../ui/components";
 import { ApprovalCard } from "./ApprovalCard";
+import { DraftAttachments, pasteHandler } from "./Attachments";
+import { drafts, useDraft } from "./drafts";
+import { ModelChoice } from "./ModelPicker";
 import { asSentence, budgetRows, EFFORT_LABELS, isActive, specLabels, statusLabel } from "./format";
 import { freshnessLabel, graphSummary } from "./GraphViews";
 import { TaskAllowances } from "./permissions";
@@ -71,21 +75,63 @@ function OutcomeBanner({ status }: { status: TaskStatus }) {
   }
 }
 
-function ContinueForm({ id }: { id: TaskId }) {
-  const [prompt, setPrompt] = useState("");
+const sameChoice = (a: ProviderChoice, b: ProviderChoice) => a.provider === b.provider && a.model === b.model && a.effort === b.effort;
+
+/**
+ * The follow-up of a stopped task: text, attachments, and optionally another
+ * model for this and later turns. Its draft belongs to this task only. A
+ * model switch the conversation cannot carry is refused by the backend with
+ * its explanation, shown here; the draft is kept.
+ */
+function ContinueForm({ id, current }: { id: TaskId; current: ProviderChoice }) {
+  const status = useAgents((s) => s.status);
+  const draft = useDraft(id);
   const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [modelProblem, setModelProblem] = useState<string | null>(null);
+  const hasContent = draft.text.trim().length > 0 || draft.attachments.length > 0;
+  const canSend = hasContent && !busy && draft.ingesting === 0 && (draft.model === null || modelProblem === null);
   async function submit() {
-    if (!prompt.trim()) return;
+    if (!canSend) return;
+    const sent = { text: draft.text, attachments: draft.attachments.map((a) => a.id), model: draft.model };
+    const switchTo = sent.model && !sameChoice(sent.model, current) ? sent.model : null;
     setBusy(true);
-    const task = await agents.run(() => commands.agentsTaskContinue(id, prompt, null));
-    setBusy(false);
-    if (task) setPrompt("");
+    setFailure(null);
+    try {
+      await commands.agentsTaskContinue(id, sent.text, null, sent.attachments, switchTo);
+    } catch (e) {
+      setFailure(errorMessage(e));
+      return;
+    } finally {
+      setBusy(false);
+    }
+    drafts.completeSend(id, sent);
   }
   return (
-    <div className="agents-stack">
-      <TextArea label="Follow-up" rows={2} value={prompt} onChange={setPrompt} />
+    <div className="agents-stack" data-testid="agents-follow-up">
+      <div onPaste={pasteHandler(id)}>
+        <TextArea label="Follow-up" rows={2} value={draft.text} onChange={(text) => drafts.setText(id, text)} testId="agents-follow-up-text" />
+      </div>
+      <DraftAttachments draftKey={id} />
+      <ModelChoice
+        value={draft.model}
+        inherited={current}
+        inheritedLabel={null}
+        chooseLabel="Change model…"
+        resetLabel="Keep current model"
+        onChange={(model) => drafts.setModel(id, model)}
+        status={status}
+        onProblemChange={setModelProblem}
+        onConfigure={() => agents.openSettings(true)}
+        testId="agents-follow-up-model"
+      />
+      {failure && (
+        <Banner tone="danger" title="The follow-up was not sent" live data-testid="agents-follow-up-error">
+          {failure}
+        </Banner>
+      )}
       <div className="agents-row">
-        <Button isDisabled={!prompt.trim()} isPending={busy} onPress={() => void submit()}>
+        <Button isDisabled={!canSend} isPending={busy} onPress={() => void submit()} data-testid="agents-continue">
           Continue task
         </Button>
       </div>
@@ -190,7 +236,7 @@ export function TaskView({ id, variant = "panel" }: { id: TaskId; variant?: "pan
         {active && draft && <Draft draft={draft} />}
       </div>
       <BudgetMeter task={task} />
-      {!active && <ContinueForm id={id} />}
+      {!active && <ContinueForm key={id} id={id} current={task.spec.provider} />}
     </article>
   );
 }

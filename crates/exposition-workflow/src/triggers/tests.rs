@@ -1092,6 +1092,8 @@ async fn agents_cannot_create_or_enable_triggers() {
             consent: None,
             budgets: None,
             approval_mode: None,
+            provider: None,
+            attachments: None,
         })
         .unwrap();
     tokio::time::timeout(Duration::from_secs(30), agents.join(&task.id)).await.expect("task finished");

@@ -379,9 +379,61 @@ impl TaskUsage {
 pub enum ProviderKind {
     /// Anthropic Claude Messages API.
     Anthropic,
+    /// OpenAI Responses API with the user's API key.
+    #[serde(rename = "openai")]
+    OpenAi,
     /// Deterministic scripted provider. Development builds only; never
     /// selectable in release builds.
     Scripted,
+}
+
+impl ProviderKind {
+    /// Human-readable provider name.
+    pub fn label(self) -> &'static str {
+        match self {
+            ProviderKind::Anthropic => "Anthropic",
+            ProviderKind::OpenAi => "OpenAI",
+            ProviderKind::Scripted => "Scripted (development)",
+        }
+    }
+}
+
+/// How a connection authenticates. Only API keys today; the ChatGPT-plan
+/// sign-in is not offered (see docs: its eligibility is not established for
+/// Exposition), and API-key access is never labeled as plan access.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthMode {
+    ApiKey,
+}
+
+/// Non-secret OpenAI request context.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAiConnection {
+    /// `OpenAI-Organization` header (optional).
+    #[serde(default)]
+    pub organization: Option<String>,
+    /// `OpenAI-Project` header (optional).
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+/// One provider connection as the webview may see it (never the credential).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionStatus {
+    pub provider: ProviderKind,
+    pub auth: AuthMode,
+    /// A credential is stored for this connection.
+    pub configured: bool,
+    /// Credential storage could not be read (safe to show).
+    pub credential_error: Option<String>,
+    /// Non-secret context shown with the connection (e.g. "Project proj_…").
+    pub context: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -417,7 +469,9 @@ pub struct ProviderChoice {
     pub effort: Effort,
 }
 
-/// Persisted provider settings (never includes the API key).
+/// Persisted provider settings: the default every new task inherits unless the
+/// task chooses explicitly (never includes a credential). Settings saved
+/// before connections existed read with the same provider, model, and effort.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
@@ -427,6 +481,10 @@ pub struct ProviderSettings {
     pub effort: Effort,
     /// Default consent for new tasks.
     pub consent: ContextConsent,
+    /// OpenAI organization/project context for the OpenAI connection.
+    #[serde(default)]
+    #[ts(optional)]
+    pub openai: Option<OpenAiConnection>,
 }
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
@@ -438,6 +496,7 @@ impl Default for ProviderSettings {
             model: DEFAULT_MODEL.into(),
             effort: Effort::Medium,
             consent: ContextConsent::ScopeContent,
+            openai: None,
         }
     }
 }
@@ -448,8 +507,10 @@ impl Default for ProviderSettings {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderStatus {
     pub settings: ProviderSettings,
-    /// An API key is stored in OS credential storage.
+    /// A credential is stored for the default provider's connection.
     pub configured: bool,
+    /// Every provider connection (Anthropic, OpenAI; scripted in debug builds).
+    pub connections: Vec<ConnectionStatus>,
     /// Human-readable name of the credential store.
     pub credential_store: String,
     /// Credential storage could not be read (message is safe to show).
@@ -498,6 +559,32 @@ pub struct CreateTaskRequest {
     #[serde(default)]
     #[ts(optional)]
     pub approval_mode: Option<ApprovalMode>,
+    /// The task's provider, model, and effort; `None` inherits the default
+    /// settings. Resolved and recorded when the task starts.
+    #[serde(default)]
+    #[ts(optional)]
+    pub provider: Option<ProviderChoice>,
+    /// Attachments (ingested with `agents_attachments_*`) sent with the request.
+    #[serde(default)]
+    #[ts(optional)]
+    pub attachments: Option<Vec<crate::attachments::AttachmentId>>,
+}
+
+/// A follow-up request to a stopped task.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ContinueTaskRequest {
+    pub prompt: String,
+    /// Raised budgets; `None` keeps the task's.
+    #[serde(default)]
+    pub budgets: Option<Budgets>,
+    #[serde(default)]
+    pub attachments: Vec<crate::attachments::AttachmentId>,
+    /// Switch provider/model for this and later turns. The history is checked
+    /// first: a switch that cannot carry it is refused with an explanation.
+    #[serde(default)]
+    pub provider: Option<ProviderChoice>,
 }
 
 /// Request to start the generation task of a newly created project.
@@ -589,6 +676,9 @@ pub enum TranscriptItem {
     UserText {
         seq: u64,
         text: String,
+        /// Attachments sent with this message, in order.
+        #[serde(default)]
+        attachments: Vec<crate::attachments::AttachmentInfo>,
     },
     AssistantText {
         seq: u64,
