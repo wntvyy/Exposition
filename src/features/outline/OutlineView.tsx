@@ -1,4 +1,4 @@
-// Editor "Outline" view (sidebar): the active document's sections and
+// Editor "Outline" view (auxiliary panel): the active document's sections and
 // mathematical items (theorems, lemmas, definitions, proofs, Lean
 // declarations) in source order, from its current text — unsaved edits
 // included and labelled — plus the compiled pages of its last successful
@@ -135,7 +135,7 @@ function PageList({ path, handle }: { path: string; handle: DocumentHandle }) {
     ) : null;
   return (
     <Section
-      variant="chrome"
+      variant="content"
       title="Pages"
       count={list.pages.length || undefined}
       collapsible
@@ -275,7 +275,7 @@ export function OutlineView() {
       {outline && (
         <>
           <CoverageNote outline={outline} />
-          <Section variant="chrome" title="Source" count={outline.itemCount || undefined} collapsible data-testid="outline-source">
+          <Section variant="content" title="Source" count={outline.itemCount || undefined} collapsible data-testid="outline-source">
             <SourceOutline outline={outline} />
           </Section>
         </>

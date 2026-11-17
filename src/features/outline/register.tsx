@@ -1,6 +1,6 @@
-// Outline feature: the Editor's "Outline" sidebar view (a rail toggle) and its
-// palette command. The outline reads the active document's text only when
-// the view is shown.
+// Outline feature: the Editor's "Outline" auxiliary view (beside Lean and
+// Dependencies, so the Files view stays visible) and its palette command.
+// The outline reads the active document's text only while the view is shown.
 import { ListTree } from "lucide-react";
 
 import { layout } from "../../app/layout";
@@ -12,10 +12,10 @@ export const OUTLINE_VIEW_ID = "editor.outline";
 
 registry.registerView({
   id: OUTLINE_VIEW_ID,
-  location: "sidebar",
+  location: "auxiliary",
   title: "Outline",
   icon: ListTree,
-  order: 10,
+  order: 25,
   render: () => <OutlineView />,
 });
 
@@ -25,6 +25,6 @@ registry.registerCommand({
   category: "View",
   run: () => {
     pages.show(EDITOR_PAGE);
-    layout.showView("sidebar", OUTLINE_VIEW_ID);
+    layout.showView("auxiliary", OUTLINE_VIEW_ID);
   },
 });
