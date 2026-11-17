@@ -149,7 +149,7 @@ export default async function equationSource({ launchApp, artifactsDir, assert, 
       request: {
         id: `e2e-eq-external-${tag}`,
         origin: { kind: "external" },
-        edits: [{ document: await s.docId(), baseRevision: await s.revision(), patches: [{ range: { start: inside, end: inside }, text: "c" }] }],
+        edits: [{ document: await s.docId(), baseRevision: await s.revision(), patches: [{ range: { start: inside, end: inside }, text: " c" }] }],
         undo: { kind: "newGroup" },
         conflict: "reject",
         label: null,
@@ -161,7 +161,7 @@ export default async function equationSource({ launchApp, artifactsDir, assert, 
     await shot(`${tag}-04-conflict`);
     if (language === "latex" && engine === "pdfLatex") await referenceShots("equation-panel-conflict");
     const afterExternal = await s.text();
-    assert.ok(afterExternal.includes("$ac + b$"), "only the external change is in the document");
+    assert.ok(afterExternal.includes("$a c + b$"), "only the external change is in the document");
     await page.getByTestId("equation-cancel").click();
     await page.waitForTimeout(300);
     assert.equal(await s.text(), afterExternal, "the conflicted draft wrote nothing");

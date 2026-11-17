@@ -134,7 +134,9 @@ export default async function equationPage({ launchApp, artifactsDir, assert, fi
     // 6. An external edit during a draft opened from the page: conflict, nothing written.
     source = await s.text();
     const sum = source.indexOf("$a + b$") + 1;
-    await s.clickPageAt(sum, { dx: 0.5, mode: "Math" });
+    // Click a glyph well inside the equation (the "+"), not its leading edge:
+    // a caret at the edge may resolve outside the math (Markdown does).
+    await s.clickPageAt(sum + 2, { dx: 1, mode: "Math" });
     await page.getByTestId("page-equation").click();
     await s.draft("edit");
     await s.mathType("q");
@@ -142,7 +144,7 @@ export default async function equationPage({ launchApp, artifactsDir, assert, fi
       request: {
         id: `e2e-eq-page-external-${language}`,
         origin: { kind: "external" },
-        edits: [{ document: await s.docId(), baseRevision: await s.revision(), patches: [{ range: { start: sum + 1, end: sum + 1 }, text: "c" }] }],
+        edits: [{ document: await s.docId(), baseRevision: await s.revision(), patches: [{ range: { start: sum + 1, end: sum + 1 }, text: " c" }] }],
         undo: { kind: "newGroup" },
         conflict: "reject",
         label: null,
