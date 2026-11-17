@@ -89,7 +89,8 @@ const answers = (detail) => detail.transcript.filter((t) => t.kind === "assistan
 
 export default async function liveAttachments({ launchApp, artifactsDir, assert }) {
   const root = await mkdtemp(join(tmpdir(), "exposition-live-attach-"));
-  await writeFile(join(root, "notes.md"), "# Notes\n");
+  // openWorkspace waits for main.typ in the tree.
+  await writeFile(join(root, "main.typ"), "= Notes\n");
   const app = await launchApp();
   const { page } = app;
   const evidence = { root, tasks: [], checks: [] };
