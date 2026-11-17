@@ -53,6 +53,7 @@ export const SCENARIOS = {
     "p1-security",
   ],
   pages: ["page-typst", "page-latex", "page-markdown", "page-recovery", "tex-build", "research-attach-build"],
+  equation: ["equation-source", "equation-page"],
   research: [
     "research-python",
     "research-isolation",
@@ -400,7 +401,8 @@ export const AREAS = [
     id: "editor",
     paths: ["src/features/editor/**", "src/features/outline/**", "src/features/media/**", "src/lib/monaco.ts", "src-tauri/src/outline.rs", "src-tauri/src/media.rs"],
     level: "local",
-    e2e: SCENARIOS.editor,
+    // Equation writes go through the source editor's document handle.
+    e2e: [...SCENARIOS.editor, "equation-source"],
     visual: ["editor-find-outline", "qol-media"],
   },
   {
@@ -432,7 +434,8 @@ export const AREAS = [
       "src-tauri/src/typesetting.rs",
     ],
     level: "local",
-    e2e: SCENARIOS.pages,
+    // The equation editor reads the page caret (activePage.ts, PageSession.currentCaret).
+    e2e: [...SCENARIOS.pages, "equation-page"],
     visual: ["page-typst", "pages-review"],
   },
   {
@@ -443,8 +446,8 @@ export const AREAS = [
     id: "equation",
     paths: ["src/features/math/**"],
     level: "local",
-    e2e: [...SCENARIOS.pages, "editor-find-outline"],
-    visual: ["page-typst", "editor-find-outline"],
+    e2e: [...SCENARIOS.equation, ...SCENARIOS.pages, "editor-find-outline"],
+    visual: ["equation-source", "equation-page", "page-typst", "editor-find-outline"],
     note: "Equation editor: compiled output from each language is authoritative; KaTeX preview is approximate.",
   },
   {

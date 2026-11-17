@@ -11,6 +11,7 @@
 import type { DocumentChanged } from "../../bindings/DocumentChanged";
 import type { DocumentId } from "../../bindings/DocumentId";
 import type { DocumentState } from "../../bindings/DocumentState";
+import type { EditOrigin } from "../../bindings/EditOrigin";
 import type { SelectionHint } from "../../bindings/SelectionHint";
 import type { TextPatch } from "../../bindings/TextPatch";
 import type { TextRange } from "../../bindings/TextRange";
@@ -55,8 +56,13 @@ interface PendingEdit {
   patches: TextPatch[];
   undo: UndoBehavior;
   selection: SelectionHint | null;
+  /** Who made the edit (`source` unless a tool writing through this view says otherwise). */
+  origin: LocalOrigin;
   sent: boolean;
 }
+
+/** Origins a view's local edit may carry: typing in the source, or a tool acting for the page view. */
+export type LocalOrigin = Extract<EditOrigin, { kind: "source" } | { kind: "page" }>;
 
 interface PendingHistory {
   kind: "undo" | "redo";
@@ -160,6 +166,7 @@ export class DocumentSync {
             id: first.id,
             patches: [patch],
             undo: first.undo,
+            origin: first.origin,
             selection:
               first.selection && last.selection
                 ? { before: first.selection.before, after: last.selection.after }
@@ -178,9 +185,9 @@ export class DocumentSync {
   }
 
   /** Record a local edit already applied to the view (patches relative to the text before it). */
-  local(patches: TextPatch[], undo: UndoBehavior, selection: SelectionHint | null = null) {
+  local(patches: TextPatch[], undo: UndoBehavior, selection: SelectionHint | null = null, origin: LocalOrigin = { kind: "source" }) {
     if (this.disposed || patches.length === 0) return;
-    this.queue.push({ kind: "edit", id: newTransactionId(), patches, undo, selection, sent: false });
+    this.queue.push({ kind: "edit", id: newTransactionId(), patches, undo, selection, origin, sent: false });
     this.callbacks.onChange?.();
     this.pump();
   }
@@ -218,7 +225,7 @@ export class DocumentSync {
     if (head.kind === "edit") {
       const request: TransactionRequest = {
         id: head.id,
-        origin: { kind: "source" },
+        origin: head.origin,
         edits: [{ document: this.document, baseRevision: this.revision, patches: head.patches }],
         undo: head.undo,
         conflict: "rebaseDisjoint",
