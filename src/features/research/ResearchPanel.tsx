@@ -39,6 +39,7 @@ import {
   Toolbar,
   type KeyValueItem,
 } from "../../ui/components";
+import { runnerAvailabilityChanged } from "../workflows/availability";
 import {
   EMPTY_RUN_OUTPUT,
   ENTRY_PREVIEW_CHARS,
@@ -234,12 +235,13 @@ export function SessionBar({ status = true }: { status?: boolean }) {
         onChange={(id) => chooseEnvironment(id)}
         placeholder="Choose environment"
       />
+      {/* Interactive environments, then restricted batch availability (Docker, images). */}
       <IconButton
         icon={RefreshCw}
         size="sm"
         aria-label="Refresh environments"
         isDisabled={environmentsLoading}
-        onPress={() => void loadEnvironments(true)}
+        onPress={() => void loadEnvironments(true).finally(runnerAvailabilityChanged)}
       />
       <SetupButton />
       {status && <SessionStatus />}

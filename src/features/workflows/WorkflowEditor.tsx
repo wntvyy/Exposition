@@ -57,6 +57,8 @@ import {
 import { useWorkspace } from "../workspace/store";
 import { CodePayloadEditor } from "./CodePayloadEditor";
 import { exportBundle, WORKFLOWS_KEY } from "./actions";
+import { useRunnerAvailabilityEpoch } from "./availability";
+import { workflowsChanged } from "./changes";
 import { workflowCommands } from "./ipc";
 import {
   addCompositeStep,
@@ -547,6 +549,27 @@ export function WorkflowEditor({ resource }: EditorProps) {
     (next: WorkflowDefinition) => setDraftState(savedSchema ? normalizeSchema(next, savedSchema) : next),
     [savedSchema],
   );
+  // Settings, trust, and project changes can make a runner (un)available while
+  // this tab is open: re-read the runner catalog and the draft's runnability.
+  const availability = useRunnerAvailabilityEpoch();
+  const contractsEpoch = useRef(availability);
+  useEffect(() => {
+    if (contractsEpoch.current === availability) return;
+    contractsEpoch.current = availability;
+    let live = true;
+    workflowCommands.operations().then(
+      (ops) => {
+        if (live) setContracts(ops);
+      },
+      () => {
+        // Keep the catalog shown; the next change or reopening reads it again.
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [availability]);
+
   const composites = useCompositeChildren(draft);
   // Registered contracts plus the ports derived for each composite reference.
   const effective = useMemo(() => withComposites(contracts, composites.definitions), [contracts, composites.definitions]);
@@ -564,14 +587,22 @@ export function WorkflowEditor({ resource }: EditorProps) {
   dirtyRef.current = dirty;
   useEffect(() => editors.setDirty(resource.key, dirty), [dirty, resource.key]);
 
-  // Live validation in Rust (debounced).
+  // Live validation in Rust (debounced), again whenever runner availability
+  // may have changed; only the newest answer is shown.
+  const validationTicket = useRef(0);
   useEffect(() => {
     if (!draft) return;
     const timer = setTimeout(() => {
-      workflowCommands.validate(draft, saved?.id ?? null).then(setValidation, (e: unknown) => setSaveError(errorMessage(e)));
+      const ticket = ++validationTicket.current;
+      workflowCommands.validate(draft, saved?.id ?? null).then(
+        (next) => {
+          if (ticket === validationTicket.current) setValidation(next);
+        },
+        (e: unknown) => setSaveError(errorMessage(e)),
+      );
     }, 200);
     return () => clearTimeout(timer);
-  }, [draft, saved?.id]);
+  }, [draft, saved?.id, availability]);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (!draft || !saved) return false;
@@ -579,9 +610,12 @@ export function WorkflowEditor({ resource }: EditorProps) {
     setSaveError(null);
     try {
       const result = await workflowCommands.save({ id: saved.id, expectedRevision: saved.revision, definition: draft });
+      // A validation still in flight is older than this answer.
+      validationTicket.current++;
       setSaved(result);
       setDraftState(result.definition);
       setValidation(result.validation);
+      if (!result.unchanged) workflowsChanged();
       editors.setTitle(resource.key, result.definition.title || "Workflow draft");
       notify({
         tone: result.unchanged ? "info" : "success",
@@ -637,11 +671,18 @@ export function WorkflowEditor({ resource }: EditorProps) {
       );
     }
     if (loadError.kind === "missing") {
+      // The backend says when it was deleted here; otherwise it was never saved
+      // in this project (its "does not exist" would mislead for another project's).
+      const deleted = /deleted/i.test(loadError.message);
       return (
         <div className="xp-wf" data-testid="workflow-missing">
           <UnavailableState
             title="This workflow is not in the open project"
-            description={`${loadError.message} A deleted workflow can be restored from Settings › Storage & History; a workflow of another project opens when that project is open.`}
+            description={
+              deleted
+                ? `${loadError.message} A deleted workflow can be restored from Settings › Storage & History.`
+                : "It is not saved in this project. A workflow of another project opens when that project is open."
+            }
             actions={recovery}
           />
         </div>

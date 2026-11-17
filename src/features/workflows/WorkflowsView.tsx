@@ -2,7 +2,7 @@
 // drafts from the workflow presets, strict imports, and recent runs. Nothing
 // here starts a run: a run starts only from a reviewed plan in the editor.
 import { Bell, BellOff, BellRing, FileUp, Plus } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { editors } from "../../app/editors";
 import type { EditorProps } from "../../app/registry";
@@ -28,6 +28,8 @@ import {
 import { onProjectOp } from "../operations/client";
 import { useOpList } from "../operations/useOpList";
 import { useWorkspace } from "../workspace/store";
+import { useRunnerAvailabilityEpoch } from "./availability";
+import { onWorkflowsChanged } from "./changes";
 import type { WorkflowTrigger } from "./contract";
 import { workflowCommands, workflowTriggerCommands } from "./ipc";
 import { workflowKey } from "./model";
@@ -43,24 +45,32 @@ export function WorkflowsView(_props: EditorProps) {
   const [text, setText] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const root = useWorkspace((s) => s.info?.root ?? null);
+  // "Can be reviewed and run" depends on runner availability now.
+  const availability = useRunnerAvailabilityEpoch();
+  const latest = useRef(0);
 
   const refresh = async () => {
+    const ticket = ++latest.current;
     try {
       const [list, p] = await Promise.all([workflowCommands.list(), workflowCommands.presets()]);
+      if (ticket !== latest.current) return;
       setDrafts(list);
       setPresets(p);
       setError(null);
       // Trigger state is supplementary here (the editor's Triggers section is the place to act).
-      setTriggers(await workflowTriggerCommands.list(null).catch(() => []));
+      const t = await workflowTriggerCommands.list(null).catch(() => []);
+      if (ticket === latest.current) setTriggers(t);
     } catch (e) {
-      setError(errorMessage(e));
+      if (ticket === latest.current) setError(errorMessage(e));
     }
   };
   useEffect(() => {
     void refresh();
-  }, [root]);
+  }, [root, availability]);
   // Deletions, copies and restores (here, in Storage & History, or by an agent).
   useEffect(() => onProjectOp(() => void refresh()), []);
+  // Drafts created, saved, or imported anywhere (New Draft here, an editor tab, an agent).
+  useEffect(() => onWorkflowsChanged(() => void refresh()), []);
   const list = useOpList({
     id: "workflows",
     label: "Workflow actions",

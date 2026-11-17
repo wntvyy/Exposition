@@ -44,6 +44,11 @@ vi.mock("../research/ipc", () => ({ researchCommands: research }));
 vi.mock("../research/Promotion", () => ({
   PreviewView: ({ preview }: { preview: { path: string } }) => <div data-testid="promotion-preview">{preview.path}</div>,
 }));
+// Runs are read through the open project (no project changes here).
+vi.mock("../workspace/store", async () => {
+  const { create } = await import("zustand");
+  return { useWorkspace: create(() => ({ info: { root: "/work/thesis", name: "thesis", recovery: [] } })) };
+});
 
 const { PlanReviewDialog } = await import("./PlanReview");
 const { RunMonitor, RunHistory, WorkflowRunView } = await import("./RunView");
