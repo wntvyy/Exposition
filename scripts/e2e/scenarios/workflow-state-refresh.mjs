@@ -1,6 +1,8 @@
 // Stabilization (lane st/state): open workflow views stay current with
 // changes made elsewhere, in the real app with real restricted runs.
 //
+// T. D1 (verifier): an open Formal Audit draft in an untrusted folder becomes
+//    reviewable when the folder is trusted from the Lean panel — no save.
 // A. XR-K-03: already-open Python, R, and Julia workflow editors (no images
 //    configured) become reviewable, and their step text says the runner is
 //    available, when Settings › Execution sets each image — no save, the
@@ -33,11 +35,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runCommand } from "../palette.mjs";
-import { invoke, waitFor } from "../workspace-helpers.mjs";
+import { alertDialog, invoke, openInEditor, waitFor } from "../workspace-helpers.mjs";
 
 const IMAGES = { python: "python:3.13-slim", r: "r-base:4.6.2", julia: "julia:1.13" };
 const OBS = "x,y\n0,1\n1,3\n2,5\n";
 const STEP_WAIT = 20_000;
+const LEAN = "theorem two_eq : 1 + 1 = 2 := rfl\n";
 
 function dockerImagesPresent() {
   try {
@@ -108,6 +111,8 @@ export default async function workflowStateRefresh({ launchApp, artifactsDir, as
   await mkdir(join(alpha, "data"), { recursive: true });
   await mkdir(dataDir, { recursive: true });
   await writeFile(join(alpha, "data", "obs.csv"), OBS);
+  await mkdir(join(alpha, "lean"), { recursive: true });
+  await writeFile(join(alpha, "lean", "Two.lean"), LEAN);
 
   const observations = [];
   const note = (id, ok, detail) => {
@@ -198,6 +203,32 @@ export default async function workflowStateRefresh({ launchApp, artifactsDir, as
       Object.fromEntries(Object.entries(saved).map(([k, s]) => [k, { state: s.validation.state, runnable: s.validation.runnable, codes: s.validation.diagnostics.map((d) => d.code) }])),
     );
 
+    // ---- T. D1: an open workflow follows a folder trusted from the Lean panel ---------------
+    await section("trust", async () => {
+      await runCommand(page, "Show Lean Infoview", /Show Lean Infoview/);
+      await openInEditor(page, "lean/Two.lean");
+      const lp = page.getByTestId("lean-panel");
+      await until("Lean panel untrusted", async () => (await lp.getAttribute("data-status")) === "untrusted", 30_000);
+      await runCommand(page, "New Formal Audit Draft", /New Formal Audit Draft/);
+      const editor = visible("workflow-editor");
+      await editor.waitFor({ timeout: STEP_WAIT });
+      const auditId = await editor.getAttribute("data-workflow");
+      saved.audit = { id: auditId };
+      const reason = async () => (await visible("workflow-run-reason").innerText().catch(() => "")).replace(/\s+/g, " ");
+      const before = { canReview: await visible("workflow-status").getAttribute("data-can-review"), reason: await reason() };
+      note("audit-blocked-untrusted", before.canReview === "false" && /not trusted/.test(before.reason), before);
+      // Trust from the Lean panel of the Lean tab, then back to the still-open workflow tab.
+      await page.locator('[data-editor-key="file:lean/Two.lean"]').first().click();
+      await lp.getByRole("button", { name: "Trust workspace…" }).click();
+      await alertDialog(page).getByRole("button", { name: "Trust workspace", exact: true }).click();
+      await until("trusted", async () => (await invoke(page, "trust_status", { root: (await invoke(page, "workspace_current")).root })).trusted, 10_000);
+      await showEditor(auditId);
+      const ready = await until("audit reviewable after trust", async () => (await visible("workflow-status").getAttribute("data-can-review")) === "true");
+      const stored = await invoke(page, "workflow_get", { id: auditId, revision: null });
+      note("audit-reviewable-after-trust-without-save", ready && stored.revision === 1, { ready, revision: stored.revision, reason: await reason() });
+      await shot("audit-after-trust");
+    });
+
     // ---- A. XR-K-03: open editors follow the restricted images ------------------------------
     await section("images", async () => {
       await runCommand(page, "Show Workflows", /Show Workflows/);
@@ -214,9 +245,32 @@ export default async function workflowStateRefresh({ launchApp, artifactsDir, as
 
       // Settings › Execution: the Python image; back to the still-open editors.
       await openSettingsExecution();
+      await page.evaluate(() => {
+        // Diagnostics: which availability reads the UI makes, and what they answer.
+        const internals = window.__TAURI_INTERNALS__;
+        const original = internals.invoke.bind(internals);
+        window.__xpIpcLog = [];
+        internals.invoke = (cmd, args, options) => {
+          const started = performance.now();
+          const result = original(cmd, args, options);
+          if (/^workflow_(operations|validate|save|get|list)$|^execution_settings_update$/.test(cmd)) {
+            result.then(
+              (value) => {
+                const python = cmd === "workflow_operations" ? value.find((o) => o.id === "research.pythonBatch")?.runner.available : undefined;
+                const runnable = cmd === "workflow_validate" ? value.runnable : cmd === "workflow_get" ? value.validation?.runnable : undefined;
+                window.__xpIpcLog.push({ cmd, at: Math.round(started), ms: Math.round(performance.now() - started), python, runnable });
+              },
+              () => window.__xpIpcLog.push({ cmd, at: Math.round(started), failed: true }),
+            );
+          }
+          return result;
+        };
+      });
       await chooseImage("docker-image", IMAGES.python);
+      const backendImage = (await invoke(page, "execution_settings_get")).settings.docker.image;
       await showEditor(saved.py.id);
       const pyReady = await until("Python editor reviewable", async () => (await editorState()).canReview === "true");
+      note("diag-ipc-after-python-image", true, { backendImage, log: await page.evaluate(() => window.__xpIpcLog) });
       const py = await editorState();
       note("py-reviewable-after-image-without-save", pyReady && py.revision === "1" && /— available\./.test(py.step) && !/no container image/.test(py.step), py);
       const pyStored = await invoke(page, "workflow_get", { id: saved.py.id, revision: null });
@@ -326,6 +380,10 @@ export default async function workflowStateRefresh({ launchApp, artifactsDir, as
 
     // ---- D. XR-K-02: Close Folder during a restricted run, then reopen ----------------------
     await section("close", async () => {
+      // A freshly opened editor (independent of section A's refresh).
+      await tab(`workflow:${saved.py.id}`).locator(".ui-editor-tab__close").click();
+      await tab("workflows:").click();
+      await page.getByTestId(`workflow-open-${saved.py.id}`).click();
       await showEditor(saved.py.id);
       await until("Python editor reviewable", async () => (await editorState()).canReview === "true");
       await visible("workflow-review-run").click();

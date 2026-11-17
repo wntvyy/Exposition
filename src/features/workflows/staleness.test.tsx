@@ -422,6 +422,35 @@ describe("XR-K-03: an open workflow editor follows runner availability", () => {
   });
 });
 
+describe("D1 (verifier): an open workflow and a folder trusted elsewhere", () => {
+  it("becomes reviewable when the folder is trusted from another surface (the Lean panel), without a save", async () => {
+    const untrusted =
+      "The project folder is not trusted. This step runs natively with your account's privileges (not a sandbox); trust the folder first.";
+    const audit: OperationContract = {
+      ...restricted(false, "lean.audit", untrusted),
+      title: "Lean audit",
+      runner: { id: "lean", title: "Lean", containment: "nativeAccount", allows: [], available: false, availability: untrusted },
+    };
+    const def = definition("Formal audit", "lean.audit");
+    const blocked = validation({ runnable: false, runnableReason: `Not runnable now: step “Run the code” (Lean): ${untrusted}` });
+    wfIpc.get.mockResolvedValue(saved("wf-audit", 1, def, 1, blocked));
+    wfIpc.operations.mockResolvedValue([audit]);
+    wfIpc.validate.mockResolvedValue(blocked);
+    render(<WorkflowEditor resource={{ key: "workflow:wf-audit", title: "Formal audit" }} mode="source" active />);
+    await waitFor(() => expect(screen.getByTestId("workflow-step-run").textContent).toContain("The project folder is not trusted"));
+    await waitFor(() => expect(wfIpc.validate).toHaveBeenCalled());
+    expect(screen.getByTestId("workflow-status").getAttribute("data-can-review")).toBe("false");
+
+    // "Trust workspace…" in the Lean panel: the backend announces trust:changed.
+    wfIpc.operations.mockResolvedValue([{ ...audit, runner: { ...audit.runner, available: true, availability: "Available" } }]);
+    wfIpc.validate.mockResolvedValue(validation());
+    act(() => trustHandlers.forEach((h) => h({ root: "/work/a", granted: true })));
+    await waitFor(() => expect(screen.getByTestId("workflow-status").getAttribute("data-can-review")).toBe("true"));
+    await waitFor(() => expect(screen.getByTestId("workflow-step-run").textContent).toContain("— available."));
+    expect(wfIpc.save).not.toHaveBeenCalled();
+  });
+});
+
 // ----- XR-E-02 -----------------------------------------------------------------------------
 
 describe("XR-E-02: an open composite parent and a child saved in another tab", () => {

@@ -671,11 +671,18 @@ export function WorkflowEditor({ resource }: EditorProps) {
       );
     }
     if (loadError.kind === "missing") {
+      // The backend says when it was deleted here; otherwise it was never saved
+      // in this project (its "does not exist" would mislead for another project's).
+      const deleted = /deleted/i.test(loadError.message);
       return (
         <div className="xp-wf" data-testid="workflow-missing">
           <UnavailableState
             title="This workflow is not in the open project"
-            description={`${loadError.message} A deleted workflow can be restored from Settings › Storage & History; a workflow of another project opens when that project is open.`}
+            description={
+              deleted
+                ? `${loadError.message} A deleted workflow can be restored from Settings › Storage & History.`
+                : "It is not saved in this project. A workflow of another project opens when that project is open."
+            }
             actions={recovery}
           />
         </div>

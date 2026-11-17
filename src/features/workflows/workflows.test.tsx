@@ -382,6 +382,16 @@ describe("WorkflowEditor", () => {
     expect(wfIpc.save).not.toHaveBeenCalled();
   });
 
+  it("explains another project's workflow without first claiming it does not exist (verifier D1, minor)", async () => {
+    wfIpc.get.mockRejectedValue({ code: "workflow.unknown", message: "That workflow (revision) does not exist." });
+    render(<WorkflowEditor resource={{ key: "workflow:wf-elsewhere", title: "Formal audit" }} mode="source" active />);
+    const state = await screen.findByTestId("workflow-missing");
+    expect(state.textContent).toMatch(/This workflow is not in the open project/);
+    expect(state.textContent).not.toMatch(/does not exist/);
+    expect(state.textContent).toMatch(/It is not saved in this project\. A workflow of another project opens when that project is open\./);
+    expect(state.textContent).not.toMatch(/Storage & History/);
+  });
+
   it("keeps Retry for a failure that may pass (the id is well formed and the backend failed otherwise)", async () => {
     wfIpc.get.mockRejectedValueOnce({ code: "graph.unavailable", message: "The project graph is unavailable." });
     render(<WorkflowEditor resource={{ key: "workflow:wf-1", title: "Formal audit" }} mode="source" active />);
