@@ -499,6 +499,53 @@ fn gate_run_command() {
     gate_matrix(Kind::Command);
 }
 
+/// XR-F-03: a read-only task refuses execution whatever its execution
+/// setting; the refusal names Read only as the controlling setting when the
+/// execution setting alone would have allowed the launch.
+#[test]
+fn read_only_execution_refusal_names_the_controlling_setting() {
+    let dir = project();
+    let files = LocalProjectFiles::open(dir.path()).unwrap();
+    let documents = DocumentService::new();
+    let store = Store::open_in_memory().unwrap();
+    let services = Recorder::new();
+    let task_id = TaskId::new();
+    let (name, input) = Kind::Python.call();
+    let call = ToolCall::parse(name, &input).unwrap();
+    let refusal = |mode, permission| {
+        let spec = spec(mode, permission, Scope::Whole, ContextConsent::ScopeContent, files.root());
+        let env = ToolEnv {
+            task_id: &task_id,
+            spec: &spec,
+            files: &files,
+            documents: &documents,
+            workspace: None,
+            services: services.as_ref(),
+            store: &store,
+            graph: None,
+            authority: Default::default(),
+        };
+        match exec::gate(&call, &env) {
+            Gate::Refused(out) => {
+                assert_eq!(out.content["code"], json!(exec::codes::EXECUTION_DISABLED));
+                out.text()
+            }
+            other => panic!("{mode:?} {permission:?}: expected a refusal, got {other:?}"),
+        }
+    };
+    for mode in [ExecutionMode::Restricted, ExecutionMode::ApproveEach] {
+        let text = refusal(mode, PermissionProfile::ReadOnly);
+        assert!(text.contains("read-only (Document changes: Read only)"), "{mode:?}: {text}");
+        assert!(text.contains("whatever the Commands and code setting") && text.contains("Nothing was run"), "{text}");
+    }
+    // "No commands" is itself the reason, read-only or not.
+    for permission in [PermissionProfile::ReadOnly, PermissionProfile::ReviewEdits] {
+        let text = refusal(ExecutionMode::Disabled, permission);
+        assert!(text.contains("Process execution is disabled for this task by the user."), "{text}");
+    }
+    assert!(services.take().is_empty(), "nothing ran");
+}
+
 // ---------------------------------------------------------------------------
 // The same matrix through the task loop: what actually happened.
 // ---------------------------------------------------------------------------
