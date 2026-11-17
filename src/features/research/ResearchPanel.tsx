@@ -1,7 +1,7 @@
 // Research panel: environment and session controls, code input, streamed run
 // output (text, figures, inert tables), run history with provenance, and
 // insert/update of figures and tables into documents.
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import {
   FlaskConical,
   FolderOpen,
@@ -51,9 +51,11 @@ import {
   sessionPill,
   stripAnsi,
 } from "./model";
+import { useOpList } from "../operations/useOpList";
 import { SetupArea, SetupButton } from "./EnvironmentSetup";
 import { ExecutionLabel } from "./ExecutionLabel";
 import { PromotionControls, RetainControls } from "./Promotion";
+import { researchRunActions } from "./researchOps";
 import { activeUserRunId, authorizationText, lastUserRun, rerunDescription } from "./runloop";
 import { startSetupTracking } from "./setup";
 import { startSpaceTracking } from "./space";
@@ -774,13 +776,22 @@ export function Provenance({ run }: { run: RunSummary }) {
   );
 }
 
-/** One run in a run list: its code (or `title`), quiet status, time, and outputs. Click or Enter/Space selects. */
+/** Operation attributes and handlers of one run row (`useOpList().itemProps`). */
+export type RunOpProps = ReturnType<ReturnType<typeof useOpList<RunSummary>>["itemProps"]>;
+
+/**
+ * One run in a run list: its code (or `title`), quiet status, time, and
+ * outputs. Click or Enter/Space selects. In a run history (`ops`) the row is
+ * also an operation item: right click / Shift+F10 opens its menu, and Delete
+ * acts on it while it has focus (XR-A-03).
+ */
 export function RunRow({
   run,
   now,
   selected,
   title,
   onSelect,
+  ops,
 }: {
   run: RunSummary;
   now: number;
@@ -788,6 +799,7 @@ export function RunRow({
   /** Replaces the code preview as the row title (e.g. the start time of an attempt). */
   title?: string;
   onSelect: () => void;
+  ops?: RunOpProps;
 }) {
   const pill = runPill(run);
   // Joined so a missing first fact never leaves a dangling separator.
@@ -798,14 +810,22 @@ export function RunRow({
     run.outputs.some((a) => a.kind === "table") ? "table" : null,
   ].filter((f): f is string => f !== null);
   const onKeyDown = (event: KeyboardEvent) => {
+    ops?.onKeyDown(event);
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
+    onSelect();
+  };
+  const onClick = (event: MouseEvent) => {
+    ops?.onClick(event);
+    // Ctrl/Cmd+click adds the run to the operation selection without showing it.
+    if (ops && (event.ctrlKey || event.metaKey)) return;
     onSelect();
   };
   return (
     <li>
       <ListRow
-        className="exp-research__run"
+        {...ops}
+        className={ops ? `exp-research__run ${ops.className}` : "exp-research__run"}
         role="button"
         tabIndex={0}
         selected={selected}
@@ -820,7 +840,7 @@ export function RunRow({
             {facts.length > 0 && <span>{facts.join(" · ")}</span>}
           </>
         }
-        onClick={onSelect}
+        onClick={onClick}
         onKeyDown={onKeyDown}
       />
     </li>
@@ -832,18 +852,37 @@ export function RunHistory() {
   const selected = useResearch((s) => s.selectedRun);
   const visible = useMemo(() => runs.slice(0, 200), [runs]);
   const now = useNow(runs.some(isActiveRun));
+  // Run records and their outputs are deleted (recoverably) and restored here
+  // as in the workflow run lists: menu, Delete key, palette, Undo.
+  const list = useOpList({
+    id: "research-runs",
+    label: "Run actions",
+    items: visible,
+    keyOf: (r) => r.id,
+    actionsFor: researchRunActions,
+  });
   return (
     <div className="exp-research__history">
       <PanelHeader title="Runs" />
       {visible.length === 0 ? (
         <EmptyState fill={false} title="No runs yet" />
       ) : (
-        <ul className="exp-research__runs" aria-label="Run history" data-testid="research-history">
-          {visible.map((run) => (
-            <RunRow key={run.id} run={run} now={now} selected={run.id === selected} onSelect={() => void selectRun(run.id)} />
-          ))}
-        </ul>
+        <div ref={list.ref} className="xp-ops-surface" data-testid="research-runs-surface">
+          <ul className="exp-research__runs" aria-label="Run history" data-testid="research-history">
+            {visible.map((run) => (
+              <RunRow
+                key={run.id}
+                run={run}
+                now={now}
+                selected={run.id === selected}
+                onSelect={() => void selectRun(run.id)}
+                ops={list.itemProps(run.id)}
+              />
+            ))}
+          </ul>
+        </div>
       )}
+      {list.contextMenu}
     </div>
   );
 }
