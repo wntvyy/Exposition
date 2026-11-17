@@ -97,6 +97,8 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
       ariaLabel: `Source of ${handle.name}`,
     });
     editorRef.current = editor;
+    // The previous view of this document (e.g. before its file was renamed).
+    if (handle.viewState) editor.restoreViewState(handle.viewState);
     const disposables: monaco.IDisposable[] = [];
     const { KeyMod, KeyCode } = monaco;
     // Undo/redo go to the shared document history, never Monaco's own stack.
@@ -152,6 +154,7 @@ export function SourceEditor({ documentId, path, active, readOnly, onEditor, cla
       offSelection();
       for (const d of disposables) d.dispose();
       onEditor?.(null, null);
+      handle.viewState = editor.saveViewState();
       editor.dispose();
       editorRef.current = null;
     };

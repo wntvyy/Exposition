@@ -7,6 +7,7 @@ import {
   Beaker,
   FileCode2,
   FileInput,
+  FilePen,
   FilePlus2,
   FileText,
   FlaskConical,
@@ -37,8 +38,10 @@ import {
   TreeItem,
   useContextMenu,
 } from "../../ui/components";
-import { OpContextMenu } from "../operations/OpMenu";
+import { baseName } from "../operations/model";
+import { OpContextMenu, type ExtraItem } from "../operations/OpMenu";
 import { useOpSurface } from "../operations/surfaces";
+import { FileNameDialogHost, openRenameDialog, registerRenameProvider, type RenameTarget } from "../workspace/explorerActions";
 import { useWorkspace } from "../workspace/store";
 import { researchActions, resolveResearchKeys } from "./researchOps";
 import { createSourceFile, importInto, itemKey, parseItemKey, selectItem, useSpace } from "./space";
@@ -121,6 +124,31 @@ export function ResearchExplorer() {
       },
     });
   useOpSurface("research", ref, actions);
+  // Rename (F2, context menu) of one selected research file, through the explorer's shared rename.
+  const renameTargets = (): RenameTarget[] =>
+    items.length === 1
+      ? items.flatMap((i) => (i.kind === "file" ? [{ path: i.path, name: baseName(i.path), kind: "file" as const }] : []))
+      : [];
+  const latestTargets = useRef(renameTargets);
+  latestTargets.current = renameTargets;
+  useEffect(() => registerRenameProvider("research", () => latestTargets.current()), []);
+  const extras = (): ExtraItem[] => {
+    const targets = renameTargets();
+    const one = targets.length === 1 ? targets[0]! : null;
+    return [
+      {
+        id: "rename",
+        label: "Rename…",
+        icon: FilePen,
+        keybinding: "F2",
+        isDisabled: !one,
+        description: one ? undefined : "Select one file",
+        run: () => {
+          if (one) openRenameDialog(one, "research");
+        },
+      },
+    ];
+  };
   // Keys that no longer resolve (deleted files, removed experiments) leave the selection.
   useEffect(() => {
     if (!listing) return;
@@ -268,7 +296,8 @@ export function ResearchExplorer() {
           )}
         </TreeItem>
       </Tree>
-      {menu.position && <OpContextMenu controller={menu} label="Research actions" actions={actions()} testId="research-context-menu" />}
+      {menu.position && <OpContextMenu controller={menu} label="Research actions" actions={actions()} extras={extras()} testId="research-context-menu" />}
+      <FileNameDialogHost surface="research" />
       </div>
       {listing.truncated && <p className="ui-meta exp-research__note">Some files are not listed (too many).</p>}
     </div>

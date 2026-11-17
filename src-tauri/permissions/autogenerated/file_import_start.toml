@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-file-import-start"
+description = "Enables the file_import_start command without any pre-configured scope."
+commands.allow = ["file_import_start"]
+
+[[permission]]
+identifier = "deny-file-import-start"
+description = "Denies the file_import_start command without any pre-configured scope."
+commands.deny = ["file_import_start"]

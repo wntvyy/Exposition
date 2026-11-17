@@ -207,6 +207,12 @@ const COMMANDS: &[&str] = &[
     "lean_allow_local_build",
     "research_selection_get",
     "research_selection_set",
+    // QOL q/files: explorer New File, Rename, and OS drop import (src/files.rs).
+    "file_create",
+    "file_rename_check",
+    "file_rename",
+    "file_import_start",
+    "file_import_cancel",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,
@@ -218,6 +224,8 @@ const DEV_COMMANDS: &[&str] = &[
     "agents_dev_load_script",
     // Fault injection for the promotion pending-reconciliation e2e (src/research.rs).
     "research_dev_fail_next_graph_write",
+    // Fault injection for the rename graph-record e2e (src/files.rs).
+    "files_dev_fail_next_graph_record",
 ];
 
 fn main() {

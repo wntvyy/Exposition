@@ -138,8 +138,18 @@ pub fn stat_file(root: &Path, path: &WorkspacePath) -> Option<FileMeta> {
     {
         return None;
     }
-    let meta = std::fs::symlink_metadata(absolute(root, path)).ok()?;
+    let abs = absolute(root, path);
+    let meta = std::fs::symlink_metadata(&abs).ok()?;
     if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    // On a case-insensitive file system another spelling of the name reaches
+    // the file too (`a.txt` after a rename to `A.txt`): only the name as
+    // stored on disk is the file, or one file would get two resources.
+    if cfg!(windows)
+        && let Ok(real) = std::fs::canonicalize(&abs)
+        && real.file_name().and_then(|n| n.to_str()).is_some_and(|n| n != path.file_name())
+    {
         return None;
     }
     let roles = match classify(path) {

@@ -421,6 +421,37 @@ impl GraphService {
         result
     }
 
+    /// Make a file change and reconcile it as ONE serialized step: `change`
+    /// runs while no reconciliation pass can run (so no pass observes half of
+    /// it, e.g. a renamed file's old path without its new one), then the pass
+    /// it returns (if any) runs before any other. Used for renames: both
+    /// paths in one pass keep the resource's identity (same physical file).
+    pub fn reconcile_after<T>(
+        &self,
+        change: impl FnOnce() -> (T, Option<ReconcileOptions>),
+    ) -> (T, Option<GraphResult<ReconcileReport>>) {
+        let mut state = self.reconcile_state();
+        let (value, options) = change();
+        let Some(options) = options else { return (value, None) };
+        let before = self.freshness();
+        self.set_freshness(GraphFreshness { state: SyncState::Reconciling, ..before.clone() });
+        let generation = self.generation();
+        let result = crate::reconcile::engine::run_locked(self, &mut state, &options);
+        drop(state);
+        if self.generation() == generation {
+            match &result {
+                Ok(_) => self.set_freshness(GraphFreshness {
+                    state: SyncState::Synchronized,
+                    pending: 0,
+                    checkpoint_ms: Some(now_ms()),
+                    overlay: Vec::new(),
+                }),
+                Err(_) => self.set_freshness(GraphFreshness { state: SyncState::Pending, ..before }),
+            }
+        }
+        (value, Some(result))
+    }
+
     /// A new change token (strictly increasing, above every earlier
     /// session's tokens unless the clock went back).
     pub(crate) fn next_change_token(&self) -> u64 {

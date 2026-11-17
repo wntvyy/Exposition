@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-file-import-cancel"
+description = "Enables the file_import_cancel command without any pre-configured scope."
+commands.allow = ["file_import_cancel"]
+
+[[permission]]
+identifier = "deny-file-import-cancel"
+description = "Denies the file_import_cancel command without any pre-configured scope."
+commands.deny = ["file_import_cancel"]

@@ -126,3 +126,21 @@
   display: flex;
   gap: var(--space-1-5);
 }
+
+/* OS drop target (QOL G): the destination folder row, or the whole tree for
+   the project folder, while files are dragged over the Files view. */
+.xp-tree .ui-tree-item[data-drop-target] .ui-tree-item__row {
+  background: var(--color-accent-subtle);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+.xp-tree[data-drop-target] {
+  background: var(--color-accent-subtle);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+/* Uses of a renamed path listed in the rename dialog. */
+.xp-rename-references {
+  margin: 0;
+  padding-left: var(--space-4);
+}

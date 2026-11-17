@@ -4,6 +4,7 @@ pub mod diff;
 pub mod documents;
 pub mod encoding;
 pub mod error;
+pub mod explorer;
 pub mod fsutil;
 pub mod ops;
 pub mod recovery;
