@@ -262,7 +262,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 typed relations among them). Results are bounded and filtered to this task's scope and content \
                 consent. query: search (by kinds and text), entity (one entity with its relations and evidence; for \
                 a statement also the evidence of the formal declarations associated with it), neighborhood \
-                (entities within depth relations), inspect (the entities bound in one file), impact (what must be \
+                (entities within depth relations; rejected suggestions are not followed), inspect (the entities bound in one file), impact (what must be \
                 reviewed if an entity changes, following its relations; for a file's entity, the items located in \
                 that file, whose own dependents are not followed). Evidence is recorded only by Exposition's \
                 services (checks you run record none). Entity ids (ent-…) come from the graph context or earlier \

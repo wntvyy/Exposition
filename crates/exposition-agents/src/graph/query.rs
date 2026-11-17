@@ -362,7 +362,9 @@ fn entity(graph: GraphEnv<'_>, vis: &Visibility<'_>, input: &GraphQueryInput) ->
         .map_err(store_error)?
 }
 
-/// Breadth-first over visible entities only (never through invisible ones).
+/// Breadth-first over visible entities only (never through invisible ones),
+/// and never through a rejected relation: a rejected suggestion connects
+/// nothing (the entity query still lists it, labelled).
 fn neighborhood(
     graph: GraphEnv<'_>,
     vis: &Visibility<'_>,
@@ -393,6 +395,9 @@ fn neighborhood(
                     if work > 20_000 {
                         truncated = true;
                         break 'walk;
+                    }
+                    if r.status == AssertionStatus::Rejected {
+                        continue;
                     }
                     let other = if r.from == current { r.to.clone() } else { r.from.clone() };
                     if seen.contains(&other) {

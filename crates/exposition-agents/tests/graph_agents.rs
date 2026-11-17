@@ -496,6 +496,58 @@ fn query(id: &str, q: &str, text: &str, entity: &str, path: &str, depth: u32) ->
     )
 }
 
+/// A rejected suggestion is not a connection: a neighborhood never walks
+/// through it, while the entity's own record still lists it, labelled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_neighborhood_does_not_walk_through_a_rejected_relation() {
+    let f = fixture();
+    let rejected =
+        f.graph.entity_detail(&f.ids.claim).unwrap().outgoing.iter().find(|r| r.to == f.ids.lemma).unwrap().id.clone();
+    let (_, outcome) = f
+        .graph
+        .propose_and_apply(
+            Origin::User,
+            &ChangeRequest {
+                base_revision: f.graph.status().revision,
+                operations: vec![GraphOperation::SetRelationStatus {
+                    relation: rejected.clone(),
+                    status: AssertionStatus::Rejected,
+                }],
+                summary: None,
+            },
+        )
+        .unwrap();
+    assert!(matches!(outcome, exposition_graph::ApplyOutcome::Applied { .. }), "{outcome:?}");
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let claim = f.ids.claim.as_str();
+    let parse = |text: &str| serde_json::from_str::<Value>(text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let queries = vec![
+        query("near", "neighborhood", "", claim, "", 3),
+        query("lemma-near", "neighborhood", "", f.ids.lemma.as_str(), "", 3),
+        query("entity", "entity", "", claim, "", 1),
+    ];
+    let (id, _) = run(&mut h, req, queries, true).await;
+    let ids_of = |v: &Value| -> Vec<String> {
+        v["entities"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap().to_owned()).collect()
+    };
+    let (_, err, near) = call(&h, &id, "near");
+    let near = parse(&near);
+    assert!(!err);
+    assert_eq!(ids_of(&near), vec![claim.to_owned()], "only the claim: its one relation was rejected: {near}");
+    let (_, _, lemma_near) = call(&h, &id, "lemma-near");
+    let lemma_near = parse(&lemma_near);
+    assert!(!ids_of(&lemma_near).contains(&claim.to_owned()), "{lemma_near}");
+    assert!(
+        ids_of(&lemma_near).contains(&f.ids.theorem.as_str().to_owned()),
+        "accepted relations are walked: {lemma_near}"
+    );
+    let (_, _, entity) = call(&h, &id, "entity");
+    let entity = parse(&entity);
+    let listed = entity["relations"].as_array().unwrap().iter().find(|r| r["id"] == json!(rejected.as_str()));
+    assert_eq!(listed.unwrap()["status"], json!("rejected"), "the record stays, labelled: {entity}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graph_queries_are_scoped_and_consent_filtered() {
     let f = fixture();
