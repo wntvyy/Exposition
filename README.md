@@ -33,12 +33,17 @@ view, command, IPC endpoint, event, setting, external connection, and stored fil
 npm ci                 # install frontend dependencies
 npm run dev            # run the desktop app with hot reload
 npm run check          # all checks: private paths, typecheck, tests, build, fmt, clippy, bindings
+npm run check:plan     # preview the checks the current changes require (runs nothing)
+npm run check:affected # run those checks
+npm run check:full     # full validation: npm run check, the app build, every e2e scenario
 npm run build:app      # debug desktop build with the bundled frontend (target/debug)
 npm run e2e            # end-to-end scenarios against the built desktop app
 npm run build:release  # release build and installer
 ```
 
-`npm run check -- --skip-rust` runs only the frontend checks.
+`npm run check -- --skip-rust` runs only the frontend checks. How checks are
+selected, what each result means, and when full validation is required:
+[docs/testing.md](docs/testing.md).
 
 ### Layout
 
@@ -55,6 +60,7 @@ npm run build:release  # release build and installer
 | `src/ui` | Design tokens and shared components |
 | `src/features/<domain>` | Feature views |
 | `scripts/e2e` | End-to-end harness driving the real desktop app over CDP |
+| `scripts/impact` | Change-impact test selection: manifest, planner, runner |
 
 Contract types are generated: change the Rust type, run `cargo test`, and commit
 the regenerated `src/bindings`. `npm run check:bindings` fails on drift.

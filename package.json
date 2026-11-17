@@ -22,6 +22,9 @@
     "check:bindings": "node scripts/check-bindings.mjs",
     "check:permissions": "node scripts/check-permissions.mjs",
     "check": "node scripts/check.mjs",
+    "check:plan": "node scripts/impact.mjs plan",
+    "check:affected": "node scripts/impact.mjs run",
+    "check:full": "node scripts/impact.mjs run --full",
     "e2e": "node scripts/e2e/run.mjs",
     "tauri": "tauri"
   },
