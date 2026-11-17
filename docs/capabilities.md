@@ -1393,6 +1393,97 @@ legacy-encoded files are not opened as text. **Save a Copy…** writes an
 open document's current text, unsaved edits included, to a new file; it
 never replaces an existing one.
 
+## Editor and explorer
+
+**Find.** Edit: Find (Ctrl+F in the source editor, the palette, or the
+editor's context menu) opens the editor's find bar on the open text, unsaved
+edits included, with match count, next/previous, and case, whole-word, and
+regular-expression options; Escape returns to the text. Finding never changes
+a document. In Page view, Find in Source (Ctrl+F on the page, or the page
+toolbar's search button) opens Split and searches the source: the rendered
+pages themselves are not searched, and there is no project-wide search.
+
+**Outline.** The Outline tab beside Lean and Dependencies lists the active
+document's sections and its theorems, lemmas, definitions, proofs, and Lean
+declarations in source order, nested and collapsible, with the same coverage
+line as Dependencies ("Extraction: Partial …"). It reads the open text, saved
+or not ("Unsaved buffer (revision N)"), with the project graph's own
+extractors, and stores nothing. Selecting an item selects its first line in
+the source (and moves the pages when they can show it); an item that is no
+longer where it was is refused with a notice instead of jumping to another.
+LaTeX `\part` … `\subparagraph`, Typst `=` headings, and Markdown ATX/setext
+headings are listed; Typst `#heading(…)` calls, theorem environments defined
+in other files, and imported material are not. Pages lists the pages of the
+last successful build, with "Showing pages from an earlier revision" after a
+failed one; pages and outline rows are never graph items.
+
+**Images.** Opening a PNG, JPEG, GIF, WebP, BMP, SVG, AVIF, or ICO file
+(at most 32 MB and 64 megapixels) from the explorer shows it read-only, with
+Fit, Actual size, zoom, and panning; TIFF and HEIC show "Can't show this image
+format", and damaged, missing, or too-large files show one short state. SVG is
+shown only as a picture: its scripts never run and it loads nothing. Viewing
+writes nothing and adds nothing to the project graph. A renamed image's open
+tab shows "Image not found"; open it again under its new name.
+
+**Image previews in source.** Markdown `![…](…)` and `<img src>`, LaTeX
+`\includegraphics`, and Typst `image("…")` references show a small preview of
+the project image below the line, with Hide/Show per image and Show/Hide Image
+Previews in Source for the document (remembered per file). Previews need no
+build or toolchain. They use the same rules as project indexing: comments,
+code, verbatim, and paths built by macros or variables are ignored; LaTeX
+references resolve beside the file, at the project folder, and beside main
+files, with the usual extensions. Nothing outside the project and nothing
+remote is loaded; unresolved references show one line. Previews never change
+the text, the undo history, the saved state, builds, or the graph.
+Markdown reference-style images and `\graphicspath` are not previewed.
+
+**File icons.** Files in the explorers and editor tabs show a small icon for
+their type (TeX, Typst, Markdown, text, BibTeX, Lean, Python, R, Julia,
+notebooks, data and tables, PDF, images, archives; a generic icon otherwise).
+The name stays the label.
+
+**New File and Rename.** New File (Files toolbar, context menu, palette,
+Ctrl+N) creates an empty file in the selected folder (or the selected file's
+folder; else the project folder). The dialog suggests `Untitled.txt` with
+"Untitled" selected; the typed name is used exactly, with any extension, a
+leading dot, or none. Names are checked by the application (no separators,
+`< > : " | ? *` or control characters, no trailing space or period, no Windows
+device names such as CON or COM1, at most 255 characters); an existing name,
+in any letter case, is refused and nothing is replaced. The new file opens
+with focus in the editor. Rename (F2 on a focused Files or Research explorer
+item, context menu, palette; F2 in the editor stays the editor's) never
+replaces anything; a change of letter case alone is allowed. An open file
+keeps its unsaved text, undo history, crash recovery, and tab; its language
+follows the new extension. The project graph keeps the file's identity,
+relationships, and bindings. Uses of the old name (manuscript includes,
+workflow inputs, retained evidence, the main document and build targets,
+triggers) are listed and not changed; run and evidence history keep the path
+they recorded. There is no New Folder and no drag-move within the tree.
+
+**Dropping files.** Files dragged from Windows Explorer onto the Files tree
+are copied into the highlighted folder (a folder row, a file's folder, or the
+project folder for the tree's empty space). Originals are never changed; an
+existing name gets a fresh one (`notes (2).md`); links, junctions, and
+Exposition's own data are refused; each copy is a new project file the graph
+indexes. Larger drops show progress with Cancel (between batches of four);
+the result lists what was imported, skipped, and failed, and Retry offers only
+what may succeed now and never copies an item twice. An import belongs to the
+project it was dropped on: after another project is opened, the rest is
+skipped.
+
+**Switching projects.** Open Folder…, Open Recent, and New Project… (the
+project menu on the page bar, the palette, Ctrl+O) stay available while a
+project is open and switch in the same window. The destination is chosen
+first; cancelling there changes nothing. Unsaved documents and workflow
+drafts, running workflow runs, and running research code are settled in one
+decision (Cancel · Don't Save · Save All, or Stop and Open when only work is
+running). If a save fails, nothing switches and the notice says what was
+saved. A destination that cannot be opened or created changes nothing:
+the project, its buffers, and their recovery stay. Runs, kernels, and trust
+stay with their project (runs are canceled and kernels stopped, as Close
+Folder does). Pending agent approvals are not part of the decision; agent
+tasks remain bound to their folder.
+
 ## Deleting, copying, and restoring
 
 Files and folders (in the Files tree and the Research explorer), workflows,
