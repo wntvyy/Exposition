@@ -19,6 +19,8 @@ import { readStored, writeStored } from "../../ui/storage";
 import { disposeAllHandles, fileKey } from "../editor/documentClient";
 import { onProjectOp, opHistory, touchedPaths } from "../operations/client";
 import { loadAppSettings, useAppSettings } from "../editor/settings";
+import { switchDeps } from "./projectSwitch";
+import { notSavedMessage, switchProject } from "./switch";
 import { reportSettingsWarning } from "../settings/warnings";
 
 /** Key of the root directory in `dirs`. */
@@ -144,19 +146,71 @@ function applyInfo(info: WorkspaceInfo) {
   }
 }
 
-/** Open a folder by absolute path. */
+/** Whether two absolute folder paths name the same folder by spelling (case-insensitive on Windows). */
+export function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => {
+    const slashes = p.replace(/\\/g, "/").replace(/\/+$/, "");
+    return /^[a-z]:\//i.test(slashes) ? slashes.toLowerCase() : slashes;
+  };
+  return norm(a) === norm(b);
+}
+
+const folderName = (path: string) => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+
+/** Make the store follow the folder the backend has open (after it opened one). */
+export async function adoptOpenedWorkspace(): Promise<void> {
+  const info = await commands.workspaceCurrent().catch(() => null);
+  if (info && useWorkspace.getState().info?.root !== info.root) applyInfo(info);
+  else useWorkspace.setState({ opening: false });
+}
+
+/**
+ * Open a folder by absolute path. With another project open this is a
+ * project switch (switch.ts): one decision about unsaved and running work,
+ * then the backend opens the folder — and only then closes the current one.
+ * A refused folder leaves the current project, its buffers, and its recovery
+ * information as they were.
+ */
 export async function openWorkspace(path: string): Promise<boolean> {
   const current = useWorkspace.getState().info;
-  if (current && current.root !== path && !(await closeFileEditors())) return false;
-  useWorkspace.setState({ opening: true, error: null });
-  try {
-    applyInfo(await commands.workspaceOpen(path));
-    return true;
-  } catch (error) {
-    const message = errorMessage(error);
-    useWorkspace.setState({ opening: false, error: message });
-    notify({ tone: "danger", title: "Could not open folder", body: message });
-    return false;
+  const switching = current !== null && !samePath(current.root, path);
+  const result = await switchProject(
+    {
+      action: "open",
+      name: folderName(path),
+      commit: async (discard) => {
+        useWorkspace.setState({ opening: true, error: null });
+        return commands.workspaceOpen(path, discard);
+      },
+    },
+    switchDeps(() => (switching ? (current?.name ?? null) : null)),
+  );
+  switch (result.status) {
+    case "switched":
+      applyInfo(result.value);
+      return true;
+    case "canceled":
+      return false;
+    case "notSaved":
+      notify({
+        id: "project-switch",
+        tone: "warning",
+        title: `Did not open ${folderName(path)}`,
+        body: notSavedMessage(result, current?.name ?? ""),
+        timeoutMs: null,
+      });
+      return false;
+    case "failed": {
+      const message = errorMessage(result.error);
+      useWorkspace.setState({ opening: false, error: current ? null : message });
+      notify({
+        id: "project-switch",
+        tone: "danger",
+        title: "Could not open folder",
+        body: current && switching ? `${message} ${current.name} is still open; nothing was closed or discarded.` : message,
+      });
+      return false;
+    }
   }
 }
 

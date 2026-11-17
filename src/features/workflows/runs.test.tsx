@@ -29,7 +29,7 @@ const events = vi.hoisted(() => ({
   }),
 }));
 const libIpc = vi.hoisted(() => ({ researchArtifact: vi.fn() }));
-const editorsMock = vi.hoisted(() => ({ open: vi.fn(), setTitle: vi.fn(), setDirty: vi.fn(), registerCloseGuard: vi.fn(() => () => {}) }));
+const editorsMock = vi.hoisted(() => ({ open: vi.fn(), setTitle: vi.fn(), setDirty: vi.fn(), registerCloseGuard: vi.fn(() => () => {}), registerSaver: vi.fn(() => () => {}) }));
 const research = vi.hoisted(() => ({ approvePromotion: vi.fn(), cancelPromotion: vi.fn() }));
 
 vi.mock("./ipc", () => ({ workflowCommands: {}, workflowRunCommands: runIpc, workflowEvents: events }));

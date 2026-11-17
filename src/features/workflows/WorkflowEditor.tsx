@@ -650,6 +650,8 @@ export function WorkflowEditor({ resource }: EditorProps) {
       }),
     [resource.key, saved?.definition.title],
   );
+  // Save All (a project switch) saves the draft as a new revision, as Save does.
+  useEffect(() => editors.registerSaver(resource.key, () => saveRef.current()), [resource.key]);
 
   const diagnostics = validation?.diagnostics ?? [];
   const candidates = useMemo(

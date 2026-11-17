@@ -55,6 +55,9 @@ export interface OpenEditorOptions {
 /** Resolves true when the editor may close (e.g. after a save/discard prompt). */
 export type CloseGuard = () => Promise<boolean>;
 
+/** Saves an editor's unsaved changes without asking; resolves true when they were saved. */
+export type EditorSaver = () => Promise<boolean>;
+
 const emptyGroup = (id: EditorGroupId): EditorGroup => ({ id, editors: [], activeKey: null });
 
 export const useEditors = create<EditorsState>(() => ({
@@ -64,6 +67,7 @@ export const useEditors = create<EditorsState>(() => ({
 }));
 
 const guards = new Map<string, CloseGuard>();
+const savers = new Map<string, EditorSaver>();
 
 function withValidActiveKey(group: EditorGroup): EditorGroup {
   if (group.activeKey !== null && group.editors.some((e) => e.resource.key === group.activeKey)) return group;
@@ -162,11 +166,16 @@ export const editors = {
     if (options.reveal !== false) pages.show(EDITOR_PAGE);
   },
 
-  /** Close a resource in every group, honoring its close guard. Resolves false if vetoed. */
-  async close(key: string): Promise<boolean> {
+  /**
+   * Close a resource in every group, honoring its close guard. Resolves false
+   * if vetoed. `discard` skips the guard: the caller already settled the
+   * editor's unsaved changes (e.g. the user chose Don't Save for a project switch).
+   */
+  async close(key: string, options: { discard?: boolean } = {}): Promise<boolean> {
     const guard = guards.get(key);
-    if (guard && !(await guard())) return false;
+    if (!options.discard && guard && !(await guard())) return false;
     guards.delete(key);
+    savers.delete(key);
     // Both groups in one change: closing the left group's last editor moves the
     // right group into its place.
     change((state) => ({
@@ -241,6 +250,23 @@ export const editors = {
     return () => {
       if (guards.get(key) === guard) guards.delete(key);
     };
+  },
+
+  /**
+   * Register how an editor that is not a workspace document (e.g. a workflow
+   * draft) saves its unsaved changes, for Save All in a project switch.
+   */
+  registerSaver(key: string, saver: EditorSaver): () => void {
+    savers.set(key, saver);
+    return () => {
+      if (savers.get(key) === saver) savers.delete(key);
+    };
+  },
+
+  /** Save an editor through its registered saver. Resolves false without one or when saving failed. */
+  async save(key: string): Promise<boolean> {
+    const saver = savers.get(key);
+    return saver ? saver() : false;
   },
 
   /** The active editor of the active group. */

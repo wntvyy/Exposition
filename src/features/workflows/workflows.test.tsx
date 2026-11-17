@@ -29,7 +29,7 @@ const editorsMock = vi.hoisted(() => ({
   close: vi.fn(),
   setDirty: vi.fn(),
   setTitle: vi.fn(),
-  registerCloseGuard: vi.fn(() => () => {}),
+  registerCloseGuard: vi.fn(() => () => {}), registerSaver: vi.fn(() => () => {}),
   active: vi.fn(() => ({ resource: { key: "file:Proofs/Main.lean", path: "Proofs/Main.lean" } })),
 }));
 const notifications = vi.hoisted(() => ({ notify: vi.fn(), dismiss: vi.fn() }));

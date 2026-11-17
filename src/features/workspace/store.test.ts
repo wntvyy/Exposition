@@ -20,6 +20,17 @@ const ipc = vi.hoisted(() => ({
   workspaceHandlers: [] as Array<(event: WorkspaceEvent) => void>,
 }));
 const notifications = vi.hoisted(() => ({ notify: vi.fn(), dismiss: vi.fn() }));
+const switching = vi.hoisted(() => ({
+  dirtyWork: vi.fn(async (): Promise<unknown[]> => []),
+  activeWork: vi.fn(async (): Promise<unknown[]> => []),
+  decide: vi.fn(async (): Promise<string> => "cancel"),
+  saveDocuments: vi.fn(async () => true),
+  saveEditor: vi.fn(async () => true),
+  discardEditors: vi.fn(async () => {}),
+}));
+vi.mock("./projectSwitch", () => ({
+  switchDeps: (currentName: () => string | null) => ({ currentName, ...switching }),
+}));
 
 vi.mock("../../lib/ipc", () => ({
   commands: ipc.commands,
@@ -38,7 +49,7 @@ vi.mock("../editor/documentClient", () => ({ disposeAllHandles: vi.fn(), fileKey
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setTitle: async () => {} }) }));
 
-const { forgetRecent, reopenLastProject, startWorkspaceEvents, useWorkspace } = await import("./store");
+const { forgetRecent, openWorkspace, reopenLastProject, samePath, startWorkspaceEvents, useWorkspace } = await import("./store");
 const { resetAppSettingsForTests } = await import("../editor/settings");
 const { resetSettingsWarnings } = await import("../settings/warnings");
 
@@ -123,5 +134,73 @@ describe("workspace events", () => {
     const warnings = notifications.notify.mock.calls.filter(([n]) => n.id === "settings-warning-project");
     expect(warnings).toHaveLength(1);
     expect(warnings[0]![0]).toMatchObject({ tone: "warning", body: message });
+  });
+});
+
+describe("opening another folder while one is open (project switch)", () => {
+  const beta = { root: "C:\\papers\\beta", name: "beta", recovery: [] };
+  const unsaved = [{ key: "file:main.tex", name: "main.tex", document: "doc-1" }];
+
+  beforeEach(() => {
+    useWorkspace.setState({ info });
+    switching.dirtyWork.mockReset().mockResolvedValue([]);
+    switching.decide.mockReset().mockResolvedValue("cancel");
+  });
+
+  it("compares folder spellings like Windows does", () => {
+    expect(samePath("C:\\Papers\\Thesis\\", "c:/papers/thesis")).toBe(true);
+    expect(samePath("C:\\papers\\thesis", "C:\\papers\\thesis2")).toBe(false);
+  });
+
+  it("reopening the open folder asks nothing", async () => {
+    switching.dirtyWork.mockResolvedValue(unsaved);
+    ipc.commands.workspaceOpen.mockResolvedValue(info);
+    expect(await openWorkspace("c:\\papers\\THESIS")).toBe(true);
+    expect(switching.decide).not.toHaveBeenCalled();
+  });
+
+  it("Cancel keeps the project and opens nothing", async () => {
+    switching.dirtyWork.mockResolvedValue(unsaved);
+    expect(await openWorkspace(beta.root)).toBe(false);
+    expect(switching.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "open", from: "thesis", to: "beta" }));
+    expect(ipc.commands.workspaceOpen).not.toHaveBeenCalled();
+    expect(useWorkspace.getState().info?.root).toBe(info.root);
+  });
+
+  it("Don't Save sends the documents with the open request; the new folder becomes current", async () => {
+    switching.dirtyWork.mockResolvedValue(unsaved);
+    switching.decide.mockResolvedValue("discard");
+    ipc.commands.workspaceOpen.mockResolvedValue(beta);
+    expect(await openWorkspace(beta.root)).toBe(true);
+    expect(ipc.commands.workspaceOpen).toHaveBeenCalledWith(beta.root, ["doc-1"]);
+    expect(useWorkspace.getState().info?.root).toBe(beta.root);
+  });
+
+  it("a folder that cannot be opened leaves the open project and says so", async () => {
+    switching.dirtyWork.mockResolvedValue(unsaved);
+    switching.decide.mockResolvedValue("discard");
+    ipc.commands.workspaceOpen.mockRejectedValue({ code: "workspace.notFound", message: "C:\\gone does not exist." });
+    expect(await openWorkspace("C:\\gone")).toBe(false);
+    expect(useWorkspace.getState().info?.root).toBe(info.root);
+    expect(useWorkspace.getState().opening).toBe(false);
+    expect(useWorkspace.getState().error).toBeNull();
+    expect(notifications.notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tone: "danger",
+        title: "Could not open folder",
+        body: "C:\\gone does not exist. thesis is still open; nothing was closed or discarded.",
+      }),
+    );
+  });
+
+  it("a failed Save All opens nothing and reports the actual state", async () => {
+    switching.dirtyWork.mockResolvedValueOnce(unsaved).mockResolvedValue(unsaved);
+    switching.decide.mockResolvedValue("save");
+    switching.saveDocuments.mockResolvedValue(false);
+    expect(await openWorkspace(beta.root)).toBe(false);
+    expect(ipc.commands.workspaceOpen).not.toHaveBeenCalled();
+    expect(notifications.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ tone: "warning", title: "Did not open beta", body: "Not saved: main.tex. thesis is still open." }),
+    );
   });
 });

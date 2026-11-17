@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use exposition_core::build::{DocumentFormat, Engine};
+use exposition_core::document::DocumentId;
 use exposition_core::path::WorkspacePath;
 use exposition_graph::blueprint::materialize::{
     CreationAction, CreationStatus, Creator, GraphApplied, Provenance, precheck,
@@ -123,6 +124,12 @@ pub struct CreateProjectRequest {
     pub blueprint: String,
     /// The user acknowledged creating the project inside a trusted folder.
     pub accept_trusted_location: bool,
+    /// Documents of the open project whose unsaved changes the user chose to
+    /// discard. They are discarded only when the new project opens; a failed
+    /// creation leaves them (and their recovery journals) as they are.
+    #[serde(default)]
+    #[ts(optional)]
+    pub discard: Option<Vec<DocumentId>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -625,7 +632,7 @@ pub async fn project_create(
     .await?;
 
     // Open it like File ▸ Open Folder (registers execution, attaches the graph).
-    if let Err(e) = crate::workspace::workspace_open(state.clone(), display.clone()).await {
+    if let Err(e) = crate::workspace::workspace_open(state.clone(), display.clone(), request.discard.clone()).await {
         Creator { graph: &graph, data_dir: &data_dir }.stopped(
             &root,
             &op,

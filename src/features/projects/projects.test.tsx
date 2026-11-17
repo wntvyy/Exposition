@@ -26,7 +26,16 @@ const notifications = vi.hoisted(() => ({ notify: vi.fn(), dismiss: vi.fn() }));
 const editorsMock = vi.hoisted(() => ({ open: vi.fn(), close: vi.fn(async () => true), all: vi.fn(() => []), setDirty: vi.fn() }));
 const pagesMock = vi.hoisted(() => ({ show: vi.fn(() => false), active: vi.fn(() => "editor") }));
 const layoutMock = vi.hoisted(() => ({ showView: vi.fn() }));
-const workspace = vi.hoisted(() => ({ openWorkspace: vi.fn(async () => true), loadDir: vi.fn() }));
+const workspace = vi.hoisted(() => ({ adoptOpenedWorkspace: vi.fn(async () => {}), loadDir: vi.fn() }));
+// The open project's unsaved/running work and the switch decision (workspace/projectSwitch.tsx).
+const switching = vi.hoisted(() => ({
+  dirtyWork: vi.fn(async (): Promise<unknown[]> => []),
+  activeWork: vi.fn(async (): Promise<unknown[]> => []),
+  decide: vi.fn(async (): Promise<string> => "cancel"),
+  saveDocuments: vi.fn(async () => true),
+  saveEditor: vi.fn(async () => true),
+  discardEditors: vi.fn(async () => {}),
+}));
 
 vi.mock("./ipc", () => ({ projectCommands: projectIpc }));
 vi.mock("../agents/generation", () => generation);
@@ -40,13 +49,16 @@ vi.mock("../../app/pages", () => ({ EDITOR_PAGE: "editor", pages: pagesMock }));
 vi.mock("../../app/layout", () => ({ layout: layoutMock }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("../editor/documentClient", () => ({ fileKey: (p: string) => `file:${p}` }));
+vi.mock("../workspace/projectSwitch", () => ({
+  switchDeps: (currentName: () => string | null) => ({ currentName, ...switching }),
+}));
 vi.mock("../workspace/store", async () => {
   const { create } = await import("zustand");
   return {
     FILES_VIEW_ID: "workspace.files",
     ROOT: "",
     loadDir: workspace.loadDir,
-    openWorkspace: workspace.openWorkspace,
+    adoptOpenedWorkspace: workspace.adoptOpenedWorkspace,
     useWorkspace: create(() => ({
       info: { root: "C:\\work\\spectral-gaps", name: "spectral-gaps", recovery: [] },
       recent: [{ path: "C:\\work\\older", name: "older", openedAt: 0 }],
@@ -126,6 +138,9 @@ const created: ProjectCreated = {
 beforeEach(() => {
   vi.clearAllMocks();
   store.resetProjectsForTests();
+  switching.dirtyWork.mockResolvedValue([]);
+  switching.activeWork.mockResolvedValue([]);
+  switching.decide.mockResolvedValue("cancel");
   projectIpc.presets.mockResolvedValue(catalog);
   projectIpc.capabilities.mockResolvedValue(report);
   projectIpc.presetBlueprint.mockResolvedValue(blueprint);
@@ -201,7 +216,9 @@ describe("preset path", () => {
       blueprint: JSON.stringify(blueprint),
       acceptTrustedLocation: false,
     });
-    expect(workspace.openWorkspace).toHaveBeenCalledWith(created.root);
+    expect(workspace.adoptOpenedWorkspace).toHaveBeenCalled();
+    // Nothing was unsaved or running: no decision was asked.
+    expect(switching.decide).not.toHaveBeenCalled();
     expect(editorsMock.open).toHaveBeenCalledWith({ key: "file:main.typ", path: "main.typ", title: "main.typ" });
     expect(pagesMock.show).toHaveBeenCalledWith("editor");
     expect(notifications.notify).toHaveBeenCalledWith(expect.objectContaining({ tone: "success", body: expect.stringContaining("Nothing was trusted or run") }));
@@ -220,6 +237,61 @@ describe("preset path", () => {
     expect(await store.createFromPreset()).toBeNull();
     expect(useStoreError()).toMatch(/users folder/);
     expect(editorsMock.close).not.toHaveBeenCalledWith("new-project:");
+  });
+
+  describe("while a project is open (project switch)", () => {
+    const unsaved = [{ key: "file:notes.md", name: "notes.md", document: "doc-1" }];
+
+    it("asks once; Cancel creates nothing and keeps the New Project page", async () => {
+      switching.dirtyWork.mockResolvedValue(unsaved);
+      await store.loadCatalog();
+      expect(await store.createFromPreset()).toBeNull();
+      expect(switching.decide).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "create", from: "spectral-gaps", to: "Spectral gaps", dirty: unsaved }),
+      );
+      expect(projectIpc.create).not.toHaveBeenCalled();
+      expect(editorsMock.close).not.toHaveBeenCalled();
+      expect(store.useProjects.getState().creating).toBe(false);
+    });
+
+    it("Don't Save hands the documents to Rust, which discards them only when the new project opens", async () => {
+      switching.dirtyWork.mockResolvedValue(unsaved);
+      switching.decide.mockResolvedValue("discard");
+      await store.loadCatalog();
+      expect(await store.createFromPreset()).toEqual(created);
+      expect(projectIpc.create).toHaveBeenCalledWith(expect.objectContaining({ discard: ["doc-1"] }));
+      expect(switching.saveDocuments).not.toHaveBeenCalled();
+    });
+
+    it("a refused creation keeps the open project and says so", async () => {
+      switching.dirtyWork.mockResolvedValue(unsaved);
+      switching.decide.mockResolvedValue("discard");
+      projectIpc.create.mockRejectedValue({ code: "project.destination", message: "The folder is not empty." });
+      await store.loadCatalog();
+      expect(await store.createFromPreset()).toBeNull();
+      expect(workspace.adoptOpenedWorkspace).not.toHaveBeenCalled();
+      expect(editorsMock.close).not.toHaveBeenCalled();
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ tone: "danger", body: expect.stringContaining("spectral-gaps is still open; nothing was closed or discarded") }),
+      );
+    });
+
+    it("a failed Save All creates nothing and reports what was and was not saved", async () => {
+      const both = [...unsaved, { key: "file:main.typ", name: "main.typ", document: "doc-2" }];
+      switching.dirtyWork.mockResolvedValueOnce(both).mockResolvedValueOnce([both[1]]);
+      switching.decide.mockResolvedValue("save");
+      switching.saveDocuments.mockResolvedValue(false);
+      await store.loadCatalog();
+      expect(await store.createFromPreset()).toBeNull();
+      expect(projectIpc.create).not.toHaveBeenCalled();
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tone: "warning",
+          title: "Did not create Spectral gaps",
+          body: "Saved: notes.md. Not saved: main.typ. spectral-gaps is still open.",
+        }),
+      );
+    });
   });
 
   it("derives the default location from the most recent project's folder and follows the title", async () => {
@@ -272,7 +344,7 @@ describe("objective path", () => {
     expect(projectIpc.create.mock.invocationCallOrder[0]!).toBeLessThan(
       generation.startProjectGeneration.mock.invocationCallOrder[0]!,
     );
-    expect(workspace.openWorkspace.mock.invocationCallOrder[0]!).toBeLessThan(
+    expect(workspace.adoptOpenedWorkspace.mock.invocationCallOrder[0]!).toBeLessThan(
       generation.startProjectGeneration.mock.invocationCallOrder[0]!,
     );
   });

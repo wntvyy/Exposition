@@ -405,16 +405,43 @@ impl WorkspaceService {
     /// unchanged; opening another closes the current one first (journals of
     /// its unsaved buffers are kept for recovery).
     pub fn open_workspace(&self, path: &Path) -> WorkspaceResult<WorkspaceInfo> {
+        self.switch_workspace(path, &[])
+    }
+
+    /// Check that `path` can be opened as the workspace, without opening it
+    /// or touching the open one. Returns the folder's display path (the same
+    /// spelling `WorkspaceInfo::root` would have).
+    pub fn check_workspace(&self, path: &Path) -> WorkspaceResult<String> {
+        Ok(WorkspaceRoot::open_excluding(path, &self.data_dir)?.display_path())
+    }
+
+    /// Open a folder in place of the open one, discarding the unsaved changes
+    /// (and recovery journals) of the `discard` documents — but only once the
+    /// destination is known to be openable and its recovery data is prepared.
+    /// A refused destination changes nothing: the open folder, its buffers,
+    /// and their recovery journals stay as they were. Other unsaved buffers
+    /// of the closed folder keep their journals for recovery. Opening the
+    /// folder that is already open discards nothing.
+    pub fn switch_workspace(&self, path: &Path, discard: &[DocumentId]) -> WorkspaceResult<WorkspaceInfo> {
         // The application's own data (recovery journals, settings, trust) is
         // never a project: its files would become editable documents.
         let root = WorkspaceRoot::open_excluding(path, &self.data_dir)?;
         let already_open = lock(&self.state).open.as_ref().is_some_and(|o| o.root.path() == root.path());
         if !already_open {
-            self.close_workspace();
+            // Prepared before anything of the open folder is closed, so a
+            // failure here leaves it open.
             let recovery = RecoveryStore::new(&self.data_dir, &workspace_key(&root.display_path()));
             recovery.promote_live().map_err(|e| {
                 WorkspaceError::new("recovery.io", format!("Recovery data could not be prepared: {e}."))
             })?;
+            for id in discard {
+                // Only documents of the folder being closed (by their file);
+                // an id that is already closed is no longer there to discard.
+                if self.documents.info(id).is_ok_and(|info| info.path.is_some()) {
+                    let _ = self.close_document(id);
+                }
+            }
+            self.close_workspace();
             let mut state = lock(&self.state);
             state.generation += 1;
             let generation = state.generation;
