@@ -67,6 +67,21 @@ const CITE_COMMANDS: &[&str] = &[
 const INPUT_COMMANDS: &[&str] = &["input", "include", "subfile"];
 const IMPORT_COMMANDS: &[&str] = &["import", "subimport"];
 const HEADING_COMMANDS: &[&str] = &["part", "chapter", "section", "subsection", "subsubsection"];
+/// Headings listed in outlines that are not used as declaration context.
+const OUTLINE_ONLY_HEADINGS: &[&str] = &["paragraph", "subparagraph"];
+
+/// Outline level of a sectioning command (`\part` 1 … `\subparagraph` 7).
+fn heading_level(name: &str) -> u8 {
+    match name {
+        "part" => 1,
+        "chapter" => 2,
+        "section" => 3,
+        "subsection" => 4,
+        "subsubsection" => 5,
+        "paragraph" => 6,
+        _ => 7,
+    }
+}
 const GRAPHICS_EXTENSIONS: &[&str] = &["pdf", "png", "jpg", "jpeg", "eps", "svg"];
 /// Commands whose use inside a macro body hides a tracked construct.
 const TRACKED_COMMANDS: &[&str] = &[
@@ -380,7 +395,8 @@ impl<'a> Latex<'a> {
             n if IMPORT_COMMANDS.contains(&n) => self.import(at, ne),
             "includegraphics" => self.graphics(at, ne),
             "bibliography" | "addbibresource" => self.bibliography(name, at, ne),
-            n if HEADING_COMMANDS.contains(&n) => self.heading(ne),
+            n if HEADING_COMMANDS.contains(&n) => self.heading(n, at, ne),
+            n if OUTLINE_ONLY_HEADINGS.contains(&n) => self.outline_heading(n, at, ne),
             "newtheorem" => self.newtheorem(ne),
             "declaretheorem" => self.declaretheorem(ne),
             "newcommand" | "renewcommand" | "providecommand" | "DeclareRobustCommand" => self.newcommand(ne, false),
@@ -767,16 +783,33 @@ impl<'a> Latex<'a> {
         }
     }
 
-    fn heading(&mut self, ne: usize) -> usize {
+    fn heading(&mut self, name: &str, at: usize, ne: usize) -> usize {
         let mut i = self.skip_star(ne);
         if let Some((_, end)) = bracket_group(self.b(), i, TITLE_LIMIT, &mut self.budget) {
             i = end;
         }
-        if let Some((inner, _)) = brace_group(self.b(), i, TITLE_LIMIT, &mut self.budget) {
+        if let Some((inner, end)) = brace_group(self.b(), i, TITLE_LIMIT, &mut self.budget) {
             let title = normalize(&self.m[inner], 200);
+            self.out.heading(heading_level(name), &format!("latex.heading:{name}"), &title, at..end);
             self.section = (!title.is_empty()).then_some(title);
+        } else {
+            self.out.heading_partial(format!("a \\{name} without a readable title is not listed"));
         }
         // The title itself is scanned too (it may contain labels or references).
+        ne
+    }
+
+    /// `\paragraph`/`\subparagraph`: listed in outlines; they never become
+    /// the declarations' section context (unchanged graph behavior).
+    fn outline_heading(&mut self, name: &str, at: usize, ne: usize) -> usize {
+        let mut i = self.skip_star(ne);
+        if let Some((_, end)) = bracket_group(self.b(), i, TITLE_LIMIT, &mut self.budget) {
+            i = end;
+        }
+        if let Some((inner, end)) = brace_group(self.b(), i, TITLE_LIMIT, &mut self.budget) {
+            let title = normalize(&self.m[inner], 200);
+            self.out.heading(heading_level(name), &format!("latex.heading:{name}"), &title, at..end);
+        }
         ne
     }
 
@@ -1063,8 +1096,8 @@ pub(in crate::reconcile::extract) mod common {
 
     use crate::reconcile::extract::markers::{self, MarkerFormat};
     use crate::reconcile::extract::{
-        Declaration, Extraction, Link, LinkFrom, LinkTarget, MAX_DECLARATIONS, MAX_LABELS, MAX_LINKS, Utf16Index,
-        context_fingerprint, fingerprint, valid_name,
+        Declaration, Extraction, Heading, Link, LinkFrom, LinkTarget, MAX_DECLARATIONS, MAX_HEADINGS, MAX_LABELS,
+        MAX_LINKS, Utf16Index, context_fingerprint, fingerprint, valid_name,
     };
     use crate::vocabulary::{EntityKind, RelationKind};
 
@@ -1101,6 +1134,7 @@ pub(in crate::reconcile::extract) mod common {
         dropped_declarations: usize,
         dropped_links: usize,
         dropped_labels: usize,
+        dropped_headings: usize,
         invalid_names: bool,
     }
 
@@ -1115,7 +1149,27 @@ pub(in crate::reconcile::extract) mod common {
                 dropped_declarations: 0,
                 dropped_links: 0,
                 dropped_labels: 0,
+                dropped_headings: 0,
                 invalid_names: false,
+            }
+        }
+
+        /// Record a heading (navigation only; see [`Extraction::headings`]).
+        /// `bytes` is the heading's own syntax.
+        pub fn heading(&mut self, level: u8, syntax: &str, title: &str, bytes: Range<usize>) {
+            if self.out.headings.len() >= MAX_HEADINGS {
+                self.dropped_headings += 1;
+                return;
+            }
+            let range = self.range(bytes);
+            self.out.headings.push(Heading { level, syntax: syntax.to_owned(), title: title.to_owned(), range });
+        }
+
+        /// A heading form that is seen but not listed (outline coverage only).
+        pub fn heading_partial(&mut self, reason: impl Into<String>) {
+            let reason = reason.into();
+            if self.out.heading_partial.len() < MAX_REASONS && !self.out.heading_partial.contains(&reason) {
+                self.out.heading_partial.push(reason);
             }
         }
 
@@ -1266,6 +1320,12 @@ pub(in crate::reconcile::extract) mod common {
             }
             if self.dropped_labels > 0 {
                 self.partial(format!("labels beyond the first {MAX_LABELS} were not indexed"));
+            }
+            if self.dropped_headings > 0 {
+                self.heading_partial(format!(
+                    "{} headings beyond the first {MAX_HEADINGS} are not listed",
+                    self.dropped_headings
+                ));
             }
             self.out
         }

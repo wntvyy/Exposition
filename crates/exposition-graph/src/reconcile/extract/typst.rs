@@ -480,6 +480,11 @@ impl<'t> Typst<'t> {
             match self.b().get(e) {
                 Some(b'(' | b'[') => {
                     let name = &self.t[s..e];
+                    if name == "heading" && s == start + 1 {
+                        // `#heading(level: 2)[Title]` in markup: a heading
+                        // the outline does not list (only `=` headings are).
+                        self.out.heading_partial("headings written as #heading(…) calls are not listed");
+                    }
                     return self.open_call(name, start, e, true);
                 }
                 Some(b'.') => match ident_end(self.t, e + 1) {
@@ -872,6 +877,8 @@ impl<'t> Typst<'t> {
             title = title[..lt].trim_end();
         }
         let title = normalize(title, 200);
+        let level = u8::try_from(j - i).unwrap_or(u8::MAX);
+        self.out.heading(level, "typst.heading", &title, i..trim_end_pos(self.t, le));
         self.heading = (!title.is_empty()).then_some(title);
         j
     }
