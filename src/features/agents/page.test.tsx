@@ -424,6 +424,32 @@ describe("kept workflow drafts", () => {
     expect(groups[activeGroup].editors.map((e) => e.resource.key)).toContain("workflow:wf-42");
     expect(usePages.getState().active).toBe(EDITOR_PAGE);
   });
+
+  // XR-F-01: a task saved a workflow (workflow_propose) and completed while
+  // the Agents page stayed visible; the kept list said "Nothing kept yet".
+  it("shows a workflow saved by a task that completes while the page stays visible", async () => {
+    const running = summary({ status: { kind: "running" } });
+    useAgents.setState({ tasks: [running], details: {} });
+    render(<AgentsPage />);
+    await act(async () => pages.show(AGENTS_PAGE_ID));
+    expect(await screen.findByText(/Nothing kept yet/)).toBeTruthy();
+    graphIpc.keptEntities.mockResolvedValue({
+      project: context.project,
+      revision: 8,
+      entities: [{ id: "ent-wf", kind: "workflow", label: "Mean of x", attributes: { "workflow.id": "wf-7" } }],
+      relations: [],
+      truncated: false,
+      total: 1,
+      coverage: context.coverage,
+      freshness: { state: "pending", pending: 0, checkpointMs: null, overlay: [] },
+    });
+    // The save is a tool call of the running task; then the task completes.
+    const saved = { ...running, usage: { ...running.usage, toolCalls: running.usage.toolCalls + 1 } };
+    await act(async () => useAgents.setState({ tasks: [saved] }));
+    await act(async () => useAgents.setState({ tasks: [{ ...saved, status: { kind: "completed" } }] }));
+    expect(await screen.findByTestId("agents-kept-open-workflow")).toBeTruthy();
+    expect(screen.queryByText(/Nothing kept yet/)).toBeNull();
+  });
 });
 
 describe("project generation helper", () => {
