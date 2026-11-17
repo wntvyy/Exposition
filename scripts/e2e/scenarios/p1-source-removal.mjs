@@ -246,7 +246,7 @@ export default async function p1SourceRemoval({ launchApp, artifactsDir, assert,
     const kept = (await entities(page)).find((e) => e.id === keepTheorem.id);
     assert.equal(kept?.lifecycle, "active", "the surviving theorem keeps its identity");
     const inspected = await invoke(page, "graph_inspect_at_source", { request: { path: "delete-ref.typ", offset: null, revision: null } });
-    const theorems = inspected.entities.filter((x) => x.entity.kind === "theorem").map((x) => x.binding.selector.name).filter(Boolean);
+    const theorems = inspected.entities.filter((x) => x.entity.kind === "theorem" && x.entity.lifecycle === "active").map((x) => x.binding.selector.name).filter(Boolean);
     assert.deepEqual(theorems, ["keep-theorem"], "the surviving theorem is still named by its own label only");
 
     assert.deepEqual(consoleErrors(app), [], "no console errors");

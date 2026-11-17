@@ -21,6 +21,18 @@ import { runCommand } from "../palette.mjs";
 import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const tool = (id, name, input) => ({ toolUse: { id, name, input } });
+const MACRO_DEFS = String.raw`\newtheorem{externaltheorem}{External Theorem}
+\newcommand{\hiddenstatement}[1]{\begin{theorem}#1\end{theorem}}
+`;
+const COVERAGE = String.raw`\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{theorem}{Theorem}
+\input{macro-defs}
+\begin{document}
+\hiddenstatement{A theorem hidden by a macro.}
+\begin{externaltheorem}A declaration whose environment is defined in another file.\end{externaltheorem}
+\end{document}
+`;
 
 export default async function graphDependencyStatus({ launchApp, artifactsDir, assert }) {
   const base = await mkdtemp(join(tmpdir(), "xp-graph-deps-"));
@@ -29,6 +41,9 @@ export default async function graphDependencyStatus({ launchApp, artifactsDir, a
   await mkdir(root, { recursive: true });
   await mkdir(dataDir, { recursive: true });
   await writeFile(join(root, "notes.md"), "# Energy\n\nNotes on balanced pairs.\n");
+  // XR-D-03: the review's two-file fixture (a theorem environment and a macro defined in an input file).
+  await writeFile(join(root, "macro-defs.tex"), MACRO_DEFS);
+  await writeFile(join(root, "coverage.tex"), COVERAGE);
   const env = { EXPOSITION_CREDENTIAL_NAMESPACE: `e2e-graph-deps-${Date.now()}` };
   const observations = [];
   const note = (id, detail) => {
@@ -64,8 +79,10 @@ export default async function graphDependencyStatus({ launchApp, artifactsDir, a
     await page.getByRole("grid", { name: "Verification" }).waitFor({ timeout: 10_000 });
   };
   const selectRow = async (id) => {
-    await page.getByRole("grid", { name: "Verification" }).locator(`[data-entity-id="${id}"]`).click();
-    await page.getByTestId("graph-entity-inspector").and(page.locator(`[data-entity-id="${id}"]`)).waitFor({ timeout: 10_000 });
+    const inspector = page.getByTestId("graph-entity-inspector").and(page.locator(`[data-entity-id="${id}"]`));
+    // Clicking the selected row again would clear the selection.
+    if (!(await inspector.count())) await page.getByRole("grid", { name: "Verification" }).locator(`[data-entity-id="${id}"]`).click();
+    await inspector.waitFor({ timeout: 10_000 });
   };
   /** Depends on rows of the selected item: [entity id, status]. */
   const dependsOn = async () => {
@@ -98,6 +115,25 @@ export default async function graphDependencyStatus({ launchApp, artifactsDir, a
     await invoke(page, "graph_reconcile", { force: false });
     await openMathematics();
     await headerAgrees("opening the graph");
+
+    // ---- XR-D-03: the consuming file's coverage is partial, and says why ----------
+    const coverageOf = async (path) => (await invoke(page, "graph_inspect_at_source", { request: { path, offset: null, revision: null } })).coverage;
+    const consuming = await waitFor(
+      async () => {
+        const c = await coverageOf("coverage.tex");
+        return c && c.state !== "pending" ? c : null;
+      },
+      { timeout: 20_000, message: "coverage.tex indexed" },
+    );
+    assert.equal(consuming.state, "partial", JSON.stringify(consuming));
+    assert.ok(
+      (consuming.detail ?? "").includes("environment externaltheorem is not interpreted (it is not defined in this file; definitions in other files, such as macro-defs, are not read)"),
+      JSON.stringify(consuming),
+    );
+    const defining = await coverageOf("macro-defs.tex");
+    assert.equal(defining.state, "partial", JSON.stringify(defining));
+    assert.ok((defining.detail ?? "").includes(String.raw`macro \hiddenstatement is not interpreted`), JSON.stringify(defining));
+    note("coverage.tex is partial and names the environment from another file", consuming.detail);
 
     // ---- An agent suggests the dependencies (arrives as an event) ---------------
     await invoke(page, "agents_dev_load_script", {
