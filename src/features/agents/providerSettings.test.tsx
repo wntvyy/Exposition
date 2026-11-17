@@ -162,7 +162,7 @@ describe("provider settings dialog", () => {
     await act(async () => {
       fireEvent.click(openai);
     });
-    expect(screen.getByText("No OpenAI API key")).toBeTruthy();
+    expect(screen.getByText("Connect OpenAI to list its models")).toBeTruthy();
     // Nothing can be listed without a key.
     expect(ipc.agentsModelsList).not.toHaveBeenCalledWith("openai", expect.anything());
     fireEvent.click(screen.getByRole("button", { name: "Add API key…" }));

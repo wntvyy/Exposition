@@ -444,15 +444,18 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     await page.evaluate(() => (document.documentElement.dataset.theme = "light"));
     await page.keyboard.press("Escape");
     await confirmRemove.waitFor({ state: "detached", timeout: 5000 });
+    // The Anthropic connection's key (`configured` follows the default
+    // provider, which is the scripted one here).
+    const anthropicKey = (s) => s.connections.find((c) => c.provider === "anthropic").configured;
     let status = await invoke(page, "agents_provider_status");
-    assert.equal(status.configured, true, "Escape keeps the key");
+    assert.equal(anthropicKey(status), true, "Escape keeps the key");
     await dialog.getByTestId("agents-key-remove").click();
     await confirmRemove.getByRole("button", { name: "Remove key" }).click();
     await page.waitForFunction(() =>
       (document.querySelector("[data-testid=agents-key-status]")?.textContent ?? "").includes("Not configured"),
     );
     status = await invoke(page, "agents_provider_status");
-    assert.equal(status.configured, false);
+    assert.equal(anthropicKey(status), false);
     // The disabled Remove button cannot keep focus; the dialog moves it to the
     // key field on the next frame. Press Escape once focus is in the dialog,
     // as a keyboard user would.

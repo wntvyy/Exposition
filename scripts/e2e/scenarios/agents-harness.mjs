@@ -116,7 +116,8 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
       return { html: document.documentElement.outerHTML.includes(key), inputs };
     }, FAKE_KEY);
     const status = await invoke(page, "agents_provider_status");
-    assert.equal(status.configured, true);
+    // The Anthropic connection's key (`configured` follows the default provider).
+    assert.equal(status.connections.find((c) => c.provider === "anthropic").configured, true);
     assert.ok(!JSON.stringify(status).includes(FAKE_KEY), "provider status must not contain the key");
     assert.deepEqual(leaks, { html: false, inputs: false }, "the key must not appear in the webview after saving");
     await page.waitForTimeout(200);
@@ -488,7 +489,8 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     assert.equal(review.files[0].state, "reverted");
     await shot(page, "agents-tasks-after-restart-light");
     step("tasks and review state persisted across restart", { tasks: tasks.map((t) => [t.title, t.status.kind]) });
-    assert.equal((await invoke(page, "agents_provider_status")).configured, false);
+    const after = await invoke(page, "agents_provider_status");
+    assert.equal(after.connections.find((c) => c.provider === "anthropic").configured, false);
     assert.deepEqual(consoleErrors(app), [], "no console errors after restart");
   } finally {
     await app.close();

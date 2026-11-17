@@ -281,7 +281,7 @@ describe("model picker", () => {
     });
     const configure = vi.fn();
     render(<ModelPicker value={{ provider: "openai", model: "gpt-6.2-sol", effort: "high" }} onChange={() => {}} status={status} onConfigure={configure} />);
-    expect(screen.getByText("No OpenAI API key")).toBeTruthy();
+    expect(screen.getByText("Connect OpenAI to list its models")).toBeTruthy();
     expect(screen.getByText("gpt-6.2-sol")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Add API key…" }));
     expect(configure).toHaveBeenCalledWith("openai");

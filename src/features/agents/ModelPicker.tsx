@@ -282,7 +282,7 @@ export function ModelPicker({ value, onChange, status, onProblemChange, onConfig
         <UnavailableState
           size="compact"
           icon={KeyRound}
-          title={`No ${PROVIDER_NAMES[provider]} API key`}
+          title={`Connect ${PROVIDER_NAMES[provider]} to list its models`}
           description={
             <>
               {connection.credentialError ?? "Add a key to list this provider's models."}
