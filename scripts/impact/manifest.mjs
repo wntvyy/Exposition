@@ -183,6 +183,7 @@ export const SCENARIO_POLICY = {
   "live-a1-loop": "live",
   "live-agentctx": "live",
   "live-agents": "live",
+  "live-attachments": "live",
   "live-graph": "live",
   "live-m9-agents": "live",
   "live-restricted": "live",
@@ -193,7 +194,7 @@ export const SCENARIO_POLICY = {
   "mathlib-setup": "manual: needs EXPOSITION_MATHLIB_SETUP=1, network, and several GB for Mathlib",
 };
 
-const LIVE_AGENTS = ["live-agents", "live-agentctx", "live-a1-loop", "live-graph", "live-restricted"];
+const LIVE_AGENTS = ["live-agents", "live-attachments", "live-agentctx", "live-a1-loop", "live-graph", "live-restricted"];
 const LIVE_WORKFLOWS = ["live-workflow", "live-workflow-audit", "live-m9-agents", "live-review-m8-agent"];
 
 /**
