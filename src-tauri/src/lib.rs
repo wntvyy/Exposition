@@ -10,6 +10,7 @@ mod error;
 mod execution;
 mod graph;
 mod lean;
+mod outline;
 mod page;
 mod project_data;
 mod project_ops;
@@ -75,6 +76,7 @@ pub fn run() {
             documents::document_apply,
             documents::document_undo,
             documents::document_redo,
+            outline::document_outline_get,
             agents::agents_provider_status,
             agents::agents_provider_update,
             agents::agents_provider_set_key,

@@ -10,6 +10,8 @@ const COMMANDS: &[&str] = &[
     "document_apply",
     "document_undo",
     "document_redo",
+    // Document outline (src/outline.rs).
+    "document_outline_get",
     // Workspace, files, saves, recovery, settings (src/workspace.rs).
     "workspace_open",
     "workspace_close",
