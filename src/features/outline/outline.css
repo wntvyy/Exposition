@@ -1,0 +1,33 @@
+/* Editor Outline view: layout only (rows, sections, states are shared components). */
+.xp-outline {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-bottom: var(--space-3);
+}
+.xp-outline__header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--pane-inset);
+}
+.xp-outline__path {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.xp-outline__note,
+.xp-outline__empty,
+.xp-outline__status {
+  margin: 0;
+  padding: 0 var(--pane-inset) var(--space-2);
+}
+.xp-outline__label {
+  max-width: 10em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-code);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-subtle);
+}
