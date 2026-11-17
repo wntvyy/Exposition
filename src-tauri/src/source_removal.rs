@@ -51,11 +51,12 @@ struct Removal {
     target: OpTarget,
     label: String,
     path: WorkspacePath,
-    /// What to remove (whole lines when the construct stands alone).
-    range: TextRange,
+    /// What to remove (whole lines when the construct stands alone; a
+    /// Typst label that follows the construct goes with it), sorted.
+    ranges: Vec<TextRange>,
     lines: Option<(usize, usize)>,
-    /// Its proofs (path, removal range, label), removed unless kept.
-    proofs: Vec<(WorkspacePath, TextRange, String)>,
+    /// Its proofs (path, removal ranges, label), removed unless kept.
+    proofs: Vec<(WorkspacePath, Vec<TextRange>, String)>,
 }
 
 /// The source side's part of a plan.
@@ -138,8 +139,8 @@ fn lines_text(lines: Option<(usize, usize)>) -> String {
 }
 
 /// Locate `binding`'s declaration in the current text and the range to remove.
-/// A located item: the range to remove, the construct's lines, and the text's content hash.
-type Located = (TextRange, Option<(usize, usize)>, String);
+/// A located item: the ranges to remove, the item's lines, and the text's content hash.
+type Located = (Vec<TextRange>, Option<(usize, usize)>, String);
 /// Why an item was not located: a refusal code and message.
 type NotFound = (&'static str, String);
 
@@ -165,9 +166,9 @@ fn locate(texts: &mut Texts<'_>, label: &str, binding: &SourceBinding) -> Result
             ("ops.sourceDerived", format!("{label} is declared in {path}; edit the source to remove it."))
         }
     })?;
-    let range = sr::removal_range(text, declaration.range)
+    let (ranges, lines) = sr::removal_ranges(text, &declaration)
         .ok_or_else(|| ("ops.failed", format!("The text of {label} in {path} could not be measured.")))?;
-    Ok((range, sr::lines_of(text, declaration.range), sr::content_hash(text)))
+    Ok((ranges, lines, sr::content_hash(text)))
 }
 
 /// Relations whose source item breaks when the target is removed.
@@ -243,7 +244,7 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
             refuse("ops.covered", format!("Its source {} is deleted in this operation.", binding.path));
             continue;
         }
-        let (range, lines, hash) = match locate(&mut texts, &label, binding) {
+        let (ranges, lines, hash) = match locate(&mut texts, &label, binding) {
             Ok(found) => found,
             Err((code, message)) => {
                 refuse(code, message);
@@ -251,10 +252,10 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
             }
         };
         out.hashes.insert(binding.path.clone(), hash.clone());
-        out.fingerprint.push(format!("src:{entity}:{}:{hash}:{}-{}", binding.path, range.start, range.end));
+        out.fingerprint.push(format!("src:{entity}:{}:{hash}:{}", binding.path, spans(&ranges)));
 
         // Its proofs (removed with it by default) and what else uses it.
-        let mut proofs: Vec<(WorkspacePath, TextRange, String)> = Vec::new();
+        let mut proofs: Vec<(WorkspacePath, Vec<TextRange>, String)> = Vec::new();
         let mut proof_consumers: Vec<OpConsumer> = Vec::new();
         let mut unlocated_proofs: Vec<String> = Vec::new();
         let mut users: Vec<(OpConsumer, String)> = Vec::new();
@@ -273,8 +274,8 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
                     Some((b.path, found))
                 });
                 match located {
-                    Some((path, (prange, plines, phash))) => {
-                        out.fingerprint.push(format!("srcproof:{from}:{path}:{phash}:{}-{}", prange.start, prange.end));
+                    Some((path, (pranges, plines, phash))) => {
+                        out.fingerprint.push(format!("srcproof:{from}:{path}:{phash}:{}", spans(&pranges)));
                         out.hashes.insert(path.clone(), phash);
                         // The label names the file already ("Proof (paper.tex)"); the lines say where.
                         let same_file = path == binding.path;
@@ -284,7 +285,7 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
                             label: format!("{}{}", n.label, lines_text(plines)),
                             path: (!same_file).then(|| path.clone()),
                         });
-                        proofs.push((path, prange, n.label.clone()));
+                        proofs.push((path, pranges, n.label.clone()));
                     }
                     None => unlocated_proofs.push(quoted(&n.label)),
                 }
@@ -363,7 +364,7 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
             target: target.clone(),
             label: detail.entity.label.clone(),
             path: binding.path.clone(),
-            range,
+            ranges,
             lines,
             proofs,
         });
@@ -426,7 +427,7 @@ fn lean_mentions(ws: &WorkspaceService, texts: &mut Texts<'_>, out: &mut SourceP
     }
     let mut exclude: HashMap<WorkspacePath, Vec<TextRange>> = HashMap::new();
     for r in &out.removals {
-        exclude.entry(r.path.clone()).or_default().push(r.range);
+        exclude.entry(r.path.clone()).or_default().extend(r.ranges.iter().copied());
     }
     let removed_names: HashSet<&str> = lean.iter().map(|(_, n)| n.as_str()).collect();
     for (index, name) in lean {
@@ -470,6 +471,11 @@ fn lean_mentions(ws: &WorkspaceService, texts: &mut Texts<'_>, out: &mut SourceP
     }
 }
 
+/// `a-b,c-d`: the removal ranges, for a plan's fingerprint.
+fn spans(ranges: &[TextRange]) -> String {
+    ranges.iter().map(|r| format!("{}-{}", r.start, r.end)).collect::<Vec<_>>().join(",")
+}
+
 impl Removal {
     fn target_key(&self) -> String {
         match &self.target {
@@ -509,11 +515,11 @@ pub fn apply(ws: &WorkspaceService, plan: &SourcePlan, choices: &BTreeMap<String
     let mut ranges: BTreeMap<WorkspacePath, Vec<TextRange>> = BTreeMap::new();
     let mut labels: BTreeMap<WorkspacePath, Vec<String>> = BTreeMap::new();
     for r in &plan.removals {
-        ranges.entry(r.path.clone()).or_default().push(r.range);
+        ranges.entry(r.path.clone()).or_default().extend(r.ranges.iter().copied());
         labels.entry(r.path.clone()).or_default().push(r.label.clone());
         if !keep_proofs {
-            for (path, range, _) in &r.proofs {
-                ranges.entry(path.clone()).or_default().push(*range);
+            for (path, proof, _) in &r.proofs {
+                ranges.entry(path.clone()).or_default().extend(proof.iter().copied());
             }
         }
     }
@@ -589,7 +595,7 @@ pub fn apply(ws: &WorkspaceService, plan: &SourcePlan, choices: &BTreeMap<String
                             path: r.path.clone(),
                             document: document.clone(),
                             revision: *revision,
-                            at: after_removal(merged, r.range.start),
+                            at: after_removal(merged, r.ranges.first().map_or(0, |x| x.start)),
                         }),
                     },
                 ));

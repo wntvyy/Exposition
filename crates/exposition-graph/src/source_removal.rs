@@ -118,6 +118,51 @@ pub fn removal_range(text: &str, construct: TextRange) -> Option<TextRange> {
     byte_range_to_utf16(text, start..end).ok()
 }
 
+/// The ranges to remove for an item (sorted, merged) and its 1-based first
+/// and last line.
+pub type ItemRemoval = (Vec<TextRange>, Option<(usize, usize)>);
+
+/// What removing `declaration` takes out of `text`: the construct (whole
+/// lines when it stands alone, see [`removal_range`]) and the text outside
+/// it that belongs to it. A Typst element in markup is labelled by the label
+/// that FOLLOWS it (`#theorem[…] <thm:x>`); left behind, that label would
+/// attach to the preceding element and references to the removed statement
+/// would silently resolve to another one. So the label goes with it: in one
+/// range when only whitespace separates them, else as a second range (a
+/// comment between them stays). LaTeX and Markdown labels of a construct are
+/// inside it (`\begin{theorem}\label{…}`, `::: {#id .theorem}`); a LaTeX
+/// `\label` after `\end{theorem}` names the enclosing counter, not the
+/// theorem, so it keeps its meaning and stays. Returns `(ranges, lines)`:
+/// ranges sorted and merged, lines the 1-based first and last line of what
+/// belongs to the item.
+pub fn removal_ranges(text: &str, declaration: &Declaration) -> Option<ItemRemoval> {
+    let construct = declaration.range;
+    let label = typst_attached_label(text, declaration)?;
+    let ranges = match label {
+        None => vec![removal_range(text, construct)?],
+        Some(label) => {
+            let gap = utf16_range_to_bytes(text, TextRange::new(construct.end, label.start)).ok()?;
+            if text[gap].chars().all(char::is_whitespace) {
+                vec![removal_range(text, TextRange::new(construct.start, label.end))?]
+            } else {
+                merge(vec![removal_range(text, construct)?, removal_range(text, label)?])
+            }
+        }
+    };
+    let whole = TextRange::new(construct.start, label.map_or(construct.end, |l| l.end));
+    Some((ranges, lines_of(text, whole)))
+}
+
+/// The label a Typst markup call (`#theorem[…]`) carries after it, if any.
+/// `None` when the text cannot be measured.
+fn typst_attached_label(text: &str, declaration: &Declaration) -> Option<Option<TextRange>> {
+    let bytes = utf16_range_to_bytes(text, declaration.range).ok()?;
+    if !declaration.syntax.starts_with("typst.") || !text[bytes.clone()].starts_with('#') {
+        return Some(None);
+    }
+    Some(extract::typst::attached_label(text, bytes.end).and_then(|label| byte_range_to_utf16(text, label).ok()))
+}
+
 /// Sort and merge overlapping or touching ranges (a proof removed with its
 /// theorem, an item inside another removed item).
 pub fn merge(mut ranges: Vec<TextRange>) -> Vec<TextRange> {
@@ -398,6 +443,74 @@ mod tests {
             vec![(Some("LeanBasic.uses_basel"), 8), (Some("LeanBasic.field"), 10), (None, 19)],
             "the header, the comment, the string and Foo.basel are not uses of LeanBasic.basel"
         );
+    }
+
+    /// Remove the declaration `syntax`/`name` of `text` the way Delete from Source does.
+    fn remove(path: &str, text: &str, syntax: &str, name: Option<&str>) -> (String, Option<(usize, usize)>) {
+        let b = binding_for(path, text, syntax, name);
+        let d = locate(&wp(path), text, &b).unwrap();
+        let (ranges, lines) = removal_ranges(text, &d).unwrap();
+        let mut out = text.to_owned();
+        for r in ranges.iter().rev() {
+            out = cut(&out, *r);
+        }
+        (out, lines)
+    }
+
+    // XR-D-04: the review's fixture (Typst numbered theorem figures).
+    const TYPST_REF: &str = "#set page(width: 150mm, height: 130mm, margin: 15mm)\n#let theorem(body) = figure(body, kind: \"theorem\", supplement: [Theorem], numbering: \"1\")\n#theorem[First surviving statement.] <keep-theorem>\n#theorem[Second target statement.] <delete-theorem>\n\nReference to target: @delete-theorem.\n";
+
+    #[test]
+    fn a_typst_theorem_is_removed_with_the_label_that_follows_it() {
+        let (after, lines) = remove("d.typ", TYPST_REF, "typst.call:theorem", Some("delete-theorem"));
+        assert_eq!(
+            after,
+            "#set page(width: 150mm, height: 130mm, margin: 15mm)\n#let theorem(body) = figure(body, kind: \"theorem\", supplement: [Theorem], numbering: \"1\")\n#theorem[First surviving statement.] <keep-theorem>\n\nReference to target: @delete-theorem.\n"
+        );
+        assert_eq!(lines, Some((4, 4)));
+        // The reference cannot rebind: the label is defined nowhere, the
+        // surviving theorem keeps its own name.
+        let x = extract(&wp("d.typ"), &after).unwrap();
+        assert!(!x.labels.contains(&"delete-theorem".to_owned()), "{:?}", x.labels);
+        let names: Vec<&str> = x.declarations.iter().filter_map(|d| d.name.as_deref()).collect();
+        assert_eq!(names, ["keep-theorem"], "{:?}", x.declarations);
+    }
+
+    #[test]
+    fn a_typst_label_on_a_following_line_or_after_a_comment_goes_too() {
+        let own_line = "#theorem[A.] <a>\n\n#theorem[B.]\n<b>\n\nSee @b.\n";
+        let (after, lines) = remove("d.typ", own_line, "typst.call:theorem", Some("b"));
+        assert_eq!(after, "#theorem[A.] <a>\n\nSee @b.\n");
+        assert_eq!(lines, Some((3, 4)), "the preview names the label's line too");
+        // A comment between the call and its label stays; the label goes.
+        let commented = "#theorem[A.] <a>\n#theorem[B.] // note\n<b>\nSee @b.\n";
+        let (after, _) = remove("d.typ", commented, "typst.call:theorem", Some("b"));
+        assert_eq!(after, "#theorem[A.] <a>\n // note\nSee @b.\n");
+        assert!(!extract(&wp("d.typ"), &after).unwrap().labels.contains(&"b".to_owned()));
+        // Inline: exactly the call and its label.
+        let inline = "Text #theorem[B.] <b> more.\n";
+        let (after, _) = remove("d.typ", inline, "typst.call:theorem", Some("b"));
+        assert_eq!(after, "Text  more.\n");
+        // An unlabelled call takes no following text; a later label after
+        // other content is not its label.
+        let unlabelled = "#theorem[A.] <a>\n#theorem[B.]\nWords <w>\n";
+        let x = extract(&wp("d.typ"), unlabelled).unwrap();
+        let d = x.declarations.iter().find(|d| d.name.is_none()).unwrap().clone();
+        let (ranges, _) = removal_ranges(unlabelled, &d).unwrap();
+        assert_eq!(cut(unlabelled, ranges[0]), "#theorem[A.] <a>\nWords <w>\n");
+    }
+
+    #[test]
+    fn latex_and_markdown_labels_are_inside_the_construct_and_a_label_after_end_stays() {
+        // `\label` after `\end{theorem}` refers to the enclosing counter (the
+        // section), before and after the removal: it is not the theorem's.
+        let latex = "\\section{S}\\label{sec:s}\n\\begin{theorem}\\label{thm:a}\nA.\n\\end{theorem}\n\\label{after}\nSee \\ref{thm:a}.\n";
+        let (after, _) = remove("a.tex", latex, "latex.env:theorem", Some("thm:a"));
+        assert_eq!(after, "\\section{S}\\label{sec:s}\n\\label{after}\nSee \\ref{thm:a}.\n");
+        let md = "Intro.\n\n::: {#thm:a .theorem}\nA.\n:::\n\nSee @thm:a.\n";
+        let (after, _) = remove("a.md", md, "markdown.div:theorem", Some("thm:a"));
+        assert_eq!(after, "Intro.\n\nSee @thm:a.\n");
+        assert!(!extract(&wp("a.md"), &after).unwrap().labels.contains(&"thm:a".to_owned()));
     }
 
     #[test]

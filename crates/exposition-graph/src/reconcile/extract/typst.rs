@@ -140,6 +140,26 @@ fn label_end(t: &str, i: usize) -> Option<usize> {
     (len > 0 && rest[len..].starts_with('>')).then_some(i + 1 + len + 1)
 }
 
+/// The label `<name>` that Typst attaches to the markup element ending at
+/// `end` (byte offset): the next label in the text when only spaces, line or
+/// paragraph breaks and comments come between — Typst labels the closest
+/// preceding element that is not a space or a paragraph break. Removing the
+/// element without it would hand the label to whatever precedes.
+pub(crate) fn attached_label(t: &str, end: usize) -> Option<Range<usize>> {
+    let b = t.as_bytes();
+    let mut i = end;
+    while i < b.len() {
+        match b[i] {
+            b' ' | b'\t' | b'\r' | b'\n' => i += 1,
+            b'/' if b.get(i + 1) == Some(&b'/') => i = line_end(b, i),
+            b'/' if b.get(i + 1) == Some(&b'*') => i = comment_end(b, i)?,
+            b'<' => return label_end(t, i).map(|e| i..e),
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// The contents of a string literal (escapes decoded).
 fn decode(inner: &str) -> String {
     let mut out = String::new();
@@ -323,7 +343,10 @@ impl<'t> Typst<'t> {
             _ => {}
         }
         let at_line_start = std::mem::replace(&mut self.line_start, false);
-        if c != b'<' {
+        // Typst labels the closest preceding element that is not a space or
+        // a paragraph break; comments are not elements either.
+        let comment = c == b'/' && matches!(self.b().get(i + 1), Some(b'/' | b'*'));
+        if c != b'<' && !comment {
             self.pending_label = None;
         }
         if let Some(next) = self.skip_lexical(i) {
