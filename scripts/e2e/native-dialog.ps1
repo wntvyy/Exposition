@@ -217,6 +217,21 @@ $itemCondition = New-Object System.Windows.Automation.AndCondition(
 )
 while ($null -eq $item -and (Get-Date) -lt $until -and (Is-Open $dialog)) {
   $item = $dialog.FindFirst($Scope::Descendants, $itemCondition)
+  if ($null -eq $item) {
+    # A long folder list is virtualized: ask the list for the item and realize it.
+    $list = $dialog.FindFirst($Scope::Descendants, (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::List)))
+    if ($list) {
+      try {
+        $container = $list.GetCurrentPattern([System.Windows.Automation.ItemContainerPattern]::Pattern)
+        $virtual = $container.FindItemByProperty($null, $AE::NameProperty, $leaf)
+        if ($virtual) {
+          try { $virtual.GetCurrentPattern([System.Windows.Automation.VirtualizedItemPattern]::Pattern).Realize() } catch {}
+          $item = $virtual
+          $steps += "realized: $leaf"
+        }
+      } catch {}
+    }
+  }
   if ($null -eq $item) { Start-Sleep -Milliseconds 250 }
 }
 if ($null -eq $item) {

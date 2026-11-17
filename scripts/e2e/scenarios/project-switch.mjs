@@ -47,6 +47,9 @@ export default async function projectSwitch({ launchApp, artifactsDir, assert, f
   const dataDir = join(base, "data");
   for (const root of [alpha, beta, gamma]) await cp(fixture("workspace-basic"), root, { recursive: true });
   await mkdir(dataDir, { recursive: true });
+  // Where the New Project location dialog points (a short folder list).
+  const newProjects = join(base, "new");
+  await mkdir(newProjects, { recursive: true });
 
   const evidence = { base, steps: [], dialogs: [] };
   const note = (name, ok, detail = null) => {
@@ -60,6 +63,8 @@ export default async function projectSwitch({ launchApp, artifactsDir, assert, f
   const { page } = app;
   const pid = app.child.pid;
   const shot = async (name) => {
+    // Let menus, dialogs and notifications finish their entrance transition.
+    await page.waitForTimeout(400);
     const path = join(artifactsDir, `${name}.png`);
     await page.screenshot({ path });
     if (devHome) {
@@ -335,11 +340,11 @@ export default async function projectSwitch({ launchApp, artifactsDir, assert, f
     await (await menuItem(/^New Project/)).click();
     await page.getByTestId("new-project").waitFor({ timeout: 15_000 });
     await page.getByTestId("project-title").locator("input").fill("Delta");
-    const browse = await withNativeDialog({ title: LOCATION_TITLE, path: base, pid }, async () =>
+    const browse = await withNativeDialog({ title: LOCATION_TITLE, path: newProjects, pid }, async () =>
       page.getByRole("button", { name: /^Browse/ }).click(),
     );
     evidence.dialogs.push(browse);
-    const delta = join(base, "delta");
+    const delta = join(newProjects, "delta");
     await waitFor(
       async () => (await page.getByTestId("project-location").locator("input").inputValue()).toLowerCase() === delta.toLowerCase(),
       { message: "location from the native dialog" },
@@ -371,11 +376,13 @@ export default async function projectSwitch({ launchApp, artifactsDir, assert, f
     await dismissNotifications();
 
     await rm(join(delta, "occupied.txt"));
-    await page.getByTestId("project-location").locator("input").fill(`${delta}`);
+    // Edit the location so the form checks it again (now empty).
+    await page.getByTestId("project-location").locator("input").fill("");
+    await page.getByTestId("project-location").locator("input").fill(delta);
     await page.waitForSelector('[data-testid="project-destination-status"][data-ok="true"]', { timeout: 20_000 });
     await page.getByTestId("project-create").click();
     await decision.waitFor({ timeout: 10_000 });
-    await decision.getByRole("button", { name: "Save" }).click();
+    await decision.getByRole("button", { name: "Save", exact: true }).click();
     await waitFor(isAt(delta), { timeout: 30_000, message: "delta open" });
     await waitFor(async () => (await label()).trim() === "delta", { timeout: 10_000, message: "page bar shows delta" });
     const alphaDisk = await readFile(join(alpha, "main.typ"), "utf8");
