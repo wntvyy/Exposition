@@ -1611,6 +1611,24 @@ fn budget_exceeded(budget: BudgetKind, detail: impl Into<String>) -> TaskStatus 
     TaskStatus::BudgetExceeded { budget, detail: detail.into() }
 }
 
+/// Output tokens one more model request needs: below this remainder of the
+/// output-token budget the task stops before sending another request.
+const MIN_OUTPUT_TOKENS_PER_REQUEST: u64 = 1024;
+
+/// Why the output-token budget stops the task before another request. A
+/// remainder above zero is not "used up": the meter still shows it, so say it
+/// is less than a request needs (XR-F-02: "used up" beside 51 of 1024).
+fn output_budget_detail(max_output_tokens: u64, remaining: u64) -> String {
+    if remaining == 0 {
+        format!("the output-token budget ({max_output_tokens}) was used up.")
+    } else {
+        format!(
+            "{remaining} output tokens of the budget ({max_output_tokens}) remain, fewer than one more model \
+             request needs ({MIN_OUTPUT_TOKENS_PER_REQUEST})."
+        )
+    }
+}
+
 /// Result text of a call the user declined in its approval request.
 const DECLINED: &str = "The user declined this action. Do not retry it unchanged.";
 /// Prefix of every result for a call that was never executed.
@@ -1736,10 +1754,11 @@ impl Run<'_> {
                 format!("the input-token budget ({}) was used up.", b.max_input_tokens),
             ));
         }
-        if b.max_output_tokens.saturating_sub(self.usage.output_tokens) < 1024 {
+        let remaining_output = b.max_output_tokens.saturating_sub(self.usage.output_tokens);
+        if remaining_output < MIN_OUTPUT_TOKENS_PER_REQUEST {
             return Some(budget_exceeded(
                 BudgetKind::OutputTokens,
-                format!("the output-token budget ({}) was used up.", b.max_output_tokens),
+                output_budget_detail(b.max_output_tokens, remaining_output),
             ));
         }
         if self.remaining_wall().is_zero() {
@@ -2319,6 +2338,15 @@ mod tests {
     use super::*;
     use crate::credentials::MemoryStore;
     use crate::tools::services::UnavailableServices;
+
+    #[test]
+    fn output_budget_stop_says_used_up_only_when_nothing_remains() {
+        assert_eq!(output_budget_detail(1024, 0), "the output-token budget (1024) was used up.");
+        assert_eq!(
+            output_budget_detail(1024, 973),
+            "973 output tokens of the budget (1024) remain, fewer than one more model request needs (1024)."
+        );
+    }
 
     #[test]
     fn scripted_provider_is_only_available_in_debug_builds() {

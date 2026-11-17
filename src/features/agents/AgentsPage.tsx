@@ -4,7 +4,7 @@
 // navigation (selected task, section, filter), so moving between Editor and
 // Agents never duplicates a task or loses an approval or review.
 import { Archive, Bot, BookmarkCheck, FolderOpen, ListTodo, Network, PanelRight, Plus, Square } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { GraphSnapshot } from "../../bindings/GraphSnapshot";
 import type { TaskId } from "../../bindings/TaskId";
@@ -259,16 +259,26 @@ export function AgentsPage() {
   const page = useAgents((s) => s.page);
   const error = useAgents((s) => s.error);
   const workspace = useAgents((s) => s.workspace);
-  const taskCount = useAgents((s) => s.tasks.length);
+  // Tasks keep work in the project graph through tool calls (workflow_propose
+  // saves a workflow) and when they end: refresh the kept list on either, not
+  // only when tasks are added (XR-F-01). A string, so unrelated updates
+  // (usage meters) do not re-render.
+  const keptSignal = useAgents((s) => s.tasks.map((t) => `${t.id}:${t.status.kind}:${t.usage.toolCalls}`).join("|"));
   const showing = usePages((s) => s.active === AGENTS_PAGE_ID);
   const [kept, setKept] = useState<GraphSnapshot | null>(null);
   const [keptError, setKeptError] = useState<string | null>(null);
 
+  const keptSeq = useRef(0);
   const refreshKept = useCallback(async () => {
+    // Refreshes can overlap: only the newest one's answer is shown.
+    const seq = ++keptSeq.current;
     try {
-      setKept(await agentGraph.keptEntities());
+      const snapshot = await agentGraph.keptEntities();
+      if (seq !== keptSeq.current) return;
+      setKept(snapshot);
       setKeptError(null);
     } catch (e) {
+      if (seq !== keptSeq.current) return;
       setKept(null);
       setKeptError(errorMessage(e));
     }
@@ -280,7 +290,7 @@ export function AgentsPage() {
 
   useEffect(() => {
     if (showing) void refreshKept();
-  }, [showing, workspace?.root, taskCount, refreshKept]);
+  }, [showing, workspace?.root, keptSignal, refreshKept]);
 
   const keptIds = keptTaskIds(kept);
   return (

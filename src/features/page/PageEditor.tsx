@@ -59,7 +59,16 @@ function rectStyle(rect: { x: number; y: number; width: number; height: number }
   return { left: rect.x * scale, top: rect.y * scale, width: rect.width * scale, height: rect.height * scale };
 }
 
-export function PageEditor({ resource, active }: EditorProps) {
+export interface PageEditorProps extends EditorProps {
+  /**
+   * A Problems reveal (requested after this view mounted) that the shown
+   * pages cannot show: no pages, or a position not on them (e.g. source
+   * added after the last good build). The caller shows it in the source.
+   */
+  onRevealMissed?: (offset: number) => void;
+}
+
+export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps) {
   const path = resource.path ?? "";
   const session = useMemo(() => new PageSession(path), [path]);
   const model = useSyncExternalStore(session.subscribe, session.getModel);
@@ -80,8 +89,16 @@ export function PageEditor({ resource, active }: EditorProps) {
     return () => session.detach();
   }, [session]);
 
+  // A reveal already pending when this view mounted (e.g. a mode switch) only
+  // places the caret; a miss is reported for later requests alone.
+  const mountedSerial = useRef(reveal?.serial ?? 0);
+  const missed = useRef(onRevealMissed);
+  missed.current = onRevealMissed;
   useEffect(() => {
-    if (reveal && reveal.path === path) void session.reveal(reveal.offset);
+    if (!reveal || reveal.path !== path) return;
+    void session.reveal(reveal.offset).then((shown) => {
+      if (!shown && reveal.serial > mountedSerial.current) missed.current?.(reveal.offset);
+    });
   }, [reveal, path, session]);
 
   useEffect(() => {

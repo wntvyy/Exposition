@@ -75,6 +75,11 @@ export function TaskComposer({
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
   const [busy, setBusy] = useState(false);
   const auto = approvalMode === "auto";
+  // Read only is a ceiling that also allows no commands or code (the service
+  // refuses every launch); the composer shows that instead of offering an
+  // execution choice that cannot apply (XR-F-03).
+  const readOnly = permission === "readOnly";
+  const effectiveExecution: ExecutionMode = readOnly ? "disabled" : execution;
   const projectPermissions = useProjectPermissions(auto && folder ? folder : null);
   // Auto needs the project's permissions first (chosen in the profile below).
   const autoReady = !auto || projectPermissions.state?.permissions != null;
@@ -93,7 +98,7 @@ export function TaskComposer({
     // task prohibits).
     const request = auto
       ? { prompt, workspaceRoot: folder, scope, permission: "autoApply" as const, execution: "approveEach" as const, consent, budgets, approvalMode }
-      : { prompt, workspaceRoot: folder, scope, permission, execution, consent, budgets, approvalMode };
+      : { prompt, workspaceRoot: folder, scope, permission, execution: effectiveExecution, consent, budgets, approvalMode };
     const task = await agents.run(() => commands.agentsTaskCreate(request));
     setBusy(false);
     if (task) {
@@ -187,7 +192,15 @@ export function TaskComposer({
             options={option(PERMISSION_LABELS)}
             data-testid="agents-permission"
           />
-          <Select label="Commands and code" value={execution} onChange={setExecution} options={option(EXECUTION_LABELS)} />
+          <Select
+            label="Commands and code"
+            value={effectiveExecution}
+            onChange={setExecution}
+            options={option(EXECUTION_LABELS)}
+            isDisabled={readOnly}
+            description={readOnly ? "Read only also allows no commands or code." : undefined}
+            data-testid="agents-execution"
+          />
         </>
       )}
       <Select label="Content sent to the model provider" value={consent} onChange={setConsent} options={option(CONSENT_LABELS)} />

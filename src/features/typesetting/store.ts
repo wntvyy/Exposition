@@ -50,6 +50,15 @@ export function requestReveal(path: string, offset: number): void {
   useTypesetting.setState({ reveal: { path, offset, serial: ++serial } });
 }
 
+/**
+ * Forget every build state and pending reveal: they belong to the folder that
+ * was open (XR-A-01: an untrusted main.tex status stayed in the status bar
+ * after switching to an unrelated project).
+ */
+export function clearBuildStates(): void {
+  useTypesetting.setState({ entries: {}, reveal: null });
+}
+
 let installed = false;
 /** Subscribe the store to build events once. */
 export function installTypesettingEvents(): void {
@@ -57,6 +66,12 @@ export function installTypesettingEvents(): void {
   installed = true;
   void events.typesettingBuild(recordBuild).catch(() => {});
   void events.typesettingStatus((e) => recordActivity(e.entry, e.activity)).catch(() => {});
+  // Closing a folder (also before another one opens) ends its builds' relevance.
+  void events
+    .workspace((e) => {
+      if (e.kind === "closed" || e.kind === "opened") clearBuildStates();
+    })
+    .catch(() => {});
 }
 
 export type BuildSummary = "building" | "succeeded" | "failed" | "stale" | "untrusted" | "unavailable" | "none";

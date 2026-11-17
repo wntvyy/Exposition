@@ -381,6 +381,17 @@ export class PageSession {
     return this.history.forward(position.offset, position.revision, this.buildRevision, "downstream");
   }
 
+  /** Whether a current-revision offset is text the shown build contains (it maps there and back). */
+  private inShownBuild(offset: number): boolean {
+    if (!this.build) return false;
+    if (this.docRevision <= this.buildRevision) return true;
+    const at = this.history.backward(offset, this.docRevision, this.buildRevision);
+    if (at === null) return false;
+    return (["upstream", "downstream"] as const).some(
+      (affinity) => this.history.forward(at, this.buildRevision, this.docRevision, affinity) === offset,
+    );
+  }
+
   private fromBuild(offset: number, affinity: Affinity): Position | null {
     const mapped = this.history.forward(offset, this.buildRevision, this.docRevision, affinity);
     return mapped === null ? null : { offset: mapped, revision: this.docRevision };
@@ -388,12 +399,13 @@ export class PageSession {
 
   // ---- geometry -----------------------------------------------------------
 
-  async refreshGeometry(): Promise<void> {
+  /** Resolves whether the caret has a position on the shown pages. */
+  async refreshGeometry(): Promise<boolean> {
     const build = this.build;
     const caret = this.caret;
     if (!build || !caret || this.disposed) {
       this.set({ caret: null, selection: [], selectionText: "", hasSelection: false });
-      return;
+      return false;
     }
     const seq = ++this.geometrySeq;
     const offset = this.toBuild(caret);
@@ -407,16 +419,18 @@ export class PageSession {
         selection = result.rects;
         selectionText = result.text;
       }
-      if (seq !== this.geometrySeq) return;
+      if (seq !== this.geometrySeq) return geometry !== null;
       this.set({
         caret: geometry,
         selection,
         selectionText,
         hasSelection: this.anchor !== null && this.anchor.offset !== caret.offset,
       });
+      return geometry !== null;
     } catch (error) {
       // The shown build is no longer retained: fetch a current one.
       if (isUnknownBuild(error)) void this.recover();
+      return false;
     }
   }
 
@@ -704,13 +718,23 @@ export class PageSession {
     this.set({ message });
   }
 
-  /** Place the caret at a source offset of the current revision (problems panel). */
-  async reveal(offset: number): Promise<void> {
+  /**
+   * Place the caret at a source offset of the current revision (problems
+   * panel). Resolves whether the shown pages can show that position: false
+   * when there are no pages or the position is not on them (e.g. source added
+   * after the last good build), so the caller can show it in the source.
+   */
+  async reveal(offset: number): Promise<boolean> {
     this.caret = { offset, revision: this.docRevision, affinity: "downstream" };
     this.unapplied = null;
     this.anchor = null;
     this.group += 1;
-    await this.refreshGeometry();
+    // Text added after the shown build has no place on its pages: mapped back
+    // it lands at the insertion point (a caret there points at the wrong
+    // text, e.g. the end of the last page for an error appended after it).
+    const onPages = this.inShownBuild(offset);
+    const shown = await this.refreshGeometry();
+    return shown && onPages && !this.disposed;
   }
 
   /**

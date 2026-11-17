@@ -685,6 +685,27 @@ async fn kernels_start_in_the_workspace_root() {
     }
 }
 
+/// XR-A-03: a run of this session whose record is deleted recoverably leaves
+/// the run history (it stayed listed from memory) and returns on restore.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deleted_run_of_this_session_leaves_the_history_until_restored() {
+    let mut fx = fixture(true).await;
+    let Some(env) = python(&fx, false).await else { return };
+    let session = start(&fx, &env, SessionOwner::User).await;
+    let summary = run(&fx, &session, input("print(6 * 7)"));
+    let done = finished(&mut fx.events, &summary.id.0, Duration::from_secs(120)).await;
+    assert_eq!(done.status, RunStatus::Succeeded);
+    let id = summary.id.0.clone();
+    let listed = |fx: &Fixture| fx.service.runs().unwrap().iter().any(|r| r.id.0 == id);
+    assert!(listed(&fx), "the finished run is in the history");
+    fx.service.delete_run_record(&id, false).unwrap();
+    assert!(!listed(&fx), "a recoverably deleted run is not listed");
+    assert_eq!(fx.service.deleted_run_records().unwrap().iter().filter(|r| r.id == id).count(), 1);
+    fx.service.restore_run_record(&id).unwrap();
+    assert!(listed(&fx), "a restored run is listed again");
+    fx.service.shutdown(&session.id).await.unwrap();
+}
+
 /// R-m4 #12: research leaves interactive-job headroom for other services.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn session_caps_are_per_owner() {

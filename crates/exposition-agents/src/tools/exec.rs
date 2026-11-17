@@ -534,6 +534,14 @@ fn execution_disabled() -> ToolOutput {
     refusal(codes::EXECUTION_DISABLED, "Process execution is disabled for this task by the user.")
 }
 
+fn execution_read_only() -> ToolOutput {
+    refusal(
+        codes::EXECUTION_DISABLED,
+        "Process execution is disabled because this task is read-only (Document changes: Read only), which allows no \
+         commands or code whatever the Commands and code setting. Nothing was run.",
+    )
+}
+
 fn project_changed(reason: &str) -> ToolOutput {
     refusal(
         codes::PROJECT_CHANGED,
@@ -1042,8 +1050,13 @@ fn effects_contract(env: &ToolEnv<'_>, effects: &tools::Effects<'_>) -> Result<(
         }
     }
     if effects.launch != Launch::None {
-        if spec.permission == PermissionProfile::ReadOnly || spec.execution == ExecutionMode::Disabled {
+        if spec.execution == ExecutionMode::Disabled {
             return Err(execution_disabled());
+        }
+        // Read only is a ceiling over the execution setting: name it, since the
+        // task's own execution choice would have allowed this (XR-F-03).
+        if spec.permission == PermissionProfile::ReadOnly {
+            return Err(execution_read_only());
         }
         if effects.setup && spec.execution == ExecutionMode::Restricted {
             return Err(setup_refused_in_restricted());

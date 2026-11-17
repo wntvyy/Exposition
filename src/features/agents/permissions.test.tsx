@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalRequest } from "../../bindings/ApprovalRequest";
@@ -192,6 +192,40 @@ describe("composer Ask / Auto", () => {
     });
     expect(ipc.agentsTaskCreate).toHaveBeenCalledWith(
       expect.objectContaining({ approvalMode: "auto", permission: "autoApply", execution: "approveEach" }),
+    );
+  });
+
+  // XR-F-03: Read only with "Restricted sandbox only" looked like it allowed
+  // execution; the service refuses every launch of a read-only task.
+  it("shows that Read only allows no commands and sends no execution choice with it", async () => {
+    const choose = async (label: RegExp, option: string) => {
+      const field = screen.getByRole("button", { name: label });
+      await act(async () => {
+        fireEvent.click(field);
+      });
+      await act(async () => {
+        fireEvent.click(await screen.findByRole("option", { name: option }));
+      });
+    };
+    render(<TaskComposer onCreated={() => {}} />);
+    fireEvent.change(screen.getByTestId("agents-prompt"), { target: { value: "Compute 2 + 2" } });
+    await choose(/Commands and code/, "Restricted sandbox only (unattended)");
+    await choose(/Document changes/, "Read only");
+    const execution = screen.getByTestId("agents-execution");
+    const button = within(execution).getByRole("button");
+    expect(button.textContent).toContain("No commands");
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(execution.textContent).toContain("Read only also allows no commands or code.");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("agents-start"));
+    });
+    expect(ipc.agentsTaskCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalMode: "ask", permission: "readOnly", execution: "disabled" }),
+    );
+    // Allowing changes again restores the person's execution choice.
+    await choose(/Document changes/, "Ask before each change");
+    expect(within(screen.getByTestId("agents-execution")).getByRole("button").textContent).toContain(
+      "Restricted sandbox only (unattended)",
     );
   });
 });

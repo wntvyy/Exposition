@@ -3,12 +3,16 @@
 // operations, with impact handling for evidence and manuscript use);
 // experiments and external references are graph items; group folders are
 // managed and saved workflows are changed in the Workflows tab.
+import { FileOutput } from "lucide-react";
+
 import { notify } from "../../app/notifications";
 import type { OpTarget } from "../../bindings/OpTarget";
 import type { ResearchListing } from "../../bindings/ResearchListing";
+import type { RunSummary } from "../../bindings/RunSummary";
 import { runUserOperation } from "../operations/client";
 import { appClipboard } from "../operations/clipboard";
-import { folderLabel, parentFolder, targetKey, trashName } from "../operations/model";
+import { folderLabel, parentFolder, quoted, targetKey, trashName } from "../operations/model";
+import type { ExtraItem } from "../operations/OpMenu";
 import type { SurfaceActions } from "../operations/surfaces";
 import { copySelection, createdPaths, pasteInto, type FileSelectionItem } from "../workspace/fileOps";
 import { parseItemKey } from "./space";
@@ -158,5 +162,73 @@ export function researchActions(
         await runUserOperation({ kind: "delete", permanent: true }, targets, { labels });
       },
     },
+  };
+}
+
+/** How a research run is named in decisions and notifications: its code's first line. */
+export function researchRunLabel(run: Pick<RunSummary, "id" | "codePreview">): string {
+  const line = run.codePreview.split(/\r?\n/).find((l) => l.trim() !== "")?.trim() ?? "";
+  const short = line.length > 40 ? `${line.slice(0, 39)}…` : line;
+  return short ? `run ${quoted(short)}` : `run ${run.id}`;
+}
+
+/**
+ * Actions for selected research runs in a run history (XR-A-03), as for
+ * workflow runs: Delete removes the record only (code, transcript;
+ * restorable from Storage & History) and its outputs stay; "…and Its
+ * Outputs" adds the outputs as their own target in the same request (held for
+ * restore; files the project keeps stay). Active runs are coordinated through
+ * the plan's choices. The backend decides impacts and recovery.
+ */
+export function researchRunActions(selected: RunSummary[]): { actions: SurfaceActions; extras: ExtraItem[] } {
+  const has = selected.length > 0;
+  const none = "Select a run first";
+  const one = selected.length === 1;
+  const targets: OpTarget[] = selected.map((r) => ({ kind: "researchRun", run: r.id }));
+  const outputTargets: OpTarget[] = selected.map((r) => ({ kind: "runOutputs", run: r.id }));
+  const labels = new Map<string, string>();
+  for (const r of selected) {
+    labels.set(targetKey({ kind: "researchRun", run: r.id }), researchRunLabel(r));
+    labels.set(targetKey({ kind: "runOutputs", run: r.id }), `outputs of ${researchRunLabel(r)}`);
+  }
+  const active = selected.some((r) => r.status.kind === "running" || r.queued);
+  const remove = (permanent: boolean, outputs: boolean) => async () => {
+    await runUserOperation({ kind: "delete", permanent }, outputs ? [...targets, ...outputTargets] : targets, { labels });
+  };
+  return {
+    actions: {
+      copy: { enabled: false, reason: "A run is not copied; run its code again instead", run: () => {} },
+      delete: {
+        enabled: has,
+        reason: none,
+        label: one || !has ? "Delete Run Record" : "Delete Run Records",
+        description: active ? "Running work is stopped first if you choose" : "The record only; outputs stay",
+        run: remove(false, false),
+      },
+      deletePermanently: {
+        enabled: has,
+        reason: none,
+        description: "The record cannot be restored; outputs stay",
+        run: remove(true, false),
+      },
+    },
+    extras: [
+      {
+        id: "deleteWithOutputs",
+        label: one || !has ? "Delete Run and Its Outputs" : "Delete Runs and Their Outputs",
+        icon: FileOutput,
+        description: "Outputs are held for restore (their files stay on disk until purged); never inputs or files the project keeps",
+        isDisabled: !has,
+        run: remove(false, true),
+      },
+      {
+        id: "deleteWithOutputsPermanently",
+        label: one || !has ? "Delete Run and Its Outputs Permanently…" : "Delete Runs and Their Outputs Permanently…",
+        icon: FileOutput,
+        description: "Removes the record and the output files; cannot be restored",
+        isDisabled: !has,
+        run: remove(true, true),
+      },
+    ],
   };
 }

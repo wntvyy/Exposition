@@ -16,6 +16,7 @@ import type { WorkspaceStatus } from "../../bindings/WorkspaceStatus";
 import { commands, errorMessage, events, isCommandError } from "../../lib/ipc";
 import { activeHandle, handleForPath } from "../editor";
 import { requestWorkspaceTrust } from "../jobs/trust";
+import { onProjectOp } from "../operations/client";
 import { setupCommands } from "./ipc";
 import {
   EMPTY_RUN_OUTPUT,
@@ -152,6 +153,21 @@ export function startResearchTracking(): void {
   // in a trusted folder) follow. A revoke also stops this folder's sessions
   // in the service; their state arrives as research events.
   void events.trustChanged(() => void refreshTrust());
+  // Run records deleted or restored (the run history, Storage & History, an
+  // agent): re-read the history; a shown run that is gone is no longer shown.
+  onProjectOp((result) => {
+    const runs = new Set(
+      result.outcomes.flatMap((o) => (o.target.kind === "researchRun" || o.target.kind === "runOutputs" ? [o.target.run] : [])),
+    );
+    const touchesRuns = runs.size > 0 || result.outcomes.some((o) => o.target.kind === "recoverable");
+    if (!touchesRuns) return;
+    void refreshRuns().then(() => {
+      const { selectedRun, runs: listed } = useResearch.getState();
+      if (selectedRun && runs.has(selectedRun) && !listed.some((r) => r.id === selectedRun)) {
+        useResearch.setState({ selectedRun: null });
+      }
+    });
+  });
   void refreshAll();
 }
 

@@ -20,20 +20,33 @@ export function TypstEditor({ resource, mode, active }: EditorProps) {
   const focused = active && selected;
   const monacoEditor = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const reveal = useTypesetting((s) => s.reveal);
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  /** A source offset to show (and focus) once the source editor exists. */
+  const pendingSource = useRef<number | null>(null);
 
   // Problems panel: reveal the diagnostic's range in the source view too.
   useEffect(() => {
     const editor = monacoEditor.current;
-    const model = editor?.getModel();
-    if (!reveal || !editor || !model || reveal.path !== resource.path || mode === "page") return;
-    const position = model.getPositionAt(reveal.offset);
-    editor.setPosition(position);
-    editor.revealPositionInCenter(position);
-    if (mode === "source") editor.focus();
+    if (!reveal || !editor || reveal.path !== resource.path || mode === "page") return;
+    showInSource(editor, reveal.offset, mode === "source");
   }, [reveal, resource.path, mode]);
+
+  // XR-B-01: the pages cannot show the position (no pages yet, or source the
+  // last good build does not contain, such as an error added after it): show
+  // the source beside the pages with the caret there, instead of nothing.
+  const onRevealMissed = (offset: number) => {
+    if (modeRef.current !== "page") return;
+    pendingSource.current = offset;
+    editors.setMode(resource.key, "split");
+  };
 
   const onEditor = (editor: monaco.editor.IStandaloneCodeEditor | null, handle: DocumentHandle | null) => {
     monacoEditor.current = editor;
+    if (editor && pendingSource.current !== null) {
+      showInSource(editor, pendingSource.current, true);
+      pendingSource.current = null;
+    }
     // The tab's path was an alias (case variant, short name, link inside the
     // folder) of a file open under its canonical path: show one tab for it
     // (as the plain source editor does).
@@ -47,7 +60,7 @@ export function TypstEditor({ resource, mode, active }: EditorProps) {
     return <SourceEditor path={resource.path} active={focused} onEditor={onEditor} />;
   }
   if (mode === "page") {
-    return <PageEditor resource={resource} mode="page" active={focused} />;
+    return <PageEditor resource={resource} mode="page" active={focused} onRevealMissed={onRevealMissed} />;
   }
   return (
     <Group orientation="horizontal" className="typst-split" data-testid="typst-split">
@@ -60,4 +73,14 @@ export function TypstEditor({ resource, mode, active }: EditorProps) {
       </ResizablePanel>
     </Group>
   );
+}
+
+/** Place the caret at a source offset, scrolled into view. */
+function showInSource(editor: monaco.editor.IStandaloneCodeEditor, offset: number, focus: boolean): void {
+  const model = editor.getModel();
+  if (!model) return;
+  const position = model.getPositionAt(offset);
+  editor.setPosition(position);
+  editor.revealPositionInCenter(position);
+  if (focus) editor.focus();
 }

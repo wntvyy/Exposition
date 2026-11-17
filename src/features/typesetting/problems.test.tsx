@@ -8,9 +8,18 @@ import type { BuildEvent } from "../../bindings/BuildEvent";
 import type { BuildStatus as Status } from "../../bindings/BuildStatus";
 import type { Diagnostic } from "../../bindings/Diagnostic";
 
+const workspaceHandlers: ((event: { kind: string }) => void)[] = [];
+
 vi.mock("../../lib/ipc", () => ({
   commands: { documentList: vi.fn(async () => []), documentState: vi.fn() },
-  events: { typesettingBuild: vi.fn(async () => () => {}), typesettingStatus: vi.fn(async () => () => {}) },
+  events: {
+    typesettingBuild: vi.fn(async () => () => {}),
+    typesettingStatus: vi.fn(async () => () => {}),
+    workspace: vi.fn(async (handler: (event: { kind: string }) => void) => {
+      workspaceHandlers.push(handler);
+      return () => {};
+    }),
+  },
 }));
 
 const { registry } = await import("../../app/registry");
@@ -94,5 +103,37 @@ describe("builds that could not run", () => {
     expect(screen.getByTestId("problem-tool-settings")).toBeTruthy();
     render(<BuildStatus />);
     expect(screen.getByTestId("build-status").textContent).toContain("1 error");
+  });
+});
+
+// XR-A-01: a build state belongs to the folder it was built in; after Close
+// Folder or opening another folder the status bar and Problems show nothing of it.
+describe("build state across a project switch", () => {
+  const untrusted = {
+    ...event({ kind: "error", message: "not trusted" }),
+    refusal: { code: "untrustedWorkspace", message: "not trusted", workspaceRoot: "C:/old" },
+  } as BuildEvent;
+
+  it.each(["closed", "opened"])("is cleared when the workspace is %s", async (kind) => {
+    store.installTypesettingEvents();
+    await waitFor(() => expect(workspaceHandlers.length).toBeGreaterThan(0));
+    store.recordBuild(untrusted);
+    store.recordBuild(event({ kind: "failed" }, [{ severity: "error", message: "boom", location: null, hints: [] }]));
+    render(<BuildStatus />);
+    expect(screen.getByTestId("build-status").textContent).toContain("main.tex");
+    for (const handler of workspaceHandlers) handler({ kind });
+    await waitFor(() => expect(screen.queryByTestId("build-status")).toBeNull());
+    cleanup();
+    render(<ProblemsPanel />);
+    expect(screen.queryByTestId("problem")).toBeNull();
+    expect(store.useTypesetting.getState().entries).toEqual({});
+  });
+
+  it("keeps the state on other workspace events", async () => {
+    store.installTypesettingEvents();
+    await waitFor(() => expect(workspaceHandlers.length).toBeGreaterThan(0));
+    store.recordBuild(untrusted);
+    for (const handler of workspaceHandlers) handler({ kind: "filesChanged" });
+    expect(Object.keys(store.useTypesetting.getState().entries)).toEqual(["main.tex"]);
   });
 });

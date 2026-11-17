@@ -736,9 +736,13 @@ impl ResearchService {
     /// Run history for the current workspace, newest first.
     pub fn runs(&self) -> Result<Vec<RunSummary>, ResearchError> {
         let workspace = self.current_workspace()?;
+        // A finished run of this session stays in memory after its record is
+        // deleted (recoverably): the history leaves it out like a record read
+        // from disk, until it is restored.
         let live: HashMap<String, RunSummary> = lock(&self.shared.runs)
             .values()
             .filter(|run| run.root == workspace.root)
+            .filter(|run| !(run.finished && crate::records::record_deleted(&workspace.root, run.id())))
             .map(|run| (run.id().to_owned(), run.summary()))
             .collect();
         let mut out: Vec<RunSummary> = live.values().cloned().collect();
