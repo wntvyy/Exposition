@@ -174,6 +174,23 @@ export default async function workflowStateRefresh({ launchApp, artifactsDir, as
 
   let saved = {};
   let runId = null;
+  // Evidence: the availability reads the UI makes (Tauri IPC requests) and their answers;
+  // no workflow_save happens in section A.
+  const ipcLog = [];
+  const t0 = Date.now();
+  page.on("requestfinished", async (request) => {
+    const cmd = /ipc\.localhost\/([a-z_]+)/.exec(request.url())?.[1];
+    if (!cmd || !/^workflow_(operations|validate|save|get|list)$|^execution_settings_update$/.test(cmd)) return;
+    const at = Date.now() - t0;
+    let body = null;
+    try {
+      body = await (await request.response())?.json();
+    } catch {}
+    const python = cmd === "workflow_operations" && Array.isArray(body) ? body.find((o) => o.id === "research.pythonBatch")?.runner.available : undefined;
+    const runnable = cmd === "workflow_validate" ? body?.runnable : cmd === "workflow_get" ? body?.validation?.runnable : undefined;
+    const image = cmd === "execution_settings_update" ? body?.settings?.docker : undefined;
+    ipcLog.push({ at, cmd, python, runnable, image });
+  });
   try {
     await page.setViewportSize({ width: 1600, height: 1000 }).catch(() => {});
     await invoke(page, "workspace_open", { path: alpha });
@@ -231,6 +248,7 @@ export default async function workflowStateRefresh({ launchApp, artifactsDir, as
 
     // ---- A. XR-K-03: open editors follow the restricted images ------------------------------
     await section("images", async () => {
+      const firstRead = ipcLog.length;
       await runCommand(page, "Show Workflows", /Show Workflows/);
       await page.getByTestId("workflows-view").waitFor({ timeout: 15_000 });
       for (const key of ["py", "r", "jl"]) {
@@ -245,32 +263,9 @@ export default async function workflowStateRefresh({ launchApp, artifactsDir, as
 
       // Settings › Execution: the Python image; back to the still-open editors.
       await openSettingsExecution();
-      await page.evaluate(() => {
-        // Diagnostics: which availability reads the UI makes, and what they answer.
-        const internals = window.__TAURI_INTERNALS__;
-        const original = internals.invoke.bind(internals);
-        window.__xpIpcLog = [];
-        internals.invoke = (cmd, args, options) => {
-          const started = performance.now();
-          const result = original(cmd, args, options);
-          if (/^workflow_(operations|validate|save|get|list)$|^execution_settings_update$/.test(cmd)) {
-            result.then(
-              (value) => {
-                const python = cmd === "workflow_operations" ? value.find((o) => o.id === "research.pythonBatch")?.runner.available : undefined;
-                const runnable = cmd === "workflow_validate" ? value.runnable : cmd === "workflow_get" ? value.validation?.runnable : undefined;
-                window.__xpIpcLog.push({ cmd, at: Math.round(started), ms: Math.round(performance.now() - started), python, runnable });
-              },
-              () => window.__xpIpcLog.push({ cmd, at: Math.round(started), failed: true }),
-            );
-          }
-          return result;
-        };
-      });
       await chooseImage("docker-image", IMAGES.python);
-      const backendImage = (await invoke(page, "execution_settings_get")).settings.docker.image;
       await showEditor(saved.py.id);
       const pyReady = await until("Python editor reviewable", async () => (await editorState()).canReview === "true");
-      note("diag-ipc-after-python-image", true, { backendImage, log: await page.evaluate(() => window.__xpIpcLog) });
       const py = await editorState();
       note("py-reviewable-after-image-without-save", pyReady && py.revision === "1" && /— available\./.test(py.step) && !/no container image/.test(py.step), py);
       const pyStored = await invoke(page, "workflow_get", { id: saved.py.id, revision: null });
@@ -319,6 +314,8 @@ export default async function workflowStateRefresh({ launchApp, artifactsDir, as
       note("py-blocked-again-after-clear", blocked && /no container image is configured/.test(cleared.step), cleared);
       await openSettingsExecution();
       await chooseImage("docker-image", IMAGES.python);
+      const saves = ipcLog.slice(firstRead).filter((l) => l.cmd === "workflow_save");
+      note("images-section-saved-nothing", saves.length === 0, { saves: saves.length, reads: ipcLog.length - firstRead });
     });
 
     // ---- B. XR-E-03: the mounted list shows new and saved drafts ----------------------------
@@ -459,6 +456,7 @@ export default async function workflowStateRefresh({ launchApp, artifactsDir, as
       note("switch-back-lists-alpha-runs", await until("alpha run listed again", async () => (await runRow.count()) === 1), "");
     });
 
+    note("diag-ipc-full-log", true, ipcLog);
     const errors = app.consoleMessages.filter((m) => m.startsWith("error") || m.startsWith("pageerror"));
     note("no-console-errors", errors.length === 0, errors.slice(0, 5));
   } finally {

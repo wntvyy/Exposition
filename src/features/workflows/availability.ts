@@ -15,9 +15,27 @@ import { useWorkspace } from "../workspace/store";
 
 const useEpoch = create<{ epoch: number }>(() => ({ epoch: 0 }));
 
+/**
+ * The backend reuses a batch runner's availability answer for a few seconds
+ * (the workflow batch runner in src-tauri/src/state.rs, 5 s), so an answer
+ * read right after a change may predate it: views read once at the change and
+ * once more after that window.
+ */
+export const AVAILABILITY_SETTLE_MS = 6000;
+let settle: ReturnType<typeof setTimeout> | null = null;
+
+function advance(): void {
+  useEpoch.setState((s) => ({ epoch: s.epoch + 1 }));
+}
+
 /** Availability may have changed (e.g. an explicit environment refresh): views re-read it. */
 export function runnerAvailabilityChanged(): void {
-  useEpoch.setState((s) => ({ epoch: s.epoch + 1 }));
+  advance();
+  if (settle !== null) clearTimeout(settle);
+  settle = setTimeout(() => {
+    settle = null;
+    advance();
+  }, AVAILABILITY_SETTLE_MS);
 }
 
 let listening = false;
