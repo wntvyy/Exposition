@@ -15,6 +15,7 @@
 //!   resolution and folder/containment steps.
 
 pub mod anchor;
+pub mod assets;
 pub mod driver;
 pub mod engine;
 pub mod extract;

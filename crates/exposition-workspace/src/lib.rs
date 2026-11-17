@@ -5,6 +5,7 @@ pub mod documents;
 pub mod encoding;
 pub mod error;
 pub mod fsutil;
+pub mod media;
 pub mod ops;
 pub mod recovery;
 pub mod root;

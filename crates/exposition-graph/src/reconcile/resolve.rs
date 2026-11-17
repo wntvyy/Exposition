@@ -123,49 +123,8 @@ impl Planner<'_> {
         base: PathBase,
         extensions: &[String],
     ) -> Vec<WorkspacePath> {
-        let dir = from.parent();
-        let mut bases: Vec<Option<WorkspacePath>> = Vec::new();
-        match base {
-            PathBase::File => bases.push(dir.clone()),
-            PathBase::Root => {
-                // A Python script's own folder comes first on its import path.
-                if extensions.iter().any(|e| e == "py") {
-                    bases.push(dir.clone());
-                }
-                bases.push(None);
-            }
-            PathBase::LatexMain => {
-                bases.push(dir.clone());
-                bases.push(None);
-                let mut mains: BTreeSet<Option<WorkspacePath>> = BTreeSet::new();
-                for m in self.index.latex_mains.iter().chain(self.planned_mains.iter()) {
-                    mains.insert(m.parent());
-                }
-                bases.extend(mains);
-            }
-        }
-        let mut out: Vec<WorkspacePath> = Vec::new();
-        let has_ext = written.rsplit('/').next().is_some_and(|n| n.contains('.'));
-        for b in bases {
-            let Some(p) = extract::join_relative(b.as_ref(), written) else { continue };
-            if has_ext || extensions.is_empty() {
-                out.push(p.clone());
-            }
-            for ext in extensions {
-                if let Ok(with) = WorkspacePath::parse(&format!("{}.{ext}", p.as_str())) {
-                    out.push(with);
-                }
-            }
-            if base == PathBase::Root
-                && extensions.iter().any(|e| e == "py")
-                && let Ok(init) = p.join("__init__.py")
-            {
-                out.push(init);
-            }
-        }
-        let mut seen = BTreeSet::new();
-        out.retain(|p| seen.insert(p.clone()));
-        out
+        let mains = self.index.latex_mains.iter().chain(self.planned_mains.iter());
+        path_candidates(from, written, base, extensions, mains)
     }
 
     /// The resource for a written path; admits a retained/attached generated
@@ -527,4 +486,61 @@ fn list(items: &[String], max: usize) -> String {
         shown.push(format!("{} more", items.len() - max));
     }
     shown.join("; ")
+}
+
+/// Candidate project paths for a path written in `from`, in the order they are
+/// tried: the base folders of `base` (for LaTeX also the folders of the
+/// project's main files `latex_mains`), each with the written name and then
+/// with each of `extensions` appended. Paths that leave the project are not
+/// candidates. Shared by the reconciler and transient readers (image previews).
+pub(crate) fn path_candidates<'a>(
+    from: &WorkspacePath,
+    written: &str,
+    base: PathBase,
+    extensions: &[String],
+    latex_mains: impl IntoIterator<Item = &'a WorkspacePath>,
+) -> Vec<WorkspacePath> {
+    let dir = from.parent();
+    let mut bases: Vec<Option<WorkspacePath>> = Vec::new();
+    match base {
+        PathBase::File => bases.push(dir.clone()),
+        PathBase::Root => {
+            // A Python script's own folder comes first on its import path.
+            if extensions.iter().any(|e| e == "py") {
+                bases.push(dir.clone());
+            }
+            bases.push(None);
+        }
+        PathBase::LatexMain => {
+            bases.push(dir.clone());
+            bases.push(None);
+            let mut mains: BTreeSet<Option<WorkspacePath>> = BTreeSet::new();
+            for m in latex_mains {
+                mains.insert(m.parent());
+            }
+            bases.extend(mains);
+        }
+    }
+    let mut out: Vec<WorkspacePath> = Vec::new();
+    let has_ext = written.rsplit('/').next().is_some_and(|n| n.contains('.'));
+    for b in bases {
+        let Some(p) = extract::join_relative(b.as_ref(), written) else { continue };
+        if has_ext || extensions.is_empty() {
+            out.push(p.clone());
+        }
+        for ext in extensions {
+            if let Ok(with) = WorkspacePath::parse(&format!("{}.{ext}", p.as_str())) {
+                out.push(with);
+            }
+        }
+        if base == PathBase::Root
+            && extensions.iter().any(|e| e == "py")
+            && let Ok(init) = p.join("__init__.py")
+        {
+            out.push(init);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    out.retain(|p| seen.insert(p.clone()));
+    out
 }

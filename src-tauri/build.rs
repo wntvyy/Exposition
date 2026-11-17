@@ -207,6 +207,9 @@ const COMMANDS: &[&str] = &[
     "lean_allow_local_build",
     "research_selection_get",
     "research_selection_set",
+    // QOL q/media: project images for the image tab and inline previews (src/media.rs).
+    "media_read_image",
+    "media_image_references",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

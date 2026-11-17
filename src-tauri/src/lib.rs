@@ -10,6 +10,7 @@ mod error;
 mod execution;
 mod graph;
 mod lean;
+mod media;
 mod page;
 mod project_data;
 mod project_ops;
@@ -266,6 +267,9 @@ pub fn run() {
             lean::lean_allow_local_build,
             setup::research_selection_get,
             setup::research_selection_set,
+            // QOL q/media: project images for the image tab and inline previews (src/media.rs).
+            media::media_read_image,
+            media::media_image_references,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Exposition")
