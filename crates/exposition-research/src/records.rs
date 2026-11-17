@@ -81,6 +81,11 @@ fn deleted_path(root: &Path, id: &str) -> PathBuf {
     join(root, RUNS).join(DELETED).join(format!("{id}.json"))
 }
 
+/// Whether `id`'s record is recoverably deleted (moved aside, restorable).
+pub(crate) fn record_deleted(root: &Path, id: &str) -> bool {
+    valid_run_id(id) && deleted_path(root, id).is_file()
+}
+
 fn artifact_dir(root: &Path, id: &str) -> PathBuf {
     join(root, ARTIFACTS).join(id)
 }
