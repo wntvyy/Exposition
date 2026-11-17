@@ -167,6 +167,7 @@ impl AppState {
             Some(Arc::new(SyncedBatchRunner {
                 inner: exposition_research::sandbox::batch_runner(Arc::clone(&research), execution.clone()),
                 research: Arc::clone(&research),
+                execution: execution.clone(),
                 availability: Mutex::new(HashMap::new()),
             }));
         let workflow_runs = crate::workflow_runs::build(
@@ -273,8 +274,15 @@ impl SourceReader for WorkspaceSources {
     }
 }
 
-/// A cached availability answer per project root, batch language, and mode.
-type AvailabilityKey = (PathBuf, exposition_research::batch::BatchLanguage, exposition_research::batch::BatchMode);
+/// A cached availability answer per project root, batch language, mode, and
+/// what the answer depends on that can change while the app runs: the
+/// execution settings (images, tool locations) and the folder's trust. A
+/// change to either is a new key, so it is never answered from the cache
+/// (review R1 XR-K-03: an image set in Settings stayed "unavailable").
+type AvailabilityKey =
+    (PathBuf, exposition_research::batch::BatchLanguage, exposition_research::batch::BatchMode, AvailabilityInputs);
+/// The execution settings (as JSON) and whether the root is trusted.
+type AvailabilityInputs = (String, bool);
 type AvailabilityAnswer = (std::time::Instant, Result<(), String>);
 
 /// The research batch runner as the workflow runner uses it: the research
@@ -286,10 +294,18 @@ type AvailabilityAnswer = (std::time::Instant, Result<(), String>);
 struct SyncedBatchRunner {
     inner: Arc<dyn exposition_research::batch::BatchRunner>,
     research: Arc<ResearchService>,
+    execution: ExecutionService,
     availability: Mutex<HashMap<AvailabilityKey, AvailabilityAnswer>>,
 }
 
 const BATCH_AVAILABILITY_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What an availability answer for `root` depends on, read now.
+fn availability_inputs(execution: &ExecutionService, root: &std::path::Path) -> AvailabilityInputs {
+    let settings = serde_json::to_string(&execution.settings()).unwrap_or_default();
+    let trusted = execution.trust_status(&root.to_string_lossy()).map(|s| s.trusted).unwrap_or(false);
+    (settings, trusted)
+}
 
 impl SyncedBatchRunner {
     fn sync(&self, root: &std::path::Path) -> Result<(), exposition_research::ResearchError> {
@@ -322,7 +338,7 @@ impl exposition_research::batch::BatchRunner for SyncedBatchRunner {
         language: exposition_research::batch::BatchLanguage,
         mode: exposition_research::batch::BatchMode,
     ) -> Result<(), String> {
-        let key = (root.to_path_buf(), language, mode);
+        let key = (root.to_path_buf(), language, mode, availability_inputs(&self.execution, root));
         if let Some((at, answer)) = self.availability.lock().unwrap_or_else(|p| p.into_inner()).get(&key)
             && at.elapsed() < BATCH_AVAILABILITY_TTL
         {
@@ -362,6 +378,74 @@ impl exposition_research::batch::BatchRunner for SyncedBatchRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Counts the availability questions that reach the real runner.
+    struct Counting(std::sync::atomic::AtomicUsize);
+    impl exposition_research::batch::BatchRunner for Counting {
+        fn availability(
+            &self,
+            _root: &std::path::Path,
+            _mode: exposition_research::batch::BatchMode,
+        ) -> Result<(), String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn run(
+            &self,
+            _root: &std::path::Path,
+            _request: &exposition_research::batch::BatchRequest,
+            _control: &exposition_research::batch::BatchControl<'_>,
+        ) -> Result<exposition_research::batch::BatchResult, exposition_research::ResearchError> {
+            unreachable!("availability only")
+        }
+    }
+
+    /// XR-K-03: an availability answer is reused only while the settings
+    /// and the folder's trust it was given under are unchanged.
+    #[test]
+    fn a_cached_availability_answer_never_outlives_a_settings_or_trust_change() {
+        use exposition_research::batch::{BatchMode, BatchRunner};
+        let outer = std::env::temp_dir().join(format!("xpn-avail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outer);
+        let root = outer.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let data = outer.join("appdata");
+        let execution = ExecutionService::with_config(ExecutionConfig::new(&data)).unwrap();
+        let research = Arc::new(ResearchService::new(ResearchConfig::new(
+            data.clone(),
+            Arc::new(ExecutionLauncher::new(execution.clone())),
+            Arc::new(DocumentService::new()),
+        )));
+        let inner = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));
+        let runner = SyncedBatchRunner {
+            inner: inner.clone(),
+            research,
+            execution: execution.clone(),
+            availability: Mutex::new(HashMap::new()),
+        };
+        let asked = || inner.0.load(std::sync::atomic::Ordering::SeqCst);
+        runner.availability(&root, BatchMode::Restricted).unwrap();
+        runner.availability(&root, BatchMode::Restricted).unwrap();
+        assert_eq!(asked(), 1, "unchanged inputs are answered from the cache");
+        execution
+            .update_settings(|s| {
+                s.tool_paths.insert("python".into(), "C:\\Python\\python.exe".into());
+            })
+            .unwrap();
+        runner.availability(&root, BatchMode::Restricted).unwrap();
+        assert_eq!(asked(), 2, "a settings change asks again");
+        execution.grant_trust(&root.to_string_lossy()).unwrap();
+        runner.availability(&root, BatchMode::Restricted).unwrap();
+        assert_eq!(asked(), 3, "a trust grant asks again");
+        runner.availability(&root, BatchMode::Restricted).unwrap();
+        assert_eq!(asked(), 3);
+        execution.revoke_trust(&root.to_string_lossy()).unwrap();
+        runner.availability(&root, BatchMode::Restricted).unwrap();
+        assert_eq!(asked(), 4, "a trust revoke asks again");
+        drop(runner);
+        let _ = std::fs::remove_dir_all(&outer);
+    }
 
     /// A development build started without credential variables (`npm run
     /// dev`, or an e2e run whose scenario sets no namespace) must not read the
