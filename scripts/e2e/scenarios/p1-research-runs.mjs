@@ -145,7 +145,8 @@ export default async function p1ResearchRuns({ launchApp, artifactsDir, assert }
 
     // --- 4. palette on a focused run row --------------------------------------------------
     await row(r3.id).focus();
-    await runCommand(page, "Delete Selected Items", /Delete Selected Items$/);
+    // The palette item text ends with its key ("…ItemsDelete"); not the Permanently one.
+    await runCommand(page, "Delete Selected Items", /^Edit: Delete Selected Items(?! Permanently)/);
     await expectNoDialog(page, assert, 600, "palette delete applies at once");
     await waitFor(async () => !(await listed()).includes(r3.id), { timeout: 15_000, message: "run 3 deleted from the palette" });
     evidence.notes.push("palette: Edit: Delete Selected Items deleted the focused run's record");

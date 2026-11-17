@@ -123,7 +123,11 @@ export default async function pageRecovery({ launchApp, artifactsDir, assert, fi
       () => !!document.activeElement?.closest('[data-testid="source-editor"][data-path="main.typ"]'),
     );
     assert.ok(focusedInSource, "keyboard focus is in the source editor");
-    assert.equal(await editor.getAttribute("data-build"), goodBuild, "the last good pages are still shown beside the source");
+    // The Split's page view attaches anew and shows the same last good pages.
+    await waitFor(async () => (await editor.getAttribute("data-build")) === goodBuild, {
+      timeout: 10_000,
+      message: "the last good pages shown beside the source",
+    });
     await page.waitForTimeout(300);
     await shot("04-diagnostic-shown-in-split");
     evidence.push(`XR-B-01: Problems click on "${location}" switched Page → Split, Monaco active line ${activeLine}, focus in source`);
