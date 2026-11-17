@@ -1,5 +1,5 @@
 // Typst math: equation locator (markup / code / math modes), parser, serializer.
-import { classOf, entryById, entryByGlyph, entryByLatex, entryByTypst } from "./catalog";
+import { allEntries, classOf, entryById, entryByGlyph, entryByLatex, entryByTypst } from "./catalog";
 import { contextFrom, isLimitFunc, type Region } from "./latex";
 import { isComplete, isEmptyRow, row } from "./tree";
 import type { CatalogEntry, EquationRange, MathLanguageAdapter, MathNode, MathRow, ParseResult, SerializeResult } from "./types";
@@ -19,6 +19,8 @@ const isIdContinue = (c: string | undefined) => c !== undefined && /[\p{L}\p{N}_
 class TypstScanner {
   readonly equations: EquationRange[] = [];
   readonly regions: (Region & { markup?: boolean })[] = [];
+  /** Nesting of equations being scanned. */
+  private mathDepth = 0;
   /** Set when a comment, string, raw text, code group, or content block runs to the end unclosed. */
   unterminated = false;
   constructor(private readonly text: string) {}
@@ -115,6 +117,15 @@ class TypstScanner {
 
   /** An equation starting at the `$` at `i`; returns the offset after its closing `$`. */
   math(i: number): number {
+    this.mathDepth++;
+    try {
+      return this.mathBody(i);
+    } finally {
+      this.mathDepth--;
+    }
+  }
+
+  private mathBody(i: number): number {
     const t = this.text;
     let j = i + 1;
     while (j < t.length) {
@@ -148,7 +159,8 @@ class TypstScanner {
     }
     const content = t.slice(i + 1, j);
     const block = content.length > 0 && /^\s/.test(content) && /\s$/.test(content);
-    this.equations.push({ start: i, end: j + 1, contentStart: i + 1, contentEnd: j, display: block, style: block ? "typst-block" : "typst-inline" });
+    // An equation nested in an equation (`$x #[$y$] z$`) is part of the outer one.
+    if (this.mathDepth === 1) this.equations.push({ start: i, end: j + 1, contentStart: i + 1, contentEnd: j, display: block, style: block ? "typst-block" : "typst-inline" });
     return j + 1;
   }
 
@@ -336,6 +348,31 @@ const SHORTHAND_OUT = new Map<string, string>([
 const TYPST_ALIASES: Record<string, string> = {
   oo: "calc.infty",
   gradient: "calc.nabla",
+  nabla: "calc.nabla",
+  // A symbol name without modifiers is its first variant (codex): `dot` is `dot.op`.
+  dot: "op.cdot",
+  dots: "dots.c",
+  arrow: "arrow.r",
+  arrows: "arrows.rr",
+  harpoon: "harpoon.rt",
+  harpoons: "harpoons.rtlb",
+  tack: "rel.vdash",
+  bar: "delim.vert",
+  ast: "op.ast",
+  tilde: "rel.sim",
+  star: "op.star",
+  paren: "delim.paren.l",
+  brace: "delim.brace.l",
+  bracket: "delim.bracket.l",
+  chevron: "delim.angle.l",
+  ceil: "delim.ceil.l",
+  floor: "delim.floor.l",
+  corner: "delim.corner.tl",
+  mustache: "delim.moustache.l",
+  circle: "misc.circ.big",
+  square: "misc.square",
+  lozenge: "misc.lozenge",
+  without: "op.setminus",
   "angle.l": "delim.angle.l",
   "angle.r": "delim.angle.r",
   "dots.c": "dots.c",
@@ -793,8 +830,11 @@ class TypstParser {
       case "number":
         return { kind: "number", text: t.v };
       case "str": {
-        const text = t.v.slice(1, -1).replace(/\\(.)/g, "$1");
-        return text === "" ? null : { kind: "text", text };
+        const body = t.v.slice(1, -1);
+        const text = unescapeString(body);
+        if (text === "") return null;
+        // The written form is kept when it is not the one the writer would produce (`\u{3b1}`).
+        return escapeString(text) === body ? { kind: "text", text } : { kind: "text", text, raw: body };
       }
       case "comment":
         return this.opaque(t.s, t.e, "comment");
@@ -937,7 +977,8 @@ class TypstParser {
           ceil: ["delim.ceil.l", "delim.ceil.r"],
         };
         const [l, r] = ids[name] as [string, string];
-        return { kind: "delim", left: l, right: r, body: one, form: "func" };
+        // Same tree as `lr(|x|)` and a template: Typst writes both as `abs(x)`.
+        return { kind: "delim", left: l, right: r, body: one };
       }
       case "lr": {
         if (!one) return opaque();
@@ -952,10 +993,17 @@ class TypstParser {
         return opaque();
       }
       case "op": {
-        if (!flat || flat.length !== 1 || named) return opaque();
+        if (!flat || flat.length < 1 || flat.length > 2) return opaque();
         const m = /^\s*"([^"\\]*)"\s*$/.exec(flat[0] as string);
         if (!m) return opaque();
         const text = m[1] as string;
+        if (flat.length === 2) {
+          // Only the catalog's own `op("...", limits: #true)` operators (arg max, arg min).
+          if (!/^\s*limits\s*:\s*#true\s*$/.test(flat[1] as string)) return opaque();
+          const limited = entryByTypst(`op("${text}", limits: #true)`);
+          return limited?.role === "func" ? { kind: "func", name: limited.id } : opaque();
+        }
+        if (named) return opaque();
         const e = entryByLatex(`\\operatorname{${text}}`);
         if (e?.role === "func") return { kind: "func", name: e.id };
         return { kind: "func", name: "func.operatorname", text };
@@ -983,6 +1031,12 @@ class TypstParser {
         return this.gridCall(name, args.inner, opaque);
     }
     if (FONT_FUNCS.has(name) && one) {
+      // Catalog symbols spelled with a style function (`upright(e)`, `bb(k)`) read back as the symbol.
+      const letter = one.children.length === 1 ? one.children[0] : undefined;
+      if (letter?.kind === "ident") {
+        const symbol = entryByTypst(`${name}(${letter.text})`);
+        if (symbol?.role === "symbol") return { kind: "symbol", id: symbol.id };
+      }
       // bold(upright(x)) and upright(bold(x)) are LaTeX \mathbf.
       const inner = one.children.length === 1 ? one.children[0] : undefined;
       if ((name === "bold" || name === "upright") && inner?.kind === "font") {
@@ -992,8 +1046,15 @@ class TypstParser {
       const fontId = name === "bold" ? "font.boldsymbol" : (entryByTypst(name)?.id ?? "");
       if (fontId) return { kind: "font", font: fontId, body: one };
     }
-    const e = entryByTypst(name);
-    if (e?.role === "accent") return one ? { kind: "accent", accent: e.id, body: one } : opaque();
+    const accent = ACCENT_BY_TYPST.get(name);
+    if (accent) return one ? { kind: "accent", accent, body: one } : opaque();
+    const aliased = TYPST_ALIASES[name];
+    const e = aliased ? entryById(aliased) : entryByTypst(name);
+    if (e && (e.role === "symbol" || e.role === "delim") && ACCENT_CHARS.has(e.glyph)) {
+      // Typst calls a symbol whose character is an accent as that accent (`arrow.r(x)`, `dot.op(x)`).
+      const byGlyph = ACCENT_BY_GLYPH[e.glyph];
+      return byGlyph && one ? { kind: "accent", accent: byGlyph, body: one } : opaque();
+    }
     if (e && (e.role === "symbol" || e.role === "func" || e.role === "bigop" || e.role === "delim")) {
       // `sin(x)`, `alpha(x)`: juxtaposition with a parenthesized group.
       this.pos = save;
@@ -1141,6 +1202,15 @@ export const TYPST_SPACING_TO_LATEX: Record<string, string> = { thin: "\\,", med
 const LITERAL_ASCII = new Set(["+", "=", "<", ">", "!", ",", ";", ":", ".", "?", "|", "(", ")", "[", "]", "{", "}"]);
 const SHORTHAND_PREFIXES = new Set(SHORTHANDS.flatMap(([k]) => [...Array(k.length).keys()].slice(1).map((n) => k.slice(0, n + 1))));
 
+/**
+ * Every form this writer emits reads back as the same tree (property.test.ts), except catalog
+ * variants that Typst spells identically and that therefore read back as the first entry:
+ * hslash → hbar (`planck`), smallsetminus → setminus (`without`), \implies / \impliedby / \iff →
+ * the long double arrows, \prime → `'`, \vert / \Vert commands and \lvert…\rvert → `|` / `||`,
+ * \colon → `:`, \widehat / \widetilde → hat / tilde, \overrightarrow → vec (`arrow`),
+ * \bm → \boldsymbol (`bold`), \triangle / \triangledown → \bigtriangleup / \bigtriangledown.
+ * Typst `lr(|x|)` and `abs(x)` are the same tree (written `abs(x)`).
+ */
 class TypstWriter {
   readonly unsupported: { what: string; reason: string }[] = [];
   /** Unpaired bracket symbols in the current row may be written literally (they balance). */
@@ -1179,13 +1249,19 @@ class TypstWriter {
     if (short && e.role !== "delim") return { text: short, cls };
     if (id === "delim.Vert" || id === "delim.Vert.cmd") return { text: "||", cls };
     if (e.typst) return { text: e.typst.name, cls, name: /^[\p{L}][\p{L}\p{N}.]*$/u.test(e.typst.name) && e.typst.name.length > 1 };
+    // No verified Typst spelling: write the character (Typst accepts Unicode) but report it,
+    // so that a draft holding it is not applied silently.
+    this.reject(id, "no verified Typst spelling");
     if (e.glyph && [...e.glyph].length === 1) return { text: e.glyph, cls };
+    return { text: "", cls };
     this.reject(id, "no Typst equivalent");
     return { text: "", cls };
   }
 
   /** Operand of `^`, `_`, or a slash fraction: atomic as is, otherwise parenthesized. */
   private operand(r: MathRow, inArgs: boolean): string {
+    // An empty operand is the empty string (`x^""`), like empty arguments and cells.
+    if (r.children.length === 0) return '""';
     const text = this.row(r, true, inArgs);
     return this.atomic(r) ? text : `(${text})`;
   }
@@ -1196,7 +1272,11 @@ class TypstWriter {
     // `f(x)` / `sin(x)`: a name directly followed by a group is one unit in Typst.
     if (r.children.length === 2) {
       const [a, b] = r.children as [MathNode, MathNode];
-      return (a.kind === "func" || (a.kind === "ident" && [...a.text].length === 1)) && b.kind === "delim" && b.form !== "func";
+      // Only a group written with a bracket character joins the name (`f(x)`, not `f abs(x)`).
+      const bracket = (id: string) => ["delim.paren.l", "delim.bracket.l", "delim.brace.l"].includes(id);
+      // A function written as a call (`op("rank")`) is complete; only bare names group (`sin(x)`).
+      const bareFunc = a.kind === "func" && a.name !== "func.operatorname" && /^[A-Za-z]+$/.test(entryById(a.name)?.typst?.name ?? "");
+      return (bareFunc || (a.kind === "ident" && [...a.text].length === 1)) && b.kind === "delim" && bracket(b.left) && b.form !== "func";
     }
     if (r.children.length !== 1) return false;
     const n = r.children[0] as MathNode;
@@ -1235,6 +1315,8 @@ class TypstWriter {
   /** One call argument; `""` keeps `t: x` from being read as a named argument. */
   private argText(r: MathRow): string {
     const text = this.row(r, false, true);
+    // An empty argument would be a missing argument: write the empty string.
+    if (text === "") return '""';
     return NAMED_ARG.test(text) ? `""${text}` : text;
   }
 
@@ -1248,7 +1330,8 @@ class TypstWriter {
         return this.symbolText(n.id, inArgs);
       case "text":
         // An empty text renders nothing (and `""` is read back as an empty operand).
-        return { text: n.text === "" ? "" : `"${n.text.replace(/[\\"]/g, (c) => `\\${c}`)}"`, cls: "ord" };
+        if (n.text === "") return { text: "", cls: "ord" };
+        return { text: `"${n.raw !== undefined && unescapeString(n.raw) === n.text ? n.raw : escapeString(n.text)}"`, cls: "ord" };
       case "frac":
         if (n.variant === "slash") return { text: `${this.operand(n.num, inArgs)} / ${this.operand(n.den, inArgs)}`, cls: "ord" };
         return { text: `${n.variant === "binom" ? "binom" : "frac"}(${this.args(n.num, n.den)})`, cls: "ord" };
@@ -1427,6 +1510,51 @@ function nestsDirectly(inner: Extract<MathNode, { kind: "scripts" }>, outer: Ext
   return a !== null && single(outer) === a;
 }
 
+/** Typst string literal bodies: `\\\\`, `\\"`, `\\n`, `\\r`, `\\t`, `\\u{...}`. */
+function unescapeString(body: string): string {
+  return body.replace(/\\(u\{([0-9A-Fa-f]+)\}|.)/gs, (m, e: string, hex: string | undefined) => {
+    if (hex !== undefined) {
+      const cp = parseInt(hex, 16);
+      return cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+    }
+    return e === "n" ? "\n" : e === "r" ? "\r" : e === "t" ? "\t" : e;
+  });
+}
+
+function escapeString(text: string): string {
+  return text.replace(/[\\"\n\r\t]/g, (c) => (c === "\n" ? "\\n" : c === "\r" ? "\\r" : c === "\t" ? "\\t" : `\\${c}`));
+}
+
+/** Accent functions by Typst name (first catalog entry wins: `hat` is \hat, not \widehat). */
+const ACCENT_BY_TYPST = new Map<string, string>();
+for (const e of allEntries()) if (e.role === "accent" && e.typst && !ACCENT_BY_TYPST.has(e.typst.name)) ACCENT_BY_TYPST.set(e.typst.name, e.id);
+
+/** Characters Typst accepts as accents (typst-library math/accent.rs) and their catalog accents. */
+const ACCENT_BY_GLYPH: Record<string, string> = {
+  "`": "accent.grave",
+  "´": "accent.acute",
+  "^": "accent.hat",
+  "ˆ": "accent.hat",
+  "~": "accent.tilde",
+  "∼": "accent.tilde",
+  "˜": "accent.tilde",
+  "¯": "accent.bar",
+  "˘": "accent.breve",
+  ".": "accent.dot",
+  "˙": "accent.dot",
+  "⋅": "accent.dot",
+  "¨": "accent.ddot",
+  "∘": "accent.mathring",
+  "○": "accent.mathring",
+  "ˇ": "accent.check",
+  "←": "accent.overleftarrow",
+  "→": "accent.vec",
+  "⟶": "accent.vec",
+  "↔": "accent.overleftrightarrow",
+  "⟷": "accent.overleftrightarrow",
+};
+const ACCENT_CHARS = new Set([...Object.keys(ACCENT_BY_GLYPH), "-", "–", "‾", "−", "˝", "↼", "⇀"]);
+
 /** Concatenate, separating characters that would otherwise form a shorthand (`[|`, `|]`, `||`). */
 function glue(a: string, b: string): string {
   if (!a || !b) return a + b;
@@ -1485,15 +1613,18 @@ function joinTypst(pieces: Piece[], script: boolean): string {
         // with it as one operand; only a plain group after a simple atom may stay attached.
         // A name (letters, then letters or digits) must not run into the next letter or digit.
         const tail = /[\p{L}\p{N}]+$/u.exec(prev.text)?.[0] ?? "";
-        const continuable = last === '"' || /^\p{L}/u.test(tail);
+        // Escapes (`\;`) are continuable too.
+        const continuable = last === '"' || /^\p{L}/u.test(tail) || /\\\S$/.test(prev.text);
         if (/^\p{L}/u.test(tail) && /[\p{L}\p{N}]/u.test(first)) sep = " ";
         else if (continuable && OPENING_START.test(p.text)) {
           const simple = (prev.kind === "ident" || prev.kind === "text" || prev.kind === "func") && !prev.name;
           if (!(simple && p.kind === "delim")) sep = " ";
         } else if (prev.name && first === ".") sep = " ";
+        // Digits of different pieces must not form one number.
+        else if (/\p{N}/u.test(last) && /\p{N}/u.test(first) && !(prev.kind === "number" && p.kind === "number")) sep = " ";
         else if (SHORTHAND_PREFIXES.has(last + first) || (last === "/" && (first === "/" || first === "*"))) sep = " ";
         else if (!script && a === "op" && /[_^]/.test(prev.text)) sep = " ";
-        else if ((prev.kind === "scripts" || prev.kind === "bigop") && /[\p{L}\p{N}.]/u.test(first)) sep = " ";
+        else if ((prev.kind === "scripts" || prev.kind === "bigop" || prev.kind === "frac") && /[\p{L}\p{N}.]/u.test(first)) sep = " ";
         else if (!script && /[\p{L}\p{N}"]/u.test(first) && (/[_^](\p{N}+|\p{L})$|[)"]$/u.test(prev.text) || a === "op")) sep = " ";
         else if (!script && first === '"' && /[\p{L}\p{N}]/u.test(last)) sep = " ";
       }

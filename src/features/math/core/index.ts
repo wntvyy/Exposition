@@ -48,10 +48,19 @@ export function adapterFor(language: MathLanguage): MathLanguageAdapter {
  */
 export function withContentLayout(oldContent: string, newSource: string): string {
   const lead = /^\s*/.exec(oldContent)?.[0] ?? "";
-  const trail = lead.length === oldContent.length ? "" : (/\s*$/.exec(oldContent)?.[0] ?? "");
+  let trail = lead.length === oldContent.length ? "" : (/\s*$/.exec(oldContent)?.[0] ?? "");
   const indent = lead.includes("\n") ? lead.slice(lead.lastIndexOf("\n") + 1) : "";
-  const nl = oldContent.includes("\r\n") ? "\r\n" : "\n";
-  const body = newSource.replace(/\r?\n/g, `${nl}${indent}`);
+  const nl = oldContent.includes("\r\n") || (!oldContent.includes("\n") && newSource.includes("\r\n")) ? "\r\n" : "\n";
+  // Source ending with a line break (after a `%` or `//` comment) needs exactly one line end
+  // before the closing delimiter; no line of the result may be white space only (a blank
+  // line inside display math is a TeX error).
+  const needsBreak = /\n[ \t]*$/.test(newSource);
+  const body = newSource
+    .replace(/\s+$/, "")
+    .split(/\r?\n/)
+    .map((line, i) => (i === 0 || line.trim() === "" ? line.trimEnd() : `${indent}${line}`))
+    .join(nl);
+  if (needsBreak && !trail.includes("\n")) trail = `${nl}${trail}`;
   return `${lead}${body}${trail}`;
 }
 

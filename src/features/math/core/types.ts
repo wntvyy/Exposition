@@ -33,6 +33,8 @@ export type MathNode =
       text: string;
       /** LaTeX command when not `\text` (`\textrm`, `\mbox`, `\textit`, `\textbf`, `\textnormal`). */
       command?: string;
+      /** Typst string body as written (escapes such as `\u{3b1}` kept); used while it still decodes to `text`. */
+      raw?: string;
     }
   | {
       kind: "frac";
@@ -68,7 +70,8 @@ export type MathNode =
       body: MathRow;
       /**
        * Source form: absent = scalable (`\left( ... \right)`, Typst natural/`lr`); "plain" = fixed-size
-       * characters (`( ... )` in LaTeX); "func" = Typst `abs()`/`norm()`/`floor()`/`ceil()`.
+       * characters (`( ... )` in LaTeX); "func" = Typst `abs()`/`norm()`/`floor()`/`ceil()` (the Typst
+       * reader produces the absent form for those, since Typst writes both alike).
        */
       form?: "plain" | "func";
     }

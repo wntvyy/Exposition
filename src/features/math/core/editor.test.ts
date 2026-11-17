@@ -298,7 +298,7 @@ describe("deletion", () => {
     s = setCaret(fromLatex("\\frac{a}{b}"), { path: [0, "den"], offset: 0 });
     expect(deleteBackward(s).caret).toEqual({ path: [0, "num"], offset: 1 });
     // Delimiters, accents, roots unwrap.
-    for (const [input, out] of [["\\left( x \\right)", "x"], ["\\hat{x}", "x"], ["\\sqrt{x}", "x"], ["\\mathbb{R}", "R"]]) {
+    for (const [input, out] of [["\\left( x \\right)", "x"], ["\\hat{x}", "x"], ["\\sqrt{x}", "x"], ["\\mathbb{x}", "x"]]) {
       expect(src(deleteBackward(setCaret(fromLatex(input as string), { path: [0, "body"], offset: 0 })))).toBe(out);
     }
     // Empty root index is removed.

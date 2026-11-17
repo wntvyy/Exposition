@@ -34,6 +34,11 @@ export const LATEX_MATH_ENVS = new Set([
   "math",
   "eqnarray",
   "eqnarray*",
+  "alignat",
+  "alignat*",
+  "xalignat",
+  "xalignat*",
+  "xxalignat",
 ]);
 const VERBATIM_ENVS = new Set(["verbatim", "verbatim*", "lstlisting", "minted", "comment", "Verbatim", "BVerbatim", "LVerbatim"]);
 
@@ -63,6 +68,20 @@ function readBraced(text: string, i: number): { value: string; end: number } | n
   return { value: text.slice(j + 1, close), end: close + 1 };
 }
 
+/** End of a `{...}` argument read verbatim (balanced braces, no comments); null when absent. */
+function readVerbatimGroup(text: string, i: number): number | null {
+  let j = i;
+  while (text[j] === " ") j++;
+  if (text[j] !== "{") return null;
+  let depth = 0;
+  for (; j < text.length; j++) {
+    if (text[j] === "\\") j++;
+    else if (text[j] === "{") depth++;
+    else if (text[j] === "}" && --depth === 0) return j + 1;
+  }
+  return null;
+}
+
 /** Skip a control sequence starting at the backslash `i`; returns the offset after it. */
 function skipControl(text: string, i: number): number {
   if (isLetter(text[i + 1])) {
@@ -76,6 +95,8 @@ function skipControl(text: string, i: number): number {
 /** Find the end of math content starting at `i`, stopping at `closer` (outside comments and escapes). */
 function findMathClose(text: string, i: number, closer: "$" | "$$" | "\\)" | "\\]"): number {
   let j = i;
+  // Brace depth: a closer inside a group (e.g. `$` of math nested in `\text{...}`) is not ours.
+  let depth = 0;
   while (j < text.length) {
     const c = text[j];
     if (c === "%") {
@@ -83,12 +104,14 @@ function findMathClose(text: string, i: number, closer: "$" | "$$" | "\\)" | "\\
       j = nl < 0 ? text.length : nl + 1;
       continue;
     }
+    if (c === "{") depth++;
+    else if (c === "}") depth = Math.max(0, depth - 1);
     if (c === "\\") {
-      if (closer.startsWith("\\") && text.startsWith(closer, j)) return j;
+      if (depth === 0 && closer.startsWith("\\") && text.startsWith(closer, j)) return j;
       j = skipControl(text, j);
       continue;
     }
-    if (c === "$") {
+    if (c === "$" && depth === 0) {
       if (closer === "$") return j;
       if (closer === "$$") return text.startsWith("$$", j) ? j : -1;
       // A stray dollar inside \( \) or \[ \] is an error; keep scanning.
@@ -210,6 +233,14 @@ export function scanLatex(text: string): LatexScan {
     }
     const after = skipControl(text, i);
     const word = text.slice(i + 1, after);
+    if (word === "url" || word === "href" || word === "path") {
+      // URL arguments are read verbatim: `%` and `#` there are not comments.
+      const arg = readVerbatimGroup(text, after);
+      if (arg) {
+        i = arg;
+        continue;
+      }
+    }
     if (word === "verb" || word === "lstinline") {
       let j = after;
       if (text[j] === "*") j++;
@@ -234,12 +265,15 @@ export function scanLatex(text: string): LatexScan {
         continue;
       }
       if (name && LATEX_MATH_ENVS.has(name.value)) {
-        const end = findEnvEnd(text, name.end, name.value);
+        // alignat-style environments take a column count `{n}`; it stays outside the content.
+        const columns = /alignat/.test(name.value) ? readBraced(text, name.end) : null;
+        const bodyStart = columns ? columns.end : name.end;
+        const end = findEnvEnd(text, bodyStart, name.value);
         if (end && end.end <= bodyEnd) {
           equations.push({
             start: i,
             end: end.end,
-            contentStart: name.end,
+            contentStart: bodyStart,
             contentEnd: end.start,
             display: name.value !== "math",
             style: name.value,
@@ -540,21 +574,56 @@ class LatexParser {
   private parseCells(stop: Stop): MathRow[][] {
     const rows: MathRow[][] = [[]];
     let rowStart = -1;
+    let modifier: MathNode | null = null;
     for (;;) {
-      const cell = this.parseRow((t) => t.k === "amp" || this.isRowBreak(t) || stop(t), false);
+      let cell = this.parseRow((t) => t.k === "amp" || this.isRowBreak(t) || stop(t), false);
       const current = rows[rows.length - 1] as MathRow[];
+      if (modifier && current.length === 0) cell = row([modifier, ...cell.children]);
+      modifier = null;
       current.push(cell);
       const t = this.peek();
       if (!t || stop(t)) break;
       this.pos++;
       if (t.k === "amp") continue;
-      // Row break (a `[2pt]` spacing argument stays visible as text of the next cell).
+      // Row break; `\\*` and `\\[len]` written directly after it belong to it.
+      modifier = this.rowBreakModifier(t.e);
       rows.push([]);
       rowStart = this.pos;
     }
     // A final `\\` followed by nothing ends the last row instead of starting an empty one.
     const blank = rowStart >= 0 && this.toks.slice(rowStart, this.pos).every((t) => t.k === "space");
     return blank ? dropTrailingEmptyRow(rows) : rows;
+  }
+
+  /** `*` and/or `[len]` directly after a `\\\\` (no space, as amsmath reads them): an opaque modifier. */
+  private rowBreakModifier(from: number): MathNode | null {
+    let p = this.pos;
+    let end = from;
+    const at = (k: number, v: string) => {
+      const x = this.toks[k];
+      return x?.k === "char" && x.v === v && x.s === end;
+    };
+    if (at(p, "*")) {
+      end = (this.toks[p] as Tok).e;
+      p++;
+    }
+    if (at(p, "[")) {
+      let depth = 0;
+      for (let q = p + 1; q < this.toks.length; q++) {
+        const x = this.toks[q] as Tok;
+        if (x.k === "open") depth++;
+        else if (x.k === "close") depth--;
+        else if (depth === 0 && x.k === "char" && x.v === "]") {
+          end = x.e;
+          p = q + 1;
+          break;
+        }
+        if (depth < 0) break;
+      }
+    }
+    if (end === from) return null;
+    this.pos = p;
+    return this.opaque(from, end, ROW_BREAK_MODIFIER);
   }
 
   /** Parse nodes until `stop` matches (not consumed), a `}` closing the group (when `inGroup`), or the end. */
@@ -913,7 +982,7 @@ class LatexParser {
         nodes.push({ kind: "func", name: entry.id });
         return;
       }
-      if (!star && /^[A-Za-z0-9 -]+$/.test(g.inner)) {
+      if (!star && /^[A-Za-z0-9 -]*$/.test(g.inner)) {
         nodes.push({ kind: "func", name: "func.operatorname", text: g.inner });
         return;
       }
@@ -980,7 +1049,15 @@ class LatexParser {
           nodes.push(this.opaqueRest(t.s, stop, `missing argument of ${name}`));
           return;
         }
-        // `\mathbb{R}` style catalog commands (with an argument) are looked up first.
+        // Catalog symbols spelled as a font command (`\mathbb{R}`, `\mathrm{d}`) read back as that symbol.
+        const only = arg.row.children.length === 1 ? arg.row.children[0] : undefined;
+        if (entry.role === "font" && only?.kind === "ident") {
+          const symbol = entryByLatex(`${name}{${only.text}}`);
+          if (symbol && symbol.role === "symbol") {
+            nodes.push({ kind: "symbol", id: symbol.id });
+            return;
+          }
+        }
         nodes.push(entry.role === "accent" ? { kind: "accent", accent: entry.id, body: arg.row } : { kind: "font", font: entry.id, body: arg.row });
         return;
       }
@@ -988,6 +1065,12 @@ class LatexParser {
       return;
     }
     const end = this.swallowArgs(t.e);
+    // Catalog symbols written with several tokens (`\\stackrel{\\text{def}}{=}`).
+    const spelled = entryByLatex(this.src.slice(t.s, end));
+    if (spelled && (spelled.role === "symbol" || spelled.role === "func")) {
+      nodes.push(this.symbolNode(spelled, this.src.slice(t.s, end)));
+      return;
+    }
     nodes.push(this.opaque(t.s, end, `unknown command ${name}`));
   }
 
@@ -1140,6 +1223,16 @@ function endsInComment(source: string): boolean {
     else if (line[i] === "%") return true;
   }
   return false;
+}
+
+/** Reason of the opaque node holding a row break's `*` / `[len]` (first node of the next row). */
+export const ROW_BREAK_MODIFIER = "row break modifier";
+
+/** Separate a row's leading row-break modifier from its cells. */
+function splitModifier(cells: MathRow[]): { mod: string; cells: MathRow[] } {
+  const first = cells[0]?.children[0];
+  if (first?.kind !== "opaque" || first.reason !== ROW_BREAK_MODIFIER) return { mod: "", cells };
+  return { mod: first.source, cells: [row((cells[0] as MathRow).children.slice(1)), ...cells.slice(1)] };
 }
 
 /** An empty last row is written as `{}` so that it is not read back as a trailing `\\\\`. */
@@ -1348,8 +1441,13 @@ class LatexWriter {
       }
       case "cases": {
         this.need("amsmath");
-        const rows = n.rows.map(([v, c]) => (isEmptyRow(c) ? this.row(v, false, true) : `${this.row(v, false, true)} & ${this.row(c, false, true)}`));
-        return { text: `\\begin{cases} ${keepLastRow(rows).join(" \\\\ ")} \\end{cases}`, cls: "ord" };
+        const parts = n.rows.map(([v, c]) => {
+          const { mod, cells } = splitModifier([v, c]);
+          const [value, condition] = cells as [MathRow, MathRow];
+          return { mod, text: isEmptyRow(condition) ? this.row(value, false, true) : `${this.row(value, false, true)} & ${this.row(condition, false, true)}` };
+        });
+        const body = keepLastRow(parts.map((x) => x.text)).reduce((out, text, i) => (i === 0 ? text : out + this.rowBreak(" \\\\ ", (parts[i] as { mod: string }).mod) + text), "");
+        return { text: `\\begin{cases} ${body} \\end{cases}`, cls: "ord" };
       }
       case "aligned": {
         if (n.bare) return { text: this.grid(n.rows, " \\\\\n"), cls: "ord" };
@@ -1365,7 +1463,8 @@ class LatexWriter {
 
   /** Cells joined by `&`; a cell starting with a relation attaches to it (`a &= b`). */
   private grid(rows: MathRow[][], rowSep: string): string {
-    const texts = rows.map((cells) =>
+    const parts = rows.map((cells) => splitModifier(cells));
+    const texts = parts.map(({ cells }) =>
         cells
           .map((c, i) => {
             const text = this.row(c, false, true);
@@ -1377,7 +1476,15 @@ class LatexWriter {
           .join(" ")
           .replace(/^ /, ""),
       );
-    return keepLastRow(texts).join(rowSep);
+    return keepLastRow(texts).reduce((out, text, i) => (i === 0 ? text : out + this.rowBreak(rowSep, (parts[i] as { mod: string }).mod) + text), "");
+  }
+
+  /** The row separator with a preserved `*` / `[len]` modifier attached to `\\\\`. */
+  private rowBreak(sep: string, mod: string): string {
+    if (!mod) return sep;
+    if (this.dialect === "markdown") this.reject("opaque", `the Markdown print profile does not support \\\\${mod}`);
+    const kept = this.dialect === "preview" ? mod.replace(/^\*/, "") : mod;
+    return sep.replace("\\\\", () => `\\\\${kept}`);
   }
 
   private opaque(n: Extract<MathNode, { kind: "opaque" }>): string {
@@ -1528,10 +1635,17 @@ export function latexAddRequirement(text: string, req: Requirement): { offset: n
   for (const m of stripped.slice(0, limit).matchAll(/\\(?:usepackage|documentclass)\s*(?:\[[^\]]*\])?\s*\{[^}]*\}/g)) {
     anchor = (m.index ?? 0) + m[0].length;
   }
-  if (anchor < 0) return null;
+  const line = `\\usepackage{${req.name}}`;
+  if (anchor < 0) {
+    // No package line yet: directly before \begin{document}, when there is one.
+    if (!begin) return null;
+    return { offset: begin.start, insert: `${begin.start > 0 && text[begin.start - 1] !== "\n" ? nl : ""}${line}${nl}` };
+  }
   const lineEnd = text.indexOf("\n", anchor);
-  if (lineEnd < 0) return { offset: text.length, insert: `${nl}\\usepackage{${req.name}}` };
-  return { offset: lineEnd + 1, insert: `\\usepackage{${req.name}}${nl}` };
+  // Always in the preamble: never after \begin{document}, even when it shares the line.
+  if (begin && (lineEnd < 0 || lineEnd + 1 > begin.start)) return { offset: begin.start, insert: `${nl}${line}${nl}` };
+  if (lineEnd < 0) return { offset: text.length, insert: `${nl}${line}` };
+  return { offset: lineEnd + 1, insert: `${line}${nl}` };
 }
 
 // ================================================================ adapter
