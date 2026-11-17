@@ -240,7 +240,8 @@ impl<'a> Markdown<'a> {
                 && let Some(title) = atx_heading(trimmed)
             {
                 self.flush(&mut para);
-                self.set_heading(title);
+                let level = trimmed.bytes().take_while(|&c| c == b'#').count() as u8;
+                self.set_heading(title, level, start + indent..end);
                 self.inline(start, end);
                 continue;
             }
@@ -249,7 +250,9 @@ impl<'a> Markdown<'a> {
                 && setext_underline(trimmed)
                 && single_paragraph_line(&m[ps..pe])
             {
-                self.set_heading(&m[ps..pe]);
+                let level = if trimmed.starts_with('=') { 1 } else { 2 };
+                let first = ps + (m[ps..pe].len() - m[ps..pe].trim_start().len());
+                self.set_heading(&m[ps..pe], level, first..end);
                 self.flush(&mut para);
                 continue;
             }
@@ -277,7 +280,9 @@ impl<'a> Markdown<'a> {
         }
     }
 
-    fn set_heading(&mut self, raw: &str) {
+    /// A heading: the declarations' context from here on, and an outline
+    /// entry (`bytes`: the heading's lines).
+    fn set_heading(&mut self, raw: &str, level: u8, bytes: Range<usize>) {
         let mut title = raw.trim();
         if title.ends_with('}')
             && let Some(open) = title.rfind('{')
@@ -285,6 +290,7 @@ impl<'a> Markdown<'a> {
             title = title[..open].trim_end();
         }
         let title = normalize(title, 200);
+        self.out.heading(level, "markdown.heading", &title, bytes);
         self.heading = (!title.is_empty()).then_some(title);
     }
 

@@ -1,0 +1,29 @@
+\documentclass{article}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{definition}{Definition}
+\begin{document}
+
+\section{Introduction}\label{sec:intro}
+% \section{Commented out}
+\begin{definition}[Group]\label{def:group}
+A group is a set with an operation.
+\end{definition}
+
+\subsection{Main statements}
+\begin{theorem}[Main result]\label{thm:main}
+Every finite group is a group.
+\end{theorem}
+\begin{proof}
+Obvious.
+\end{proof}
+
+\section{Further results}
+\begin{mytheorem}
+Stated with an environment defined in another file.
+\end{mytheorem}
+\begin{lemma}
+An auxiliary lemma.
+\end{lemma}
+
+\end{document}

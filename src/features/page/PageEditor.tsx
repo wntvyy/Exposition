@@ -6,7 +6,7 @@
 // the pages from the page map. All source changes are page transactions.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, KeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
-import { FileDown, FileWarning, RefreshCw, ZoomIn, ZoomOut } from "lucide-react";
+import { FileDown, FileWarning, RefreshCw, Search, ZoomIn, ZoomOut } from "lucide-react";
 
 import { notify } from "../../app/notifications";
 import { registry, type EditorProps } from "../../app/registry";
@@ -33,6 +33,7 @@ import {
   useTypesetting,
 } from "../typesetting/store";
 import { handleForPath, MIXED_EOL_REASON, normalizeLineEndings } from "../editor";
+import { FIND_KEYBINDING, findInSource } from "../editor/find";
 import { PageSession } from "./session";
 import "./page.css";
 
@@ -104,6 +105,18 @@ export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps
   useEffect(() => {
     if (active && model.pages.length > 0) input.current?.focus({ preventScroll: true });
   }, [active, model.pages.length]);
+
+  // The outline's page list: scroll a page of the shown build into view
+  // (requests made before this view mounted are not replayed).
+  const pageRequest = useTypesetting((s) => s.pageRequest);
+  const handledPageSerial = useRef(pageRequest?.serial ?? 0);
+  useEffect(() => {
+    if (!pageRequest || pageRequest.path !== path || pageRequest.serial <= handledPageSerial.current) return;
+    const element = pageRefs.current.get(pageRequest.page);
+    if (!element) return; // Not shown yet: tried again when the pages arrive.
+    handledPageSerial.current = pageRequest.serial;
+    element.scrollIntoView({ block: "start" });
+  }, [pageRequest, path, model.pages]);
 
   // Keep the input at the caret (IME candidate windows open there) and the caret visible.
   useLayoutEffect(() => {
@@ -290,6 +303,15 @@ export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps
           onPress={() => setZoom((z) => Math.min(4, Math.round((z + 0.25) * 100) / 100))}
         />
         <IconButton aria-label="Export PDF" icon={FileDown} size="sm" isDisabled={!model.buildId} onPress={exportPdf} />
+        {/* Pages have no text search: Find searches the source (opened beside the pages). */}
+        <IconButton
+          aria-label="Find in Source"
+          icon={Search}
+          size="sm"
+          keybinding={FIND_KEYBINDING}
+          data-testid="page-find-in-source"
+          onPress={() => void findInSource()}
+        />
       </Toolbar>
 
       {model.readOnly && (

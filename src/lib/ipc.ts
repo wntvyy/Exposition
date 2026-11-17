@@ -23,6 +23,7 @@ import type { DocumentChanged } from "../bindings/DocumentChanged";
 import type { DocumentEvent } from "../bindings/DocumentEvent";
 import type { DocumentId } from "../bindings/DocumentId";
 import type { DocumentInfo } from "../bindings/DocumentInfo";
+import type { DocumentOutline } from "../bindings/DocumentOutline";
 import type { DocumentOpened } from "../bindings/DocumentOpened";
 import type { DockerImage } from "../bindings/DockerImage";
 import type { DocumentState } from "../bindings/DocumentState";
@@ -278,6 +279,8 @@ export const commands = {
   pageEdit: (request: PageEditRequest) => invoke<PageEditOutcome>("page_edit", { request }),
   /** A rendered page image (SVG or PNG bytes) by its `renderRef`. */
   pageImage: (renderRef: string) => invoke<ArrayBuffer>("page_image", { renderRef }),
+  /** Outline of an open document's current text (transient; nothing is stored). */
+  documentOutline: (document: DocumentId) => invoke<DocumentOutline>("document_outline_get", { document }),
 };
 
 export const events = {

@@ -12,19 +12,30 @@ export interface EntryBuildState {
   latest: BuildEvent | null;
 }
 
-/** A request to show a source position (from the problems panel). */
+/** A request to show a source position (from the problems panel, the outline). */
 export interface RevealRequest {
   path: string;
   offset: number;
+  /** End of a source range to select from `offset` (the outline); a caret otherwise. */
+  end?: number;
+  serial: number;
+}
+
+/** A request to show a compiled page in the page view (the outline's page list). */
+export interface PageRequest {
+  path: string;
+  /** Zero-based page index. */
+  page: number;
   serial: number;
 }
 
 interface TypesettingState {
   entries: Record<string, EntryBuildState>;
   reveal: RevealRequest | null;
+  pageRequest: PageRequest | null;
 }
 
-export const useTypesetting = create<TypesettingState>(() => ({ entries: {}, reveal: null }));
+export const useTypesetting = create<TypesettingState>(() => ({ entries: {}, reveal: null, pageRequest: null }));
 
 export function recordBuild(event: BuildEvent): void {
   const entry = event.result.target.entry;
@@ -46,8 +57,13 @@ export function recordActivity(entry: string, activity: BuildActivity): void {
 }
 
 let serial = 0;
-export function requestReveal(path: string, offset: number): void {
-  useTypesetting.setState({ reveal: { path, offset, serial: ++serial } });
+export function requestReveal(path: string, offset: number, end?: number): void {
+  useTypesetting.setState({ reveal: { path, offset, ...(end !== undefined && end > offset ? { end } : {}), serial: ++serial } });
+}
+
+/** Scroll the page view of `path` to page `page` (zero-based). */
+export function requestPage(path: string, page: number): void {
+  useTypesetting.setState({ pageRequest: { path, page, serial: ++serial } });
 }
 
 /**
@@ -56,7 +72,7 @@ export function requestReveal(path: string, offset: number): void {
  * after switching to an unrelated project).
  */
 export function clearBuildStates(): void {
-  useTypesetting.setState({ entries: {}, reveal: null });
+  useTypesetting.setState({ entries: {}, reveal: null, pageRequest: null });
 }
 
 let installed = false;

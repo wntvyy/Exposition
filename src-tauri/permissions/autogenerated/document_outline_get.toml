@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-document-outline-get"
+description = "Enables the document_outline_get command without any pre-configured scope."
+commands.allow = ["document_outline_get"]
+
+[[permission]]
+identifier = "deny-document-outline-get"
+description = "Denies the document_outline_get command without any pre-configured scope."
+commands.deny = ["document_outline_get"]

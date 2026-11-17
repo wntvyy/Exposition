@@ -37,6 +37,8 @@ pub const MAX_LINKS: usize = 20_000;
 pub const MAX_LABELS: usize = 20_000;
 /// Names/labels longer than this are ignored (reported as partial).
 pub const MAX_NAME: usize = 256;
+/// Headings kept per file (more are reported in `heading_partial`).
+pub const MAX_HEADINGS: usize = 5_000;
 
 /// What one extractor saw in one file.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +60,31 @@ pub struct Extraction {
     pub notes: Vec<String>,
     /// Attachment blocks (`exposition:begin <key>` … `end <key>`) found.
     pub attachments: Vec<Attachment>,
+    /// Headings (parts, chapters, sections, Markdown/Typst headings) in
+    /// source order. Navigation structure for outlines only: never graph
+    /// entities, never part of coverage, matching, or fingerprints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headings: Vec<Heading>,
+    /// Heading forms seen but not listed in `headings` (outline coverage
+    /// only; `partial` stays the graph's coverage).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heading_partial: Vec<String>,
+}
+
+/// A heading recognised literally (`\section{…}`, `== Title`, `## Title`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Heading {
+    /// Nesting level: 1 is the outermost the format has (LaTeX `\part` 1,
+    /// `\chapter` 2, `\section` 3, …; Typst `=` 1; Markdown `#` 1).
+    pub level: u8,
+    /// The construct, e.g. `latex.heading:section`, `typst.heading`,
+    /// `markdown.heading`.
+    pub syntax: String,
+    /// The title as written (whitespace normalized; may be empty).
+    pub title: String,
+    /// UTF-16 range of the heading's own syntax (command and title, or the
+    /// heading line).
+    pub range: TextRange,
 }
 
 /// A declaration recognised literally (a theorem environment, a Lean
@@ -214,6 +241,9 @@ fn enforce_limits(out: &mut Extraction) {
     out.notes.sort();
     out.notes.dedup();
     out.notes.truncate(20);
+    out.heading_partial.sort();
+    out.heading_partial.dedup();
+    out.heading_partial.truncate(20);
 }
 
 // ----- helpers shared by the extractors -----

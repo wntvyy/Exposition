@@ -18,8 +18,12 @@ import {
   saveDocument,
   type DocumentHandle,
 } from "./documentClient";
+import { registerFind } from "./find";
 import { offerEditorLink } from "./links";
 import { SourceEditor } from "./SourceEditor";
+
+// Find (Mod+F, palette, editor context menu) over Monaco's Find widget.
+registerFind();
 
 // Links in editor hovers are copied, never opened (no navigation, no opener).
 setEditorLinkHandler((uri) => void offerEditorLink(uri));

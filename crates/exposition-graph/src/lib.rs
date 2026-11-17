@@ -10,6 +10,7 @@
 //! - [`vocabulary`]: entity kinds, resource roles, relation kinds + rules.
 //! - [`model`]: records, status, events.
 //! - [`ops`]: typed change operations, proposals, outcomes.
+//! - [`outline`]: transient, navigation-only document outlines.
 //! - [`query`]: snapshots, source inspection, impact, Mathematics, views.
 //! - [`store`]: hardened SQLite persistence (`.exposition/graph.sqlite3`).
 //! - [`validate`]: the one validator for people, presets, agents, services.
@@ -43,6 +44,7 @@ pub mod journal;
 pub mod mac;
 pub mod model;
 pub mod ops;
+pub mod outline;
 pub mod project_ops;
 pub mod query;
 pub mod reconcile;
@@ -63,6 +65,7 @@ pub use ids::{
 pub use journal::{OperationJournal, OperationKind, OperationRecord, OperationState};
 pub use model::*;
 pub use ops::*;
+pub use outline::{DocumentOutline, OutlineItem, OutlineItemKind, document_outline};
 pub use query::*;
 pub use service::{GraphConfig, GraphError, GraphResult, GraphService, is_graph_storage};
 pub use validate::{BatchOutcome, BatchRef, EntityUpsert, RelationUpsert, ServiceBatch};

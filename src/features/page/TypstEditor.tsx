@@ -10,6 +10,7 @@ import { editors, useEditors } from "../../app/editors";
 import type { EditorProps } from "../../app/registry";
 import { ResizeHandle } from "../../ui/components";
 import { fileKey, SourceEditor, type DocumentHandle } from "../editor";
+import { clearSourceFocus, usePrefersSource } from "../editor/sourceFocus";
 import { useTypesetting } from "../typesetting/store";
 import { PageEditor } from "./PageEditor";
 import "./page.css";
@@ -25,11 +26,21 @@ export function TypstEditor({ resource, mode, active }: EditorProps) {
   /** A source offset to show (and focus) once the source editor exists. */
   const pendingSource = useRef<number | null>(null);
 
-  // Problems panel: reveal the diagnostic's range in the source view too.
+  // Find in Source (and other source routes) asked Split to focus the source.
+  // The request lasts while the document stays in Split.
+  const prefersSource = usePrefersSource(resource.key);
+  const previousMode = useRef(mode);
+  useEffect(() => {
+    if (previousMode.current === "split" && mode !== "split") clearSourceFocus(resource.key);
+    previousMode.current = mode;
+  }, [mode, resource.key]);
+  useEffect(() => () => clearSourceFocus(resource.key), [resource.key]);
+
+  // Problems panel, outline: reveal the range in the source view too.
   useEffect(() => {
     const editor = monacoEditor.current;
     if (!reveal || !editor || reveal.path !== resource.path || mode === "page") return;
-    showInSource(editor, reveal.offset, mode === "source");
+    showInSource(editor, reveal.offset, mode === "source", reveal.end);
   }, [reveal, resource.path, mode]);
 
   // XR-B-01: the pages cannot show the position (no pages yet, or source the
@@ -65,22 +76,32 @@ export function TypstEditor({ resource, mode, active }: EditorProps) {
   return (
     <Group orientation="horizontal" className="typst-split" data-testid="typst-split">
       <ResizablePanel id="source" defaultSize="50%" minSize="20%">
-        <SourceEditor path={resource.path} active={false} onEditor={onEditor} />
+        <SourceEditor path={resource.path} active={focused && prefersSource} onEditor={onEditor} />
       </ResizablePanel>
       <ResizeHandle aria-label="Resize source and page views" />
       <ResizablePanel id="page" defaultSize="50%" minSize="20%">
-        <PageEditor resource={resource} mode="page" active={focused} />
+        <PageEditor resource={resource} mode="page" active={focused && !prefersSource} />
       </ResizablePanel>
     </Group>
   );
 }
 
-/** Place the caret at a source offset, scrolled into view. */
-function showInSource(editor: monaco.editor.IStandaloneCodeEditor, offset: number, focus: boolean): void {
+/** Place the caret at a source offset (or select up to `end`), scrolled into view. */
+function showInSource(editor: monaco.editor.IStandaloneCodeEditor, offset: number, focus: boolean, end?: number): void {
   const model = editor.getModel();
   if (!model) return;
   const position = model.getPositionAt(offset);
-  editor.setPosition(position);
+  if (end !== undefined && end > offset) {
+    const to = model.getPositionAt(end);
+    editor.setSelection({
+      startLineNumber: position.lineNumber,
+      startColumn: position.column,
+      endLineNumber: to.lineNumber,
+      endColumn: to.column,
+    });
+  } else {
+    editor.setPosition(position);
+  }
   editor.revealPositionInCenter(position);
   if (focus) editor.focus();
 }
