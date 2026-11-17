@@ -25,7 +25,7 @@ import { classifyEol, textFitsEol, type EolMode } from "./eol";
 import { ensureLanguage } from "./languages";
 import { diffPatch } from "./ot";
 import { useAppSettings } from "./settings";
-import { DocumentSync } from "./sync";
+import { DocumentSync, type LocalOrigin } from "./sync";
 import { UndoGrouper } from "./typing";
 
 /** Why a document with mixed line endings is read-only in every view. */
@@ -61,6 +61,12 @@ export class DocumentHandle {
   viewState: monaco.editor.ICodeEditorViewState | null = null;
   /** Selection before the next local edit, for undo/redo restoration. */
   selection: TextRange[] = [];
+  /**
+   * Origin of the next local model edit, set by a tool that writes through
+   * this model on behalf of the page view (the equation editor) right before
+   * its edit; consumed by that edit. Unset: the edit is the source editor's.
+   */
+  editOrigin: LocalOrigin | null = null;
   private applying = false;
   private dirty = false;
   private listeners = new Set<Listener>();
@@ -221,6 +227,8 @@ export class DocumentHandle {
   }
 
   private onLocalChange(e: monaco.editor.IModelContentChangedEvent) {
+    const origin = this.editOrigin ?? { kind: "source" };
+    this.editOrigin = null;
     if (this.applying || e.isFlush || this.closed) return;
     if (this.eolMode === "mixed") {
       // The view is a normalized display of mixed line endings; its offsets do
@@ -244,7 +252,7 @@ export class DocumentHandle {
     });
     const before = this.selection.length ? this.selection : patches.map((p) => p.range);
     this.selection = after;
-    this.sync.local(patches, undo, { before, after });
+    this.sync.local(patches, undo, { before, after }, origin);
   }
 
   private canApply(patches: TextPatch[]): boolean {

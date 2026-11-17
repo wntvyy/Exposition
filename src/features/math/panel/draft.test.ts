@@ -1,10 +1,8 @@
-// The equation draft against a document wired like DocumentHandle (real
-// UndoGrouper + DocumentSync): what is written, as how many transactions,
-// and what is never written (cancel, unchanged, conflicts, refusals).
-// The math core is the test fake (lane EQ-A's core replaces it at merge).
+// The equation draft against the real math core and a document wired like
+// DocumentHandle (real UndoGrouper + DocumentSync): what is written, as how
+// many transactions with which origin, and what is never written (cancel,
+// unchanged, conflicts, refusals).
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("../core", async () => await import("./testing/fakeCore"));
 
 import { insertSymbol, move, typeText } from "../core";
 import { resolvePageCaret, writePatches, type CaretTarget, type Resolved } from "./document";
@@ -56,8 +54,9 @@ describe("equation draft: writing", () => {
     expect(draft.complete).toBe(false); // \label is kept as an opaque segment
     s.store.edit((st) => typeText(st, "+c"));
     expect(await s.store.apply()).toBe("written");
-    expect(s.text()).toContain("\\begin{equation}\\label{eq:one}a=b+c\\end{equation}");
+    expect(s.text()).toContain("\\begin{equation}\\label{eq:one} a = b + c\\end{equation}");
     expect(s.text()).toContain("See \\ref{eq:one}.");
+    expect(s.text().replace("\\label{eq:one} a = b + c", "\\label{eq:one}a=b")).toBe(LATEX);
     expect(s.doc.requests).toHaveLength(1);
     const request = s.doc.requests[0]!;
     expect(request.edits[0]!.patches).toHaveLength(1);
@@ -83,7 +82,7 @@ describe("equation draft: writing", () => {
     await s.store.open("display");
     s.store.edit((st) => typeText(st, "z"));
     await s.store.apply();
-    expect(s.text().slice(at, at + 7)).toBe("\\[\nz\n\\]");
+    expect(s.text().slice(at, at + 9)).toBe("\\[\n  z\n\\]");
   });
 
   it("inserts inside math without new delimiters", async () => {
@@ -132,7 +131,7 @@ describe("equation draft: writing", () => {
     expect(s.doc.requests).toHaveLength(1);
     expect(s.doc.requests[0]!.edits[0]!.patches).toHaveLength(2);
     expect(s.text()).toContain("\\usepackage{amssymb}\n\\begin{document}");
-    expect(s.text()).toContain("a=b\\lesssim\\end{equation}");
+    expect(s.text()).toContain("a = b \\lesssim\\end{equation}");
   });
 
   it("leaves the preamble alone when the requirement is declined", async () => {
@@ -146,13 +145,56 @@ describe("equation draft: writing", () => {
   });
 
   it("refuses to write parts the language cannot express", async () => {
-    s.at(LATEX.indexOf("a=b"));
+    const md = setup("Text $a + b$ here.", "notes.md");
+    md.at(7);
+    await md.store.open("edit");
+    md.store.edit((st) => insertSymbol(st, "rel.lesssim"));
+    expect(md.store.analyze()!.serialized!.unsupported.map((u) => u.what)).toEqual(["rel.lesssim"]);
+    expect(await md.store.apply()).toBe("blocked");
+    expect(md.doc.requests).toHaveLength(0);
+    expect(md.store.getState().draft).not.toBeNull();
+  });
+
+  it("keeps the layout around an edited multi-line equation's content", async () => {
+    const text = "\\begin{document}\n\\begin{equation}\n  E = m c^2\n  \\label{eq:energy}\n\\end{equation}\n\\end{document}";
+    const t = setup(text);
+    t.at(text.indexOf("m c"));
+    await t.store.open("edit");
+    t.store.edit((st) => typeText(move(st, "end"), "+1"));
+    await t.store.apply();
+    // The label stays in the content (opaque); indentation and line breaks around the content stay.
+    expect(t.text()).toMatch(/^\\begin\{document\}\n\\begin\{equation\}\n {2}\S[^\n]*\\label\{eq:energy\}[^\n]*\+ 1\n\\end\{equation\}/);
+    expect(t.text().endsWith("\n\\end{equation}\n\\end{document}")).toBe(true);
+  });
+
+  it("separates inserted math from neighbouring command names and identifiers", async () => {
+    const t = setup("\\begin{document}\nLet $\\alpha x$ be.\n\\end{document}");
+    const at = t.text().indexOf("\\alpha") + "\\alpha".length;
+    t.at(at);
+    await t.store.open("inline");
+    t.store.edit((st) => typeText(st, "y"));
+    await t.store.apply();
+    expect(t.text()).toContain("$\\alpha y x$");
+    const typ = setup("Let $x y$ be.", "main.typ");
+    typ.at(6);
+    await typ.store.open("inline");
+    typ.store.edit((st) => insertSymbol(st, "greek.alpha"));
+    await typ.store.apply();
+    expect(typ.text()).toContain("$x alpha y$");
+  });
+
+  it("sends edits made from the page view with the page origin, still one transaction", async () => {
+    s.at(LATEX.indexOf("a=b"), undefined, s.doc, "page");
     await s.store.open("edit");
-    s.store.edit((st) => insertSymbol(st, "misc.typstonly"));
-    expect(s.store.analyze()!.serialized!.unsupported).toHaveLength(1);
-    expect(await s.store.apply()).toBe("blocked");
-    expect(s.doc.requests).toHaveLength(0);
-    expect(s.store.getState().draft).not.toBeNull();
+    s.store.edit((st) => typeText(st, "+c"));
+    await s.store.apply();
+    expect(s.doc.requests).toHaveLength(1);
+    expect(s.doc.requests[0]!.origin).toEqual({ kind: "page" });
+    // The next ordinary edit is the source editor's again.
+    await flush();
+    s.doc.model.edit([{ rangeOffset: 0, rangeLength: 0, text: "%" }]);
+    expect(s.doc.requests[1]!.origin).toEqual({ kind: "source" });
+    expect(s.doc.editOrigin).toBeNull();
   });
 
   it("never merges the equation write into typing before or after it", async () => {
@@ -194,7 +236,7 @@ describe("equation draft: target safety", () => {
     s.doc.model.edit([{ rangeOffset: LATEX.indexOf("Let"), rangeLength: 0, text: "Now " }]);
     expect(await s.store.apply()).toBe("written");
     expect(s.text()).toContain("Now Let $x+1$");
-    expect(s.text()).toContain("\\label{eq:one}a=b+d\\end{equation}");
+    expect(s.text()).toContain("\\label{eq:one} a = b + d\\end{equation}");
   });
 
   it("shows a conflict and writes nothing when the equation changed during the draft", async () => {
@@ -216,7 +258,7 @@ describe("equation draft: target safety", () => {
     expect(s.store.retargetToCurrentEquation()).toBe(true);
     expect(s.store.getState().draft!.conflict).toBeNull();
     expect(await s.store.apply()).toBe("written");
-    expect(s.text()).toContain("\\begin{equation}\\label{eq:one}a=b+d\\end{equation}");
+    expect(s.text()).toContain("\\begin{equation}\\label{eq:one} a = b + d\\end{equation}");
   });
 
   it("treats a closed document as a conflict and keeps the draft for copying", async () => {
@@ -228,7 +270,7 @@ describe("equation draft: target safety", () => {
     expect(await s.store.apply()).toBe("conflict");
     expect(s.store.getState().draft!.conflict?.kind).toBe("closed");
     expect(await s.store.copyDraft()).toBe(true);
-    expect(s.env.copy).toHaveBeenCalledWith("\\label{eq:one}a=b+d");
+    expect(s.env.copy).toHaveBeenCalledWith("\\label{eq:one} a = b + d");
   });
 
   it("keeps a changed draft when another open is requested, and moves it only on retarget", async () => {
@@ -249,7 +291,7 @@ describe("equation draft: target safety", () => {
     expect(await s.store.retargetToCaret()).toBe(true);
     expect(s.store.getState().draft).toMatchObject({ path: "other.tex", kind: "edit" });
     await s.store.apply();
-    expect(tex2.model.getValue()).toContain("$\\label{eq:one}a=b+d$");
+    expect(tex2.model.getValue()).toContain("$\\label{eq:one} a = b + d$");
     expect(s.text()).toBe(LATEX);
   });
 

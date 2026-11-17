@@ -1,6 +1,8 @@
 // Pure helpers over the editing tree for the panel's rendering and keyboard
-// handling. The slot-path convention lives here only (see `SlotPath` in the
-// core contract: alternating node index and slot name).
+// handling, following the core's slot-path convention (`SlotPath` in
+// core/types.ts): alternating node index and slot name; field names for
+// slots, "r<row>c<col>" for grid cells, and a trailing [index, "text"] for a
+// caret inside a text node.
 import type { CatalogEntry, MathLanguage, MathNode, MathRow, SlotPath } from "../core";
 
 /** One editable child row of a node, with the slot name used in caret paths. */
@@ -11,8 +13,18 @@ export interface Slot {
   label: string;
 }
 
-/** Name of a grid cell's slot (matrix, cases, aligned): `"r,c"` (0-based). */
-export const gridSlot = (row: number, col: number): string => `${row},${col}`;
+/** Name of a grid cell's slot (matrix, cases, aligned): "r0c1" (0-based). */
+export const gridSlot = (row: number, col: number): string => `r${row}c${col}`;
+
+/** The slot name of a caret inside a text node (path ends with [index, "text"]). */
+export const TEXT_SLOT = "text";
+
+/** The caret is inside the text node at `index` of the row at `rowPath`. */
+export const isTextCaret = (caretPath: SlotPath, rowPath: SlotPath, index: number): boolean =>
+  caretPath.length === rowPath.length + 2 &&
+  caretPath[caretPath.length - 1] === TEXT_SLOT &&
+  caretPath[caretPath.length - 2] === index &&
+  rowPath.every((p, i) => caretPath[i] === p);
 
 /** The editable child rows of a node, in reading order. */
 export function slotsOf(node: MathNode): Slot[] {

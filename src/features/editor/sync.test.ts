@@ -483,3 +483,30 @@ describe("diffPatch", () => {
     expect(patch.range.end).toBe(3);
   });
 });
+
+describe("local edit origin", () => {
+  it("sends a local edit with the origin it was recorded with (source by default), one request each", () => {
+    const sent: TransactionRequest[] = [];
+    const sync = new DocumentSync(
+      "doc-1",
+      1,
+      {
+        apply: async (request) => {
+          sent.push(request);
+          return new Promise<TransactionOutcome>(() => {});
+        },
+        undo: async () => {},
+        redo: async () => {},
+        state: async () => ({ info: { revision: 1 }, text: "" }) as unknown as DocumentState,
+      },
+      { applyPatches: () => {}, canApply: () => true, setText: () => {} },
+    );
+    sync.local([{ range: { start: 0, end: 0 }, text: "$x$" }, { range: { start: 5, end: 5 }, text: "y" }], { kind: "newGroup" }, null, { kind: "page" });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.origin).toEqual({ kind: "page" });
+    expect(sent[0]!.edits[0]!.patches).toHaveLength(2);
+    const plain = new DocumentSync("doc-2", 1, { apply: async (r) => (sent.push(r), new Promise<TransactionOutcome>(() => {})), undo: async () => {}, redo: async () => {}, state: async () => ({}) as DocumentState }, { applyPatches: () => {}, canApply: () => true, setText: () => {} });
+    plain.local([{ range: { start: 0, end: 0 }, text: "a" }], { kind: "newGroup" });
+    expect(sent[1]!.origin).toEqual({ kind: "source" });
+  });
+});

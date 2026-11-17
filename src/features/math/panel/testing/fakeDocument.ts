@@ -1,7 +1,8 @@
 // Test doubles for the equation panel: a text model with Monaco's change-event
-// and position semantics, and a document wired like `DocumentHandle` — every
-// model change goes through the real `UndoGrouper` and `DocumentSync`, so a
-// test sees the exact transactions the document service would receive.
+// and position semantics, and a document wired like `DocumentHandle` (its
+// `onLocalChange`: the edit origin, the real `UndoGrouper`, the real
+// `DocumentSync`), so a test sees the exact transactions the document service
+// would receive.
 import type { TransactionRequest } from "../../../../bindings/TransactionRequest";
 import { DocumentSync } from "../../../editor/sync";
 import { UndoGrouper } from "../../../editor/typing";
@@ -137,15 +138,18 @@ export function fakeDocument(text: string, options: { id?: string; path?: string
     sync,
     grouper,
     selection: [],
+    editOrigin: null,
     requests,
   };
   model.onDidChangeContent((e) => {
+    const origin = doc.editOrigin ?? { kind: "source" as const };
+    doc.editOrigin = null;
     if (e.isFlush) return;
     const patches = [...e.changes]
       .sort((a, b) => a.rangeOffset - b.rangeOffset)
       .map((c) => ({ range: { start: c.rangeOffset, end: c.rangeOffset + c.rangeLength }, text: c.text }));
     const undo = grouper.classify(patches, Date.now());
-    sync.local(patches, undo, { before: doc.selection, after: [] });
+    sync.local(patches, undo, { before: doc.selection, after: [] }, origin);
   });
   return doc;
 }

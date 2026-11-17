@@ -110,7 +110,7 @@ export default async function equationSource({ launchApp, artifactsDir, assert, 
     await page.keyboard.press("End");
     await s.mathType("+1");
     await page.keyboard.press("Enter");
-    const edited = await s.waitText((t) => /E=mc\^\{?2\}?\+1/.test(squash(t)), "energy equation edited");
+    const edited = await s.waitText((t) => PATTERNS.energyPlusOne.test(squash(t)), "energy equation edited");
     assert.equal(await s.revision(), before + 1, "one transaction");
     if (language === "latex") {
       assert.ok(edited.includes("\\label{eq:energy}") && edited.includes("\\eqref{eq:energy}") && edited.includes("\\ref{sec:eq}"));

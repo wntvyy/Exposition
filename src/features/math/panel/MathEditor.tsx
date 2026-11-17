@@ -22,7 +22,7 @@ import {
   type Motion,
   type SlotPath,
 } from "../core";
-import { childPath, nodesOnPath, samePath, slotsOf } from "./tree";
+import { childPath, nodesOnPath, samePath, slotsOf, TEXT_SLOT } from "./tree";
 
 export type EditOperation = (state: EditorState) => EditorState;
 
@@ -67,6 +67,10 @@ export function describeCaret(state: EditorState): string {
   let row: MathRow = state.root;
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i]!;
+    if (node.kind === "text") {
+      parts.push("text");
+      return `In ${parts.reverse().join(", in ")}, position ${state.caret.offset + 1} of ${node.text.length + 1}`;
+    }
     const slot = slotsOf(node).find((s) => s.name === state.caret.path[i * 2 + 1]);
     if (!slot) break;
     parts.push(`${slot.label} of ${node.kind === "scripts" ? "scripts" : node.kind}`);
@@ -226,6 +230,38 @@ function RowView({ row, path, caret, onPlace, root, slot }: RowViewProps) {
   );
 }
 
+/** Upright text inside math; the caret can be inside it (path ends with [index, "text"]). */
+function TextView({ text, path, caret, onPlace }: { text: string; path: SlotPath; caret: MathCaret; onPlace: (path: SlotPath, offset: number) => void }) {
+  const here = samePath(caret.path, path);
+  const onMouseDown = (event: ReactMouseEvent<HTMLSpanElement>) => {
+    if (event.button !== 0) return;
+    event.stopPropagation();
+    const box = event.currentTarget.getBoundingClientRect();
+    const ratio = box.width > 0 ? (event.clientX - box.left) / box.width : 1;
+    onPlace(path, Math.max(0, Math.min(text.length, Math.round(ratio * text.length))));
+  };
+  if (!here) {
+    return (
+      <span className="xp-eq-text" data-empty={text === "" || undefined} onMouseDown={onMouseDown}>
+        {text || " "}
+      </span>
+    );
+  }
+  const lo = Math.min(caret.anchor ?? caret.offset, caret.offset);
+  const hi = Math.max(caret.anchor ?? caret.offset, caret.offset);
+  const caretMark = <span className="xp-eq-caret" aria-hidden data-testid="equation-caret-mark" />;
+  return (
+    <span className="xp-eq-text" data-active onMouseDown={onMouseDown}>
+      {text.slice(0, lo)}
+      {caret.offset === lo && caretMark}
+      {hi > lo && <span className="xp-eq-item" data-selected>{text.slice(lo, hi)}</span>}
+      {caret.offset === hi && hi > lo && caretMark}
+      {text.slice(hi)}
+      {text === "" && " "}
+    </span>
+  );
+}
+
 interface NodeViewProps {
   node: MathNode;
   path: SlotPath;
@@ -249,9 +285,9 @@ function NodeView({ node, path, index, caret, onPlace }: NodeViewProps) {
         </span>
       );
     case "text":
-      return <span className="xp-eq-text">{node.text || " "}</span>;
+      return <TextView text={node.text} path={childPath(path, index, TEXT_SLOT)} caret={caret} onPlace={onPlace} />;
     case "func":
-      return <span className="xp-eq-func">{entryOf(node.name)?.glyph ?? node.name}</span>;
+      return <span className="xp-eq-func">{node.text || (entryOf(node.name)?.glyph ?? node.name)}</span>;
     case "frac":
       return (
         <span className="xp-eq-frac">

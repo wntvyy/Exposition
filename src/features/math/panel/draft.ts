@@ -20,6 +20,7 @@ import {
   insertSymbol,
   previewLatex,
   sameMath,
+  withContentLayout,
   type EditorState,
   type EquationRange,
   type MathLanguage,
@@ -115,6 +116,22 @@ const lineAt = (text: string, offset: number): number => {
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export const requirementLabel = (requirement: Requirement): string => `\\usepackage{${requirement.name}}`;
+
+/**
+ * Math inserted into existing equation source must not fuse with its
+ * neighbours: `\alpha` + `x` would read as `\alphax` in TeX, and `x` +
+ * `alpha` as the identifier `xalpha` in Typst. A space keeps the tokens apart.
+ */
+export function separated(language: MathLanguage, text: string, start: number, end: number, source: string): string {
+  if (!source) return source;
+  const before = text.slice(Math.max(0, start - 64), start);
+  const after = text.slice(end, end + 1);
+  const fusesBefore =
+    language === "typst" ? /[\p{L}\p{N}.]$/u.test(before) && /^[\p{L}\p{N}]/u.test(source) : /\\[A-Za-z]+$/.test(before) && /^[A-Za-z]/.test(source);
+  const fusesAfter =
+    language === "typst" ? /[\p{L}\p{N}]$/u.test(source) && /^[\p{L}\p{N}]/u.test(after) : /\\[A-Za-z]+$/.test(source) && /^[A-Za-z]/.test(after);
+  return `${fusesBefore ? " " : ""}${source}${fusesAfter ? " " : ""}`;
+}
 
 export class EquationPanelStore {
   private state: PanelState = { draft: null, notice: null };
@@ -474,11 +491,14 @@ export class EquationPanelStore {
     let main: Patch;
     if (draft.kind === "edit" && draft.equation) {
       // Only the content between the delimiters changes; the delimiters,
-      // environment, labels outside it, and everything else stay byte-for-byte.
+      // environment, labels outside it, and everything else stay byte-for-byte,
+      // and so does the whitespace/indentation around the content.
       const eq = draft.equation;
-      main = { start: tracked.start + (eq.contentStart - eq.start), end: tracked.end - (eq.end - eq.contentEnd), text: source };
+      const start = tracked.start + (eq.contentStart - eq.start);
+      const end = tracked.end - (eq.end - eq.contentEnd);
+      main = { start, end, text: withContentLayout(text.slice(start, end), source) };
     } else if (draft.context === "math") {
-      main = { start: tracked.start, end: tracked.end, text: source };
+      main = { start: tracked.start, end: tracked.end, text: separated(draft.language, text, tracked.start, tracked.end, source) };
     } else {
       main = { start: tracked.start, end: tracked.end, text: adapter.wrap(source, draft.display) };
     }
@@ -507,7 +527,7 @@ export class EquationPanelStore {
     // text: write now, as one edit, before anything else can change it.
     tracked.dispose();
     try {
-      writePatches(document, patches, { start: main.start, end: main.end });
+      writePatches(document, patches, { start: main.start, end: main.end }, draft.surface);
     } catch (error) {
       // Nothing was written (the model refuses invalid edits before changing).
       this.tracked = new TrackedRange(document.model, tracked.start, tracked.end, tracked.original);

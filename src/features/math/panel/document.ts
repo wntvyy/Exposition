@@ -33,6 +33,8 @@ export interface EquationDocument {
   readonly grouper: { reset(): void };
   /** Selection restored around undo/redo of the next local edit. */
   selection: { start: number; end: number }[];
+  /** Origin of the next local edit (consumed by it); null = the source editor. */
+  editOrigin: { kind: "source" } | { kind: "page" } | null;
 }
 
 /** A text replacement in the model's current text. */
@@ -68,10 +70,16 @@ export function writeBlocker(document: EquationDocument): string | null {
 
 /**
  * Apply `patches` (non-overlapping, offsets in the model's current text) as
- * one edit of the shared model: one transaction, its own undo step. The undo
- * selection is `selection` (the edited range), whichever surface asked.
+ * one edit of the shared model: one transaction, its own undo step, with the
+ * origin of the surface that asked (`page` for the page view). The undo
+ * selection is `selection` (the edited range).
  */
-export function writePatches(document: EquationDocument, patches: Patch[], selection: { start: number; end: number }): void {
+export function writePatches(
+  document: EquationDocument,
+  patches: Patch[],
+  selection: { start: number; end: number },
+  surface: Surface = "source",
+): void {
   const blocker = writeBlocker(document);
   if (blocker) throw new Error(blocker);
   const sorted = [...patches].sort((a, b) => a.start - b.start);
@@ -92,8 +100,14 @@ export function writePatches(document: EquationDocument, patches: Patch[], selec
   // A new undo group: never merged into the typing before or after it.
   document.grouper.reset();
   document.selection = [selection];
-  model.applyEdits(operations);
-  document.grouper.reset();
+  document.editOrigin = { kind: surface };
+  try {
+    model.applyEdits(operations);
+  } finally {
+    // Consumed by the edit; never left for the next keystroke.
+    document.editOrigin = null;
+    document.grouper.reset();
+  }
 }
 
 /**

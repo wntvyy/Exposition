@@ -96,7 +96,7 @@ export default async function equationPage({ launchApp, artifactsDir, assert, fi
     await page.keyboard.press("End");
     await s.mathType("+1");
     await page.keyboard.press("Enter");
-    const edited = await s.waitText((t) => /E=mc\^\{?2\}?\+1/.test(squash(t)), "energy equation edited from the page");
+    const edited = await s.waitText((t) => PATTERNS.energyPlusOne.test(squash(t)), "energy equation edited from the page");
     assert.equal(await s.revision(), before + 1, "one transaction");
     if (language === "latex") assert.ok(edited.includes("\\label{eq:energy}") && edited.includes("\\eqref{eq:energy}"));
     if (language === "typst") assert.ok(edited.includes("$ <energy>") && edited.includes("@energy"));

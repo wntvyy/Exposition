@@ -234,6 +234,9 @@ export async function openDocumentIn(page, path, mode, { trustPrompt = true } = 
 
 /** The structural patterns each language's serializer must produce (whitespace removed). */
 export const PATTERNS = {
+  // "+1" typed at the end of `E = m c^2` (LaTeX: the \label inside the
+  // equation is the row's last, opaque item, so "+1" follows it).
+  energyPlusOne: /E=mc\^\{?2\}?(\\label\{eq:energy\})?\+1/,
   nestedFraction: {
     latex: /\\frac\{1\}\{\\sqrt\{x\^(\{2\}|2)\}\}/,
     markdown: /\\frac\{1\}\{\\sqrt\{x\^(\{2\}|2)\}\}/,

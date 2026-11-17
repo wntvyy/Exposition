@@ -2,11 +2,9 @@
 // templates, Enter/Escape rules, symbol search (names, synonyms, glyphs,
 // commands) with keyboard navigation and empty states, focus retention when
 // inserting with the mouse, and the notices (requirements, conflicts, kept
-// source, another document). The core is the test fake (EQ-A's core at merge).
+// source, another document). Runs on the real math core.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("../core", async () => await import("./testing/fakeCore"));
 
 import { insertSymbol, insertTemplate } from "../core";
 import type { CaretTarget, Resolved } from "./document";
@@ -14,7 +12,7 @@ import { EquationPanelStore } from "./draft";
 import { EquationView } from "./EquationView";
 import { fakeDocument } from "./testing/fakeDocument";
 
-const TEXT = "\\begin{document}\nLet $x+1$ be.\n\\[\\mycmd{y}=2\\]\n\\end{document}";
+const TEXT = "\\documentclass{article}\n\\begin{document}\nLet $x+1$ be.\n\\[\\mycmd{y}=2\\]\n\\end{document}";
 
 function setup(text = TEXT, path = "main.tex") {
   const doc = fakeDocument(text, { path });
@@ -68,7 +66,7 @@ describe("Equation panel", () => {
     const s = setup();
     s.view();
     await openAt(s, TEXT.indexOf("x+1"));
-    expect(screen.getByTestId("equation-target").textContent).toContain("Editing equation at line 2");
+    expect(screen.getByTestId("equation-target").textContent).toContain("Editing equation at line 3");
     expect(screen.getByTestId("equation-target").textContent).toContain("main.tex · LaTeX · from the source · inline");
     expect(document.activeElement).toBe(editor());
   });
@@ -118,7 +116,7 @@ describe("Equation panel", () => {
     await act(async () => {
       key("Enter");
     });
-    expect(s.doc.model.getValue()).toContain("Let $x+1$ be$\\frac{1}{\\sqrt{x^{2}}}$.");
+    expect(s.doc.model.getValue()).toContain("Let $x+1$ be$\\frac{1}{\\sqrt{x^2}}$.");
   });
 
   it("Enter applies only when unambiguous; Ctrl+Enter always applies; Escape cancels", async () => {
@@ -137,10 +135,12 @@ describe("Equation panel", () => {
     });
     expect(s.store.getState().draft).toBeNull();
     const written = s.doc.model.getValue();
-    expect(written).toContain("be$\\begin{pmatrix}a &");
+    expect(written).toContain("be$\\begin{pmatrix} a &");
+    // pmatrix needs amsmath: added in the same edit (the option is on by default).
+    expect(written).toContain("\\usepackage{amsmath}\n\\begin{document}");
     expect(written.split("\\\\").length - 1).toBe(2); // three rows
 
-    await openAt(s, TEXT.indexOf("x+1"));
+    await openAt(s, written.indexOf("x+1"));
     key("z");
     key("Escape");
     expect(s.store.getState().draft).toBeNull();
@@ -188,8 +188,15 @@ describe("Equation panel", () => {
     fireEvent.keyDown(grid, { key: "Enter" });
     expect(children(s.store).at(-1)).toEqual({ kind: "symbol", id: "greek.beta" });
     expect(document.activeElement).toBe(grid);
+  });
+
+  it("marks symbols the document's language cannot express and does not insert them", async () => {
+    const s = setup("Text $a$ here.", "notes.md");
+    s.view();
+    await openAt(s, 6);
     const count = children(s.store).length;
-    const unavailable = within(grid).getByRole("option", { name: "typst-only mark, not available in LaTeX" });
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search symbols" }), { target: { value: "lesssim" } });
+    const unavailable = await screen.findByRole("option", { name: "less than or similar, not available in Markdown" });
     expect(unavailable.getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(unavailable);
     expect(children(s.store)).toHaveLength(count);
@@ -213,7 +220,7 @@ describe("Equation panel", () => {
     s.view();
     await openAt(s, TEXT.indexOf("=2"));
     const banner = screen.getByTestId("equation-opaque");
-    expect(banner.textContent).toContain("Unknown command \\mycmd");
+    expect(banner.textContent).toContain("unknown command \\mycmd");
     expect(screen.getByText("\\mycmd{y}")).toBeTruthy();
     fireEvent.click(within(banner).getByRole("button", { name: "Edit in Source" }));
     const start = TEXT.indexOf("\\[");
@@ -269,9 +276,9 @@ describe("Equation panel", () => {
     const s = setup();
     s.view();
     await openAt(s, TEXT.indexOf("."), "inline");
-    expect(screen.getByTestId("equation-target").textContent).toContain("New inline equation at line 2");
+    expect(screen.getByTestId("equation-target").textContent).toContain("New inline equation at line 3");
     fireEvent.click(screen.getByRole("radio", { name: "Display" }));
     expect(s.store.getState().draft!.display).toBe(true);
-    expect(screen.getByTestId("equation-target").textContent).toContain("New display equation at line 2");
+    expect(screen.getByTestId("equation-target").textContent).toContain("New display equation at line 3");
   });
 });
