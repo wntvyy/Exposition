@@ -1814,3 +1814,65 @@ impl MathEmitter<'_, '_> {
         self.need_space = true;
     }
 }
+
+/// The equation editor's symbol catalog (`src/features/math/core/catalog.json`)
+/// claims Markdown support per entry; the claim must match what this
+/// translator actually renders without an error marker.
+#[cfg(test)]
+mod catalog_agreement {
+    use super::check;
+
+    /// The JSON string value after `"key":` on a catalog line (one entry per line).
+    fn string_field(line: &str, key: &str) -> Option<String> {
+        let start = line.find(&format!("\"{key}\":\""))? + key.len() + 4;
+        let mut out = String::new();
+        let mut chars = line[start..].chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return Some(out),
+                '\\' => match chars.next()? {
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    'u' => {
+                        let hex: String = chars.by_ref().take(4).collect();
+                        out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+                    }
+                    other => out.push(other),
+                },
+                _ => out.push(c),
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn catalog_markdown_flags_match_the_translator() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/features/math/core/catalog.json");
+        let text = std::fs::read_to_string(&path).expect("catalog.json");
+        let mut checked = 0;
+        let mut mismatches = Vec::new();
+        for line in text.lines().filter(|l| l.trim_start().starts_with("{\"id\"")) {
+            let id = string_field(line, "id").unwrap();
+            let Some(latex) = line.find("\"latex\":{").map(|i| &line[i..]) else { continue };
+            let Some(command) = string_field(latex, "markdown").or_else(|| string_field(latex, "command")) else {
+                continue;
+            };
+            let claimed = line.contains("},\"markdown\":true") || line.contains("\"markdown\":true,\"mathClass\"");
+            let role = string_field(line, "role").unwrap_or_default();
+            let content =
+                if matches!(role.as_str(), "accent" | "font") { format!("{command}{{x}}") } else { command.clone() };
+            let renders_alone = |content: &str| {
+                let src = format!("${content}$");
+                check(&src, 1..src.len() - 1).iter().all(|p| !p.marker)
+            };
+            // Commands that take an argument (\operatorname{…}) are checked with one.
+            let renders = renders_alone(&content) || renders_alone(&format!("{command}{{x}}"));
+            if claimed && !renders {
+                mismatches.push(format!("{id}: claims Markdown support, but `{content}` renders an error marker"));
+            }
+            checked += 1;
+        }
+        assert!(checked > 400, "only {checked} catalog entries were checked");
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+}
