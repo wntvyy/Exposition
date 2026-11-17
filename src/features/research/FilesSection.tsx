@@ -3,7 +3,7 @@
 import { Beaker, FileCode2, FlaskConical, Image, Table2, Workflow } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { Button, EmptyState, Section, Tree, TreeItem } from "../../ui/components";
+import { Button, EmptyState, fileIconFor, Section, Tree, TreeItem } from "../../ui/components";
 import { itemKey, parseItemKey, revealInResearch, startSpaceTracking, useSpace, type ResearchItem } from "./space";
 import "./research.css";
 
@@ -91,7 +91,13 @@ export function ResearchFilesSection() {
             >
               {[
                 ...g.items.slice(0, MAX_SHOWN).map(({ item, title }) => (
-                  <TreeItem key={itemKey(item)} id={itemKey(item)} title={title} data-research-item={itemKey(item)} />
+                  <TreeItem
+                    key={itemKey(item)}
+                    id={itemKey(item)}
+                    title={title}
+                    icon={item.kind === "file" ? fileIconFor(title) : undefined}
+                    data-research-item={itemKey(item)}
+                  />
                 )),
                 // Long groups are cut here; say so instead of hiding the rest silently.
                 ...(g.items.length > MAX_SHOWN
