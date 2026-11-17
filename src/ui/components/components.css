@@ -701,11 +701,29 @@
   cursor: default;
   outline-offset: calc(-1 * var(--focus-ring-width));
 }
+.ui-tab-list[data-variant="chrome"] {
+  container-type: inline-size;
+}
 .ui-tab-list[data-variant="chrome"] .ui-tab {
+  flex: none;
+  white-space: nowrap;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
   letter-spacing: var(--letter-spacing-label);
   text-transform: uppercase;
+}
+/* A narrow region strip (the auxiliary panel at its default width): tabs
+   other than the selected one show only their icon; the label stays the
+   accessible name. Tabs without an icon keep their label. */
+@container (max-width: 380px) {
+  .ui-tab-list[data-variant="chrome"] .ui-tab:not([data-selected]):has(svg) .ui-tab__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 .ui-tab__count {
   color: var(--color-text-subtle);

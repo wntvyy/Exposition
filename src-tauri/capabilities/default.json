@@ -15,6 +15,7 @@
     "allow-document-apply",
     "allow-document-undo",
     "allow-document-redo",
+    "allow-document-outline-get",
     "allow-workspace-open",
     "allow-workspace-close",
     "allow-workspace-current",

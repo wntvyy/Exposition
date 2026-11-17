@@ -1751,11 +1751,15 @@ impl<'a> Planner<'a> {
 /// a huge extraction keeps its declarations and drops what can be rebuilt
 /// by re-reading the file (links, then labels).
 fn bounded_index_json(body: &IndexBody) -> Option<String> {
-    let json = serde_json::to_string(body).ok()?;
+    // Headings are outline navigation only: never stored with the graph's
+    // index, so they can never crowd out links or labels within the bound.
+    let mut reduced = body.clone();
+    reduced.extraction.headings.clear();
+    reduced.extraction.heading_partial.clear();
+    let json = serde_json::to_string(&reduced).ok()?;
     if json.len() <= crate::store::MAX_INDEX_BODY {
         return Some(json);
     }
-    let mut reduced = body.clone();
     reduced.extraction.links.clear();
     let json = serde_json::to_string(&reduced).ok()?;
     if json.len() <= crate::store::MAX_INDEX_BODY {
@@ -1962,4 +1966,24 @@ fn confirm_renames(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Outline headings never enter the graph's stored index.
+    #[test]
+    fn the_stored_index_leaves_out_outline_headings() {
+        let path = WorkspacePath::parse("main.typ").unwrap();
+        let text = "= Intro\n\n#theorem[A]\n\n== Details\n";
+        let extraction = extract::extract(&path, text).unwrap();
+        assert!(!extraction.headings.is_empty(), "the extractor saw the headings");
+        let body = IndexBody { extraction, ids: vec![], latex_main: false };
+        let json = bounded_index_json(&body).unwrap();
+        assert!(!json.contains("\"headings\""), "{json}");
+        let stored: IndexBody = serde_json::from_str(&json).unwrap();
+        assert!(stored.extraction.headings.is_empty());
+        assert_eq!(stored.extraction.declarations, body.extraction.declarations);
+    }
 }
