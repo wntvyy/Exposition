@@ -21,21 +21,25 @@
 //   --fail-fast          stop starting checks after the first failure
 //   --live               run deferred live-provider scenarios (spends API credit:
 //                        only with the user's authorization)
-//   --release            run the deferred release build
+//   --release            run the deferred release build and release smoke
+//   --allow-full         run: execute the plan even when the change escalated to
+//                        full validation (otherwise the run stops as pending)
 //
-// Exit status: 0 every planned check passed; 1 a check failed; 2 usage error or
-// invalid comparison base; 3 nothing failed but some planned checks were skipped
-// or unavailable. Deferred qualification items never run implicitly; they are
-// listed in the summary and keep `complete` false in the JSON result.
+// Exit status: 0 every planned check passed and nothing required is pending;
+// 1 a check failed; 2 usage error, invalid comparison base, or a plan that no
+// longer matches --expect-plan; 3 nothing failed but planned checks were
+// skipped or unavailable; 4 pending: required gates were deferred (live,
+// release, CI, manual) or full validation was needed and not allowed. Deferred
+// items never run implicitly. Uncovered files keep `complete` false.
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { buildPlan } from "./impact/plan.mjs";
-import { buildIndex, collectChanges, ImpactError, resolveBase } from "./impact/repo.mjs";
+import { buildIndex, collectChanges, ImpactError, inputDigest, resolveBase } from "./impact/repo.mjs";
 import { EXIT, executePlan } from "./impact/runner.mjs";
 
 const VALUE_FLAGS = new Set(["--base", "--json-out", "--expect-plan", "--jobs", "--skip"]);
-const BOOLEAN_FLAGS = new Set(["--full", "--json", "--fail-fast", "--live", "--release"]);
+const BOOLEAN_FLAGS = new Set(["--full", "--json", "--fail-fast", "--live", "--release", "--allow-full"]);
 
 export function parseArgs(argv) {
   const [command, ...rest] = argv;
@@ -68,6 +72,7 @@ export function resolvePlan({ cwd, full = false, base, live = false, release = f
     index,
     options: { live, release },
     env: { e2eExecutable: env.EXPOSITION_E2E_EXECUTABLE || null },
+    inputs: inputDigest({ cwd, base: resolved, changes }),
   });
 }
 
@@ -113,15 +118,16 @@ export function formatResult(result) {
   for (const d of result.deferred) lines.push(`DEFERRED    ${d.id} — ${d.why}`);
   for (const p of result.uncovered) lines.push(`UNCOVERED   ${p} — no automated check exercises it`);
   const t = result.totals;
-  const gaps = [result.deferred.length && "the deferred items", result.uncovered.length && "the uncovered files"].filter(Boolean).join(" and ");
   const verdict =
     result.exitCode === EXIT.failed
       ? "FAILED"
       : result.exitCode === EXIT.incomplete
         ? "INCOMPLETE: planned checks were skipped or unavailable"
-        : gaps
-          ? `PASSED (planned checks); still unverified: ${gaps} above`
-          : "PASSED: every required check ran and passed";
+        : result.exitCode === EXIT.pending
+          ? "PENDING: planned checks passed; the deferred gates above are still required"
+          : result.uncovered.length
+            ? "PASSED (planned checks); the uncovered files above have no automated check"
+            : "PASSED: every required check ran and passed";
   lines.push(`${t.passed} passed, ${t.failed} failed, ${t.skipped} skipped, ${t.unavailable} unavailable, ${result.deferred.length} deferred — ${verdict}`);
   return lines.join("\n");
 }
@@ -131,7 +137,7 @@ async function main() {
   try {
     opts = parseArgs(process.argv.slice(2));
   } catch (error) {
-    console.error(`impact: ${error.message}\nusage: node scripts/impact.mjs <plan|run> [--full] [--base <ref>] [--json] [--jobs <n>] [--skip <kinds>] [--live] [--release] [--expect-plan <hash>] [--json-out <file>] [--fail-fast]`);
+    console.error(`impact: ${error.message}\nusage: node scripts/impact.mjs <plan|run> [--full] [--base <ref>] [--json] [--jobs <n>] [--skip <kinds>] [--live] [--release] [--allow-full] [--expect-plan <hash>] [--json-out <file>] [--fail-fast]`);
     return EXIT.usage;
   }
   const started = performance.now();
@@ -156,8 +162,16 @@ async function main() {
   const log = opts.json ? process.stderr : process.stdout;
   log.write(`${formatPlan(plan)}\n(planned in ${planSeconds.toFixed(2)}s)\n`);
   if (opts["expect-plan"] && opts["expect-plan"] !== plan.hash) {
-    console.error(`impact: the resolved plan is ${plan.hash}, not the expected ${opts["expect-plan"]}; the changes or options differ from the preview. Preview again.`);
+    console.error(`impact: the resolved plan is ${plan.hash}, not the expected ${opts["expect-plan"]}; the changes, their content, or the options differ from the preview. Preview again.`);
     return EXIT.usage;
+  }
+  if (plan.mode === "affected" && plan.level === "full" && !opts["allow-full"]) {
+    // Escalation is never silent: running full validation is an explicit choice.
+    log.write(
+      `\n=== PENDING: this change escalated to full validation (see Escalations above). Nothing was run.\n` +
+        `Run it with: npm run check:affected -- --allow-full   (or npm run check:full)\n`,
+    );
+    return EXIT.pending;
   }
   const result = await executePlan(plan, { jobs: opts.jobs ? Number(opts.jobs) : 2, skip: opts.skip, failFast: opts["fail-fast"], out: log });
   log.write(`${formatResult(result)}\n`);

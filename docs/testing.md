@@ -22,7 +22,7 @@ product's project graph.
 
 Options (after `--`): `--base <ref>`, `--json`, `--json-out <file>`,
 `--expect-plan <hash>`, `--jobs <n>`, `--skip <kinds or ids>`, `--fail-fast`,
-`--live`, `--release`, `--full`. `node scripts/impact.mjs` without arguments
+`--live`, `--release`, `--allow-full`, `--full`. `node scripts/impact.mjs` without arguments
 prints the usage.
 
 To run exactly what a preview showed: `npm run check:plan` prints the plan hash
@@ -142,10 +142,21 @@ Each planned check ends **passed**, **failed**, **skipped** (by `--skip`,
 
 | Exit status | Meaning |
 |---|---|
-| 0 | every planned check ran and passed |
+| 0 | every planned check ran and passed, and no required gate is pending |
 | 1 | a check failed |
 | 2 | usage error, invalid base, or the plan differs from `--expect-plan` |
 | 3 | nothing failed, but planned checks were skipped or unavailable |
+| 4 | pending: planned checks passed, but required gates were deferred (live, release, CI, manual), or the change escalated to full validation and the run was not allowed to expand |
+
+Only 0 is a passing result. An affected run never expands into full validation
+by itself: when the plan escalates to full it stops before running anything
+(exit 4) until you rerun with `--allow-full` or use `npm run check:full`.
+Live-provider and release runs need `--live` / `--release`.
+
+The plan hash binds the plan to its inputs: the comparison base, `HEAD`, and
+the content of every changed file. Editing a file after a preview makes
+`--expect-plan <hash>` refuse the run (exit 2) even when the selected checks
+would be the same.
 
 The summary and the JSON result (`--json`, `--json-out`) also list the deferred
 qualification items and uncovered files; `complete` is true only when every
@@ -213,6 +224,7 @@ listed; everything deferred or uncovered remains unverified.
 - Rust selection is per crate. A `#[cfg(test)]` module inside a source file is
   treated as product code. `cargo -p` selections unify features differently
   from `--workspace`; the full gate in CI covers the workspace build.
-- The plan hash identifies the checks to run (commands, order, environment,
-  deferred items, notes such as the e2e executable), not file contents.
+- The plan hash covers the checks (commands, order, environment, deferred
+  items, notes such as the e2e executable) and the content of changed files,
+  not the content of unchanged files the analysis read.
 - End-to-end scenarios are verified on Windows only.

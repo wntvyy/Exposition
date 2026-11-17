@@ -65,6 +65,25 @@ describe("impact CLI", () => {
     expect(executed.stderr).toMatch(/not the expected/);
   }, 30_000);
 
+  it("binds a plan to the content of the changed files", () => {
+    const r = docsRepo();
+    const { hash } = JSON.parse(cli(r.dir, "plan", "--json").stdout);
+    r.write("docs/guide.md", "three\n"); // same file, same checks, new content
+    const again = JSON.parse(cli(r.dir, "plan", "--json").stdout);
+    expect(again.checks.map((c) => c.id)).toEqual(["private-paths"]);
+    expect(again.hash).not.toBe(hash);
+    expect(cli(r.dir, "run", "--expect-plan", hash).status).toBe(2);
+  }, 30_000);
+
+  it("does not run an escalated full plan without --allow-full", () => {
+    const r = docsRepo();
+    r.write("newdir/unmapped.txt", "x\n");
+    const run = cli(r.dir, "run");
+    expect(run.status).toBe(4);
+    expect(run.stdout).toMatch(/PENDING: this change escalated to full validation/);
+    expect(run.stdout).not.toMatch(/=== check-all:/);
+  }, 30_000);
+
   it("propagates a failing check as exit status 1", () => {
     const r = docsRepo();
     // Ignore rules that stop covering CLAUDE.md: the private-path guard fails.

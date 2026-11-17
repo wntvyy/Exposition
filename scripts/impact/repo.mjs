@@ -2,6 +2,7 @@
 // set (committed branch changes plus staged, unstaged, and untracked files),
 // and an index of how files use each other.
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 
@@ -256,6 +257,25 @@ export function buildIndex({ cwd, changes, mergeBase, cargoMetadata = readCargoM
     .sort();
 
   return { files, imports, refs, crates: cargoMetadata(cwd), scenarios, ...changeFacts({ cwd, changes, mergeBase }) };
+}
+
+/**
+ * Digest of everything a plan is computed from: the comparison base, HEAD, and
+ * the content of every changed file (absent files hash as "absent"). An edit
+ * after a preview changes the digest, so `--expect-plan` rejects the stale plan.
+ */
+export function inputDigest({ cwd, base, changes }) {
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify({ ref: base.ref ?? null, mergeBase: base.mergeBase ?? null, head: base.head ?? null, ok: base.ok }));
+  for (const change of [...changes].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    hash.update(`\0${change.status}\0${change.from ?? ""}\0${change.path}\0`);
+    try {
+      hash.update(readFileSync(join(cwd, change.path)));
+    } catch {
+      hash.update("absent");
+    }
+  }
+  return hash.digest("hex").slice(0, 16);
 }
 
 /**

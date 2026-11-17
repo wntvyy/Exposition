@@ -248,7 +248,7 @@ function referencesTo(path, refs) {
 
 const sortById = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
-function finish(builder, { mode, base, changes, options, env }) {
+function finish(builder, { mode, base, changes, options, env, inputs }) {
   // `npm run check` runs every gate over the whole workspace: it subsumes them.
   if (builder.checks.has("check-all")) for (const id of Object.keys(GATES)) builder.checks.delete(id);
   const order = ["private-paths", "permissions", "typecheck", "frontend-tests", "frontend-build", "check-all", "rust-format", "rust-lint", "rust-tests", "bindings", "release-build", "release-smoke", "build-app"];
@@ -271,6 +271,7 @@ function finish(builder, { mode, base, changes, options, env }) {
     schema: PLAN_SCHEMA,
     mode,
     base,
+    inputs: inputs ?? null,
     changes,
     level: builder.level,
     escalations: builder.escalations,
@@ -294,6 +295,7 @@ export function planHash(plan) {
     schema: plan.schema,
     mode: plan.mode,
     base: plan.base ? { ref: plan.base.ref ?? null, mergeBase: plan.base.mergeBase ?? null } : null,
+    inputs: plan.inputs, // content of the changed files: a later edit makes a preview stale
     changes: plan.changes,
     checks: plan.checks.map(({ id, command, after, env }) => ({ id, command, after, env: env ?? null })),
     deferred: plan.deferred.map(({ id }) => id),
@@ -379,8 +381,9 @@ function applyOptions(builder, options) {
  * @param {{status: string, path: string, from?: string}[]} input.changes
  * @param {object} input.index repository index (repo.mjs buildIndex)
  * @param {{live?: boolean, release?: boolean}} [input.options]
+ * @param {string|null} [input.inputs] digest of the inputs (repo.mjs inputDigest)
  */
-export function buildPlan({ mode, base, changes: unsorted, index, options = {}, env = {} }) {
+export function buildPlan({ mode, base, changes: unsorted, index, options = {}, env = {}, inputs = null }) {
   const changes = [...unsorted].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : (a.from ?? "") < (b.from ?? "") ? -1 : 1));
   const builder = new PlanBuilder();
   const scenarios = index.scenarios;
@@ -389,17 +392,17 @@ export function buildPlan({ mode, base, changes: unsorted, index, options = {}, 
   if (mode === "full") {
     builder.escalate("full", "full validation requested");
     addFullChecks(builder, scenarios, options);
-    return finish(builder, { mode, base, changes, options, env });
+    return finish(builder, { mode, base, changes, options, env, inputs });
   }
   if (!base.ok) {
     builder.escalate("full", base.reason);
     addFullChecks(builder, scenarios, options);
-    return finish(builder, { mode, base, changes, options, env });
+    return finish(builder, { mode, base, changes, options, env, inputs });
   }
   if (changes.length === 0) {
     builder.notes.add(`No changes between the merge base and the working tree: only the baseline runs.`);
     builder.level = "none";
-    return finish(builder, { mode, base, changes, options, env });
+    return finish(builder, { mode, base, changes, options, env, inputs });
   }
 
   const rev = reverse(usageEdges(index));
@@ -535,7 +538,7 @@ export function buildPlan({ mode, base, changes: unsorted, index, options = {}, 
 
   if (builder.level === "full") {
     addFullChecks(builder, scenarios, options);
-    return finish(builder, { mode, base, changes, options, env });
+    return finish(builder, { mode, base, changes, options, env, inputs });
   }
   // Every plan below full says which changed files no selected check exercises.
   builder.uncovered = paths.filter((p) => !covered.has(p));
@@ -629,5 +632,5 @@ export function buildPlan({ mode, base, changes: unsorted, index, options = {}, 
   }
 
   applyOptions(builder, options);
-  return finish(builder, { mode, base, changes, options, env });
+  return finish(builder, { mode, base, changes, options, env, inputs });
 }

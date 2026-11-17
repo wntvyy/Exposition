@@ -5,7 +5,14 @@
 import { spawn, spawnSync } from "node:child_process";
 
 /** Exit statuses of `impact run`. */
-export const EXIT = { ok: 0, failed: 1, usage: 2, incomplete: 3 };
+/**
+ * Exit statuses: 0 every planned check passed and no required gate is pending;
+ * 1 a check failed; 2 usage, invalid base, or stale plan; 3 planned checks were
+ * skipped or unavailable; 4 pending: planned checks passed but required gates
+ * were deferred (live, release, CI, manual) or the plan escalated to full
+ * validation without --allow-full. Only 0 is a passing result.
+ */
+export const EXIT = { ok: 0, failed: 1, usage: 2, incomplete: 3, pending: 4 };
 
 /** A scenario that skipped itself as a whole ("SKIPPED: …" / "skip <name> …"). */
 const WHOLE_SKIP = /^\s*(SKIPPED:|skip\s)(.*)$/;
@@ -164,7 +171,13 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
 
   const ordered = plan.checks.map((c) => results.get(c.id));
   const count = (s) => ordered.filter((r) => r.status === s).length;
-  const exitCode = count("failed") ? EXIT.failed : count("skipped") || count("unavailable") ? EXIT.incomplete : EXIT.ok;
+  const exitCode = count("failed")
+    ? EXIT.failed
+    : count("skipped") || count("unavailable")
+      ? EXIT.incomplete
+      : plan.deferred.length
+        ? EXIT.pending
+        : EXIT.ok;
   return {
     schema: "exposition-impact-run/1",
     plan: plan.hash,
@@ -174,7 +187,7 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
     uncovered: plan.uncovered ?? [],
     // Complete: every planned check passed, nothing is deferred, and every
     // changed file is exercised by some check.
-    complete: exitCode === EXIT.ok && plan.deferred.length === 0 && (plan.uncovered ?? []).length === 0,
+    complete: exitCode === EXIT.ok && (plan.uncovered ?? []).length === 0,
     exitCode,
   };
 }

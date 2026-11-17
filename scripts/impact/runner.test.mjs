@@ -26,8 +26,9 @@ describe("statuses and exit codes", () => {
     expect(ok.exitCode).toBe(EXIT.ok);
     expect(ok.results.map((r) => r.status)).toEqual(["passed", "passed"]);
     expect(ok.complete).toBe(true);
+    // A deferred required gate keeps the result pending: never a pass.
     const deferred = await run(plan([step("a", node(""))], [{ id: "live:x", label: "x", why: "live" }]));
-    expect(deferred.exitCode).toBe(EXIT.ok);
+    expect(deferred.exitCode).toBe(EXIT.pending);
     expect(deferred.complete).toBe(false);
     const uncovered = await run(plan([step("a", node(""))], [], ["docs/x.md"]));
     expect(uncovered.complete).toBe(false);
