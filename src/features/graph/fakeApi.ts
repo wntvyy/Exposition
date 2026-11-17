@@ -199,6 +199,8 @@ export function createFakeGraph(seed: { entities?: Entity[]; relations?: Relatio
           const next: string[] = [];
           for (const r of relations) {
             if (relationKinds && !relationKinds.includes(r.kind)) continue;
+            // As the service: a rejected suggestion is followed only with inactive records.
+            if (r.status === "rejected" && !query.includeInactive) continue;
             if (direction !== "incoming" && frontier.includes(r.from) && !keep.has(r.to)) next.push(r.to);
             if (direction !== "outgoing" && frontier.includes(r.to) && !keep.has(r.from)) next.push(r.from);
           }

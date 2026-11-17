@@ -283,17 +283,48 @@ export function VerificationTable({
   );
 }
 
-/** Traversal: the assumptions and results this entity depends on (bounded). */
-function DependsOnSection({ entityId, vocabulary, onSelectEntity }: { entityId: string; vocabulary: VocabularyIndex | null; onSelectEntity: (id: string) => void }) {
+const DEPENDENCY_KINDS: Relation["kind"][] = ["dependsOn", "assumes"];
+const DEPENDENCY_DEPTH = 4;
+
+/**
+ * Of a dependency closure (`relations` among its items), the items reached
+ * from `start` only through suggested links: not along any path of accepted
+ * or observed "depends on"/"assumes" relations within the closure's depth.
+ * Rejected relations never count (the service does not follow them either).
+ */
+export function reachedOnlyBySuggestion(start: string, relations: Relation[], depth = DEPENDENCY_DEPTH): (id: string) => boolean {
+  const firm = new Set([start]);
+  let frontier = [start];
+  for (let d = 0; d < depth && frontier.length; d++) {
+    const next: string[] = [];
+    for (const r of relations) {
+      if (!DEPENDENCY_KINDS.includes(r.kind) || (r.status !== "accepted" && r.status !== "observed")) continue;
+      if (frontier.includes(r.from) && !firm.has(r.to)) {
+        firm.add(r.to);
+        next.push(r.to);
+      }
+    }
+    frontier = next;
+  }
+  return (id) => !firm.has(id);
+}
+
+/**
+ * Traversal: the assumptions and results this entity depends on (bounded).
+ * Rejected suggestions are not followed; an item reached only through
+ * suggested links is labelled as suggested.
+ */
+export function DependsOnSection({ entityId, vocabulary, onSelectEntity }: { entityId: string; vocabulary: VocabularyIndex | null; onSelectEntity: (id: string) => void }) {
   const loaded = useGraphLoad<GraphSnapshot>(`depends:${entityId}`, () =>
     graphApi().snapshot({
       kinds: null,
       text: null,
-      around: { entity: entityId, depth: 4, relationKinds: ["dependsOn", "assumes"], direction: "outgoing" },
+      around: { entity: entityId, depth: DEPENDENCY_DEPTH, relationKinds: DEPENDENCY_KINDS, direction: "outgoing" },
       includeInactive: false,
       limit: 200,
     }),
   );
+  const suggestedOnly = useMemo(() => reachedOnlyBySuggestion(entityId, loaded.data?.relations ?? []), [entityId, loaded.data]);
   const others = (loaded.data?.entities ?? []).filter((e) => e.id !== entityId);
   const assumptions = others.filter((e) => e.kind === "assumption" || e.kind === "conjecture");
   const results = others.filter((e) => !assumptions.includes(e));
@@ -305,12 +336,24 @@ function DependsOnSection({ entityId, vocabulary, onSelectEntity }: { entityId: 
       {items.length ? (
         <ul className="xp-graph-rows">
           {items.map((e) => (
-            <li key={e.id} className="xp-graph-row" data-testid="graph-depends-on" data-entity-id={e.id}>
+            <li
+              key={e.id}
+              className="xp-graph-row"
+              data-testid="graph-depends-on"
+              data-entity-id={e.id}
+              data-status={suggestedOnly(e.id) ? "suggested" : "asserted"}
+            >
               <p className="xp-graph-row__line xp-graph-row__main">
                 <button type="button" className="xp-link" onClick={() => onSelectEntity(e.id)}>
                   {e.label}
                 </button>
                 <span className="ui-muted"> ({kindDisplay(vocabulary, e.kind).title})</span>
+                {suggestedOnly(e.id) && (
+                  <>
+                    {" "}
+                    <RelationStatus status="suggested" />
+                  </>
+                )}
               </p>
             </li>
           ))}
