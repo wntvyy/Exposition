@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-media-image-references"
+description = "Enables the media_image_references command without any pre-configured scope."
+commands.allow = ["media_image_references"]
+
+[[permission]]
+identifier = "deny-media-image-references"
+description = "Denies the media_image_references command without any pre-configured scope."
+commands.deny = ["media_image_references"]
