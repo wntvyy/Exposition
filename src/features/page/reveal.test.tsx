@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BuildEvent } from "../../bindings/BuildEvent";
 import type { CaretGeometry } from "../../bindings/CaretGeometry";
 
-const ipc = vi.hoisted(() => ({ caret: null as unknown }));
+const ipc = vi.hoisted(() => ({ caret: null as unknown, documents: null as null | ((event: unknown) => void) }));
 
 vi.mock("../../lib/ipc", () => ({
   commands: {
@@ -19,7 +19,10 @@ vi.mock("../../lib/ipc", () => ({
     pageImage: async () => [],
   },
   events: {
-    documents: async () => () => {},
+    documents: async (handler: (event: unknown) => void) => {
+      ipc.documents = handler;
+      return () => {};
+    },
     typesettingBuild: async () => () => {},
     trustChanged: async () => () => {},
   },
@@ -109,6 +112,32 @@ describe("page session reveal", () => {
     // A position the pages do not contain (e.g. appended after the build).
     ipc.caret = null;
     expect(await session.reveal(400)).toBe(false);
+    session.detach();
+  });
+
+  it("does not count text added after the shown build as on its pages", async () => {
+    const session = new PageSession("paper.typ");
+    await session.attach();
+    await session.onBuild(succeeded());
+    // "Hello" + an unclosed delimiter appended after the build (revision 2).
+    ipc.documents?.({
+      kind: "changed",
+      document: "doc-1",
+      transaction: null,
+      origin: { kind: "source" },
+      change: "edit",
+      previousRevision: 1,
+      revision: 2,
+      patches: [{ range: { start: 5, end: 5 }, text: "\n#let broken = (\n" }],
+      selection: null,
+      canUndo: true,
+      canRedo: false,
+    });
+    // The page map would place a caret at the insertion point (end of "Hello").
+    ipc.caret = GEOMETRY;
+    expect(await session.reveal(19)).toBe(false);
+    // Text the build contains is still shown on the page.
+    expect(await session.reveal(3)).toBe(true);
     session.detach();
   });
 });

@@ -128,24 +128,26 @@ export default async function pageRecovery({ launchApp, artifactsDir, assert, fi
     await shot("04-diagnostic-shown-in-split");
     evidence.push(`XR-B-01: Problems click on "${location}" switched Page → Split, Monaco active line ${activeLine}, focus in source`);
 
-    // A diagnostic the pages can show keeps Page mode: fix the error, then a
-    // deliberate error inside the shown text.
+    // A diagnostic the pages can show keeps Page mode: remove the appended
+    // error and break text the last good pages contain (the escaped "\#tag"
+    // becomes code: "unknown variable: tag"), so the error is on the pages.
     await modeButton("Page").click();
     await page.getByTestId("typst-split").waitFor({ state: "detached", timeout: 10_000 });
     const broken = await invoke(page, "document_state", { document: doc });
-    const at = broken.text.indexOf("\n#let broken = (\n");
-    const fixAt = broken.text.indexOf("Exposition Basics");
-    assert.ok(at > 0 && fixAt > 0, "fixture text");
+    const appended = "\n#let broken = (\n";
+    const at = broken.text.indexOf(appended);
+    const escape = broken.text.indexOf("\\#tag");
+    assert.ok(at > 0 && escape > 0, "fixture text");
     await invoke(page, "document_apply", {
       request: {
-        id: "e2e-fix-and-break-inside",
+        id: "e2e-break-shown-text",
         origin: { kind: "source" },
         edits: [{
           document: doc,
           baseRevision: broken.info.revision,
           patches: [
-            { range: { start: fixAt, end: fixAt }, text: "#nosuch " },
-            { range: { start: at, end: at + "\n#let broken = (\n".length }, text: "" },
+            { range: { start: escape, end: escape + 1 }, text: "" },
+            { range: { start: at, end: at + appended.length }, text: "" },
           ],
         }],
         undo: { kind: "newGroup" },
@@ -154,12 +156,13 @@ export default async function pageRecovery({ launchApp, artifactsDir, assert, fi
         selection: null,
       },
     });
-    const inside = page.locator('[data-testid="problem"][data-source="build"]').filter({ hasText: /nosuch/ }).first();
+    const inside = page.locator('[data-testid="problem"][data-source="build"]').filter({ hasText: /tag/ }).first();
     await inside.waitFor({ timeout: 15_000 });
+    const insideText = await inside.innerText();
     await inside.click();
-    await page.waitForTimeout(1000);
-    assert.equal(await page.getByTestId("typst-split").count(), 0, "a position on the shown pages keeps Page mode");
     await page.locator('[data-testid="page-caret"]').first().waitFor({ timeout: 5_000 });
+    await page.waitForTimeout(800);
+    assert.equal(await page.getByTestId("typst-split").count(), 0, `a position on the shown pages keeps Page mode (${insideText})`);
     await shot("05-diagnostic-on-page-keeps-page-mode");
     evidence.push("XR-B-01: a diagnostic inside the shown pages keeps Page mode");
 

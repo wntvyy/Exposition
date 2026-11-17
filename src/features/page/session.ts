@@ -381,6 +381,17 @@ export class PageSession {
     return this.history.forward(position.offset, position.revision, this.buildRevision, "downstream");
   }
 
+  /** Whether a current-revision offset is text the shown build contains (it maps there and back). */
+  private inShownBuild(offset: number): boolean {
+    if (!this.build) return false;
+    if (this.docRevision <= this.buildRevision) return true;
+    const at = this.history.backward(offset, this.docRevision, this.buildRevision);
+    if (at === null) return false;
+    return (["upstream", "downstream"] as const).some(
+      (affinity) => this.history.forward(at, this.buildRevision, this.docRevision, affinity) === offset,
+    );
+  }
+
   private fromBuild(offset: number, affinity: Affinity): Position | null {
     const mapped = this.history.forward(offset, this.buildRevision, this.docRevision, affinity);
     return mapped === null ? null : { offset: mapped, revision: this.docRevision };
@@ -718,8 +729,12 @@ export class PageSession {
     this.unapplied = null;
     this.anchor = null;
     this.group += 1;
+    // Text added after the shown build has no place on its pages: mapped back
+    // it lands at the insertion point (a caret there points at the wrong
+    // text, e.g. the end of the last page for an error appended after it).
+    const onPages = this.inShownBuild(offset);
     const shown = await this.refreshGeometry();
-    return shown && !this.disposed;
+    return shown && onPages && !this.disposed;
   }
 
   /**
