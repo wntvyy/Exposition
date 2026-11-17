@@ -440,9 +440,19 @@ mod tests {
         assert_eq!(asked(), 3, "a trust grant asks again");
         runner.availability(&root, BatchMode::Restricted).unwrap();
         assert_eq!(asked(), 3);
+        // Revoking returns to inputs answered moments ago (these settings,
+        // untrusted): that answer still holds. Under other settings a revoke
+        // is a new question.
+        execution
+            .update_settings(|s| {
+                s.tool_paths.insert("rscript".into(), "C:\\R\\bin\\Rscript.exe".into());
+            })
+            .unwrap();
+        runner.availability(&root, BatchMode::Restricted).unwrap();
+        assert_eq!(asked(), 4, "a settings change asks again");
         execution.revoke_trust(&root.to_string_lossy()).unwrap();
         runner.availability(&root, BatchMode::Restricted).unwrap();
-        assert_eq!(asked(), 4, "a trust revoke asks again");
+        assert_eq!(asked(), 5, "a trust revoke asks again");
         drop(runner);
         let _ = std::fs::remove_dir_all(&outer);
     }
