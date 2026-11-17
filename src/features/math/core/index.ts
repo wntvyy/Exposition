@@ -1,5 +1,6 @@
 // Public surface of the equation core (contract; lane EQ-A implements every
 // function, lane EQ-B and the editor/page integration only import from here).
+import { allEntries, entryById, search } from "./catalog";
 import type {
   CatalogEntry,
   EditorState,
@@ -35,11 +36,11 @@ export function adapterFor(language: MathLanguage): MathLanguageAdapter {
 // ---- symbol catalog
 
 export function catalog(): readonly CatalogEntry[] {
-  return pending("catalog");
+  return allEntries();
 }
 
 export function catalogEntry(id: SymbolId): CatalogEntry | undefined {
-  return pending(`catalogEntry(${id})`);
+  return entryById(id);
 }
 
 export interface SearchHit {
@@ -55,7 +56,7 @@ export interface SearchHit {
  * exact matches first, then prefixes, then substrings; ties by catalog order.
  */
 export function searchCatalog(query: string, options: { language?: MathLanguage; limit?: number; category?: string }): SearchHit[] {
-  return pending(`searchCatalog(${query}, ${JSON.stringify(options)})`);
+  return search(query, options);
 }
 
 // ---- editing model (pure: every operation returns a new state)
