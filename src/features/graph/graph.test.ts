@@ -198,10 +198,61 @@ describe("graph store", () => {
       origin: { kind: "user" },
     });
     expect(useGraph.getState().revision).toBe(5);
+    // A change re-reads the status (its totals are not in the delta).
+    await vi.waitFor(() => expect(fake.calls.filter((c) => c.method === "status")).toHaveLength(2));
     const epoch = useGraph.getState().epoch;
     fake.resync();
     expect(useGraph.getState().epoch).toBe(epoch + 1);
-    await vi.waitFor(() => expect(fake.calls.filter((c) => c.method === "status")).toHaveLength(2));
+    await vi.waitFor(() => expect(fake.calls.filter((c) => c.method === "status")).toHaveLength(3));
+  });
+
+  // XR-D-02: the page header shows `status`; it must follow manual and agent changes.
+  it("keeps the status counts and revision current after manual and agent changes", async () => {
+    const fake = createFakeGraph({ entities: [entity("a", "lemma", "A"), entity("b", "definition", "B")] });
+    setGraphApi(fake.api);
+    graph.start();
+    await vi.waitFor(() => expect(useGraph.getState().status).toMatchObject({ entities: 2, relations: 0, revision: 1 }));
+    // A person's change through the service (the fake emits `changed`).
+    const proposal = await fake.api.propose({
+      baseRevision: 1,
+      operations: [{ op: "addRelation", kind: "dependsOn", from: { kind: "id", id: "a" }, to: { kind: "id", id: "b" }, evidenceKind: null, evidence: [], note: null }],
+      summary: null,
+    });
+    await fake.api.apply({ proposal: proposal.id, expectedRevision: proposal.baseRevision });
+    await vi.waitFor(() => expect(useGraph.getState().status).toMatchObject({ entities: 2, relations: 1, revision: fake.revision() }));
+    // An agent's change arrives only as an event.
+    fake.relations.push(relation("r9", "dependsOn", "b", "a", "suggested"));
+    fake.entities.push(entity("c", "theorem", "C"));
+    const delta = { revision: fake.revision(), entitiesAdded: [], entitiesUpdated: [], entitiesRemoved: [], relationsAdded: [], relationsUpdated: [], relationsRemoved: [], truncated: false };
+    fake.emit({ kind: "changed", delta, origin: { kind: "agent", taskId: "t1" } });
+    await vi.waitFor(() => expect(useGraph.getState().status).toMatchObject({ entities: 3, relations: 2 }));
+  });
+
+  it("keeps the last status when a re-read fails and never goes back to an older one", async () => {
+    const fake = createFakeGraph({ entities: [entity("a", "lemma", "A")] });
+    let fail = false;
+    let stale = false;
+    setGraphApi({
+      ...fake.api,
+      status: async () => {
+        if (fail) throw { code: "graph.unavailable", message: "busy" };
+        const s = await fake.api.status();
+        return stale ? { ...s, revision: 0, entities: 99 } : s;
+      },
+    });
+    graph.start();
+    await vi.waitFor(() => expect(useGraph.getState().status?.entities).toBe(1));
+    const delta = { revision: 2, entitiesAdded: [], entitiesUpdated: [], entitiesRemoved: [], relationsAdded: [], relationsUpdated: [], relationsRemoved: [], truncated: false };
+    fail = true;
+    fake.emit({ kind: "changed", delta, origin: { kind: "user" } });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(useGraph.getState().status?.entities).toBe(1);
+    expect(useGraph.getState().statusError).toBeNull();
+    fail = false;
+    stale = true;
+    fake.emit({ kind: "changed", delta, origin: { kind: "user" } });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(useGraph.getState().status?.entities).toBe(1);
   });
 
   it("reports an unavailable service instead of pretending", async () => {

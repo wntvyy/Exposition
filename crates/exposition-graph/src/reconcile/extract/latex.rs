@@ -100,6 +100,7 @@ pub fn extract(_path: &WorkspacePath, text: &str) -> Extraction {
         stmt_gap: None,
         proof_title: None,
         noted_commentary: false,
+        first_input: None,
     };
     for reason in mask_partial {
         lx.out.partial(reason);
@@ -332,6 +333,9 @@ struct Latex<'a> {
     stmt_gap: Option<usize>,
     proof_title: Option<ProofTitle>,
     noted_commentary: bool,
+    /// The first file read in with `\input`/`\include`/`\import` so far (its
+    /// definitions are not read here), as written.
+    first_input: Option<String>,
 }
 
 impl<'a> Latex<'a> {
@@ -450,6 +454,20 @@ impl<'a> Latex<'a> {
         if kind.is_none() && commentary(base) && !self.envs.contains_key(base) && !self.noted_commentary {
             self.noted_commentary = true;
             self.out.note("remarks and examples are not admitted as entities");
+        }
+        if kind.is_none() && literal(&env) && !self.envs.contains_key(base) && theorem_like_name(base) {
+            // Named like a theorem environment but not defined here (or
+            // defined by a non-literal construct): most likely a
+            // `\newtheorem` in another file. Its statements are not
+            // extracted, so this file's coverage is not complete.
+            let place = match &self.first_input {
+                Some(file) => format!(
+                    "it is not defined in this file; definitions in other files, such as {}, are not read",
+                    short(file)
+                ),
+                None => "it is not defined in this file".to_owned(),
+            };
+            self.out.partial(format!("environment {} is not interpreted ({place})", short(base)));
         }
         let mut decl = None;
         let kind = kind.filter(|_| self.out.may_nest(self.open_decls.len()));
@@ -635,6 +653,9 @@ impl<'a> Latex<'a> {
     fn path_link(&mut self, kind: RelationKind, written: &str, extensions: &[&str], range: Range<usize>) {
         if written.is_empty() {
             return;
+        }
+        if kind == RelationKind::Imports && self.first_input.is_none() {
+            self.first_input = Some(written.to_owned());
         }
         let target = LinkTarget::Path {
             written: written.to_owned(),
@@ -1015,6 +1036,19 @@ fn theorem_option_name(opts: &str) -> Option<String> {
 }
 
 /// A short, display-safe rendering of a name for messages.
+/// An environment name that reads like a theorem environment: a theorem
+/// word (`externaltheorem`, `mainlemma`, `axiom`, `proofsketch`) or a usual
+/// abbreviation at its start (`thmA`, `lem2`, `defn*`) or `thm` at its end
+/// (`mainthm`, not `algorithm`). Unknown environments with other names
+/// (`tikzcd`, `algorithm`, a package's boxes) are layout, not statements,
+/// and do not make coverage partial.
+fn theorem_like_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    kind_by_words(&lower).is_some()
+        || ["thm", "lem", "prop", "defn", "conj", "corol"].iter().any(|a| lower.starts_with(a))
+        || (lower.ends_with("thm") && !lower.ends_with("rithm"))
+}
+
 fn short(s: &str) -> String {
     let n = normalize(s, 60);
     if n.is_empty() { "(unnamed)".to_owned() } else { n }
@@ -1643,6 +1677,47 @@ Done, see \ref{sec:intro}.
         // Definition bodies are not content: no theorem, no label.
         assert!(x.declarations.is_empty());
         assert!(x.labels.is_empty());
+    }
+
+    /// XR-D-03: the review's two-file fixture. The consuming file uses a
+    /// theorem environment defined in the file it inputs: not Complete.
+    #[test]
+    fn a_theorem_environment_defined_in_another_file_makes_coverage_partial() {
+        let consuming = "\\documentclass{article}\n\\usepackage{amsthm}\n\\newtheorem{theorem}{Theorem}\n\\input{macro-defs}\n\\begin{document}\n\\hiddenstatement{A theorem hidden by a macro.}\n\\begin{externaltheorem}A declaration whose environment is defined in another file.\\end{externaltheorem}\n\\end{document}\n";
+        let x = run(consuming);
+        assert!(x.declarations.is_empty());
+        assert_eq!(
+            x.partial,
+            [
+                "environment externaltheorem is not interpreted (it is not defined in this file; definitions in other files, such as macro-defs, are not read)"
+            ]
+        );
+        // The defining file reports its own hidden macro, as before.
+        let defs = run(
+            "\\newtheorem{externaltheorem}{External Theorem}\n\\newcommand{\\hiddenstatement}[1]{\\begin{theorem}#1\\end{theorem}}\n",
+        );
+        assert_eq!(defs.partial, ["macro \\hiddenstatement is not interpreted (its definition uses \\begin{theorem})"]);
+        // Defined in the same file: interpreted, nothing partial.
+        let local =
+            run("\\newtheorem{externaltheorem}{External Theorem}\\begin{externaltheorem}A.\\end{externaltheorem}");
+        assert_eq!((local.declarations.len(), local.partial.len()), (1, 0));
+        // Without an input, the reason does not name one; abbreviations count.
+        let bare = run("\\begin{thmA}A.\\end{thmA}\\begin{lem2*}B.\\end{lem2*}\\begin{mainthm}C.\\end{mainthm}");
+        assert_eq!(
+            bare.partial,
+            [
+                "environment thmA is not interpreted (it is not defined in this file)",
+                "environment lem2 is not interpreted (it is not defined in this file)",
+                "environment mainthm is not interpreted (it is not defined in this file)"
+            ]
+        );
+        // Ordinary environments (standard, amsmath, packages' layout) never do.
+        let layout = run(
+            "\\input{figs}\\begin{document}\\begin{figure}\\begin{center}\\begin{tikzcd}a\\end{tikzcd}\\end{center}\\end{figure}\
+                          \\begin{align*}x\\end{align*}\\begin{itemize}\\item a\\end{itemize}\\begin{algorithm}s\\end{algorithm}\
+                          \\begin{mybox}t\\end{mybox}\\begin{remark}r\\end{remark}\\begin{abstract}a\\end{abstract}\\end{document}",
+        );
+        assert!(layout.partial.is_empty(), "{:?}", layout.partial);
     }
 
     #[test]

@@ -15,6 +15,10 @@
 //     from the buffer, nothing on disk.
 //  5. Keys on items that cannot take them explain why: Delete on the project
 //     node, Shift+Delete on a theorem ("use Delete from Source").
+//  6. A labelled Typst theorem (Inspector): the decision says the reference
+//     becomes undefined; the call AND its trailing label are removed in one
+//     undoable edit; after saving, the surviving theorem keeps its own label
+//     and the deleted one's label is defined nowhere.
 import { cp, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +38,17 @@ import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const BASEL = "namespace LeanBasic\n\n/-- The Basel sum. -/\ntheorem basel : True := by\n  trivial\n\ntheorem keep : True := trivial\n\nend LeanBasic\n";
 const USE = "import LeanBasic.Basel\n\nnamespace Other\n\ntheorem uses : True := LeanBasic.basel\n\nend Other\n";
+// The review's fixture (XR-D-04): numbered theorem figures with labels after the calls.
+const TYPST_REF = [
+  "#set page(width: 150mm, height: 130mm, margin: 15mm)",
+  '#let theorem(body) = figure(body, kind: "theorem", supplement: [Theorem], numbering: "1")',
+  "#theorem[First surviving statement.] <keep-theorem>",
+  "#theorem[Second target statement.] <delete-theorem>",
+  "",
+  "Reference to target: @delete-theorem.",
+  "",
+].join("\n");
+const TYPST_AFTER = TYPST_REF.replace("#theorem[Second target statement.] <delete-theorem>\n", "");
 
 async function entities(page) {
   return (await invoke(page, "graph_snapshot", { query: { kinds: null, text: null, around: null, includeInactive: true, limit: 500 } })).entities;
@@ -60,6 +75,7 @@ export default async function p1SourceRemoval({ launchApp, artifactsDir, assert,
   await mkdir(join(root, "lean", "LeanBasic"), { recursive: true });
   await writeFile(join(root, "lean", "LeanBasic", "Basel.lean"), BASEL);
   await writeFile(join(root, "lean", "LeanBasic", "Use.lean"), USE);
+  await writeFile(join(root, "delete-ref.typ"), TYPST_REF);
   await mkdir(dataDir, { recursive: true });
   const paperOnDisk = await readFile(join(root, "paper.tex"), "utf8");
   const shots = [];
@@ -79,12 +95,12 @@ export default async function p1SourceRemoval({ launchApp, artifactsDir, assert,
     await waitFor(
       async () => {
         const all = await entities(page);
-        return all.some((e) => e.kind === "theorem") && all.some((e) => e.key === "LeanBasic.basel") && all.some((e) => e.key === "rudin");
+        return all.filter((e) => e.kind === "theorem").length >= 3 && all.some((e) => e.key === "LeanBasic.basel") && all.some((e) => e.key === "rudin");
       },
       { timeout: 30_000, message: "theorem, Lean declaration and bib entry extracted" },
     );
     const all = await entities(page);
-    const theorem = all.find((e) => e.kind === "theorem");
+    const theorem = all.find((e) => e.kind === "theorem" && /thm:main/.test(`${e.key} ${e.label}`));
     const lemma = all.find((e) => e.kind === "lemma");
     const rudin = all.find((e) => e.key === "rudin");
     const basel = all.find((e) => e.key === "LeanBasic.basel");
@@ -188,6 +204,50 @@ export default async function p1SourceRemoval({ launchApp, artifactsDir, assert,
     const lean = await buffer(page, "lean/LeanBasic/Basel.lean");
     assert.ok(lean.dirty && !lean.text.includes("theorem basel") && !lean.text.includes("The Basel sum") && lean.text.includes("theorem keep"), lean.text);
     assert.equal(await readFile(join(root, "lean", "LeanBasic", "Basel.lean"), "utf8"), BASEL, "nothing written to disk");
+    await dismissNotifications(page);
+
+    // 6. A labelled Typst theorem (XR-D-04): its label goes with it in the
+    //    same undoable edit, so the reference cannot attach to the theorem
+    //    before it; after saving, the label is defined nowhere.
+    const typstTheorem = (await entities(page)).find((e) => e.kind === "theorem" && (e.key === "delete-theorem" || e.label.includes("delete-theorem")));
+    const keepTheorem = (await entities(page)).find((e) => e.kind === "theorem" && (e.key === "keep-theorem" || e.label.includes("keep-theorem")));
+    assert.ok(typstTheorem && keepTheorem, "both Typst theorems are extracted");
+    const deleteTypst = async () => {
+      await runCommand(page, "Show Project Graph", /Graph: Show Project Graph/);
+      await canvas.waitFor({ timeout: 15_000 });
+      await select(typstTheorem.id);
+      await inspector.waitFor({ timeout: 10_000 });
+      await inspector.getByRole("button", { name: "More actions" }).click();
+      await page.getByRole("menuitem", { name: /^Delete from Source/ }).click();
+      await decision(page).waitFor({ timeout: 15_000 });
+      const text = await decision(page).textContent();
+      assert.match(text, /references it/, "the reference is named");
+      assert.match(text, /shows as undefined/, "and said to become undefined");
+      assert.match(text, /delete-ref\.typ, line 4/, "the item's line, label included");
+      await decision(page).locator(".ui-dialog__footer button").last().click();
+      await waitForNotification(page, /^Removed “.*delete-theorem.*” from its source$/);
+    };
+    await deleteTypst();
+    await shot(page, "p1-source-removal-typst-light");
+    const typst = await buffer(page, "delete-ref.typ");
+    assert.equal(typst.text, TYPST_AFTER, "the call and its label are removed together; nothing else");
+    assert.ok(typst.dirty, "an unsaved edit");
+    assert.equal(await readFile(join(root, "delete-ref.typ"), "utf8"), TYPST_REF, "nothing written to disk");
+    await pressNotificationAction(page, /^Removed “.*delete-theorem.*” from its source$/, "Undo Removal");
+    await waitForNotification(page, "Removal undone");
+    assert.equal((await buffer(page, "delete-ref.typ")).text, TYPST_REF, "one Undo brings back the call and its label");
+    await dismissNotifications(page);
+    await deleteTypst();
+    await page.locator(".monaco-editor textarea").first().focus();
+    await page.keyboard.press("Control+S");
+    await waitFor(async () => !(await buffer(page, "delete-ref.typ")).dirty, { message: "delete-ref.typ saved" });
+    assert.equal(await readFile(join(root, "delete-ref.typ"), "utf8"), TYPST_AFTER);
+    await waitFor(async () => (await entities(page)).find((e) => e.id === typstTheorem.id)?.lifecycle !== "active", { timeout: 20_000, message: "the graph follows the save" });
+    const kept = (await entities(page)).find((e) => e.id === keepTheorem.id);
+    assert.equal(kept?.lifecycle, "active", "the surviving theorem keeps its identity");
+    const inspected = await invoke(page, "graph_inspect_at_source", { request: { path: "delete-ref.typ", offset: null, revision: null } });
+    const theorems = inspected.entities.filter((x) => x.entity.kind === "theorem" && x.entity.lifecycle === "active").map((x) => x.binding.selector.name).filter(Boolean);
+    assert.deepEqual(theorems, ["keep-theorem"], "the surviving theorem is still named by its own label only");
 
     assert.deepEqual(consoleErrors(app), [], "no console errors");
     await publishShots(shots);

@@ -55,12 +55,50 @@ function onEvent(event: GraphEvent) {
     }
     case "changed":
       bumpRevision(event.delta.revision);
+      // The delta carries no totals: re-read the status so the page header's
+      // counts and revision follow every change (manual, agent, indexing).
+      refreshStatus();
       break;
     case "reconciled":
       bumpRevision(event.revision);
       useGraph.setState((s) => (s.status ? { status: { ...s.status, freshness: event.freshness } } : s));
+      refreshStatus();
       break;
   }
+}
+
+// One status read at a time; events arriving meanwhile ask for one more read
+// after it (a burst of changes costs at most two reads).
+let statusRead: Promise<void> | null = null;
+let statusReadAgain = false;
+
+/**
+ * Re-read the status after a change. A failed read keeps the status shown
+ * (the next event or a resync reads again), and an answer older than the
+ * status already shown for the same project never replaces it.
+ */
+function refreshStatus() {
+  if (statusRead) {
+    statusReadAgain = true;
+    return;
+  }
+  statusRead = (async () => {
+    try {
+      const next = await graphApi().status();
+      useGraph.setState((s) =>
+        !s.status || s.status.project !== next.project || next.revision >= s.status.revision ? { status: next, statusError: null } : s,
+      );
+      bumpRevision(next.revision);
+    } catch {
+      // Keep the last known status.
+    }
+  })().finally(() => {
+    statusRead = null;
+    if (statusReadAgain) {
+      statusReadAgain = false;
+      refreshStatus();
+    }
+  });
 }
 
 async function loadStatus() {
@@ -104,7 +142,9 @@ export const graph = {
 
   /** Record a revision the caller learned (e.g. from an applied change). */
   noteRevision(revision: number): void {
+    const known = useGraph.getState().status?.revision ?? 0;
     bumpRevision(revision);
+    if (revision > known) refreshStatus();
   },
 
   /** Replace the status (e.g. after a recovery action returned it). */
@@ -118,6 +158,8 @@ export const graph = {
 export function resetGraphForTests(): void {
   stopEvents?.();
   stopEvents = null;
+  statusRead = null;
+  statusReadAgain = false;
   useGraph.setState(initial(), true);
 }
 

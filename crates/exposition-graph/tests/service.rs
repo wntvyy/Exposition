@@ -153,6 +153,77 @@ fn people_cannot_create_indexed_kinds_or_structural_relations_and_agents_only_su
     assert!(matches!(out, ApplyOutcome::Applied { .. }));
 }
 
+/// XR-D-01: the "Depends on" closure (an outgoing dependsOn/assumes
+/// neighborhood) never reaches an item through a rejected suggestion;
+/// suggested links are still followed (the caller labels them), and the
+/// rejected record stays in the entity's relationships as provenance.
+#[test]
+fn a_rejected_dependency_is_not_followed_by_a_dependency_closure() {
+    let (_d, _p, svc) = service();
+    let agent = Origin::Agent { task_id: "task-3".into() };
+    let (_, out) = apply(
+        &svc,
+        Origin::User,
+        vec![
+            create("t", EntityKind::Theorem, "Balanced energy"),
+            create("l", EntityKind::Lemma, "Nonnegative energy"),
+            create("d", EntityKind::Definition, "Pair energy"),
+            create("x", EntityKind::Definition, "Unrelated"),
+        ],
+    );
+    let ApplyOutcome::Applied { created, .. } = out else { panic!("{out:?}") };
+    let (t, l, d, x) = (created[0].id.clone(), created[1].id.clone(), created[2].id.clone(), created[3].id.clone());
+    let id = |e: &EntityId| EntityRef::Id { id: e.clone() };
+    let suggest = |a: &EntityId, b: &EntityId| GraphOperation::AddRelation {
+        kind: RelationKind::DependsOn,
+        from: id(a),
+        to: id(b),
+        evidence_kind: None,
+        evidence: vec![],
+        note: None,
+    };
+    let (_, out) = apply(&svc, agent, vec![suggest(&t, &l), suggest(&l, &d), suggest(&t, &x)]);
+    assert!(matches!(out, ApplyOutcome::Applied { .. }), "{out:?}");
+    let closure = |of: &EntityId, include_inactive: bool| -> Vec<String> {
+        let snap = svc
+            .snapshot(&GraphQuery {
+                around: Some(Neighborhood {
+                    entity: of.clone(),
+                    depth: 4,
+                    relation_kinds: Some(vec![RelationKind::DependsOn, RelationKind::Assumes]),
+                    direction: Direction::Outgoing,
+                }),
+                include_inactive,
+                limit: Some(200),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut labels: Vec<String> = snap.entities.iter().filter(|e| &e.id != of).map(|e| e.label.clone()).collect();
+        labels.sort();
+        labels
+    };
+    assert_eq!(closure(&t, false), ["Nonnegative energy", "Pair energy", "Unrelated"], "suggestions are followed");
+    // Reject lemma → definition: the lemma no longer depends on it, directly
+    // or (for the theorem) transitively.
+    let rejected = svc.entity_detail(&l).unwrap().outgoing.iter().find(|r| r.to == d).unwrap().id.clone();
+    let (_, out) = apply(
+        &svc,
+        Origin::User,
+        vec![GraphOperation::SetRelationStatus { relation: rejected.clone(), status: AssertionStatus::Rejected }],
+    );
+    assert!(matches!(out, ApplyOutcome::Applied { .. }), "{out:?}");
+    assert!(closure(&l, false).is_empty(), "{:?}", closure(&l, false));
+    assert_eq!(closure(&t, false), ["Nonnegative energy", "Unrelated"]);
+    // Asking for inactive records too (the canvas's "show rejected") follows it.
+    assert_eq!(closure(&t, true), ["Nonnegative energy", "Pair energy", "Unrelated"]);
+    // The rejected record is kept, labelled, in the lemma's relationships.
+    let kept = svc.entity_detail(&l).unwrap();
+    assert!(kept.outgoing.iter().any(|r| r.id == rejected && r.status == AssertionStatus::Rejected));
+    // Impact follows the same rule: the definition's change reaches nothing through it.
+    let impact = svc.impact(&ImpactRequest { entities: vec![d.clone()], max_depth: None, max_items: None }).unwrap();
+    assert!(impact.items.iter().all(|i| i.entity.id != l && i.entity.id != t), "{:?}", impact.items);
+}
+
 #[test]
 fn formal_check_evidence_cannot_be_minted_by_people_or_agents() {
     let (_d, _p, svc) = service();

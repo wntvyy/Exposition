@@ -1681,12 +1681,17 @@ fn neighborhood(
     for _ in 0..depth {
         let mut next = Vec::new();
         for id in &frontier {
+            // A rejected suggestion is provenance, not a relationship: it is
+            // followed only when inactive records are asked for too (the
+            // canvas's "Show archived items and rejected suggestions"), so a
+            // dependency closure never reaches an item through it.
+            let followed = |r: &Relation| query.include_inactive || r.status != AssertionStatus::Rejected;
             let mut rels = Vec::new();
             if matches!(n.direction, Direction::Outgoing | Direction::Both) {
-                rels.extend(store.relations_from(id)?.into_iter().map(|r| (r.to, r.kind)));
+                rels.extend(store.relations_from(id)?.into_iter().filter(followed).map(|r| (r.to, r.kind)));
             }
             if matches!(n.direction, Direction::Incoming | Direction::Both) {
-                rels.extend(store.relations_to(id)?.into_iter().map(|r| (r.from, r.kind)));
+                rels.extend(store.relations_to(id)?.into_iter().filter(followed).map(|r| (r.from, r.kind)));
             }
             for (other, kind) in rels {
                 if let Some(kinds) = &n.relation_kinds

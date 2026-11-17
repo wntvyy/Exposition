@@ -180,9 +180,7 @@ svg = [
     "</svg>",
 ]
 with open(os.path.join(OUT, "figure.svg"), "w", encoding="utf-8") as f:
-    f.write("
-".join(svg) + "
-")
+    f.write("\n".join(svg) + "\n")
 "##;
 
 fn numerical_experiment(r: &WorkflowPresetRequest) -> WorkflowDefinition {
@@ -299,5 +297,161 @@ fn formal_audit(r: &WorkflowPresetRequest) -> WorkflowDefinition {
             propose_changes: true,
         },
         execution: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 1-based lines where a Python short string literal (`'…'` or `"…"`,
+    /// any prefix) is not closed on its line — a SyntaxError (XR-E-01: a
+    /// literal newline inside `"\n".join(svg)`). Comments and triple-quoted
+    /// strings are skipped; a backslash-newline continuation is allowed.
+    fn short_strings_spanning_lines(src: &str) -> Vec<usize> {
+        let b = src.as_bytes();
+        let (mut i, mut line, mut out) = (0usize, 1usize, Vec::new());
+        while i < b.len() {
+            match b[i] {
+                b'\n' => {
+                    line += 1;
+                    i += 1;
+                }
+                b'#' => {
+                    while i < b.len() && b[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                q @ (b'\'' | b'"') if b[i..].starts_with(&[q, q, q]) => {
+                    i += 3;
+                    while i < b.len() && !b[i..].starts_with(&[q, q, q]) {
+                        if b[i] == b'\\' {
+                            i += 1;
+                        }
+                        if b.get(i) == Some(&b'\n') {
+                            line += 1;
+                        }
+                        i += 1;
+                    }
+                    i += 3;
+                }
+                q @ (b'\'' | b'"') => {
+                    let start = line;
+                    i += 1;
+                    loop {
+                        match b.get(i) {
+                            None | Some(b'\n') => {
+                                out.push(start);
+                                break;
+                            }
+                            Some(b'\\') => {
+                                if b.get(i + 1) == Some(&b'\n') {
+                                    line += 1;
+                                }
+                                i += 2;
+                            }
+                            Some(&c) if c == q => {
+                                i += 1;
+                                break;
+                            }
+                            Some(_) => i += 1,
+                        }
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        out
+    }
+
+    /// Every inline code template a preset can produce.
+    fn templates() -> Vec<(&'static str, String)> {
+        let data = WorkspacePath::parse("data/obs.csv").unwrap();
+        vec![("no data", numerical_template(None)), ("declared data", numerical_template(Some(&data)))]
+    }
+
+    #[test]
+    fn the_short_string_check_catches_a_literal_newline() {
+        // The XR-E-01 line: line 1 opens a string the newline breaks; line 2
+        // reads as a closed string; line 3 opens another.
+        assert_eq!(short_strings_spanning_lines("f.write(\"\n\".join(svg) + \"\n\")\n"), [1, 3]);
+        assert!(short_strings_spanning_lines("x = 'a\\'b'  # it's fine\ny = \"\"\"\nmulti\n\"\"\"\n").is_empty());
+    }
+
+    #[test]
+    fn no_python_short_string_in_a_preset_template_spans_a_line() {
+        for (case, source) in templates() {
+            assert_eq!(short_strings_spanning_lines(&source), Vec::<usize>::new(), "{case}");
+            assert!(
+                source.contains(r#"f.write("\n".join(svg) + "\n")"#),
+                "{case}: the figure is written with escaped newlines"
+            );
+        }
+        // The draft carries the template unchanged as the run step's code.
+        let draft =
+            draft(&WorkflowPresetRequest { preset: NUMERICAL_EXPERIMENT.into(), ..Default::default() }).unwrap();
+        let Some(StepPayload::Code { source, .. }) = &draft.steps[0].payload else { panic!("{:?}", draft.steps[0]) };
+        assert_eq!(source, &numerical_template(None));
+    }
+
+    /// A host Python interpreter (`python3`, `python`, `py`), if any.
+    fn host_python() -> Option<&'static str> {
+        ["python3", "python", "py"]
+            .into_iter()
+            .find(|p| std::process::Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+    }
+
+    fn python(
+        py: &str,
+        args: &[&str],
+        stdin: &str,
+        cwd: &std::path::Path,
+        out: &std::path::Path,
+    ) -> std::process::Output {
+        use std::io::Write;
+        let mut child = std::process::Command::new(py)
+            .arg("-I")
+            .args(args)
+            .current_dir(cwd)
+            .env("EXPOSITION_OUTPUT_DIR", out)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    /// The templates parse with a real Python and, run as the batch runner
+    /// runs them (declared input at its project path, outputs into
+    /// EXPOSITION_OUTPUT_DIR), write the statistics table and a well-formed
+    /// SVG figure. Skipped (with a message) only when no Python is installed;
+    /// the restricted-container run is covered by the e2e scenario
+    /// `workflow-preset-template`.
+    #[test]
+    fn the_numerical_template_parses_and_runs_with_a_real_python() {
+        let Some(py) = host_python() else {
+            eprintln!("SKIPPED: no host Python (python3/python/py) to parse the preset templates");
+            return;
+        };
+        for (case, source) in templates() {
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("out");
+            std::fs::create_dir_all(dir.path().join("data")).unwrap();
+            std::fs::create_dir_all(&out).unwrap();
+            std::fs::write(dir.path().join("data/obs.csv"), "x\n1\n2\n3\n4\n").unwrap();
+            let parsed = python(py, &["-c", "import ast,sys; ast.parse(sys.stdin.read())"], &source, dir.path(), &out);
+            assert!(parsed.status.success(), "{case}: {}", String::from_utf8_lossy(&parsed.stderr));
+            let ran = python(py, &["-"], &source, dir.path(), &out);
+            assert!(ran.status.success(), "{case}: {}", String::from_utf8_lossy(&ran.stderr));
+            let table = std::fs::read_to_string(out.join("table.csv")).unwrap();
+            let count = if case == "no data" { "count,60" } else { "count,4" };
+            assert!(table.starts_with("statistic,value") && table.contains(count), "{case}: {table}");
+            let svg = out.join("figure.svg");
+            let check = "import sys, xml.etree.ElementTree as E; r = E.parse(sys.argv[1]).getroot(); assert r.tag.endswith('svg'), r.tag";
+            let valid = python(py, &["-c", check, svg.to_str().unwrap()], "", dir.path(), &out);
+            assert!(valid.status.success(), "{case}: {}", String::from_utf8_lossy(&valid.stderr));
+        }
     }
 }

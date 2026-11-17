@@ -17,7 +17,7 @@ import { ipcGraphApi, setGraphApi } from "./api";
 import { EdgeLabelContent } from "./canvas/RelationEdge";
 import { createFakeGraph, entity, fakeVocabulary, relation, type FakeGraph } from "./fakeApi";
 import { EntityInspector, type InspectorActions } from "./Inspector";
-import { mathBadges, VerificationTable } from "./Mathematics";
+import { DependsOnSection, mathBadges, VerificationTable } from "./Mathematics";
 import { indexVocabulary, verdictThroughLink, type SavedView } from "./model";
 import { project } from "./projection";
 import { RelationReviewNote, RelationStatus } from "./RelationStatus";
@@ -163,6 +163,51 @@ describe("canvas edges", () => {
     expect(container.textContent).toBe("formalizes· needs re-review");
     const plain = project({ entities: [thm, decl], relations: [{ ...flagged, review: CURRENT }] }, vocabulary, view).edges[0]!;
     expect(plain.attention).toBeUndefined();
+  });
+});
+
+// XR-D-01: a rejected dependency is not a dependency; a suggested one is labelled.
+describe("Depends on (Mathematics inspector)", () => {
+  const lem = entity("lem", "lemma", "Nonnegative energy");
+  const def = entity("def", "definition", "Pair energy");
+  const hyp = entity("hyp", "assumption", "Finite pairs");
+  const listed = async () => {
+    await waitFor(() => expect(screen.queryByText("Tracing dependencies…")).toBeNull(), { timeout: 3000 });
+    return screen.queryAllByTestId("graph-depends-on").map((li) => [li.getAttribute("data-entity-id"), li.getAttribute("data-status")]);
+  };
+
+  it("leaves out what is reached only through a rejected suggestion, directly or transitively", async () => {
+    setGraphApi(
+      createFakeGraph({
+        entities: [thm, lem, def, hyp],
+        relations: [relation("r1", "dependsOn", "thm", "lem"), relation("r2", "dependsOn", "lem", "def", "rejected"), relation("r3", "assumes", "lem", "hyp")],
+      }).api,
+    );
+    render(<DependsOnSection entityId="thm" vocabulary={vocabulary} onSelectEntity={() => {}} />);
+    expect(await listed()).toEqual([
+      ["hyp", "asserted"],
+      ["lem", "asserted"],
+    ]);
+    cleanup();
+    render(<DependsOnSection entityId="lem" vocabulary={vocabulary} onSelectEntity={() => {}} />);
+    expect(await listed()).toEqual([["hyp", "asserted"]]);
+    expect(screen.queryByText("Pair energy")).toBeNull();
+  });
+
+  it("labels an item reached only through suggested links as suggested", async () => {
+    setGraphApi(
+      createFakeGraph({
+        entities: [thm, lem, def, hyp],
+        relations: [relation("r1", "dependsOn", "thm", "lem", "suggested"), relation("r2", "dependsOn", "lem", "def"), relation("r3", "dependsOn", "thm", "hyp"), relation("r4", "assumes", "thm", "hyp", "suggested")],
+      }).api,
+    );
+    render(<DependsOnSection entityId="thm" vocabulary={vocabulary} onSelectEntity={() => {}} />);
+    const rows = await listed();
+    expect(Object.fromEntries(rows)).toEqual({ lem: "suggested", def: "suggested", hyp: "asserted" });
+    const lemRow = screen.getAllByTestId("graph-depends-on").find((li) => li.getAttribute("data-entity-id") === "lem")!;
+    expect(within(lemRow).getByText("Suggested").closest("[title]")?.getAttribute("title")).toBe("Suggested, not yet accepted");
+    const hypRow = screen.getAllByTestId("graph-depends-on").find((li) => li.getAttribute("data-entity-id") === "hyp")!;
+    expect(within(hypRow).queryByText("Suggested")).toBeNull();
   });
 });
 
