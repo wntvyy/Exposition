@@ -70,6 +70,7 @@ export const SCENARIOS = {
     "agents-harness",
     "agents-attention",
     "agents-composer",
+    "agents-questions",
     "agents-graph",
     "agent-save",
     "agentctx-narration",
