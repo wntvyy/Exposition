@@ -684,6 +684,7 @@ export default async function reviewSecRender({ launchApp, artifactsDir, fixture
       const selectOption = async (scope, label, option) => {
         await scope.getByRole("button", { name: label }).click();
         await page.getByRole("option", { name: option, exact: true }).click();
+        await page.waitForFunction(() => !document.querySelector(".ui-select__popover"));
       };
       // Select the development-only scripted provider as the default (setup
       // only; provider configuration lives in Settings › Model providers and

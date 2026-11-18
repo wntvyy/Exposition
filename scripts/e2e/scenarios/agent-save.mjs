@@ -219,6 +219,8 @@ export default async function agentSave({ launchApp, artifactsDir, assert }) {
     await page.getByRole("option", { name: "Ask before each change", exact: true }).click();
     await sheet.getByRole("button", { name: /Commands and code/ }).click();
     await page.getByRole("option", { name: "Ask before each command (runs natively)", exact: true }).click();
+    // The list closes with an exit animation; Escape during it closes only the list.
+    await page.waitForFunction(() => !document.querySelector(".ui-select__popover"));
     await page.keyboard.press("Escape");
     await sheet.waitFor({ state: "detached" });
     await panel.getByTestId("agents-start").click();

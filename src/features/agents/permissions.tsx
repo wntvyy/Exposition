@@ -3,7 +3,7 @@
 // of what the user approved for the rest of a task. Rust owns every decision;
 // these views only show it and send the user's choices.
 import { Settings, ShieldCheck, ShieldOff } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ApprovalMode } from "../../bindings/ApprovalMode";
 import type { CodeAccess } from "../../bindings/CodeAccess";
@@ -230,15 +230,24 @@ export function TaskAllowances({ id }: { id: TaskId }) {
   // A stable empty list: a new array per read would re-render forever.
   const allowances = useAgents((s) => s.details[id]?.allowances ?? NO_ALLOWANCES);
   const [busy, setBusy] = useState(false);
+  const root = useRef<HTMLDivElement | null>(null);
   if (allowances.length === 0) return null;
   async function revoke(kind: (typeof allowances)[number]["kind"] | null) {
+    // A revoke removes its own button (and the list with the last one): keep
+    // focus in the surrounding panel or sheet so Escape and Tab still work.
+    const fallback =
+      root.current?.closest<HTMLElement>("[role=tabpanel][tabindex]") ?? root.current?.closest<HTMLElement>("[role=dialog]") ?? null;
     setBusy(true);
     await agents.run(() => agentPermissions.revokeAllowance(id, kind));
     await agents.refetch(id);
     setBusy(false);
+    requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (fallback?.isConnected && (!active || active === document.body || !active.isConnected)) fallback.focus();
+    });
   }
   return (
-    <div className="agents-row ui-meta" data-testid="agents-allowances">
+    <div ref={root} className="agents-row ui-meta" data-testid="agents-allowances">
       <span>Allowed for this task:</span>
       {allowances.map((a) => (
         <span key={a.kind} className="agents-row" data-testid="agents-allowance" data-kind={a.kind}>

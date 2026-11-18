@@ -80,6 +80,8 @@ const cardsSeen = (page) => page.evaluate(() => window.__liveCards ?? []);
 async function selectOption(page, scope, label, option) {
   await scope.getByRole("button", { name: label }).click();
   await page.getByRole("option", { name: option, exact: true }).click();
+  // The list closes with an exit animation; Escape during it closes only the list.
+  await page.waitForFunction(() => !document.querySelector(".ui-select__popover"));
 }
 
 /** Open the composer's Options sheet on a tab (Model, Permissions, Budgets); returns that tab's panel. */

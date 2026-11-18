@@ -158,7 +158,7 @@ function codeOf(error: unknown): string | null {
 }
 
 export const QUESTION_STALE_TEXT = "The question changed; review the updated options.";
-export const QUESTION_RESOLVED_TEXT = "Already answered in another view.";
+export const QUESTION_RESOLVED_TEXT = "This question is no longer open.";
 export const QUESTION_BUSY_TEXT = "The agent is still replying about this question. Send again after its reply.";
 
 /** What the user can do about a refused answer or discussion message. */

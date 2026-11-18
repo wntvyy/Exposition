@@ -267,6 +267,38 @@ describe("allowances and permission events", () => {
     expect(core.invoke).toHaveBeenCalledWith("agents_allowance_revoke", { task: "task-1", kind: "nativeCode" });
   });
 
+  // e2e agentctx-narration: revoking the last allowance removed the focused
+  // button, focus fell to the page, and Escape no longer closed the Options sheet.
+  it("keeps focus in the sheet when a revoke removes the focused button", async () => {
+    const detail = (allowances: { kind: "nativeCode"; grantedAtMs: number; approved: string }[]) => ({
+      summary: { id: "task-1", status: { kind: "completed" } } as never,
+      transcript: [],
+      approvals: [],
+      graph: { project: null, context: null, contexts: 0, targets: [], proposals: [], investigation: null },
+      allowances,
+    });
+    core.invoke.mockReset().mockResolvedValue(undefined);
+    ipc.agentsTaskDetail.mockReset().mockImplementation(async () => detail([]));
+    useAgents.setState({
+      ...initialAgentsState,
+      details: { "task-1": detail([{ kind: "nativeCode", grantedAtMs: 1, approved: "Run Python code" }]) },
+    });
+    render(
+      <section role="dialog" aria-label="Options" tabIndex={-1}>
+        <div role="tabpanel" aria-label="Permissions" tabIndex={0} data-testid="panel">
+          <TaskAllowances id="task-1" />
+        </div>
+      </section>,
+    );
+    const revoke = screen.getByRole("button", { name: "Revoke Native code" });
+    revoke.focus();
+    await act(async () => {
+      fireEvent.click(revoke);
+    });
+    await waitFor(() => expect(screen.queryByTestId("agents-allowances")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("panel")));
+  });
+
   it("re-reads permissions on any change and reports stopped Auto tasks and unconfirmed cleanup", () => {
     const change = {
       root: "C:/paper",

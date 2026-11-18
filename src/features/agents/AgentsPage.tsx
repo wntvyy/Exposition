@@ -380,7 +380,8 @@ export function AgentsPage() {
   const side = page.selected && !page.composing && page.tab !== "run" ? page.tab : null;
   return (
     <div className="agents agents-page" data-testid="agents-page" data-list={listOpen ? "open" : "rail"} data-side={side ?? undefined}>
-      <aside className="agents-page__list" aria-label="Agent tasks and kept work" data-region="agents-tasks">
+      {/* F6 stops: the header, the list body (or the collapsed rail), the detail. Regions are innermost-only, so the aside itself is not one. */}
+      <aside className="agents-page__list" aria-label="Agent tasks and kept work">
         {listOpen ? (
           <>
             <PageHeader
@@ -394,7 +395,7 @@ export function AgentsPage() {
                 </>
               }
             />
-            <div className="agents-page__list-body">
+            <div className="agents-page__list-body" data-region="agents-tasks">
               <PageTaskList kept={keptIds} />
               <Section title="Kept in the project graph" className="agents-page__kept">
                 <KeptEntities snapshot={kept} error={keptError} />
@@ -402,7 +403,7 @@ export function AgentsPage() {
             </div>
           </>
         ) : (
-          <nav className="agents-page__rail" aria-label="Agent tasks (collapsed)">
+          <nav className="agents-page__rail" aria-label="Agent tasks (collapsed)" data-region="agents-tasks">
             <h1 className="ui-visually-hidden">Agents</h1>
             <IconButton icon={PanelLeftOpen} aria-label="Show task list" onPress={() => setListOpen(true)} data-testid="agents-page-expand" />
             <IconButton icon={Plus} aria-label="New task" onPress={() => agents.setPage({ composing: true })} data-testid="agents-page-new-task" />

@@ -37,6 +37,8 @@ async function setTheme(page, theme) {
 async function selectOption(page, scope, label, option) {
   await scope.getByRole("button", { name: label }).click();
   await page.getByRole("option", { name: option, exact: true }).click();
+  // The list closes with an exit animation; Escape during it closes only the list.
+  await page.waitForFunction(() => !document.querySelector(".ui-select__popover"));
 }
 
 async function documentText(page, path) {

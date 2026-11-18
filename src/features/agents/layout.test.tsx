@@ -536,4 +536,16 @@ describe("Agents page", () => {
     expect(screen.getByTestId("agents-page").dataset.list).toBe("open");
     await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "Agents" })).toBeTruthy());
   });
+
+  // e2e pages-review: the list region contained the header region, and regions
+  // are innermost-only, so F6 never reached the task list.
+  it("is three F6 stops: the header, the task list (or its rail), and the detail", async () => {
+    const { regionElements } = await import("../../app/shell/regions");
+    render(<AgentsPage />);
+    await act(async () => pages.show(AGENTS_PAGE_ID));
+    const names = () => regionElements().map((r) => r.dataset.region);
+    expect(names()).toEqual(expect.arrayContaining(["agents-header", "agents-tasks", "agents-detail"]));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse task list" }));
+    expect(names()).toEqual(expect.arrayContaining(["agents-tasks", "agents-detail"]));
+  });
 });

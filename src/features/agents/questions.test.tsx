@@ -286,7 +286,7 @@ describe("QuestionCard", () => {
     render(<QuestionCard task={TASK} request={r} />);
     fireEvent.click(screen.getByText("Celsius"));
     fireEvent.click(sendButton());
-    expect((await screen.findByTestId("agents-question-error")).textContent).toBe("Already answered in another view.");
+    expect((await screen.findByTestId("agents-question-error")).textContent).toBe("This question is no longer open.");
     await waitFor(() => expect(ipc.agentsTaskDetail).toHaveBeenCalledWith(TASK));
   });
 
@@ -432,7 +432,7 @@ describe("Chat about it drafts", () => {
     drafts.chatAbout(TASK, revised);
     ipc.agentsQuestionDiscuss.mockRejectedValueOnce({ code: "agents.questionResolved", message: "resolved" });
     await expect(questions.sendDiscussion(TASK, drafts.get(TASK).about!, "And eV?")).rejects.toThrow(
-      "Already answered in another view.",
+      "This question is no longer open.",
     );
     expect(drafts.get(TASK).about).toBeNull();
 
