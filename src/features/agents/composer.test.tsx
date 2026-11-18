@@ -56,7 +56,7 @@ vi.mock("../../app/registry", async (importOriginal) => {
   return { ...actual, registry: { ...actual.registry, runCommand: registryRun } };
 });
 
-const { TaskComposer, DEFAULT_BUDGETS, optionsSummary, resetComposerForTests, SEND_WAITS } = await import("./TaskComposer");
+const { TaskComposer, DEFAULT_BUDGETS, resetComposerForTests } = await import("./TaskComposer");
 const { TaskView } = await import("./TaskView");
 const { TranscriptEntry } = await import("./Transcript");
 const { drafts, NEW_TASK_DRAFT, clipboardImages, genericPasteName } = await import("./drafts");
