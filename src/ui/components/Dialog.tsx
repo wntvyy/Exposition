@@ -1,11 +1,13 @@
 import { CircleAlert, TriangleAlert } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   Dialog as AriaDialog,
   DialogTrigger,
   Heading,
   Modal,
   ModalOverlay,
+  PopoverContext,
+  useSlottedContext,
   type ModalOverlayProps,
 } from "react-aria-components";
 import { create } from "zustand";
@@ -106,25 +108,151 @@ export interface PopoverDialogProps {
   children: ReactNode;
   placement?: PopoverProps["placement"];
   className?: string;
+  /**
+   * Element to anchor to when the popover is not inside a `DialogTrigger`
+   * (open it with `isOpen`/`onOpenChange`), e.g. a composer the popover opens above.
+   */
+  triggerRef?: RefObject<Element | null>;
+  /** Controlled open state; omit inside a `DialogTrigger`, which controls it. */
+  isOpen?: boolean;
+  onOpenChange?: (isOpen: boolean) => void;
+  /** `anchor`: exactly the anchor's width (fits a narrow panel). Default: the shared popover width. */
+  width?: "default" | "anchor";
+  /**
+   * Keep the popover inside this element (a panel body): it opens on the
+   * `placement` side without flipping, and its content scrolls within the
+   * space between the anchor and the element's edge.
+   */
+  boundaryElement?: Element | null;
+  /** Upper bound for the content height in px (scrolls beyond it). */
+  maxHeight?: number;
+  /** Gap between anchor and popover in px (default 4). */
+  offset?: number;
+}
+
+/** Space kept between a bounded popover and its boundary's edge (--space-2). */
+const BOUNDARY_PADDING = 8;
+const DEFAULT_OFFSET = 4;
+
+/**
+ * Non-modal dialog in a popover (filters, small pickers, sheets anchored to an
+ * element). Place inside `DialogTrigger` after its Button trigger, or pass
+ * `triggerRef` with `isOpen`/`onOpenChange`. Escape or clicking outside closes
+ * it and returns focus to the trigger.
+ */
+export function PopoverDialog({
+  title,
+  hideTitle,
+  children,
+  placement = "bottom start",
+  className,
+  triggerRef,
+  isOpen,
+  onOpenChange,
+  width = "default",
+  boundaryElement,
+  maxHeight,
+  offset = DEFAULT_OFFSET,
+}: PopoverDialogProps) {
+  // Inside a DialogTrigger the anchor comes from the trigger context.
+  const context = useSlottedContext(PopoverContext);
+  const anchorRef = triggerRef ?? context?.triggerRef;
+  return (
+    <Popover
+      placement={placement}
+      offset={offset}
+      {...(triggerRef ? { triggerRef } : {})}
+      {...(isOpen !== undefined ? { isOpen, onOpenChange } : {})}
+      {...(boundaryElement ? { boundaryElement, shouldFlip: false, containerPadding: BOUNDARY_PADDING } : {})}
+      className={cx("ui-popover-dialog", className)}
+      data-width={width}
+    >
+      <PopoverDialogContent
+        title={title}
+        hideTitle={hideTitle}
+        anchorRef={anchorRef}
+        boundaryElement={boundaryElement}
+        maxHeight={maxHeight}
+        side={placement.split(" ")[0]!}
+        offset={offset}
+      >
+        {children}
+      </PopoverDialogContent>
+    </Popover>
+  );
+}
+
+interface PopoverDialogContentProps {
+  title: string;
+  hideTitle?: boolean;
+  children: ReactNode;
+  anchorRef?: RefObject<Element | null>;
+  boundaryElement?: Element | null;
+  maxHeight?: number;
+  side: string;
+  offset: number;
 }
 
 /**
- * Non-modal dialog in a popover (filters, small pickers). Place inside
- * `DialogTrigger` after its Button trigger. Escape or clicking outside closes
- * it and returns focus to the trigger.
+ * The dialog inside the popover. react-aria writes its own inline max-height
+ * on the popover element, so the boundary cap goes on the dialog, measured
+ * while open from the anchor and the boundary.
  */
-export function PopoverDialog({ title, hideTitle, children, placement = "bottom start", className }: PopoverDialogProps) {
+function PopoverDialogContent({ title, hideTitle, children, anchorRef, boundaryElement, maxHeight, side, offset }: PopoverDialogContentProps) {
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const [bounded, setBounded] = useState<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!boundaryElement) {
+      setBounded(undefined);
+      return;
+    }
+    const measure = () => {
+      const dialog = dialogRef.current;
+      const anchor = anchorRef?.current;
+      if (!dialog || !anchor) return;
+      const box = boundaryElement.getBoundingClientRect();
+      const at = anchor.getBoundingClientRect();
+      const space =
+        side === "top" ? at.top - box.top : side === "bottom" ? box.bottom - at.bottom : box.height - BOUNDARY_PADDING;
+      // The popover's own padding and border sit around the dialog.
+      const popover = dialog.parentElement;
+      let chrome = 0;
+      if (popover) {
+        const style = getComputedStyle(popover);
+        chrome = ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"].reduce(
+          (sum, key) => sum + (parseFloat(style[key as "paddingTop"]) || 0),
+          0,
+        );
+      }
+      const next = Math.max(0, Math.floor(space - offset - BOUNDARY_PADDING - chrome));
+      setBounded((prev) => (prev === next ? prev : next));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+    observer?.observe(boundaryElement);
+    if (anchorRef?.current) observer?.observe(anchorRef.current);
+    return () => {
+      window.removeEventListener("resize", measure);
+      observer?.disconnect();
+    };
+  }, [anchorRef, boundaryElement, side, offset]);
+  const cap = bounded === undefined ? maxHeight : maxHeight === undefined ? bounded : Math.min(bounded, maxHeight);
   return (
-    <Popover placement={placement} className={cx("ui-popover-dialog", className)}>
-      <AriaDialog className="ui-popover-dialog__dialog" aria-label={hideTitle ? title : undefined}>
-        {!hideTitle && (
-          <Heading slot="title" className="ui-popover-dialog__title">
-            {title}
-          </Heading>
-        )}
-        {children}
-      </AriaDialog>
-    </Popover>
+    <AriaDialog
+      ref={dialogRef}
+      className="ui-popover-dialog__dialog"
+      aria-label={hideTitle ? title : undefined}
+      data-bounded={cap !== undefined || undefined}
+      style={cap !== undefined ? { maxHeight: cap } : undefined}
+    >
+      {!hideTitle && (
+        <Heading slot="title" className="ui-popover-dialog__title">
+          {title}
+        </Heading>
+      )}
+      {children}
+    </AriaDialog>
   );
 }
 

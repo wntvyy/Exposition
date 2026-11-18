@@ -328,3 +328,44 @@
 .ref-state-frame--compact {
   min-height: 0;
 }
+
+/* Slider, option list, chip, anchored popover specimens. */
+.ref-control-frame {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 100%;
+  max-width: 360px;
+}
+.ref-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 100%;
+}
+.ref-chip-row > .ui-chip {
+  max-width: 280px;
+}
+.ref-thumbnail {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(var(--color-accent-subtle), var(--color-surface-sunken));
+}
+.ref-anchor-frame {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: var(--space-2);
+}
+.ref-anchor-frame__composer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-2);
+  border: var(--border-width) solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-field);
+}
