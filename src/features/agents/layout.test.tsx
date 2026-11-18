@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FileReview } from "../../bindings/FileReview";
 import type { ProviderStatus } from "../../bindings/ProviderStatus";
+import type { QuestionRequest } from "../../bindings/QuestionRequest";
 import type { TaskDetail } from "../../bindings/TaskDetail";
 import type { TaskGraphInfo } from "../../bindings/TaskGraphInfo";
 import type { TaskSummary } from "../../bindings/TaskSummary";
@@ -24,6 +25,8 @@ const ipc = vi.hoisted(() => ({
   agentsTaskList: vi.fn(),
   workspaceCurrent: vi.fn(),
   agentsAttachmentPreview: vi.fn(),
+  agentsQuestionAnswer: vi.fn(),
+  agentsQuestionDiscuss: vi.fn(),
 }));
 const graphIpc = vi.hoisted(() => ({ keepInvestigation: vi.fn(), keptEntities: vi.fn(), createGenerationTask: vi.fn() }));
 vi.mock("../../lib/ipc", () => ({
@@ -34,15 +37,19 @@ vi.mock("../../lib/ipc", () => ({
 vi.mock("./graphIpc", () => ({ agentGraph: graphIpc }));
 vi.mock("./DiffView", () => ({ DiffView: () => null }));
 vi.mock("./ModelMenu", () => ({ ModelMenu: () => <div data-testid="model-menu" /> }));
+// The real figure card loads Research (and the editor); its own tests cover it.
+vi.mock("./FigureCard", () => ({
+  FigureCard: ({ figure }: { figure: { name: string } }) => <figure data-testid="agents-figure">{figure.name}</figure>,
+}));
 // The first load never completes, so it cannot overwrite the state set here.
 ipc.agentsProviderStatus.mockReturnValue(new Promise(() => {}));
 
-const { DEFAULT_BUDGETS, optionsSummary, resetComposerForTests, SEND_WAITS, TaskComposer } = await import("./TaskComposer");
+const { ANSWER_FIRST, DEFAULT_BUDGETS, optionsSummary, resetComposerForTests, SEND_WAITS, TaskComposer } = await import("./TaskComposer");
+const { QUESTION_BUSY_TEXT, resetQuestionMemoryForTests } = await import("./questions");
 const { TaskView } = await import("./TaskView");
 const { AgentsPage, changesLabel, proposalsLabel } = await import("./AgentsPage");
 const { groupTurns, turnSummary } = await import("./turns");
 const { resetOutlineForTests } = await import("./TurnOutline");
-const { pendingQuestions } = await import("./NeedsYou");
 const { drafts, NEW_TASK_DRAFT } = await import("./drafts");
 const { initialAgentsState, useAgents, AGENTS_PAGE_ID } = await import("./store");
 const { pages, resetPagesForTests } = await import("../../app/pages");
@@ -97,6 +104,29 @@ const call = (seq: number, name: string, input: unknown, status: Call["status"] 
   ...extra,
 });
 
+function question(id: string, toolUseId: string, prompt = "Which unit?"): QuestionRequest {
+  return {
+    id,
+    taskId: "task-1",
+    toolUseId,
+    revision: 1,
+    questions: [
+      {
+        id: "q1",
+        prompt,
+        explanation: null,
+        options: [
+          { id: "kelvin", label: "Kelvin", consequence: null, recommended: true },
+          { id: "celsius", label: "Celsius", consequence: null, recommended: false },
+        ],
+        allowCustom: true,
+      },
+    ],
+    state: { kind: "pending" },
+    createdAtMs: 1,
+  };
+}
+
 function load(detail: Partial<TaskDetail> & { summary: TaskSummary }) {
   const full: TaskDetail = { transcript: [], approvals: [], graph: NO_GRAPH, allowances: [], ...detail };
   ipc.agentsTaskDetail.mockResolvedValue(full);
@@ -117,6 +147,7 @@ beforeEach(() => {
   drafts.resetForTests();
   resetComposerForTests();
   resetOutlineForTests();
+  resetQuestionMemoryForTests();
   resetPagesForTests();
   useAgents.setState({ ...initialAgentsState, status, workspace: { root: "C:/paper", name: "paper" } as never });
 });
@@ -312,7 +343,7 @@ describe("turn outline", () => {
     expect(screen.getAllByText("Done.")).toHaveLength(1);
   });
 
-  it("renders a structured question at its call through the question slot, always visible", () => {
+  it("shows an ask_user call as a tool row until its question request is recorded", () => {
     load({
       summary: summary(),
       transcript: [{ kind: "userText", seq: 1, text: "Go", attachments: [] }, call(2, "read_file", { path: "a.tex" }), call(3, "ask_user", { questions: [] }, "running")],
@@ -322,6 +353,35 @@ describe("turn outline", () => {
     expect(anchor).toBeTruthy();
     expect(within(anchor as HTMLElement).getByTestId("agents-tool-call").dataset.tool).toBe("ask_user");
     expect(screen.getByTestId("agents-turn-summary").textContent).toBe("Read a.tex");
+  });
+
+  it("renders the question card at its call, always visible while the turn is collapsed", () => {
+    load({
+      summary: summary({ status: { kind: "awaitingAnswer" } }),
+      transcript: [{ kind: "userText", seq: 1, text: "Go", attachments: [] }, call(2, "read_file", { path: "a.tex" }), call(3, "ask_user", { questions: [] }, "running")],
+      questions: [question("req-1", "t3")],
+    });
+    render(<TaskView id="task-1" />);
+    expect(screen.getByTestId("agents-turn-toggle").getAttribute("aria-expanded")).toBe("false");
+    const anchor = document.querySelector("[data-needs-you='question:t3']") as HTMLElement;
+    const card = within(anchor).getByTestId("agents-question");
+    expect(card.dataset.question).toBe("req-1");
+    expect(within(card).getByText("Needs your answer")).toBeTruthy();
+    expect(within(anchor).queryByTestId("agents-tool-call")).toBeNull();
+    expect(screen.getByTestId("agents-task-status").dataset.status).toBe("awaitingAnswer");
+  });
+
+  it("shows a call's figures beside it, outside the collapsed activity", async () => {
+    const figure = { runId: "run-1", artifactId: "art-1", mediaType: "image/png", name: "fit.png", caption: null };
+    load({
+      summary: summary(),
+      transcript: [{ kind: "userText", seq: 1, text: "Plot it", attachments: [] }, call(2, "run_python", { code: "plot()" }, "succeeded", { figures: [figure] })],
+    });
+    render(<TaskView id="task-1" />);
+    expect(screen.getByTestId("agents-turn-toggle").getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("agents-tool-call")).toBeNull();
+    expect((await screen.findByTestId("agents-figure")).textContent).toBe("fit.png");
+    expect(screen.getByTestId("agents-turn-summary").textContent).toBe("Ran Python · 1 figure");
   });
 });
 
@@ -358,16 +418,81 @@ describe("Needs you", () => {
     fireEvent.click(row);
     expect(useAgents.getState()).toMatchObject({ view: "review", selected: "task-1" });
   });
+});
 
-  it("reads pending questions from the task detail when the backend provides them", () => {
-    expect(pendingQuestions(undefined)).toEqual([]);
-    const detail = {
-      questions: [
-        { id: "q-1", toolUseId: "t9", questions: [{ prompt: "Which unit?" }], state: { kind: "pending" } },
-        { id: "q-0", toolUseId: "t8", questions: [{ prompt: "Old" }], state: { kind: "answered", answers: [] } },
-      ],
-    } as unknown as TaskDetail;
-    expect(pendingQuestions(detail)).toEqual([{ id: "q-1", toolUseId: "t9", prompt: "Which unit?" }]);
+describe("questions in Needs you and the composer", () => {
+  const asked = () =>
+    load({
+      summary: summary({ status: { kind: "awaitingAnswer" } }),
+      transcript: [{ kind: "userText", seq: 1, text: "Go", attachments: [] }, call(2, "ask_user", { questions: [] }, "running")],
+      questions: [question("req-1", "t2", "Which temperature unit should Table 2 use in the final version of the paper?")],
+    });
+
+  it("lists a waiting question with its short prompt and jumps to the card", () => {
+    asked();
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    render(<TaskView id="task-1" />);
+    const needs = screen.getByRole("navigation", { name: "Needs you" });
+    const link = within(needs).getByTestId("agents-needs-question");
+    expect(link.getAttribute("aria-label")).toBe("Needs your answer: Which temperature unit should Table 2 use in the final…");
+    fireEvent.click(link);
+    expect(document.activeElement).toBe(screen.getByTestId("agents-question"));
+    expect(scroll).toHaveBeenCalled();
+    scroll.mockRestore();
+  });
+
+  it("while a question waits, Send takes only a discussion; Chat about it adds the About chip and focuses the field", async () => {
+    asked();
+    ipc.agentsQuestionDiscuss.mockResolvedValue(undefined);
+    render(<TaskView id="task-1" />);
+    const field = screen.getByTestId("agents-follow-up-text") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "Unrelated idea" } });
+    const send = screen.getByTestId("agents-continue") as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    expect(screen.getByTestId("agents-send-waits").textContent).toBe(ANSWER_FIRST);
+
+    fireEvent.click(screen.getByRole("button", { name: /Chat about it/ }));
+    const chip = screen.getByTestId("agents-about");
+    expect(chip.textContent).toContain("About: Which temperature unit should Table 2 use in the final version of the paper?");
+    expect(chip.dataset.tone).toBe("accent");
+    expect(document.activeElement).toBe(field);
+    // The existing draft text stays; the hint about answering is gone.
+    expect(field.value).toBe("Unrelated idea");
+    expect(screen.queryByTestId("agents-send-waits")).toBeNull();
+    expect(send.disabled).toBe(false);
+
+    fireEvent.change(field, { target: { value: "Why Kelvin?" } });
+    await act(async () => {
+      fireEvent.click(send);
+    });
+    expect(ipc.agentsQuestionDiscuss).toHaveBeenCalledWith("task-1", "req-1", 1, "Why Kelvin?");
+    expect(ipc.agentsTaskContinue).not.toHaveBeenCalled();
+    // Sent: the About is gone and the unrelated draft comes back.
+    expect(screen.queryByTestId("agents-about")).toBeNull();
+    expect(field.value).toBe("Unrelated idea");
+    expect(send.disabled).toBe(true);
+  });
+
+  it("shows a refused discussion in the composer and keeps the message; removing the chip stops discussing", async () => {
+    asked();
+    ipc.agentsQuestionDiscuss.mockRejectedValue({ code: "agents.questionBusy", message: "busy" });
+    render(<TaskView id="task-1" />);
+    fireEvent.click(screen.getByRole("button", { name: /Chat about it/ }));
+    const field = screen.getByTestId("agents-follow-up-text") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "Why Kelvin?" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("agents-continue"));
+    });
+    expect(screen.getByTestId("agents-discussion-error").textContent).toContain(QUESTION_BUSY_TEXT);
+    expect(field.value).toBe("Why Kelvin?");
+    expect(screen.getByTestId("agents-about")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Remove About:/ }));
+    expect(screen.queryByTestId("agents-about")).toBeNull();
+    expect(screen.queryByTestId("agents-discussion-error")).toBeNull();
+    expect(field.value).toBe("Why Kelvin?");
+    expect((screen.getByTestId("agents-continue") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("agents-send-waits").textContent).toBe(ANSWER_FIRST);
   });
 });
 

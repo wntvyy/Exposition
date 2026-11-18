@@ -3,33 +3,14 @@
 // conversation, and — once the task has stopped with changes to review —
 // "Review changes: N files · M unsaved". Nothing is answered from here.
 import { ArrowUp, ChevronRight, FileDiff, MessageCircleQuestion, ShieldAlert } from "lucide-react";
-import type { KeyboardEvent, ReactNode } from "react";
+import { useRef, type KeyboardEvent, type ReactNode } from "react";
 
 import type { ApprovalRequest } from "../../bindings/ApprovalRequest";
-import type { TaskDetail } from "../../bindings/TaskDetail";
+import type { QuestionRequest } from "../../bindings/QuestionRequest";
 import { ListRow } from "../../ui/components";
 import { WAITING_FOR_APPROVAL } from "./format";
-import { approvalAnchor, questionAnchor } from "./TurnOutline";
-
-/** A pending structured question (`TaskDetail.questions`, added by the backend; optional here). */
-export interface PendingQuestion {
-  id: string;
-  toolUseId: string;
-  prompt: string;
-}
-
-/** Questions waiting for the user's answer, in order (none on backends without questions). */
-export function pendingQuestions(detail: TaskDetail | undefined): PendingQuestion[] {
-  const questions = (detail as (TaskDetail & { questions?: unknown }) | undefined)?.questions;
-  if (!Array.isArray(questions)) return [];
-  return questions.flatMap((request: { id?: unknown; toolUseId?: unknown; questions?: { prompt?: unknown }[]; state?: { kind?: unknown } }) => {
-    const kind = request.state?.kind;
-    if (kind !== "pending" && kind !== "discussing") return [];
-    if (typeof request.id !== "string" || typeof request.toolUseId !== "string") return [];
-    const prompt = request.questions?.[0]?.prompt;
-    return [{ id: request.id, toolUseId: request.toolUseId, prompt: typeof prompt === "string" ? prompt : "Question" }];
-  });
-}
+import { jumpToQuestion, needsYouLabel } from "./questions";
+import { approvalAnchor } from "./TurnOutline";
 
 /**
  * Scroll an inline card into view and move focus to it (the approval card's
@@ -75,12 +56,14 @@ export function NeedsYou({
   onReview,
 }: {
   approvals: readonly ApprovalRequest[];
-  questions: readonly PendingQuestion[];
+  /** Open question requests (`pendingQuestions(detail)`, questions.ts). */
+  questions: readonly QuestionRequest[];
   /** Files to review after the task stopped (`null`: nothing to review now). */
   review: { files: number; unsaved: number } | null;
   onJump: (anchor: string) => void;
   onReview: () => void;
 }) {
+  const navRef = useRef<HTMLElement>(null);
   const count = approvals.length + questions.length + (review ? 1 : 0);
   if (count === 0) return null;
   const jump = (
@@ -89,7 +72,7 @@ export function NeedsYou({
     </span>
   );
   return (
-    <nav className="agents-needs" aria-label="Needs you" data-testid="agents-needs-you">
+    <nav ref={navRef} className="agents-needs" aria-label="Needs you" data-testid="agents-needs-you">
       <span className="ui-group-label agents-needs__label">
         Needs you <span className="ui-section__count">{count}</span>
       </span>
@@ -97,9 +80,9 @@ export function NeedsYou({
         <JumpRow
           key={q.id}
           icon={<MessageCircleQuestion size={14} aria-hidden />}
-          label={q.prompt}
+          label={needsYouLabel(q)}
           trailing={jump}
-          onActivate={() => onJump(questionAnchor(q.toolUseId))}
+          onActivate={() => jumpToQuestion(q.id, navRef.current)}
           testId="agents-needs-question"
         />
       ))}

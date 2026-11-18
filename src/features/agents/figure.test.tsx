@@ -83,9 +83,9 @@ describe("FigureCard", () => {
     ipc.agentsFigure.mockResolvedValue(png());
     const { unmount } = render(<FigureCard task="task-1" figure={figure} />);
 
-    // Not on screen yet: nothing fetched, a placeholder the size of a preview.
+    // Not on screen yet: nothing fetched, a loading indicator (as in Research).
     expect(ipc.agentsFigure).not.toHaveBeenCalled();
-    expect(screen.getByRole("status", { name: "Loading fig_arrhenius.png" })).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "Loading fig_arrhenius.png" })).toBeTruthy();
     act(() => trigger?.([{ isIntersecting: true }]));
     expect(disconnect).toHaveBeenCalled();
     expect(ipc.agentsFigure).toHaveBeenCalledWith("task-1", figure.runId, figure.artifactId);

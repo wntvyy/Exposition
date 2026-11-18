@@ -17,17 +17,21 @@
 // inspector); "Insert or update in document…" is Research's own promotion
 // flow (`PromotionControls`: plan review, document revision and artifact
 // digest checks, explicit approval), offered when Research lists the run.
+//
+// Frameless, like a Research figure: the image keeps Research's figure
+// treatment (`exp-research__figure`, the image's 1 px border only).
 import { FlaskConical, ImageOff, Maximize2, RotateCcw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { FigureRef } from "../../bindings/FigureRef";
 import type { TaskId } from "../../bindings/TaskId";
 import { commands, errorMessage } from "../../lib/ipc";
-import { Button, Dialog, StatusText } from "../../ui/components";
+import { Button, Dialog, Spinner, StatusText } from "../../ui/components";
 import { PromotionControls } from "../research/Promotion";
 import { revealInResearch } from "../research/space";
 import { useResearch } from "../research/store";
-import "./cards.css";
+import "../research/research.css";
+import "./agents.css";
 
 /** Figures larger than this are not decoded in the conversation. */
 export const FIGURE_MAX_BYTES = 20 * 1024 * 1024;
@@ -145,42 +149,37 @@ export function FigureCard({ task, figure }: { task: TaskId; figure: FigureRef }
   return (
     <figure
       ref={ref}
-      className="agents-figure"
+      className="exp-research__figure"
       data-testid="agents-figure"
       data-state={load.kind}
       data-run={figure.runId}
       data-artifact={figure.artifactId}
     >
-      <div className="agents-figure__preview">
-        {(load.kind === "waiting" || load.kind === "loading") && (
-          <div className="agents-figure__placeholder" role="status" aria-label={`Loading ${figure.name}`} />
-        )}
-        {load.kind === "ready" && (
-          <img
-            className="agents-figure__img"
-            src={load.url}
-            alt={alt}
-            decoding="async"
-            draggable={false}
-            onError={() => setLoad({ kind: "error", text: "The figure could not be displayed (the image data is not valid)." })}
-          />
-        )}
-        {load.kind === "unavailable" && (
-          <p className="agents-figure__gone" data-testid="agents-figure-unavailable">
-            <ImageOff size={16} aria-hidden />
-            <span>{load.text}</span>
-          </p>
-        )}
-        {load.kind === "error" && (
-          <div className="agents-row" role="alert" data-testid="agents-figure-error">
-            <StatusText status="failed" wrap label={load.text} />
-            <Button size="sm" variant="ghost" icon={RotateCcw} onPress={() => setAttempt((n) => n + 1)}>
-              Retry
-            </Button>
-          </div>
-        )}
-      </div>
-      <figcaption className="agents-figure__caption">
+      {(load.kind === "waiting" || load.kind === "loading") && <Spinner size="sm" aria-label={`Loading ${figure.name}`} />}
+      {load.kind === "ready" && (
+        <img
+          src={load.url}
+          alt={alt}
+          decoding="async"
+          draggable={false}
+          onError={() => setLoad({ kind: "error", text: "The figure could not be displayed (the image data is not valid)." })}
+        />
+      )}
+      {load.kind === "unavailable" && (
+        <div className="agents-row ui-meta" data-testid="agents-figure-unavailable">
+          <ImageOff size={14} aria-hidden />
+          <span>{load.text}</span>
+        </div>
+      )}
+      {load.kind === "error" && (
+        <div className="agents-row" role="alert" data-testid="agents-figure-error">
+          <StatusText status="failed" wrap label={load.text} />
+          <Button size="sm" variant="ghost" icon={RotateCcw} onPress={() => setAttempt((n) => n + 1)}>
+            Retry
+          </Button>
+        </div>
+      )}
+      <figcaption className="agents-row">
         <code className="ui-code">{figure.name}</code>
         <span className="ui-meta" title={figure.runId}>
           {provenance}
@@ -203,7 +202,7 @@ export function FigureCard({ task, figure }: { task: TaskId; figure: FigureRef }
             </Button>
           </div>
           {run && artifact && artifact.kind === "figure" && <PromotionControls run={run} artifact={artifact} />}
-          <p className="ui-meta">{FIGURE_NOTE}</p>
+          <div className="ui-meta">{FIGURE_NOTE}</div>
           <Dialog
             title={figure.name}
             size="lg"
@@ -216,9 +215,13 @@ export function FigureCard({ task, figure }: { task: TaskId; figure: FigureRef }
               </Button>
             }
           >
-            <img className="agents-figure__large" src={load.url} alt={alt} draggable={false} />
-            <p className="ui-meta">{provenance}</p>
-            {figure.caption && <p className="ui-meta">{figure.caption}</p>}
+            <figure className="exp-research__figure agents-figure-expanded">
+              <img src={load.url} alt={alt} draggable={false} />
+              <figcaption className="ui-meta">
+                {provenance}
+                {figure.caption ? ` · ${figure.caption}` : ""}
+              </figcaption>
+            </figure>
           </Dialog>
         </>
       )}
