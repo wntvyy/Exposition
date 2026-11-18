@@ -55,7 +55,7 @@ async function makePaperProject() {
   return root;
 }
 
-const terminal = (status) => !["queued", "running", "awaitingApproval"].includes(status.kind);
+const terminal = (status) => !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(status.kind);
 
 async function documentText(page, path) {
   const docs = await invoke(page, "document_list");

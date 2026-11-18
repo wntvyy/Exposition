@@ -293,7 +293,7 @@ export default async function workflowRun({ launchApp, artifactsDir, assert }) {
           answered.add(approval.id);
           await invoke(page, "agents_approval_resolve", { task: task.id, approval: approval.id, approved: approval.tool === "workflow_propose" });
         }
-        return !["queued", "running", "awaitingApproval"].includes(detail.summary.status.kind);
+        return !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(detail.summary.status.kind);
       }, { timeout: 90_000, interval: 300, message: "agent task finishes" }).catch((e) => note("agent-task-finished", false, String(e)));
       const agentDraft = (await invoke(page, "workflow_list")).find((w) => w.title === "Agent experiment");
       const runsBeforeCustomize = (await invoke(page, "workflow_runs", { workflow: null })).length;

@@ -97,7 +97,7 @@ export default async function p1Storage({ launchApp, artifactsDir, assert }) {
       });
       await waitFor(async () => {
         const t = (await invoke(page, "agents_task_list")).find((x) => x.id === task.id);
-        return t && !["queued", "running", "awaitingApproval"].includes(t.status.kind);
+        return t && !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(t.status.kind);
       }, { timeout: 30_000, message: "scripted task finished" });
       await runCommand(page, "Open Agents Page", /Agent: Open Agents Page/);
       // The Agents side panel may list the same task: use the page's list.

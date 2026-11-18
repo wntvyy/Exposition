@@ -76,7 +76,7 @@ export async function waitTaskDone(page, id, timeout = 60_000) {
   await waitFor(
     async () => {
       task = (await invoke(page, "agents_task_list")).find((t) => t.id === id);
-      return task && !["queued", "running", "awaitingApproval"].includes(task.status.kind);
+      return task && !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(task.status.kind);
     },
     { timeout, interval: 150, message: `task ${id} finishes` },
   );

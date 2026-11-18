@@ -105,7 +105,7 @@ export default async function reviewA1({ launchApp, artifactsDir, assert }) {
   const detail = (id) => call("agents_task_detail", { task: id });
   const toolCalls = async (id) => (await detail(id)).transcript.filter((i) => i.kind === "toolCall");
   const status = async (id) => (await call("agents_task_list")).find((t) => t.id === id)?.status?.kind;
-  const active = (kind) => ["queued", "running", "awaitingApproval"].includes(kind);
+  const active = (kind) => ["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(kind);
   /** Run a task; `answer(approval)` returns true / false / "task" / null (leave pending). */
   const runTask = async (req, script, answer = () => false, timeout = 180_000) => {
     await call("agents_dev_load_script", { script });

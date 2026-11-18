@@ -127,7 +127,7 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     await waitFor(
       async () => {
         const t = (await invoke(page, "agents_task_list")).find((x) => x.id === task.id);
-        return t && !["queued", "running", "awaitingApproval"].includes(t.status.kind);
+        return t && !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(t.status.kind);
       },
       { timeout: 30_000, message: `task ${prompt}` },
     );

@@ -165,7 +165,7 @@ export default async function graphDependencyStatus({ launchApp, artifactsDir, a
     await waitFor(
       async () => {
         const t = (await invoke(page, "agents_task_list")).find((x) => x.id === task.id);
-        return t && !["queued", "running", "awaitingApproval"].includes(t.status.kind);
+        return t && !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(t.status.kind);
       },
       { timeout: 30_000, message: "agent task finishes" },
     );

@@ -82,7 +82,7 @@ async function waitDone(page, id, timeout = 60_000) {
   const deadline = Date.now() + timeout;
   for (;;) {
     const task = (await invoke(page, "agents_task_list")).find((t) => t.id === id);
-    if (task && !["queued", "running", "awaitingApproval"].includes(task.status.kind)) return task;
+    if (task && !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(task.status.kind)) return task;
     if (Date.now() > deadline) throw new Error(`task ${id} did not finish: ${JSON.stringify(task?.status)}`);
     await page.waitForTimeout(150);
   }

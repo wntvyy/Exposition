@@ -30,7 +30,7 @@ theorem oddSum_eq_sq (n : Nat) : oddSum n = n * n := by
     simp only [oddSum, ih, Nat.add_mul, Nat.mul_add]
     omega
 `;
-const terminal = (status) => !["queued", "running", "awaitingApproval"].includes(status.kind);
+const terminal = (status) => !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(status.kind);
 
 export default async function liveWorkflowAudit({ launchApp, artifactsDir, assert }) {
   const root = await mkdtemp(join(tmpdir(), "exposition-live-wf-audit-"));

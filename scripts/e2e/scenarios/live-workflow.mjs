@@ -27,7 +27,7 @@ import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const IMAGE = "python:3.13-slim";
 const BUDGET = { maxTurns: 10, maxOutputTokens: 30_000, maxInputTokens: 300_000, maxWallMs: 600_000, maxToolCalls: 12, maxCommands: 0 };
-const terminal = (status) => !["queued", "running", "awaitingApproval"].includes(status.kind);
+const terminal = (status) => !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(status.kind);
 const toolCalls = (detail, name) => detail.transcript.filter((t) => t.kind === "toolCall" && (!name || t.name === name));
 
 export default async function liveWorkflow({ launchApp, artifactsDir, assert }) {

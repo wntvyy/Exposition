@@ -49,7 +49,7 @@ const PROMPT = [
   "```",
 ].join("\n");
 
-const terminal = (status) => !["queued", "running", "awaitingApproval"].includes(status.kind);
+const terminal = (status) => !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(status.kind);
 const toolCalls = (detail, name) => detail.transcript.filter((t) => t.kind === "toolCall" && (!name || t.name === name));
 const parse = (text) => {
   try {

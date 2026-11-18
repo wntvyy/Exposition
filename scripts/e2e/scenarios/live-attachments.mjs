@@ -69,7 +69,7 @@ function pdf(text) {
   return Buffer.from(out, "latin1");
 }
 
-const terminal = (status) => !["queued", "running", "awaitingApproval"].includes(status.kind);
+const terminal = (status) => !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(status.kind);
 
 async function waitTask(page, id, timeout = 180_000) {
   const started = Date.now();

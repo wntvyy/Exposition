@@ -23,7 +23,7 @@ import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const KEY_PATTERN = /sk-ant-[A-Za-z0-9_-]{8,}/;
 const BUDGET = { maxTurns: 12, maxOutputTokens: 40_000, maxInputTokens: 400_000, maxWallMs: 600_000, maxToolCalls: 16, maxCommands: 0 };
-const terminal = (status) => !["queued", "running", "awaitingApproval"].includes(status.kind);
+const terminal = (status) => !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(status.kind);
 const toolCalls = (detail, name) => detail.transcript.filter((t) => t.kind === "toolCall" && (!name || t.name === name));
 
 /** Run a task to completion, approving only the listed tools (others declined). */
