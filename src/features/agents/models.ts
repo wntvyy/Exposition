@@ -61,14 +61,22 @@ export function choiceParts(choice: ProviderChoice, effortLabel: (e: Effort) => 
   return [PROVIDER_NAMES[choice.provider], choice.model || "no model chosen", `${effortLabel(choice.effort)} effort`];
 }
 
-/** Rows whose display name or exact ID contain every word of the query. */
+/** Rows whose display name, exact ID, or provider name contain every word of the query. */
 export function filterModels(models: ModelDescriptor[], query: string): ModelDescriptor[] {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return models;
   return models.filter((m) => {
-    const text = `${m.displayName} ${m.id}`.toLowerCase();
+    const text = `${m.displayName} ${m.id} ${PROVIDER_NAMES[m.provider] ?? ""}`.toLowerCase();
     return words.every((w) => text.includes(w));
   });
+}
+
+/**
+ * What identifies a connection's model list: a saved or removed key (another
+ * account), a changed OpenAI project, or a credential error each list again.
+ */
+export function connectionIdentity(connection: ConnectionState): string {
+  return `${connection.configured}|${connection.version}|${connection.context ?? ""}|${connection.credentialError ?? ""}`;
 }
 
 const placeholders = new WeakSet<ModelDescriptor>();
@@ -166,6 +174,44 @@ export function effortFor(current: Effort, efforts: Effort[]): Effort {
   return efforts[0]!;
 }
 
+/**
+ * Effort levels a chosen model accepts: `known` only when a loaded catalog
+ * lists the model. An unlisted model's levels are unknown (every level is
+ * offered and the backend checks it); a listed model without levels has no
+ * effort setting.
+ */
+export function effortLevels(descriptor: ModelDescriptor | null): { known: boolean; efforts: Effort[] } {
+  if (!descriptor || isPlaceholder(descriptor)) return { known: false, efforts: ALL_EFFORTS };
+  return { known: true, efforts: descriptor.capabilities.efforts };
+}
+
+export const ALL_EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
+
+// The effort last chosen per model in this session (draft choices only; the
+// saved default changes only through Settings).
+const rememberedEfforts = new Map<string, Effort>();
+
+/** Remember the effort chosen for a model (draft memory; never saved). */
+export function rememberEffort(choice: ProviderChoice): void {
+  if (choice.model) rememberedEfforts.set(`${choice.provider}|${choice.model}`, choice.effort);
+}
+
+/**
+ * The effort to use after choosing `model`: the one remembered for it when
+ * the model accepts it, else `effortFor(current, …)`.
+ */
+export function effortForModel(model: ModelDescriptor, current: Effort): Effort {
+  const { known, efforts } = effortLevels(model);
+  const remembered = rememberedEfforts.get(`${model.provider}|${model.id}`);
+  if (remembered && (!known || !efforts.length || efforts.includes(remembered))) return remembered;
+  return effortFor(current, known ? efforts : []);
+}
+
+/** Forget remembered efforts (tests). */
+export function resetRememberedEfforts(): void {
+  rememberedEfforts.clear();
+}
+
 /** Why the choice cannot be used yet (`null`: it can). */
 export function choiceProblem(
   choice: ProviderChoice,
@@ -181,6 +227,13 @@ export function choiceProblem(
 }
 
 // ---------------------------------------------------------------- catalog loading
+
+/** One provider connection and its model list (the model menu's groups, Settings). */
+export function useConnectionCatalog(status: ProviderStatus | null, provider: ProviderKind): CatalogLoad & { connection: ConnectionState } {
+  const connection = connectionOf(status, provider);
+  const load = useModelCatalog(provider, connectionIdentity(connection), provider !== "scripted" && connection.configured);
+  return { ...load, connection };
+}
 
 export interface CatalogLoad {
   catalog: ModelCatalog | null;

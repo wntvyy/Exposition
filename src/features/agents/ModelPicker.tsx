@@ -1,7 +1,7 @@
-// The one model picker: provider/connection → (connect it) → a searchable list
-// of the connection's models → the settings that model supports. Used by the
-// provider settings (the default for new tasks), the task composer, and the
-// follow-up form. Support facts come from the backend's catalog; a chosen model
+// The provider-first model picker, still used by the task composer and the
+// follow-up form (`ModelChoice`) until they move to the grouped `ModelMenu`;
+// delete this file then. Provider configuration lives in Settings → Model
+// providers. Support facts come from the backend's catalog; a chosen model
 // the catalog does not list stays chosen and is marked, never replaced.
 import { KeyRound, RefreshCw } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
@@ -287,7 +287,7 @@ export function ModelPicker({ value, onChange, status, onProblemChange, onConfig
           title={`Connect ${PROVIDER_NAMES[provider]} to list its models`}
           description={
             <>
-              {connection.credentialError ?? "Add a key to list this provider's models."}
+              {connection.credentialError ?? "Add an API key in Settings → Model providers to list this provider's models."}
               {value.model && (
                 <>
                   {" "}
@@ -299,7 +299,7 @@ export function ModelPicker({ value, onChange, status, onProblemChange, onConfig
           actions={
             onConfigure && (
               <Button size="sm" onPress={() => onConfigure(provider)} data-testid="model-configure">
-                Add API key…
+                Configure in Settings
               </Button>
             )
           }

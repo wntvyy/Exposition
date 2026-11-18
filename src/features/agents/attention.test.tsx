@@ -1,15 +1,12 @@
-// Approval visibility, stopped tasks, review state that follows content, and
-// the key-removal confirmation.
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+// Approval visibility, stopped tasks, and review state that follows content.
+// (The key-removal confirmation is tested with Settings → Model providers.)
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ProviderStatus } from "../../bindings/ProviderStatus";
 import type { TaskSummary } from "../../bindings/TaskSummary";
 
 const ipc = vi.hoisted(() => ({
   agentsTaskDetail: vi.fn(),
-  agentsProviderClearKey: vi.fn(),
-  agentsProviderSetKey: vi.fn(),
   agentsModelsList: vi.fn(() => new Promise(() => {})),
   agentsReview: vi.fn(),
   agentsReviewDiff: vi.fn(),
@@ -28,9 +25,7 @@ const { statusLabel, stopLabel } = await import("./format");
 const { DEFAULT_BUDGETS } = await import("./TaskComposer");
 const store = await import("./store");
 const { AgentStatusItem } = await import("./register");
-const { ProviderSettingsDialog } = await import("./ProviderSettingsDialog");
 const { ReviewView } = await import("./ReviewView");
-const { ConfirmHost } = await import("../../ui/components");
 const { useNotifications } = await import("../../app/notifications");
 const { layout, useLayout } = await import("../../app/layout");
 
@@ -234,71 +229,5 @@ describe("review follows content", () => {
     expect(screen.getByRole("button", { name: "Restore" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Remove Copy" })).toBeTruthy();
     expect(ipc.agentsReviewDiff).not.toHaveBeenCalled();
-  });
-});
-
-describe("provider settings", () => {
-  const status: ProviderStatus = {
-    settings: { provider: "anthropic", model: "claude-opus-5-5", effort: "medium", consent: "scopeContent" },
-    configured: true,
-    connections: [],
-    credentialStore: "Windows Credential Manager",
-    credentialError: null,
-    scriptedAvailable: false,
-  };
-
-  beforeEach(() => {
-    ipc.agentsProviderClearKey.mockReset();
-    ipc.agentsProviderClearKey.mockResolvedValue({ ...status, configured: false });
-    useAgents.setState({ settingsOpen: true, status });
-  });
-
-  it("takes the key out of the form before saving it, and back only if saving fails", async () => {
-    const key = "sk-ant-unit-test-not-a-real-key-7c1d";
-    let finish: (value: ProviderStatus | null) => void = () => {};
-    ipc.agentsProviderSetKey.mockReset();
-    ipc.agentsProviderSetKey.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
-    render(<ProviderSettingsDialog />);
-    const field = screen.getByLabelText(/API key/) as HTMLInputElement;
-    fireEvent.change(field, { target: { value: key } });
-    fireEvent.click(screen.getByTestId("agents-key-save"));
-    // The provider event can report "Configured" before the save call returns:
-    // by then the key must already be gone from the form and the DOM.
-    expect(ipc.agentsProviderSetKey).toHaveBeenCalledWith(key, "anthropic");
-    expect((screen.getByLabelText(/API key/) as HTMLInputElement).value).toBe("");
-    expect(document.documentElement.outerHTML.includes(key)).toBe(false);
-    await act(async () => finish({ ...status, configured: true }));
-    await screen.findByText("Anthropic API key saved to the credential store.");
-    expect(document.documentElement.outerHTML.includes(key)).toBe(false);
-
-    // A failed save gives the key back so the user can retry.
-    ipc.agentsProviderSetKey.mockReset();
-    ipc.agentsProviderSetKey.mockRejectedValue(new Error("credential store unavailable"));
-    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: key } });
-    fireEvent.click(screen.getByTestId("agents-key-save"));
-    await waitFor(() => expect((screen.getByLabelText(/API key/) as HTMLInputElement).value).toBe(key));
-  });
-
-  it("asks before removing the stored key; Keep is focused and Escape keeps it", async () => {
-    render(
-      <>
-        <ProviderSettingsDialog />
-        <ConfirmHost />
-      </>,
-    );
-    fireEvent.click(screen.getByTestId("agents-key-remove"));
-    const alert = await screen.findByRole("alertdialog");
-    expect(alert.textContent).toContain("Remove the API key?");
-    // Escape keeps the key. (That "Keep key" gets focus is checked in the real
-    // app; jsdom does not move focus between sibling modal scopes.)
-    expect(screen.getByRole("button", { name: "Keep key" })).toBeTruthy();
-    fireEvent.keyDown(alert, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
-    expect(ipc.agentsProviderClearKey).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByTestId("agents-key-remove"));
-    fireEvent.click(await screen.findByRole("button", { name: "Remove key" }));
-    await waitFor(() => expect(ipc.agentsProviderClearKey).toHaveBeenCalledWith("anthropic"));
-    await screen.findByText("Anthropic API key removed.");
   });
 });

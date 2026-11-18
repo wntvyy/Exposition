@@ -5,12 +5,12 @@ import { Bot, Cpu, FlaskConical, FolderCog, HardDrive, Info, Palette, ShieldChec
 
 import { Tab, TabList, TabPanel, Tabs, type IconComponent } from "../../ui/components";
 import { AboutSection } from "./AboutSection";
-import { AgentsSection } from "./AgentsSection";
 import { AppearanceSection } from "./AppearanceSection";
 import { EditorSection } from "./EditorSection";
 import { ExecutionSection } from "./ExecutionSection";
 import { isSectionId, SECTIONS, type SectionId } from "./model";
 import { ProjectSection } from "./ProjectSection";
+import { ProvidersSection } from "./ProvidersSection";
 import { ResearchSection } from "./ResearchSection";
 import { showSection, useSettings } from "./store";
 import { StorageSection } from "./StorageSection";
@@ -23,7 +23,7 @@ const VIEWS: Record<SectionId, { icon: IconComponent; component: ComponentType }
   project: { icon: FolderCog, component: ProjectSection },
   trust: { icon: ShieldCheck, component: TrustSection },
   execution: { icon: Cpu, component: ExecutionSection },
-  agents: { icon: Bot, component: AgentsSection },
+  providers: { icon: Bot, component: ProvidersSection },
   research: { icon: FlaskConical, component: ResearchSection },
   storage: { icon: HardDrive, component: StorageSection },
   about: { icon: Info, component: AboutSection },

@@ -157,6 +157,44 @@
   margin: var(--space-2) 0 0;
 }
 
+/* Model providers: the key field with its buttons, the key actions, and a
+   field that takes the row's remaining width. */
+.exp-settings__key-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-top: var(--border-width) solid var(--color-border-subtle);
+}
+
+.exp-settings__key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) 0 var(--space-2);
+}
+
+.exp-settings__grow {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.exp-settings__feedback {
+  margin: var(--space-2) 0 0;
+}
+
+/* The default's model menu takes the popover's full width. */
+.exp-settings__model-popover {
+  width: 360px;
+}
+
+.exp-settings__model-label {
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+
 /* Setting rows: label and description beside the control. */
 .exp-settings__row {
   display: grid;
