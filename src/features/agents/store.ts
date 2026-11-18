@@ -130,6 +130,28 @@ export function approvalNotification(
   };
 }
 
+/** Notification id for a task's open structured question (one at a time). */
+export const questionNotificationId = (taskId: TaskId) => `agents-question-${taskId}`;
+
+/**
+ * A persistent notification for a structured question the task waits on,
+ * with an action that opens it. Retired when the question is resolved.
+ */
+export function questionNotification(
+  taskId: TaskId,
+  prompt: string | null,
+  task: string | undefined,
+): NonNullable<EventEffect["notification"]> {
+  return {
+    id: questionNotificationId(taskId),
+    tone: "warning",
+    title: "Agent needs your answer",
+    body: [prompt, task ? `Task: ${task}` : null].filter(Boolean).join(" · ") || undefined,
+    actions: [{ label: "Open question", run: () => openQuestion(taskId) }],
+    timeoutMs: null,
+  };
+}
+
 /** Notification for a task that just stopped running; `undefined` otherwise. */
 export function finishedNotification(previous: TaskSummary | undefined, task: TaskSummary): EventEffect["notification"] {
   if (!previous || !isActive(previous.status) || isActive(task.status)) return undefined;
@@ -172,9 +194,9 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
         },
         refetch: null,
         notification: finishedNotification(previous, event.task),
-        // A task that is no longer waiting (finished, canceled) has no approval to answer.
+        // A task that is no longer waiting (finished, canceled) has no approval or question to answer.
         ...(event.task.status.kind !== "awaitingApproval" && !isActive(event.task.status)
-          ? { dismiss: [approvalNotificationId(event.task.id)] }
+          ? { dismiss: [approvalNotificationId(event.task.id), questionNotificationId(event.task.id)] }
           : {}),
       };
     }
@@ -257,11 +279,20 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
       };
     }
     // Structured questions live in the task detail: re-read it.
-    case "questionRequested":
-      return { patch: {}, refetch: event.request.taskId };
+    case "questionRequested": {
+      const { taskId, questions, state: requestState } = event.request;
+      const open = requestState.kind === "pending" || requestState.kind === "discussing";
+      const task = state.tasks.find((t) => t.id === taskId)?.title;
+      return {
+        patch: {},
+        refetch: taskId,
+        ...(open ? { notification: questionNotification(taskId, questions[0]?.prompt ?? null, task) } : {}),
+      };
+    }
     case "questionChanged":
-    case "questionResolved":
       return { patch: {}, refetch: event.taskId };
+    case "questionResolved":
+      return { patch: {}, refetch: event.taskId, dismiss: [questionNotificationId(event.taskId)] };
     case "providerChanged":
       return { patch: { status: event.status }, refetch: null };
     case "reviewChanged":
@@ -309,7 +340,11 @@ export function mergeDetail(state: AgentsState, detail: TaskDetail): Partial<Age
   const draft = state.drafts[id];
   const drafts = { ...state.drafts };
   if (draft) {
-    const running = detail.summary.status.kind === "running" || detail.summary.status.kind === "awaitingApproval";
+    // A discussion turn ("Chat about it") streams while the task waits for the answer.
+    const running =
+      detail.summary.status.kind === "running" ||
+      detail.summary.status.kind === "awaitingApproval" ||
+      detail.summary.status.kind === "awaitingAnswer";
     if (!running) delete drafts[id];
     else if (draft.persisted) drafts[id] = { ...draft, text: "", thinking: "" };
   }
@@ -358,10 +393,10 @@ function approvalShowing(taskId: TaskId): boolean {
   return agentViewShowing() && view === "task" && selected === taskId;
 }
 
-function focusApprovalIn(container: string) {
+function focusApprovalIn(container: string, selector = "[data-testid=agents-approval]") {
   let frames = 0;
   const focus = () => {
-    const card = document.querySelector<HTMLElement>(`[data-testid=${container}] [data-testid=agents-approval]`);
+    const card = document.querySelector<HTMLElement>(`[data-testid=${container}] ${selector}`);
     if (!card) {
       if (++frames < 120) requestAnimationFrame(focus);
       return;
@@ -390,12 +425,33 @@ export function openApproval(taskId: TaskId): void {
   focusApprovalIn("agents-panel");
 }
 
+/** Selector of a task's open question card (the first one when several are open). */
+const OPEN_QUESTION = "[data-testid=agents-question][data-open=true]";
+
+/**
+ * Show the task where the user works (Agents page or Agent view) and move
+ * focus to its open question card (labelled by the question; the options
+ * are the next Tab stop).
+ */
+export function openQuestion(taskId: TaskId): void {
+  if (agentsPageShowing()) {
+    agents.showInPage(taskId, "run");
+    focusApprovalIn("agents-page", OPEN_QUESTION);
+    return;
+  }
+  layout.showView("auxiliary", AGENT_VIEW_ID);
+  agents.show("task", taskId);
+  focusApprovalIn("agents-panel", OPEN_QUESTION);
+}
+
 function handleEvent(event: AgentEvent) {
   const { patch, refetch: id, notification, dismiss: retired } = reduceEvent(useAgents.getState(), event);
   if (Object.keys(patch).length) useAgents.setState(patch);
   for (const old of retired ?? []) dismiss(old);
-  // An approval the user is already looking at needs no notification.
-  const shown = event.kind === "approvalRequested" && approvalShowing(event.approval.taskId);
+  // An approval or question the user is already looking at needs no notification.
+  const shown =
+    (event.kind === "approvalRequested" && approvalShowing(event.approval.taskId)) ||
+    (event.kind === "questionRequested" && approvalShowing(event.request.taskId));
   if (notification && !shown) notify(notification);
   if (id && (useAgents.getState().details[id] || useAgents.getState().selected === id)) void refetch(id);
 }
@@ -405,6 +461,8 @@ function syncApprovalNotifications(tasks: TaskSummary[]) {
   for (const task of tasks) {
     if (task.status.kind !== "awaitingApproval") dismiss(approvalNotificationId(task.id));
     else if (!approvalShowing(task.id)) notify(approvalNotification(task.id, null, task.title));
+    if (task.status.kind !== "awaitingAnswer") dismiss(questionNotificationId(task.id));
+    else if (!approvalShowing(task.id)) notify(questionNotification(task.id, null, task.title));
   }
 }
 
@@ -495,8 +553,11 @@ export const agents = {
       error: null,
     }));
     if (selected) void refetch(selected);
-    // The task's approval card is on screen now; its notification has done its job.
-    if (view === "task" && selected && agentViewShowing()) dismiss(approvalNotificationId(selected));
+    // The task's approval or question card is on screen now; its notification has done its job.
+    if (view === "task" && selected && agentViewShowing()) {
+      dismiss(approvalNotificationId(selected));
+      dismiss(questionNotificationId(selected));
+    }
   },
 
   /** Show a task on the Agents page (the same task the Agent view shows). */
@@ -508,6 +569,7 @@ export const agents = {
     }));
     if (taskId) void refetch(taskId);
     if (taskId) dismiss(approvalNotificationId(taskId));
+    if (taskId) dismiss(questionNotificationId(taskId));
   },
 
   /** Change the Agents page's navigation without leaving the current page. */
@@ -517,7 +579,10 @@ export const agents = {
     if (selected) void refetch(selected);
     // An approval now on screen on the page needs no notification.
     const { page } = useAgents.getState();
-    if (page.selected && approvalShowing(page.selected)) dismiss(approvalNotificationId(page.selected));
+    if (page.selected && approvalShowing(page.selected)) {
+      dismiss(approvalNotificationId(page.selected));
+      dismiss(questionNotificationId(page.selected));
+    }
   },
 
   setStatus(status: ProviderStatus) {

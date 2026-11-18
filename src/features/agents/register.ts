@@ -11,9 +11,9 @@ import { StatusPill } from "../../ui/components";
 import { openSettings } from "../settings/open";
 import { AgentPanel } from "./AgentPanel";
 import { AgentsPage } from "./AgentsPage";
-import { isActive, waitingLabel } from "./format";
+import { attentionLabel, isActive, needsUser } from "./format";
 import { REVIEW_PREFIX, ReviewView } from "./ReviewView";
-import { AGENT_VIEW_ID, AGENTS_PAGE_ID, agents, openApproval, useAgents } from "./store";
+import { AGENT_VIEW_ID, AGENTS_PAGE_ID, agents, openApproval, openQuestion, useAgents } from "./store";
 
 export { AGENT_VIEW_ID };
 
@@ -30,26 +30,29 @@ function ReviewEditor({ resource }: EditorProps) {
 
 export function AgentStatusItem() {
   const running = useAgents((s) => s.tasks.filter((t) => isActive(t.status)).length);
-  const waiting = useAgents((s) => s.tasks.filter((t) => t.status.kind === "awaitingApproval").length);
+  const approvals = useAgents((s) => s.tasks.filter((t) => t.status.kind === "awaitingApproval").length);
+  const answers = useAgents((s) => s.tasks.filter((t) => t.status.kind === "awaitingAnswer").length);
+  const waiting = approvals + answers;
   const review = useAgents((s) => s.tasks.reduce((n, t) => n + t.pendingReview, 0));
   useEffect(() => {
     void agents.init();
   }, []);
   if (waiting) {
-    // A task is blocked on the user: attention style, and a button that opens
-    // the (oldest) pending approval wherever the Agent view is.
-    const label = waitingLabel(waiting);
+    // A task is blocked on the user (an approval or a question): attention
+    // style, and a button that opens the oldest one wherever the Agent view is.
+    const label = attentionLabel(approvals, answers);
     return createElement(
       "button",
       {
         type: "button",
         className: "agents-status-attention",
         "data-testid": "agents-status-approval",
-        title: "Open the pending approval",
+        title: !answers ? "Open the pending approval" : !approvals ? "Open the pending question" : "Open the oldest task waiting for you",
         onClick: () => {
-          const blocked = useAgents.getState().tasks.filter((t) => t.status.kind === "awaitingApproval");
+          const blocked = useAgents.getState().tasks.filter((t) => needsUser(t.status));
           const oldest = blocked.sort((x, y) => x.updatedAtMs - y.updatedAtMs)[0];
-          if (oldest) openApproval(oldest.id);
+          if (oldest?.status.kind === "awaitingAnswer") openQuestion(oldest.id);
+          else if (oldest) openApproval(oldest.id);
         },
       },
       createElement(StatusPill, { status: "warning", size: "sm", label }),
@@ -128,6 +131,17 @@ registry.registerCommand({
   run: () => {
     const task = useAgents.getState().tasks.find((t) => t.status.kind === "awaitingApproval");
     if (task) openApproval(task.id);
+  },
+});
+
+registry.registerCommand({
+  id: "agents.openQuestion",
+  title: "Open Pending Agent Question",
+  category: "Agent",
+  enabled: () => useAgents.getState().tasks.some((t) => t.status.kind === "awaitingAnswer"),
+  run: () => {
+    const task = useAgents.getState().tasks.find((t) => t.status.kind === "awaitingAnswer");
+    if (task) openQuestion(task.id);
   },
 });
 

@@ -139,6 +139,23 @@ export function waitingLabel(count: number): string {
   return count === 1 ? `Agent: ${WAITING_FOR_APPROVAL.toLowerCase()}` : `Agent: ${count} ${WAITING_FOR_APPROVAL.toLowerCase()}`;
 }
 
+/** Whether the task is blocked on the user: an approval or a structured question ("needs you"). */
+export function needsUser(status: TaskStatus): boolean {
+  return status.kind === "awaitingApproval" || status.kind === "awaitingAnswer";
+}
+
+/**
+ * Status bar text for tasks blocked on the user. Approvals alone keep the
+ * approval wording (`waitingLabel`); questions alone say "waiting for your
+ * answer"; a mix counts the tasks waiting for you.
+ */
+export function attentionLabel(approvals: number, answers: number): string {
+  if (answers === 0) return waitingLabel(approvals);
+  const answer = WAITING_FOR_ANSWER.toLowerCase();
+  if (approvals === 0) return answers === 1 ? `Agent: ${answer}` : `Agent: ${answers} ${answer}`;
+  return `Agent: ${approvals + answers} waiting for you`;
+}
+
 /** The provider actually selected, and whether it can run tasks. */
 export function providerLabel(status: ProviderStatus): { text: string; ready: boolean } {
   if (status.settings.provider === "scripted") {

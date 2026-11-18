@@ -115,7 +115,8 @@ describe("approval notifications", () => {
     const resolved = reduceEvent(state, { kind: "approvalResolved", taskId: "task-1", approvalId: "approval-1", approved: true });
     expect(resolved.dismiss).toEqual([approvalNotificationId("task-1")]);
     const canceled = reduceEvent(state, { kind: "taskChanged", task: summary({ status: { kind: "canceled" } }) });
-    expect(canceled.dismiss).toEqual([approvalNotificationId("task-1")]);
+    // A stopped task has no approval and no question left to answer.
+    expect(canceled.dismiss).toEqual([approvalNotificationId("task-1"), store.questionNotificationId("task-1")]);
     const stillRunning = reduceEvent(state, { kind: "taskChanged", task: summary({ status: { kind: "running" } }) });
     expect(stillRunning.dismiss).toBeUndefined();
   });
