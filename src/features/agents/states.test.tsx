@@ -155,6 +155,42 @@ describe("the streaming draft follows the call through approval", () => {
     renderTask({ kind: "running" });
     expect(screen.queryByText(/create_file/)).toBeNull();
   });
+
+  // Independent review D1: the draft said "Running: ask_user" while the task waited for the user.
+  it("shows waiting for your answer (not running) while a question is open, then running", async () => {
+    const request = {
+      id: "question-1",
+      taskId: "task-1",
+      toolUseId: "q",
+      revision: 1,
+      questions: [
+        {
+          id: "q1",
+          prompt: "Which unit?",
+          explanation: null,
+          options: [
+            { id: "c", label: "Celsius", consequence: null, recommended: false },
+            { id: "k", label: "Kelvin", consequence: null, recommended: false },
+          ],
+          allowCustom: true,
+        },
+      ],
+      state: { kind: "pending" as const },
+      createdAtMs: 1,
+    };
+    dispatch(
+      { kind: "streamStarted", taskId: "task-1", turn: 1 },
+      { kind: "toolCallStarted", taskId: "task-1", toolUseId: "q", name: "ask_user" },
+      { kind: "questionRequested", request },
+    );
+    const view = renderTask({ kind: "awaitingAnswer" });
+    expect(screen.queryByText(/Running.*ask_user/)).toBeNull();
+    expect(screen.getByText("Waiting for your answer: ask_user")).toBeTruthy();
+
+    act(() => dispatch({ kind: "questionResolved", taskId: "task-1", requestId: "question-1" }));
+    view.rerender(<TaskView id="task-1" />);
+    expect(screen.getByText("Running: ask_user")).toBeTruthy();
+  });
 });
 
 describe("a finished task's outcome", () => {

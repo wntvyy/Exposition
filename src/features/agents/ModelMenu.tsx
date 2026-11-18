@@ -616,7 +616,8 @@ export function ModelMenuContent({
       {footer && (
         <div className="agents-model-menu__footer">
           <Button size="sm" variant="ghost" isDisabled={value === null || !fallback} onPress={() => onChange(null)} data-testid="model-use-default">
-            {`Use default (${fallback ? choiceSummary(fallback, fallbackDescriptor) : "not loaded"})`}
+            {/* The default can name a long model: it truncates in a narrow panel (the accessible name stays whole). */}
+            <span className="agents-model-menu__default-label">{`Use default (${fallback ? choiceSummary(fallback, fallbackDescriptor) : "not loaded"})`}</span>
           </Button>
           <Button size="sm" variant="ghost" onPress={onManageProviders} data-testid="model-manage-providers">
             Manage providers…

@@ -128,9 +128,9 @@ export function toolStatusLabel(status: ToolCallStatus, result: string | null = 
   }
 }
 
-/** The live pill for the tool the agent is on, e.g. "Waiting for approval: create_file". */
-export function activeToolLabel(name: string, status: "running" | "awaitingApproval"): PillState {
-  const pill = toolStatusLabel(status);
+/** The live pill for the tool the agent is on, e.g. "Waiting for approval: create_file", "Waiting for your answer: ask_user". */
+export function activeToolLabel(name: string, status: "running" | "awaitingApproval" | "awaitingAnswer"): PillState {
+  const pill = status === "awaitingAnswer" ? { status: "warning" as const, label: WAITING_FOR_ANSWER } : toolStatusLabel(status);
   return { status: pill.status, label: `${pill.label}: ${name}` };
 }
 

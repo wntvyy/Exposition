@@ -133,3 +133,15 @@
   gap: var(--space-1);
   padding-block: var(--space-1);
 }
+
+/* A long default name must not widen the sheet (350 px Agent panel). */
+.agents-model-menu__footer > .ui-button {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.agents-model-menu__default-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

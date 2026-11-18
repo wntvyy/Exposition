@@ -55,8 +55,8 @@ export interface StreamDraft {
   thinking: string;
   /** Name of the tool the agent is on, if any. */
   activeTool: string | null;
-  /** Whether that tool runs or waits for the user's approval (default running). */
-  activeToolStatus?: "running" | "awaitingApproval";
+  /** Whether that tool runs or waits for the user's approval or answer (default running). */
+  activeToolStatus?: "running" | "awaitingApproval" | "awaitingAnswer";
   /** The streamed output has been persisted; drop it on the next detail read. */
   persisted?: boolean;
 }
@@ -286,16 +286,26 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
       const { taskId, questions, state: requestState } = event.request;
       const open = requestState.kind === "pending" || requestState.kind === "discussing";
       const task = state.tasks.find((t) => t.id === taskId)?.title;
+      // ask_user has not returned: it waits for the user's answer.
+      const draft = state.drafts[taskId];
+      const waiting = open && draft ? { ...draft, activeToolStatus: "awaitingAnswer" as const } : null;
       return {
-        patch: {},
+        patch: waiting ? { drafts: { ...state.drafts, [taskId]: waiting } } : {},
         refetch: taskId,
         ...(open ? { notification: questionNotification(taskId, questions[0]?.prompt ?? null, task) } : {}),
       };
     }
     case "questionChanged":
       return { patch: {}, refetch: event.taskId };
-    case "questionResolved":
-      return { patch: {}, refetch: event.taskId, dismiss: [questionNotificationId(event.taskId)] };
+    case "questionResolved": {
+      const draft = state.drafts[event.taskId];
+      const next = draft?.activeToolStatus === "awaitingAnswer" ? { ...draft, activeToolStatus: "running" as const } : null;
+      return {
+        patch: next ? { drafts: { ...state.drafts, [event.taskId]: next } } : {},
+        refetch: event.taskId,
+        dismiss: [questionNotificationId(event.taskId)],
+      };
+    }
     case "providerChanged":
       return { patch: { status: event.status }, refetch: null };
     case "reviewChanged":
