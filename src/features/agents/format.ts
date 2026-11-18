@@ -23,7 +23,12 @@ export interface PillState {
 }
 
 export function isActive(status: TaskStatus): boolean {
-  return status.kind === "queued" || status.kind === "running" || status.kind === "awaitingApproval";
+  return (
+    status.kind === "queued" ||
+    status.kind === "running" ||
+    status.kind === "awaitingApproval" ||
+    status.kind === "awaitingAnswer"
+  );
 }
 
 const BUDGET_NAMES: Record<BudgetKind, string> = {
@@ -64,6 +69,9 @@ export function asSentence(text: string): string {
  */
 export const WAITING_FOR_APPROVAL = "Waiting for approval";
 
+/** The task status while a structured question waits for the user's answer. */
+export const WAITING_FOR_ANSWER = "Waiting for your answer";
+
 /** Task status in the shared status vocabulary, with a specific label. */
 export function statusLabel(status: TaskStatus): PillState {
   switch (status.kind) {
@@ -73,6 +81,8 @@ export function statusLabel(status: TaskStatus): PillState {
       return { status: "running", label: "Agent working" };
     case "awaitingApproval":
       return { status: "warning", label: WAITING_FOR_APPROVAL };
+    case "awaitingAnswer":
+      return { status: "warning", label: WAITING_FOR_ANSWER };
     case "completed":
       return { status: "succeeded", label: "Task completed" };
     case "canceled":
@@ -150,7 +160,7 @@ export const PERMISSION_LABELS: Record<PermissionProfile, string> = {
 export const EXECUTION_LABELS: Record<ExecutionMode, string> = {
   disabled: "No commands",
   approveEach: "Ask before each command (runs natively)",
-  restricted: "Restricted sandbox only (unattended)",
+  restricted: "Restricted container only (unattended)",
 };
 
 export const CONSENT_LABELS: Record<ContextConsent, string> = {

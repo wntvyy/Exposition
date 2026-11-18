@@ -2,10 +2,11 @@
 import type { ApprovalRequest } from "./ApprovalRequest";
 import type { PermissionsChange } from "./PermissionsChange";
 import type { ProviderStatus } from "./ProviderStatus";
+import type { QuestionRequest } from "./QuestionRequest";
 import type { TaskId } from "./TaskId";
 import type { TaskSummary } from "./TaskSummary";
 
 /**
  * Events on the `agents:event` channel.
  */
-export type AgentEvent = { "kind": "taskChanged", task: TaskSummary, } | { "kind": "transcriptChanged", taskId: TaskId, } | { "kind": "streamStarted", taskId: TaskId, turn: number, } | { "kind": "textDelta", taskId: TaskId, turn: number, text: string, } | { "kind": "thinkingDelta", taskId: TaskId, turn: number, text: string, } | { "kind": "streamReset", taskId: TaskId, turn: number, reason: string, } | { "kind": "toolCallStarted", taskId: TaskId, toolUseId: string, name: string, } | { "kind": "toolCallFinished", taskId: TaskId, toolUseId: string, isError: boolean, } | { "kind": "approvalRequested", approval: ApprovalRequest, } | { "kind": "approvalResolved", taskId: TaskId, approvalId: string, approved: boolean, } | { "kind": "fallback", taskId: TaskId, from: string, to: string, } | { "kind": "reviewChanged", taskId: TaskId, } | { "kind": "providerChanged", status: ProviderStatus, } | { "kind": "permissionsChanged", change: PermissionsChange, };
+export type AgentEvent = { "kind": "taskChanged", task: TaskSummary, } | { "kind": "transcriptChanged", taskId: TaskId, } | { "kind": "streamStarted", taskId: TaskId, turn: number, } | { "kind": "textDelta", taskId: TaskId, turn: number, text: string, } | { "kind": "thinkingDelta", taskId: TaskId, turn: number, text: string, } | { "kind": "streamReset", taskId: TaskId, turn: number, reason: string, } | { "kind": "toolCallStarted", taskId: TaskId, toolUseId: string, name: string, } | { "kind": "toolCallFinished", taskId: TaskId, toolUseId: string, isError: boolean, } | { "kind": "approvalRequested", approval: ApprovalRequest, } | { "kind": "approvalResolved", taskId: TaskId, approvalId: string, approved: boolean, } | { "kind": "questionRequested", request: QuestionRequest, } | { "kind": "questionChanged", taskId: TaskId, requestId: string, } | { "kind": "questionResolved", taskId: TaskId, requestId: string, } | { "kind": "fallback", taskId: TaskId, from: string, to: string, } | { "kind": "reviewChanged", taskId: TaskId, } | { "kind": "providerChanged", status: ProviderStatus, } | { "kind": "permissionsChanged", change: PermissionsChange, };

@@ -223,6 +223,10 @@ const COMMANDS: &[&str] = &[
     "file_rename",
     "file_import_start",
     "file_import_cancel",
+    // Agent UI rework: structured questions and figures (src/agents.rs).
+    "agents_question_answer",
+    "agents_question_discuss",
+    "agents_figure",
 ];
 
 /// Debug-build-only commands. They are compiled only with `debug_assertions`,

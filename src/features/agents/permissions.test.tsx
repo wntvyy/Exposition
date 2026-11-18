@@ -196,7 +196,7 @@ describe("composer Ask / Auto", () => {
     );
   });
 
-  // XR-F-03: Read only with "Restricted sandbox only" looked like it allowed
+  // XR-F-03: Read only with "Restricted container only" looked like it allowed
   // execution; the service refuses every launch of a read-only task.
   it("shows that Read only allows no commands and sends no execution choice with it", async () => {
     const choose = async (label: RegExp, option: string) => {
@@ -210,7 +210,7 @@ describe("composer Ask / Auto", () => {
     };
     render(<TaskComposer onCreated={() => {}} />);
     fireEvent.change(screen.getByTestId("agents-prompt"), { target: { value: "Compute 2 + 2" } });
-    await choose(/Commands and code/, "Restricted sandbox only (unattended)");
+    await choose(/Commands and code/, "Restricted container only (unattended)");
     await choose(/Document changes/, "Read only");
     const execution = screen.getByTestId("agents-execution");
     const button = within(execution).getByRole("button");
@@ -226,7 +226,7 @@ describe("composer Ask / Auto", () => {
     // Allowing changes again restores the person's execution choice.
     await choose(/Document changes/, "Ask before each change");
     expect(within(screen.getByTestId("agents-execution")).getByRole("button").textContent).toContain(
-      "Restricted sandbox only (unattended)",
+      "Restricted container only (unattended)",
     );
   });
 });

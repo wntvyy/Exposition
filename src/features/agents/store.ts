@@ -258,6 +258,12 @@ export function reduceEvent(state: AgentsState, event: AgentEvent): EventEffect 
         dismiss: [approvalNotificationId(event.taskId)],
       };
     }
+    // Structured questions live in the task detail: re-read it.
+    case "questionRequested":
+      return { patch: {}, refetch: event.request.taskId };
+    case "questionChanged":
+    case "questionResolved":
+      return { patch: {}, refetch: event.taskId };
     case "providerChanged":
       return { patch: { status: event.status }, refetch: null };
     case "reviewChanged":

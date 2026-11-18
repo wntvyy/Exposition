@@ -315,6 +315,10 @@ pub enum TaskStatus {
     Queued,
     Running,
     AwaitingApproval,
+    /// Blocked on the user's answer to a structured question (`ask_user`),
+    /// pending or being discussed. Not terminal; like an approval wait, the
+    /// time spent waiting is excluded from the wall-time budget.
+    AwaitingAnswer,
     Completed,
     Canceled,
     BudgetExceeded {
@@ -343,7 +347,10 @@ pub enum TaskStatus {
 
 impl TaskStatus {
     pub fn is_active(&self) -> bool {
-        matches!(self, TaskStatus::Queued | TaskStatus::Running | TaskStatus::AwaitingApproval)
+        matches!(
+            self,
+            TaskStatus::Queued | TaskStatus::Running | TaskStatus::AwaitingApproval | TaskStatus::AwaitingAnswer
+        )
     }
 }
 
@@ -682,6 +689,10 @@ pub enum TranscriptItem {
         /// Attachments sent with this message, in order.
         #[serde(default)]
         attachments: Vec<crate::attachments::AttachmentInfo>,
+        /// A "Chat about it" message about this question request (its id).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        question: Option<String>,
     },
     AssistantText {
         seq: u64,
@@ -705,12 +716,33 @@ pub enum TranscriptItem {
         /// How the call was authorized when it ran (`None`: it did not run,
         /// or it ran before authorizations were recorded).
         authorized_by: Option<AuthorizedBy>,
+        /// Figures the call produced (native `run_python`), recorded from the
+        /// run's manifest when the call finished.
+        #[serde(default)]
+        #[ts(optional)]
+        figures: Vec<FigureRef>,
     },
     Notice {
         seq: u64,
         level: NoticeLevel,
         message: String,
     },
+}
+
+/// A figure a tool call produced: an artifact of the research run the call
+/// created (kind figure, an image media type), recorded from that run's
+/// manifest. Its bytes are served only to the task that recorded it
+/// (`agents_figure`), read through the research artifact store.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct FigureRef {
+    pub run_id: String,
+    pub artifact_id: String,
+    pub media_type: String,
+    /// The artifact's file name.
+    pub name: String,
+    pub caption: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -743,6 +775,11 @@ pub struct TaskDetail {
     pub graph: crate::graph::TaskGraphInfo,
     /// What the user approved for the rest of this task (revocable).
     pub allowances: Vec<TaskAllowance>,
+    /// Every structured question of the task, in order, resolved ones
+    /// included. Each renders at the `ToolCall` item with its `tool_use_id`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub questions: Vec<crate::questions::QuestionRequest>,
 }
 
 /// Events on the `agents:event` channel.
@@ -796,6 +833,21 @@ pub enum AgentEvent {
         task_id: TaskId,
         approval_id: String,
         approved: bool,
+    },
+    /// The agent asked the user a structured question; the task waits.
+    QuestionRequested {
+        request: crate::questions::QuestionRequest,
+    },
+    /// A question request changed: a discussion started or ended, or the
+    /// options were revised (re-read the task detail).
+    QuestionChanged {
+        task_id: TaskId,
+        request_id: String,
+    },
+    /// A question request was answered or superseded.
+    QuestionResolved {
+        task_id: TaskId,
+        request_id: String,
     },
     /// Server-side fallback switched models for this turn.
     Fallback {
@@ -863,6 +915,11 @@ pub struct FileReview {
     pub current_revision: Option<u64>,
     /// Outcome of the latest review action (e.g. why a revert was refused).
     pub message: Option<String>,
+    /// Whether the open document has unsaved changes (`None`: the file is
+    /// not open, or its state is unknown). Derived when the review is read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unsaved: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
