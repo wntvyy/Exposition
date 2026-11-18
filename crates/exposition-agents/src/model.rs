@@ -719,7 +719,7 @@ pub enum TranscriptItem {
         /// Figures the call produced (native `run_python`), recorded from the
         /// run's manifest when the call finished.
         #[serde(default)]
-        #[ts(optional)]
+        #[ts(as = "Option<Vec<FigureRef>>", optional)]
         figures: Vec<FigureRef>,
     },
     Notice {
@@ -778,7 +778,7 @@ pub struct TaskDetail {
     /// Every structured question of the task, in order, resolved ones
     /// included. Each renders at the `ToolCall` item with its `tool_use_id`.
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(as = "Option<Vec<crate::questions::QuestionRequest>>", optional)]
     pub questions: Vec<crate::questions::QuestionRequest>,
 }
 

@@ -934,7 +934,7 @@ fn lean_contract(spec: &TaskSpec, kind: AutoExec, trusted: bool) -> Result<(), T
         ExecutionMode::Restricted => Err(refusal(
             codes::NATIVE_NOT_ALLOWED,
             format!(
-                "{consequence} That runs natively, which this task does not allow (restricted sandbox only), so \
+                "{consequence} That runs natively, which this task does not allow (restricted container only), so \
                  nothing was changed. Describe the change instead."
             ),
         )),
@@ -976,7 +976,7 @@ fn setup_refused_in_restricted() -> ToolOutput {
     refusal(
         codes::NATIVE_NOT_ALLOWED,
         "Package setup installs into the project's own environment with installers that run natively; the restricted \
-         container does not use that environment, and this task allows only the restricted sandbox. Nothing was \
+         container does not use that environment, and this task allows only the restricted container. Nothing was \
          installed.",
     )
 }
@@ -1076,7 +1076,7 @@ fn effects_contract(env: &ToolEnv<'_>, effects: &tools::Effects<'_>) -> Result<(
                 codes::NATIVE_NOT_ALLOWED,
                 format!(
                     "{} runs natively with your account's privileges, which this task does not allow (restricted \
-                 sandbox only; there is no restricted backend for it). Nothing was run.",
+                 container only; there is no restricted backend for it). Nothing was run.",
                     effects.what
                 ),
             ));

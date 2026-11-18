@@ -161,6 +161,25 @@ pub trait ToolServices: Send + Sync {
         Err(ServiceError::NotAvailable(ServiceKind::Research))
     }
 
+    /// The artifacts a research run of the project at `root` recorded (its
+    /// manifest's outputs). Figures shown in a conversation come from here,
+    /// never from a tool's result text.
+    fn run_artifacts(&self, _root: &Path, _run_id: &str) -> Result<Vec<ArtifactRecord>, ServiceError> {
+        Err(ServiceError::NotAvailable(ServiceKind::Research))
+    }
+
+    /// An artifact of a research run of the project at `root`: its record and
+    /// its bytes (bounded), read through the research artifact store. A run
+    /// whose record is gone fails with the code `research.unknownRun`.
+    fn artifact_bytes(
+        &self,
+        _root: &Path,
+        _run_id: &str,
+        _artifact_id: &str,
+    ) -> Result<(ArtifactRecord, Vec<u8>), ServiceError> {
+        Err(ServiceError::NotAvailable(ServiceKind::Research))
+    }
+
     /// Record an attachment the agent inserted with the format-owned
     /// transform, as a reviewed promotion records its own: the research
     /// project retains the artifact (one resource identity, computational

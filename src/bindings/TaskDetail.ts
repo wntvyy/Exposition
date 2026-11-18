@@ -6,15 +6,15 @@ import type { TaskGraphInfo } from "./TaskGraphInfo";
 import type { TaskSummary } from "./TaskSummary";
 import type { TranscriptItem } from "./TranscriptItem";
 
-export type TaskDetail = { summary: TaskSummary, transcript: Array<TranscriptItem>, approvals: Array<ApprovalRequest>,
+export type TaskDetail = { summary: TaskSummary, transcript: Array<TranscriptItem>, approvals: Array<ApprovalRequest>, 
 /**
  * The task's graph record: its context, targets, proposals, investigation.
  */
-graph: TaskGraphInfo,
+graph: TaskGraphInfo, 
 /**
  * What the user approved for the rest of this task (revocable).
  */
-allowances: Array<TaskAllowance>,
+allowances: Array<TaskAllowance>, 
 /**
  * Every structured question of the task, in order, resolved ones
  * included. Each renders at the `ToolCall` item with its `tool_use_id`.

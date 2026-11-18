@@ -283,9 +283,11 @@ impl AgentReviewer for AgentServiceReviewer {
             max_commands: 0,
             ..Budgets::default()
         };
+        // No user is in the loop of a workflow step: the task is never
+        // offered structured questions, so it cannot wait for an answer.
         let summary = self
             .agents
-            .create_task(CreateTaskRequest {
+            .create_unattended_task(CreateTaskRequest {
                 prompt: request.prompt.clone(),
                 workspace_root: display_root(&request.root),
                 scope: TaskScope::Files { paths: request.files.clone() },

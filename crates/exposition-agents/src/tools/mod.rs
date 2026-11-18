@@ -42,8 +42,35 @@ pub const WORKFLOW_PROPOSE: &str = "workflow_propose";
 pub const DELETE_PATHS: &str = "delete_paths";
 pub const COPY_PATHS: &str = "copy_paths";
 pub const INSTALL_PACKAGES: &str = "install_packages";
+/// A structured question to the user (interactive tasks only; handled by the
+/// task loop, not the gate: it reads and changes nothing).
+pub const ASK_USER: &str = "ask_user";
+/// Revise the question being discussed (offered only in a discussion turn).
+pub const REVISE_QUESTION: &str = "revise_question";
 /// Paths one delete/copy call may name.
 pub const MAX_OP_PATHS: usize = 100;
+
+/// The tools a task's model requests offer: every tool, except `ask_user`
+/// when no user is in the loop (workflow reviews, restricted-only runs).
+pub fn task_definitions(interactive: bool) -> Vec<ToolDefinition> {
+    definitions().into_iter().filter(|d| interactive || d.name != ASK_USER).collect()
+}
+
+/// The tools of a "Chat about it" turn: read-only context plus
+/// `revise_question`; no edits, commands, or new questions.
+pub fn discussion_definitions() -> Vec<ToolDefinition> {
+    let mut tools: Vec<ToolDefinition> =
+        definitions().into_iter().filter(|d| matches!(d.name, LIST_FILES | READ_FILE | GRAPH_QUERY)).collect();
+    tools.push(ToolDefinition {
+        name: REVISE_QUESTION,
+        strict: false,
+        description: "Revise the question the user is discussing with you: give the complete new questions. Keep \
+            the id of every option you keep (even when you reword it) so the user can tell what changed; give new \
+            options new ids. The user then answers the revised question; you cannot answer it yourself.",
+        input_schema: crate::questions::revise_question_schema(),
+    });
+    tools
+}
 
 /// The tool list, in a fixed order.
 pub fn definitions() -> Vec<ToolDefinition> {
@@ -202,7 +229,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 return its real exit code and output. Use it for calculations and data analysis the user asked for. \
                 Code that reads project files sees them as saved on disk, not unsaved editor text (save_document \
                 saves a file you edited first). \
-                In the restricted sandbox the project is read-only at /workspace and files can be written to /out. \
+                In the restricted container the project is read-only at /workspace and files can be written to /out. \
                 Available only for tasks scoped to the whole project.",
             input_schema: json!({
                 "type": "object",
@@ -237,7 +264,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 folder and return its exit code and bounded output. Use only when no dedicated tool fits. The \
                 program reads files as saved on disk, not unsaved editor text (the result lists open files with \
                 unsaved changes it did not see; save_document saves a file you edited first). In the \
-                restricted sandbox the project is read-only at /workspace and files can be written to /out. \
+                restricted container the project is read-only at /workspace and files can be written to /out. \
                 Available only for tasks scoped to the whole project.",
             input_schema: json!({
                 "type": "object",
@@ -380,7 +407,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 them. Packages come from PyPI as prebuilt wheels; each entry is a name with optional extras and \
                 version clauses (e.g. numpy, pandas>=2.2, scipy==1.14.1); URLs, paths, and options are refused. It \
                 needs the network and runs the installers natively, so it needs the project's setup permission or the \
-                user's approval of the complete plan, and it never runs in the restricted sandbox (which does not use \
+                user's approval of the complete plan, and it never runs in the restricted container (which does not use \
                 the project's environment). The result says what was installed or why not.",
             input_schema: json!({
                 "type": "object",
@@ -390,6 +417,19 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["packages"],
                 "additionalProperties": false
             }),
+        },
+        ToolDefinition {
+            name: ASK_USER,
+            // Non-strict, like the later tools; Rust validates the input.
+            strict: false,
+            description: "Ask the user a decision only they can make, when it blocks the work (a choice of approach, \
+                scope, or meaning you cannot settle from the project or the request). Give 1 to 3 related questions, \
+                each with 2 to 5 concrete options (short labels, the consequence of each where useful) and at most \
+                one recommended option. The task waits until the user answers; the other calls of this response \
+                run only after that. The user may first discuss the question with you. The result maps each \
+                question id (q1, q2, q3) to {\"optionId\": …} or {\"custom\": …}. An answer is the user's choice, not \
+                an approval: actions still need their own authorization. Do not ask what you can find out yourself.",
+            input_schema: crate::questions::ask_user_schema(),
         },
     ]
 }
@@ -1126,7 +1166,18 @@ mod tests {
         }
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 16);
+        assert_eq!(names.len(), 17);
+        // The discussion tools are read-only plus revise_question.
+        let discussion = discussion_definitions();
+        for def in &discussion {
+            object_schemas_are_strict(&def.input_schema, def.name);
+        }
+        let names: Vec<&str> = discussion.iter().map(|d| d.name).collect();
+        assert_eq!(names, [LIST_FILES, READ_FILE, GRAPH_QUERY, REVISE_QUESTION]);
+        // No user in the loop: no ask_user.
+        assert!(task_definitions(true).iter().any(|d| d.name == ASK_USER));
+        assert!(!task_definitions(false).iter().any(|d| d.name == ASK_USER));
+        assert_eq!(task_definitions(false).len(), 16);
     }
 
     #[test]
