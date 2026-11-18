@@ -231,7 +231,8 @@ export function QuestionCard({ task, request, draftKey, onChatAbout }: QuestionC
           No longer needed — {continueSentence(request.state.reason)}
         </div>
       )}
-      {open && failure && (
+      {/* A late answer from this view stays explained after the card shows the answer that was used. */}
+      {failure && (open || failure.code === "agents.questionResolved") && (
         <div role="alert" data-testid="agents-question-error" data-code={failure.code ?? ""}>
           <StatusText status="warning" wrap label={failure.message} />
         </div>

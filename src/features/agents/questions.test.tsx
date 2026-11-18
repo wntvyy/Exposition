@@ -290,6 +290,31 @@ describe("QuestionCard", () => {
     await waitFor(() => expect(ipc.agentsTaskDetail).toHaveBeenCalledWith(TASK));
   });
 
+  // Independent review: the other view's answer re-read the task and the card
+  // turned "Answered" before this view's refusal arrived, so the user's own
+  // choice was dropped without a word.
+  it("keeps saying a late answer was not used after the card shows the other answer", async () => {
+    const r = request();
+    put([r]);
+    const refusal = deferred<void>();
+    ipc.agentsQuestionAnswer.mockReturnValue(refusal.promise);
+    const view = render(<QuestionCard task={TASK} request={r} />);
+    fireEvent.click(screen.getByText("Celsius"));
+    fireEvent.click(sendButton());
+    const answered: QuestionRequest = {
+      ...r,
+      state: { kind: "answered", answers: [{ questionId: "q1", value: { kind: "option", optionId: "kelvin" } }] },
+    };
+    view.rerender(<QuestionCard task={TASK} request={answered} />);
+    await act(async () => {
+      refusal.reject({ code: "agents.questionResolved", message: "resolved" });
+      await refusal.promise.catch(() => {});
+    });
+    expect((await screen.findByTestId("agents-question-error")).textContent).toBe("This question is no longer open.");
+    expect(screen.getByTestId("agents-question-answered").textContent).toContain("Kelvin");
+    expect(screen.queryByTestId("agents-question-send")).toBeNull();
+  });
+
   it("records an answered question quietly, with no controls", () => {
     const r = twoQuestions({
       state: {
