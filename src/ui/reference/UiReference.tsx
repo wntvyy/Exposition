@@ -98,6 +98,28 @@ import { setThemePreference, useTheme, type ThemePreference } from "../theme";
 import { palettes, type ColorRole } from "../tokens";
 
 const MonacoSample = lazy(() => import("./MonacoSample"));
+// V2 standard, phase 1 review samples: isolated, loaded only when opened.
+const V2Samples = lazy(() => import("./v2/V2Samples").then((m) => ({ default: m.V2Samples })));
+
+function V2SamplesSection() {
+  const [open, setOpen] = useState(false);
+  return (
+    <RefSection
+      title="V2 samples (review)"
+      description="Phase 1 of the V2 visual standard: three directions, four palette sheets, and file icons. Sample-only styling and mock data; nothing here changes the app or your settings."
+    >
+      {open ? (
+        <Suspense fallback={<LoadingState title="Loading samples…" fill={false} />}>
+          <V2Samples />
+        </Suspense>
+      ) : (
+        <Button variant="secondary" onPress={() => setOpen(true)} data-testid="v2-samples-open">
+          Show V2 samples
+        </Button>
+      )}
+    </RefSection>
+  );
+}
 
 function RefSection({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
   const id = useId();
@@ -1014,6 +1036,8 @@ export function UiReference() {
           <MonacoSample />
         </Suspense>
       </RefSection>
+
+      <V2SamplesSection />
     </div>
   );
 }
