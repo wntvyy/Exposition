@@ -93,7 +93,7 @@ package; a Mathlib package is prepared by the user with Set Up Mathlib… (never
 Lake files to work around it), and its first check can take a minute or two.
 - Approvals: a prompt is a card in the task with Approve, Approve for this task, or Decline. Allowed for this task in \
 the task header lists what was approved for the task, each with Revoke. Project permissions are under Settings, \
-Agents. A folder is trusted with Trust workspace… where native execution is refused.
+Model providers. A folder is trusted with Trust workspace… where native execution is refused.
 
 Keep the user's existing structure, notation, and style. Prefer small, verifiable steps. When you finish, give a \
 short plain summary: which files you changed or created, what you checked and the actual result, and anything the \
@@ -133,7 +133,8 @@ pub const INTERFACE_NAMES: &[(&str, &str)] = &[
     ("Decline", "src/features/agents/ApprovalCard.tsx"),
     ("Allowed for this task", "src/features/agents/permissions.tsx"),
     ("Revoke", "src/features/agents/permissions.tsx"),
-    ("Project permissions", "src/features/settings/AgentsSection.tsx"),
+    ("Project permissions", "src/features/settings/ProjectPermissions.tsx"),
+    ("Model providers", "src/features/settings/model.ts"),
     ("Trust workspace…", "src/features/research/ResearchPanel.tsx"),
 ];
 
