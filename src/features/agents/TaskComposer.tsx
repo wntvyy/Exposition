@@ -166,7 +166,8 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
         : "No project permissions yet"
       : PERMISSION_LABELS[settings.permission];
   const execution = task ? task.spec.execution : auto ? "approveEach" : effectiveExecution;
-  const native = auto ? execution === "approveEach" && project?.code === "native" : execution === "approveEach" || nativeAllowed;
+  // Native runs apply: Ask with native commands, Auto with the project's native code, or an allowance for this task.
+  const native = (auto ? execution === "approveEach" && project?.code === "native" : execution === "approveEach") || nativeAllowed;
   const customBudgets = budgetsCustom(task ? task.spec.budgets : settings.budgets);
   const summary = optionsSummary({ model: effective, approvals: auto ? "Auto" : "Ask", changes, customBudgets });
 
