@@ -1,8 +1,7 @@
-import { ListTodo, Plus, Settings } from "lucide-react";
+import { ListTodo, Plus } from "lucide-react";
 import { useEffect } from "react";
 
-import { Banner, Button, IconButton, Toolbar } from "../../ui/components";
-import { ProviderSettingsDialog } from "./ProviderSettingsDialog";
+import { Banner, Button, Toolbar } from "../../ui/components";
 import { providerLabel } from "./format";
 import { ReviewView } from "./ReviewView";
 import { agents, useAgents } from "./store";
@@ -55,13 +54,6 @@ export function AgentPanel() {
           <Button variant="ghost" size="sm" icon={ListTodo} onPress={() => agents.show("tasks", null)} data-testid="agents-show-tasks">
             Tasks
           </Button>
-          <IconButton
-            icon={Settings}
-            size="sm"
-            aria-label="Agent provider settings"
-            onPress={() => agents.openSettings(true)}
-            data-testid="agents-open-settings"
-          />
         </Toolbar>
         <ProviderLabel />
       </div>
@@ -78,7 +70,6 @@ export function AgentPanel() {
         {view === "task" && selected && <TaskView id={selected} />}
         {view === "review" && selected && <ReviewView id={selected} />}
       </div>
-      <ProviderSettingsDialog />
     </div>
   );
 }

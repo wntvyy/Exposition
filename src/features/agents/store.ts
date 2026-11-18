@@ -69,7 +69,6 @@ export interface AgentsState {
   reviewVersions: Record<TaskId, number>;
   selected: TaskId | null;
   view: PanelView;
-  settingsOpen: boolean;
   error: string | null;
   page: PageState;
   /** Incremented when any project's permissions change (views re-read them). */
@@ -85,7 +84,6 @@ export const initialAgentsState: AgentsState = {
   reviewVersions: {},
   selected: null,
   view: "tasks",
-  settingsOpen: false,
   error: null,
   page: { selected: null, tab: "run", filter: "all", composing: false },
   permissionsVersion: 0,
@@ -520,8 +518,12 @@ export const agents = {
     useAgents.setState({ status });
   },
 
-  openSettings(open: boolean) {
-    useAgents.setState({ settingsOpen: open });
+  /**
+   * Open Settings → Model providers, the only place providers and keys are
+   * configured. Drafts live in the drafts store and survive the trip.
+   */
+  openSettings(open = true) {
+    if (open && registry.command("agents.providerSettings")) void registry.runCommand("agents.providerSettings");
   },
 
   setError(error: string | null) {

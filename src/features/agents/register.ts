@@ -8,6 +8,7 @@ import type { EditorProps } from "../../app/registry";
 import { registry } from "../../app/registry";
 import { layout } from "../../app/layout";
 import { StatusPill } from "../../ui/components";
+import { openSettings } from "../settings/open";
 import { AgentPanel } from "./AgentPanel";
 import { AgentsPage } from "./AgentsPage";
 import { isActive, waitingLabel } from "./format";
@@ -134,10 +135,8 @@ registry.registerCommand({
   id: "agents.providerSettings",
   title: "Agent Provider Settings",
   category: "Agent",
-  run: () => {
-    showAgent();
-    agents.openSettings(true);
-  },
+  // Provider configuration lives in Settings → Model providers.
+  run: () => openSettings("providers"),
 });
 
 registry.registerStatusItem({

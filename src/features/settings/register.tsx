@@ -1,18 +1,15 @@
 // Settings feature registration: the Settings editor (`settings:` resource),
 // the commands that open it, the LaTeX engine switch, and the startup check
 // for settings files that were invalid and set aside.
-import { editors } from "../../app/editors";
 import { registry } from "../../app/registry";
 import { loadAppSettings } from "../editor/settings";
 import { canSwitchEngine, switchEngine } from "./engine";
-import { SETTINGS_RESOURCE, type SectionId } from "./model";
+import { SETTINGS_RESOURCE } from "./model";
+import { openSettings } from "./open";
 import { SettingsEditor } from "./SettingsEditor";
-import { loadExecutionSettings, showSection } from "./store";
+import { loadExecutionSettings } from "./store";
 
-export function openSettings(section?: SectionId): void {
-  if (section) showSection(section);
-  editors.open({ ...SETTINGS_RESOURCE });
-}
+export { openSettings };
 
 registry.registerEditor({
   id: "settings.editor",

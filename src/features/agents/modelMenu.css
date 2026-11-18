@@ -1,0 +1,135 @@
+/* Model menu: layout only. Rows are shared ListRows, the effort control is the
+   shared Slider, headings use the shared group label; every value is a token.
+   The menu is inline content: the popover, sheet, or Settings row around it
+   decides its width. */
+
+.agents-model-menu {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* Rows and notes take the menu's own inset. */
+  --list-inset: var(--space-2);
+}
+
+.agents-model-menu > :not(.agents-model-menu__notice) {
+  padding-inline: var(--space-2);
+}
+
+.agents-model-menu__running {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  padding-block: var(--space-1) var(--space-2);
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+}
+
+.agents-model-menu__search {
+  padding-block: var(--space-2) var(--space-1);
+}
+
+/* The groups scroll inside the menu; the effort and footer stay visible. */
+.agents-model-menu > .agents-model-menu__groups {
+  max-height: 320px;
+  overflow: auto;
+  padding-inline: 0;
+}
+
+.agents-model-group__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-2);
+  min-height: var(--row-height-menu);
+  padding: var(--space-1) var(--space-2) 0;
+}
+
+.agents-model-group__state {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.agents-model-group__loading {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.agents-model-group__note {
+  margin: 0;
+  padding: 0 var(--space-2) var(--space-1);
+  overflow-wrap: anywhere;
+}
+
+/* The meta line's parts stay flex items of the ListRow meta line. */
+.agents-model-option__meta {
+  display: contents;
+}
+
+.agents-model-option__note {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+
+.agents-model-option__badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.agents-model-option[aria-disabled="true"] {
+  color: var(--color-text-muted);
+}
+
+.agents-model-menu__notice {
+  margin-block: var(--space-2) 0;
+}
+
+.agents-model-menu > .agents-model-menu__notice {
+  margin-inline: var(--space-2);
+}
+
+.agents-model-menu__custom {
+  padding-block: var(--space-1);
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+}
+
+.agents-model-menu__custom-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.agents-model-menu__custom-id {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.agents-model-menu__custom-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.agents-model-menu__effort {
+  padding-block: var(--space-2);
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+}
+
+.agents-model-menu__effort > p {
+  margin: 0;
+}
+
+.agents-model-menu__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1);
+  padding-block: var(--space-1);
+}

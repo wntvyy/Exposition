@@ -18,7 +18,7 @@ export const SECTIONS = [
   { id: "project", title: "Project" },
   { id: "trust", title: "Trusted folders" },
   { id: "execution", title: "Execution" },
-  { id: "agents", title: "Agents" },
+  { id: "providers", title: "Model providers" },
   { id: "research", title: "Research" },
   { id: "storage", title: "Storage & History" },
   { id: "about", title: "About" },
