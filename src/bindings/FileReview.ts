@@ -3,21 +3,26 @@ import type { ReviewChangeKind } from "./ReviewChangeKind";
 import type { ReviewState } from "./ReviewState";
 import type { WorkspacePath } from "./WorkspacePath";
 
-export type FileReview = { path: WorkspacePath, kind: ReviewChangeKind, state: ReviewState, changeCount: number, 
+export type FileReview = { path: WorkspacePath, kind: ReviewChangeKind, state: ReviewState, changeCount: number,
 /**
  * Concurrent edits overlapped the agent's changes while the task ran, so
  * the agent's net change can no longer be separated automatically.
  */
-entangled: boolean, 
+entangled: boolean,
 /**
  * Revision after the task's latest change to this file.
  */
-tipRevision: number | null, 
+tipRevision: number | null,
 /**
  * Current revision of the open document, if open.
  */
-currentRevision: number | null, 
+currentRevision: number | null,
 /**
  * Outcome of the latest review action (e.g. why a revert was refused).
  */
-message: string | null, };
+message: string | null,
+/**
+ * Whether the open document has unsaved changes (`None`: the file is
+ * not open, or its state is unknown). Derived when the review is read.
+ */
+unsaved?: boolean, };

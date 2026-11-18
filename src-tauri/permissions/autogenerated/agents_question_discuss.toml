@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agents-question-discuss"
+description = "Enables the agents_question_discuss command without any pre-configured scope."
+commands.allow = ["agents_question_discuss"]
+
+[[permission]]
+identifier = "deny-agents-question-discuss"
+description = "Denies the agents_question_discuss command without any pre-configured scope."
+commands.deny = ["agents_question_discuss"]

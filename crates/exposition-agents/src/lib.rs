@@ -16,6 +16,7 @@ pub mod patch;
 pub mod permissions;
 pub mod prompt;
 pub mod provider;
+pub mod questions;
 pub mod review;
 pub mod service;
 pub mod store;
@@ -25,4 +26,5 @@ pub mod wincred;
 pub mod workspace;
 
 pub use model::*;
+pub use questions::{Question, QuestionAnswer, QuestionOption, QuestionRequest, QuestionRequestState, QuestionValue};
 pub use service::{AgentConfig, AgentError, AgentService};

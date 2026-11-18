@@ -35,6 +35,27 @@ export interface ComposerDraft {
   pastedImages: number;
   /** Explicit provider/model for this message; `null` keeps the default (or the task's). */
   model: ProviderChoice | null;
+  /**
+   * "Chat about it": the structured question the next message discusses
+   * (absent or `null`: an ordinary message). See `drafts.chatAbout`.
+   */
+  about?: DraftAbout | null;
+}
+
+/** The question a draft is about ("About: <prompt>" in the composer). */
+export interface DraftAbout {
+  /** The question request's id (`QuestionRequest.id`). */
+  requestId: string;
+  /** Its first prompt, for the composer's About chip. */
+  prompt: string;
+  /**
+   * The draft text when the discussion began. It is unrelated to the
+   * question and comes back after the discussion if the field was cleared
+   * to discuss (see `sendDiscussion` and `drafts.clearAbout`).
+   */
+  previousText: string;
+  /** Increases with every Chat about it: the composer focuses its field when it changes. */
+  seq: number;
 }
 
 export const EMPTY_DRAFT: ComposerDraft = { text: "", attachments: [], rejections: [], ingesting: 0, pastedImages: 0, model: null };
@@ -44,6 +65,13 @@ export const useDrafts = create<{ drafts: Record<string, ComposerDraft> }>(() =>
 export function useDraft(key: string): ComposerDraft {
   return useDrafts((s) => s.drafts[key] ?? EMPTY_DRAFT);
 }
+
+/** The question a conversation's draft is about, if any (Chat about it). */
+export function useDraftAbout(key: string): DraftAbout | null {
+  return useDrafts((s) => s.drafts[key]?.about ?? null);
+}
+
+let aboutSeq = 0;
 
 function get(key: string): ComposerDraft {
   return useDrafts.getState().drafts[key] ?? EMPTY_DRAFT;
@@ -187,6 +215,49 @@ export const drafts = {
 
   dismissRejections(key: string) {
     update(key, () => ({ rejections: [] }));
+  },
+
+  /**
+   * "Chat about it": the next message from this draft discusses `request`.
+   * Submits nothing. The draft's text and attachments stay exactly as they
+   * are; the text is also remembered as `previousText` (kept from the first
+   * Chat about it when one is already set) so an unrelated draft survives
+   * the discussion.
+   */
+  chatAbout(key: string, request: { id: string; questions: readonly { prompt: string }[] }) {
+    update(key, (d) => ({
+      about: {
+        requestId: request.id,
+        prompt: request.questions[0]?.prompt ?? "",
+        previousText: d.about ? d.about.previousText : d.text,
+        seq: ++aboutSeq,
+      },
+    }));
+  },
+
+  /**
+   * Stop discussing (the About chip's remove). Leaves text and attachments;
+   * an empty field gets the unrelated draft text back.
+   */
+  clearAbout(key: string) {
+    update(key, (d) => ({
+      about: null,
+      text: d.text === "" && d.about?.previousText ? d.about.previousText : d.text,
+    }));
+  },
+
+  /**
+   * After a discussion message was sent: remove the sent text (as
+   * `completeSend` does) and the About; an empty field gets the unrelated
+   * draft text back unless that text was part of what was sent.
+   */
+  completeDiscussion(key: string, sent: string) {
+    update(key, (d) => {
+      const previous = d.about?.previousText ?? "";
+      const left = remainingText(d.text, sent);
+      const restore = left === "" && previous.trim() !== "" && !sent.includes(previous.trim());
+      return { about: null, text: restore ? previous : left };
+    });
   },
 
   /**

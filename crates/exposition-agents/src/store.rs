@@ -18,12 +18,13 @@ use serde_json::Value;
 
 use crate::attachments::{AttachmentId, AttachmentInfo, AttachmentKind};
 use crate::model::{
-    AllowanceKind, AuthorizedBy, Checkpoint, NoticeLevel, ReviewChangeKind, ReviewState, TaskId, TaskSpec, TaskStatus,
-    TaskUsage, ToolCallStatus,
+    AllowanceKind, AuthorizedBy, Checkpoint, FigureRef, NoticeLevel, ReviewChangeKind, ReviewState, TaskId, TaskSpec,
+    TaskStatus, TaskUsage, ToolCallStatus,
 };
+use crate::questions::{QuestionRequest, QuestionRequestState};
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (
@@ -201,6 +202,29 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ALTER TABLE tasks ADD COLUMN connection TEXT;
     "#,
     ),
+    // Agent UI rework: structured questions (`ask_user`) with their
+    // revisions and resolution (the discussion lives in the transcript as
+    // `discussion` rows); the figures a tool call produced (from its run's
+    // manifest); tasks started without a user in the loop (workflow reviews),
+    // which are never offered questions.
+    (
+        8,
+        r#"
+    CREATE TABLE questions (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        id TEXT NOT NULL,
+        tool_use_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        questions TEXT NOT NULL,
+        state TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (task_id, id)
+    );
+    ALTER TABLE tool_calls ADD COLUMN figures TEXT;
+    ALTER TABLE tasks ADD COLUMN unattended INTEGER NOT NULL DEFAULT 0;
+    "#,
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -234,8 +258,22 @@ pub struct TaskRow {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptEntry {
-    Message { role: String, content: Vec<Value> },
-    Notice { level: NoticeLevel, message: String },
+    Message {
+        role: String,
+        content: Vec<Value>,
+    },
+    Notice {
+        level: NoticeLevel,
+        message: String,
+    },
+    /// A "Chat about it" exchange about a question request (the user's
+    /// message, the model's reply, its read-only tool results). Shown in the
+    /// transcript; not part of the provider history.
+    Discussion {
+        question: String,
+        role: String,
+        content: Vec<Value>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -256,6 +294,9 @@ pub struct ToolCallRow {
     pub is_error: bool,
     /// How the call was authorized when it ran (kept once recorded).
     pub authorized_by: Option<AuthorizedBy>,
+    /// Figures the call produced (recorded separately with
+    /// [`Store::set_tool_call_figures`]; an upsert keeps them).
+    pub figures: Vec<FigureRef>,
 }
 
 /// An allowance as stored: what, for which project, granted by which approval.
@@ -591,7 +632,8 @@ impl Store {
             + sum("SELECT sum(length(patches) + length(inverse)) FROM changes WHERE task_id = ?1")?
             + sum("SELECT sum(length(context)) FROM task_graph_contexts WHERE task_id = ?1")?
             + sum("SELECT sum(length(record)) FROM task_targets WHERE task_id = ?1")?
-            + sum("SELECT sum(length(record)) FROM task_proposals WHERE task_id = ?1")?;
+            + sum("SELECT sum(length(record)) FROM task_proposals WHERE task_id = ?1")?
+            + sum("SELECT sum(length(questions) + length(state)) FROM questions WHERE task_id = ?1")?;
         Ok(u(total))
     }
 
@@ -704,13 +746,23 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         raws.into_iter()
             .map(|(seq, created, kind, role, content)| {
-                let entry = if kind == "message" {
-                    TranscriptEntry::Message { role: role.unwrap_or_default(), content: from_json(&content)? }
-                } else {
-                    TranscriptEntry::Notice {
+                let entry = match kind.as_str() {
+                    "message" => {
+                        TranscriptEntry::Message { role: role.unwrap_or_default(), content: from_json(&content)? }
+                    }
+                    "discussion" => {
+                        let record: Value = from_json(&content)?;
+                        TranscriptEntry::Discussion {
+                            question: record.get("question").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                            role: role.unwrap_or_default(),
+                            content: serde_json::from_value(record.get("content").cloned().unwrap_or(Value::Null))
+                                .unwrap_or_default(),
+                        }
+                    }
+                    _ => TranscriptEntry::Notice {
                         level: from_json(role.as_deref().unwrap_or("\"info\""))?,
                         message: content,
-                    }
+                    },
                 };
                 Ok(TranscriptRow { seq: u(seq), created_at_ms: u(created), entry })
             })
@@ -724,9 +776,161 @@ impl Store {
             .into_iter()
             .filter_map(|row| match row.entry {
                 TranscriptEntry::Message { role, content } => Some((role, content)),
-                TranscriptEntry::Notice { .. } => None,
+                TranscriptEntry::Notice { .. } | TranscriptEntry::Discussion { .. } => None,
             })
             .collect())
+    }
+
+    /// Append one entry of a question's discussion (`role`: user or assistant).
+    pub fn append_discussion(&self, task: &TaskId, question: &str, role: &str, content: &[Value]) -> StoreResult<u64> {
+        let record = serde_json::json!({"question": question, "content": content});
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let seq = Self::next_seq(&tx, task)?;
+        tx.execute(
+            "INSERT INTO transcript (task_id, seq, created_at, kind, role, content) VALUES (?1, ?2, ?3, 'discussion', ?4, ?5)",
+            params![task.0, i(seq), i(now_ms()), role, to_json(&record)?],
+        )?;
+        tx.commit()?;
+        Ok(seq)
+    }
+
+    /// The discussion of one question request, in order: (role, content).
+    pub fn discussion(&self, task: &TaskId, question: &str) -> StoreResult<Vec<(String, Vec<Value>)>> {
+        Ok(self
+            .transcript(task)?
+            .into_iter()
+            .filter_map(|row| match row.entry {
+                TranscriptEntry::Discussion { question: q, role, content } if q == question => Some((role, content)),
+                _ => None,
+            })
+            .collect())
+    }
+
+    // ---- structured questions
+
+    pub fn insert_question(&self, request: &QuestionRequest) -> StoreResult<()> {
+        let now = i(now_ms());
+        self.lock().execute(
+            "INSERT INTO questions (task_id, id, tool_use_id, revision, questions, state, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                request.task_id.0,
+                request.id,
+                request.tool_use_id,
+                request.revision,
+                to_json(&request.questions)?,
+                to_json(&request.state)?,
+                request.created_at_ms,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Store a request's current revision, questions, and state.
+    pub fn update_question(&self, request: &QuestionRequest) -> StoreResult<()> {
+        self.lock().execute(
+            "UPDATE questions SET revision = ?3, questions = ?4, state = ?5, updated_at = ?6 WHERE task_id = ?1 AND id = ?2",
+            params![
+                request.task_id.0,
+                request.id,
+                request.revision,
+                to_json(&request.questions)?,
+                to_json(&request.state)?,
+                i(now_ms())
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A task's question requests, in the order they were asked.
+    pub fn questions(&self, task: &TaskId) -> StoreResult<Vec<QuestionRequest>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, tool_use_id, revision, questions, state, created_at FROM questions WHERE task_id = ?1 ORDER BY rowid",
+        )?;
+        let raws = stmt
+            .query_map([&task.0], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, u32>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        raws.into_iter()
+            .map(|(id, tool_use_id, revision, questions, state, created)| {
+                Ok(QuestionRequest {
+                    id,
+                    task_id: task.clone(),
+                    tool_use_id,
+                    revision,
+                    questions: from_json(&questions)?,
+                    state: from_json(&state)?,
+                    created_at_ms: created,
+                })
+            })
+            .collect()
+    }
+
+    pub fn question(&self, task: &TaskId, id: &str) -> StoreResult<Option<QuestionRequest>> {
+        Ok(self.questions(task)?.into_iter().find(|q| q.id == id))
+    }
+
+    /// Supersede every pending or discussing request (of `task`, or of every
+    /// task when `None`) with `reason`; returns the requests changed.
+    pub fn supersede_open_questions(&self, task: Option<&TaskId>, reason: &str) -> StoreResult<Vec<(TaskId, String)>> {
+        let open: Vec<(String, String, String)> = {
+            let conn = self.lock();
+            let mut stmt = conn.prepare("SELECT task_id, id, state FROM questions ORDER BY rowid")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?
+        };
+        let state = to_json(&QuestionRequestState::Superseded { reason: reason.to_owned() })?;
+        let mut changed = Vec::new();
+        for (task_id, id, raw) in open {
+            if task.is_some_and(|t| t.0 != task_id) {
+                continue;
+            }
+            // An unreadable state is treated as open: it can never be answered now.
+            let open = serde_json::from_str::<QuestionRequestState>(&raw).map(|s| s.is_open()).unwrap_or(true);
+            if !open {
+                continue;
+            }
+            self.lock().execute(
+                "UPDATE questions SET state = ?3, updated_at = ?4 WHERE task_id = ?1 AND id = ?2",
+                params![task_id, id, state, i(now_ms())],
+            )?;
+            changed.push((TaskId(task_id), id));
+        }
+        Ok(changed)
+    }
+
+    // ---- tasks without a user in the loop
+
+    /// Mark a task as started without a user in the loop (a workflow review):
+    /// it is never offered structured questions.
+    pub fn set_task_unattended(&self, id: &TaskId) -> StoreResult<()> {
+        self.lock().execute("UPDATE tasks SET unattended = 1 WHERE id = ?1", [&id.0])?;
+        Ok(())
+    }
+
+    pub fn task_unattended(&self, id: &TaskId) -> StoreResult<bool> {
+        let raw: Option<i64> =
+            self.lock().query_row("SELECT unattended FROM tasks WHERE id = ?1", [&id.0], |r| r.get(0)).optional()?;
+        Ok(raw.unwrap_or(0) != 0)
+    }
+
+    /// Record the figures a tool call produced.
+    pub fn set_tool_call_figures(&self, task: &TaskId, tool_use_id: &str, figures: &[FigureRef]) -> StoreResult<()> {
+        self.lock().execute(
+            "UPDATE tool_calls SET figures = ?3 WHERE task_id = ?1 AND tool_use_id = ?2",
+            params![task.0, tool_use_id, to_json(&figures)?],
+        )?;
+        Ok(())
     }
 
     // ---- tool calls
@@ -763,7 +967,7 @@ impl Store {
     pub fn tool_calls(&self, task: &TaskId) -> StoreResult<Vec<ToolCallRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT tool_use_id, turn, name, input, status, result, is_error, authorized_by FROM tool_calls WHERE task_id = ?1 ORDER BY rowid",
+            "SELECT tool_use_id, turn, name, input, status, result, is_error, authorized_by, figures FROM tool_calls WHERE task_id = ?1 ORDER BY rowid",
         )?;
         let raws = stmt
             .query_map([&task.0], |r| {
@@ -776,12 +980,15 @@ impl Store {
                     r.get::<_, Option<String>>(5)?,
                     r.get::<_, bool>(6)?,
                     r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         raws.into_iter()
-            .map(|(tool_use_id, turn, name, input, status, result, is_error, authorized_by)| {
+            .map(|(tool_use_id, turn, name, input, status, result, is_error, authorized_by, figures)| {
                 Ok(ToolCallRow {
+                    // An unreadable record reads as no figures.
+                    figures: figures.and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default(),
                     tool_use_id,
                     turn,
                     name,
