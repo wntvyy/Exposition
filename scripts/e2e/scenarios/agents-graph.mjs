@@ -139,6 +139,20 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     };
     const agentsPage = page.getByTestId("agents-page");
     const panel = page.getByTestId("agents-panel");
+    // Design C: Changes, Graph context, and Proposals are header toggles that
+    // open one right panel beside the conversation (no tabs).
+    const side = agentsPage.getByTestId("agents-page-side");
+    const openSide = async (toggle, panelName) => {
+      if ((await side.getAttribute("data-panel").catch(() => null)) !== panelName) {
+        await agentsPage.getByTestId(toggle).click();
+      }
+      await agentsPage.locator(`[data-testid=agents-page-side][data-panel=${panelName}]`).waitFor();
+    };
+    // Only the conversation (the old Run tab): close the right panel if one is open.
+    const closeSide = async () => {
+      if (await side.count()) await agentsPage.getByTestId("agents-page-side-close").click();
+      await side.waitFor({ state: "detached" });
+    };
 
     // --- Task 1: graph context, graph_query, graph_propose with approval.
     await invoke(page, "agents_dev_load_script", {
@@ -214,7 +228,8 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     await setTheme(page, "light");
     step("Agents page shows the task and the complete graph_propose payload");
     await gotoPage("Editor");
-    await panel.getByTestId("agents-show-tasks").click();
+    // Back to the task list ("Back to tasks"), unless the Agent view already shows it.
+    if (await panel.getByTestId("agents-show-tasks").count()) await panel.getByTestId("agents-show-tasks").click();
     await panel.getByTestId("agents-task-item").first().click();
     await panel.getByTestId("agents-approval").waitFor({ timeout: 15_000 });
     assert.equal((await invoke(page, "agents_task_list")).length, 1, "one task after navigating");
@@ -238,8 +253,8 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     assert.equal(dependsOn.origin.taskId, task1.id);
     assert.equal(detail.graph.proposals.at(-1).state, "applied");
     assert.equal((await invoke(page, "agents_task_list")).length, 1, "still one task");
-    await agentsPage.getByRole("tab", { name: /Proposals/ }).click();
-    await agentsPage.locator("[data-testid=agents-proposal][data-state=applied]").waitFor();
+    await openSide("agents-page-proposals", "proposals");
+    await side.locator("[data-testid=agents-proposal][data-state=applied]").waitFor();
     await shot(page, "agents-graph-proposals-light");
     step("approved on the Agents page; applied once as a suggestion of this task", {
       lemma: lemmaId,
@@ -299,10 +314,10 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     assert.equal(resultOf(toolCall(detail, "readmeta")).code, "agents.metadataOnly");
     assert.ok(everything.length > 0);
     await agentsPage.locator(`[data-testid=agents-page-task][data-task-id="${task2.id}"]`).click();
-    await agentsPage.getByRole("tab", { name: /Graph context/ }).click();
-    await agentsPage.locator("[data-testid=agents-graph-context][data-consent=metadataOnly]").waitFor();
-    await agentsPage.locator(`[data-testid=agents-graph-entity][data-entity-id="${lemmaId}"] [data-testid=agents-graph-withheld]`).waitFor();
-    const ctxText = await agentsPage.getByTestId("agents-graph-context").textContent();
+    await openSide("agents-show-graph", "graph");
+    await side.locator("[data-testid=agents-graph-context][data-consent=metadataOnly]").waitFor();
+    await side.locator(`[data-testid=agents-graph-entity][data-entity-id="${lemmaId}"] [data-testid=agents-graph-withheld]`).waitFor();
+    const ctxText = await side.getByTestId("agents-graph-context").textContent();
     assert.ok(!ctxText.includes("LEMMA-MARK"), "the page shows what the agent got: no label");
     await page.waitForTimeout(200);
     await shot(page, "agents-graph-context-metadata-light");
@@ -357,7 +372,7 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     });
     await waitStatus(page, taskW.id, "awaitingApproval");
     await agentsPage.locator(`[data-testid=agents-page-task][data-task-id="${taskW.id}"]`).click();
-    await agentsPage.getByRole("tab", { name: /Run/ }).click();
+    await closeSide();
     await agentsPage.getByTestId("agents-approval").waitFor({ timeout: 15_000 });
     const wfPayload = await agentsPage.getByTestId("agents-approval-payload").textContent();
     for (const needle of [WORKFLOW_TITLE, "Definition (complete):", '"operation": {', "Summarize the claims.", "Saving runs nothing", "Diagnostics:"]) {
@@ -448,7 +463,7 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     assert.equal(refused.ok, false);
     assert.equal(refused.error.code, "agents.graphUnavailable", JSON.stringify(refused));
     await agentsPage.locator(`[data-testid=agents-page-task][data-task-id="${task3.id}"]`).click();
-    await agentsPage.getByRole("tab", { name: /Run/ }).click();
+    await closeSide();
     await page.waitForTimeout(300);
     await shot(page, "agents-graph-unavailable-light");
     step("graph unavailable: read_file and edit_document paused (agents.graphUnavailable, not run); new tasks refused", {

@@ -1037,17 +1037,21 @@ OpenAI's Responses API, each with your own API key stored in the system
 credential store (one entry per provider; keys never mix). OpenAI's "Sign in
 with ChatGPT" is not offered: OpenAI documents it for open-source clients and
 Exposition's eligibility has not been established, so OpenAI use is always
-API-key access billed to that key's API account. Models are chosen from the
-connection's own model list in a searchable picker (names, exact IDs,
-lifecycle, what Exposition has verified: tool use, images, PDF, effort);
-a model the provider lists but Exposition has not verified must be confirmed
-explicitly, and a saved model the list no longer shows stays as it is. Each
+API-key access billed to that key's API account. Keys, the OpenAI
+organization and project, and the defaults for new tasks are set in one
+place, Settings › Model providers; no agent panel asks for a key. Models are
+chosen from the connections' own model lists in one searchable menu grouped
+by provider (names, exact IDs, lifecycle, what Exposition has verified: tool
+use, images, PDF, effort, with the effort as a slider of the model's own
+levels); a model the provider lists but Exposition has not verified must be
+confirmed explicitly, and a saved model the list no longer shows stays as it
+is. Each
 task records its provider and model when it starts; changing the default
 affects later tasks only. A follow-up can switch model: the task, its
 instructions, permissions, project graph record, and changes stay, and the
 switch is refused with an explanation when the new model cannot read the
 conversation's attachments. Every provider goes through the same approvals,
-sandbox rules, budgets, cancellation, and review; one provider's private
+restricted-container rules, budgets, cancellation, and review; one provider's private
 reasoning is never sent to the other.
 
 Requests can carry attachments: text and source files, PNG/JPEG/GIF/WebP
@@ -1081,7 +1085,8 @@ reason. A task runs in one of two approval modes, chosen in the composer:
   approval. An approval card can be answered **Approve** (this call) or,
   for native code, file changes in scope, and package installs, **Approve
   for this task**, which covers later calls of that kind in the same task
-  until you revoke it from the task view; revoking folder trust clears it.
+  until you revoke it ("Allowed for this task" under the task's Options ›
+  Permissions); revoking folder trust clears it.
 - **Auto**: the project's permissions decide (below). What they cover
   proceeds without a dialog; a legitimate step beyond them (native code when
   the project allows only the container or no code, a file change when files
@@ -1113,7 +1118,7 @@ is never pre-selected, and the composer states what running code can
 actually reach under the choice. Nothing runs in Auto until you choose. The
 permissions are stored on this computer, never in the project, and bound to
 the project's folder and its project-graph identity: a copied, moved,
-imported, or generated project has none. Settings › Agents lists every
+imported, or generated project has none. Settings › Model providers lists every
 project's permissions, lets you change the open project's and revoke any;
 narrowing or revoking them stops that project's running Auto tasks (what
 they already did stays reviewable and is not undone) and leaves Ask tasks
@@ -1122,8 +1127,8 @@ to run, the call is refused rather than run under the old ones.
 
 Auto does not let a model approve itself. No tool, input field, file,
 retrieved text, tool output, or response changes permissions, allowances,
-the approval mode, or folder trust; only your composer, approval cards,
-task view, and Settings do. Auto never turns a restricted run into a native
+the approval mode, or folder trust; only your composer and its Options,
+approval cards, and Settings do. Auto never turns a restricted run into a native
 one, and a restricted run without a configured container image is refused,
 never run natively. Text an agent puts into a Lean file counts as running
 code, because the Lean server elaborates it natively (an `#eval` runs) — at
@@ -1161,8 +1166,9 @@ can query the graph within their scope and propose typed entities and
 relations; changes are approved like edits, and the relations an agent adds
 remain suggestions until you accept them. Keeping a task as an investigation
 admits it into the graph; ordinary tasks stay operational records. The Agents
-page and the Agent panel show the same tasks and approvals, with each task's
-graph context, proposals, and changes.
+page and the Agent panel show the same tasks, approvals, and questions; the
+page opens a task's changes, graph context, and proposals in a panel beside
+the conversation.
 
 What a task is told about itself comes from the application's own state,
 never from project files, graph labels, or tool output, and describing an
@@ -1307,6 +1313,57 @@ reason, and a task that uses up its own budget ends as "Budget exceeded"
 says how many remain);
 neither is reported as completed. Review reflects the
 document's actual content: a change you undid in the editor shows as undone.
+
+**Working with a task.** One composer starts a task and sends follow-ups,
+in the Agent panel and on the Agents page alike: the request, attachments,
+and one Options button whose summary names the model, effort, approval mode,
+and document-change setting (with a "Native" warning badge whenever code
+would run natively). Options opens one sheet with Model, Permissions, and
+Budgets; a started task's settings are shown there but never change. Send is
+disabled while the task works (nothing is queued), and Stop cancels it. The
+conversation reads as a turn outline: each agent turn has a header that says
+what its tool calls and the review records show it did ("Read 3 files ·
+Edited main.tex — unsaved · Ran Python · 1 figure"), never what the agent
+claims; the individual tool calls fold away under it (a turn with a failure
+stays open), while the agent's text, approvals, questions, and figures stay
+in view. Saved or unsaved comes from the open document at the time the
+review is read, and nothing is claimed for a file that is not open. A "Needs
+you" list above the composer links to each waiting approval or question in
+place (the card itself stays where the agent asked) and, once the task has
+stopped, to the review of its changed files with the number still unsaved.
+
+**Questions from an agent.** An interactive task can ask you one to three
+related questions with a few concrete options each (at most one marked
+Recommended, none preselected, and usually room for an answer of your own)
+instead of guessing. The task then shows "Waiting for your answer" and
+waits, like an approval; the time budget does not run while it waits, and
+nothing else from that response runs until you answer. Send answer sends one
+answer per question together; the answer is your reply to the agent and
+approves nothing — every later action is still decided by the gate. **Chat
+about it** lets you ask about the question first: the composer shows "About:"
+with the question, your message gets one bounded reply from the agent (it may
+read files and refine the options, which then show as New, but it cannot
+change or run anything), and the question stays open until you answer. An
+answer from a second view, a stale set of options, or a reply still running
+is refused with what to do next, never sent twice. Cancel, a budget stop, or
+restarting Exposition closes an open question ("No longer needed — …");
+continuing the task afterwards is an ordinary follow-up. Workflow review
+steps and unattended (restricted-only) tasks never ask: no one is there to
+answer. Questions and their answers are kept with the task. (The question
+backend lands in its own lane of the Agent UI rework; the interface follows
+the agreed contract and is exercised against it by `npm run e2e --
+agents-questions` with the scripted provider.)
+
+**Figures in the conversation.** A figure that an agent's native Python run
+produced (PNG, JPEG, GIF, or SVG) appears beside that run in the
+conversation, read from the run's own record in Research (its size and
+checksum verified) and shown only as an image, so an SVG cannot run scripts
+or load anything. Showing a figure does not add it to a document: Open in
+Research shows the run, and inserting it uses Research's reviewed promotion.
+Runs in the restricted container record no figures, and a figure whose run
+was purged says it is no longer available. `npm run e2e -- agents-harness`
+checks a figure from a real native Python run (it needs Python installed)
+beside its call in the conversation.
 
 The API key is stored in Windows Credential Manager for this computer only
 (it does not roam with a domain profile). A key saved by an earlier version

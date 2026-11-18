@@ -5,10 +5,11 @@
 // No real provider is called and no real key is used (a namespaced
 // development credential entry). It cannot establish live OpenAI behavior.
 //
-// Covers: saving an OpenAI key through the provider dialog (its own
-// connection; the key never reaches the webview), the model picker populated
-// from the connection's catalog (badges, exact IDs), choosing the default and
-// a per-task model, attaching two files through the backend's native file
+// Covers: saving an OpenAI key in Settings › Model providers (its own
+// connection; the key never reaches the webview), the grouped model menu
+// populated from the connection's catalog (badges, exact IDs), choosing the
+// default (Settings › Defaults for new tasks) and a per-task model (the
+// composer's Options › Model), attaching two files through the backend's native file
 // dialog (UI Automation), pasting a real screenshot from the OS clipboard
 // (System.Windows.Forms.Clipboard.SetImage) and typing text after it, sending,
 // the request the mock received (input_image with the PNG bytes, the text, the
@@ -23,6 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { withNativeDialog } from "../native-dialog.mjs";
+import { runCommand } from "../palette.mjs";
 import { consoleErrors, setTheme, settle } from "../p1-helpers.mjs";
 import { invoke, openWorkspace, waitFor } from "../workspace-helpers.mjs";
 
@@ -108,10 +110,8 @@ function setClipboardImage() {
   return execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-STA", "-Command", script], { encoding: "utf8" }).trim();
 }
 
-async function selectOption(page, scope, label, option) {
-  await scope.getByRole("button", { name: label }).click();
-  await page.getByRole("option", { name: option, exact: true }).click();
-}
+/** Model ids of a provider's group in a model menu, in order. */
+const groupOptions = (menu, provider) => menu.locator(`[data-testid=model-group][data-provider=${provider}] [data-testid=model-option]`);
 
 export default async function agentsComposer({ launchApp, artifactsDir, assert }) {
   if (process.platform !== "win32") {
@@ -161,60 +161,79 @@ export default async function agentsComposer({ launchApp, artifactsDir, assert }
     await panel.waitFor({ timeout: 15_000 });
     await openWorkspace(page, project);
 
-    // --- OpenAI key on its own connection; never in the webview.
-    await panel.getByRole("button", { name: "Agent provider settings" }).click();
-    const dialog = page.getByRole("dialog", { name: "Agent provider" });
-    await dialog.waitFor();
-    await dialog.getByRole("radio", { name: "OpenAI" }).click();
-    assert.match(await dialog.getByTestId("agents-key-status").textContent(), /Not configured/);
-    await dialog.getByLabel("API key").fill(FAKE_KEY);
-    await dialog.getByTestId("agents-key-save").click();
-    await waitFor(async () => /OpenAI API key saved/.test((await dialog.getByTestId("agents-settings-message").textContent()) ?? ""), {
+    // --- OpenAI key on its own connection (Settings › Model providers); never in the webview.
+    await runCommand(page, "Agent Provider Settings", /Agent Provider Settings/);
+    const providers = page.getByTestId("settings-providers");
+    await providers.waitFor();
+    const openai = providers.getByTestId("settings-provider-openai");
+    assert.match(await openai.getByTestId("agents-key-status").textContent(), /Not configured/);
+    await openai.getByTestId("agents-key-input").locator("input").fill(FAKE_KEY);
+    await openai.getByTestId("agents-key-save").click();
+    await waitFor(async () => /OpenAI API key saved/.test((await openai.getByTestId("agents-settings-message").textContent().catch(() => "")) ?? ""), {
       message: "OpenAI key saved",
     });
     const status = await invoke(page, "agents_provider_status");
     const connections = Object.fromEntries(status.connections.map((c) => [c.provider, c.configured]));
     assert.equal(connections.openai, true, "the OpenAI connection is configured");
     assert.equal(connections.anthropic, false, "the Anthropic connection is untouched");
+    assert.match(await providers.getByTestId("settings-provider-anthropic").getByTestId("agents-key-status").textContent(), /Not configured/);
     assert.ok(!JSON.stringify(status).includes(FAKE_KEY), "provider status never contains the key");
     const leaks = await page.evaluate((key) => document.documentElement.outerHTML.includes(key), FAKE_KEY);
     assert.equal(leaks, false, "the key is not in the webview after saving");
     step("OpenAI key saved to its own credential entry", { connections });
 
-    // --- The default: OpenAI, from the populated picker.
-    await selectOption(page, dialog, /Provider/, "OpenAI");
-    const list = dialog.getByRole("listbox", { name: "Models" });
+    // --- The default: OpenAI, from the populated, grouped model menu.
+    const defaults = providers.getByTestId("agents-default");
+    await defaults.getByTestId("agents-default-model").click();
+    const menu = page.getByTestId("agents-default-menu");
+    await menu.waitFor();
+    const list = menu.getByRole("listbox", { name: "OpenAI models" });
     await list.waitFor({ timeout: 15_000 });
-    const ids = await list.getByRole("option").evaluateAll((els) => els.map((e) => e.getAttribute("data-model-id")));
+    const ids = await groupOptions(menu, "openai").evaluateAll((els) => els.map((e) => e.getAttribute("data-model-id")));
     assert.deepEqual(ids.slice(0, 2), ["gpt-6.2-sol", "gpt-6.2-luna"], `supported models first: ${ids}`);
     assert.ok(ids.includes("text-embedding-3-large"), "an unsupported model is listed (not selectable)");
     assert.equal(await list.locator('[data-model-id="text-embedding-3-large"]').getAttribute("aria-disabled"), "true");
     assert.match(await list.locator('[data-model-id^="ft:"]').textContent(), /Unverified/);
-    assert.equal(await list.locator('[aria-selected="true"]').getAttribute("data-model-id"), "gpt-6.2-sol", "the suggestion is taken");
-    assert.match(await dialog.getByTestId("model-suggested").textContent(), /newest model Exposition supports/);
+    // The connection's suggestion (the newest model Exposition supports) is marked, not chosen silently.
+    assert.match(await list.locator('[data-model-id="gpt-6.2-sol"]').textContent(), /Suggested/);
+    assert.doesNotMatch(await list.locator('[data-model-id="gpt-6.2-luna"]').textContent(), /Suggested/);
     await shot(page, "agents-composer-picker-light");
-    await dialog.getByRole("button", { name: "Save settings" }).click();
-    await waitFor(async () => (await dialog.getByTestId("agents-settings-message").textContent()) === "Settings saved.", { message: "settings saved" });
+    await list.locator('[data-model-id="gpt-6.2-sol"]').click();
+    await waitFor(async () => (await defaults.getByTestId("agents-settings-message").textContent().catch(() => "")) === "Default model saved.", {
+      message: "default saved on choice",
+    });
     const saved = await invoke(page, "agents_provider_status");
     assert.equal(saved.settings.provider, "openai");
     assert.equal(saved.settings.model, "gpt-6.2-sol");
-    await dialog.getByRole("button", { name: "Close" }).click();
-    await dialog.waitFor({ state: "detached" });
+    if (await menu.isVisible().catch(() => false)) {
+      await page.keyboard.press("Escape");
+      await menu.waitFor({ state: "detached" });
+    }
     assert.match(await panel.getByTestId("agents-provider-chip").textContent(), /^OpenAI · gpt-6\.2-sol$/);
     const modelRequests = mock.seen.filter((r) => r.url?.startsWith("/v1/models"));
     assert.ok(modelRequests.length >= 1 && modelRequests.every((r) => r.authorization === `Bearer ${FAKE_KEY}`), "catalog fetched with the OpenAI key");
-    step("default chosen from the populated picker", { ids, modelRequests: modelRequests.length });
+    step("default chosen from the populated menu", { ids, modelRequests: modelRequests.length });
 
     // --- Composer: a per-task model, two files, a pasted screenshot, then text.
     await panel.getByTestId("agents-new-task").click();
     const composer = panel.getByTestId("agents-composer");
     await composer.waitFor();
-    assert.match(await composer.getByTestId("model-choice-summary").textContent(), /^Default: OpenAI · gpt-6\.2-sol/);
-    await composer.getByRole("button", { name: "Choose…" }).click();
-    const taskList = composer.getByRole("listbox", { name: "Models" });
+    // The Options summary names the inherited default first.
+    const options = composer.getByTestId("agents-options");
+    assert.match(await options.textContent(), /^Options: gpt-6\.2-sol · /);
+    await options.click();
+    const sheet = page.getByRole("dialog", { name: "Options" });
+    await sheet.waitFor();
+    await sheet.getByRole("tab", { name: /^Model/ }).click();
+    const taskList = sheet.getByRole("listbox", { name: "OpenAI models" });
     await taskList.waitFor({ timeout: 15_000 });
     await taskList.locator('[data-model-id="gpt-6.2-luna"]').click();
-    assert.match(await composer.getByTestId("model-choice-summary").textContent(), /^OpenAI · gpt-6\.2-luna/);
+    await waitFor(async () => /^Options: gpt-6\.2-luna · /.test((await options.textContent()) ?? ""), { message: "per-task model in the summary" });
+    if (await sheet.isVisible().catch(() => false)) {
+      await page.keyboard.press("Escape");
+      await sheet.waitFor({ state: "detached" });
+    }
+    assert.equal((await invoke(page, "agents_provider_status")).settings.model, "gpt-6.2-sol", "the per-task choice leaves the default alone");
 
     const dialogs = [];
     for (const file of [alpha, beta]) {
@@ -226,7 +245,7 @@ export default async function agentsComposer({ launchApp, artifactsDir, assert }
         message: `attachment row for ${file}`,
       });
     }
-    const names = await composer.getByTestId("agents-attachment").locator(".ui-list-row__title").allTextContents();
+    const names = await composer.getByTestId("agents-attachment").locator(".ui-chip__label").allTextContents();
     assert.deepEqual(names, ["notes-alpha", "notes-beta"]);
     step("two files attached through the backend's native dialog", { dialogs });
 
@@ -239,7 +258,7 @@ export default async function agentsComposer({ launchApp, artifactsDir, assert }
       message: "the pasted screenshot becomes an attachment (OS clipboard paste)",
     });
     const pasted = composer.getByTestId("agents-attachment").nth(2);
-    assert.equal(await pasted.locator(".ui-list-row__title").textContent(), "Pasted image 1.png");
+    assert.equal(await pasted.locator(".ui-chip__label").textContent(), "Pasted image 1.png");
     assert.match(await pasted.textContent(), /PNG image · .* · 160×90/);
     await pasted.getByTestId("agents-attachment-thumb").waitFor();
     // Pasting the image inserted no text; typing afterwards goes to the field.
@@ -250,7 +269,7 @@ export default async function agentsComposer({ launchApp, artifactsDir, assert }
     await shot(page, "agents-composer-panel-light", panel);
     step("screenshot pasted from the OS clipboard, then text typed");
 
-    await composer.getByRole("button", { name: "Start task" }).click();
+    await composer.getByTestId("agents-start").click();
     await page.waitForSelector("[data-testid=agents-task-view]");
     await page.waitForFunction(() => document.querySelector("[data-testid=agents-task-status]")?.dataset.status === "completed", null, {
       timeout: 30_000,
@@ -281,7 +300,7 @@ export default async function agentsComposer({ launchApp, artifactsDir, assert }
     // --- The transcript shows the message's attachments.
     const view = panel.getByTestId("agents-task-view");
     const sent = view.getByTestId("agents-message-attachments").getByTestId("agents-attachment");
-    assert.deepEqual(await sent.locator(".ui-list-row__title").allTextContents(), ["notes-alpha", "notes-beta", "Pasted image 1.png"]);
+    assert.deepEqual(await sent.locator(".ui-chip__label").allTextContents(), ["notes-alpha", "notes-beta", "Pasted image 1.png"]);
     await sent.nth(2).getByTestId("agents-attachment-thumb").waitFor();
     // The composer's draft was cleared of what was sent.
     const tasks = await invoke(page, "agents_task_list");
@@ -306,7 +325,7 @@ export default async function agentsComposer({ launchApp, artifactsDir, assert }
     await view.waitFor();
     const rows = view.getByTestId("agents-message-attachments").getByTestId("agents-attachment");
     await waitFor(async () => (await rows.count()) === 3, { message: "attachments after reopening" });
-    assert.deepEqual(await rows.locator(".ui-list-row__title").allTextContents(), ["notes-alpha", "notes-beta", "Pasted image 1.png"]);
+    assert.deepEqual(await rows.locator(".ui-chip__label").allTextContents(), ["notes-alpha", "notes-beta", "Pasted image 1.png"]);
     assert.equal(await rows.nth(0).getAttribute("data-missing"), null);
     await rows.nth(2).getByTestId("agents-attachment-thumb").waitFor();
     await shot(page, "agents-composer-reopened-light");

@@ -3,35 +3,34 @@
 // OptionList (nothing preselected; at most one Recommended) with an optional
 // "Other answer…", one Send answer for the whole group, and Chat about it.
 //
-// INTEGRATION POINTS (the transcript and composer own the wiring):
-// - Transcript: for a `toolCall` item, look up
-//   `questionsForTask(detail).get(item.toolUseId)` (questions.ts) and render
-//   `<QuestionCard task={taskId} request={request} />` there.
-// - "Needs you" list: `pendingQuestions(detail)` with `needsYouLabel(request)`;
-//   the jump link calls `jumpToQuestion(request.id, linkElement)`. The card is
+// The frame is the approval card's: a shared info Banner ("Needs your
+// answer") with the questions and actions beneath it; an answered or
+// superseded request is a quiet record without controls.
+//
+// Wiring:
+// - Transcript: `QuestionSlot` (slots.tsx) renders the card at the `ask_user`
+//   call (`questionsForTask(detail).get(item.toolUseId)`).
+// - "Needs you" (NeedsYou.tsx) lists `pendingQuestions(detail)` with
+//   `needsYouLabel(request)` and jumps with `jumpToQuestion`. The card is
 //   `[data-question=<request id>]`, `id={questionAnchorId(request.id)}`,
 //   focusable (tabIndex -1), labelled by its first prompt.
-// - Composer: Chat about it calls `drafts.chatAbout(<draft key>, request)`
-//   (the task's draft key is its task id; override with `draftKey` or
-//   `onChatAbout`). The composer reads `useDraftAbout(key)`: when set, it
-//   shows the About `Chip` ("About: <prompt>", tone accent, onRemove =
-//   `drafts.clearAbout(key)`), focuses its field whenever `about.seq`
-//   changes, and routes Send to `sendDiscussion(task, about, text)`
-//   (questions.ts), which clears the sent text and the About itself — do not
-//   also call `drafts.completeSend`. Attachments stay in the draft.
+// - Composer (TaskComposer.tsx): Chat about it calls
+//   `drafts.chatAbout(<draft key>, request)`; the composer shows the About
+//   chip, focuses its field when `about.seq` changes, and sends through
+//   `sendDiscussion`. While a question waits, Send takes only a discussion.
 // - Status, notifications, and "Open Pending Agent Question" are wired in
 //   store.ts / register.ts (`openQuestion(taskId)` focuses the open card).
 //
 // The answer grants nothing: it is user content, and the central gate still
 // evaluates every later action.
-import { CircleCheck, MessageSquare, Send } from "lucide-react";
+import { MessageSquare, Send } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { Question } from "../../bindings/Question";
 import type { QuestionAnswer } from "../../bindings/QuestionAnswer";
 import type { QuestionRequest } from "../../bindings/QuestionRequest";
 import type { TaskId } from "../../bindings/TaskId";
-import { Badge, Button, OptionList, StatusText, TextField } from "../../ui/components";
+import { Badge, Banner, Button, OptionList, StatusText, TextField } from "../../ui/components";
 import {
   type AnswerResult,
   answerQuestion,
@@ -42,7 +41,6 @@ import {
   useAnswerInFlight,
   useChatAbout,
 } from "./questions";
-import "./cards.css";
 
 /** The backend's limit for a custom answer. */
 export const CUSTOM_ANSWER_MAX = 2000;
@@ -111,7 +109,7 @@ export function QuestionCard({ task, request, draftKey, onChatAbout }: QuestionC
     });
     setSent(false);
     // The questions are read through `optionsKey` (a re-read detail is a new array).
-  },[request.revision, optionsKey, request.state.kind]);
+  }, [request.revision, optionsKey, request.state.kind]);
 
   const answers = useMemo(
     () => request.questions.map((q) => answerFor(q, choices[q.id], custom[q.id])),
@@ -155,7 +153,7 @@ export function QuestionCard({ task, request, draftKey, onChatAbout }: QuestionC
 
   return (
     <section
-      className="agents-question"
+      className={open ? "agents-stack agents-question" : "agents-stack agents-stack--tight agents-question"}
       id={questionAnchorId(request.id)}
       data-testid="agents-question"
       data-question={request.id}
@@ -166,8 +164,12 @@ export function QuestionCard({ task, request, draftKey, onChatAbout }: QuestionC
       aria-label={firstPrompt}
     >
       {open && (
+        <Banner tone="info" title="Needs your answer">
+          The agent waits for your answer before it continues. Your answer is passed to it as your reply; it approves nothing.
+        </Banner>
+      )}
+      {open && (group || discussing) && (
         <div className="agents-row">
-          <Badge tone="info">Needs your answer</Badge>
           {group && (
             <span className="ui-meta">
               {answeredCount} of {request.questions.length} answered
@@ -177,7 +179,7 @@ export function QuestionCard({ task, request, draftKey, onChatAbout }: QuestionC
         </div>
       )}
       {request.questions.map((q) => (
-        <div key={q.id} className="agents-question__item" data-question-id={q.id}>
+        <div key={q.id} className="agents-stack agents-stack--tight" data-question-id={q.id}>
           {open ? (
             <>
               <OptionList<string>
@@ -211,21 +213,23 @@ export function QuestionCard({ task, request, draftKey, onChatAbout }: QuestionC
             </>
           ) : (
             <>
-              <p className="agents-question__prompt ui-meta">{q.prompt}</p>
+              <div className="ui-meta">{q.prompt}</div>
               {answered && (
-                <p className="ui-meta agents-question__answered" data-testid="agents-question-answered">
-                  <CircleCheck size={14} aria-hidden />
-                  <span>Answered: {answeredText(q, answered.find((a) => a.questionId === q.id))}</span>
-                </p>
+                <StatusText
+                  status="succeeded"
+                  wrap
+                  label={`Answered: ${answeredText(q, answered.find((a) => a.questionId === q.id))}`}
+                  data-testid="agents-question-answered"
+                />
               )}
             </>
           )}
         </div>
       ))}
       {request.state.kind === "superseded" && (
-        <p className="ui-meta" data-testid="agents-question-superseded">
+        <div className="ui-meta" data-testid="agents-question-superseded">
           No longer needed — {continueSentence(request.state.reason)}
-        </p>
+        </div>
       )}
       {open && failure && (
         <div role="alert" data-testid="agents-question-error" data-code={failure.code ?? ""}>

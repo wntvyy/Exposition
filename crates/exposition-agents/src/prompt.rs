@@ -72,8 +72,8 @@ How the user does things in Exposition. You cannot see the screen; these are fac
 them (not to a terminal or to files under .exposition) and use these names:
 - Any command: the command palette (Ctrl+Shift+P); names written Category: Title below are palette commands.
 - Save: Ctrl+S (File: Save) or File: Save All. Nothing saves automatically; an unsaved file has a dot on its tab.
-- Review your changes: Review changes in the task (or the Changes tab on the Agents page), then Keep or Revert per \
-file, or Keep all / Revert all.
+- Review your changes: Review changes in the task menu (or Changes on the Agents page header), then Keep or Revert \
+per file, or Keep all / Revert all.
 - Run code themselves: the Research panel at the bottom (Research: Show Research Panel): type code and press Run \
 (Ctrl+Enter), Rerun to repeat, Stop to cancel; for the script open in the editor, Research: Run File in Research \
 Session or Research: Run Selection in Research Session; on the Research page, Run file and Run selection. Python, R, \
@@ -91,9 +91,10 @@ and the status bar show the verdict. There is no separate check button. Record e
 declaration's verdict in the graph; a check alone records none. A file in a Lake package is checked in that \
 package; a Mathlib package is prepared by the user with Set Up Mathlib… (never run lake update or edit its \
 Lake files to work around it), and its first check can take a minute or two.
-- Approvals: a prompt is a card in the task with Approve, Approve for this task, or Decline. Allowed for this task in \
-the task header lists what was approved for the task, each with Revoke. Project permissions are under Settings, \
-Model providers. A folder is trusted with Trust workspace… where native execution is refused.
+- Approvals: a prompt is a card in the task with Approve, Approve for this task, or Decline. Allowed for this task \
+under Options › Permissions in the composer lists what was approved for the task, each with Revoke. Project \
+permissions are under Settings › Model providers. A folder is trusted with Trust workspace… where native execution \
+is refused.
 
 Keep the user's existing structure, notation, and style. Prefer small, verifiable steps. When you finish, give a \
 short plain summary: which files you changed or created, what you checked and the actual result, and anything the \
@@ -132,13 +133,15 @@ pub const INTERFACE_NAMES: &[(&str, &str)] = &[
     ("Approve for this task", "src/features/agents/ApprovalCard.tsx"),
     ("Decline", "src/features/agents/ApprovalCard.tsx"),
     ("Allowed for this task", "src/features/agents/permissions.tsx"),
+    ("Options", "src/features/agents/TaskComposer.tsx"),
+    ("Permissions", "src/features/agents/TaskComposer.tsx"),
     ("Revoke", "src/features/agents/permissions.tsx"),
     ("Project permissions", "src/features/settings/ProjectPermissions.tsx"),
     ("Model providers", "src/features/settings/model.ts"),
     ("Trust workspace…", "src/features/research/ResearchPanel.tsx"),
 ];
 
-/// How a kind of allowance is named to the model (as the task header names it).
+/// How a kind of allowance is named to the model (as Options › Permissions names it).
 fn allowance_label(kind: AllowanceKind) -> &'static str {
     match kind {
         AllowanceKind::NativeCode => "native code",

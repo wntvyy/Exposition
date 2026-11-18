@@ -13,7 +13,8 @@
 //   (task status, streaming draft, transcript, status bar), running, done,
 //   declined, canceled, not run.
 // - The provider chip follows the provider actually selected, from any surface.
-// - Removing the stored API key asks first, with the safe choice focused.
+// - Removing the stored API key (Settings › Model providers) asks first, with
+//   the safe choice focused.
 // - The live-agents scope check accepts a real application refusal and rejects
 //   a model that merely declines.
 // Screenshots (light and dark) go to test-results/e2e/agents-attention/.
@@ -76,8 +77,18 @@ async function showTask(panel) {
   await panel.getByTestId("agents-task-view").waitFor({ timeout: 10_000 });
 }
 
-/** Visible text of the task status pill, the draft pill, and each transcript tool pill. */
+/** Expand every collapsed turn header so the routine tool-call rows are rendered (design C). */
+async function expandTurns(scope) {
+  const toggles = scope.getByTestId("agents-turn-toggle");
+  for (let i = 0; i < (await toggles.count()); i++) {
+    const toggle = toggles.nth(i);
+    if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click().catch(() => {});
+  }
+}
+
+/** Visible text of the task status pill, the draft pill, and each transcript tool pill (turns expanded). */
 async function visibleStates(panel) {
+  await expandTurns(panel);
   return panel.evaluate((root) => ({
     task: root.querySelector("[data-testid=agents-task-status]")?.textContent ?? null,
     draft: root.querySelector("[data-testid=agents-draft] .ui-status-text")?.textContent ?? null,
@@ -117,7 +128,7 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     await setTheme(page, "light");
     await openWorkspace(page, project);
     // The chip starts on the default provider (no key in this namespace) and
-    // follows a change made outside the dialog (here: over IPC).
+    // follows a change made outside Settings (here: over IPC).
     const chip = panel.getByTestId("agents-provider-chip");
     await waitFor(async () => (await chip.textContent()) === "Claude · no API key configured", { message: "default chip" });
     await invoke(page, "agents_provider_update", {
@@ -125,10 +136,10 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     });
     await waitFor(async () => (await chip.textContent()) === "Scripted provider — development only", {
       timeout: 5000,
-      message: "chip follows the provider selected outside the dialog",
+      message: "chip follows the provider selected outside Settings",
     });
     await shot(page, "provider-chip-scripted-light");
-    step("provider chip follows the selected provider (changed over IPC, not through the dialog)");
+    step("provider chip follows the selected provider (changed over IPC, not through Settings)");
 
     // --- 1. Approval while the Agent view is hidden ---------------------------
     await page.locator("body").click({ position: { x: 700, y: 540 } });
@@ -243,7 +254,8 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     step("approved by keyboard; status item and notifications cleared; finished calls read Done", { doneStates });
 
     // --- 2. Diff gutter icons (codicon font bundled locally) ------------------
-    await panel.getByTestId("agents-open-review").click();
+    // Design C: once the task stopped with changes, "Needs you" offers the review.
+    await panel.getByTestId("agents-needs-review").click();
     await page.waitForSelector("[data-testid=agents-panel] [data-testid=agents-diff] .monaco-diff-editor", { timeout: 20_000 });
     await page.waitForTimeout(600);
     const fonts = await page.evaluate(async () => {
@@ -301,7 +313,9 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     const textOf = async () => (await invoke(page, "document_state", { document: mainId })).text;
     assert.equal(await textOf(), "= Notes\nThe dog sat on the mat.\n");
     await showTask(panel);
-    await panel.getByTestId("agents-open-review").click();
+    // Review changes from the task's menu.
+    await panel.getByTestId("agents-task-menu").click();
+    await page.getByRole("menuitem", { name: "Review changes" }).click();
     const stateOf = () =>
       page.locator("[data-testid=agents-panel] [data-testid=agents-review-file][data-path='main.typ'] [data-testid=agents-review-state]");
     await waitFor(async () => (await stateOf().getAttribute("data-state")) === "pending", { message: "pending review" });
@@ -421,16 +435,18 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     step("declined, running (after approval), canceled, and not run read correctly", { running, stopped });
 
     // --- 5. Removing the key asks first; Keep is focused ----------------------
-    await panel.getByRole("button", { name: "Agent provider settings" }).click();
-    const dialog = page.getByRole("dialog", { name: "Agent provider" });
-    await dialog.waitFor();
-    await dialog.getByLabel("API key").fill(FAKE_KEY);
-    await dialog.getByTestId("agents-key-save").click();
-    await page.waitForFunction(() => {
-      const text = document.querySelector("[data-testid=agents-key-status]")?.textContent ?? "";
+    // Provider keys live in Settings › Model providers, one group per provider.
+    await runCommand(page, "Agent Provider Settings", /Agent Provider Settings/);
+    const anthropic = page.getByTestId("settings-providers").getByTestId("settings-provider-anthropic");
+    await anthropic.waitFor();
+    const keySelector = "[data-testid=settings-provider-anthropic] [data-testid=agents-key-status]";
+    await anthropic.getByTestId("agents-key-input").locator("input").fill(FAKE_KEY);
+    await anthropic.getByTestId("agents-key-save").click();
+    await page.waitForFunction((selector) => {
+      const text = document.querySelector(selector)?.textContent ?? "";
       return text.includes("Configured") && !text.includes("Not configured");
-    });
-    await dialog.getByTestId("agents-key-remove").click();
+    }, keySelector);
+    await anthropic.getByTestId("agents-key-remove").click();
     const confirmRemove = page.getByRole("alertdialog", { name: "Remove the API key?" });
     await confirmRemove.waitFor({ timeout: 5000 });
     await page.waitForFunction(() => document.activeElement?.textContent === "Keep key", null, { timeout: 5000 });
@@ -449,22 +465,25 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
     const anthropicKey = (s) => s.connections.find((c) => c.provider === "anthropic").configured;
     let status = await invoke(page, "agents_provider_status");
     assert.equal(anthropicKey(status), true, "Escape keeps the key");
-    await dialog.getByTestId("agents-key-remove").click();
+    assert.match((await page.textContent(keySelector)) ?? "", /Configured/);
+    await anthropic.getByTestId("agents-key-remove").click();
     await confirmRemove.getByRole("button", { name: "Remove key" }).click();
-    await page.waitForFunction(() =>
-      (document.querySelector("[data-testid=agents-key-status]")?.textContent ?? "").includes("Not configured"),
+    await page.waitForFunction(
+      (selector) => (document.querySelector(selector)?.textContent ?? "").includes("Not configured"),
+      keySelector,
     );
     status = await invoke(page, "agents_provider_status");
     assert.equal(anthropicKey(status), false);
-    // The disabled Remove button cannot keep focus; the dialog moves it to the
-    // key field on the next frame. Press Escape once focus is in the dialog,
-    // as a keyboard user would.
-    await page.waitForFunction(() =>
-      [...document.querySelectorAll('[role="dialog"]')].some((d) => d.contains(document.activeElement)),
+    // The Remove button is gone; focus moves to the key field for a new key
+    // (the keyboard user is not left on a removed control).
+    await page.waitForFunction(
+      () =>
+        document.querySelector("[data-testid=settings-provider-anthropic] [data-testid=agents-key-input]")?.contains(document.activeElement) ??
+        false,
+      null,
+      { timeout: 5000 },
     );
-    await page.keyboard.press("Escape");
-    await dialog.waitFor({ state: "detached", timeout: 5000 });
-    step("Remove asks (alertdialog, Keep focused); Escape keeps the key; Remove key removes it");
+    step("Remove asks (alertdialog, Keep focused); Escape keeps the key; Remove key removes it; focus moves to the key field");
 
     // --- 6. The live scope check accepts only the application's refusal -------
     const scoped = await startTask(

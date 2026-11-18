@@ -485,9 +485,17 @@
   user-select: text;
 }
 
-/* The approval is focused from a notification or the status bar. */
-.agents-approval {
+/* The approval and the question card are focused from a notification, the
+   status bar, or a "Needs you" link. */
+.agents-approval,
+.agents-question {
   border-radius: var(--radius-md);
+}
+
+/* An expanded conversation figure (Dialog lg) uses Research's figure
+   treatment at a readable size. */
+.agents-figure-expanded img {
+  max-height: 70vh;
 }
 
 /* The complete payload of an approval: taller than other code blocks, and

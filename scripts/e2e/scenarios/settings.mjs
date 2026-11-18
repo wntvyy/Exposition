@@ -125,7 +125,12 @@ export default async function settings({ launchApp, artifactsDir, assert }) {
   await mkdir(dataDir, { recursive: true });
   await mkdir(project, { recursive: true });
   await writeFile(join(project, "main.typ"), "= Paper\n");
-  const env = { EXPOSITION_TOOL_CACHE_DIR: join(artifactsDir, "..", "tool-cache") };
+  const env = {
+    EXPOSITION_TOOL_CACHE_DIR: join(artifactsDir, "..", "tool-cache"),
+    // Debug builds keep this run's provider keys apart from the real credential
+    // entry, so Model providers never lists models with a real key here.
+    EXPOSITION_CREDENTIAL_NAMESPACE: `e2e-settings-${Date.now()}`,
+  };
   let pythonOverride;
 
   // ---------------- First session ----------------
@@ -297,17 +302,25 @@ export default async function settings({ launchApp, artifactsDir, assert }) {
     await pythonRow.scrollIntoViewIfNeeded();
     await shot(page, "settings-tools-light");
 
-    // --- Agents: the existing provider dialog, never the key.
-    await section(page, "Agents");
-    await page.getByTestId("agents-key").waitFor();
-    await page.getByTestId("open-provider-settings").click();
-    const providerDialog = page.getByRole("dialog", { name: "Agent provider" });
-    await providerDialog.waitFor();
-    await providerDialog.getByRole("button", { name: "Close" }).click();
-    await providerDialog.waitFor({ state: "detached" });
-    // The provider dialog lives in the Agent view, which it revealed; hide it again.
-    await page.keyboard.press("Control+Alt+b");
-    await page.locator('[data-region="auxiliary"]').waitFor({ state: "detached" });
+    // --- Model providers: configured here (no provider dialog), never the key.
+    await section(page, "Model providers");
+    await page.getByTestId("settings-providers").waitFor();
+    for (const provider of ["anthropic", "openai"]) {
+      const group = page.getByTestId(`settings-provider-${provider}`);
+      await group.waitFor();
+      const keyStatus = (await group.getByTestId("agents-key-status").innerText()).trim();
+      assert.match(keyStatus, /^(Not configured|Configured — stored in .+)$/, `${provider} key status names the state only`);
+      // A key is typed into a password field only, and a saved key is never shown.
+      const keyInput = group.getByTestId("agents-key-input").locator("input");
+      if (await keyInput.count()) assert.equal(await keyInput.getAttribute("type"), "password");
+    }
+    assert.equal(await page.getByRole("dialog").count(), 0, "no provider dialog");
+    // The Agent palette command opens this same section; nothing reveals the Agent view.
+    await section(page, "Appearance");
+    await runCommand(page, "agent provider settings", /Agent Provider Settings/);
+    await page.getByRole("tabpanel", { name: "Model providers" }).waitFor();
+    assert.equal(await page.getByRole("tab", { name: "Model providers" }).getAttribute("aria-selected"), "true");
+    assert.equal(await page.locator('[data-region="auxiliary"]').count(), 0, "the Agent view stays hidden");
 
     // Dark screenshots of this session's sections; the dark choice persists.
     await section(page, "Appearance");
@@ -371,12 +384,12 @@ export default async function settings({ launchApp, artifactsDir, assert }) {
     for (const [name, file] of [
       ["Trusted folders", "settings-trust"],
       ["Research", "settings-research"],
-      ["Agents", "settings-agents"],
+      ["Model providers", "settings-providers"],
       ["Editor", "settings-editor"],
     ]) {
       await section(page, name);
       if (name === "Research") await page.getByTestId("research-environments").waitFor({ timeout: 120_000 });
-      if (name === "Agents") await page.getByTestId("agents-key").waitFor();
+      if (name === "Model providers") await page.getByTestId("settings-provider-anthropic").getByTestId("agents-key-status").waitFor();
       await shot(page, `${file}-dark`);
     }
     // Editor preferences go through the workspace settings service.
@@ -397,13 +410,13 @@ export default async function settings({ launchApp, artifactsDir, assert }) {
     await setTheme(page, assert, "Light", "light");
     for (const [name, file] of [
       ["Editor", "settings-editor"],
-      ["Agents", "settings-agents"],
+      ["Model providers", "settings-providers"],
       ["Research", "settings-research"],
       ["About", "settings-about"],
     ]) {
       await section(page, name);
       if (name === "Research") await page.getByTestId("research-environments").waitFor({ timeout: 120_000 });
-      if (name === "Agents") await page.getByTestId("agents-key").waitFor();
+      if (name === "Model providers") await page.getByTestId("settings-provider-anthropic").getByTestId("agents-key-status").waitFor();
       await shot(page, `${file}-light`);
     }
     assert.deepEqual(consoleErrors(app), [], "no console errors after relaunch");

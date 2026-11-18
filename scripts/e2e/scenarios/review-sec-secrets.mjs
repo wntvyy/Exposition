@@ -6,7 +6,7 @@
 // and removes it again at the end. It never contacts a model provider.
 //
 // Checks:
-// - the key typed into Agent provider settings never comes back to the webview
+// - the key typed into Settings › Model providers never comes back to the webview
 //   (status, DOM, inputs) and is not written to app data, the WebView2
 //   profile, the project, or the app's stdout/stderr;
 // - what a trusted native child (a Python research kernel) can do with it:
@@ -21,6 +21,7 @@ import { cp, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { runCommand } from "../palette.mjs";
 import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const NAME = "review-sec-secrets";
@@ -122,14 +123,16 @@ export default async function reviewSecSecrets({ launchApp, artifactsDir, fixtur
     const panel = page.getByTestId("agents-panel");
     await panel.waitFor({ timeout: 15_000 });
 
-    // ---- Save the key through the real dialog.
-    await panel.getByRole("button", { name: "Agent provider settings" }).click();
-    const dialog = page.getByRole("dialog", { name: "Agent provider" });
-    await dialog.waitFor();
-    await dialog.getByLabel("API key").fill(FAKE_KEY);
-    await dialog.getByRole("button", { name: "Save key" }).click();
+    // ---- Save the key through the real form: Settings › Model providers
+    // (the only place keys are entered; the Agent command opens it).
+    await runCommand(page, "agent provider settings", /Agent Provider Settings/);
+    const providerGroup = page.getByTestId("settings-provider-anthropic");
+    await providerGroup.waitFor();
+    await providerGroup.getByTestId("agents-key-input").locator("input").fill(FAKE_KEY);
+    await providerGroup.getByRole("button", { name: "Save key" }).click();
     await page.waitForFunction(() => {
-      const text = document.querySelector("[data-testid=agents-key-status]")?.textContent ?? "";
+      const text =
+        document.querySelector("[data-testid=settings-provider-anthropic] [data-testid=agents-key-status]")?.textContent ?? "";
       return text.includes("Configured") && !text.includes("Not configured");
     });
     keySaved = true;
@@ -142,7 +145,6 @@ export default async function reviewSecSecrets({ launchApp, artifactsDir, fixtur
       core,
     );
     check("dom-has-no-key-after-save", !domLeak);
-    await dialog.getByRole("button", { name: "Close" }).click();
 
     // ---- A trusted project with a Python research kernel.
     await invoke(page, "workspace_open", { path: project });

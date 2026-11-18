@@ -21,7 +21,7 @@ const invoke = (page, cmd, args) =>
   page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args ?? {}]);
 
 const BUDGET = { turns: 18, toolCalls: 18, commands: 6, outputTokens: 30000, minutes: 10 };
-const terminal = (status) => !["queued", "running", "awaitingApproval"].includes(status.kind);
+const terminal = (status) => !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(status.kind);
 
 /** Wait for the task to end, answering each card "for this task"; the cards' titles. */
 async function finish(page, id, artifactsDir, label, timeout = 600_000) {
@@ -36,6 +36,20 @@ async function finish(page, id, artifactsDir, label, timeout = 600_000) {
       if (await forTask.count()) await forTask.click();
       else await card.getByTestId("agents-approve").click();
       await card.waitFor({ state: "detached", timeout: 30_000 }).catch(() => {});
+    }
+    // A structured question (not an approval card): take the recommended
+    // (else the first) option of each question and send the answer.
+    const question = page.locator("[data-testid=agents-question][data-open=true]").first();
+    if (await question.count()) {
+      await page.screenshot({ path: join(artifactsDir, `${label}-question.png`) });
+      for (const group of await question.getByRole("radiogroup").all()) {
+        const recommended = group.locator(".ui-option-list__option", { hasText: "Recommended" });
+        await ((await recommended.count()) ? recommended.first() : group.locator(".ui-option-list__option").first()).click();
+      }
+      await question.getByTestId("agents-question-send").click();
+      await page
+        .waitForFunction(() => !document.querySelector("[data-testid=agents-question][data-open=true]"), null, { timeout: 30_000 })
+        .catch(() => {});
     }
     const task = (await invoke(page, "agents_task_list")).find((t) => t.id === id);
     if (task && terminal(task.status)) return { task, cards };
@@ -99,18 +113,25 @@ export default async function liveAgentctx({ launchApp, artifactsDir, assert }) 
         "including whether I will be asked to approve it. Keep everything else brief.",
     );
     await panel.getByTestId("agents-folder").waitFor();
-    await panel.getByRole("radio", { name: "Auto" }).click();
+    // Approvals and Budgets are tabs of the composer's Options sheet.
+    await panel.getByTestId("agents-options").click();
+    const sheet = page.getByRole("dialog", { name: "Options" });
+    await sheet.getByRole("tab", { name: /^Permissions/ }).click();
+    await page.getByTestId("agents-options-permissions").getByRole("radio", { name: "Auto" }).click();
     await page.waitForFunction(
       () => document.querySelector("[data-testid=agents-auto-profile]")?.dataset.granted === "true",
     );
-    await panel.getByRole("button", { name: /^Budgets/ }).click();
-    const fill = (label, value) => panel.getByLabel(label, { exact: true }).fill(String(value));
+    await sheet.getByRole("tab", { name: /^Budgets/ }).click();
+    const budgets = page.getByTestId("agents-options-budgets");
+    const fill = (label, value) => budgets.getByLabel(label, { exact: true }).fill(String(value));
     await fill("Model turns", BUDGET.turns);
     await fill("Tool calls", BUDGET.toolCalls);
     await fill("Commands", BUDGET.commands);
     await fill("Output tokens", BUDGET.outputTokens);
     await fill("Minutes", BUDGET.minutes);
-    await panel.getByRole("button", { name: "Start task" }).click();
+    await page.keyboard.press("Escape");
+    await sheet.waitFor({ state: "detached" });
+    await panel.getByTestId("agents-start").click();
     await page.waitForSelector("[data-testid=agents-task-view]");
     const id = (await invoke(page, "agents_task_list"))[0].id;
     let { task, cards } = await finish(page, id, artifactsDir, "1");

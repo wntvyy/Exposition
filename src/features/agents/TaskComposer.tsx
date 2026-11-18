@@ -9,8 +9,14 @@
 // each task), and a new task's settings in a store of their own, so both
 // views show the same draft. While a task is active the person may keep
 // typing, but nothing is queued: Send waits until the task stops or asks.
+//
+// "Chat about it" on a question card marks the task's draft as being about
+// that question (`drafts.chatAbout`): the composer shows the About chip,
+// takes focus, and Send discusses the question (`sendDiscussion`) instead of
+// continuing the task. While a question waits, that is the only message Send
+// takes; the answer itself is sent from the card.
 import { ArrowUp, FolderOpen, Paperclip, SlidersHorizontal, Square } from "lucide-react";
-import { useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { create } from "zustand";
 
 import type { Budgets } from "../../bindings/Budgets";
@@ -23,20 +29,24 @@ import type { TaskSummary } from "../../bindings/TaskSummary";
 import { editors } from "../../app/editors";
 import { registry } from "../../app/registry";
 import { commands, errorMessage } from "../../lib/ipc";
-import { Badge, Banner, Button, IconButton, PopoverDialog, Tab, TabList, TabPanel, Tabs, TextArea } from "../../ui/components";
+import { Badge, Banner, Button, Chip, IconButton, PopoverDialog, Tab, TabList, TabPanel, Tabs, TextArea } from "../../ui/components";
 import { DraftAttachments, pasteHandler } from "./Attachments";
 import { BudgetFields, budgetsCustom, BudgetUsage, DEFAULT_BUDGETS } from "./budgets";
-import { drafts, NEW_TASK_DRAFT, useDraft } from "./drafts";
+import { drafts, NEW_TASK_DRAFT, useDraft, useDraftAbout } from "./drafts";
 import { EFFORT_LABELS, environmentText, FILES_LABELS, isActive, PERMISSION_LABELS } from "./format";
 import { ModelMenu } from "./ModelMenu";
 import { connectionOf } from "./models";
 import { PermissionsPanel, scopeLabel, SCOPE_LABELS, useProjectPermissions, type ScopeKind, type TaskSettingsDraft } from "./permissions";
+import { sendDiscussion } from "./questions";
 import { agents, useAgents } from "./store";
 
 export { DEFAULT_BUDGETS };
 
 /** Why Send is disabled while the task works (typing stays allowed; nothing is queued). */
 export const SEND_WAITS = "You can send when the task stops or asks you something";
+
+/** Why Send is disabled while a question waits and the draft is not about it. */
+export const ANSWER_FIRST = "Answer the question above, or use Chat about it.";
 
 /** Build the scope from the composer fields; `null` when incomplete. */
 export function buildScope(kind: ScopeKind, files: string, document: string): TaskScope | null {
@@ -111,15 +121,26 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
   const options = useNewTaskOptions();
   const key = task ? task.id : NEW_TASK_DRAFT;
   const draft = useDraft(key);
+  // Chat about it: the message discusses a waiting question (follow-ups only).
+  const about = useDraftAbout(key);
+  const discussing = task !== null && about !== null;
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [sheet, setSheet] = useState<SheetTab | null>(null);
   const [showPath, setShowPath] = useState(false);
   const anchorRef = useRef<HTMLFormElement>(null);
   const closedAt = useRef(0);
+  // The field takes focus whenever Chat about it is pressed (not when the view mounts).
+  const focusedSeq = useRef(about?.seq ?? 0);
+  useEffect(() => {
+    if (!about || about.seq === focusedSeq.current) return;
+    focusedSeq.current = about.seq;
+    anchorRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+  }, [about]);
 
   const folder = task ? task.spec.workspaceRoot : (workspace?.root ?? "");
   const active = task ? isActive(task.status) : false;
+  const awaitingAnswer = task?.status.kind === "awaitingAnswer";
 
   // The new task's settings (a started task's are fixed in its spec).
   const settings: TaskSettingsDraft & { budgets: Budgets } = {
@@ -147,9 +168,13 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
   const providerReady = status !== null && connectionOf(status, effective.provider).configured;
   const scope = task ? task.spec.scope : buildScope(settings.scopeKind, settings.files, settings.document);
   const hasContent = draft.text.trim().length > 0 || draft.attachments.length > 0;
-  const canSend = task
-    ? hasContent && !active && !busy && draft.ingesting === 0 && modelReady
-    : hasContent && folder.trim().length > 0 && scope !== null && providerReady && autoReady && !busy && draft.ingesting === 0 && modelReady;
+  // A discussion sends only its text (attachments stay in the draft) and may
+  // be sent while the task waits for the answer; nothing else is sent then.
+  const canSend = discussing
+    ? draft.text.trim().length > 0 && !busy
+    : task
+      ? hasContent && !active && !busy && draft.ingesting === 0 && modelReady
+      : hasContent && folder.trim().length > 0 && scope !== null && providerReady && autoReady && !busy && draft.ingesting === 0 && modelReady;
 
   // The Options summary and the native indication.
   const changes = task
@@ -174,6 +199,20 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     if (!canSend || !scope) return;
+    if (task && about) {
+      // One bounded discussion turn; on success the sent text and the About
+      // are cleared by `sendDiscussion` (not `completeSend`).
+      setBusy(true);
+      setFailure(null);
+      try {
+        await sendDiscussion(task.id, about, draft.text, key);
+      } catch (e) {
+        setFailure(errorMessage(e));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     // Exactly what is sent now; additions made while the request runs stay.
     const sent = {
       text: draft.text,
@@ -275,9 +314,9 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
       {failure && (
         <Banner
           tone="danger"
-          title={task ? "The follow-up was not sent" : "The task was not started"}
+          title={discussing ? "The message about the question was not sent" : task ? "The follow-up was not sent" : "The task was not started"}
           live
-          data-testid={task ? "agents-follow-up-error" : "agents-composer-error"}
+          data-testid={discussing ? "agents-discussion-error" : task ? "agents-follow-up-error" : "agents-composer-error"}
         >
           {failure}
         </Banner>
@@ -294,6 +333,19 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
             {[projectName, scopeText].filter(Boolean).join(" · ")}
           </button>
           {showPath && <code className="ui-code agents-folder-path">{folder}</code>}
+        </div>
+      )}
+      {task && about && (
+        <div className="agents-row">
+          <Chip
+            tone="accent"
+            label={`About: ${about.prompt}`}
+            onRemove={() => {
+              setFailure(null);
+              drafts.clearAbout(key);
+            }}
+            data-testid="agents-about"
+          />
         </div>
       )}
       <div className="agents-composer__field" onPaste={pasteHandler(key)} onKeyDown={onKeyDown}>
@@ -347,9 +399,9 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
           Send
         </Button>
       </div>
-      {active && (
+      {active && !discussing && (
         <p className="ui-meta" data-testid="agents-send-waits">
-          {SEND_WAITS}
+          {awaitingAnswer ? ANSWER_FIRST : SEND_WAITS}
         </p>
       )}
       <PopoverDialog

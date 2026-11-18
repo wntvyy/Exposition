@@ -27,7 +27,7 @@ import {
   StatusPill,
   ToggleButton,
 } from "../../ui/components";
-import { isActive, statusLabel } from "./format";
+import { isActive, needsUser, statusLabel } from "./format";
 import { agentGraph } from "./graphIpc";
 import { useOpList } from "../operations/useOpList";
 import { GraphContextView, kindTitle, ProposalList } from "./GraphViews";
@@ -55,7 +55,7 @@ export function taskMatches(task: TaskSummary, filter: TaskFilter, kept: Readonl
     case "active":
       return isActive(task.status);
     case "attention":
-      return task.status.kind === "awaitingApproval" || task.pendingReview > 0;
+      return needsUser(task.status) || task.pendingReview > 0;
     case "kept":
       return kept.has(task.id);
   }
