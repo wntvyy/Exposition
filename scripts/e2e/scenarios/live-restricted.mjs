@@ -6,8 +6,8 @@
 // scripted provider does not exist.
 //
 // Checks, in the app under test:
-//   A. An unattended ("Restricted sandbox only") task's run_python runs in the
-//      Docker sandbox: Linux, uid 65534, no network, read-only project, no
+//   A. An unattended ("Restricted container only (unattended)") task's run_python runs in the
+//      Docker container: Linux, uid 65534, no network, read-only project, no
 //      credential variables, and the job is recorded under the restricted policy.
 //   B. With no image configured the same request is refused by the application
 //      and never runs natively: no job, no kernel, nothing written.
@@ -90,7 +90,7 @@ export default async function liveRestricted({ launchApp, artifactsDir, assert }
     await invoke(page, "trust_grant", { root });
     const request = { workspaceRoot: root, consent: "scopeContent", prompt: PROMPT, scope: { kind: "workspace" }, permission: "autoApply", execution: "restricted", budgets: BUDGETS };
 
-    // --- A. unattended run_python in the Docker sandbox ------------------------
+    // --- A. unattended run_python in the Docker container ----------------------
     const set = await invoke(page, "execution_settings_update", { change: { kind: "dockerImage", image: IMAGE } });
     check("Docker image configured", set.settings.docker.image === IMAGE, set.settings.docker);
     const jobsBefore = (await invoke(page, "job_list")).length;
@@ -104,10 +104,10 @@ export default async function liveRestricted({ launchApp, artifactsDir, assert }
     evidence.restrictedResult = boxed ? { policy: boxed.policy, stdout: boxed.stdout } : (runs[0].result ?? "").slice(0, 400);
     check("run_python succeeded under restricted:docker", !runs[0].isError && boxed?.policy === "restricted:docker", evidence.restrictedResult);
     const out = boxed?.stdout ?? "";
-    check("sandbox is Linux as uid 65534", /platform Linux/.test(out) && /uid 65534/.test(out), out);
-    check("sandbox has no network", /network blocked/.test(out) && !/network open/.test(out), out);
-    check("project is read-only in the sandbox", /workspace read-only/.test(out) && !existsSync(join(root, "restricted-ran.txt")), out);
-    check("no credential variables in the sandbox", /credential variables: \[\]/.test(out), out);
+    check("container is Linux as uid 65534", /platform Linux/.test(out) && /uid 65534/.test(out), out);
+    check("container has no network", /network blocked/.test(out) && !/network open/.test(out), out);
+    check("project is read-only in the container", /workspace read-only/.test(out) && !existsSync(join(root, "restricted-ran.txt")), out);
+    check("no credential variables in the container", /credential variables: \[\]/.test(out), out);
     const jobs = await invoke(page, "job_list");
     const job = jobs.find((j) => j.info.id === boxed?.job);
     check("the job is recorded under the restricted Docker policy", job?.info.policy?.kind === "restricted" && job?.info.policy?.backend === "docker", job?.info.policy ?? null);

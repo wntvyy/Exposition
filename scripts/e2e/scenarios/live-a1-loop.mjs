@@ -46,7 +46,7 @@ estimate(2000)
 const IMAGE = "python:3.13-slim";
 const BUDGET = { turns: 10, toolCalls: 12, commands: 6, outputTokens: 30000, minutes: 10 };
 
-const terminal = (status) => !["queued", "running", "awaitingApproval"].includes(status.kind);
+const terminal = (status) => !["queued", "running", "awaitingApproval", "awaitingAnswer"].includes(status.kind);
 
 /** Record every approval card that appears from now on (title + whether "for this task" is offered). */
 async function watchCards(page) {
@@ -61,7 +61,11 @@ async function watchCards(page) {
         window.__liveCards.push({
           title: (card.getAttribute("aria-label") ?? "").replace(/^Approval needed: /, ""),
           forTask: Boolean(card.querySelector("[data-testid=agents-approve-task]")),
-          reason: card.querySelector("[data-testid=agents-approval-reason]")?.textContent ?? null,
+          // The reason opens the card's banner text, before the fixed review sentence.
+          reason:
+            (card.querySelector(".ui-banner__text")?.textContent ?? "")
+              .replace("Nothing is applied until you approve. Review the complete content below.", "")
+              .trim() || null,
         });
       }
     };
@@ -78,9 +82,27 @@ async function selectOption(page, scope, label, option) {
   await page.getByRole("option", { name: option, exact: true }).click();
 }
 
+/** Open the composer's Options sheet on a tab (Model, Permissions, Budgets); returns that tab's panel. */
+async function optionsTab(page, panel, tab) {
+  const button = panel.getByTestId("agents-options");
+  if ((await button.getAttribute("aria-expanded")) !== "true") await button.click();
+  const sheet = page.getByRole("dialog", { name: "Options" });
+  await sheet.getByRole("tab", { name: new RegExp(`^${tab}`) }).click();
+  const body = page.getByTestId(`agents-options-${tab.toLowerCase()}`);
+  await body.waitFor();
+  return body;
+}
+
+async function closeOptions(page) {
+  const sheet = page.getByRole("dialog", { name: "Options" });
+  if (!(await sheet.count())) return;
+  await page.keyboard.press("Escape");
+  await sheet.waitFor({ state: "detached" });
+}
+
 async function setBudgets(page, panel) {
-  await panel.getByRole("button", { name: /^Budgets/ }).click();
-  const fill = (label, value) => panel.getByLabel(label, { exact: true }).fill(String(value));
+  const budgets = await optionsTab(page, panel, "Budgets");
+  const fill = (label, value) => budgets.getByLabel(label, { exact: true }).fill(String(value));
   await fill("Model turns", BUDGET.turns);
   await fill("Tool calls", BUDGET.toolCalls);
   await fill("Commands", BUDGET.commands);
@@ -91,24 +113,29 @@ async function setBudgets(page, panel) {
 /** Open the composer in the Agent view, fill it, and start the task. */
 async function startTask(page, { prompt, mode, permission, execution, profile }) {
   const panel = page.getByTestId("agents-panel");
-  await panel.getByTestId("agents-new-task").click();
+  await runCommand(page, "New Agent Task", /New Agent Task/);
+  await panel.getByTestId("agents-composer").waitFor();
   await page.fill("[data-testid=agents-prompt]", prompt);
   await panel.getByTestId("agents-folder").waitFor();
-  await panel.getByRole("radio", { name: mode }).click();
+  // Approvals, Document changes, Commands and code, and the project's Auto
+  // permissions are in the composer's Options sheet (Permissions tab).
+  const permissions = await optionsTab(page, panel, "Permissions");
+  await permissions.getByRole("radio", { name: mode }).click();
   if (mode === "Ask") {
-    await selectOption(page, panel, /Document changes/, permission);
-    await selectOption(page, panel, /Commands and code/, execution);
+    await selectOption(page, permissions, /Document changes/, permission);
+    await selectOption(page, permissions, /Commands and code/, execution);
   } else {
-    await panel.getByTestId("agents-auto-profile").waitFor();
+    await permissions.getByTestId("agents-auto-profile").waitFor();
     if (profile) {
-      await page.getByTestId("agents-permissions-change").click();
-      await selectOption(page, panel, /Code/, profile.code);
-      await page.getByTestId("agents-permissions-use").click();
+      await permissions.getByTestId("agents-permissions-change").click();
+      await selectOption(page, permissions, /Code/, profile.code);
+      await permissions.getByTestId("agents-permissions-use").click();
       await page.waitForFunction(() => document.querySelector("[data-testid=agents-auto-profile]")?.dataset.granted === "true");
     }
   }
   await setBudgets(page, panel);
-  await panel.getByRole("button", { name: "Start task" }).click();
+  await closeOptions(page);
+  await panel.getByTestId("agents-start").click();
   await page.waitForSelector("[data-testid=agents-task-view]");
   return (await invoke(page, "agents_task_list"))[0];
 }
@@ -128,6 +155,21 @@ async function finish(page, id, answer, shot, timeout = 600_000) {
       else if (choice === "once") await card.getByTestId("agents-approve").click();
       else await card.getByTestId("agents-decline").click();
       await card.waitFor({ state: "detached", timeout: 30_000 }).catch(() => {});
+    }
+    // A live model may ask a structured question: take the recommended (else
+    // the first) option of each and send, so the run is not left waiting.
+    const question = page.locator("[data-testid=agents-question][data-open=true]").first();
+    if (await question.count()) {
+      n += 1;
+      await shot(`question-${n}`);
+      for (const group of await question.getByRole("radiogroup").all()) {
+        const recommended = group.locator(".ui-option-list__option", { hasText: "Recommended" });
+        await ((await recommended.count()) ? recommended.first() : group.locator(".ui-option-list__option").first()).click();
+      }
+      await question.getByTestId("agents-question-send").click();
+      await page
+        .waitForFunction(() => !document.querySelector("[data-testid=agents-question][data-open=true]"), null, { timeout: 30_000 })
+        .catch(() => {});
     }
     const task = (await invoke(page, "agents_task_list")).find((t) => t.id === id);
     if (task && terminal(task.status)) return task;

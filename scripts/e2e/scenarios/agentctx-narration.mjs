@@ -115,11 +115,25 @@ export default async function agentctxNarration({ launchApp, artifactsDir, asser
     await panel.getByTestId("agents-new-task").click();
     await page.fill("[data-testid=agents-prompt]", "Write a script and run it");
     await panel.getByTestId("agents-folder").waitFor();
-    await panel.getByRole("radio", { name: "Auto" }).click();
+    // Approvals (Ask | Auto) is in the composer's Options sheet, Permissions tab.
+    const sheet = page.getByRole("dialog", { name: "Options" });
+    const permissionsTab = async () => {
+      if ((await panel.getByTestId("agents-options").getAttribute("aria-expanded")) !== "true") {
+        await panel.getByTestId("agents-options").click();
+      }
+      await sheet.getByRole("tab", { name: /^Permissions/ }).click();
+      return page.getByTestId("agents-options-permissions");
+    };
+    const closeSheet = async () => {
+      await page.keyboard.press("Escape");
+      await sheet.waitFor({ state: "detached" });
+    };
+    await (await permissionsTab()).getByRole("radio", { name: "Auto" }).click();
     await page.waitForFunction(
       () => document.querySelector("[data-testid=agents-auto-profile]")?.dataset.granted === "true",
     );
-    await panel.getByRole("button", { name: "Start task" }).click();
+    await closeSheet();
+    await panel.getByTestId("agents-start").click();
     await page.waitForSelector("[data-testid=agents-task-view]");
     let task = (await invoke(page, "agents_task_list"))[0];
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 60_000 });
@@ -128,8 +142,13 @@ export default async function agentctxNarration({ launchApp, artifactsDir, asser
     task = await waitDone(page, task.id);
     assert.equal(task.status.kind, "completed", JSON.stringify(task.status));
     assert.equal(await page.getByTestId("agents-approval").count(), 0, "no second card");
-    await page.getByTestId("agents-allowances").waitFor();
+    // "Allowed for this task" with Revoke is under Options › Permissions; the tab counts it.
+    const permissions = await permissionsTab();
+    assert.match(await sheet.getByRole("tab", { name: /^Permissions/ }).innerText(), /1 allowed/);
+    await permissions.getByTestId("agents-allowances").waitFor();
+    assert.match(await permissions.getByTestId("agents-allowances").innerText(), /Allowed for this task:/);
     await page.screenshot({ path: join(artifactsDir, "agentctx-allowed-for-this-task.png") });
+    await closeSheet();
 
     let messages = sentMessages(app.dataDir, task.id);
     let blocks = contextBlocks(messages);
@@ -202,8 +221,9 @@ export default async function agentctxNarration({ launchApp, artifactsDir, asser
     assert.match(c3.authorization, /^No prompt: covered by what the user approved/);
 
     // --- 4: revoked allowance → the next run asks again; declined → nothing ran.
-    await page.getByTestId("agents-allowance-revoke").first().click();
+    await (await permissionsTab()).getByTestId("agents-allowance-revoke").first().click();
     await page.waitForFunction(() => document.querySelectorAll("[data-testid=agents-allowance]").length === 0);
+    await closeSheet();
     await invoke(page, "agents_task_continue", { task: task.id, prompt: "And once more", budgets: null });
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 60_000 });
     await page.screenshot({ path: join(artifactsDir, "agentctx-asks-again-after-revoke.png") });

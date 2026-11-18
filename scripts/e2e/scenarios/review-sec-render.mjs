@@ -685,21 +685,25 @@ export default async function reviewSecRender({ launchApp, artifactsDir, fixture
         await scope.getByRole("button", { name: label }).click();
         await page.getByRole("option", { name: option, exact: true }).click();
       };
-      // Select the development-only scripted provider in the provider dialog.
-      await panel.getByRole("button", { name: "Agent provider settings" }).click();
-      const dialog = page.getByRole("dialog", { name: "Agent provider" });
-      await dialog.waitFor();
-      await selectOption(dialog, /Provider/, "Scripted provider — development only");
-      await dialog.getByRole("button", { name: "Save settings" }).click();
-      await page.waitForSelector("[data-testid=agents-settings-message]");
-      await dialog.getByRole("button", { name: "Close" }).click();
-      await dialog.waitFor({ state: "detached" });
+      // Select the development-only scripted provider as the default (setup
+      // only; provider configuration lives in Settings › Model providers and
+      // has no provider dialog any more).
+      const current = status.settings;
+      await invoke(page, "agents_provider_update", { settings: { ...current, provider: "scripted" } });
+      await panel.getByTestId("agents-provider-chip").filter({ hasText: "Scripted provider — development only" }).waitFor({ timeout: 10_000 });
+      // The composer's Options sheet (Model / Permissions / Budgets) opens above the composer.
+      const sheet = page.getByRole("dialog", { name: "Options" });
       const startTask = async (prompt, permission) => {
-        await panel.getByTestId("agents-new-task").click();
+        await runCommand(page, "New Agent Task", /New Agent Task/);
+        await panel.getByTestId("agents-composer").waitFor();
         await page.fill("[data-testid=agents-prompt]", prompt);
         await panel.getByTestId("agents-folder").waitFor();
-        await selectOption(panel, /Document changes/, permission);
-        await panel.getByRole("button", { name: "Start task" }).click();
+        await panel.getByTestId("agents-options").click();
+        await sheet.getByRole("tab", { name: /^Permissions/ }).click();
+        await selectOption(page.getByTestId("agents-options-permissions"), /Document changes/, permission);
+        await page.keyboard.press("Escape");
+        await sheet.waitFor({ state: "detached" });
+        await panel.getByTestId("agents-start").click();
         await page.waitForSelector("[data-testid=agents-task-view]");
       };
       const waitForStatus = (kind, timeout = 30_000) =>
@@ -727,7 +731,8 @@ export default async function reviewSecRender({ launchApp, artifactsDir, fixture
       await page.waitForTimeout(500);
       const notes = await page.getByTestId("notification").allInnerTexts();
       check(notes.some((t) => t.includes("PROMPT<img src=x")), "notifications: task title with markup shown literally", notes.map((t) => t.slice(0, 80)));
-      // Expand tool call details.
+      // Expand the turn outline (routine tool rows show only in an expanded turn), then each tool call's details.
+      for (const t of await page.locator("[data-testid=agents-task-view] [data-testid=agents-turn-toggle][aria-expanded=false]").all()) await t.click().catch(() => {});
       for (const s of await page.locator("[data-testid=agents-task-view] details > summary").all()) await s.click().catch(() => {});
       await page.waitForTimeout(500);
       const transcript = await page.getByTestId("agents-task-view").innerText();
@@ -771,8 +776,8 @@ export default async function reviewSecRender({ launchApp, artifactsDir, fixture
       await sweep("agent approval card", "/k-agent");
       await panel.getByRole("button", { name: "Approve", exact: true }).click();
       await waitForStatus("completed");
-      // Open the review (Monaco diff) if offered.
-      const review = panel.getByRole("button", { name: /Review/ }).first();
+      // Open the review (Monaco diff) if offered: the "Needs you" row once the task stopped.
+      const review = panel.getByTestId("agents-needs-review").first();
       if (await review.count()) {
         await review.click().catch(() => {});
         await page.waitForTimeout(1500);

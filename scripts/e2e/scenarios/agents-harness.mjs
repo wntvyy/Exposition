@@ -3,7 +3,9 @@
 // loop, tools, document service transactions, persistence, review, workbench
 // shell, and UI are the real ones. It cannot establish live model behavior.
 //
-// Covers: credentials dialog (configured / not configured, key never shown),
+// Covers: Settings › Model providers (key configured / not configured, never
+// shown; the scripted provider chosen as the default), the design C composer
+// (Options sheet, Send, Stop), a figure shown beside its run_python call,
 // a task editing an open document through a transaction while the user edits
 // concurrently, streamed transcript, approval, Monaco review diff (panel and
 // editor area), revert, cancellation, task history after a restart, no console
@@ -51,14 +53,57 @@ async function waitForStatus(page, kind, timeout = 20_000) {
   );
 }
 
-async function startTask(page, { prompt, permission }) {
-  const panel = page.getByTestId("agents-panel");
+/** Back to the task list from a task, its review, or the new-task view. */
+async function toTaskList(panel) {
+  for (const name of ["Back to task", "Back to tasks"]) {
+    const button = panel.getByRole("button", { name, exact: true });
+    if (await button.count()) await button.first().click();
+  }
+  await panel.getByTestId("agents-new-task").waitFor();
+}
+
+/** A new task in the Agent view (design C: the task list's New task, then the composer). */
+async function newTask(panel) {
+  await toTaskList(panel);
   await panel.getByTestId("agents-new-task").click();
+  await panel.getByTestId("agents-new-task-view").waitFor();
+}
+
+/** The composer's Options sheet (one sheet: Model / Permissions / Budgets), at `tab`. */
+async function openOptions(page, panel, tab) {
+  const button = panel.getByTestId("agents-options");
+  if ((await button.getAttribute("aria-expanded")) !== "true") await button.click();
+  const sheet = page.getByRole("dialog", { name: "Options" });
+  await sheet.waitFor();
+  await sheet.getByRole("tab", { name: new RegExp(`^${tab}`) }).click();
+  return sheet;
+}
+
+async function closeOptions(page) {
+  await page.keyboard.press("Escape");
+  await page.getByRole("dialog", { name: "Options" }).waitFor({ state: "detached" });
+}
+
+/** Expand every collapsed turn header so the routine tool-call rows are rendered. */
+async function expandTurns(scope) {
+  const toggles = scope.getByTestId("agents-turn-toggle");
+  for (let i = 0; i < (await toggles.count()); i++) {
+    const toggle = toggles.nth(i);
+    if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+  }
+}
+
+async function startTask(page, { prompt, permission, execution }) {
+  const panel = page.getByTestId("agents-panel");
+  await newTask(panel);
   await page.fill("[data-testid=agents-prompt]", prompt);
   // The task acts on the open project folder.
   await panel.getByTestId("agents-folder").waitFor();
-  await selectOption(page, panel, /Document changes/, permission);
-  await panel.getByRole("button", { name: "Start task" }).click();
+  const sheet = await openOptions(page, panel, "Permissions");
+  if (permission) await selectOption(page, sheet, /Document changes/, permission);
+  if (execution) await selectOption(page, sheet, /Commands and code/, execution);
+  await closeOptions(page);
+  await panel.getByTestId("agents-start").click();
   await page.waitForSelector("[data-testid=agents-task-view]");
 }
 
@@ -100,17 +145,21 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     await shot(page, "agents-empty-light");
 
     // --- Credentials: configured / not configured; the key is never revealed.
-    await panel.getByRole("button", { name: "Agent provider settings" }).click();
-    const dialog = page.getByRole("dialog", { name: "Agent provider" });
-    await dialog.waitFor();
-    const keyStatus = () => page.textContent("[data-testid=agents-key-status]");
+    // Provider configuration lives only in Settings › Model providers (one
+    // group per provider); the Agent view has no key form.
+    await runCommand(page, "Agent Provider Settings", /Agent Provider Settings/);
+    const providers = page.getByTestId("settings-providers");
+    await providers.waitFor();
+    const anthropic = providers.getByTestId("settings-provider-anthropic");
+    const keySelector = "[data-testid=settings-provider-anthropic] [data-testid=agents-key-status]";
+    const keyStatus = () => page.textContent(keySelector);
     assert.match(await keyStatus(), /Not configured/);
-    await dialog.getByLabel("API key").fill(FAKE_KEY);
-    await dialog.getByRole("button", { name: "Save key" }).click();
-    await page.waitForFunction(() => {
-      const text = document.querySelector("[data-testid=agents-key-status]")?.textContent ?? "";
+    await anthropic.getByTestId("agents-key-input").locator("input").fill(FAKE_KEY);
+    await anthropic.getByTestId("agents-key-save").click();
+    await page.waitForFunction((selector) => {
+      const text = document.querySelector(selector)?.textContent ?? "";
       return text.includes("Configured") && !text.includes("Not configured");
-    });
+    }, keySelector);
     const leaks = await page.evaluate((key) => {
       const inputs = [...document.querySelectorAll("input, textarea")].some((el) => el.value.includes(key));
       return { html: document.documentElement.outerHTML.includes(key), inputs };
@@ -124,13 +173,14 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     await shot(page, "agents-settings-configured-light");
     step("key saved to OS credential storage; webview shows Configured only", { store: status.credentialStore });
     // Removing the key asks first; the safe choice (keep) has focus.
-    await dialog.getByRole("button", { name: "Remove", exact: true }).click();
+    await anthropic.getByTestId("agents-key-remove").click();
     const confirmRemove = page.getByRole("alertdialog", { name: "Remove the API key?" });
     await confirmRemove.waitFor();
     await page.waitForFunction(() => document.activeElement?.textContent === "Keep key");
     await confirmRemove.getByRole("button", { name: "Remove key" }).click();
-    await page.waitForFunction(() =>
-      (document.querySelector("[data-testid=agents-key-status]")?.textContent ?? "").includes("Not configured"),
+    await page.waitForFunction(
+      (selector) => (document.querySelector(selector)?.textContent ?? "").includes("Not configured"),
+      keySelector,
     );
     step("key removed after confirmation (Keep focused by default); Not configured");
 
@@ -138,12 +188,20 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     const opened = await invoke(page, "workspace_open", { path: project });
     step("project folder opened in the workspace", { root: opened.root });
 
-    // Select the development-only scripted provider.
-    await selectOption(page, dialog, /Provider/, "Scripted provider — development only");
-    await dialog.getByRole("button", { name: "Save settings" }).click();
-    await page.waitForSelector("[data-testid=agents-settings-message]");
-    await dialog.getByRole("button", { name: "Close" }).click();
-    await dialog.waitFor({ state: "detached" });
+    // Select the development-only scripted provider as the default for new
+    // tasks (Settings › Model providers › Defaults; saved on choice).
+    const defaults = providers.getByTestId("agents-default");
+    await defaults.getByTestId("agents-default-model").click();
+    const menu = page.getByTestId("agents-default-menu");
+    await menu.waitFor();
+    await menu.locator("[data-testid=model-group][data-provider=scripted] [data-testid=model-option]").click();
+    await defaults.getByTestId("agents-settings-message").waitFor();
+    assert.equal((await defaults.getByTestId("agents-settings-message").textContent())?.trim(), "Default model saved.");
+    if (await menu.isVisible().catch(() => false)) {
+      await page.keyboard.press("Escape");
+      await menu.waitFor({ state: "detached" });
+    }
+    assert.equal((await invoke(page, "agents_provider_status")).settings.provider, "scripted");
     assert.equal(await page.textContent("[data-testid=agents-provider-chip]"), "Scripted provider — development only");
 
     // --- Task A (read-only) opens main.typ in the document service.
@@ -222,6 +280,8 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     assert.ok(growing >= 3, `draft should grow while streaming (samples ${samples})`);
     step("transcript streamed", { draftLengths: samples });
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 20_000 });
+    // The turn header names the wait too; its routine rows show once expanded.
+    await expandTurns(panel);
     // While the edit waits for approval, every surface says so (nothing says "Running").
     await page.waitForFunction(() => {
       const panelEl = document.querySelector("[data-testid=agents-panel]");
@@ -260,7 +320,10 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     });
 
     // --- Review: Monaco diff in the panel and in the editor area, then revert.
-    await panel.getByRole("button", { name: /Review changes/ }).click();
+    // Design C: Review changes is in the task's menu (and a "Needs you" row once the task stopped).
+    await panel.getByTestId("agents-needs-review").waitFor();
+    await panel.getByTestId("agents-task-menu").click();
+    await page.getByRole("menuitem", { name: "Review changes" }).click();
     await page.waitForSelector("[data-testid=agents-review-file][data-path='main.typ']");
     await page.waitForSelector("[data-testid=agents-panel] [data-testid=agents-diff] .monaco-diff-editor", { timeout: 20_000 });
     const diff = await invoke(page, "agents_review_diff", { task: taskB.id, path: "main.typ" });
@@ -296,10 +359,7 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
         ],
       },
     });
-    await panel.getByTestId("agents-new-task").click();
-    await page.fill("[data-testid=agents-prompt]", "Plot the squares");
-    await selectOption(page, panel, /Commands and code/, "Ask before each command (runs natively)");
-    await panel.getByRole("button", { name: "Start task" }).click();
+    await startTask(page, { prompt: "Plot the squares", execution: "Ask before each command (runs natively)" });
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 30_000 });
     await shot(page, "agents-python-approval-light");
     await panel.getByRole("button", { name: "Approve", exact: true }).click();
@@ -314,7 +374,20 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     assert.ok(figure, `figure artifact: ${pyCall.result}`);
     const manifest = await invoke(page, "research_run", { runId: pyResult.run });
     assert.deepEqual(manifest.session.owner, { kind: "agent", taskId: pyTask.id }, "the run is owned by the agent task");
-    step("run_python ran in an agent-owned research session", { run: pyResult.run, figure: figure.path });
+    // The figure is recorded on the call (from the run manifest) and shown in
+    // the conversation beside it, outside the collapsed activity.
+    assert.deepEqual(
+      (pyCall.figures ?? []).map((f) => [f.runId, f.artifactId]),
+      [[pyResult.run, figure.id]],
+      `figures recorded on the call: ${JSON.stringify(pyCall.figures)}`,
+    );
+    await panel
+      .locator(`[data-testid=agents-figure][data-artifact="${figure.id}"][data-state=ready] img`)
+      .waitFor({ timeout: 20_000 });
+    step("run_python ran in an agent-owned research session; its figure shows in the conversation", {
+      run: pyResult.run,
+      figure: figure.path,
+    });
 
     await invoke(page, "agents_dev_load_script", {
       script: {
@@ -393,7 +466,8 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     await shot(page, "agents-running-dark");
     await setTheme(page, "light");
     const canceledAt = Date.now();
-    await panel.getByRole("button", { name: "Cancel" }).click();
+    // Design C: the composer's Stop cancels the running task.
+    await panel.getByTestId("agents-cancel").click();
     await waitForStatus(page, "canceled", 10_000);
     const cancelMs = Date.now() - canceledAt;
     assert.ok(cancelMs < 5000, `cancel took ${cancelMs} ms`);
@@ -402,14 +476,13 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
 
     // Settings and task list in the dark theme.
     await setTheme(page, "dark");
-    await panel.getByRole("button", { name: "Tasks", exact: true }).click();
+    await panel.getByTestId("agents-show-tasks").click();
     await panel.getByTestId("agents-task-list").waitFor();
     await shot(page, "agents-tasks-dark");
-    await panel.getByRole("button", { name: "Agent provider settings" }).click();
-    await page.getByRole("dialog", { name: "Agent provider" }).waitFor();
+    await runCommand(page, "Agent Provider Settings", /Agent Provider Settings/);
+    await page.getByTestId("settings-providers").waitFor();
     await page.waitForTimeout(200);
     await shot(page, "agents-settings-dark");
-    await page.keyboard.press("Escape");
     await setTheme(page, "light");
     // --- Real Lean check (lean-basic fixture) in a second project.
     const elanHome = process.env.ELAN_HOME || join(homedir(), ".elan");
@@ -435,10 +508,7 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
           ],
         },
       });
-      await panel.getByTestId("agents-new-task").click();
-      await page.fill("[data-testid=agents-prompt]", "Check the Lean proofs");
-      await selectOption(page, panel, /Commands and code/, "Ask before each command (runs natively)");
-      await panel.getByRole("button", { name: "Start task" }).click();
+      await startTask(page, { prompt: "Check the Lean proofs", execution: "Ask before each command (runs natively)" });
       for (let i = 0; i < 2; i++) {
         await page.waitForSelector("[data-testid=agents-approval]", { timeout: 60_000 });
         await panel.getByRole("button", { name: "Approve", exact: true }).click();

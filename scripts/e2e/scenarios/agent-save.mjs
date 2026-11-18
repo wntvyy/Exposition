@@ -209,12 +209,19 @@ export default async function agentSave({ launchApp, artifactsDir, assert }) {
     await panel.getByTestId("agents-new-task").click();
     await page.fill("[data-testid=agents-prompt]", "Change the script to print v2 and run it");
     await panel.getByTestId("agents-folder").waitFor();
-    await panel.getByRole("radio", { name: "Ask" }).click();
-    await panel.getByRole("button", { name: /Document changes/ }).click();
+    // Design C: approvals, document changes, and commands are in Options › Permissions.
+    await panel.getByTestId("agents-options").click();
+    const sheet = page.getByRole("dialog", { name: "Options" });
+    await sheet.waitFor();
+    await sheet.getByRole("tab", { name: /^Permissions/ }).click();
+    await sheet.getByRole("radio", { name: "Ask" }).click();
+    await sheet.getByRole("button", { name: /Document changes/ }).click();
     await page.getByRole("option", { name: "Ask before each change", exact: true }).click();
-    await panel.getByRole("button", { name: /Commands and code/ }).click();
+    await sheet.getByRole("button", { name: /Commands and code/ }).click();
     await page.getByRole("option", { name: "Ask before each command (runs natively)", exact: true }).click();
-    await panel.getByRole("button", { name: "Start task" }).click();
+    await page.keyboard.press("Escape");
+    await sheet.waitFor({ state: "detached" });
+    await panel.getByTestId("agents-start").click();
     await page.waitForSelector("[data-testid=agents-task-view]");
     let task = (await invoke(page, "agents_task_list"))[0];
 
@@ -271,6 +278,11 @@ export default async function agentSave({ launchApp, artifactsDir, assert }) {
     const row = await callOf(page, task.id, "s1");
     assert.equal(row.status, "succeeded");
     assert.deepEqual(row.authorizedBy, { kind: "approved", forTask: false });
+    // Routine tool rows show under an expanded turn header (design C).
+    const toggles = panel.getByTestId("agents-turn-toggle");
+    for (let i = 0; i < (await toggles.count()); i++) {
+      if ((await toggles.nth(i).getAttribute("aria-expanded")) !== "true") await toggles.nth(i).click();
+    }
     const saveRow = panel.locator("[data-testid=agents-tool-call][data-tool=save_document]").first();
     await saveRow.waitFor();
     assert.match(await saveRow.innerText(), /scripts\/check\.py/);

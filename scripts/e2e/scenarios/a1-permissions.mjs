@@ -17,8 +17,10 @@
 //   e. Auto: an out-of-scope change is refused, no card.
 //   h. Ask: install_packages shows one card with the complete setup plan
 //      (declined, so nothing is installed and no network is used).
-//   f. Revoking the project's permissions in Settings › Agents while an Auto
-//      task runs Python stops it; its research session stops too.
+//   f. Revoking the project's permissions in Settings › Model providers while
+//      an Auto task runs Python stops it; its research session stops too.
+// The task's settings and "Allowed for this task" live in the composer's
+// Options sheet (Permissions tab); tool-call rows show in an expanded turn.
 // Evidence: test-results/e2e/a1-permissions/evidence.json (+ screenshots); the
 // screenshots are also copied to A1_SHOTS_DIR when it is set.
 import { copyFile, mkdir, mkdtemp, writeFile } from "node:fs/promises";
@@ -86,28 +88,60 @@ async function toolCalls(page, id) {
 const recordedApprovals = (calls) =>
   calls.filter((c) => c.status === "declined" || c.authorizedBy?.kind === "approved").map((c) => c.name);
 
-/** Open the composer in the Agent view and fill it. */
+/** Open the composer's Options sheet at a tab; returns the tab's panel. */
+async function openOptions(page, tab) {
+  const panel = page.getByTestId("agents-panel");
+  const button = panel.getByTestId("agents-options");
+  if ((await button.getAttribute("aria-expanded")) !== "true") await button.click();
+  await page.getByRole("tab", { name: new RegExp(`^${tab}`) }).click();
+  const sheet = page.getByTestId(`agents-options-${tab.toLowerCase()}`);
+  await sheet.waitFor();
+  return sheet;
+}
+
+/** Close the Options sheet (Escape returns focus to the composer). */
+async function closeOptions(page) {
+  const button = page.getByTestId("agents-panel").getByTestId("agents-options");
+  if ((await button.getAttribute("aria-expanded")) !== "true") return;
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => document.querySelector("[data-testid=agents-panel] [data-testid=agents-options]")?.getAttribute("aria-expanded") !== "true");
+}
+
+/**
+ * Open the composer in the Agent view and fill it; the task's settings are in
+ * Options › Permissions, which stays open (the Auto permissions are there).
+ */
 async function compose(page, { prompt, mode, permission, execution, scope, document }) {
   const panel = page.getByTestId("agents-panel");
+  // From a task: Back to tasks, then New task.
+  if (await panel.getByTestId("agents-show-tasks").count()) await panel.getByTestId("agents-show-tasks").click();
   await panel.getByTestId("agents-new-task").click();
   await page.fill("[data-testid=agents-prompt]", prompt);
   await panel.getByTestId("agents-folder").waitFor();
-  if (scope) await selectOption(page, panel, /Scope/, scope);
-  if (document) await panel.getByLabel("Document (relative to the project folder)").fill(document);
-  await panel.getByRole("radio", { name: mode }).click();
+  const sheet = await openOptions(page, "Permissions");
+  if (scope) await selectOption(page, sheet, /Scope/, scope);
+  if (document) await sheet.getByLabel("Document (relative to the project folder)").fill(document);
+  await sheet.getByRole("radio", { name: mode }).click();
   if (mode === "Ask") {
-    if (permission) await selectOption(page, panel, /Document changes/, permission);
-    if (execution) await selectOption(page, panel, /Commands and code/, execution);
+    if (permission) await selectOption(page, sheet, /Document changes/, permission);
+    if (execution) await selectOption(page, sheet, /Commands and code/, execution);
   } else {
-    await panel.getByTestId("agents-auto-profile").waitFor();
+    await sheet.getByTestId("agents-auto-profile").waitFor();
   }
-  return panel;
+  return sheet;
 }
 
-async function start(page, panel) {
-  await panel.getByRole("button", { name: "Start task" }).click();
+async function start(page) {
+  await closeOptions(page);
+  await page.getByTestId("agents-panel").getByTestId("agents-start").click();
   await page.waitForSelector("[data-testid=agents-task-view]");
   return newestTask(page);
+}
+
+/** Expand every collapsed turn of the Agent view, so its tool-call rows show. */
+async function expandTurns(page) {
+  const collapsed = page.locator("[data-testid=agents-panel] [data-testid=agents-turn-toggle][aria-expanded=false]");
+  for (let n = await collapsed.count(); n > 0; n--) await collapsed.first().click();
 }
 
 const tool = (id, name, input) => ({ toolUse: { id, name, input } });
@@ -175,7 +209,7 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
       execution: "Ask before each command (runs natively)",
     });
     await shot(page, "a1-composer-ask-light");
-    let task = await start(page, panel);
+    let task = await start(page);
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 60_000 });
     assert.equal(await page.getByTestId("agents-approve-task").count(), 1, "Approve for this task is offered");
     await shot(page, "a1-approval-for-task-light");
@@ -190,8 +224,11 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
         ["succeeded", { kind: "taskAllowance", kinds: ["nativeCode"] }],
       ],
     );
-    await page.getByTestId("agents-allowances").waitFor();
-    // Each tool-call row says quietly how it was authorized.
+    // "Allowed for this task" is in the task's Options › Permissions.
+    await (await openOptions(page, "Permissions")).getByTestId("agents-allowances").waitFor();
+    await closeOptions(page);
+    // Each tool-call row says quietly how it was authorized (rows of an expanded turn).
+    await expandTurns(page);
     await page.waitForFunction(
       () => document.querySelectorAll("[data-testid=agents-panel] [data-testid=agents-tool-authorization]").length >= 2,
     );
@@ -220,14 +257,14 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
     assert.ok(await page.getByTestId("agents-start").isDisabled(), "Auto needs the project's permissions first");
     await shot(page, "a1-composer-auto-profile-light");
     await page.getByTestId("agents-permissions-change").click();
-    await selectOption(page, panel, /Code/, "Native on this computer");
+    await selectOption(page, panel.getByTestId("agents-permissions-editor"), /Code/, "Native on this computer");
     await page.getByTestId("agents-permissions-environment").getByText(/not a sandbox/).waitFor();
     await shot(page, "a1-composer-auto-native-light");
     await page.getByTestId("agents-permissions-use").click();
     await page.waitForFunction(
       () => document.querySelector("[data-testid=agents-auto-profile]")?.dataset.granted === "true",
     );
-    task = await start(page, panel);
+    task = await start(page);
     task = await waitDone(page, task.id);
     assert.equal(task.status.kind, "completed", JSON.stringify(task.status));
     assert.ok(existsSync(join(project, "notes", "result.typ")));
@@ -252,7 +289,7 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
     });
     panel = await compose(page, { prompt: "Check Lean, then compute", mode: "Auto" });
     await page.waitForFunction(() => document.querySelector("[data-testid=agents-auto-profile]")?.dataset.granted === "true");
-    task = await start(page, panel);
+    task = await start(page);
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 30_000 });
     await page.getByTestId("agents-decline").click();
     task = await waitDone(page, task.id);
@@ -283,7 +320,7 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
     });
     panel = await compose(page, { prompt: "Add an eval to Main.lean", mode: "Auto" });
     await page.waitForFunction(() => document.querySelector("[data-testid=agents-auto-profile]")?.dataset.granted === "true");
-    task = await start(page, panel);
+    task = await start(page);
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 30_000 });
     const leanPayload = await page.getByTestId("agents-approval-payload").innerText();
     assert.match(leanPayload, /Lean elaborates the text of an open Lean file natively/);
@@ -312,7 +349,7 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
     });
     panel = await compose(page, { prompt: "Delete notes/a.typ", mode: "Auto" });
     await page.waitForFunction(() => document.querySelector("[data-testid=agents-auto-profile]")?.dataset.granted === "true");
-    task = await start(page, panel);
+    task = await start(page);
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 30_000 });
     assert.equal(await page.getByTestId("agents-approve-task").count(), 0, "consequences are never approved for the task");
     await page.getByTestId("agents-decline").click();
@@ -329,7 +366,7 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
     });
     panel = await compose(page, { prompt: "Write outside the scope", mode: "Auto", scope: "One document", document: "main.typ" });
     await page.waitForFunction(() => document.querySelector("[data-testid=agents-auto-profile]")?.dataset.granted === "true");
-    task = await start(page, panel);
+    task = await start(page);
     task = await waitDone(page, task.id);
     calls = await toolCalls(page, task.id);
     assert.equal(calls[0].status, "failed");
@@ -349,7 +386,7 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
       permission: "Apply changes, review afterwards",
       execution: "Ask before each command (runs natively)",
     });
-    task = await start(page, panel);
+    task = await start(page);
     await page.waitForSelector("[data-testid=agents-approval]", { timeout: 120_000 });
     const setupPayload = await page.getByTestId("agents-approval-payload").innerText();
     assert.match(setupPayload, /Needs network; installs into the project environment/);
@@ -366,7 +403,7 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
     assert.equal(step.cards.length, 1);
     assert.match(step.cards[0], /install packages/i);
 
-    // --- f. Revoke in Settings › Agents while an Auto task runs Python.
+    // --- f. Revoke in Settings › Model providers while an Auto task runs Python.
     await invoke(page, "agents_permissions_set", { root, choice: { files: "edit", code: "native", setup: false } });
     await watchCards(page);
     await invoke(page, "agents_dev_load_script", {
@@ -380,7 +417,7 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
     });
     panel = await compose(page, { prompt: "A long computation", mode: "Auto" });
     await page.waitForFunction(() => document.querySelector("[data-testid=agents-auto-profile]")?.dataset.granted === "true");
-    task = await start(page, panel);
+    task = await start(page);
     const running = task.id;
     const deadline = Date.now() + 120_000;
     for (;;) {
@@ -391,10 +428,10 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
       await page.waitForTimeout(300);
     }
     await runCommand(page, "open settings", /Preferences: Open Settings/);
-    await page.getByRole("tab", { name: "Agents", exact: true }).click();
+    await page.getByRole("tab", { name: "Model providers", exact: true }).click();
     const row = page.getByTestId("settings-project-permission").filter({ hasText: "Code: native" });
     await row.waitFor();
-    await shot(page, "a1-settings-agents-light");
+    await shot(page, "a1-settings-providers-light");
     await row.getByTestId("settings-permissions-revoke").click();
     task = await waitDone(page, running, 30_000);
     assert.equal(task.status.kind, "canceled");
@@ -412,8 +449,8 @@ export default async function a1Permissions({ launchApp, artifactsDir, assert })
     assert.deepEqual(alive, [], "the agent's research session stopped");
     // Revoking returns once the stopped task released its services (bounded).
     await page.getByTestId("settings-project-permissions-empty").waitFor({ timeout: 20_000 });
-    await shot(page, "a1-settings-agents-revoked-light");
-    step = await record(page, "f. Revoked in Settings › Agents while Python ran: task stopped", running, {
+    await shot(page, "a1-settings-providers-revoked-light");
+    step = await record(page, "f. Revoked in Settings › Model providers while Python ran: task stopped", running, {
       notice: notice.message,
     });
     assert.equal(step.cards.length, 0);

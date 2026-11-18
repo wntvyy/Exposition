@@ -9,7 +9,7 @@
 //    Monaco diff gutter's icon font (codicon) is loaded.
 // 3. Scope/consent: Typst build diagnostics of an agent-written file read an
 //    out-of-scope file under "File names only" consent (F2).
-// 4. Removing the stored key from the provider dialog asks for confirmation.
+// 4. Removing the stored key in Settings › Model providers asks for confirmation.
 //    Credential separation: a fake key in a throwaway credential namespace
 //    never reaches a native command's environment, an agent research kernel,
 //    task transcripts, or the app data directory.
@@ -273,7 +273,9 @@ export default async function reviewM5Agents({ launchApp, artifactsDir }) {
     await waitStatus(page, created.id, ["completed"]);
 
     // --- 2. Review UI: revert the created-then-edited file. ------------------
-    await panel.getByTestId("agents-open-review").click();
+    // Review changes is in the task's menu (design C).
+    await panel.getByTestId("agents-task-menu").click();
+    await page.getByRole("menuitem", { name: "Review changes" }).click();
     await page.waitForSelector("[data-testid=agents-review-file][data-path='notes/new.typ']", { timeout: 10_000 });
     await page.waitForSelector("[data-testid=agents-panel] [data-testid=agents-diff] .monaco-diff-editor", { timeout: 20_000 });
     await page.waitForTimeout(500);
@@ -327,21 +329,25 @@ export default async function reviewM5Agents({ launchApp, artifactsDir }) {
     note("typst-build-does-not-reveal-out-of-scope-content", !(build.result ?? "").includes(SECRET), build.result);
 
     // --- 4. Credential separation. -------------------------------------------
-    // Save the fake key through the dialog, then remove it: is the destructive
-    // action confirmed?
-    await panel.getByRole("button", { name: "Agent provider settings" }).click();
-    const dialog = page.getByRole("dialog", { name: "Agent provider" });
-    await dialog.waitFor();
-    await dialog.getByLabel("API key").fill(FAKE_KEY);
-    await dialog.getByTestId("agents-key-save").click();
+    // Save the fake key in Settings › Model providers (the Agent command opens
+    // it), then remove it: is the destructive action confirmed?
+    await runCommand(page, "agent provider settings");
+    const providerGroup = page.getByTestId("settings-provider-anthropic");
+    await providerGroup.waitFor();
+    await providerGroup.getByTestId("agents-key-input").locator("input").fill(FAKE_KEY);
+    await providerGroup.getByTestId("agents-key-save").click();
     await page.waitForFunction(() =>
-      /Configured/.test(document.querySelector("[data-testid=agents-key-status]")?.textContent?.replace("Not configured", "") ?? ""),
+      /Configured/.test(
+        document
+          .querySelector("[data-testid=settings-provider-anthropic] [data-testid=agents-key-status]")
+          ?.textContent?.replace("Not configured", "") ?? "",
+      ),
     );
     let status = await invoke(page, "agents_provider_status");
     note("fake-key-stored-in-namespace", status.configured === true, status.credentialStore);
     await page.waitForTimeout(200);
     await shot(page, "provider-settings-configured-light");
-    await dialog.getByTestId("agents-key-remove").click();
+    await providerGroup.getByTestId("agents-key-remove").click();
     await page.waitForTimeout(500);
     const confirmShown = await page.getByRole("alertdialog").isVisible().catch(() => false);
     status = await invoke(page, "agents_provider_status");
@@ -350,8 +356,7 @@ export default async function reviewM5Agents({ launchApp, artifactsDir }) {
       configuredAfterOneClick: status.configured,
     });
     if (confirmShown) await page.keyboard.press("Escape");
-    await page.keyboard.press("Escape");
-    await dialog.waitFor({ state: "detached", timeout: 5000 }).catch(() => {});
+    await page.getByRole("alertdialog").waitFor({ state: "detached", timeout: 5000 }).catch(() => {});
     status = await invoke(page, "agents_provider_set_key", { key: FAKE_KEY });
     await invoke(page, "trust_grant", { root: project });
     const envTask = await startTask(
@@ -496,6 +501,9 @@ export default async function reviewM5Agents({ launchApp, artifactsDir }) {
     const panel = page.getByTestId("agents-panel");
     await panel.getByTestId("agents-task-item").first().click().catch(() => {});
     await page.waitForSelector("[data-testid=agents-task-view]", { timeout: 10_000 }).catch(() => {});
+    // Tool-call rows show in an expanded turn (a turn with a failure starts expanded).
+    const collapsedTurn = page.locator("[data-testid=agents-panel] [data-testid=agents-turn-toggle][aria-expanded=false]").first();
+    if (await collapsedTurn.count()) await collapsedTurn.click().catch(() => {});
     await page.locator("[data-testid=agents-tool-call]").first().click().catch(() => {});
     await page.waitForTimeout(400);
     await shot(page, "interrupted-task-view-light");

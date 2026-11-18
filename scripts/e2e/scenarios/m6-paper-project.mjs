@@ -512,9 +512,16 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
     await panel.getByTestId("agents-composer").waitFor({ timeout: 10_000 });
     await page.fill("[data-testid=agents-prompt]", prompt);
     await panel.getByTestId("agents-folder").waitFor();
-    await selectOption(page, panel, /Document changes/, permission);
-    await selectOption(page, panel, /Commands and code/, execution);
-    await panel.getByRole("button", { name: "Start task" }).click();
+    // Document changes and Commands and code are in the composer's Options sheet (Permissions).
+    await panel.getByTestId("agents-options").click();
+    const sheet = page.getByRole("dialog", { name: "Options" });
+    await sheet.getByRole("tab", { name: /^Permissions/ }).click();
+    const permissions = page.getByTestId("agents-options-permissions");
+    await selectOption(page, permissions, /Document changes/, permission);
+    await selectOption(page, permissions, /Commands and code/, execution);
+    await page.keyboard.press("Escape");
+    await sheet.waitFor({ state: "detached" });
+    await panel.getByTestId("agents-start").click();
     await page.waitForSelector("[data-testid=agents-task-view]");
   }
 
@@ -699,16 +706,12 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       }
       const paperBefore = await textOf(PAPER);
       assert.equal(paperBefore, original(PAPER));
-      // Select the development-only scripted provider (settings only, never a key).
-      await runCommand(page, "New Agent Task", /New Agent Task/);
-      await agentPanel().getByRole("button", { name: "Agent provider settings" }).click();
-      const dialog = page.getByRole("dialog", { name: "Agent provider" });
-      await dialog.waitFor();
-      await selectOption(page, dialog, /Provider/, "Scripted provider — development only");
-      await dialog.getByRole("button", { name: "Save settings" }).click();
-      await page.waitForSelector("[data-testid=agents-settings-message]");
-      await dialog.getByRole("button", { name: "Close" }).click();
-      await dialog.waitFor({ state: "detached" });
+      // Select the development-only scripted provider as the default (settings
+      // only, never a key; provider configuration lives in Settings › Model
+      // providers, without a provider dialog).
+      await invoke(page, "agents_provider_update", { settings: { ...providerStatus.settings, provider: "scripted" } });
+      await runCommand(page, "Show Agent Tasks", /Show Agent Tasks/);
+      await agentPanel().getByTestId("agents-provider-chip").filter({ hasText: "Scripted provider — development only" }).waitFor({ timeout: 10_000 });
 
       const placeholder = "#figure(\n  rect(width: 70%, height: 3cm, fill: luma(230)),\n  caption: [Placeholder for the fitted curve.],\n)\n";
       const evidence =
@@ -834,7 +837,8 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       await shot("02-agent-completed-light");
 
       // Review: the Monaco diff, then revert analysis/fit.py and keep main.typ.
-      await agentPanel().getByRole("button", { name: /Review changes/ }).click();
+      // "Review changes: N files" is the "Needs you" row once the task stopped.
+      await agentPanel().getByTestId("agents-needs-review").click();
       await page.waitForSelector(`[data-testid=agents-review-file][data-path="${PAPER}"]`);
       await page.waitForSelector(`[data-testid=agents-review-file][data-path="${FIT}"]`);
       await agentPanel().locator(`[data-testid=agents-review-file][data-path="${PAPER}"] .agents-review-file__name`).click();
@@ -1492,7 +1496,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       const jobsBefore = (await invoke(page, "job_list")).length;
       let t0 = Date.now();
       await startAgentTask({
-        prompt: "Probe the sandbox",
+        prompt: "Probe the container",
         permission: "Apply changes, review afterwards",
         execution: "Restricted container only (unattended)",
       });
@@ -1530,7 +1534,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       const sessionsMid = (await invoke(page, "research_sessions")).length;
       t0 = Date.now();
       await startAgentTask({
-        prompt: "Probe the sandbox without an image",
+        prompt: "Probe the container without an image",
         permission: "Apply changes, review afterwards",
         execution: "Restricted container only (unattended)",
       });
