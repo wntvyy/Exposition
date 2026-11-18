@@ -390,7 +390,8 @@ mod tests {
         assert!(lean[0].allow_custom && lean[0].options[1].recommended);
         let q = |options: Value| json!([{"prompt": "P", "explanation": "", "options": options}]);
         assert!(ask(json!([])).is_err(), "no questions");
-        assert!(ask(json!([q(json!([option("a"), option("b")]))[0].clone(); 4])).is_err(), "four questions");
+        let one = q(json!([option("a"), option("b")]))[0].clone();
+        assert!(ask(Value::Array(vec![one; 4])).is_err(), "four questions");
         assert!(ask(q(json!([option("a")]))).is_err(), "one option");
         assert!(ask(q(json!([option("a"), option("b"), option("c"), option("d"), option("e"), option("f")]))).is_err());
         assert!(ask(q(json!([option("A"), option("b")]))).is_err(), "upper-case id");

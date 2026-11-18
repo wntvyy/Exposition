@@ -20,7 +20,7 @@ use exposition_core::text::utf16_range_to_bytes;
 use exposition_graph::{GraphService, ProjectId};
 use exposition_workspace::{DocumentService, WorkspaceService};
 use serde_json::{Value, json};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -38,6 +38,7 @@ use crate::provider::openai::{self as openai_provider, OpenAiProvider, REASONING
 use crate::provider::{
     Provider, ProviderError, ProviderMessage, ProviderRequest, StreamEvent, block_type, sanitize_after_fallback,
 };
+use crate::questions::{self, QuestionAnswer, QuestionRequest, QuestionRequestState};
 use crate::store::{Store, StoreError, TaskRow, ToolCallRow, TranscriptEntry, now_ms};
 use crate::tools::exec::{self, Allowances, Authority, Gate, SeenTexts, ToolEnv, ToolOutput, codes};
 use crate::tools::services::ToolServices;
@@ -179,11 +180,41 @@ struct ScriptState {
 struct Running {
     cancel: CancellationToken,
     approvals: HashMap<String, (ApprovalRequest, oneshot::Sender<ApprovalAnswer>)>,
+    /// Open question requests the worker is blocked on, by request id.
+    questions: HashMap<String, QuestionSlot>,
+    /// Why the run is being stopped, when not by the user's Cancel (open
+    /// questions are superseded with it).
+    stop_reason: Option<String>,
     join: Option<JoinHandle<()>>,
     /// The task loop has ended and its terminal status is stored; the worker
     /// may still be releasing services (e.g. stopping research kernels).
     finished: bool,
 }
+
+/// A question request the worker waits on. Its state is changed only under
+/// the `running` lock (answers, discussions, revisions), and stored at once.
+struct QuestionSlot {
+    request: QuestionRequest,
+    /// Wakes the worker.
+    tx: mpsc::UnboundedSender<QuestionInput>,
+    /// Ends a running discussion turn early (an answer arrived).
+    discussion: Option<CancellationToken>,
+}
+
+/// What wakes a worker blocked on a question.
+enum QuestionInput {
+    /// The request was answered or superseded (its state says which).
+    Resolved,
+    /// The user started a discussion (state `Discussing`).
+    Discuss,
+}
+
+/// Model requests one discussion turn may make (each counted in the budgets).
+const DISCUSSION_REQUESTS: usize = 3;
+/// Why a question's task can no longer act on its answer.
+const PROJECT_CLOSED: &str = "The project was closed or switched";
+/// Image media types a figure reference may have.
+const FIGURE_MEDIA_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/svg+xml"];
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -465,6 +496,8 @@ impl AgentService {
                  task to resume.",
             )?;
         }
+        // No worker of a previous process waits for an answer any more.
+        store.supersede_open_questions(None, "Exposition restarted")?;
         let (events, _) = broadcast::channel(4096);
         // Project permissions live in the application's data directory (the
         // task database's folder), under execution/ beside trust.json.
@@ -870,6 +903,17 @@ impl AgentService {
     }
 
     pub fn create_task(&self, request: CreateTaskRequest) -> Result<TaskSummary> {
+        self.create(request, false)
+    }
+
+    /// Create a task that runs without a user in the loop (a workflow's
+    /// review step): like [`Self::create_task`], but it is never offered
+    /// structured questions (`ask_user`), so it cannot wait for an answer.
+    pub fn create_unattended_task(&self, request: CreateTaskRequest) -> Result<TaskSummary> {
+        self.create(request, true)
+    }
+
+    fn create(&self, request: CreateTaskRequest, unattended: bool) -> Result<TaskSummary> {
         let attachments = self.inner.message_attachments(request.attachments.as_deref().unwrap_or_default())?;
         let prompt = request.prompt.trim();
         if prompt.is_empty() && attachments.is_empty() {
@@ -950,6 +994,9 @@ impl AgentService {
             usage: TaskUsage::default(),
         };
         self.inner.store.insert_task(&row)?;
+        if unattended {
+            self.inner.store.set_task_unattended(&id)?;
+        }
         if spec.provider.provider == ProviderKind::OpenAi {
             // The billing context this task resolved at start (kept for continuations).
             let current = self.inner.settings()?.openai.unwrap_or_default();
@@ -1146,24 +1193,146 @@ impl AgentService {
     /// central gate still decides every later action.
     pub fn answer_question(
         &self,
-        _id: &TaskId,
-        _request: &str,
-        _revision: u32,
-        _answers: Vec<crate::questions::QuestionAnswer>,
+        id: &TaskId,
+        request_id: &str,
+        revision: u32,
+        answers: Vec<QuestionAnswer>,
     ) -> Result<()> {
-        Err(AgentError::new("agents.notImplemented", "Structured questions are not implemented yet."))
+        let answers = questions::normalize(&answers);
+        let mut running = lock(&self.inner.running);
+        let Some(slot) = running.get_mut(id).and_then(|r| r.questions.get_mut(request_id)) else {
+            drop(running);
+            // No worker waits for it: answered, superseded, or unknown.
+            let stored = self.inner.stored_question(id, request_id)?;
+            return settled_answer(&stored.state, &answers).unwrap_or_else(|| Err(no_longer_waiting()));
+        };
+        if let Some(settled) = settled_answer(&slot.request.state, &answers) {
+            return settled;
+        }
+        if revision != slot.request.revision {
+            return Err(stale_revision(slot.request.revision));
+        }
+        questions::validate_answers(&slot.request.questions, &answers)
+            .map_err(|message| AgentError::new(questions::codes::INVALID_ANSWER, message))?;
+        // Like an approval, an answer is acted on only in the task's own open
+        // project; otherwise the question is superseded and the held calls
+        // meet the gate's own checks.
+        let closed = self.inner.project_closed(id);
+        slot.request.state = if closed {
+            QuestionRequestState::Superseded { reason: PROJECT_CLOSED.to_owned() }
+        } else {
+            QuestionRequestState::Answered { answers }
+        };
+        self.inner.store.update_question(&slot.request)?;
+        if let Some(abort) = &slot.discussion {
+            abort.cancel();
+        }
+        let _ = slot.tx.send(QuestionInput::Resolved);
+        drop(running);
+        self.inner.emit(AgentEvent::QuestionResolved { task_id: id.clone(), request_id: request_id.to_owned() });
+        if closed {
+            return Err(AgentError::new(
+                questions::codes::RESOLVED,
+                format!("This question can no longer be answered: {}.", PROJECT_CLOSED.to_lowercase()),
+            ));
+        }
+        Ok(())
     }
 
     /// "Chat about it": one bounded discussion turn about a pending question,
     /// in the task's own worker and budgets; the question's tool batch stays held.
-    pub fn discuss_question(&self, _id: &TaskId, _request: &str, _revision: u32, _text: &str) -> Result<()> {
-        Err(AgentError::new("agents.notImplemented", "Structured questions are not implemented yet."))
+    pub fn discuss_question(&self, id: &TaskId, request_id: &str, revision: u32, text: &str) -> Result<()> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(AgentError::new("agents.emptyPrompt", "Write what you want to ask about the question."));
+        }
+        if text.chars().count() > questions::MAX_DISCUSSION_CHARS {
+            return Err(AgentError::new(
+                "agents.promptTooLong",
+                format!("A message about a question can have at most {} characters.", questions::MAX_DISCUSSION_CHARS),
+            ));
+        }
+        let mut running = lock(&self.inner.running);
+        let Some(slot) = running.get_mut(id).and_then(|r| r.questions.get_mut(request_id)) else {
+            drop(running);
+            let stored = self.inner.stored_question(id, request_id)?;
+            return Err(settled_error(&stored.state).unwrap_or_else(no_longer_waiting));
+        };
+        match &slot.request.state {
+            QuestionRequestState::Discussing => {
+                return Err(AgentError::new(
+                    questions::codes::BUSY,
+                    "The agent is still replying about this question; wait for its reply.",
+                ));
+            }
+            QuestionRequestState::Pending => {}
+            settled => return Err(settled_error(settled).unwrap_or_else(no_longer_waiting)),
+        }
+        if revision != slot.request.revision {
+            return Err(stale_revision(slot.request.revision));
+        }
+        if self.inner.project_closed(id) {
+            slot.request.state = QuestionRequestState::Superseded { reason: PROJECT_CLOSED.to_owned() };
+            self.inner.store.update_question(&slot.request)?;
+            let _ = slot.tx.send(QuestionInput::Resolved);
+            drop(running);
+            self.inner.emit(AgentEvent::QuestionResolved { task_id: id.clone(), request_id: request_id.to_owned() });
+            return Err(AgentError::new(
+                questions::codes::RESOLVED,
+                format!("This question can no longer be discussed: {}.", PROJECT_CLOSED.to_lowercase()),
+            ));
+        }
+        slot.request.state = QuestionRequestState::Discussing;
+        self.inner.store.update_question(&slot.request)?;
+        self.inner.store.append_discussion(id, request_id, "user", &[json!({"type": "text", "text": text})])?;
+        let _ = slot.tx.send(QuestionInput::Discuss);
+        drop(running);
+        self.inner.emit(AgentEvent::QuestionChanged { task_id: id.clone(), request_id: request_id.to_owned() });
+        self.inner.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
+        Ok(())
     }
 
     /// The bytes of a figure one of this task's tool calls recorded, read
     /// through the research artifact store (hash and size verified).
-    pub fn figure(&self, _id: &TaskId, _run_id: &str, _artifact_id: &str) -> Result<Vec<u8>> {
-        Err(AgentError::new("agents.figureUnavailable", "Figures are not implemented yet."))
+    pub fn figure(&self, id: &TaskId, run_id: &str, artifact_id: &str) -> Result<Vec<u8>> {
+        let unavailable = |reason: &str| {
+            AgentError::new("agents.figureUnavailable", format!("The figure is not available: {reason}."))
+        };
+        let row = self.inner.store.task(id)?.ok_or_else(|| not_found(id))?;
+        let recorded = self
+            .inner
+            .store
+            .tool_calls(id)?
+            .into_iter()
+            .flat_map(|call| call.figures)
+            .find(|f| f.run_id == run_id && f.artifact_id == artifact_id);
+        let Some(figure) = recorded else {
+            return Err(unavailable("it is not this task's (no tool call of this task recorded it)"));
+        };
+        let files =
+            self.inner.content_files(&row).ok_or_else(|| unavailable("missing: the task's project is not open"))?;
+        let (record, bytes) = match self.inner.services.artifact_bytes(files.root(), run_id, artifact_id) {
+            Ok(found) => found,
+            Err(tools::services::ServiceError::Outcome(value))
+                if value.get("code").and_then(Value::as_str) == Some("research.unknownRun") =>
+            {
+                return Err(unavailable("purged: the record of the run that made it was removed"));
+            }
+            Err(tools::services::ServiceError::Outcome(value)) => {
+                let reason = value.get("error").and_then(Value::as_str).unwrap_or("it cannot be read").to_owned();
+                return Err(unavailable(&format!("missing: {reason}")));
+            }
+            Err(e) => return Err(unavailable(&format!("missing: {e}"))),
+        };
+        let digest = format!("sha256:{}", att::sha256_hex(&bytes));
+        let intact = record.kind == exposition_core::artifact::ArtifactKind::Figure
+            && record.media_type == figure.media_type
+            && record.size_bytes == bytes.len() as u64
+            && record.content_hash.eq_ignore_ascii_case(&digest);
+        if !intact {
+            return Err(unavailable("it changed after the run recorded it (its size or hash no longer match)"));
+        }
+        Ok(bytes)
     }
 
     /// Wait for a task's current run to finish (tests and shutdown).
@@ -1184,7 +1353,14 @@ impl AgentService {
         let cancel = CancellationToken::new();
         lock(&self.inner.running).insert(
             id.clone(),
-            Running { cancel: cancel.clone(), approvals: HashMap::new(), join: None, finished: false },
+            Running {
+                cancel: cancel.clone(),
+                approvals: HashMap::new(),
+                questions: HashMap::new(),
+                stop_reason: None,
+                join: None,
+                finished: false,
+            },
         );
         let inner = Arc::clone(&self.inner);
         let task_id = id.clone();
@@ -1565,6 +1741,9 @@ impl AgentService {
                 ),
             );
             self.inner.emit(AgentEvent::TranscriptChanged { task_id: row.id.clone() });
+            if let Some(running) = lock(&self.inner.running).get_mut(&row.id) {
+                running.stop_reason = Some(format!("The task stopped: project permissions changed ({what})"));
+            }
             let _ = self.cancel_task(&row.id);
         }
         let mut problems = Vec::new();
@@ -1809,9 +1988,48 @@ fn not_found(id: &TaskId) -> AgentError {
     AgentError::new("agents.notFound", format!("Unknown task {id}."))
 }
 
+/// Answering a request that is no longer open: the identical answer again is
+/// accepted (a duplicate delivery); anything else is refused. `None` while
+/// the request is open.
+fn settled_answer(state: &QuestionRequestState, answers: &[QuestionAnswer]) -> Option<Result<()>> {
+    match state {
+        QuestionRequestState::Answered { answers: given } if given.as_slice() == answers => Some(Ok(())),
+        open if open.is_open() => None,
+        settled => settled_error(settled).map(Err),
+    }
+}
+
+/// Why a resolved request takes no more input.
+fn settled_error(state: &QuestionRequestState) -> Option<AgentError> {
+    match state {
+        QuestionRequestState::Answered { .. } => {
+            Some(AgentError::new(questions::codes::RESOLVED, "This question was already answered."))
+        }
+        QuestionRequestState::Superseded { reason } => Some(AgentError::new(
+            questions::codes::RESOLVED,
+            format!("This question can no longer be answered ({reason})."),
+        )),
+        QuestionRequestState::Pending | QuestionRequestState::Discussing => None,
+    }
+}
+
+fn no_longer_waiting() -> AgentError {
+    AgentError::new(questions::codes::RESOLVED, "The task is no longer waiting for this answer.")
+}
+
+fn stale_revision(current: u32) -> AgentError {
+    AgentError::new(
+        questions::codes::STALE,
+        format!("The options changed since you read them (now revision {current}); answer the current question."),
+    )
+}
+
 enum Interrupt {
     Canceled,
     WallTime,
+    /// The run ends with this status (a budget reached while discussing a
+    /// question).
+    Stop(TaskStatus),
 }
 
 enum ApprovalOutcome {
@@ -1823,6 +2041,97 @@ enum ApprovalOutcome {
 impl Inner {
     fn emit(&self, event: AgentEvent) {
         let _ = self.events.send(event);
+    }
+
+    /// A task's stored question request (no worker waits for it).
+    fn stored_question(&self, id: &TaskId, request_id: &str) -> Result<QuestionRequest> {
+        self.store.task(id)?.ok_or_else(|| not_found(id))?;
+        self.store
+            .question(id, request_id)?
+            .ok_or_else(|| AgentError::new(questions::codes::NOT_FOUND, "This task has no such question."))
+    }
+
+    /// Record on a finished native `run_python` call the figures of the run
+    /// it created, from that run's manifest (never from the result text):
+    /// artifacts of kind figure with an image media type.
+    fn record_figures(&self, id: &TaskId, root: &Path, tool_use_id: &str, output: &ToolOutput) {
+        let Some(run_id) = output.content.get("run").and_then(Value::as_str) else { return };
+        let artifacts = match self.services.run_artifacts(root, run_id) {
+            Ok(artifacts) => artifacts,
+            Err(e) => {
+                tracing::warn!("the figures of run {run_id} could not be read: {e}");
+                return;
+            }
+        };
+        let figures: Vec<FigureRef> = artifacts
+            .into_iter()
+            .filter(|a| {
+                a.kind == exposition_core::artifact::ArtifactKind::Figure
+                    && FIGURE_MEDIA_TYPES.contains(&a.media_type.as_str())
+            })
+            .map(|a| {
+                let name = a
+                    .path
+                    .as_ref()
+                    .map(|p| p.as_str())
+                    .or(a.scratch_path.as_deref())
+                    .and_then(|p| p.rsplit(['/', '\\']).next())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or(a.id.0.as_str())
+                    .to_owned();
+                FigureRef {
+                    run_id: run_id.to_owned(),
+                    artifact_id: a.id.0,
+                    media_type: a.media_type,
+                    name,
+                    caption: None,
+                }
+            })
+            .collect();
+        if figures.is_empty() {
+            return;
+        }
+        if let Err(e) = self.store.set_tool_call_figures(id, tool_use_id, &figures) {
+            tracing::error!("failed to record figures: {e}");
+        }
+    }
+
+    /// The task's project folder is no longer the open project.
+    fn project_closed(&self, id: &TaskId) -> bool {
+        match self.store.task(id) {
+            Ok(Some(row)) => {
+                crate::workspace::check_root(self.workspace.as_deref(), Path::new(&row.spec.workspace_root)).is_err()
+            }
+            _ => true,
+        }
+    }
+
+    /// Supersede the task's open questions once its run ended (cancel, a
+    /// budget stop, a failure, a permission change), and drop their slots.
+    fn supersede_questions(&self, id: &TaskId, status: &TaskStatus) {
+        let reason = {
+            let mut running = lock(&self.running);
+            let entry = running.get_mut(id);
+            let reason = entry.as_ref().and_then(|r| r.stop_reason.clone());
+            if let Some(r) = entry {
+                r.questions.clear();
+            }
+            reason
+        };
+        let reason = reason.unwrap_or_else(|| match status {
+            TaskStatus::Canceled => "The task was canceled".to_owned(),
+            TaskStatus::BudgetExceeded { detail, .. } => format!("The task stopped: {}", detail.trim_end_matches('.')),
+            TaskStatus::Failed { message } => format!("The task stopped: {}", message.trim_end_matches('.')),
+            _ => "The task stopped".to_owned(),
+        });
+        match self.store.supersede_open_questions(Some(id), &reason) {
+            Ok(changed) => {
+                for (task_id, request_id) in changed {
+                    self.emit(AgentEvent::QuestionResolved { task_id, request_id });
+                }
+            }
+            Err(e) => tracing::error!("failed to supersede open questions: {e}"),
+        }
     }
 
     /// `root` as the open project (absolute, existing, the open folder).
@@ -2447,7 +2756,14 @@ impl Inner {
             Ok(Some(row)) => match LocalProjectFiles::open(Path::new(&row.spec.workspace_root)) {
                 Ok(files) => {
                     let graph_project = inner.store.graph_project(&id).ok().flatten();
+                    // Questions need a user in the loop: never for a task
+                    // created without one (an unreadable flag counts as
+                    // without), nor for a restricted-only (unattended) run.
+                    let interactive = !inner.store.task_unattended(&id).unwrap_or(true)
+                        && row.spec.execution != ExecutionMode::Restricted;
                     let mut run = Run {
+                        interactive,
+                        context: Vec::new(),
                         inner: &inner,
                         graph_project,
                         base_elapsed: row.usage.elapsed_ms,
@@ -2473,6 +2789,7 @@ impl Inner {
         };
         if let Some((status, usage)) = status {
             inner.finish(&id, &status, &usage);
+            inner.supersede_questions(&id, &status);
         }
         // The terminal status is stored: review actions may proceed while the
         // worker releases services below.
@@ -2646,6 +2963,11 @@ struct Run<'a> {
     files: LocalProjectFiles,
     /// The project graph the task is bound to.
     graph_project: Option<ProjectId>,
+    /// A user is in the loop: `ask_user` is offered.
+    interactive: bool,
+    /// Text blocks that go with the current batch's results (a question's
+    /// discussion and final options, beside its answer).
+    context: Vec<Value>,
 }
 
 impl Run<'_> {
@@ -2725,32 +3047,20 @@ impl Run<'_> {
             let limited_by_budget = u64::from(max_tokens) < u64::from(MAX_TOKENS_PER_TURN);
             let request = ProviderRequest {
                 system: prompt::SYSTEM_PROMPT.to_owned(),
-                tools: tools::definitions(),
+                tools: tools::task_definitions(self.interactive),
                 messages,
                 max_tokens,
             };
             let turn = self.usage.turns + 1;
             self.inner.emit(AgentEvent::StreamStarted { task_id: self.id.clone(), turn });
-            let events = self.inner.events.clone();
-            let task_id = self.id.clone();
-            let sink = move |event: StreamEvent| {
-                let event = match event {
-                    StreamEvent::TextDelta(text) => AgentEvent::TextDelta { task_id: task_id.clone(), turn, text },
-                    StreamEvent::ThinkingDelta(text) => {
-                        AgentEvent::ThinkingDelta { task_id: task_id.clone(), turn, text }
-                    }
-                    StreamEvent::Reset { reason } => AgentEvent::StreamReset { task_id: task_id.clone(), turn, reason },
-                    StreamEvent::Fallback { from, to } => AgentEvent::Fallback { task_id: task_id.clone(), from, to },
-                    StreamEvent::MessageStart { .. } | StreamEvent::ToolUseStart { .. } => return,
-                };
-                let _ = events.send(event);
-            };
+            let sink = self.sink(turn);
             let result = tokio::select! {
                 r = provider.stream(&request, &sink, &self.cancel) => Ok(r),
                 _ = self.cancel.cancelled() => Err(Interrupt::Canceled),
                 _ = tokio::time::sleep(self.remaining_wall()) => Err(Interrupt::WallTime),
             };
             let response = match result {
+                Err(Interrupt::Stop(status)) => return status,
                 Err(Interrupt::Canceled) | Ok(Err(ProviderError::Canceled)) => return TaskStatus::Canceled,
                 Err(Interrupt::WallTime) => {
                     return budget_exceeded(
@@ -2799,7 +3109,9 @@ impl Run<'_> {
             let calls = content.iter().filter(|b| block_type(b) == "tool_use").count();
             match response.stop_reason.as_str() {
                 "tool_use" if calls > 0 => {
-                    if let Some(status) = self.execute_tools(&content, &response.invalid_tool_inputs, turn).await {
+                    if let Some(status) =
+                        self.execute_tools(&content, &response.invalid_tool_inputs, turn, provider).await
+                    {
                         return status;
                     }
                 }
@@ -2880,6 +3192,7 @@ impl Run<'_> {
         content: &[Value],
         invalid: &HashMap<String, String>,
         turn: u32,
+        provider: &dyn Provider,
     ) -> Option<TaskStatus> {
         let calls: Vec<(String, String, Value)> = content
             .iter()
@@ -2906,9 +3219,10 @@ impl Run<'_> {
                 tool_use_id: tool_use_id.clone(),
                 name: name.clone(),
             });
-            let output = match self.execute_one(tool_use_id, name, input, invalid, &mut budget_hit).await {
+            let output = match self.execute_one(tool_use_id, name, input, invalid, &mut budget_hit, provider).await {
                 Ok(output) => output,
                 Err((interrupt, partial)) => {
+                    self.context.clear();
                     let stopped = ToolOutput::error(format!("{NOT_EXECUTED} the task stopped."));
                     let mut rest = &calls[index..];
                     if let Some(output) = partial {
@@ -2927,6 +3241,7 @@ impl Run<'_> {
                         Interrupt::WallTime => {
                             budget_exceeded(BudgetKind::WallTime, "the time budget ran out while a tool was running.")
                         }
+                        Interrupt::Stop(status) => status,
                     });
                 }
             };
@@ -2945,6 +3260,8 @@ impl Run<'_> {
             });
             results.push(tool_result(tool_use_id, &output.text(), output.is_error));
         }
+        // After the results: what goes with them (a question's discussion).
+        results.append(&mut self.context);
         if let Err(e) = self.inner.store.append_message(&self.id, "user", &results) {
             return Some(TaskStatus::Failed { message: e.to_string() });
         }
@@ -2961,6 +3278,7 @@ impl Run<'_> {
         input: &Value,
         invalid: &HashMap<String, String>,
         budget_hit: &mut Option<TaskStatus>,
+        provider: &dyn Provider,
     ) -> Result<ToolOutput, (Interrupt, Option<ToolOutput>)> {
         if let Some(raw) = invalid.get(tool_use_id) {
             return Ok(ToolOutput::error_with(
@@ -2980,6 +3298,17 @@ impl Run<'_> {
             return Ok(ToolOutput::error("Not executed: the task's tool-call budget is used up."));
         }
         self.usage.tool_calls += 1;
+        // Questions are handled by the loop itself: they read and change
+        // nothing, so the gate has nothing to decide.
+        match name {
+            tools::ASK_USER => return self.ask_user(tool_use_id, input, provider).await,
+            tools::REVISE_QUESTION => {
+                return Ok(ToolOutput::error(
+                    "revise_question is only available while the user discusses a question with you.",
+                ));
+            }
+            _ => {}
+        }
         let mut call = match ToolCall::parse(name, input) {
             Ok(call) => call,
             Err(message) => return Ok(ToolOutput::error(message)),
@@ -3116,6 +3445,10 @@ impl Run<'_> {
         if call.is_process() {
             self.usage.commands += 1;
         }
+        // A native Python run creates a research run whose manifest lists
+        // its figures (restricted runs create none).
+        let records_figures = matches!(call, ToolCall::RunPython(_))
+            && authorization.policy() == Some(&exposition_core::job::ExecutionPolicy::TrustedNative);
         self.authorized.insert(tool_use_id.to_owned(), authorization.authorized_by().clone());
         let cancel = self.cancel.child_token();
         let wall = self.remaining_wall();
@@ -3148,6 +3481,9 @@ impl Run<'_> {
                 if matches!(code, Some(codes::PERMISSIONS_CHANGED | codes::PROJECT_CHANGED)) {
                     self.authorized.remove(tool_use_id);
                 }
+                if records_figures {
+                    inner.record_figures(&self.id, self.files.root(), tool_use_id, &output);
+                }
                 return Ok(output);
             }
             _ = self.cancel.cancelled() => Interrupt::Canceled,
@@ -3160,6 +3496,459 @@ impl Run<'_> {
             .await
             .unwrap_or_else(|_| ToolOutput::error("Stopped while running; the tool did not report how far it got."));
         Err((interrupt, Some(output)))
+    }
+
+    /// Forward a model request's stream to the task's events.
+    fn sink(&self, turn: u32) -> impl Fn(StreamEvent) + Send + Sync + use<> {
+        let events = self.inner.events.clone();
+        let task_id = self.id.clone();
+        move |event: StreamEvent| {
+            let event = match event {
+                StreamEvent::TextDelta(text) => AgentEvent::TextDelta { task_id: task_id.clone(), turn, text },
+                StreamEvent::ThinkingDelta(text) => AgentEvent::ThinkingDelta { task_id: task_id.clone(), turn, text },
+                StreamEvent::Reset { reason } => AgentEvent::StreamReset { task_id: task_id.clone(), turn, reason },
+                StreamEvent::Fallback { from, to } => AgentEvent::Fallback { task_id: task_id.clone(), from, to },
+                StreamEvent::MessageStart { .. } | StreamEvent::ToolUseStart { .. } => return,
+            };
+            let _ = events.send(event);
+        }
+    }
+
+    /// `ask_user`: record the request and block, like an approval wait,
+    /// until the user answers (the rest of the batch stays held). A
+    /// discussion runs inside this wait, in this worker.
+    async fn ask_user(
+        &mut self,
+        tool_use_id: &str,
+        input: &Value,
+        provider: &dyn Provider,
+    ) -> Result<ToolOutput, (Interrupt, Option<ToolOutput>)> {
+        if !self.interactive {
+            return Ok(ToolOutput::error(
+                "ask_user is not available in this task: it runs without a user to answer (a workflow review or a \
+                 restricted-only run). Decide with what you have, or report what you need from the user.",
+            ));
+        }
+        let asked = match questions::parse_ask_user(input) {
+            Ok(asked) => asked,
+            Err(message) => return Ok(ToolOutput::error(message)),
+        };
+        let request = QuestionRequest::new(self.id.clone(), tool_use_id, asked, now_ms() as i64);
+        let request_id = request.id.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // The worker's slot exists before the request can be seen anywhere.
+        match lock(&self.inner.running).get_mut(&self.id) {
+            Some(running) => {
+                running
+                    .questions
+                    .insert(request_id.clone(), QuestionSlot { request: request.clone(), tx, discussion: None });
+            }
+            None => return Err((Interrupt::Canceled, None)),
+        }
+        if let Err(e) = self.inner.store.insert_question(&request) {
+            self.remove_question(&request_id);
+            return Ok(ToolOutput::error(format!("The question could not be recorded: {e}")));
+        }
+        self.set_status(TaskStatus::AwaitingAnswer);
+        self.inner.emit(AgentEvent::QuestionRequested { request });
+        self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
+        loop {
+            // Passive waiting is not work time.
+            let waiting = Instant::now();
+            let input = tokio::select! {
+                input = rx.recv() => input,
+                _ = self.cancel.cancelled() => None,
+            };
+            self.paused += waiting.elapsed();
+            match input {
+                // Canceled (or stopped): superseded when the run ends.
+                None => return Err((Interrupt::Canceled, None)),
+                Some(QuestionInput::Resolved) => break,
+                Some(QuestionInput::Discuss) => {
+                    if let Err(status) = self.discuss(&request_id, tool_use_id, provider).await {
+                        return Err((Interrupt::Stop(status), None));
+                    }
+                    // Pending again, unless the user answered meanwhile.
+                    let reopened = {
+                        let mut running = lock(&self.inner.running);
+                        match running.get_mut(&self.id).and_then(|r| r.questions.get_mut(&request_id)) {
+                            Some(slot) if slot.request.state == QuestionRequestState::Discussing => {
+                                slot.request.state = QuestionRequestState::Pending;
+                                if let Err(e) = self.inner.store.update_question(&slot.request) {
+                                    tracing::error!("failed to record the question state: {e}");
+                                }
+                                true
+                            }
+                            _ => false,
+                        }
+                    };
+                    if reopened {
+                        self.inner.emit(AgentEvent::QuestionChanged {
+                            task_id: self.id.clone(),
+                            request_id: request_id.clone(),
+                        });
+                    }
+                    self.set_status(TaskStatus::AwaitingAnswer);
+                }
+            }
+        }
+        let resolved = self.remove_question(&request_id);
+        self.set_status(TaskStatus::Running);
+        match resolved.map(|slot| slot.request) {
+            Some(QuestionRequest {
+                state: QuestionRequestState::Answered { answers },
+                revision,
+                questions: final_questions,
+                ..
+            }) => {
+                if let Some(block) = self.question_context(&request_id, revision, &final_questions) {
+                    self.context.push(block);
+                }
+                Ok(ToolOutput::ok(questions::answer_result(&answers)))
+            }
+            Some(QuestionRequest { state: QuestionRequestState::Superseded { reason }, .. }) => Ok(ToolOutput::error(
+                format!("The user did not answer: the question was superseded ({reason}). Nothing was decided."),
+            )),
+            _ => Ok(ToolOutput::error("The user did not answer the question.")),
+        }
+    }
+
+    fn remove_question(&self, request_id: &str) -> Option<QuestionSlot> {
+        lock(&self.inner.running).get_mut(&self.id).and_then(|r| r.questions.remove(request_id))
+    }
+
+    /// The discussion and the final questions, as a text block that goes with
+    /// the answer into the history (the discussion itself is not part of
+    /// it). `None` when there was neither a discussion nor a revision.
+    fn question_context(
+        &self,
+        request_id: &str,
+        revision: u32,
+        final_questions: &[questions::Question],
+    ) -> Option<Value> {
+        let discussion = self.inner.store.discussion(&self.id, request_id).unwrap_or_default();
+        let mut lines = Vec::new();
+        for (role, content) in &discussion {
+            for block in content.iter().filter(|b| block_type(b) == "text") {
+                let text = block.get("text").and_then(Value::as_str).unwrap_or_default().trim();
+                if !text.is_empty() {
+                    lines.push(format!("{}: {text}", if role == "user" { "User" } else { "You" }));
+                }
+            }
+        }
+        if lines.is_empty() && revision <= 1 {
+            return None;
+        }
+        let questions = serde_json::to_string(final_questions).unwrap_or_default();
+        let text = format!(
+            "{QUESTION_CONTEXT} request=\"{request_id}\" revision=\"{revision}\">\nThe user discussed this question \
+             before answering; the answer above refers to these questions (revision {revision}):\n{}\nDiscussion:\n{}\n\
+             </question_discussion>",
+            bounded(&questions, 8_000),
+            bounded(&lines.join("\n"), 16_000)
+        );
+        Some(json!({"type": "text", "text": text}))
+    }
+
+    /// One "Chat about it" turn: at most [`DISCUSSION_REQUESTS`] model
+    /// requests, counted in the budgets, with read-only tools and
+    /// `revise_question`. `Err` ends the run with that status.
+    async fn discuss(&mut self, request_id: &str, ask_id: &str, provider: &dyn Provider) -> Result<(), TaskStatus> {
+        let abort = self.cancel.child_token();
+        if let Some(slot) = lock(&self.inner.running).get_mut(&self.id).and_then(|r| r.questions.get_mut(request_id)) {
+            slot.discussion = Some(abort.clone());
+        }
+        let outcome = self.discussion_turn(request_id, ask_id, provider, &abort).await;
+        if let Some(slot) = lock(&self.inner.running).get_mut(&self.id).and_then(|r| r.questions.get_mut(request_id)) {
+            slot.discussion = None;
+        }
+        outcome
+    }
+
+    async fn discussion_turn(
+        &mut self,
+        request_id: &str,
+        ask_id: &str,
+        provider: &dyn Provider,
+        abort: &CancellationToken,
+    ) -> Result<(), TaskStatus> {
+        for _ in 0..DISCUSSION_REQUESTS {
+            if self.cancel.is_cancelled() {
+                return Err(TaskStatus::Canceled);
+            }
+            if abort.is_cancelled() {
+                return Ok(());
+            }
+            if let Some(status) = self.budget_before_request() {
+                return Err(status);
+            }
+            let messages = match self.discussion_messages(request_id, ask_id, provider.kind()) {
+                Ok(messages) => messages,
+                Err(message) => {
+                    self.notice(
+                        NoticeLevel::Warning,
+                        &format!("The message about the question was not sent: {message}"),
+                    );
+                    return Ok(());
+                }
+            };
+            let remaining_output = self.spec.budgets.max_output_tokens.saturating_sub(self.usage.output_tokens);
+            let max_tokens = remaining_output.min(u64::from(MAX_TOKENS_PER_TURN)) as u32;
+            let request = ProviderRequest {
+                system: prompt::SYSTEM_PROMPT.to_owned(),
+                tools: tools::discussion_definitions(),
+                messages,
+                max_tokens,
+            };
+            let turn = self.usage.turns + 1;
+            self.inner.emit(AgentEvent::StreamStarted { task_id: self.id.clone(), turn });
+            let sink = self.sink(turn);
+            // `abort` is a child of the task's token: Cancel ends it too.
+            let result = tokio::select! {
+                r = provider.stream(&request, &sink, abort) => Some(r),
+                _ = tokio::time::sleep(self.remaining_wall()) => None,
+            };
+            let response = match result {
+                None => {
+                    return Err(budget_exceeded(
+                        BudgetKind::WallTime,
+                        "the time budget ran out while the model was replying about a question.",
+                    ));
+                }
+                Some(Err(ProviderError::Canceled)) if self.cancel.is_cancelled() => return Err(TaskStatus::Canceled),
+                // The user answered meanwhile.
+                Some(Err(ProviderError::Canceled)) => return Ok(()),
+                Some(Err(e)) => {
+                    self.notice(
+                        NoticeLevel::Warning,
+                        &format!("The reply about the question failed: {e} The question still waits for your answer."),
+                    );
+                    return Ok(());
+                }
+                Some(Ok(response)) => response,
+            };
+            self.usage.turns += 1;
+            self.usage.input_tokens += response.usage.input_tokens;
+            self.usage.output_tokens += response.usage.output_tokens;
+            self.usage.cache_read_tokens += response.usage.cache_read_tokens;
+            self.usage.cache_write_tokens += response.usage.cache_write_tokens;
+            self.usage.served_by = Some(response.model.clone());
+            self.set_status(TaskStatus::AwaitingAnswer);
+            if response.stop_reason == "refusal" {
+                self.notice(
+                    NoticeLevel::Warning,
+                    "The model provider declined to reply about the question. It still waits for your answer.",
+                );
+                return Ok(());
+            }
+            let content = sanitize_after_fallback(response.content);
+            if content.is_empty() {
+                return Ok(());
+            }
+            if let Err(e) = self.inner.store.append_discussion(&self.id, request_id, "assistant", &content) {
+                return Err(TaskStatus::Failed { message: e.to_string() });
+            }
+            self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
+            let calls: Vec<(String, String, Value)> = content
+                .iter()
+                .filter(|b| block_type(b) == "tool_use")
+                .map(|b| {
+                    (
+                        b.get("id").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                        b.get("name").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                        b.get("input").cloned().unwrap_or(Value::Null),
+                    )
+                })
+                .collect();
+            if calls.is_empty() {
+                return Ok(());
+            }
+            // Every call gets a result in the discussion (run or not), so the
+            // next message about the question has a complete history.
+            let ran = response.stop_reason == "tool_use";
+            let skipped = ToolOutput::error(format!(
+                "{NOT_EXECUTED} {}",
+                skip_reason(&sanitize_stop_reason(&response.stop_reason))
+            ));
+            let mut results = Vec::with_capacity(calls.len());
+            for (tool_use_id, name, input) in &calls {
+                let output = if ran {
+                    self.record_call(tool_use_id, turn, name, input, ToolCallStatus::Running, None);
+                    self.discussion_tool(request_id, tool_use_id, name, input, &response.invalid_tool_inputs).await
+                } else {
+                    skipped.clone()
+                };
+                let output = self.with_authorization(tool_use_id, output);
+                self.record_call(tool_use_id, turn, name, input, finished_status(&output), Some(&output));
+                results.push(tool_result(tool_use_id, &output.text(), output.is_error));
+            }
+            if let Err(e) = self.inner.store.append_discussion(&self.id, request_id, "user", &results) {
+                return Err(TaskStatus::Failed { message: e.to_string() });
+            }
+            self.set_status(TaskStatus::AwaitingAnswer);
+            self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
+            if !ran {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// The history a discussion request sends: the task's history (ending
+    /// with the response that asked), held results for that response's calls
+    /// (the question's own says it waits and shows its current revision),
+    /// then the discussion so far.
+    fn discussion_messages(
+        &self,
+        request_id: &str,
+        ask_id: &str,
+        kind: ProviderKind,
+    ) -> std::result::Result<Vec<ProviderMessage>, String> {
+        let mut messages = self.inner.store.messages(&self.id).map_err(|e| e.to_string())?;
+        let request = lock(&self.inner.running)
+            .get(&self.id)
+            .and_then(|r| r.questions.get(request_id))
+            .map(|slot| slot.request.clone())
+            .ok_or("the question is no longer open")?;
+        let batch: Vec<String> = match messages.last() {
+            Some((role, content)) if role == "assistant" => content
+                .iter()
+                .filter(|b| block_type(b) == "tool_use")
+                .map(|b| b.get("id").and_then(Value::as_str).unwrap_or_default().to_owned())
+                .collect(),
+            _ => return Err("the response that asked the question is not the latest one".into()),
+        };
+        let held: Vec<Value> = batch
+            .iter()
+            .map(|id| {
+                if id == ask_id {
+                    let waiting = json!({
+                        "status": "awaitingAnswer",
+                        "request": request.id,
+                        "revision": request.revision,
+                        "questions": request.questions,
+                        "note": "The user has not answered yet. They want to discuss this question with you first; \
+                                 their messages follow. Reply to them: explain, compare the options, clarify. You may \
+                                 read project files and the graph (list_files, read_file, graph_query) and call \
+                                 revise_question to change the options, keeping the ids of options you keep. You \
+                                 cannot answer the question yourself, change anything, or run anything until the \
+                                 user answers; the other calls of your previous response stay held until then.",
+                    });
+                    tool_result(id, &waiting.to_string(), false)
+                } else {
+                    tool_result(id, "Held: not run yet. It runs only after the user answers the question.", false)
+                }
+            })
+            .collect();
+        messages.push(("user".to_owned(), held));
+        for (role, content) in self.inner.store.discussion(&self.id, request_id).map_err(|e| e.to_string())? {
+            match messages.last_mut() {
+                Some((last, blocks)) if *last == role => blocks.extend(content),
+                _ => messages.push((role, content)),
+            }
+        }
+        self.inner.provider_messages(kind, messages)
+    }
+
+    /// A tool call of a discussion turn: read-only tools under the gate, and
+    /// `revise_question`; everything else is refused (the batch stays held).
+    async fn discussion_tool(
+        &mut self,
+        request_id: &str,
+        tool_use_id: &str,
+        name: &str,
+        input: &Value,
+        invalid: &HashMap<String, String>,
+    ) -> ToolOutput {
+        if invalid.contains_key(tool_use_id) {
+            return ToolOutput::error("The tool input was not valid JSON, so the tool was not run.");
+        }
+        if self.usage.tool_calls >= self.spec.budgets.max_tool_calls {
+            return ToolOutput::error(format!("{NOT_EXECUTED} the task's tool-call budget is used up."));
+        }
+        self.usage.tool_calls += 1;
+        if name == tools::REVISE_QUESTION {
+            return self.revise_question(request_id, input);
+        }
+        if !matches!(name, tools::LIST_FILES | tools::READ_FILE | tools::GRAPH_QUERY) {
+            return ToolOutput::error(format!(
+                "{NOT_EXECUTED} {name} is not available while the user discusses a question: until they answer, only \
+                 list_files, read_file, graph_query, and revise_question can be used, and the other calls of the \
+                 response that asked stay held."
+            ));
+        }
+        let call = match ToolCall::parse(name, input) {
+            Ok(call) => call,
+            Err(message) => return ToolOutput::error(message),
+        };
+        self.settle_graph(&call).await;
+        let gate = {
+            let env = self.env();
+            exec::gate(&call, &env)
+        };
+        let authorization = match gate {
+            Gate::Allowed(authorization) => authorization,
+            Gate::Refused(output) => return output,
+            Gate::NeedsApproval { .. } => {
+                return ToolOutput::error(format!(
+                    "{NOT_EXECUTED} it would need the user's approval, which is not asked while they discuss a \
+                     question."
+                ));
+            }
+        };
+        self.authorized.insert(tool_use_id.to_owned(), authorization.authorized_by().clone());
+        let inner = Arc::clone(self.inner);
+        let authority = inner.authority(&self.id, &self.spec, self.files.root(), self.graph_project.as_ref());
+        let env = ToolEnv {
+            task_id: &self.id,
+            spec: &self.spec,
+            files: &self.files,
+            documents: &inner.documents,
+            workspace: inner.workspace.as_deref(),
+            services: inner.services.as_ref(),
+            store: &inner.store,
+            graph: inner.graph.as_deref().map(|service| GraphEnv { service, project: self.graph_project.as_ref() }),
+            authority,
+        };
+        exec::run(call, &env, &mut self.seen, tool_use_id, authorization, self.cancel.child_token()).await
+    }
+
+    /// `revise_question`: new questions for the request being discussed;
+    /// the revision moves on so stale answers are refused.
+    fn revise_question(&self, request_id: &str, input: &Value) -> ToolOutput {
+        let mut running = lock(&self.inner.running);
+        let Some(slot) = running.get_mut(&self.id).and_then(|r| r.questions.get_mut(request_id)) else {
+            return ToolOutput::error("The question is no longer open.");
+        };
+        let allow_custom = slot.request.questions.first().is_none_or(|q| q.allow_custom);
+        let (named, revised) = match questions::parse_revise(input, allow_custom) {
+            Ok(parsed) => parsed,
+            Err(message) => return ToolOutput::error(message),
+        };
+        if named != request_id {
+            return ToolOutput::error(format!(
+                "revise_question can only revise the question being discussed (request {request_id})."
+            ));
+        }
+        if slot.request.state != QuestionRequestState::Discussing {
+            return ToolOutput::error("The user already answered; the question can no longer be revised.");
+        }
+        let mut next = slot.request.clone();
+        next.questions = revised;
+        next.revision += 1;
+        if let Err(e) = self.inner.store.update_question(&next) {
+            return ToolOutput::error(format!("The revision could not be recorded: {e}"));
+        }
+        slot.request = next;
+        let revision = slot.request.revision;
+        drop(running);
+        self.inner.emit(AgentEvent::QuestionChanged { task_id: self.id.clone(), request_id: request_id.to_owned() });
+        ToolOutput::ok(json!({
+            "revised": true,
+            "request": request_id,
+            "revision": revision,
+            "note": "The user now sees the revised question and answers when ready; you cannot answer it yourself.",
+        }))
     }
 
     /// Add how a call that ran was authorized to its result, so the model

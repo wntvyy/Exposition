@@ -180,7 +180,7 @@ fn refusal_clause(code: &str, reason: &str) -> String {
         codes::EXECUTION_DISABLED => "refused: execution is disabled for this task".to_owned(),
         codes::WHOLE_PROJECT_ONLY => "refused: needs a task scoped to the whole project".to_owned(),
         codes::METADATA_ONLY => "refused: needs content consent".to_owned(),
-        codes::NATIVE_NOT_ALLOWED => "refused: this task allows only the restricted sandbox".to_owned(),
+        codes::NATIVE_NOT_ALLOWED => "refused: this task allows only the restricted container".to_owned(),
         codes::RESTRICTED_UNAVAILABLE => {
             "refused: the restricted backend is not available (never run natively instead)".to_owned()
         }

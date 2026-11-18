@@ -8,24 +8,24 @@ import type { ToolCallStatus } from "./ToolCallStatus";
 /**
  * One rendered transcript entry, in order.
  */
-export type TranscriptItem = { "kind": "userText", seq: number, text: string,
+export type TranscriptItem = { "kind": "userText", seq: number, text: string, 
 /**
  * Attachments sent with this message, in order.
  */
-attachments: Array<AttachmentInfo>,
+attachments: Array<AttachmentInfo>, 
 /**
  * A "Chat about it" message about this question request (its id).
  */
-question?: string, } | { "kind": "assistantText", seq: number, text: string, } | { "kind": "thinking", seq: number, text: string, } | { "kind": "toolCall", seq: number, toolUseId: string, name: string, input: unknown, status: ToolCallStatus,
+question?: string, } | { "kind": "assistantText", seq: number, text: string, } | { "kind": "thinking", seq: number, text: string, } | { "kind": "toolCall", seq: number, toolUseId: string, name: string, input: unknown, status: ToolCallStatus, 
 /**
  * Result text (bounded).
  */
-result: string | null, isError: boolean,
+result: string | null, isError: boolean, 
 /**
  * How the call was authorized when it ran (`None`: it did not run,
  * or it ran before authorizations were recorded).
  */
-authorizedBy: AuthorizedBy | null,
+authorizedBy: AuthorizedBy | null, 
 /**
  * Figures the call produced (native `run_python`), recorded from the
  * run's manifest when the call finished.

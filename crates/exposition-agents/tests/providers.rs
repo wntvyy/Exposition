@@ -682,3 +682,85 @@ async fn key_changes_change_the_connection_version_and_attachment_only_messages_
     });
     assert_eq!(shown.as_deref(), Some(""), "the request text of an attachment-only message is not shown as the user's");
 }
+
+/// Structured questions through a real provider adapter (mocked HTTP):
+/// `ask_user` is offered only with a user in the loop; a "Chat about it"
+/// request offers read-only tools plus `revise_question`, holds the batch,
+/// and carries the user's message; the answer comes back as the call's result.
+#[tokio::test]
+async fn questions_are_offered_with_a_user_and_a_discussion_offers_read_only_tools() {
+    let mock = Mock::start().await;
+    let h = harness(&mock).await;
+    use_openai(&h, "gpt-6.2-sol");
+    let options = json!([
+        {"id": "a", "label": "Formal", "consequence": "", "recommended": false},
+        {"id": "b", "label": "Informal", "consequence": "", "recommended": true}
+    ]);
+    let arguments =
+        json!({"questions": [{"prompt": "Which tone?", "explanation": "", "options": options}], "allowCustom": true});
+    let ask = json!({"type": "function_call", "id": "fc_1", "call_id": "call_ask", "name": "ask_user", "arguments": arguments.to_string()});
+    let read = json!({"type": "function_call", "id": "fc_2", "call_id": "call_read", "name": "read_file", "arguments": "{\"path\":\"main.typ\"}"});
+    mock.reply("/v1/responses", openai_response(json!([ask, read])));
+    mock.reply("/v1/responses", text_reply("Formal reads like a paper."));
+    mock.reply("/v1/responses", text_reply("Informal it is."));
+    let mut events = h.service.subscribe();
+    let task = h.service.create_task(request(&h, "Tidy the notes")).unwrap();
+    let question = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(AgentEvent::QuestionRequested { request }) = events.recv().await {
+                return request;
+            }
+        }
+    })
+    .await
+    .expect("question asked");
+    h.service.discuss_question(&task.id, &question.id, 1, "Why formal?").unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while h.service.task_detail(&task.id).unwrap().questions[0].state != QuestionRequestState::Pending {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("discussion finished");
+    let b = QuestionAnswer { question_id: "q1".into(), value: QuestionValue::Option { option_id: "b".into() } };
+    h.service.answer_question(&task.id, &question.id, 1, vec![b]).unwrap();
+    assert_eq!(finish(&h, &task.id).await.status, TaskStatus::Completed);
+
+    let seen: Vec<Seen> = mock.seen().into_iter().filter(|s| s.line.contains("/v1/responses")).collect();
+    assert_eq!(seen.len(), 3, "the request, one discussion request, the request after the answer");
+    let tools = |s: &Seen| -> Vec<String> {
+        s.body["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect()
+    };
+    assert!(tools(&seen[0]).contains(&"ask_user".to_owned()));
+    assert!(!tools(&seen[0]).contains(&"revise_question".to_owned()));
+    assert_eq!(tools(&seen[1]), ["list_files", "read_file", "graph_query", "revise_question"]);
+    let input = seen[1].body["input"].as_array().unwrap().clone();
+    let output = |items: &[Value], call: &str| -> String {
+        items
+            .iter()
+            .find(|i| i["type"] == "function_call_output" && i["call_id"] == call)
+            .and_then(|i| i["output"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert!(output(&input, "call_ask").contains("awaitingAnswer"));
+    assert!(output(&input, "call_read").starts_with("Held"), "the batch is held");
+    assert_eq!(input.last().unwrap()["content"][0]["text"], "Why formal?");
+    let after = seen[2].body["input"].as_array().unwrap().clone();
+    assert_eq!(serde_json::from_str::<Value>(&output(&after, "call_ask")).unwrap(), json!({"q1": {"optionId": "b"}}));
+    assert!(output(&after, "call_read").contains("The cat sat"), "the held call ran after the answer");
+    let texts: Vec<String> = after
+        .iter()
+        .filter(|i| i["type"] == "message" && i["role"] == "user")
+        .flat_map(|i| i["content"].as_array().cloned().unwrap_or_default())
+        .filter_map(|c| c["text"].as_str().map(str::to_owned))
+        .collect();
+    assert!(texts.iter().any(|t| t.starts_with("<question_discussion") && t.contains("Why formal?")));
+
+    // A task without a user in the loop is not offered ask_user.
+    mock.reply("/v1/responses", text_reply("Reviewed."));
+    let review = h.service.create_unattended_task(request(&h, "Review the notes")).unwrap();
+    finish(&h, &review.id).await;
+    let last = mock.seen().into_iter().rfind(|s| s.line.contains("/v1/responses")).unwrap();
+    assert!(!tools(&last).contains(&"ask_user".to_owned()));
+}

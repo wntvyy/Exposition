@@ -3,7 +3,7 @@ import type { Question } from "./Question";
 import type { QuestionRequestState } from "./QuestionRequestState";
 import type { TaskId } from "./TaskId";
 
-export type QuestionRequest = { id: string, taskId: TaskId, toolUseId: string,
+export type QuestionRequest = { id: string, taskId: TaskId, toolUseId: string, 
 /**
  * Starts at 1; bumped when a discussion turn revises the questions.
  */

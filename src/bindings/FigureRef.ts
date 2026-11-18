@@ -6,7 +6,7 @@
  * manifest. Its bytes are served only to the task that recorded it
  * (`agents_figure`), read through the research artifact store.
  */
-export type FigureRef = { runId: string, artifactId: string, mediaType: string,
+export type FigureRef = { runId: string, artifactId: string, mediaType: string, 
 /**
  * The artifact's file name.
  */

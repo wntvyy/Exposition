@@ -1661,6 +1661,100 @@ mod tests {
         );
     }
 
+    /// Agent UI rework: a schema-7 database gains questions, figures, and
+    /// the unattended flag; it is copied aside first, its tasks and calls
+    /// load unchanged (no figures, no questions, interactive), and open
+    /// questions are superseded with a reason.
+    #[test]
+    fn version_7_tasks_load_unchanged_after_the_v8_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("agents.sqlite3");
+        let id = TaskId::new();
+        {
+            let conn = Connection::open(&db).unwrap();
+            for (version, sql) in &MIGRATIONS[..7] {
+                conn.execute_batch(&format!("BEGIN; {sql} PRAGMA user_version = {version}; COMMIT;")).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO tasks (id, created_at, updated_at, title, spec, status, usage) VALUES (?1, 1, 1, 'Old', ?2, ?3, ?4)",
+                params![
+                    id.0,
+                    serde_json::to_string(&spec()).unwrap(),
+                    serde_json::to_string(&TaskStatus::Completed).unwrap(),
+                    serde_json::to_string(&TaskUsage::default()).unwrap()
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tool_calls (task_id, tool_use_id, turn, name, input, status, result, is_error)
+                 VALUES (?1, 't1', 1, 'run_python', '{}', '\"succeeded\"', '{}', 0)",
+                [&id.0],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transcript (task_id, seq, created_at, kind, role, content) VALUES (?1, 1, 1, 'message', 'user', '[]')",
+                [&id.0],
+            )
+            .unwrap();
+            conn.execute("UPDATE tasks SET next_seq = 2 WHERE id = ?1", [&id.0]).unwrap();
+        }
+        let store = Store::open(&db).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 8);
+        assert_eq!(store.task(&id).unwrap().unwrap().spec, spec());
+        let calls = store.tool_calls(&id).unwrap();
+        assert_eq!((calls.len(), calls[0].figures.len()), (1, 0));
+        assert!(store.questions(&id).unwrap().is_empty());
+        assert!(!store.task_unattended(&id).unwrap(), "old tasks are interactive");
+        assert_eq!(store.messages(&id).unwrap().len(), 1);
+        let backups = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("agents.sqlite3.premigration-v7-"))
+            .count();
+        assert_eq!(backups, 1, "copied aside before the upgrade");
+
+        // Questions, figures, and discussion rows round-trip.
+        let question = crate::questions::Question {
+            id: "q1".into(),
+            prompt: "Which?".into(),
+            explanation: None,
+            options: vec![],
+            allow_custom: true,
+        };
+        let request = QuestionRequest::new(id.clone(), "t1", vec![question], 5);
+        store.insert_question(&request).unwrap();
+        store
+            .append_discussion(&id, &request.id, "user", &[serde_json::json!({"type": "text", "text": "why?"})])
+            .unwrap();
+        assert_eq!(store.discussion(&id, &request.id).unwrap().len(), 1);
+        assert_eq!(store.messages(&id).unwrap().len(), 1, "a discussion is not provider history");
+        let figure = FigureRef {
+            run_id: "r".into(),
+            artifact_id: "a".into(),
+            media_type: "image/png".into(),
+            name: "plot.png".into(),
+            caption: None,
+        };
+        store.set_tool_call_figures(&id, "t1", std::slice::from_ref(&figure)).unwrap();
+        let mut row = store.tool_calls(&id).unwrap().remove(0);
+        assert_eq!(row.figures, vec![figure.clone()]);
+        row.result = Some("{\"run\":\"r\"}".into());
+        store.upsert_tool_call(&id, &row).unwrap();
+        assert_eq!(store.tool_calls(&id).unwrap()[0].figures, vec![figure], "an upsert keeps the figures");
+        let changed = store.supersede_open_questions(None, "Exposition restarted").unwrap();
+        assert_eq!(changed, vec![(id.clone(), request.id.clone())]);
+        assert_eq!(
+            store.question(&id, &request.id).unwrap().unwrap().state,
+            QuestionRequestState::Superseded { reason: "Exposition restarted".into() }
+        );
+        assert!(
+            store.supersede_open_questions(None, "again").unwrap().is_empty(),
+            "resolved requests stay as they are"
+        );
+        store.set_task_unattended(&id).unwrap();
+        assert!(store.task_unattended(&id).unwrap());
+    }
+
     #[test]
     fn refuses_newer_schema() {
         let dir = tempfile::tempdir().unwrap();

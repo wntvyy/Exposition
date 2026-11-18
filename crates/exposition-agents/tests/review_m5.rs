@@ -198,7 +198,7 @@ fn tool(id: &str, name: &str, input: Value) -> Value {
 // F1: LaTeX builds bypass the task's execution mode.
 // ---------------------------------------------------------------------------
 
-/// "Restricted sandbox only (unattended)" promises no native execution, and
+/// "Restricted container only (unattended)" promises no native execution, and
 /// "Ask before each command (runs natively)" promises an approval per launch.
 /// build_document on a .tex entry runs pdfLaTeX natively (TrustedNative job)
 /// with no approval in BOTH modes. Combined with TeX reading any file the user
@@ -313,7 +313,7 @@ async fn r_m5_f2_typst_build_diagnostics_reveal_out_of_scope_content_despite_met
 }
 
 // ---------------------------------------------------------------------------
-// F3: run_python in the restricted sandbox ignores scope and consent.
+// F3: run_python in the restricted container ignores scope and consent.
 // ---------------------------------------------------------------------------
 
 /// Records process-tool calls; reports a restricted backend.

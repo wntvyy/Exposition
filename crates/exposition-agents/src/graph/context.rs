@@ -336,7 +336,7 @@ pub fn operations(spec: &TaskSpec, services: &dyn ToolServices) -> Vec<ContextOp
             "install_packages",
             processes.0 && spec.execution != ExecutionMode::Restricted,
             match spec.execution {
-                ExecutionMode::Restricted => "refused: the restricted sandbox does not use the project's environment",
+                ExecutionMode::Restricted => "refused: the restricted container does not use the project's environment",
                 _ if !processes.0 => processes.1,
                 _ if auto => {
                     "Auto: installs when the project's permissions allow setup or the user approved package installs \

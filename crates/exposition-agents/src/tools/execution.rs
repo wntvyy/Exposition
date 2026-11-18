@@ -565,7 +565,7 @@ impl ToolServices for AppToolServices {
             Ok(status) if status.trusted => None,
             Ok(_) => Some(
                 "This project folder is not trusted for native execution, so code cannot run with your account's \
-                 privileges. Trust the folder in Exposition first, or run the task with the restricted sandbox."
+                 privileges. Trust the folder in Exposition first, or run the task with the restricted container."
                     .to_owned(),
             ),
             Err(e) => Some(format!("Native execution is not possible here: {e}")),
@@ -610,7 +610,7 @@ impl ToolServices for AppToolServices {
         // Lean runs project code (lakefile, macros, #eval); it only runs natively.
         if !matches!(request.policy, ExecutionPolicy::TrustedNative) {
             return Err(ServiceError::Failed(
-                "Lean checks run the project's own toolchain natively and cannot run in the restricted sandbox. \
+                "Lean checks run the project's own toolchain natively and cannot run in the restricted container. \
                  Use per-command approval in a trusted folder to check Lean files."
                     .into(),
             ));
@@ -676,6 +676,28 @@ impl ToolServices for AppToolServices {
             .artifact(run_id, artifact_id)
             .map(|(record, _)| record)
             .map_err(|e| ServiceError::Failed(e.to_string()))
+    }
+
+    fn run_artifacts(&self, root: &Path, run_id: &str) -> Result<Vec<ArtifactRecord>, ServiceError> {
+        let research = self.research.as_ref().ok_or(ServiceError::NotAvailable(ServiceKind::Research))?;
+        self.sync_research_workspace(research, root)?;
+        research
+            .run_manifest(run_id)
+            .map(|manifest| manifest.record.outputs)
+            .map_err(|e| super::services::research_outcome(&e.code(), e.to_string()))
+    }
+
+    fn artifact_bytes(
+        &self,
+        root: &Path,
+        run_id: &str,
+        artifact_id: &str,
+    ) -> Result<(ArtifactRecord, Vec<u8>), ServiceError> {
+        let research = self.research.as_ref().ok_or(ServiceError::NotAvailable(ServiceKind::Research))?;
+        self.sync_research_workspace(research, root)?;
+        research
+            .artifact_bytes(run_id, artifact_id)
+            .map_err(|e| super::services::research_outcome(&e.code(), e.to_string()))
     }
 
     fn record_attachment(
