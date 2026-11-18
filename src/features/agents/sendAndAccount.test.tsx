@@ -1,12 +1,10 @@
 // Regressions from the independent review of the agents work: attachments
 // stay put while their send runs, a finished send never cuts a word the user
-// typed meanwhile, and an open model picker refetches when the key changes.
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+// typed meanwhile (the picker refetch on a key change is in modelMenu.test.tsx).
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AttachmentInfo } from "../../bindings/AttachmentInfo";
-import type { ModelCatalog } from "../../bindings/ModelCatalog";
-import type { ModelDescriptor } from "../../bindings/ModelDescriptor";
 import type { ProviderStatus } from "../../bindings/ProviderStatus";
 
 const ipc = vi.hoisted(() => ({
@@ -26,7 +24,6 @@ vi.mock("../../lib/ipc", () => ({
 }));
 
 const { TaskComposer } = await import("./TaskComposer");
-const { ModelPicker } = await import("./ModelPicker");
 const { drafts, NEW_TASK_DRAFT, remainingText } = await import("./drafts");
 const { initialAgentsState, useAgents } = await import("./store");
 
@@ -54,26 +51,6 @@ const att: AttachmentInfo = {
   missing: false,
 };
 
-const model = (id: string): ModelDescriptor => ({
-  provider: "openai",
-  id,
-  displayName: id,
-  lifecycle: { kind: "active" },
-  agent: { kind: "supported" },
-  capabilities: { tools: "yes", images: "yes", pdf: "yes", efforts: ["low", "medium", "high"], contextTokens: null, maxOutputTokens: null },
-  source: "catalog",
-  createdAtMs: 1,
-});
-const catalog = (ids: string[]): ModelCatalog => ({
-  provider: "openai",
-  state: "fresh",
-  fetchedAtMs: Date.now(),
-  error: null,
-  models: ids.map(model),
-  suggested: null,
-  suggestedReason: null,
-  metadataChecked: "2026-11-17",
-});
 
 beforeEach(() => {
   for (const fn of Object.values(ipc)) fn.mockReset();
@@ -111,18 +88,5 @@ describe("sending", () => {
     drafts.setText(NEW_TASK_DRAFT, "Fixed the intro");
     drafts.completeSend(NEW_TASK_DRAFT, { text: "Fix", attachments: [], model: null });
     expect(drafts.get(NEW_TASK_DRAFT).text).toBe("Fixed the intro");
-  });
-});
-
-describe("model picker", () => {
-  it("fetches the models again when the connection's key changes (another account)", async () => {
-    ipc.agentsModelsList.mockResolvedValueOnce(catalog(["gpt-6.2-sol", "only-on-account-a"]));
-    ipc.agentsModelsList.mockResolvedValue(catalog(["gpt-6.2-sol"]));
-    const value = { provider: "openai" as const, model: "gpt-6.2-sol", effort: "medium" as const };
-    const { rerender, container } = render(<ModelPicker value={value} onChange={() => {}} status={status(1)} />);
-    await waitFor(() => expect(container.querySelector('[data-model-id="only-on-account-a"]')).not.toBeNull());
-    rerender(<ModelPicker value={value} onChange={() => {}} status={status(2)} />);
-    await waitFor(() => expect(ipc.agentsModelsList).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(container.querySelector('[data-model-id="only-on-account-a"]')).toBeNull());
   });
 });

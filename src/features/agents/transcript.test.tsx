@@ -207,4 +207,48 @@ describe("follow the bottom", () => {
       clientHeight.mockRestore();
     }
   });
+
+  it("offers New activity when output arrives while the reader is away from the end, and goes back there", async () => {
+    function Activity({ count }: { count: number }) {
+      const ref = useRef<HTMLDivElement>(null);
+      const { newActivity, toEnd } = useFollowBottom(ref, "task-1", count);
+      return (
+        <>
+          <div ref={ref} data-testid="log" role="log">
+            {"x ".repeat(count)}
+          </div>
+          {newActivity && (
+            <button type="button" onClick={toEnd}>
+              New activity
+            </button>
+          )}
+        </>
+      );
+    }
+    let height = 1000;
+    const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(() => height);
+    const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(200);
+    try {
+      const { rerender } = render(<Activity count={1} />);
+      const log = screen.getByTestId("log");
+      // At the end: followed, nothing to announce.
+      height = 1200;
+      rerender(<Activity count={2} />);
+      await act(async () => {});
+      expect(screen.queryByRole("button", { name: "New activity" })).toBeNull();
+      // Scrolled up: new output is announced, not followed.
+      log.scrollTop = 100;
+      fireEvent.scroll(log);
+      height = 1600;
+      rerender(<Activity count={3} />);
+      await act(async () => {});
+      expect(log.scrollTop).toBe(100);
+      fireEvent.click(screen.getByRole("button", { name: "New activity" }));
+      expect(log.scrollTop).toBe(1600);
+      expect(screen.queryByRole("button", { name: "New activity" })).toBeNull();
+    } finally {
+      scrollHeight.mockRestore();
+      clientHeight.mockRestore();
+    }
+  });
 });

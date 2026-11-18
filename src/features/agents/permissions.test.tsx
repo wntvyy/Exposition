@@ -168,9 +168,16 @@ describe("composer Ask / Auto", () => {
   });
   afterEach(() => cleanup());
 
+  /** The composer's settings live in its Options sheet (Permissions tab). */
+  const openPermissions = () => {
+    fireEvent.click(screen.getByTestId("agents-options"));
+    fireEvent.click(screen.getByRole("tab", { name: "Permissions" }));
+  };
+
   it("needs the project's permissions before an Auto task can start, then sends Auto", async () => {
     render(<TaskComposer onCreated={() => {}} />);
     fireEvent.change(screen.getByTestId("agents-prompt"), { target: { value: "Run the analysis" } });
+    openPermissions();
     // Ask: the task's own settings are shown.
     expect(screen.getByTestId("agents-permission")).toBeTruthy();
     fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
@@ -210,6 +217,7 @@ describe("composer Ask / Auto", () => {
     };
     render(<TaskComposer onCreated={() => {}} />);
     fireEvent.change(screen.getByTestId("agents-prompt"), { target: { value: "Compute 2 + 2" } });
+    openPermissions();
     await choose(/Commands and code/, "Restricted sandbox only (unattended)");
     await choose(/Document changes/, "Read only");
     const execution = screen.getByTestId("agents-execution");
@@ -217,16 +225,18 @@ describe("composer Ask / Auto", () => {
     expect(button.textContent).toContain("No commands");
     expect((button as HTMLButtonElement).disabled).toBe(true);
     expect(execution.textContent).toContain("Read only also allows no commands or code.");
+    // Allowing changes again restores the person's execution choice.
+    await choose(/Document changes/, "Ask before each change");
+    expect(within(screen.getByTestId("agents-execution")).getByRole("button").textContent).toContain(
+      "Restricted sandbox only (unattended)",
+    );
+    // Read only again, and start: no execution choice is sent with it.
+    await choose(/Document changes/, "Read only");
     await act(async () => {
       fireEvent.click(screen.getByTestId("agents-start"));
     });
     expect(ipc.agentsTaskCreate).toHaveBeenCalledWith(
       expect.objectContaining({ approvalMode: "ask", permission: "readOnly", execution: "disabled" }),
-    );
-    // Allowing changes again restores the person's execution choice.
-    await choose(/Document changes/, "Ask before each change");
-    expect(within(screen.getByTestId("agents-execution")).getByRole("button").textContent).toContain(
-      "Restricted sandbox only (unattended)",
     );
   });
 });

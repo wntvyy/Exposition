@@ -1,7 +1,7 @@
-import { ListTodo, Plus } from "lucide-react";
-import { useEffect } from "react";
+import { ArrowLeft, Plus } from "lucide-react";
+import { useEffect, useState } from "react";
 
-import { Banner, Button, Toolbar } from "../../ui/components";
+import { Banner, Button, EmptyState, IconButton, Toolbar } from "../../ui/components";
 import { providerLabel } from "./format";
 import { ReviewView } from "./ReviewView";
 import { agents, useAgents } from "./store";
@@ -28,7 +28,30 @@ function ProviderLabel() {
   );
 }
 
-/** Body of the Agent view (the shell provides the tab, header, and scrolling region). */
+/** The new task in the Agent view: a header, room for the conversation, the composer at the bottom. */
+function NewTaskView() {
+  const workspace = useAgents((s) => s.workspace);
+  const [self, setSelf] = useState<HTMLElement | null>(null);
+  return (
+    <section ref={setSelf} className="agents-task" aria-label="New task" data-testid="agents-new-task-view">
+      <header className="agents-task__header">
+        <IconButton icon={ArrowLeft} size="sm" aria-label="Back to tasks" onPress={() => agents.show("tasks", null)} data-testid="agents-show-tasks" />
+        <h2 className="agents-task__title">New task</h2>
+      </header>
+      <div className="agents-task__scroll">
+        <EmptyState
+          title="New task"
+          description={`Describe what the agent should do${workspace ? ` in ${workspace.name}` : ""}. Options sets the model, permissions, and budgets.`}
+        />
+      </div>
+      <div className="agents-task__foot">
+        <TaskComposer boundary={self} />
+      </div>
+    </section>
+  );
+}
+
+/** Body of the Agent view (the shell provides the tab and the region). */
 export function AgentPanel() {
   const view = useAgents((s) => s.view);
   const selected = useAgents((s) => s.selected);
@@ -39,24 +62,18 @@ export function AgentPanel() {
   }, []);
 
   return (
-    <div className="agents" data-testid="agents-panel">
-      <div className="agents-bar">
-        <Toolbar aria-label="Agent actions" className="agents-bar__actions">
-          <Button
-            variant="primary"
-            size="sm"
-            icon={Plus}
-            onPress={() => agents.show("compose")}
-            data-testid="agents-new-task"
-          >
-            New task
-          </Button>
-          <Button variant="ghost" size="sm" icon={ListTodo} onPress={() => agents.show("tasks", null)} data-testid="agents-show-tasks">
-            Tasks
-          </Button>
-        </Toolbar>
-        <ProviderLabel />
-      </div>
+    <div className="agents agents-panel" data-testid="agents-panel">
+      {view === "tasks" && (
+        <div className="agents-bar">
+          <h2 className="agents-task__title">Tasks</h2>
+          <Toolbar aria-label="Agent actions" className="agents-bar__actions">
+            <Button variant="primary" size="sm" icon={Plus} onPress={() => agents.show("compose")} data-testid="agents-new-task">
+              New task
+            </Button>
+          </Toolbar>
+          <ProviderLabel />
+        </div>
+      )}
       {error && (
         <div className="agents-error" data-testid="agents-error">
           <Banner tone="danger" title="Agent action failed" live actions={<Button size="sm" variant="ghost" onPress={() => agents.setError(null)}>Dismiss</Button>}>
@@ -66,7 +83,7 @@ export function AgentPanel() {
       )}
       <div className="agents-content" data-view={view}>
         {view === "tasks" && <TaskList />}
-        {view === "compose" && <TaskComposer />}
+        {view === "compose" && <NewTaskView />}
         {view === "task" && selected && <TaskView id={selected} />}
         {view === "review" && selected && <ReviewView id={selected} />}
       </div>

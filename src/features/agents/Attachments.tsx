@@ -1,13 +1,12 @@
-// Attachments in the composers (removable, with ingestion and rejection
-// states) and in the transcript (read-only; missing content marked). Rows are
-// shared ListRows; an image row leads with its thumbnail (the snapshot's own
+// Attachments in the composer (removable, with ingestion and rejection
+// states) and in the transcript (read-only; missing content marked). Each is
+// a shared Chip; an image chip leads with its thumbnail (the snapshot's own
 // bytes as a data URL from the backend, never a remote address).
-import { Paperclip, X } from "lucide-react";
 import { useEffect, useState, type ClipboardEvent } from "react";
 
 import type { AttachmentInfo } from "../../bindings/AttachmentInfo";
 import { commands } from "../../lib/ipc";
-import { Banner, Button, FileIcon, IconButton, ListRow, StatusText } from "../../ui/components";
+import { Banner, Button, Chip, FileIcon, StatusText } from "../../ui/components";
 import { clipboardImages, drafts, useDraft } from "./drafts";
 
 /** "12.3 KB" (the backend's units). */
@@ -58,32 +57,22 @@ export function useAttachmentPreview(info: AttachmentInfo): string | null {
   return wanted ? url : null;
 }
 
-function AttachmentRow({ info, onRemove }: { info: AttachmentInfo; onRemove?: () => void }) {
+function AttachmentChip({ info, onRemove }: { info: AttachmentInfo; onRemove?: () => void }) {
   const preview = useAttachmentPreview(info);
   return (
-    <ListRow
+    <Chip
       role="listitem"
-      static
-      icon={
+      label={info.name}
+      thumbnail={
         preview ? (
           <img src={preview} alt="" className="agents-attachment__thumb" data-testid="agents-attachment-thumb" />
         ) : (
           <FileIcon name={info.name} />
         )
       }
-      title={info.name}
-      meta={
-        info.missing ? (
-          <StatusText status="unavailable" label="Content no longer available" />
-        ) : (
-          <span>{attachmentMeta(info)}</span>
-        )
-      }
-      trailing={
-        onRemove && (
-          <IconButton icon={X} size="sm" aria-label={`Remove ${info.name}`} onPress={onRemove} data-testid="agents-attachment-remove" />
-        )
-      }
+      meta={info.missing ? <StatusText status="unavailable" label="Content no longer available" /> : attachmentMeta(info)}
+      onRemove={onRemove}
+      tone={info.missing ? "warning" : "neutral"}
       data-testid="agents-attachment"
       data-attachment-id={info.id}
       data-kind={info.kind}
@@ -98,36 +87,26 @@ export function MessageAttachments({ items }: { items: AttachmentInfo[] }) {
   return (
     <div role="list" aria-label="Attachments" className="agents-attachments" data-testid="agents-message-attachments">
       {items.map((info) => (
-        <AttachmentRow key={info.id} info={info} />
+        <AttachmentChip key={info.id} info={info} />
       ))}
     </div>
   );
 }
 
 /**
- * A composer's attachments: the Attach files control, the attached files
- * (each removable), ingestion in progress, and why files were not attached.
+ * A composer's attachments: the attached files (each removable), ingestion
+ * in progress, and why files were not attached. Attach is in the composer's bar.
  */
 export function DraftAttachments({ draftKey, sending = false }: { draftKey: string; sending?: boolean }) {
   const draft = useDraft(draftKey);
+  if (draft.ingesting === 0 && draft.rejections.length === 0 && draft.attachments.length === 0) return null;
   return (
-    <div className="agents-stack" data-testid="agents-draft-attachments" data-ingesting={draft.ingesting > 0 || undefined}>
-      <div className="agents-row">
-        <Button
-          size="sm"
-          variant="secondary"
-          icon={Paperclip}
-          onPress={() => void drafts.pickFiles(draftKey)}
-          data-testid="agents-attach"
-        >
-          Attach files…
-        </Button>
-        {draft.ingesting > 0 && (
-          <span role="status">
-            <StatusText status="running" label="Adding attachments…" />
-          </span>
-        )}
-      </div>
+    <div className="agents-stack agents-stack--tight" data-testid="agents-draft-attachments" data-ingesting={draft.ingesting > 0 || undefined}>
+      {draft.ingesting > 0 && (
+        <span role="status">
+          <StatusText status="running" label="Adding attachments…" />
+        </span>
+      )}
       {draft.rejections.length > 0 && (
         <Banner
           tone="warning"
@@ -151,7 +130,7 @@ export function DraftAttachments({ draftKey, sending = false }: { draftKey: stri
       {draft.attachments.length > 0 && (
         <div role="list" aria-label="Attachments" className="agents-attachments" data-testid="agents-draft-attachment-list">
           {draft.attachments.map((info) => (
-            <AttachmentRow
+            <AttachmentChip
               key={info.id}
               info={info}
               // An attachment in a send that is still running cannot be removed.

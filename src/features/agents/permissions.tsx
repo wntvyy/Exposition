@@ -2,18 +2,35 @@
 // profile, the profile editor shared with Settings, and the task view's list
 // of what the user approved for the rest of a task. Rust owns every decision;
 // these views only show it and send the user's choices.
-import { ShieldCheck, ShieldOff } from "lucide-react";
+import { Settings, ShieldCheck, ShieldOff } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import type { ApprovalMode } from "../../bindings/ApprovalMode";
 import type { CodeAccess } from "../../bindings/CodeAccess";
+import type { ContextConsent } from "../../bindings/ContextConsent";
+import type { ExecutionMode } from "../../bindings/ExecutionMode";
 import type { FilesAccess } from "../../bindings/FilesAccess";
 import type { PermissionChoice } from "../../bindings/PermissionChoice";
+import type { PermissionProfile } from "../../bindings/PermissionProfile";
 import type { ProjectPermissionsState } from "../../bindings/ProjectPermissionsState";
 import type { TaskAllowance } from "../../bindings/TaskAllowance";
 import type { TaskId } from "../../bindings/TaskId";
+import type { TaskScope } from "../../bindings/TaskScope";
+import type { TaskSummary } from "../../bindings/TaskSummary";
+import { registry } from "../../app/registry";
 import { errorMessage } from "../../lib/ipc";
-import { Banner, Button, Checkbox, Select } from "../../ui/components";
-import { ALLOWANCE_LABELS, CODE_LABELS, environmentText, FILES_LABELS, profileSummary } from "./format";
+import { Banner, Button, Checkbox, KeyValueList, Section, SegmentedControl, Select, TextArea, TextField } from "../../ui/components";
+import {
+  ALLOWANCE_LABELS,
+  APPROVAL_MODE_LABELS,
+  CODE_LABELS,
+  CONSENT_LABELS,
+  environmentText,
+  EXECUTION_LABELS,
+  FILES_LABELS,
+  PERMISSION_LABELS,
+  profileSummary,
+} from "./format";
 import { agentPermissions } from "./permissionsIpc";
 import { agents, useAgents } from "./store";
 
@@ -238,6 +255,188 @@ export function TaskAllowances({ id }: { id: TaskId }) {
           </Button>
         </span>
       ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- Options sheet: Permissions
+
+export type ScopeKind = "workspace" | "files" | "document";
+
+export const SCOPE_LABELS: Record<ScopeKind, string> = {
+  workspace: "Whole project",
+  document: "One document",
+  files: "Selected files and folders",
+};
+
+/** A scope in words ("One document: main.tex"). */
+export function scopeLabel(scope: TaskScope): string {
+  switch (scope.kind) {
+    case "workspace":
+      return SCOPE_LABELS.workspace;
+    case "document":
+      return `${SCOPE_LABELS.document}: ${scope.path}`;
+    case "selection":
+      return `Selection in ${scope.path}`;
+    case "files":
+      return scope.paths.length === 1 ? `${SCOPE_LABELS.files}: ${scope.paths[0]}` : `${scope.paths.length} selected files and folders`;
+  }
+}
+
+/** The new task's own settings (editable until it starts). */
+export interface TaskSettingsDraft {
+  approvalMode: ApprovalMode;
+  permission: PermissionProfile;
+  execution: ExecutionMode;
+  consent: ContextConsent;
+  scopeKind: ScopeKind;
+  files: string;
+  document: string;
+}
+
+/** The new task's Approvals, document changes, commands, scope, and content sent. */
+function NewTaskSettings({ value, onChange }: { value: TaskSettingsDraft; onChange: (patch: Partial<TaskSettingsDraft>) => void }) {
+  const auto = value.approvalMode === "auto";
+  // Read only is a ceiling that also allows no commands or code (the service
+  // refuses every launch); the composer shows that instead of offering an
+  // execution choice that cannot apply (XR-F-03).
+  const readOnly = value.permission === "readOnly";
+  return (
+    <>
+      <div className="agents-stack agents-stack--tight">
+        <span className="ui-field__label" aria-hidden>
+          Approvals
+        </span>
+        <SegmentedControl<ApprovalMode>
+          aria-label="Approvals"
+          value={value.approvalMode}
+          onChange={(approvalMode) => onChange({ approvalMode })}
+          options={option(APPROVAL_MODE_LABELS)}
+          data-testid="agents-approval-mode"
+        />
+        <p className="ui-meta" data-testid="agents-approval-mode-help">
+          {auto
+            ? "Proceeds within this project's permissions and asks only for anything beyond them."
+            : "Asks before actions the settings below do not cover."}
+        </p>
+      </div>
+      {!auto && (
+        <>
+          <Select
+            label="Document changes"
+            value={value.permission}
+            onChange={(permission) => onChange({ permission })}
+            options={option(PERMISSION_LABELS)}
+            data-testid="agents-permission"
+          />
+          <Select
+            label="Commands and code"
+            value={readOnly ? "disabled" : value.execution}
+            onChange={(execution) => onChange({ execution })}
+            options={option(EXECUTION_LABELS)}
+            isDisabled={readOnly}
+            description={readOnly ? "Read only also allows no commands or code." : undefined}
+            data-testid="agents-execution"
+          />
+        </>
+      )}
+      <Select
+        label="Scope"
+        value={value.scopeKind}
+        onChange={(scopeKind) => onChange({ scopeKind })}
+        options={option(SCOPE_LABELS)}
+        data-testid="agents-scope"
+      />
+      {value.scopeKind === "document" && (
+        <TextField label="Document (relative to the project folder)" code value={value.document} onChange={(document) => onChange({ document })} />
+      )}
+      {value.scopeKind === "files" && (
+        <TextArea label="Files and folders, one per line" code value={value.files} onChange={(files) => onChange({ files })} />
+      )}
+      <Select
+        label="Content sent to the model provider"
+        value={value.consent}
+        onChange={(consent) => onChange({ consent })}
+        options={option(CONSENT_LABELS)}
+      />
+    </>
+  );
+}
+
+/** A started task's settings: fixed when it started. */
+function StartedTaskSettings({ task }: { task: TaskSummary }) {
+  const { spec } = task;
+  const auto = spec.approvalMode === "auto";
+  const ceiling = [
+    spec.permission === "readOnly" ? PERMISSION_LABELS.readOnly : null,
+    spec.execution === "disabled" ? EXECUTION_LABELS.disabled : null,
+    spec.execution === "restricted" ? EXECUTION_LABELS.restricted : null,
+  ].filter((part): part is string => part !== null);
+  return (
+    <div className="agents-stack agents-stack--tight" data-testid="agents-task-settings">
+      <KeyValueList
+        items={[
+          { key: "mode", label: "Approvals", value: auto ? "Auto: project permissions" : APPROVAL_MODE_LABELS.ask },
+          ...(auto
+            ? ceiling.length
+              ? [{ key: "ceiling", label: "Limited to", value: ceiling.join(" · ") }]
+              : []
+            : [
+                { key: "changes", label: "Document changes", value: PERMISSION_LABELS[spec.permission] },
+                { key: "execution", label: "Commands and code", value: EXECUTION_LABELS[spec.execution] },
+              ]),
+          { key: "scope", label: "Scope", value: scopeLabel(spec.scope) },
+          { key: "consent", label: "Content sent", value: CONSENT_LABELS[spec.consent] },
+        ]}
+      />
+      <p className="ui-meta">Fixed when the task started.</p>
+    </div>
+  );
+}
+
+/**
+ * The Permissions tab of the composer's Options: this task (editable for a
+ * new task, fixed for a started one, with what was allowed for the rest of
+ * it), this project's Auto permissions (when Auto applies), and where the
+ * defaults for future tasks live.
+ */
+export function PermissionsPanel({
+  draft,
+  onDraftChange,
+  task,
+  projectPermissions,
+}: {
+  /** The new task's settings; omitted for a started task. */
+  draft?: TaskSettingsDraft;
+  onDraftChange?: (patch: Partial<TaskSettingsDraft>) => void;
+  task?: TaskSummary | null;
+  /** The project's permissions (loaded while Auto applies). */
+  projectPermissions: ReturnType<typeof useProjectPermissions>;
+}) {
+  const auto = task ? task.spec.approvalMode === "auto" : draft?.approvalMode === "auto";
+  return (
+    <div className="agents-stack" data-testid="agents-permissions-panel">
+      <Section title="This task">
+        <div className="agents-stack">
+          {task ? <StartedTaskSettings task={task} /> : draft && onDraftChange && <NewTaskSettings value={draft} onChange={onDraftChange} />}
+          {task && <TaskAllowances id={task.id} />}
+        </div>
+      </Section>
+      {auto && (
+        <Section title="This project's Auto permissions">
+          <AutoProfile permissions={projectPermissions} />
+        </Section>
+      )}
+      <Section title="Defaults for future tasks">
+        <div className="agents-stack agents-stack--tight">
+          <p className="ui-meta">New tasks start with the default model and content setting from Settings.</p>
+          <div className="agents-row">
+            <Button size="sm" variant="ghost" icon={Settings} onPress={() => void registry.runCommand("workbench.action.openSettings")}>
+              Open Settings
+            </Button>
+          </div>
+        </div>
+      </Section>
     </div>
   );
 }

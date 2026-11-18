@@ -15,15 +15,28 @@
   font-size: var(--font-size-md);
 }
 
-/* ---------- Agent view (auxiliary region) ---------- */
+/* ---------- Agent view (auxiliary region) ----------
+   The view fills its region: the task list scrolls as a whole; a task (or
+   the new task) keeps its header and composer in place and scrolls the
+   conversation between them. */
+
+.agents-panel {
+  height: 100%;
+}
 
 .agents-bar {
   display: flex;
+  flex: none;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1) var(--space-2);
-  padding: var(--space-1-5) var(--pane-inset);
+  min-height: var(--pane-header-height);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--pane-inset);
   border-bottom: var(--border-width) solid var(--color-border);
+}
+
+.agents-bar > .agents-task__title {
+  flex: none;
 }
 
 .agents-bar__actions {
@@ -31,7 +44,7 @@
 }
 
 .agents-provider {
-  margin-left: auto;
+  flex-basis: 100%;
 }
 
 .agents-provider[data-scripted],
@@ -40,18 +53,270 @@
 }
 
 .agents-error {
+  flex: none;
   padding: var(--space-2) var(--pane-inset) 0;
 }
 
 .agents-content {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-height: 0;
+  overflow: auto;
+}
+
+/* The review keeps its padded column. */
+.agents-content[data-view="review"] {
   padding: var(--space-3) var(--pane-inset);
 }
 
-/* The task list is a flat list of rows from edge to edge. */
-.agents-content[data-view="tasks"] {
+/* ---------- One task: header, conversation, composer ---------- */
+
+.agents-task {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Compact header: back arrow, title (up to two lines), the one StatusPill, the task's menu. */
+.agents-task__header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1-5);
+  min-height: var(--pane-header-height);
+  padding: var(--space-1);
+  border-bottom: var(--border-width) solid var(--color-border);
+}
+
+/* Item title role (13-14/600). */
+.agents-task__title {
+  display: -webkit-box;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+
+.agents-task__status {
+  display: inline-flex;
+  flex: none;
+}
+
+.agents-task__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-3) var(--pane-inset) var(--space-4);
+  user-select: text;
+}
+
+.agents-task__foot {
+  position: relative;
+  flex: none;
+  padding: var(--space-2) var(--pane-inset) var(--space-3);
+  border-top: var(--border-width) solid var(--color-border);
+  container-type: inline-size;
+}
+
+/* "New activity": above the composer while the reader is away from the end. */
+.agents-task__new-activity {
+  position: absolute;
+  bottom: calc(100% + var(--space-2));
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.agents-task__new-activity > * {
+  pointer-events: auto;
+  box-shadow: var(--shadow-2);
+}
+
+/* The readable column (the page centers it; code, figures, and review may use the page's width). */
+.agents-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 100%;
+  min-width: 0;
+  margin: 0 auto;
+}
+
+.agents-task[data-variant="page"] .agents-column {
+  max-width: 720px;
+}
+
+.agents-task[data-variant="page"] > .agents-task__scroll {
+  padding: var(--space-4) var(--space-6) var(--space-6);
+}
+
+.agents-task[data-variant="page"] > .agents-task__foot {
+  padding-inline: var(--space-6);
+}
+
+/* ---------- Composer ---------- */
+
+.agents-composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.agents-composer__context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+/* The context line is quiet text that discloses the folder on demand. */
+.agents-composer__context-button {
+  min-width: 0;
   padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: default;
+}
+
+.agents-composer__context-button:hover {
+  color: var(--color-text);
+}
+
+.agents-composer__context-button:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* The field's label is the accessible name; the composer itself is the visual frame. */
+.agents-composer__field .ui-field__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.agents-composer__bar {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.agents-composer__options {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.agents-composer__options-button {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.agents-composer__options-button > .ui-button__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agents-composer__options-name {
+  font-weight: var(--font-weight-semibold);
+}
+
+.agents-composer__options-summary {
+  color: var(--color-text-muted);
+}
+
+.agents-composer__options > .ui-badge {
+  flex: none;
+}
+
+/* Narrow (the Agent view): Options takes its own row above Attach and Send, so its summary stays legible. */
+@container (max-width: 520px) {
+  .agents-composer__bar {
+    flex-wrap: wrap;
+  }
+
+  .agents-composer__options {
+    flex: 1 0 100%;
+    order: -1;
+  }
+
+  .agents-composer__options-button {
+    flex: 1 1 auto;
+    justify-content: flex-start;
+  }
+}
+
+/* The Options sheet: a popover above the composer, the composer's width. */
+.agents-sheet-popover .ui-popover-dialog__dialog {
+  min-height: 0;
+}
+
+.agents-sheet {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.agents-sheet > .ui-tab-list {
+  flex: none;
+}
+
+.agents-sheet__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-top: var(--space-2);
+}
+
+/* ---------- Needs you (above the composer) ---------- */
+
+.agents-needs {
+  --list-inset: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0 calc(-1 * var(--space-1));
+}
+
+.agents-needs__label {
+  padding: 0 var(--space-1) var(--space-0-5);
+}
+
+.agents-needs__row .ui-list-row__icon {
+  color: var(--color-warning-text);
+}
+
+.agents-needs__jump {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-0-5);
 }
 
 /* ---------- Layout helpers ---------- */
@@ -61,6 +326,10 @@
   flex-direction: column;
   gap: var(--space-3);
   min-width: 0;
+}
+
+.agents-stack--tight {
+  gap: var(--space-1-5);
 }
 
 .agents-row {
@@ -165,25 +434,20 @@
 
 /* ---------- Attachments ---------- */
 
+.agents-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
 /* An image attachment's thumbnail (its own bytes; decorative beside the name). */
 .agents-attachment__thumb {
   display: block;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-sm);
   object-fit: cover;
 }
 
 /* ---------- Transcript and approvals ---------- */
-
-.agents-transcript {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  max-height: 55vh;
-  overflow: auto;
-  user-select: text;
-}
 
 /* Messages (.agents-msg*): transcript.css, next to Transcript.tsx. */
 
@@ -338,29 +602,47 @@
   border-color: var(--color-warning-text);
 }
 
-/* ---------- Agents page ---------- */
+/* ---------- Agents page ----------
+   A collapsible task list (or a narrow rail), the conversation in the
+   middle, and the task's Changes / Graph context / Proposals in a right
+   panel on demand — an overlay drawer when the page is narrow. */
 
 .agents-page {
+  position: relative;
+  flex-direction: row;
   height: 100%;
   min-height: 0;
   overflow: hidden;
   background: var(--color-surface);
-}
-
-.agents-page__body {
-  display: grid;
-  flex: 1;
-  grid-template-columns: var(--inspector-width) minmax(0, 1fr);
-  min-height: 0;
+  container-type: inline-size;
 }
 
 .agents-page__list {
   display: flex;
+  flex: none;
   flex-direction: column;
+  width: 300px;
   min-height: 0;
-  overflow: auto;
   border-right: var(--border-width) solid var(--color-border);
   background: var(--color-surface-sunken);
+}
+
+.agents-page[data-list="rail"] .agents-page__list {
+  width: var(--activity-rail-width);
+}
+
+.agents-page__list-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.agents-page__rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) 0;
 }
 
 .agents-page__filter {
@@ -385,37 +667,62 @@
 
 .agents-page__detail {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow: auto;
-}
-
-.agents-page__compose {
-  width: 100%;
-  max-width: var(--content-max-width);
-  padding: var(--space-3) var(--pane-inset) var(--space-6);
 }
 
 .agents-page__task {
   display: flex;
+  flex: 1;
   flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The header's title may wrap; its actions wrap under it on narrow pages. */
+.agents-page__header .ui-page-header__lead {
+  flex: 1 1 240px;
   min-width: 0;
 }
 
-.agents-page__panel {
-  padding: var(--space-3) var(--pane-inset) var(--space-6);
+.agents-page__header .ui-page-header__actions {
+  flex-wrap: wrap;
 }
 
-@media (max-width: 860px) {
-  .agents-page__body {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
-  }
+.agents-page__side {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: 420px;
+  min-height: 0;
+  border-left: var(--border-width) solid var(--color-border);
+  background: var(--color-surface-sunken);
+}
 
-  .agents-page__list {
-    max-height: 40vh;
-    border-right: none;
-    border-bottom: var(--border-width) solid var(--color-border);
+.agents-page__side-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-3) var(--pane-inset) var(--space-4);
+}
+
+/* Below 1100 px the right panel is a drawer over the conversation. */
+@container (max-width: 1100px) {
+  .agents-page__side {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: var(--z-sticky);
+    width: min(420px, 100%);
+    box-shadow: var(--shadow-3);
+  }
+}
+
+@container (max-width: 640px) {
+  .agents-page[data-list="open"] .agents-page__list {
+    width: min(300px, 50%);
   }
 }

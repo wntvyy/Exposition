@@ -3,7 +3,7 @@
 // results, reasoning summaries, and the user's own text stay plain text.
 import "./transcript.css";
 
-import { useEffect, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { EDITOR_PAGE, pages } from "../../app/pages";
 import { notify } from "../../app/notifications";
@@ -26,17 +26,30 @@ const BOTTOM_SLACK = 32;
  * put) and scrolling back to the end resumes it. Content changes of any kind
  * (streamed text rendered a frame later, typeset math, highlighting, new
  * entries) are followed. A new `key` (another task) starts at the end.
+ *
+ * `activity` is a value that changes with new recorded or streamed output
+ * (not with the reader's own expanding and collapsing). When it changes
+ * while the reader is away from the end, `newActivity` turns on (the "New
+ * activity" affordance) until they are back at the end; `toEnd` goes there.
  */
-export function useFollowBottom(ref: RefObject<HTMLElement | null>, key: unknown): void {
+export function useFollowBottom(
+  ref: RefObject<HTMLElement | null>,
+  key: unknown,
+  activity?: unknown,
+): { newActivity: boolean; toEnd: () => void } {
+  const [newActivity, setNewActivity] = useState(false);
+  const atBottom = useRef(true);
   useEffect(() => {
     const log = ref.current;
+    atBottom.current = true;
+    setNewActivity(false);
     if (!log) return;
-    let atBottom = true;
     const onScroll = () => {
-      atBottom = log.scrollHeight - log.scrollTop - log.clientHeight <= BOTTOM_SLACK;
+      atBottom.current = log.scrollHeight - log.scrollTop - log.clientHeight <= BOTTOM_SLACK;
+      if (atBottom.current) setNewActivity(false);
     };
     const follow = () => {
-      if (atBottom) log.scrollTop = log.scrollHeight;
+      if (atBottom.current) log.scrollTop = log.scrollHeight;
     };
     follow();
     log.addEventListener("scroll", onScroll, { passive: true });
@@ -47,6 +60,21 @@ export function useFollowBottom(ref: RefObject<HTMLElement | null>, key: unknown
       observer?.disconnect();
     };
   }, [ref, key]);
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    if (!atBottom.current) setNewActivity(true);
+  }, [activity]);
+  const toEnd = useCallback(() => {
+    const log = ref.current;
+    if (log) log.scrollTop = log.scrollHeight;
+    atBottom.current = true;
+    setNewActivity(false);
+  }, [ref]);
+  return { newActivity, toEnd };
 }
 
 // ---------------------------------------------------------------- actions
@@ -121,6 +149,32 @@ function AgentResponse({
   );
 }
 
+/**
+ * One recorded tool call: name, summary, status, and how it was authorized;
+ * expanding it shows the complete input and result (plain text).
+ */
+export function ToolCallRow({ item }: { item: Extract<TranscriptItem, { kind: "toolCall" }> }) {
+  const pill = toolStatusLabel(item.status, item.result);
+  // How it was authorized, quietly (nothing for reads and calls that did not run).
+  const authorization = authorizationLabel(item.authorizedBy);
+  return (
+    <details className="agents-disclosure agents-tool" data-testid="agents-tool-call" data-tool={item.name} data-status={item.status}>
+      <summary>
+        <code className="ui-code">{item.name}</code>
+        <span className="ui-meta agents-tool__summary">{toolSummary(item.name, item.input)}</span>
+        <StatusText status={pill.status} label={pill.label} />
+        {authorization && (
+          <span className="ui-meta" data-testid="agents-tool-authorization">
+            {authorization}
+          </span>
+        )}
+      </summary>
+      <pre className="agents-pre">{JSON.stringify(item.input, null, 2)}</pre>
+      {item.result && <pre className="agents-pre">{item.result}</pre>}
+    </details>
+  );
+}
+
 export function TranscriptEntry({ item }: { item: TranscriptItem }) {
   switch (item.kind) {
     case "userText":
@@ -144,27 +198,8 @@ export function TranscriptEntry({ item }: { item: TranscriptItem }) {
           <p className="agents-msg__text ui-meta">{item.text}</p>
         </details>
       );
-    case "toolCall": {
-      const pill = toolStatusLabel(item.status, item.result);
-      // How it was authorized, quietly (nothing for reads and calls that did not run).
-      const authorization = authorizationLabel(item.authorizedBy);
-      return (
-        <details className="agents-disclosure agents-tool" data-testid="agents-tool-call" data-tool={item.name}>
-          <summary>
-            <code className="ui-code">{item.name}</code>
-            <span className="ui-meta agents-tool__summary">{toolSummary(item.name, item.input)}</span>
-            <StatusText status={pill.status} label={pill.label} />
-            {authorization && (
-              <span className="ui-meta" data-testid="agents-tool-authorization">
-                {authorization}
-              </span>
-            )}
-          </summary>
-          <pre className="agents-pre">{JSON.stringify(item.input, null, 2)}</pre>
-          {item.result && <pre className="agents-pre">{item.result}</pre>}
-        </details>
-      );
-    }
+    case "toolCall":
+      return <ToolCallRow item={item} />;
     case "notice":
       return (
         <p className="agents-notice" data-level={item.level}>

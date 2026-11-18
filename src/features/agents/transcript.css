@@ -31,3 +31,80 @@
 .agents-msg .ui-response .agents-disclosure + .ui-markdown {
   margin-top: var(--space-1-5);
 }
+
+/* ---------- Turn outline (TurnOutline.tsx) ---------- */
+
+.agents-outline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.agents-turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+/* Agent turns read as an outline: a hairline and the turn header on top. */
+.agents-turn[data-role="agent"] {
+  padding-top: var(--space-2);
+  border-top: var(--border-width) solid var(--color-border-subtle);
+}
+
+/* The header: a disclosure that summarizes recorded outcomes. */
+.agents-turn__toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-0-5) var(--space-1-5);
+  margin: 0 calc(-1 * var(--space-1));
+  padding: var(--space-0-5) var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.agents-turn__toggle:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.agents-turn__toggle:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-width));
+}
+
+.agents-turn__chevron {
+  flex: none;
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.agents-turn__toggle[aria-expanded="true"] .agents-turn__chevron {
+  transform: rotate(90deg);
+}
+
+.agents-turn__summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Routine activity under the header, indented to its label. */
+.agents-turn__activity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+  margin-top: calc(-1 * var(--space-2));
+  padding-left: var(--space-3);
+}
+
+/* Jump targets of "Needs you". */
+.agents-anchor {
+  min-width: 0;
+}

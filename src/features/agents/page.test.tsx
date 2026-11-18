@@ -382,7 +382,8 @@ describe("Editor ↔ Agents navigation keeps one task and its approval", () => {
   it("the panel's task view leads to the same task on the Agents page", async () => {
     render(<AgentPanel />);
     act(() => useAgents.setState({ view: "task", selected: "task-1" }));
-    fireEvent.click(await screen.findByTestId("agents-open-page"));
+    fireEvent.click(await screen.findByTestId("agents-task-menu"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Show graph context" }));
     expect(usePages.getState().active).toBe(AGENTS_PAGE_ID);
     expect(useAgents.getState().page).toMatchObject({ selected: "task-1", tab: "graph" });
   });

@@ -185,12 +185,15 @@ describe("task view", () => {
     expect(screen.getByText("Streaming now")).toBeTruthy();
     // Task status and the tool call say the same thing.
     expect(screen.getAllByText("Waiting for approval")).toHaveLength(2);
-    expect(screen.getByRole("progressbar", { name: "Tool calls" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     });
     expect(ipc.agentsApprovalResolve).toHaveBeenCalledWith("task-1", "approval-1", true);
+    // The budget meter is in the composer's Options (Budgets).
+    fireEvent.click(screen.getByTestId("agents-options"));
+    fireEvent.click(screen.getByRole("tab", { name: "Budgets" }));
+    expect(screen.getByRole("progressbar", { name: "Tool calls" })).toBeTruthy();
   });
 
   it("shows the complete approval payload, however long, in a focusable scroll area", () => {
