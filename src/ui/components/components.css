@@ -241,8 +241,11 @@
   border-color: var(--color-border-strong);
   background: var(--color-surface-raised);
 }
-/* Disclosure toggles (aria-expanded) show their open state. */
-.ui-icon-button[aria-expanded="true"] {
+/* Disclosure toggles (aria-expanded) show their open state: icon buttons and
+   secondary/ghost text buttons (menu and sheet triggers). Hover and press
+   keep their own feedback while open. */
+.ui-icon-button[aria-expanded="true"],
+.ui-button:is([data-variant="secondary"], [data-variant="ghost"])[aria-expanded="true"]:not([data-hovered], [data-pressed]) {
   background: var(--color-surface-selected);
   color: var(--color-text);
 }
@@ -1955,11 +1958,23 @@ th.ui-data-table__cell {
   max-width: 360px;
   padding: var(--space-2) var(--space-3) var(--space-3);
 }
+/* Anchored to an element (a composer): exactly its width. */
+.ui-popover-dialog[data-width="anchor"] {
+  width: var(--trigger-width);
+  min-width: 0;
+  max-width: none;
+}
 .ui-popover-dialog__dialog {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  min-width: 0;
   outline: none;
+}
+/* Bounded to a container or a max height: the content scrolls inside. */
+.ui-popover-dialog__dialog[data-bounded] {
+  min-height: 0;
+  overflow-y: auto;
 }
 .ui-popover-dialog__title {
   margin: 0;
@@ -2181,4 +2196,248 @@ th.ui-data-table__cell {
   gap: var(--space-1);
   color: var(--color-text-subtle);
   font-size: var(--font-size-sm);
+}
+
+/* ---------- Discrete slider ---------- */
+
+.ui-slider {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.ui-slider__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.ui-slider__value {
+  margin-left: auto;
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}
+.ui-slider[data-kind="fixed"] .ui-slider__value {
+  font-weight: var(--font-weight-medium);
+}
+/* The track is inset by half a thumb so the end stops sit inside the control. */
+.ui-slider__track {
+  position: relative;
+  height: var(--space-5);
+  margin: 0 var(--space-2);
+}
+.ui-slider__rail,
+.ui-slider__fill {
+  position: absolute;
+  top: var(--space-2);
+  left: 0;
+  height: var(--space-1);
+  border-radius: var(--radius-full);
+}
+.ui-slider__rail {
+  right: 0;
+  background: var(--color-border);
+}
+.ui-slider__fill {
+  background: var(--color-accent);
+}
+.ui-slider__tick {
+  position: absolute;
+  top: calc(var(--space-2) - 1px);
+  width: var(--space-1-5);
+  height: var(--space-1-5);
+  margin-left: calc(-1 * var(--space-1-5) / 2);
+  border-radius: var(--radius-full);
+  background: var(--color-border-strong);
+}
+.ui-slider__tick[data-reached] {
+  background: var(--color-accent);
+}
+/* react-aria positions the thumb with translate(-50%, -50%). */
+.ui-slider__thumb {
+  top: 50%;
+  width: var(--space-4);
+  height: var(--space-4);
+  border: 2px solid var(--color-accent);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-1);
+  cursor: grab;
+}
+.ui-slider__thumb[data-dragging] {
+  background: var(--color-accent-subtle);
+  cursor: grabbing;
+}
+.ui-slider__thumb[data-focus-visible] {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+.ui-slider[data-disabled] .ui-slider__fill,
+.ui-slider[data-disabled] .ui-slider__tick[data-reached] {
+  background: var(--color-text-disabled);
+}
+.ui-slider[data-disabled] .ui-slider__thumb {
+  border-color: var(--color-text-disabled);
+  box-shadow: none;
+  cursor: default;
+}
+.ui-slider[data-disabled] .ui-slider__value,
+.ui-slider[data-disabled] .ui-slider__stop[data-current] {
+  color: var(--color-text-disabled);
+}
+.ui-slider__stops {
+  position: relative;
+  height: var(--space-4);
+  margin: 0 var(--space-2);
+}
+.ui-slider__stop {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  color: var(--color-text-subtle);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  cursor: default;
+}
+.ui-slider__stop[data-edge="start"] {
+  transform: translateX(calc(-1 * var(--space-2)));
+}
+.ui-slider__stop[data-edge="end"] {
+  transform: translateX(calc(-100% + var(--space-2)));
+}
+.ui-slider__stop[data-current] {
+  color: var(--color-text);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* ---------- Chips (removable attachments and context) ---------- */
+
+.ui-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  max-width: 100%;
+  min-width: 0;
+  height: var(--control-height-sm);
+  padding: 0 var(--space-2) 0 var(--space-1-5);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-chip);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  line-height: 1;
+}
+.ui-chip[data-removable] {
+  padding-right: var(--space-0-5);
+}
+.ui-chip[data-tone="accent"] {
+  border-color: var(--color-accent-subtle);
+  background: var(--color-accent-subtle);
+}
+.ui-chip[data-tone="warning"] {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+}
+.ui-chip__icon {
+  flex: none;
+  color: var(--color-text-muted);
+}
+.ui-chip[data-tone="warning"] .ui-chip__icon {
+  color: var(--color-warning-text);
+}
+.ui-chip__thumbnail {
+  display: inline-flex;
+  flex: none;
+  width: var(--space-5);
+  height: var(--space-5);
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+}
+.ui-chip__thumbnail > :is(img, svg) {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ui-chip__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-chip__meta {
+  flex: none;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+/* The remove button fits inside the 24px chip. */
+.ui-chip .ui-chip__remove {
+  width: var(--space-5);
+  height: var(--space-5);
+  border-radius: var(--radius-sm);
+}
+.ui-chip .ui-chip__remove > svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+.ui-chip[data-disabled],
+.ui-chip[data-disabled] :is(.ui-chip__icon, .ui-chip__meta) {
+  color: var(--color-text-disabled);
+}
+
+/* ---------- Option lists (radio choices with consequences) ---------- */
+
+.ui-option-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.ui-option-list__options {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+/* Rows are ListRows (dividers, hover, selection tint); none below the last. */
+.ui-option-list__option:last-child {
+  border-bottom: 0;
+}
+.ui-option-list__option[data-focus-visible] {
+  box-shadow: inset 0 0 0 var(--focus-ring-width) var(--color-focus-ring);
+}
+.ui-option-list__option[data-disabled],
+.ui-option-list__option[data-disabled] .ui-list-row__meta {
+  color: var(--color-text-disabled);
+}
+.ui-option-list__option[data-disabled]:hover {
+  background: transparent;
+}
+.ui-option-list__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-0-5) var(--space-1-5);
+  min-width: 0;
+}
+.ui-radio-mark {
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+  margin-top: 1px;
+  border: var(--border-width) solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  background: var(--color-field);
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+.ui-option-list__option[data-selected] .ui-radio-mark {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  box-shadow: inset 0 0 0 3px var(--color-field);
+}
+.ui-option-list__option[data-disabled] .ui-radio-mark {
+  border-color: var(--color-border);
+}
+.ui-option-list__option[data-disabled][data-selected] .ui-radio-mark {
+  background: var(--color-text-disabled);
 }

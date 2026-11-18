@@ -24,7 +24,7 @@ import {
   TriangleAlert,
   WrapText,
 } from "lucide-react";
-import { lazy, Suspense, useId, useState, type ReactNode } from "react";
+import { lazy, Suspense, useId, useRef, useState, type ReactNode } from "react";
 import { Group, Panel as ResizablePanel } from "react-resizable-panels";
 
 import { formatKeybinding } from "../../app/keybindings";
@@ -36,6 +36,7 @@ import {
   Banner,
   Button,
   Checkbox,
+  Chip,
   confirmUnsaved,
   Dialog,
   DialogTrigger,
@@ -57,9 +58,11 @@ import {
   MenuSeparator,
   MenuTrigger,
   NodeCard,
+  OptionList,
   PageHeader,
   Panel,
   PanelBody,
+  PopoverDialog,
   PanelHeader,
   ProgressBar,
   ResizeHandle,
@@ -69,6 +72,7 @@ import {
   SegmentedControl,
   Select,
   SimpleTable,
+  Slider,
   Spinner,
   StateSizeProvider,
   StatusPill,
@@ -158,6 +162,98 @@ const sampleTabs: EditorTabItem[] = [
   { key: "analysis.py", title: "analysis.py", icon: FileCode, dirty: true, description: "research/analysis.py" },
   { key: "refs.bib", title: "refs.bib", icon: File, preview: true, description: "refs.bib (preview)" },
 ];
+
+const sampleEfforts = [
+  { id: "low", label: "Low" },
+  { id: "medium", label: "Medium" },
+  { id: "high", label: "High" },
+  { id: "max", label: "Max" },
+];
+
+function SliderSamples() {
+  const [effort, setEffort] = useState("high");
+  return (
+    <>
+      <Specimen label="Slider (discrete stops; arrows, Home, End; drag snaps)">
+        <div className="ref-control-frame">
+          <Slider label="Effort" values={sampleEfforts} value={effort} onChange={setEffort} description="Levels this model supports." />
+        </div>
+      </Specimen>
+      <Specimen label="Slider with one stop (fixed) and disabled">
+        <div className="ref-control-frame">
+          <Slider label="Effort" values={[{ id: "high", label: "High" }]} value="high" onChange={() => {}} />
+          <Slider label="Effort" values={sampleEfforts} value="low" onChange={() => {}} isDisabled />
+        </div>
+      </Specimen>
+    </>
+  );
+}
+
+function OptionListSample() {
+  const [choice, setChoice] = useState<string | null>(null);
+  return (
+    <Specimen label="Option list (radio choices with consequences; nothing preselected)" wide>
+      <div className="ref-control-frame">
+        <OptionList
+          label="How should the fit handle the outlier?"
+          value={choice}
+          onChange={setChoice}
+          options={[
+            { id: "refit", label: "Refit without the outlier", description: "Replaces Figure 2 and the fitted values in Table 1.", recommended: true },
+            { id: "keep", label: "Keep the current fit", description: "Nothing changes." },
+            { id: "both", label: "Report both fits", description: "Adds a supplementary figure.", badge: <Badge>Longer</Badge> },
+          ]}
+        />
+      </div>
+    </Specimen>
+  );
+}
+
+function ChipSamples() {
+  const [chips, setChips] = useState(["observations.csv", "a-very-long-attachment-name-from-the-instrument-export.json"]);
+  return (
+    <Specimen label="Chips (removable attachments and context)" wide>
+      <div className="ref-chip-row" role="list" aria-label="Sample attachments">
+        {chips.map((name) => (
+          <Chip key={name} role="listitem" icon={FileText} label={name} meta="16 KB" onRemove={() => setChips((c) => c.filter((n) => n !== name))} />
+        ))}
+        <Chip role="listitem" label="figure-2.png" meta="1.2 MB" thumbnail={<span className="ref-thumbnail" />} />
+        <Chip role="listitem" tone="accent" label="About: Which baseline should the comparison use?" removeLabel="Remove About" onRemove={() => {}} />
+        <Chip role="listitem" tone="warning" icon={TriangleAlert} label="scan.pdf" meta="Too large to send" onRemove={() => {}} />
+        <Chip role="listitem" icon={File} label="notes.md" isDisabled onRemove={() => {}} />
+      </div>
+    </Specimen>
+  );
+}
+
+function AnchoredPopoverSample() {
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [panel, setPanel] = useState<HTMLDivElement | null>(null);
+  return (
+    <Specimen label="Popover anchored to an element (anchor width, bounded by the panel)">
+      <div className="ref-panel-frame ref-anchor-frame" ref={setPanel}>
+        <div className="ref-anchor-frame__composer" ref={anchorRef}>
+          <span className="ui-meta">Composer (sample)</span>
+          <Button size="sm" variant="ghost" aria-expanded={open} onPress={() => setOpen(true)}>
+            Options
+          </Button>
+        </div>
+        <PopoverDialog
+          title="Options"
+          triggerRef={anchorRef}
+          isOpen={open}
+          onOpenChange={setOpen}
+          placement="top"
+          width="anchor"
+          boundaryElement={panel}
+        >
+          <Slider label="Effort" values={sampleEfforts} value="medium" onChange={() => {}} />
+        </PopoverDialog>
+      </div>
+    </Specimen>
+  );
+}
 
 function EditorTabsSample() {
   const [tabs, setTabs] = useState(sampleTabs);
@@ -382,6 +478,13 @@ export function UiReference() {
           <IconButton icon={Copy} aria-label="Copy" variant="secondary" />
           <IconButton icon={Settings2} aria-label="Settings" isDisabled />
         </Specimen>
+        <Specimen label="Open state (aria-expanded: menu or sheet open)">
+          <Button aria-expanded>Options</Button>
+          <Button variant="ghost" aria-expanded>
+            Model
+          </Button>
+          <IconButton icon={Settings2} aria-label="Settings (open)" aria-expanded />
+        </Specimen>
         <Specimen label="Toggle buttons">
           <ToggleButton icon={WrapText} variant="secondary" isSelected={wrap} onChange={setWrap}>
             Wrap lines
@@ -484,6 +587,7 @@ export function UiReference() {
             </Dialog>
           </DialogTrigger>
         </Specimen>
+        <AnchoredPopoverSample />
         <Specimen label="Confirm: unsaved changes">
           <Button onPress={async () => setUnsavedResult(await confirmUnsaved("analysis.py"))}>Close dirty file…</Button>
           {unsavedResult && <span className="ref-result">Result: {unsavedResult}</span>}
@@ -521,6 +625,9 @@ export function UiReference() {
           <Switch defaultSelected>Auto-build</Switch>
           <Switch>Show whitespace</Switch>
         </Specimen>
+        <SliderSamples />
+        <OptionListSample />
+        <ChipSamples />
       </RefSection>
 
       <RefSection title="Tooltip, toolbar, panel, section">
