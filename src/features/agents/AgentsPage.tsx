@@ -3,8 +3,8 @@
 // transcripts, approvals, and reviews are shared; this page only adds its own
 // navigation (selected task, section, filter), so moving between Editor and
 // Agents never duplicates a task or loses an approval or review.
-import { Archive, Bot, BookmarkCheck, FolderOpen, ListTodo, Network, PanelRight, Plus, Square } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Archive, Bot, BookmarkCheck, FileDiff, FolderOpen, GitPullRequestArrow, Network, PanelLeftClose, PanelLeftOpen, PanelRight, Plus, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import type { GraphSnapshot } from "../../bindings/GraphSnapshot";
 import type { TaskId } from "../../bindings/TaskId";
@@ -14,20 +14,18 @@ import { layout } from "../../app/layout";
 import { EDITOR_PAGE, pages, usePages } from "../../app/pages";
 import { notify } from "../../app/notifications";
 import { registry } from "../../app/registry";
-import { commands, errorMessage } from "../../lib/ipc";
+import { errorMessage } from "../../lib/ipc";
 import {
   Banner,
   Button,
   EmptyState,
-  InspectorHeader,
+  IconButton,
   PageHeader,
+  PanelHeader,
   Section,
   SegmentedControl,
   StatusPill,
-  Tab,
-  TabList,
-  TabPanel,
-  Tabs,
+  ToggleButton,
 } from "../../ui/components";
 import { isActive, statusLabel } from "./format";
 import { agentGraph } from "./graphIpc";
@@ -38,7 +36,8 @@ import { AGENT_VIEW_ID, AGENTS_PAGE_ID, agents, type PageTab, type TaskFilter, u
 import { TaskComposer } from "./TaskComposer";
 import { TaskRow } from "./TaskList";
 import { taskActions } from "./taskOps";
-import { TaskView } from "./TaskView";
+import { unsavedCount, useTaskReview } from "./taskReview";
+import { TaskMenu, TaskView } from "./TaskView";
 import "./agents.css";
 
 const FILTERS: { id: TaskFilter; label: string }[] = [
@@ -152,10 +151,31 @@ function KeptEntities({ snapshot, error }: { snapshot: GraphSnapshot | null; err
   );
 }
 
+/** "Changes 3 · 2 unsaved" (the unsaved count once the review records carry it). */
+export function changesLabel(files: number, unsaved: number): string {
+  return `Changes ${files}${unsaved ? ` · ${unsaved} unsaved` : ""}`;
+}
+
+/** "Proposals 2 · 1 waiting". */
+export function proposalsLabel(total: number, waiting: number): string {
+  return `Proposals ${total}${waiting ? ` · ${waiting} waiting` : ""}`;
+}
+
+/**
+ * The selected task's header: title, the one StatusPill, the context panels
+ * (Changes, Graph context, Proposals) as toggles of the right panel, Keep as
+ * investigation, Show in Agent panel, and the task's menu.
+ */
 function TaskHeader({ task, kept, onKept }: { task: TaskSummary; kept: boolean; onKept: () => void }) {
   const [busy, setBusy] = useState(false);
+  const tab = useAgents((s) => s.page.tab);
+  const proposals = useAgents((s) => s.details[task.id]?.graph?.proposals);
+  const reviews = useTaskReview(task.id, task.changedFiles);
   const pill = statusLabel(task.status);
   const active = isActive(task.status);
+  const total = proposals?.length ?? 0;
+  const waiting = proposals?.filter((p) => p.state === "awaitingApproval").length ?? 0;
+  const toggle = (next: Exclude<PageTab, "run">) => agents.setPage({ tab: tab === next ? "run" : next });
   async function keep() {
     setBusy(true);
     const entity = await agents.run(() => agentGraph.keepInvestigation(task.id));
@@ -166,20 +186,41 @@ function TaskHeader({ task, kept, onKept }: { task: TaskSummary; kept: boolean; 
     }
   }
   return (
-    <InspectorHeader
+    <PageHeader
       title={task.title}
-      meta={
+      className="agents-page__header"
+      status={
         <span data-testid="agents-page-status" data-status={task.status.kind}>
           <StatusPill status={pill.status} label={pill.label} />
         </span>
       }
       actions={
         <>
-          {active && (
-            <Button size="sm" variant="secondary" icon={Square} onPress={() => void agents.run(() => commands.agentsTaskCancel(task.id))}>
-              Cancel
-            </Button>
+          {task.changedFiles > 0 && (
+            <ToggleButton
+              size="sm"
+              variant="secondary"
+              icon={FileDiff}
+              isSelected={tab === "changes"}
+              onChange={() => toggle("changes")}
+              data-testid="agents-page-changes"
+            >
+              {changesLabel(task.changedFiles, unsavedCount(reviews))}
+            </ToggleButton>
           )}
+          <ToggleButton size="sm" variant="secondary" icon={Network} isSelected={tab === "graph"} onChange={() => toggle("graph")} data-testid="agents-show-graph">
+            Graph context
+          </ToggleButton>
+          <ToggleButton
+            size="sm"
+            variant="secondary"
+            icon={GitPullRequestArrow}
+            isSelected={tab === "proposals"}
+            onChange={() => toggle("proposals")}
+            data-testid="agents-page-proposals"
+          >
+            {proposalsLabel(total, waiting)}
+          </ToggleButton>
           <Button
             size="sm"
             icon={kept ? BookmarkCheck : Archive}
@@ -203,54 +244,90 @@ function TaskHeader({ task, kept, onKept }: { task: TaskSummary; kept: boolean; 
           >
             Show in Agent panel
           </Button>
+          <TaskMenu task={task} where="page" />
         </>
       }
     />
   );
 }
 
-function TaskDetailSections({ id, kept, onKept }: { id: TaskId; kept: boolean; onKept: () => void }) {
+const SIDE_TITLES: Record<Exclude<PageTab, "run">, string> = { changes: "Changes", graph: "Graph context", proposals: "Proposals" };
+
+/** The right panel: the task's Changes, Graph context, or Proposals (an overlay drawer on narrow pages). */
+function SidePanel({ id, tab }: { id: TaskId; tab: Exclude<PageTab, "run"> }) {
   const task = useAgents((s) => s.details[id]?.summary ?? s.tasks.find((t) => t.id === id));
   const graph = useAgents((s) => s.details[id]?.graph);
-  const tab = useAgents((s) => s.page.tab);
+  const close = () => agents.setPage({ tab: "run" });
+  const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape" && !event.defaultPrevented) {
+      event.preventDefault();
+      close();
+    }
+  };
   if (!task) return null;
-  const proposals = graph?.proposals ?? [];
-  const waiting = proposals.filter((p) => p.state === "awaitingApproval").length;
   return (
-    <div className="agents-page__task" data-testid="agents-page-task-detail" data-task-id={id}>
-      <TaskHeader task={task} kept={kept} onKept={onKept} />
-      <Tabs selectedKey={tab} onSelectionChange={(key) => agents.setPage({ tab: key as PageTab })}>
-        <TabList aria-label="Task sections">
-          <Tab id="run" icon={ListTodo}>
-            Run
-          </Tab>
-          <Tab id="graph" icon={Network}>
-            Graph context
-          </Tab>
-          <Tab id="proposals" count={waiting ? `${proposals.length} · ${waiting} waiting` : proposals.length}>
-            Proposals
-          </Tab>
-          <Tab id="changes" count={task.changedFiles}>
-            Changes
-          </Tab>
-        </TabList>
-        <TabPanel id="run" className="agents-page__panel">
-          <TaskView id={id} variant="page" />
-        </TabPanel>
-        <TabPanel id="graph" className="agents-page__panel">
-          {graph ? <GraphContextView graph={graph} /> : null}
-        </TabPanel>
-        <TabPanel id="proposals" className="agents-page__panel">
-          <ProposalList proposals={proposals} />
-        </TabPanel>
-        <TabPanel id="changes" className="agents-page__panel">
-          {task.changedFiles > 0 ? (
+    <aside className="agents-page__side" aria-label={SIDE_TITLES[tab]} data-testid="agents-page-side" data-panel={tab} onKeyDown={onKeyDown}>
+      <PanelHeader
+        title={SIDE_TITLES[tab]}
+        actions={<IconButton icon={X} size="sm" aria-label={`Close ${SIDE_TITLES[tab]}`} onPress={close} data-testid="agents-page-side-close" />}
+      />
+      <div className="agents-page__side-body" data-tab={tab}>
+        {tab === "changes" ? (
+          task.changedFiles > 0 ? (
             <ReviewView id={id} showBack={false} />
           ) : (
             <p className="ui-meta">This task has not changed any files.</p>
-          )}
-        </TabPanel>
-      </Tabs>
+          )
+        ) : tab === "graph" ? (
+          graph ? (
+            <GraphContextView graph={graph} />
+          ) : null
+        ) : (
+          <ProposalList proposals={graph?.proposals ?? []} />
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function TaskDetailSections({ id, kept, onKept, boundary }: { id: TaskId; kept: boolean; onKept: () => void; boundary: Element | null }) {
+  const task = useAgents((s) => s.details[id]?.summary ?? s.tasks.find((t) => t.id === id));
+  const tab = useAgents((s) => s.page.tab);
+  if (!task) return null;
+  return (
+    <div className="agents-page__task" data-testid="agents-page-task-detail" data-task-id={id}>
+      <TaskHeader task={task} kept={kept} onKept={onKept} />
+      <TaskView
+        id={id}
+        variant="page"
+        boundary={boundary}
+        onReview={() => agents.setPage({ tab: "changes" })}
+        reviewShown={tab === "changes"}
+      />
+    </div>
+  );
+}
+
+/** The page's new task: the conversation area stays empty until it starts. */
+function NewTaskCenter({ boundary }: { boundary: Element | null }) {
+  const workspace = useAgents((s) => s.workspace);
+  return (
+    <div className="agents-page__task" data-testid="agents-page-compose">
+      <PageHeader title="New task" className="agents-page__header" />
+      <div className="agents-task" data-variant="page">
+        <div className="agents-task__scroll">
+          <EmptyState
+            icon={Bot}
+            title="New task"
+            description={`Describe what the agent should do${workspace ? ` in ${workspace.name}` : ""}. These are the same tasks as in the Agent panel. Options sets the model, permissions, and budgets.`}
+          />
+        </div>
+        <div className="agents-task__foot">
+          <div className="agents-column">
+            <TaskComposer boundary={boundary} onCreated={(id) => agents.setPage({ selected: id, composing: false, tab: "run" })} />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -267,6 +344,8 @@ export function AgentsPage() {
   const showing = usePages((s) => s.active === AGENTS_PAGE_ID);
   const [kept, setKept] = useState<GraphSnapshot | null>(null);
   const [keptError, setKeptError] = useState<string | null>(null);
+  const [listOpen, setListOpen] = useState(true);
+  const [center, setCenter] = useState<HTMLElement | null>(null);
 
   const keptSeq = useRef(0);
   const refreshKept = useCallback(async () => {
@@ -293,82 +372,78 @@ export function AgentsPage() {
   }, [showing, workspace?.root, keptSignal, refreshKept]);
 
   const keptIds = keptTaskIds(kept);
+  const newTask = (
+    <Button size="sm" icon={Plus} onPress={() => agents.setPage({ composing: true })} data-testid="agents-page-new-task">
+      New task
+    </Button>
+  );
+  const side = page.selected && !page.composing && page.tab !== "run" ? page.tab : null;
   return (
-    <div className="agents agents-page" data-testid="agents-page">
-      <PageHeader
-        level={1}
-        title="Agents"
-        region="agents-header"
-        actions={
-          <Button
-            variant={workspace ? "primary" : "secondary"}
-            size="sm"
-            icon={Plus}
-            onPress={() => agents.setPage({ composing: true })}
-            data-testid="agents-page-new-task"
-          >
-            New task
-          </Button>
-        }
-      />
-      <div className="agents-page__body">
-        <aside className="agents-page__list" aria-label="Agent tasks and kept work" data-region="agents-tasks">
-          <PageTaskList kept={keptIds} />
-          <Section title="Kept in the project graph" className="agents-page__kept">
-            <KeptEntities snapshot={kept} error={keptError} />
-          </Section>
-        </aside>
-        <section className="agents-page__detail" aria-label="Selected agent task" data-region="agents-detail">
-          {error && (
-            <div className="agents-error" data-testid="agents-page-error">
-              <Banner
-                tone="danger"
-                title="Agent action failed"
-                live
-                actions={
-                  <Button size="sm" variant="ghost" onPress={() => agents.setError(null)}>
-                    Dismiss
-                  </Button>
-                }
-              >
-                {error}
-              </Banner>
-            </div>
-          )}
-          {page.composing ? (
-            <div className="agents-page__compose">
-              <TaskComposer
-                onCreated={(id) => agents.setPage({ selected: id, composing: false, tab: "run" })}
-                onCancel={() => agents.setPage({ composing: false })}
-              />
-            </div>
-          ) : page.selected ? (
-            <TaskDetailSections id={page.selected} kept={keptIds.has(page.selected)} onKept={() => void refreshKept()} />
-          ) : !workspace ? (
-            <EmptyState
-              icon={FolderOpen}
-              title="No folder open"
-              description="Agent tasks work in the open project folder. Open a folder to start or continue tasks."
+    <div className="agents agents-page" data-testid="agents-page" data-list={listOpen ? "open" : "rail"} data-side={side ?? undefined}>
+      <aside className="agents-page__list" aria-label="Agent tasks and kept work" data-region="agents-tasks">
+        {listOpen ? (
+          <>
+            <PageHeader
+              level={1}
+              title="Agents"
+              region="agents-header"
               actions={
-                <Button variant="primary" icon={FolderOpen} onPress={() => void registry.runCommand("workspace.openFolder")}>
-                  Open Folder…
-                </Button>
+                <>
+                  {newTask}
+                  <IconButton icon={PanelLeftClose} size="sm" aria-label="Collapse task list" onPress={() => setListOpen(false)} data-testid="agents-page-collapse" />
+                </>
               }
             />
-          ) : (
-            <EmptyState
-              icon={Bot}
-              title="Select a task"
-              description="These are the same tasks as in the Agent panel. Select one to see its run, graph context, proposals, and changes."
+            <div className="agents-page__list-body">
+              <PageTaskList kept={keptIds} />
+              <Section title="Kept in the project graph" className="agents-page__kept">
+                <KeptEntities snapshot={kept} error={keptError} />
+              </Section>
+            </div>
+          </>
+        ) : (
+          <nav className="agents-page__rail" aria-label="Agent tasks (collapsed)">
+            <h1 className="ui-visually-hidden">Agents</h1>
+            <IconButton icon={PanelLeftOpen} aria-label="Show task list" onPress={() => setListOpen(true)} data-testid="agents-page-expand" />
+            <IconButton icon={Plus} aria-label="New task" onPress={() => agents.setPage({ composing: true })} data-testid="agents-page-new-task" />
+          </nav>
+        )}
+      </aside>
+      <section ref={setCenter} className="agents-page__detail" aria-label="Selected agent task" data-region="agents-detail">
+        {error && (
+          <div className="agents-error" data-testid="agents-page-error">
+            <Banner
+              tone="danger"
+              title="Agent action failed"
+              live
               actions={
-                <Button icon={Plus} onPress={() => agents.setPage({ composing: true })}>
-                  New task
+                <Button size="sm" variant="ghost" onPress={() => agents.setError(null)}>
+                  Dismiss
                 </Button>
               }
-            />
-          )}
-        </section>
-      </div>
+            >
+              {error}
+            </Banner>
+          </div>
+        )}
+        {page.selected && !page.composing ? (
+          <TaskDetailSections id={page.selected} kept={keptIds.has(page.selected)} onKept={() => void refreshKept()} boundary={center} />
+        ) : !workspace ? (
+          <EmptyState
+            icon={FolderOpen}
+            title="No folder open"
+            description="Agent tasks work in the open project folder. Open a folder to start or continue tasks."
+            actions={
+              <Button variant="primary" icon={FolderOpen} onPress={() => void registry.runCommand("workspace.openFolder")}>
+                Open Folder…
+              </Button>
+            }
+          />
+        ) : (
+          <NewTaskCenter boundary={center} />
+        )}
+      </section>
+      {side && page.selected && <SidePanel id={page.selected} tab={side} />}
     </div>
   );
 }

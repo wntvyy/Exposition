@@ -26,7 +26,10 @@ export const AGENTS_PAGE_ID = "agents";
 
 export type PanelView = "tasks" | "compose" | "task" | "review";
 
-/** Sections of a task on the Agents page. */
+/**
+ * The Agents page's right panel beside the conversation: `run` = none (the
+ * conversation alone), else the task's Graph context, Proposals, or Changes.
+ */
 export type PageTab = "run" | "graph" | "proposals" | "changes";
 
 /** Which tasks the Agents page lists. */
@@ -350,7 +353,8 @@ function agentsPageShowing(): boolean {
 /** Whether the task's approval card is on screen right now (panel or page). */
 function approvalShowing(taskId: TaskId): boolean {
   const { view, selected, page } = useAgents.getState();
-  if (agentsPageShowing()) return page.selected === taskId && page.tab === "run" && !page.composing;
+  // The page shows the conversation beside its right panel (Changes, Graph context, Proposals).
+  if (agentsPageShowing()) return page.selected === taskId && !page.composing;
   return agentViewShowing() && view === "task" && selected === taskId;
 }
 

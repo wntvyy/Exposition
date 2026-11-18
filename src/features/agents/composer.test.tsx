@@ -29,8 +29,34 @@ vi.mock("../../lib/ipc", () => ({
   events: { agents: vi.fn(), agentsResync: vi.fn() },
   errorMessage: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }));
+// The model menu belongs to the settings lane; the composer only passes its
+// value, the running model, and the provider-settings action through.
+const modelMenu = vi.hoisted(() => ({ props: null as null | Record<string, unknown> }));
+vi.mock("./ModelMenu", () => ({
+  ModelMenu: (props: { value: unknown; onChange: (c: unknown) => void; running?: unknown; onManageProviders: () => void }) => {
+    modelMenu.props = props;
+    return (
+      <div data-testid="model-menu" data-value={JSON.stringify(props.value)} data-running={JSON.stringify(props.running ?? null)}>
+        <button type="button" onClick={() => props.onChange({ provider: "openai", model: "gpt-6.2-sol", effort: "medium" })}>
+          Pick gpt-6.2-sol
+        </button>
+        <button type="button" onClick={() => props.onChange({ provider: "openai", model: "gpt-4.1-nano", effort: "medium" })}>
+          Pick gpt-4.1-nano
+        </button>
+        <button type="button" onClick={() => props.onChange(null)}>
+          Inherit
+        </button>
+      </div>
+    );
+  },
+}));
+const registryRun = vi.hoisted(() => vi.fn());
+vi.mock("../../app/registry", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../app/registry")>();
+  return { ...actual, registry: { ...actual.registry, runCommand: registryRun } };
+});
 
-const { TaskComposer, DEFAULT_BUDGETS } = await import("./TaskComposer");
+const { TaskComposer, DEFAULT_BUDGETS, optionsSummary, resetComposerForTests, SEND_WAITS } = await import("./TaskComposer");
 const { TaskView } = await import("./TaskView");
 const { TranscriptEntry } = await import("./Transcript");
 const { drafts, NEW_TASK_DRAFT, clipboardImages, genericPasteName } = await import("./drafts");
@@ -135,9 +161,19 @@ beforeEach(() => {
   );
   ipc.agentsTaskCreate.mockResolvedValue(summary({ id: "task-9" }));
   drafts.resetForTests();
+  resetComposerForTests();
+  registryRun.mockReset();
   useAgents.setState({ ...initialAgentsState, status, workspace: { root: "C:/paper", name: "paper" } as never });
 });
 afterEach(cleanup);
+
+/** Open the composer's Options sheet on a tab. */
+function openOptions(tab: "Model" | "Permissions" | "Budgets") {
+  const button = screen.getByTestId("agents-options");
+  if (button.getAttribute("aria-expanded") !== "true") fireEvent.click(button);
+  fireEvent.click(screen.getByRole("tab", { name: new RegExp(`^${tab}`) }));
+}
+const optionsText = () => screen.getByTestId("agents-options").textContent ?? "";
 
 describe("clipboard and formatting helpers", () => {
   it("takes image files once, from the items when they hold any, and never text, HTML, or URLs", () => {
@@ -297,41 +333,13 @@ describe("new task composer", () => {
   });
 
   it("inherits the default model unless one is chosen for this task, and sends the explicit choice", async () => {
-    const openai: ModelCatalog = {
-      provider: "openai",
-      state: "fresh",
-      fetchedAtMs: Date.now(),
-      error: null,
-      models: [
-        {
-          provider: "openai",
-          id: "gpt-6.2-sol",
-          displayName: "gpt-6.2-sol",
-          lifecycle: { kind: "active" },
-          agent: { kind: "supported" },
-          capabilities: { tools: "yes", images: "yes", pdf: "yes", efforts: ["low", "medium", "high"], contextTokens: null, maxOutputTokens: null },
-          source: "catalog",
-          createdAtMs: 2,
-        },
-      ],
-      suggested: "gpt-6.2-sol",
-      suggestedReason: "The newest model Exposition supports for agents on this connection.",
-      metadataChecked: "2026-11-17",
-    };
-    ipc.agentsModelsList.mockImplementation((provider: string) =>
-      Promise.resolve(provider === "openai" ? openai : { ...openai, provider: "anthropic", models: [], suggested: null }),
-    );
     render(<TaskComposer onCreated={() => {}} />);
-    expect(screen.getByTestId("model-choice-summary").textContent).toBe("Default: Anthropic · claude-opus-5-5 · Medium effort");
-    expect(ipc.agentsModelsList).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Choose…" }));
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Provider/ }));
-    });
-    await act(async () => {
-      fireEvent.click(await screen.findByRole("option", { name: "OpenAI" }));
-    });
-    await waitFor(() => expect(screen.getByTestId("model-choice-summary").textContent).toBe("OpenAI · gpt-6.2-sol · Medium effort"));
+    expect(optionsText()).toBe("Options: claude-opus-5-5 · Medium · Ask · Ask before each change");
+    openOptions("Model");
+    expect(screen.getByTestId("model-menu").dataset.value).toBe("null");
+    expect(screen.getByTestId("model-menu").dataset.running).toBe("null");
+    fireEvent.click(screen.getByRole("button", { name: "Pick gpt-6.2-sol" }));
+    expect(optionsText()).toBe("Options: gpt-6.2-sol · Medium · Ask · Ask before each change");
     fireEvent.change(screen.getByTestId("agents-prompt"), { target: { value: "Fit the model" } });
     await act(async () => {
       fireEvent.click(start());
@@ -340,7 +348,14 @@ describe("new task composer", () => {
       expect.objectContaining({ provider: { provider: "openai", model: "gpt-6.2-sol", effort: "medium" } }),
     );
     // Sent: the composer is back on the default.
-    expect(screen.getByTestId("model-choice-summary").textContent).toMatch(/^Default: /);
+    expect(optionsText()).toBe("Options: claude-opus-5-5 · Medium · Ask · Ask before each change");
+  });
+
+  it("opens provider settings from the model menu through the shared command", () => {
+    render(<TaskComposer onCreated={() => {}} />);
+    openOptions("Model");
+    (modelMenu.props!.onManageProviders as () => void)();
+    expect(registryRun).toHaveBeenCalledWith("agents.providerSettings");
   });
 
   it("names the provider that needs a key", () => {
@@ -390,18 +405,10 @@ describe("follow-up", () => {
     fireEvent.paste(field, { clipboardData: clipboard({ files: [png([5])] }) });
     await screen.findByTestId("agents-attachment");
     const attachment = screen.getByTestId("agents-attachment").dataset.attachmentId;
-    fireEvent.click(screen.getByRole("button", { name: "Change model…" }));
-    const custom = screen.getByRole("button", { name: "Custom model ID" });
-    fireEvent.click(custom);
-    // Choose OpenAI and type an exact ID.
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Provider/ }));
-    });
-    await act(async () => {
-      fireEvent.click(await screen.findByRole("option", { name: "OpenAI" }));
-    });
-    fireEvent.change(screen.getByRole("textbox", { name: "Exact model ID" }), { target: { value: "gpt-4.1-nano" } });
-    fireEvent.click(screen.getByRole("button", { name: "Use this ID" }));
+    openOptions("Model");
+    // The menu knows the model the task runs on; nothing is chosen yet.
+    expect(JSON.parse(screen.getByTestId("model-menu").dataset.running!)).toEqual({ provider: "anthropic", model: "claude-opus-5-5", effort: "medium" });
+    fireEvent.click(screen.getByRole("button", { name: "Pick gpt-4.1-nano" }));
     await act(async () => {
       fireEvent.click(screen.getByTestId("agents-continue"));
     });
@@ -416,7 +423,8 @@ describe("follow-up", () => {
 
     // Keeping the current model sends no switch.
     ipc.agentsTaskContinue.mockResolvedValueOnce(summary({ status: { kind: "queued" } }));
-    fireEvent.click(screen.getByRole("button", { name: "Keep current model" }));
+    openOptions("Model");
+    fireEvent.click(screen.getByRole("button", { name: "Inherit" }));
     await act(async () => {
       fireEvent.click(screen.getByTestId("agents-continue"));
     });

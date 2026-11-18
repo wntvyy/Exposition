@@ -171,7 +171,7 @@ describe("a finished task's outcome", () => {
     expect(
       screen.getByText("The limit of 40 model turns was reached. A follow-up keeps the same budgets and the usage so far."),
     ).toBeTruthy();
-    expect(screen.getByText(/claude-opus-5-5 \(extra high effort\)/)).toBeTruthy();
+    expect(screen.getByTestId("agents-options").textContent).toContain("claude-opus-5-5 · Extra high");
   });
 });
 
