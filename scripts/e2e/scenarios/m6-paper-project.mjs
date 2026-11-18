@@ -1494,7 +1494,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       await startAgentTask({
         prompt: "Probe the sandbox",
         permission: "Apply changes, review afterwards",
-        execution: "Restricted sandbox only (unattended)",
+        execution: "Restricted container only (unattended)",
       });
       await waitForTaskStatus("completed", 180_000);
       timing("restricted run_python (docker)", Date.now() - t0);
@@ -1532,7 +1532,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       await startAgentTask({
         prompt: "Probe the sandbox without an image",
         permission: "Apply changes, review afterwards",
-        execution: "Restricted sandbox only (unattended)",
+        execution: "Restricted container only (unattended)",
       });
       await waitForTaskStatus("completed", 60_000);
       timing("refusal without an image", Date.now() - t0);

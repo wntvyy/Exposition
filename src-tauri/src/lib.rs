@@ -289,6 +289,10 @@ pub fn run() {
             files::file_rename,
             files::file_import_start,
             files::file_import_cancel,
+            // Agent UI rework: structured questions and figures.
+            agents::agents_question_answer,
+            agents::agents_question_discuss,
+            agents::agents_figure,
             #[cfg(debug_assertions)]
             files::files_dev_fail_next_graph_record,
         ])

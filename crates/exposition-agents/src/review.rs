@@ -266,8 +266,11 @@ pub fn effective_state(row: &TaskFileRow, current: &Current) -> (ReviewState, Op
 /// cannot be consulted (e.g. the task's folder is not the open one); the
 /// stored state is shown then.
 pub fn file_review(row: &TaskFileRow, documents: &DocumentService, current: Option<&Current>) -> FileReview {
-    let current_revision =
-        documents.find_by_path(&row.path).and_then(|id| documents.info(&id).ok()).map(|i| i.revision);
+    let info = documents.find_by_path(&row.path).and_then(|id| documents.info(&id).ok());
+    let current_revision = info.as_ref().map(|i| i.revision);
+    // Saved or not, only for the task's own (open) project: a same-named
+    // document of another folder is not this file.
+    let unsaved = current.and(info.as_ref()).map(|i| i.saved_revision != Some(i.revision));
     let (state, message) = match current {
         Some(current) => effective_state(row, current),
         None => (row.state, row.message.clone()),
@@ -281,6 +284,7 @@ pub fn file_review(row: &TaskFileRow, documents: &DocumentService, current: Opti
         tip_revision: row.tip_revision,
         current_revision,
         message,
+        unsaved,
     }
 }
 

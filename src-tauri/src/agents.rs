@@ -12,11 +12,12 @@ use exposition_agents::permissions::{
 };
 use exposition_agents::{
     AgentError, AllowanceKind, ApprovalScope, Budgets, ContinueTaskRequest, CreateTaskRequest, FileDiff,
-    GenerationTaskRequest, ProviderChoice, ProviderKind, ProviderSettings, ProviderStatus, ReviewActionResult,
-    TaskDetail, TaskId, TaskReview, TaskSummary,
+    GenerationTaskRequest, ProviderChoice, ProviderKind, ProviderSettings, ProviderStatus, QuestionAnswer,
+    ReviewActionResult, TaskDetail, TaskId, TaskReview, TaskSummary,
 };
 use exposition_core::path::WorkspacePath;
 use exposition_graph::EntityId;
+use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::broadcast::error::RecvError;
@@ -201,6 +202,69 @@ pub async fn agents_approval_resolve(
         .agents
         .resolve_approval_scoped(&task_id(task)?, &approval, approved, scope.unwrap_or_default())
         .map_err(command_error)
+}
+
+fn question_request(request: &str) -> Result<(), CommandError> {
+    let valid =
+        !request.is_empty() && request.len() <= 128 && request.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if valid { Ok(()) } else { Err(CommandError::new("agents.noQuestion", "invalid question identifier")) }
+}
+
+/// Answer a structured question (one answer per question, at the request's
+/// current revision). The answer is user content, never an authorization;
+/// a second identical answer is accepted and does nothing.
+#[tauri::command]
+pub async fn agents_question_answer(
+    state: State<'_, AppState>,
+    task: TaskId,
+    request: String,
+    revision: u32,
+    answers: Vec<QuestionAnswer>,
+) -> Result<(), CommandError> {
+    question_request(&request)?;
+    if answers.len() > exposition_agents::questions::MAX_QUESTIONS {
+        return Err(CommandError::new("agents.invalidAnswer", "too many answers"));
+    }
+    state.agents.answer_question(&task_id(task)?, &request, revision, answers).map_err(command_error)
+}
+
+/// "Chat about it": one bounded discussion turn about a pending question in
+/// the task's own worker (read-only tools; the question's batch stays held).
+#[tauri::command]
+pub async fn agents_question_discuss(
+    state: State<'_, AppState>,
+    task: TaskId,
+    request: String,
+    revision: u32,
+    text: String,
+) -> Result<(), CommandError> {
+    question_request(&request)?;
+    if text.len() > 4 * exposition_agents::questions::MAX_DISCUSSION_CHARS {
+        return Err(CommandError::new("agents.invalidAnswer", "the message is too long"));
+    }
+    state.agents.discuss_question(&task_id(task)?, &request, revision, &text).map_err(command_error)
+}
+
+/// The bytes of a figure one of the task's own tool calls recorded (read
+/// through the research artifact store; the webview shows it only as an
+/// image, never inline markup).
+#[tauri::command]
+pub async fn agents_figure(
+    state: State<'_, AppState>,
+    task: TaskId,
+    run_id: String,
+    artifact_id: String,
+) -> Result<Response, CommandError> {
+    if run_id.len() > 128 || artifact_id.len() > 128 {
+        return Err(CommandError::new("agents.figureUnavailable", "invalid figure reference"));
+    }
+    let task = task_id(task)?;
+    let agents = state.agents.clone();
+    let bytes = tauri::async_runtime::spawn_blocking(move || agents.figure(&task, &run_id, &artifact_id))
+        .await
+        .map_err(|e| CommandError::new("internal.task", format!("Agent task failed: {e}")))?
+        .map_err(command_error)?;
+    Ok(Response::new(bytes))
 }
 
 /// Revoke one allowance of a task (`kind`) or all of them (`null`).

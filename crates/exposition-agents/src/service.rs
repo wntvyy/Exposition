@@ -191,6 +191,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The request text of an attachment-only message (not shown as the user's).
 const ATTACHMENTS_ONLY: &str = "Use the attached files.";
+/// Start of the context block that carries a question's discussion and final
+/// options into the history with its answer (not shown as the user's text).
+const QUESTION_CONTEXT: &str = "<question_discussion";
 
 /// Bytes of an attachment once base64-encoded in a request.
 fn encoded_size(bytes: u64) -> u64 {
@@ -862,7 +865,8 @@ impl AgentService {
             .unwrap_or_default();
         let graph = self.inner.graph_info(id)?;
         let allowances = self.inner.task_allowances(id)?;
-        Ok(TaskDetail { summary, transcript, approvals, graph, allowances })
+        let questions = self.inner.store.questions(id)?;
+        Ok(TaskDetail { summary, transcript, approvals, graph, allowances, questions })
     }
 
     pub fn create_task(&self, request: CreateTaskRequest) -> Result<TaskSummary> {
@@ -1134,6 +1138,32 @@ impl AgentService {
             let _ = tx.send(ApprovalAnswer { approved, scope: if approved { scope } else { ApprovalScope::Once } });
         }
         Ok(())
+    }
+
+    /// Answer a structured question (the user's answer card). Validates every
+    /// answer against the request's current revision; a second identical
+    /// answer is accepted and changes nothing. The answer grants nothing: the
+    /// central gate still decides every later action.
+    pub fn answer_question(
+        &self,
+        _id: &TaskId,
+        _request: &str,
+        _revision: u32,
+        _answers: Vec<crate::questions::QuestionAnswer>,
+    ) -> Result<()> {
+        Err(AgentError::new("agents.notImplemented", "Structured questions are not implemented yet."))
+    }
+
+    /// "Chat about it": one bounded discussion turn about a pending question,
+    /// in the task's own worker and budgets; the question's tool batch stays held.
+    pub fn discuss_question(&self, _id: &TaskId, _request: &str, _revision: u32, _text: &str) -> Result<()> {
+        Err(AgentError::new("agents.notImplemented", "Structured questions are not implemented yet."))
+    }
+
+    /// The bytes of a figure one of this task's tool calls recorded, read
+    /// through the research artifact store (hash and size verified).
+    pub fn figure(&self, _id: &TaskId, _run_id: &str, _artifact_id: &str) -> Result<Vec<u8>> {
+        Err(AgentError::new("agents.figureUnavailable", "Figures are not implemented yet."))
     }
 
     /// Wait for a task's current run to finish (tests and shutdown).
@@ -2246,102 +2276,108 @@ impl Inner {
         let mut items = Vec::new();
         for row in self.store.transcript(id)? {
             let seq = row.seq;
-            match row.entry {
+            // A discussion entry renders like a message; its user text is
+            // marked with the question it is about.
+            let (role, content, question) = match row.entry {
                 TranscriptEntry::Notice { level, message } => {
-                    items.push(TranscriptItem::Notice { seq, level, message })
+                    items.push(TranscriptItem::Notice { seq, level, message });
+                    continue;
                 }
-                TranscriptEntry::Message { role, content } => {
-                    // Attachments render with the message's text (or alone).
-                    let attached: Vec<AttachmentInfo> = content
-                        .iter()
-                        .filter(|b| role == "user" && block_type(b) == "exposition_attachment")
-                        .map(|b| {
-                            let id =
-                                AttachmentId(b.get("attachment_id").and_then(Value::as_str).unwrap_or("").to_owned());
-                            self.attachment(&id).unwrap_or_else(|_| AttachmentInfo {
-                                id,
-                                name: b.get("name").and_then(Value::as_str).unwrap_or("attachment").to_owned(),
-                                media_type: b.get("media_type").and_then(Value::as_str).unwrap_or("").to_owned(),
-                                kind: b
-                                    .get("kind")
-                                    .and_then(Value::as_str)
-                                    .and_then(AttachmentKind::parse)
-                                    .unwrap_or(AttachmentKind::Text),
-                                size_bytes: 0,
-                                width: None,
-                                height: None,
-                                sha256: String::new(),
-                                missing: true,
-                            })
+                TranscriptEntry::Message { role, content } => (role, content, None),
+                TranscriptEntry::Discussion { question, role, content } => (role, content, Some(question)),
+            };
+            // Attachments render with the message's text (or alone).
+            let attached: Vec<AttachmentInfo> = content
+                .iter()
+                .filter(|b| role == "user" && block_type(b) == "exposition_attachment")
+                .map(|b| {
+                    let id = AttachmentId(b.get("attachment_id").and_then(Value::as_str).unwrap_or("").to_owned());
+                    self.attachment(&id).unwrap_or_else(|_| AttachmentInfo {
+                        id,
+                        name: b.get("name").and_then(Value::as_str).unwrap_or("attachment").to_owned(),
+                        media_type: b.get("media_type").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        kind: b
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .and_then(AttachmentKind::parse)
+                            .unwrap_or(AttachmentKind::Text),
+                        size_bytes: 0,
+                        width: None,
+                        height: None,
+                        sha256: String::new(),
+                        missing: true,
+                    })
+                })
+                .collect();
+            let first_user_item = items.len();
+            for block in content {
+                let text = block.get("text").and_then(Value::as_str).unwrap_or_default();
+                match (role.as_str(), block_type(&block)) {
+                    ("user", "text")
+                        if !text.starts_with("<task_context>")
+                            && !text.starts_with("<graph_context>")
+                            && !text.starts_with(QUESTION_CONTEXT) =>
+                    {
+                        let shown = if text == ATTACHMENTS_ONLY && !attached.is_empty() { "" } else { text };
+                        items.push(TranscriptItem::UserText {
+                            seq,
+                            text: shown.to_owned(),
+                            attachments: Vec::new(),
+                            question: question.clone(),
                         })
-                        .collect();
-                    let first_user_item = items.len();
-                    for block in content {
-                        let text = block.get("text").and_then(Value::as_str).unwrap_or_default();
-                        match (role.as_str(), block_type(&block)) {
-                            ("user", "text")
-                                if !text.starts_with("<task_context>") && !text.starts_with("<graph_context>") =>
-                            {
-                                let shown = if text == ATTACHMENTS_ONLY && !attached.is_empty() { "" } else { text };
-                                items.push(TranscriptItem::UserText {
-                                    seq,
-                                    text: shown.to_owned(),
-                                    attachments: Vec::new(),
-                                })
-                            }
-                            ("assistant", t) if t == REASONING_BLOCK => {
-                                let summary: Vec<&str> = block
-                                    .get("summary")
-                                    .and_then(Value::as_array)
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(|s| s.get("text").and_then(Value::as_str))
-                                    .collect();
-                                if !summary.is_empty() {
-                                    items.push(TranscriptItem::Thinking { seq, text: summary.join("\n\n") });
-                                }
-                            }
-                            ("assistant", "text") if !text.is_empty() => {
-                                items.push(TranscriptItem::AssistantText { seq, text: text.to_owned() })
-                            }
-                            ("assistant", "thinking") => {
-                                let thinking = block.get("thinking").and_then(Value::as_str).unwrap_or_default();
-                                if !thinking.trim().is_empty() {
-                                    items.push(TranscriptItem::Thinking { seq, text: thinking.to_owned() });
-                                }
-                            }
-                            ("assistant", "tool_use") => {
-                                let tool_use_id =
-                                    block.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
-                                let call = calls.get(&tool_use_id);
-                                items.push(TranscriptItem::ToolCall {
-                                    seq,
-                                    name: block.get("name").and_then(Value::as_str).unwrap_or_default().to_owned(),
-                                    input: block.get("input").cloned().unwrap_or(Value::Null),
-                                    status: call.map(|c| c.status).unwrap_or(ToolCallStatus::NotRun),
-                                    result: call
-                                        .and_then(|c| c.result.as_deref())
-                                        .map(|r| bounded(r, TRANSCRIPT_RESULT_LIMIT)),
-                                    is_error: call.is_some_and(|c| c.is_error),
-                                    authorized_by: call.and_then(|c| c.authorized_by.clone()),
-                                    tool_use_id,
-                                });
-                            }
-                            _ => {}
+                    }
+                    ("assistant", t) if t == REASONING_BLOCK => {
+                        let summary: Vec<&str> = block
+                            .get("summary")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|s| s.get("text").and_then(Value::as_str))
+                            .collect();
+                        if !summary.is_empty() {
+                            items.push(TranscriptItem::Thinking { seq, text: summary.join("\n\n") });
                         }
                     }
-                    if !attached.is_empty() {
-                        let user_text = items[first_user_item..].iter_mut().rev().find_map(|item| match item {
-                            TranscriptItem::UserText { attachments, .. } => Some(attachments),
-                            _ => None,
+                    ("assistant", "text") if !text.is_empty() => {
+                        items.push(TranscriptItem::AssistantText { seq, text: text.to_owned() })
+                    }
+                    ("assistant", "thinking") => {
+                        let thinking = block.get("thinking").and_then(Value::as_str).unwrap_or_default();
+                        if !thinking.trim().is_empty() {
+                            items.push(TranscriptItem::Thinking { seq, text: thinking.to_owned() });
+                        }
+                    }
+                    ("assistant", "tool_use") => {
+                        let tool_use_id = block.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+                        let call = calls.get(&tool_use_id);
+                        items.push(TranscriptItem::ToolCall {
+                            seq,
+                            name: block.get("name").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                            input: block.get("input").cloned().unwrap_or(Value::Null),
+                            status: call.map(|c| c.status).unwrap_or(ToolCallStatus::NotRun),
+                            result: call.and_then(|c| c.result.as_deref()).map(|r| bounded(r, TRANSCRIPT_RESULT_LIMIT)),
+                            is_error: call.is_some_and(|c| c.is_error),
+                            authorized_by: call.and_then(|c| c.authorized_by.clone()),
+                            figures: call.map(|c| c.figures.clone()).unwrap_or_default(),
+                            tool_use_id,
                         });
-                        match user_text {
-                            Some(attachments) => *attachments = attached,
-                            None => {
-                                items.push(TranscriptItem::UserText { seq, text: String::new(), attachments: attached })
-                            }
-                        }
                     }
+                    _ => {}
+                }
+            }
+            if !attached.is_empty() {
+                let user_text = items[first_user_item..].iter_mut().rev().find_map(|item| match item {
+                    TranscriptItem::UserText { attachments, .. } => Some(attachments),
+                    _ => None,
+                });
+                match user_text {
+                    Some(attachments) => *attachments = attached,
+                    None => items.push(TranscriptItem::UserText {
+                        seq,
+                        text: String::new(),
+                        attachments: attached,
+                        question: None,
+                    }),
                 }
             }
         }
@@ -2830,6 +2866,7 @@ impl Run<'_> {
             result: result.map(ToolOutput::text),
             is_error: result.is_some_and(|r| r.is_error),
             authorized_by,
+            figures: Vec::new(),
         };
         if let Err(e) = self.inner.store.upsert_tool_call(&self.id, &row) {
             tracing::error!("failed to record tool call: {e}");

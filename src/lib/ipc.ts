@@ -68,6 +68,7 @@ import type { ProviderChoice } from "../bindings/ProviderChoice";
 import type { ProviderKind } from "../bindings/ProviderKind";
 import type { ProviderSettings } from "../bindings/ProviderSettings";
 import type { ProviderStatus } from "../bindings/ProviderStatus";
+import type { QuestionAnswer } from "../bindings/QuestionAnswer";
 import type { RecentProject } from "../bindings/RecentProject";
 import type { RecoveryEntry } from "../bindings/RecoveryEntry";
 import type { ResearchEvent } from "../bindings/ResearchEvent";
@@ -261,6 +262,15 @@ export const commands = {
     invoke<ReviewActionResult[]>("agents_review_revert", { task, path }),
   agentsReviewAccept: (task: TaskId, path: string | null) =>
     invoke<ReviewActionResult[]>("agents_review_accept", { task, path }),
+  /** Answer a structured question at its current revision (one answer per question; idempotent). */
+  agentsQuestionAnswer: (task: TaskId, request: string, revision: number, answers: QuestionAnswer[]) =>
+    invoke<void>("agents_question_answer", { task, request, revision, answers }),
+  /** "Chat about it": one bounded discussion turn in the task's worker; submits no answer. */
+  agentsQuestionDiscuss: (task: TaskId, request: string, revision: number, text: string) =>
+    invoke<void>("agents_question_discuss", { task, request, revision, text }),
+  /** Bytes of a figure the task's own tool call recorded (render only as an image). */
+  agentsFigure: (task: TaskId, runId: string, artifactId: string) =>
+    invoke<ArrayBuffer>("agents_figure", { task, runId, artifactId }),
   /** Development builds only (scripted provider); rejected in release builds. */
   agentsDevLoadScript: (script: unknown) => invoke<void>("agents_dev_load_script", { script }),
 
