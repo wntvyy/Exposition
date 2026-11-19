@@ -402,7 +402,8 @@ export const AREAS = [
     id: "ui-system",
     paths: ["src/ui/**", "src/styles.css"],
     level: "broad",
-    e2e: [...SCENARIOS.shell, "editor-find-outline", "graph-canvas"],
+    // v2-theme-preservation: theme switches keep drafts, undo, editor identity, and graph state.
+    e2e: [...SCENARIOS.shell, "editor-find-outline", "graph-canvas", "v2-theme-preservation"],
     visual: [...SCENARIOS.visual, "editor-find-outline", "graph-canvas"],
     note: "Shared UI tokens and components: compare the refreshed ui-reference screens with the previous ones.",
   },
