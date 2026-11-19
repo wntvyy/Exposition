@@ -122,6 +122,20 @@ describe("design tokens", () => {
     }
   });
 
+  it.each(themeNames)("keeps links apart from muted text (%s)", (theme) => {
+    // A link next to muted meta ("Constant pre-exponential factor (Assumption) · accepted")
+    // must read as a link: ΔE >= 18 (Sage's gray-green once measured 12.5).
+    expect(deltaE(palettes[theme]["accent-text"], palettes[theme]["text-muted"])).toBeGreaterThanOrEqual(18);
+  });
+
+  it.each(themeNames)("keeps success, info, warning, and danger apart from the accent (%s)", (theme) => {
+    // Approved 2026-11-19: semantic colours never read as the accent (Sage's success green
+    // and Ocean's teal links were the close cases).
+    for (const tone of ["success", "info", "warning", "danger"] as const) {
+      expect(deltaE(palettes[theme][`${tone}-text`], palettes[theme]["accent-text"]), tone).toBeGreaterThanOrEqual(20);
+    }
+  });
+
   it.each(themeNames)("keeps every pair of graph categories distinguishable (%s)", (theme) => {
     // CIE76 ΔE between node outlines/edge colors; 15 is clearly visible side by side.
     const lab = (value: string) => {
@@ -219,3 +233,21 @@ describe("shared component insets", () => {
     }
   });
 });
+
+/** CIE76 color difference (sRGB → CIELAB, D65). */
+function deltaE(a: string, b: string): number {
+  const lab = (value: string) => {
+    const { r, g, b: bl } = parseColor(value);
+    const lin = [r, g, bl].map((x) => {
+      const v = x / 255;
+      return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+    }) as [number, number, number];
+    const X = (lin[0] * 0.4124 + lin[1] * 0.3576 + lin[2] * 0.1805) / 0.95047;
+    const Y = lin[0] * 0.2126 + lin[1] * 0.7152 + lin[2] * 0.0722;
+    const Z = (lin[0] * 0.0193 + lin[1] * 0.1192 + lin[2] * 0.9505) / 1.08883;
+    const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+    return [116 * f(Y) - 16, 500 * (f(X) - f(Y)), 200 * (f(Y) - f(Z))] as const;
+  };
+  const [la, lb] = [lab(a), lab(b)];
+  return Math.hypot(la[0] - lb[0], la[1] - lb[1], la[2] - lb[2]);
+}
