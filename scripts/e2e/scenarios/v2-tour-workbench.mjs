@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { runCommand } from "../palette.mjs";
-import { applyTheme, THEMES } from "../theme-helpers.mjs";
+import { THEMES } from "../theme-helpers.mjs";
 import { invoke, openWorkspace, waitFor } from "../workspace-helpers.mjs";
 
 const AREA = "workbench";
@@ -74,7 +74,21 @@ async function closedLoopbackUrl() {
       server.close(() => resolve(p));
     });
   });
-  return `http://127.0.0.1:${port}/v1`;
+  // Exactly http://127.0.0.1:<port> (debug builds ignore any other form and
+  // would reach the real provider).
+  return `http://127.0.0.1:${port}`;
+}
+
+/**
+ * Switch theme through its "Color Theme: …" command. (theme-helpers'
+ * applyTheme anchors its match at the start of the palette row, which begins
+ * with the "Preferences:" category, so it never matches.)
+ */
+async function applyTheme(page, theme) {
+  const label = THEMES.find(([id]) => id === theme)?.[1];
+  await runCommand(page, `Color Theme: ${label}`, new RegExp(`Color Theme: ${label}`));
+  await page.waitForFunction((t) => document.documentElement.dataset.theme === t, theme);
+  await page.waitForTimeout(150);
 }
 
 async function setViewport(page, size) {
@@ -162,7 +176,7 @@ export default async function v2TourWorkbench({ launchApp, artifactsDir, assert 
       request: {
         id: "v2-tour-error",
         origin: { kind: "source" },
-        edits: [{ document: doc, baseRevision: state.info.revision, patches: [{ range: { start: at, end: at }, text: "#let k(T) = A * calc.exp(-Ea_kj / (R * T))\n" }] }],
+        edits: [{ document: doc, baseRevision: state.info.revision, patches: [{ range: { start: at, end: at }, text: "#let k(T) = A * calc.exp(-Ea_kj / (R * T))\nAt 300 K the rate is #k(300).\n" }] }],
         undo: { kind: "newGroup" },
         conflict: "reject",
         label: null,
@@ -256,6 +270,11 @@ export default async function v2TourWorkbench({ launchApp, artifactsDir, assert 
       message: "the model list error",
     });
     assert.equal(await page.evaluate((k) => document.documentElement.outerHTML.includes(k), FAKE_KEY), false, "the key is not in the webview");
+    assert.doesNotMatch(
+      (await openai.getByTestId("settings-provider-catalog").textContent()) ?? "",
+      /openai\.com/,
+      "the model list error comes from the closed loopback endpoint, not the real provider",
+    );
     await shoot("settings-providers-error", {
       prepare: async () => {
         await providers.locator(".exp-settings__body").evaluate((el) => el.scrollTo(0, 0));

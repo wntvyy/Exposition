@@ -173,13 +173,27 @@
 /* Model providers: the key field with its buttons, the actions that follow a
    row's value (pushed to the row's end), and a field that takes the row's
    remaining width. */
+.exp-settings__key {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--gap-related);
+  min-width: 0;
+}
+
+.exp-settings__key-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-related);
+  min-height: var(--control-height-md);
+}
+
 .exp-settings__key-form {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
   gap: var(--gap-related);
-  padding: calc(var(--gap-related) + var(--space-0-5)) 0;
-  border-top: var(--border-width) solid var(--color-border-subtle);
 }
 
 .exp-settings__key-actions {
@@ -188,6 +202,13 @@
   align-items: center;
   gap: var(--space-1);
   padding: var(--space-1) 0 var(--space-2);
+}
+
+/* A row's value takes the room its actions leave (a wrapped status keeps
+   its label and detail readable). */
+.exp-settings__row-control > :first-child:not(:only-child) {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .exp-settings__value-actions {
@@ -213,6 +234,7 @@
 }
 
 .exp-settings__model-label {
+  margin-inline-end: var(--space-1);
   overflow-wrap: anywhere;
   text-align: start;
 }

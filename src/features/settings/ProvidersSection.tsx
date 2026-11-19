@@ -201,67 +201,73 @@ function ProviderGroup({ provider, status, catalog }: { provider: Keyed; status:
           {connection.credentialError}
         </Banner>
       )}
+      {/* The key's state, its actions, and (when there is no key, or while
+          replacing it) the field, all in the API key row. */}
       <SettingRow label="API key">
-        <span data-testid="agents-key-status" data-provider={provider}>
-          {configured ? `Configured — stored in ${status.credentialStore}` : "Not configured"}
-        </span>
-        {configured && (
-          <span className="exp-settings__value-actions">
-            {!replacing && (
-              <Button
-                size="sm"
-                icon={KeyRound}
-                isDisabled={busy}
-                onPress={() => {
-                  setReplacing(true);
-                  focusKeyField(provider);
-                }}
-                data-testid="agents-key-replace"
-              >
-                Replace key
-              </Button>
+        <div className="exp-settings__key">
+          <div className="exp-settings__key-line">
+            <span data-testid="agents-key-status" data-provider={provider}>
+              {configured ? `Configured — stored in ${status.credentialStore}` : "Not configured"}
+            </span>
+            {configured && (
+              <span className="exp-settings__value-actions">
+                {!replacing && (
+                  <Button
+                    size="sm"
+                    icon={KeyRound}
+                    isDisabled={busy}
+                    onPress={() => {
+                      setReplacing(true);
+                      focusKeyField(provider);
+                    }}
+                    data-testid="agents-key-replace"
+                  >
+                    Replace key
+                  </Button>
+                )}
+                <Button size="sm" variant="ghost" icon={Trash2} isDisabled={busy} onPress={() => void removeKey()} data-testid="agents-key-remove">
+                  Remove
+                </Button>
+              </span>
             )}
-            <Button size="sm" variant="ghost" icon={Trash2} isDisabled={busy} onPress={() => void removeKey()} data-testid="agents-key-remove">
-              Remove
-            </Button>
-          </span>
-        )}
-      </SettingRow>
-      {showForm && (
-        <div className="exp-settings__key-form">
-          <TextField
-            label={configured ? "New API key" : "API key"}
-            type="password"
-            autoComplete="off"
-            code
-            placeholder={KEY_PLACEHOLDER[provider]}
-            value={key}
-            onChange={setKey}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void saveKey();
-              } else event.continuePropagation();
-            }}
-            className="exp-settings__grow"
-            data-testid="agents-key-input"
-          />
-          <Button icon={KeyRound} isDisabled={busy || !key.trim()} onPress={() => void saveKey()} data-testid="agents-key-save">
-            Save key
-          </Button>
-          {replacing && (
-            <Button
-              variant="ghost"
-              onPress={() => {
-                setReplacing(false);
-                setKey("");
-              }}
-            >
-              Cancel
-            </Button>
+          </div>
+          {showForm && (
+            <div className="exp-settings__key-form">
+              <TextField
+                aria-label={configured ? "New API key" : "API key"}
+                type="password"
+                autoComplete="off"
+                code
+                placeholder={KEY_PLACEHOLDER[provider]}
+                value={key}
+                onChange={setKey}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void saveKey();
+                  } else event.continuePropagation();
+                }}
+                className="exp-settings__grow"
+                data-testid="agents-key-input"
+              />
+              <Button icon={KeyRound} isDisabled={busy || !key.trim()} onPress={() => void saveKey()} data-testid="agents-key-save">
+                Save key
+              </Button>
+              {replacing && (
+                <Button
+                  variant="ghost"
+                  onPress={() => {
+                    setReplacing(false);
+                    setKey("");
+                  }}
+                >
+                  Cancel
+                </Button>
+              )}
+            </div>
           )}
         </div>
-      )}
+      </SettingRow>
       <SettingRow label="Model list" testId="settings-provider-catalog">
         <CatalogState name={name} catalog={catalog} />
         {configured && (

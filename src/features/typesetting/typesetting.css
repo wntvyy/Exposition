@@ -98,12 +98,13 @@
 }
 
 .problems__message {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
 }
 
 .problems__location {
   flex: none;
+  margin-right: auto;
   color: var(--color-text-muted);
   font-family: var(--font-code);
   font-size: var(--font-size-sm);
