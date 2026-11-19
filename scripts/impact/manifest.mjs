@@ -30,6 +30,8 @@ export const LEVELS = ["none", "local", "broad", "full"];
 export const SCENARIOS = {
   shell: ["smoke", "ui-shell", "pages-review"],
   visual: ["ui-shell", "pages-review"],
+  // Theme switches keep drafts, undo, editor identity, and graph state (UI standard V2).
+  themes: ["v2-theme-preservation"],
   editor: [
     "editor-find-outline",
     "workspace-files",
@@ -402,8 +404,7 @@ export const AREAS = [
     id: "ui-system",
     paths: ["src/ui/**", "src/styles.css"],
     level: "broad",
-    // v2-theme-preservation: theme switches keep drafts, undo, editor identity, and graph state.
-    e2e: [...SCENARIOS.shell, "editor-find-outline", "graph-canvas", "v2-theme-preservation"],
+    e2e: [...SCENARIOS.shell, ...SCENARIOS.themes, "editor-find-outline", "graph-canvas"],
     visual: [...SCENARIOS.visual, "editor-find-outline", "graph-canvas"],
     note: "Shared UI tokens and components: compare the refreshed ui-reference screens with the previous ones.",
   },
