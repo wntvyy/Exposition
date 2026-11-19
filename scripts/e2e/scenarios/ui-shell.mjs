@@ -334,7 +334,7 @@ export default async function uiShell({ launchApp, artifactsDir, assert }) {
     const monacoBg = await page
       .locator("[data-testid=monaco-sample] .monaco-editor-background")
       .evaluate((el) => getComputedStyle(el).backgroundColor);
-    assert.equal(monacoBg, "rgb(31, 32, 36)", "Monaco follows the app theme");
+    assert.equal(monacoBg, "rgb(29, 30, 32)", "Monaco follows the app theme");
     await reference.evaluate((el) => el.scrollTo(0, 0));
     await shot(page, "ui-reference-dark");
     await captureFullReference(page, shot, "ui-reference-dark-full");

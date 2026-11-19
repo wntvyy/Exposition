@@ -27,7 +27,7 @@ export function SettingsPage({
       <PageHeader title={title} titleId={id} actions={actions} />
       <div className="exp-settings__body">
         <div className="exp-settings__content">
-          {description && <p className="exp-settings__description ui-meta">{description}</p>}
+          {description && <p className="exp-settings__description">{description}</p>}
           {children}
         </div>
       </div>

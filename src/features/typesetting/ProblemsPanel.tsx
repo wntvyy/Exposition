@@ -8,7 +8,7 @@ import { useProblems } from "../../app/problems";
 import { registry } from "../../app/registry";
 import type { Diagnostic } from "../../bindings/Diagnostic";
 import { commands } from "../../lib/ipc";
-import { Button, EmptyState } from "../../ui/components";
+import { Button, EmptyState, FileIcon } from "../../ui/components";
 import {
   mentionsToolSettings,
   requestReveal,
@@ -47,6 +47,57 @@ interface ProblemRow {
 function revealBuildDiagnostic(diagnostic: Diagnostic) {
   const loc = diagnostic.location;
   if (loc) requestReveal(loc.path, loc.range.start);
+}
+
+/** Rows grouped by file, in first-seen order; rows without a file come first, ungrouped. */
+function groupByFile(rows: ProblemRow[]): { path: string | null; rows: { row: ProblemRow; index: number }[] }[] {
+  const groups = new Map<string | null, { row: ProblemRow; index: number }[]>();
+  groups.set(null, []);
+  rows.forEach((row, index) => {
+    const path = row.diagnostic.location?.path ?? null;
+    const list = groups.get(path) ?? [];
+    list.push({ row, index });
+    groups.set(path, list);
+  });
+  return [...groups.entries()].filter(([, list]) => list.length > 0).map(([path, list]) => ({ path, rows: list }));
+}
+
+function ProblemEntry({ row, position }: { row: ProblemRow; position: string | undefined }) {
+  const { diagnostic, label, reveal, toolSettings } = row;
+  const Icon = ICONS[diagnostic.severity];
+  const loc = diagnostic.location;
+  return (
+    <li className="problems__entry">
+      <button
+        type="button"
+        className="problems__item"
+        data-severity={diagnostic.severity}
+        data-testid="problem"
+        disabled={!loc}
+        data-source={label ?? "build"}
+        onClick={() => loc && reveal()}
+      >
+        <Icon size={14} className="problems__icon" aria-label={diagnostic.severity} />
+        <span className="problems__message">{diagnostic.message}</span>
+        {label && <span className="problems__source">{label}</span>}
+        {loc && <span className="problems__location">{position ?? loc.path}</span>}
+      </button>
+      {diagnostic.hints.length > 0 && (
+        <ul className="problems__hints">
+          {diagnostic.hints.map((h, j) => (
+            <li key={j}>{h}</li>
+          ))}
+        </ul>
+      )}
+      {toolSettings && (
+        <div className="problems__actions">
+          <Button size="sm" variant="secondary" data-testid="problem-tool-settings" onPress={() => void registry.runCommand(TOOL_SETTINGS_COMMAND)}>
+            {TOOL_SETTINGS_LABEL}
+          </Button>
+        </div>
+      )}
+    </li>
+  );
 }
 
 export function ProblemsPanel() {
@@ -119,49 +170,29 @@ export function ProblemsPanel() {
       </div>
     );
   }
+  // Grouped by file (icon, name, folder, count), like the Files view; the
+  // rows keep the full path:line:column so it can be read and copied.
   return (
     <ul className="problems" data-testid="problems-panel" aria-label="Problems">
-      {rows.map(({ diagnostic, label, reveal, toolSettings }, i) => {
-        const Icon = ICONS[diagnostic.severity];
-        const loc = diagnostic.location;
-        return (
-          <li key={i} className="problems__entry">
-            <button
-              type="button"
-              className="problems__item"
-              data-severity={diagnostic.severity}
-              data-testid="problem"
-              disabled={!loc}
-              data-source={label ?? "build"}
-              onClick={() => loc && reveal()}
-            >
-              <Icon size={14} className="problems__icon" aria-label={diagnostic.severity} />
-              {label && <span className="problems__source">{label}</span>}
-              <span className="problems__message">{diagnostic.message}</span>
-              {loc && <span className="problems__location">{positions.get(i) ?? loc.path}</span>}
-            </button>
-            {diagnostic.hints.length > 0 && (
-              <ul className="problems__hints">
-                {diagnostic.hints.map((h, j) => (
-                  <li key={j}>{h}</li>
-                ))}
-              </ul>
-            )}
-            {toolSettings && (
-              <div className="problems__actions">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  data-testid="problem-tool-settings"
-                  onPress={() => void registry.runCommand(TOOL_SETTINGS_COMMAND)}
-                >
-                  {TOOL_SETTINGS_LABEL}
-                </Button>
-              </div>
-            )}
+      {groupByFile(rows).map(({ path, rows: entries }) =>
+        path === null ? (
+          entries.map(({ row, index }) => <ProblemEntry key={index} row={row} position={positions.get(index)} />)
+        ) : (
+          <li key={path} className="problems__group" data-path={path}>
+            <div className="problems__file">
+              <FileIcon name={path} className="problems__file-icon" />
+              <span className="problems__file-name">{path.slice(path.lastIndexOf("/") + 1)}</span>
+              {path.includes("/") && <span className="problems__file-folder">{path.slice(0, path.lastIndexOf("/"))}</span>}
+              <span className="problems__file-count">{entries.length}</span>
+            </div>
+            <ul className="problems__list" aria-label={path}>
+              {entries.map(({ row, index }) => (
+                <ProblemEntry key={index} row={row} position={positions.get(index)} />
+              ))}
+            </ul>
           </li>
-        );
-      })}
+        ),
+      )}
     </ul>
   );
 }

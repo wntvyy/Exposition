@@ -35,16 +35,20 @@
   height: var(--control-height-md);
   padding: 0 var(--space-2);
   border-radius: var(--radius-md);
+  color: var(--color-text-muted);
   font-weight: var(--font-weight-regular);
 }
 
 .exp-settings__nav-item.ui-tab[data-hovered] {
   background: var(--color-surface-hover);
+  color: var(--color-text);
 }
 
+/* Selected: the neutral selection tone and the accent bar (V2 Balanced); the
+   weight stays, so the label does not shift. */
 .exp-settings__nav-item.ui-tab[data-selected] {
-  background: var(--color-accent-subtle);
-  font-weight: var(--font-weight-medium);
+  background: var(--color-surface-selected);
+  color: var(--color-text);
 }
 
 .exp-settings__nav-item.ui-tab[data-selected]::after {
@@ -85,11 +89,20 @@
   max-width: var(--content-max-width);
 }
 
+/* The page lead: one short statement under the title, at UI size. */
 .exp-settings__description {
-  max-width: 72ch;
-  margin: var(--space-2) 0;
+  max-width: 76ch;
+  margin: var(--space-2) 0 0;
   padding-inline: var(--pane-inset);
-  line-height: var(--line-height-normal);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-prose);
+}
+
+/* Groups on a page are a section gap apart (the shared content Section adds
+   its header margin and the group gap at its end). */
+.exp-settings__content > .ui-section + .ui-section {
+  margin-top: calc(var(--gap-section) - var(--gap-group) - var(--space-2));
 }
 
 .exp-settings__inset {
@@ -130,7 +143,7 @@
 
 .exp-settings__group-description {
   max-width: 80ch;
-  margin: 0 0 var(--space-2);
+  margin: var(--space-1) 0 var(--gap-related);
   line-height: var(--line-height-normal);
 }
 
@@ -157,14 +170,15 @@
   margin: var(--space-2) 0 0;
 }
 
-/* Model providers: the key field with its buttons, the key actions, and a
-   field that takes the row's remaining width. */
+/* Model providers: the key field with its buttons, the actions that follow a
+   row's value (pushed to the row's end), and a field that takes the row's
+   remaining width. */
 .exp-settings__key-form {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: var(--space-2);
-  padding: var(--space-2) 0;
+  gap: var(--gap-related);
+  padding: calc(var(--gap-related) + var(--space-0-5)) 0;
   border-top: var(--border-width) solid var(--color-border-subtle);
 }
 
@@ -174,6 +188,14 @@
   align-items: center;
   gap: var(--space-1);
   padding: var(--space-1) 0 var(--space-2);
+}
+
+.exp-settings__value-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
 }
 
 .exp-settings__grow {
@@ -195,14 +217,21 @@
   text-align: start;
 }
 
-/* Setting rows: label and description beside the control. */
+/* Setting rows (V2 Balanced): the label with its hint stacked on the left,
+   the control on the right; a faint rule between rows, none under the
+   section title's own rule. */
 .exp-settings__row {
   display: grid;
-  grid-template-columns: minmax(calc(var(--space-12) * 4), 2fr) minmax(0, 3fr);
-  gap: var(--space-1) var(--space-6);
+  grid-template-columns: minmax(0, calc(var(--space-12) * 5)) minmax(0, 1fr);
+  gap: var(--space-1) var(--space-4);
   align-items: start;
-  padding: var(--space-2) 0;
+  padding: calc(var(--gap-related) + var(--space-0-5)) 0;
   border-top: var(--border-width) solid var(--color-border-subtle);
+}
+
+.ui-section__body > .exp-settings__row:first-child,
+.exp-settings__group-description + .exp-settings__row {
+  border-top: 0;
 }
 
 @container (max-width: 640px) {
@@ -219,6 +248,7 @@
 }
 
 .exp-settings__row-description {
+  margin-top: var(--space-0-5);
   line-height: var(--line-height-normal);
 }
 
@@ -273,7 +303,7 @@
 .exp-settings__rules {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--space-12) * 6)), 1fr));
-  gap: var(--space-4);
+  gap: var(--gap-group);
 }
 
 .exp-settings__rules .ui-group-label {
@@ -285,7 +315,7 @@
 .exp-settings__confirm {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--gap-group);
 }
 
 /* Storage & History (P1): the selected scope beside the purge action. */
@@ -293,7 +323,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-3);
+  gap: var(--gap-group);
   padding: var(--space-1) var(--pane-inset) var(--space-3);
   border-bottom: var(--border-width) solid var(--color-border);
 }
