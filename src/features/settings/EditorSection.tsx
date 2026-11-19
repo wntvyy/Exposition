@@ -35,7 +35,7 @@ export function EditorSection() {
   }, []);
 
   return (
-    <SettingsPage title="Editor" description="Source editor preferences. Open editors update immediately." testId="settings-editor-prefs">
+    <SettingsPage title="Editor" description="Open editors update immediately." testId="settings-editor-prefs">
       {!loaded ? (
         <LoadingState title="Loading settings…" />
       ) : (
