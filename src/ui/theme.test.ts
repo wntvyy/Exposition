@@ -29,6 +29,32 @@ describe("theme", () => {
     expect(useTheme.getState()).toMatchObject({ preference: "dark", resolved: "dark" });
   });
 
+  it("reads every pre-V2 value unchanged and accepts the four built-in themes", () => {
+    for (const legacy of ["light", "dark", "system"] as const) expect(parseThemePreference(JSON.stringify(legacy))).toBe(legacy);
+    expect(parseThemePreference('"ocean"')).toBe("ocean");
+    expect(parseThemePreference('"sage"')).toBe("sage");
+    expect(parseThemePreference('"Ocean"')).toBe("system");
+    expect(parseThemePreference("42")).toBe("system");
+  });
+
+  it("applies Ocean and Sage by name and keeps them across a reload of the stored value", () => {
+    setThemePreference("ocean");
+    expect(document.documentElement.dataset.theme).toBe("ocean");
+    expect(parseThemePreference(localStorage.getItem(THEME_STORAGE_KEY))).toBe("ocean");
+    expect(resolveTheme("sage", true)).toBe("sage");
+    setThemePreference("sage");
+    expect(useTheme.getState()).toMatchObject({ preference: "sage", resolved: "sage" });
+  });
+
+  it("toggles by kind from Ocean and Sage", () => {
+    setThemePreference("ocean");
+    toggleTheme();
+    expect(useTheme.getState().resolved).toBe("light");
+    setThemePreference("sage");
+    toggleTheme();
+    expect(useTheme.getState().resolved).toBe("dark");
+  });
+
   it("toggles between light and dark from the resolved theme", () => {
     setThemePreference("light");
     toggleTheme();

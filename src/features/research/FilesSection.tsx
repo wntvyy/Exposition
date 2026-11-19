@@ -95,7 +95,7 @@ export function ResearchFilesSection() {
                     key={itemKey(item)}
                     id={itemKey(item)}
                     title={title}
-                    icon={item.kind === "file" ? fileIconFor(title) : undefined}
+                    icon={item.kind === "file" ? fileIconFor(item.path) : undefined}
                     data-research-item={itemKey(item)}
                   />
                 )),

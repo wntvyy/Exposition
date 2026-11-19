@@ -5,16 +5,12 @@ import { IconButton } from "../../ui/components/Button";
 import { Menu, MenuItem, MenuSection, MenuSeparator, MenuTrigger, SubmenuTrigger } from "../../ui/components/Menu";
 import { Toolbar } from "../../ui/components/Panel";
 import { Tooltip } from "../../ui/components/Tooltip";
-import { setThemePreference, useTheme, type ThemePreference } from "../../ui/theme";
+import { setThemePreference, THEME_OPTIONS, useTheme, type ThemePreference } from "../../ui/theme";
+import { themeKinds } from "../../ui/tokens";
 import { EDITOR_PAGE, EDITOR_PAGE_TITLE, PAGE_KEYBINDINGS, pages, usePages } from "../pages";
 import { registry } from "../registry";
 import { useRegistryVersion } from "./useRegistry";
 
-const themeOptions: { id: ThemePreference; label: string; icon: typeof Sun }[] = [
-  { id: "light", label: "Light", icon: Sun },
-  { id: "dark", label: "Dark", icon: Moon },
-  { id: "system", label: "Follow system", icon: Monitor },
-];
 
 /**
  * A page tab: a navigation button marked `aria-current="page"` when its page
@@ -75,7 +71,7 @@ function ManageMenu() {
           Settings…
         </MenuItem>
         <SubmenuTrigger>
-          <MenuItem id="theme" icon={preference === "dark" ? Moon : preference === "light" ? Sun : Monitor} hasSubmenu>
+          <MenuItem id="theme" icon={preference === "system" ? Monitor : themeKinds[preference] === "dark" ? Moon : Sun} hasSubmenu>
             Color Theme
           </MenuItem>
           <Menu
@@ -86,7 +82,7 @@ function ManageMenu() {
             onAction={(key) => setThemePreference(key as ThemePreference)}
           >
             <MenuSection title="Color theme">
-              {themeOptions.map((option) => (
+              {THEME_OPTIONS.map((option) => (
                 <MenuItem key={option.id} id={option.id}>
                   {option.label}
                 </MenuItem>

@@ -6,13 +6,9 @@ import { AlertTriangle, CheckCircle2, Circle, Folder, FolderOpen, Info, Loader2,
 import type { ReactNode } from "react";
 
 import { FileIcon } from "../../components/FileIcon";
-import { resolveFileIcon, type IconAsset, type NodeKind, type ThemeKind } from "./fileIcons";
+import { iconUrl, resolveFileIcon, type NodeKind, type ThemeKind } from "./fileIcons";
 
-const ICON_URLS = import.meta.glob<string>("./icons/*.svg", { eager: true, query: "?url", import: "default" });
-
-export function iconUrl(asset: IconAsset): string {
-  return ICON_URLS[`./icons/${asset}.svg`] ?? "";
-}
+export { iconUrl };
 
 export type Tone = "neutral" | "accent" | "success" | "warning" | "danger" | "info" | "stale";
 /** Forced interaction state for palette sheets (otherwise real :hover/:active/:focus apply). */
@@ -131,7 +127,7 @@ export function FileGlyph({
     const F = expanded ? FolderOpen : Folder;
     return <F size={size} aria-hidden className="v2-glyph v2-glyph--folder" />;
   }
-  if (r.rule === "existing-glyph") {
+  if (r.rule === "existing-glyph" || r.rule === "generic") {
     return (
       <span className="v2-glyph v2-glyph--legacy" style={{ width: size, height: size }} aria-hidden>
         <FileIcon name={path} size={size} />

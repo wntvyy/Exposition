@@ -1,34 +1,26 @@
 // Appearance: the color theme (the shared theme store; persisted per profile).
-import { Monitor, Moon, Sun } from "lucide-react";
+// Four built-in themes plus "Follow system" (Light or Dark by the OS setting).
+import { ChoiceCards, ThemePreview } from "../../ui/components";
+import { setThemePreference, THEME_OPTIONS, useTheme, type ThemePreference } from "../../ui/theme";
+import { themeLabels } from "../../ui/tokens";
+import { SettingsGroup, SettingsPage } from "./parts";
 
-import { SegmentedControl } from "../../ui/components";
-import { setThemePreference, useTheme, type ThemePreference } from "../../ui/theme";
-import { SettingRow, SettingsGroup, SettingsPage } from "./parts";
-
-const THEME_OPTIONS: { id: ThemePreference; label: string; icon: typeof Sun }[] = [
-  { id: "light", label: "Light", icon: Sun },
-  { id: "dark", label: "Dark", icon: Moon },
-  { id: "system", label: "System", icon: Monitor },
-];
+const OPTIONS = THEME_OPTIONS.map((option) => ({ ...option, preview: <ThemePreview theme={option.id} /> }));
 
 export function AppearanceSection() {
   const preference = useTheme((s) => s.preference);
   const resolved = useTheme((s) => s.resolved);
   return (
     <SettingsPage title="Appearance" testId="settings-appearance">
-      <SettingsGroup title="Theme">
-        <SettingRow
-          label="Color theme"
-          description={preference === "system" ? `Follows your system setting (currently ${resolved}).` : undefined}
-        >
-          <SegmentedControl
-            aria-label="Color theme"
-            value={preference}
-            onChange={setThemePreference}
-            options={THEME_OPTIONS}
-            size="md"
-          />
-        </SettingRow>
+      <SettingsGroup
+        title="Color theme"
+        description={
+          preference === "system"
+            ? `Follows your system setting (currently ${themeLabels[resolved]}).`
+            : "Applies immediately. Open documents, drafts, and graph positions stay as they are."
+        }
+      >
+        <ChoiceCards<ThemePreference> aria-label="Color theme" value={preference} onChange={setThemePreference} options={OPTIONS} />
       </SettingsGroup>
     </SettingsPage>
   );

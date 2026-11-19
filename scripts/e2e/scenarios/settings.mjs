@@ -152,6 +152,10 @@ export default async function settings({ launchApp, artifactsDir, assert }) {
     // --- Theme.
     await setTheme(page, assert, "Dark", "dark");
     await shot(page, "settings-appearance-dark");
+    await setTheme(page, assert, "Ocean", "ocean");
+    await shot(page, "settings-appearance-ocean");
+    await setTheme(page, assert, "Sage", "sage");
+    await shot(page, "settings-appearance-sage");
     await setTheme(page, assert, "Light", "light");
     await shot(page, "settings-appearance-light");
 

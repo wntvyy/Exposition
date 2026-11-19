@@ -1,17 +1,23 @@
 // Monaco themes and editor defaults derived from the design tokens.
 //
-// `src/lib/monaco.ts` defines both themes and keeps Monaco on the app theme
+// `src/lib/monaco.ts` defines the four themes and keeps Monaco on the app theme
 // (Monaco's theme is global), so feature editors never call `setTheme`
 // themselves; they spread `editorDefaults` into their construction options.
+//
+// Syntax uses the semantic roles only (UI standard V2): keywords on info, so code
+// keeps its meaning whatever the accent; strings success; numbers warning; types,
+// tags, and attributes the accent; comments and punctuation the quiet text roles.
 import type * as Monaco from "monaco-editor/editor";
 
 import { parseColor } from "./color";
 import { useTheme } from "./theme";
-import { fonts, palettes, type ColorRole, type ThemeName } from "./tokens";
+import { fonts, palettes, themeKinds, themeNames, type ColorRole, type ThemeName } from "./tokens";
 
 export const MONACO_THEMES: Record<ThemeName, string> = {
   light: "exposition-light",
   dark: "exposition-dark",
+  ocean: "exposition-ocean",
+  sage: "exposition-sage",
 };
 
 /** Monaco accepts `#rrggbb` / `#rrggbbaa` only. */
@@ -30,17 +36,17 @@ function fg(theme: ThemeName, role: ColorRole): string {
 export function monacoThemeData(theme: ThemeName): Monaco.editor.IStandaloneThemeData {
   const c = (role: ColorRole, alpha?: number) => hex(theme, role, alpha);
   return {
-    base: theme === "dark" ? "vs-dark" : "vs",
+    base: themeKinds[theme] === "dark" ? "vs-dark" : "vs",
     inherit: true,
     rules: [
       { token: "", foreground: fg(theme, "text") },
       { token: "comment", foreground: fg(theme, "text-subtle"), fontStyle: "italic" },
-      { token: "keyword", foreground: fg(theme, "accent-text") },
+      { token: "keyword", foreground: fg(theme, "info-text") },
       { token: "string", foreground: fg(theme, "success-text") },
       { token: "number", foreground: fg(theme, "warning-text") },
-      { token: "type", foreground: fg(theme, "status-stale-text") },
+      { token: "type", foreground: fg(theme, "accent-text") },
       { token: "tag", foreground: fg(theme, "accent-text") },
-      { token: "attribute.name", foreground: fg(theme, "status-stale-text") },
+      { token: "attribute.name", foreground: fg(theme, "accent-text") },
       { token: "delimiter", foreground: fg(theme, "text-muted") },
       { token: "operator", foreground: fg(theme, "text-muted") },
       { token: "invalid", foreground: fg(theme, "danger-text") },
@@ -125,10 +131,9 @@ export const editorDefaults: Monaco.editor.IStandaloneEditorConstructionOptions 
 
 type MonacoApi = typeof Monaco;
 
-/** Define both themes. Idempotent. */
+/** Define the four themes. Idempotent. */
 export function defineMonacoThemes(monaco: MonacoApi): void {
-  monaco.editor.defineTheme(MONACO_THEMES.light, monacoThemeData("light"));
-  monaco.editor.defineTheme(MONACO_THEMES.dark, monacoThemeData("dark"));
+  for (const theme of themeNames) monaco.editor.defineTheme(MONACO_THEMES[theme], monacoThemeData(theme));
 }
 
 /** Set Monaco's (global) theme to the app's current theme. */

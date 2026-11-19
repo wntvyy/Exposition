@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { contrastRatio, parseColor, readCustomProperties, resolveVar } from "./color";
-import { colorRoles, densityPx, graphCategories, palettes, type ColorRole, type ThemeName } from "./tokens";
+import { colorRoles, densityPx, graphCategories, palettes, themeKinds, themeNames, type ColorRole, type ThemeName } from "./tokens";
 
 // Vitest stubs CSS imports (even `?raw`), so read the stylesheet from disk.
 const nodeFs = "node:fs";
@@ -13,7 +13,7 @@ const tokensCss = readFileSync("src/ui/tokens.css", "utf8");
 
 function themeProperties(theme: ThemeName): Record<string, string> {
   const base = readCustomProperties(tokensCss, ":root");
-  return theme === "light" ? base : { ...base, ...readCustomProperties(tokensCss, ':root[data-theme="dark"]') };
+  return theme === "light" ? base : { ...base, ...readCustomProperties(tokensCss, `:root[data-theme="${theme}"]`) };
 }
 
 function resolvedColor(theme: ThemeName, role: ColorRole): string {
@@ -95,11 +95,30 @@ const boundaryPairs: [ColorRole, ColorRole][] = [
 ];
 
 describe("design tokens", () => {
-  it.each(["light", "dark"] as const)("tokens.ts mirrors tokens.css (%s)", (theme) => {
+  it.each(themeNames)("tokens.ts mirrors tokens.css (%s)", (theme) => {
     for (const role of colorRoles) {
       const css = parseColor(resolvedColor(theme, role));
       const ts = parseColor(palettes[theme][role]);
       expect({ role, ...ts }).toEqual({ role, ...css });
+    }
+  });
+
+  it.each(themeNames.filter((t) => t !== "light"))("%s overrides every base color role and sets its color scheme", (theme) => {
+    const block = readCustomProperties(tokensCss, `:root[data-theme="${theme}"]`);
+    const rootProps = readCustomProperties(tokensCss, ":root");
+    const baseRoles = colorRoles.filter((role) => !rootProps[`--color-${role}`]?.startsWith("var("));
+    expect(baseRoles.filter((role) => block[`--color-${role}`] === undefined)).toEqual([]);
+    expect(tokensCss).toContain(`:root[data-theme="${theme}"] {\n  color-scheme: ${themeKinds[theme]};`);
+  });
+
+  it("keeps the semantic roles apart from the accent in every theme", () => {
+    for (const theme of themeNames) {
+      const c = palettes[theme];
+      for (const role of ["info-text", "success-text", "warning-text", "danger-text", "focus-ring"] as const) {
+        expect([theme, role, c[role]]).not.toEqual([theme, role, c["accent-text"]]);
+      }
+      // Stale follows the warning colors (one hue fewer).
+      expect(c["status-stale-text"]).toBe(c["warning-text"]);
     }
   });
 
@@ -110,7 +129,7 @@ describe("design tokens", () => {
     expect(declared.filter((role) => !(colorRoles as readonly string[]).includes(role))).toEqual([]);
   });
 
-  it.each(["light", "dark"] as const)("text pairs meet 4.5:1 (%s)", (theme) => {
+  it.each(themeNames)("text pairs meet 4.5:1 (%s)", (theme) => {
     const failures = textPairs
       .map(([fg, bg]) => ({ fg, bg, ratio: contrastRatio(resolvedColor(theme, fg), resolvedColor(theme, bg)) }))
       .filter((r) => r.ratio < 4.5)
@@ -118,7 +137,7 @@ describe("design tokens", () => {
     expect(failures).toEqual([]);
   });
 
-  it.each(["light", "dark"] as const)("boundary, focus, and icon pairs meet 3:1 (%s)", (theme) => {
+  it.each(themeNames)("boundary, focus, and icon pairs meet 3:1 (%s)", (theme) => {
     const failures = boundaryPairs
       .map(([fg, bg]) => ({ fg, bg, ratio: contrastRatio(resolvedColor(theme, fg), resolvedColor(theme, bg)) }))
       .filter((r) => r.ratio < 3)

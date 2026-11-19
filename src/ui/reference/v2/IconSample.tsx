@@ -12,7 +12,7 @@ const RULE_LABEL = {
   filename: "Exact file name",
   extension: "Extension",
   "existing-glyph": "No package asset: current glyph",
-  generic: "Generic fallback",
+  generic: "Generic fallback: current glyph",
 } as const;
 
 function allNodes(nodes: TreeNode[], prefix = "", out: { path: string; node: TreeNode }[] = []) {

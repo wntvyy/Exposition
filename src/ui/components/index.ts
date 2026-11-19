@@ -30,6 +30,9 @@ export type { InspectorHeaderProps, KeyValueItem, PageHeaderProps, PanelHeaderPr
 export { ListRow } from "./ListRow";
 export { OptionList } from "./OptionList";
 export type { OptionListOption, OptionListProps } from "./OptionList";
+export { ChoiceCards } from "./ChoiceCards";
+export type { ChoiceCardOption, ChoiceCardsProps } from "./ChoiceCards";
+export { ThemePreview } from "./ThemePreview";
 export type { ListRowProps } from "./ListRow";
 export { SimpleTable } from "./SimpleTable";
 export type { SimpleTableColumn, SimpleTableProps } from "./SimpleTable";

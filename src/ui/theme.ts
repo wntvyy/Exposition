@@ -1,10 +1,15 @@
-// Application theme. Follows the OS color scheme by default; an explicit
-// light/dark choice is persisted. The resolved theme is applied as
-// `<html data-theme="light|dark">`, which `tokens.css` keys on.
+// Application theme. Follows the OS color scheme by default ("system": Light or
+// Dark); an explicit choice of one of the four built-in themes (Light, Dark,
+// Ocean, Sage) is persisted. The resolved theme is applied as
+// `<html data-theme="light|dark|ocean|sage">`, which `tokens.css` keys on.
+//
+// Compatibility: values saved before V2 ("light", "dark", "system") are read
+// unchanged. A missing, unreadable, or unknown value falls back to "system"
+// and is not rewritten until the user picks a theme.
 import { create } from "zustand";
 
 import { parseJson, readStored, writeStored } from "./storage";
-import type { ThemeName } from "./tokens";
+import { themeKinds, themeLabels, themeNames, type ThemeName } from "./tokens";
 
 export type ThemePreference = "system" | ThemeName;
 
@@ -14,7 +19,7 @@ const DARK_QUERY = "(prefers-color-scheme: dark)";
 
 export function parseThemePreference(raw: string | null): ThemePreference {
   const value = parseJson(raw);
-  return value === "light" || value === "dark" || value === "system" ? value : "system";
+  return value === "system" || (themeNames as readonly unknown[]).includes(value) ? (value as ThemePreference) : "system";
 }
 
 export function resolveTheme(preference: ThemePreference, systemDark: boolean): ThemeName {
@@ -54,9 +59,9 @@ export function setThemePreference(preference: ThemePreference): void {
   writeStored(THEME_STORAGE_KEY, JSON.stringify(preference));
 }
 
-/** Switch to the opposite of the currently resolved theme (an explicit choice). */
+/** Switch between Light and Dark by the current theme's kind (an explicit choice). */
 export function toggleTheme(): void {
-  setThemePreference(useTheme.getState().resolved === "dark" ? "light" : "dark");
+  setThemePreference(themeKinds[useTheme.getState().resolved] === "dark" ? "light" : "dark");
 }
 
 let installed = false;
@@ -78,3 +83,9 @@ export function installTheme(): void {
     // matchMedia unavailable: keep the resolved theme.
   }
 }
+
+/** The theme choices every picker offers (Settings, the page-bar menu, commands), in order. */
+export const THEME_OPTIONS: readonly { id: ThemePreference; label: string }[] = [
+  ...themeNames.map((id) => ({ id, label: themeLabels[id] })),
+  { id: "system", label: "Follow system" },
+];

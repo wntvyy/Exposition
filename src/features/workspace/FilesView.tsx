@@ -199,7 +199,7 @@ function RecoveryList({ entries }: { entries: RecoveryEntry[] }) {
 function entryIcon(entry: FileEntry, expanded: boolean) {
   if (entry.unavailable) return entry.link ? Unlink : FileWarning;
   if (entry.kind === "directory") return expanded ? FolderOpen : Folder;
-  return fileIconFor(entry.name);
+  return fileIconFor(entry.path);
 }
 
 let lastPointerToggle = 0;

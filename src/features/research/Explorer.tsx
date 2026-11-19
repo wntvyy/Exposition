@@ -220,7 +220,7 @@ export function ResearchExplorer() {
                     key={f.path}
                     id={itemKey({ kind: "file", path: f.path })}
                     title={f.name}
-                    icon={fileIconFor(f.name)}
+                    icon={fileIconFor(f.path)}
                     data-path={f.path}
                     data-item-key={itemKey({ kind: "file", path: f.path })}
                     data-entity={f.entity ?? undefined}

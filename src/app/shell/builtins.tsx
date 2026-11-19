@@ -194,6 +194,18 @@ const builtinCommands: CommandContribution[] = [
     run: () => setThemePreference("dark"),
   },
   {
+    id: "workbench.action.theme.ocean",
+    title: "Color Theme: Ocean",
+    category: "Preferences",
+    run: () => setThemePreference("ocean"),
+  },
+  {
+    id: "workbench.action.theme.sage",
+    title: "Color Theme: Sage",
+    category: "Preferences",
+    run: () => setThemePreference("sage"),
+  },
+  {
     id: "workbench.action.theme.system",
     title: "Color Theme: Follow System",
     category: "Preferences",

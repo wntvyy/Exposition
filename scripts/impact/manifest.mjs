@@ -218,6 +218,13 @@ export const AREAS = [
     e2e: [],
     note: "Documentation: no automated check reads it; review the text against current behavior.",
   },
+  {
+    id: "prototypes",
+    paths: ["prototypes/**"],
+    level: "local",
+    e2e: [],
+    note: "Design-review harnesses (standalone Vite pages and screenshots; not part of the app). Typecheck covers their TSX; re-shoot to review.",
+  },
   { id: "git-ignore", paths: [".gitignore"], level: "local", e2e: [], note: "Ignore rules: the private-path guard verifies them." },
   {
     id: "line-endings",

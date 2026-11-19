@@ -2441,3 +2441,90 @@ th.ui-data-table__cell {
 .ui-option-list__option[data-disabled][data-selected] .ui-radio-mark {
   background: var(--color-text-disabled);
 }
+
+/* --- ChoiceCards: a single choice as small pictures (the color theme). --- */
+.ui-choice-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 136px));
+  gap: var(--gap-group);
+}
+.ui-choice-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+  min-width: 0;
+  cursor: default;
+  outline: none;
+}
+.ui-choice-card__preview {
+  display: block;
+  border-radius: var(--radius-lg);
+  outline: var(--focus-ring-width) solid transparent;
+  outline-offset: 2px;
+}
+.ui-choice-card[data-hovered] .ui-choice-card__preview {
+  outline-color: var(--color-border-strong);
+}
+.ui-choice-card[data-selected] .ui-choice-card__preview {
+  outline-color: var(--color-accent);
+}
+.ui-choice-card[data-focus-visible] .ui-choice-card__preview {
+  outline-color: var(--color-focus-ring);
+}
+.ui-choice-card__label {
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-choice-card[data-selected] .ui-choice-card__label {
+  font-weight: var(--font-weight-semibold);
+}
+
+/* --- ThemePreview: a miniature sidebar and editor in a theme's own colors. --- */
+.ui-theme-preview__frame {
+  display: grid;
+  grid-template-columns: 2fr 3fr;
+  gap: var(--space-1);
+  height: 76px;
+  padding: var(--space-1-5);
+  border: var(--border-width) solid;
+  border-radius: var(--radius-lg);
+}
+.ui-theme-preview__pane {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: var(--space-1-5);
+  border-radius: var(--radius-sm);
+}
+.ui-theme-preview__pane i {
+  display: block;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+}
+.ui-theme-preview__split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  height: 76px;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.ui-theme-preview__split .ui-theme-preview__frame {
+  border-radius: 0;
+  grid-template-columns: 1fr;
+}
+.ui-theme-preview__split .ui-theme-preview__frame:first-child .ui-theme-preview__pane:last-child,
+.ui-theme-preview__split .ui-theme-preview__frame:last-child .ui-theme-preview__pane:first-child {
+  display: none;
+}
+
+/* --- File-type icons drawn from the supplied SVGs: the same box as a glyph. --- */
+.ui-file-icon {
+  flex: none;
+  display: block;
+  object-fit: contain;
+  user-select: none;
+}
