@@ -140,8 +140,16 @@
   max-width: 100%;
 }
 
+/* The shared button label does not shrink by itself: let it, so the default's name ellipsizes. */
+.agents-model-menu__footer > .ui-button > .ui-button__label {
+  min-width: 0;
+  overflow: hidden;
+}
+
 .agents-model-menu__default-label {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }

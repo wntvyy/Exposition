@@ -21,6 +21,7 @@ import { taskActions } from "./taskOps";
 import { unsavedCount, useTaskReview } from "./taskReview";
 import { useFollowBottom } from "./Transcript";
 import { TurnOutline } from "./TurnOutline";
+import { withoutRepeatedFailure } from "./turns";
 
 export { payloadSize } from "./ApprovalCard";
 
@@ -189,7 +190,10 @@ export function TaskView({
       )}
       <div className="agents-task__scroll" role="log" aria-live="polite" aria-label="Transcript" ref={logRef} data-testid="agents-transcript">
         <div className="agents-column">
-          <TurnOutline taskId={id} transcript={transcript} approvals={approvals} draft={active ? (draft ?? null) : null} reviews={reviews} />
+          <TurnOutline
+            taskId={id}
+            transcript={withoutRepeatedFailure(transcript, task.status)}
+            approvals={approvals} draft={active ? (draft ?? null) : null} reviews={reviews} />
           {!active && <OutcomeBanner status={task.status} />}
         </div>
       </div>

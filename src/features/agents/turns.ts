@@ -4,6 +4,7 @@
 // calls recorded and what the review records say about the files — never the
 // assistant's prose — so a claim in the text cannot become a claimed action.
 import type { FileReview } from "../../bindings/FileReview";
+import type { TaskStatus } from "../../bindings/TaskStatus";
 import type { TranscriptItem } from "../../bindings/TranscriptItem";
 
 export type ToolCallItem = Extract<TranscriptItem, { kind: "toolCall" }>;
@@ -148,4 +149,17 @@ export function turnSummary(calls: readonly ToolCallItem[], reviews: ReadonlyMap
     running: running ? running.name : null,
     calls: calls.length,
   };
+}
+
+/**
+ * The transcript as the conversation shows it: when a failed task's last
+ * entry is an error notice with exactly the failure message, the "Task
+ * failed" banner under the conversation states it, so it is not repeated
+ * right above the banner. Everything else is shown as recorded.
+ */
+export function withoutRepeatedFailure(items: readonly TranscriptItem[], status: TaskStatus): readonly TranscriptItem[] {
+  if (status.kind !== "failed") return items;
+  const last = items[items.length - 1];
+  if (last?.kind === "notice" && last.level === "error" && last.message.trim() === status.message.trim()) return items.slice(0, -1);
+  return items;
 }

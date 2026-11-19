@@ -144,8 +144,22 @@ export default async function v2TourAgents({ launchApp, artifactsDir, assert }) 
     evidence.steps.push({ name, ...data });
     console.log(`ok: ${name}${Object.keys(data).length ? ` ${JSON.stringify(data)}` : ""}`);
   };
+  // Task notifications (approval, question, failure) would cover the views: dismiss them before each shot.
+  const clearToasts = async (page) => {
+    const buttons = page.getByRole("button", { name: /^Dismiss notification/ });
+    for (let i = 0; i < 20 && (await buttons.count()) > 0; i++) await buttons.first().click();
+    await page.waitForTimeout(150);
+  };
   const shoot = async (name, prepare) => {
-    const paths = await shootThemes(app.page, { outDir: artifactsDir, area: AREA, name, prepare });
+    const paths = await shootThemes(app.page, {
+      outDir: artifactsDir,
+      area: AREA,
+      name,
+      prepare: async (page, theme) => {
+        await clearToasts(page);
+        if (prepare) await prepare(page, theme);
+      },
+    });
     evidence.shots.push(...paths);
   };
   try {
@@ -329,13 +343,15 @@ export default async function v2TourAgents({ launchApp, artifactsDir, assert }) 
       await page.waitForTimeout(100);
     });
     await shoot("page-response-code", async () => {
-      await response.locator("[data-testid=md-code-text]").first().evaluate((el) => el.scrollIntoView({ block: "center" }));
+      // Scroll the transcript (not the fence sideways) so the fence's header is near the top.
+      const header = response.locator(".ui-md-code__header").first();
+      await transcript.evaluate((log, top) => (log.scrollTop += top - log.getBoundingClientRect().top - 120), (await header.boundingBox()).y);
       await page.waitForTimeout(100);
     });
     step("Agents page: task list, long title, attachments, long response with code and math");
 
     await openOnPage(failed.id);
-    await agentsPage.getByText("Task failed", { exact: true }).waitFor();
+    await transcript.locator(".ui-banner__title", { hasText: "Task failed" }).waitFor();
     assert.equal(await agentsPage.locator("[data-testid=agents-turn][data-failed]").count() >= 1, true, "a turn marked failed");
     await shoot("page-failed", async () => {
       await transcript.evaluate((el) => (el.scrollTop = el.scrollHeight));
@@ -396,14 +412,16 @@ export default async function v2TourAgents({ launchApp, artifactsDir, assert }) 
     await field.fill("Also mention the thermocouple offset in the caption.");
 
     // Keyboard: Needs you → Enter moves focus to the approval card.
-    const focusApproval = async () => {
+    // The jump centers the card; `block` then shows its start (banner) or its end (the decision).
+    const focusApproval = (block) => async () => {
       const link = panel.getByTestId("agents-needs-approval");
       await link.focus();
       await page.keyboard.press("Enter");
       await page.waitForFunction(() => document.activeElement?.getAttribute("data-testid") === "agents-approval", null, { timeout: 5000 });
+      await panel.getByTestId("agents-approval").evaluate((el, b) => el.scrollIntoView({ block: b }), block);
       await page.waitForTimeout(100);
     };
-    await shoot("panel-approval", focusApproval);
+    await shoot("panel-approval", focusApproval("start"));
     step("Agent panel (normal width): approval card with the complete payload, focus after Needs you, two pasted attachments", {
       width: normal,
       payloadHasMarker: evidence.payloadHasMarker,
@@ -423,7 +441,7 @@ export default async function v2TourAgents({ launchApp, artifactsDir, assert }) 
       await payload.evaluate((el) => el.scrollIntoView({ block: "start" }));
       await page.waitForTimeout(100);
     });
-    await shoot("panel-approval-narrow-actions", focusApproval);
+    await shoot("panel-approval-narrow-actions", focusApproval("end"));
     step("Agent panel (narrow): approval payload and actions", { width: narrow });
 
     // The question in the narrow panel.
@@ -472,9 +490,17 @@ export default async function v2TourAgents({ launchApp, artifactsDir, assert }) 
     }
     await openSheet();
     // The sheet stays within the panel: no horizontal overflow from the long name.
-    const sheetOverflow = await sheet.evaluate((el) => el.scrollWidth - el.clientWidth);
-    assert.ok(sheetOverflow <= 1, `the Options sheet does not scroll sideways (${sheetOverflow})`);
     await shoot("panel-options-long-model", openSheet);
+    const sheetOverflow = await sheet.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      const wide = [...el.querySelectorAll("*")]
+        .filter((n) => n.getBoundingClientRect().right > box.right + 1)
+        .slice(0, 8)
+        .map((n) => `${n.tagName.toLowerCase()}.${String(n.className).split(" ").join(".")}[${n.getAttribute("data-testid") ?? ""}] ${Math.round(n.getBoundingClientRect().right - box.right)}`);
+      return { overflow: el.scrollWidth - el.clientWidth, wide };
+    });
+    evidence.sheetOverflow = sheetOverflow;
+    assert.ok(sheetOverflow.overflow <= 1, `the Options sheet does not scroll sideways (${JSON.stringify(sheetOverflow)})`);
     step("Options sheet, Model tab, long model name", { longModelChosen: evidence.longModelChosen });
     await page.keyboard.press("Escape");
 
