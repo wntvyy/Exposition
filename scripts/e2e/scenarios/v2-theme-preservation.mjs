@@ -20,7 +20,8 @@ import { documentState, editorLocator, focusEditor, invoke, makeProject, openInE
 
 // The editor surface per theme (tokens.ts `palettes[theme].surface`).
 const SURFACE = { light: "rgb(255, 255, 255)", dark: "rgb(29, 30, 32)", ocean: "rgb(24, 31, 40)", sage: "rgb(251, 251, 251)" };
-const TYPED = " theme-preservation-check";
+// No leading space: Monaco may drop a typed leading space on an empty last line.
+const TYPED = "theme-preservation-check";
 
 /** Monaco editor facts for `path`, through the SourceEditor's React state. */
 function editorFacts(page, path) {
