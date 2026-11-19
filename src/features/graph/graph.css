@@ -243,6 +243,11 @@ p.xp-graph-row__main {
 .xp-graph-row__line > .ui-status-text {
   vertical-align: text-bottom;
 }
+/* A source file's icon before its path. */
+.xp-graph-row__line > .xp-graph-file-icon {
+  margin-right: var(--space-1);
+  vertical-align: text-bottom;
+}
 .xp-graph-row__actions {
   flex: none;
 }
@@ -250,7 +255,7 @@ p.xp-graph-row__main {
   margin: 0;
 }
 .xp-graph-group + .xp-graph-group {
-  margin-top: var(--space-3);
+  margin-top: var(--gap-group);
 }
 .xp-graph-group > .ui-group-label {
   margin-bottom: var(--space-1);
@@ -292,7 +297,7 @@ p.xp-graph-row__main {
 .xp-graph-form {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--gap-group);
 }
 .xp-graph-form__ends {
   display: flex;
@@ -316,9 +321,9 @@ p.xp-graph-row__main {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--block-padding);
   border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--color-surface-sunken);
   user-select: text;
 }
@@ -421,8 +426,8 @@ p.xp-graph-row__main {
   max-width: 100%;
 }
 .xp-deps-entity + .xp-deps-entity {
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
+  margin-top: var(--gap-group);
+  padding-top: var(--gap-group);
   border-top: var(--border-width) solid var(--color-border-subtle);
 }
 .xp-deps-entity > .xp-graph-group {

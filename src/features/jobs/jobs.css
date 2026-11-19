@@ -79,8 +79,8 @@
   display: flex;
   flex: 1 0 auto;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: 0 var(--pane-inset) var(--space-3);
+  gap: var(--gap-related);
+  padding: 0 var(--pane-inset) var(--gap-group);
 }
 
 .exp-jobs__output-options {
@@ -152,7 +152,7 @@
 .exp-trust {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--gap-related);
 }
 
 .exp-trust p {

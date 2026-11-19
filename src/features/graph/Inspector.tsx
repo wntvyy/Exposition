@@ -42,6 +42,7 @@ import {
   confirm,
   EmptyState,
   ErrorState,
+  FileIcon,
   IconButton,
   InspectorBody,
   InspectorHeader,
@@ -120,6 +121,7 @@ export function BindingRow({ binding }: { binding: SourceBinding }) {
     <li className="xp-graph-row" data-testid="graph-binding" data-path={binding.path} data-state={binding.state}>
       <div className="xp-graph-row__main">
         <p className="xp-graph-row__line">
+          <FileIcon name={binding.path} className="xp-graph-file-icon" />
           <span className="ui-code">{binding.path}</span> <span className="ui-muted">· {where}</span>
           {binding.state === "resolved" ? (
             <span className="ui-muted"> · resolved</span>

@@ -17,6 +17,7 @@ import {
   Banner,
   Button,
   EditorTabList,
+  fileIconFor,
   EmptyState,
   IconButton,
   LoadingState,
@@ -110,7 +111,7 @@ function SourceArea() {
         <div className="exp-rpage__tabbar">
           <EditorTabList
             aria-label="Open research sources"
-            items={open.map((p) => ({ key: p, title: p.split("/").pop() ?? p, description: p }))}
+            items={open.map((p) => ({ key: p, title: p.split("/").pop() ?? p, description: p, icon: fileIconFor(p) }))}
             onClose={(key) => void closeSource(key)}
           />
           <Toolbar aria-label="Run" className="exp-rpage__run">

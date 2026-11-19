@@ -14,6 +14,7 @@ import {
   Banner,
   Button,
   EmptyState,
+  FileIcon,
   IconButton,
   KeyValueList,
   ProgressBar,
@@ -276,7 +277,10 @@ function LeanDocumentView({ state }: { state: LeanDocumentState }) {
             <span data-testid="lean-status">
               <StatusPill status={view.status} label={view.label} detail={view.detail} />
             </span>
-            <span className="exp-lean__file" title={state.path}>{state.path.split("/").pop()}</span>
+            <span className="exp-lean__file" title={state.path}>
+              <FileIcon name={state.path} />
+              <span className="exp-lean__file-name">{state.path.split("/").pop()}</span>
+            </span>
           </div>
           <Toolbar aria-label="Lean actions">
             <IconButton icon={RotateCcw} aria-label="Restart file (rebuild imports)" onPress={() => void commands.leanRestartFile(state.document)} />

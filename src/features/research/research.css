@@ -73,7 +73,7 @@
 .exp-research__work {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--gap-related);
   min-width: 0;
   min-height: 0;
   overflow: auto;
@@ -280,9 +280,10 @@
   list-style: none;
 }
 
-/* Execution policies (Research page explorer). */
+/* Execution policies (Research page explorer): set apart from the tree by
+   space; the section title carries the rule. */
 .exp-research__modes-section {
-  border-top: var(--border-width) solid var(--color-border);
+  margin-top: var(--gap-group);
 }
 
 .exp-research__modes {
@@ -333,12 +334,19 @@
 
 /* ---- Inspector -------------------------------------------------------------------- */
 
+/* A project file's type line: its file icon and type name. */
+.exp-rinspector__type {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
 /* Facts, banners, and forms between the item header and its sections. */
 .exp-rinspector__facts {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: 0 var(--pane-inset) var(--space-3);
+  gap: var(--gap-related);
+  padding: 0 var(--pane-inset) var(--space-2);
 }
 
 .exp-rinspector__note {
@@ -374,10 +382,8 @@
   padding: 0;
 }
 
-/* Graph relations, evidence, and impact: a block of sections after the item's own. */
-.exp-graph {
-  border-top: var(--border-width) solid var(--color-border-subtle);
-}
+/* Graph relations, evidence, and impact: a block of sections after the
+   item's own (their titles carry the rules; no divider above the block). */
 
 .exp-graph--state {
   padding: var(--space-2) var(--pane-inset);
@@ -562,7 +568,7 @@
 .exp-setup {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--gap-group);
 }
 
 .exp-setup p {
