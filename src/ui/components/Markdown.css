@@ -64,8 +64,8 @@
   --ui-md-inset-bg: var(--ui-response-inset-bg, var(--color-surface-sunken));
   min-width: 0;
   color: var(--color-text);
-  font-size: var(--font-size-lg);
-  line-height: var(--line-height-normal);
+  font-size: var(--font-size-prose);
+  line-height: var(--line-height-prose);
   overflow-wrap: anywhere;
   user-select: text;
   cursor: text;
