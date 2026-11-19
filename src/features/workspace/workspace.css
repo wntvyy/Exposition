@@ -141,7 +141,7 @@
 /* Project switch decision: one paragraph per consequence. */
 .xp-switch {
   display: grid;
-  gap: var(--space-2);
+  gap: var(--gap-related);
 }
 
 /* OS drop target (QOL G): the destination folder row, or the whole tree for

@@ -94,7 +94,7 @@ import {
   type EditorTabItem,
   type Status,
 } from "../components";
-import { setThemePreference, useTheme, type ThemePreference } from "../theme";
+import { setThemePreference, THEME_OPTIONS, useTheme, type ThemePreference } from "../theme";
 import { palettes, type ColorRole } from "../tokens";
 
 const MonacoSample = lazy(() => import("./MonacoSample"));
@@ -448,11 +448,7 @@ export function UiReference() {
           size="md"
           value={preference}
           onChange={setThemePreference}
-          options={[
-            { id: "light", label: "Light" },
-            { id: "dark", label: "Dark" },
-            { id: "system", label: "System" },
-          ]}
+          options={[...THEME_OPTIONS]}
         />
       </header>
 
@@ -460,6 +456,10 @@ export function UiReference() {
         <div className="ref-type">
           <p style={{ fontSize: "var(--font-size-2xl)", fontWeight: 600 }}>Heading 20 / semibold</p>
           <p style={{ fontSize: "var(--font-size-xl)", fontWeight: 600 }}>Title 16 / semibold — dialogs, empty states</p>
+          <p style={{ fontSize: "var(--font-size-title)", fontWeight: 600 }}>Page title 15 / semibold</p>
+          <p style={{ fontSize: "var(--font-size-prose)", lineHeight: "var(--line-height-prose)" }}>
+            Prose 14 / 1.5 — agent responses, rendered Markdown, dialog text
+          </p>
           <p style={{ fontSize: "var(--font-size-lg)" }}>Body 14 — dialog text, emphasized content</p>
           <p style={{ fontSize: "var(--font-size-md)" }}>UI 13 — default controls, lists, menus</p>
           <p style={{ fontSize: "var(--font-size-sm)", color: "var(--color-text-muted)" }}>Small 12 — tabs, status bar, hints</p>
@@ -1031,7 +1031,7 @@ export function UiReference() {
         <SplitSample />
       </RefSection>
 
-      <RefSection title="Monaco theme" description="exposition-light / exposition-dark, generated from tokens.">
+      <RefSection title="Monaco theme" description="exposition-light / -dark / -ocean / -sage, generated from tokens; keywords use the info role.">
         <Suspense fallback={<LoadingState title="Loading editor…" fill={false} />}>
           <MonacoSample />
         </Suspense>

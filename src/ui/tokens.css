@@ -110,9 +110,9 @@
   --color-graph-document-bg: #eef1f7;
   --color-graph-document-border: #4d6d9d;
   --color-graph-document-text: #364c6d;
-  --color-graph-data-bg: #eef6f2;
-  --color-graph-data-border: #51976e;
-  --color-graph-data-text: #396a4e;
+  --color-graph-data-bg: #eef7f1;
+  --color-graph-data-border: #4b9963;
+  --color-graph-data-text: #366d47;
   --color-graph-math-bg: #f1eff5;
   --color-graph-math-border: #6e5991;
   --color-graph-math-text: #4c3e65;
@@ -122,9 +122,9 @@
   --color-graph-reference-bg: #f6eef0;
   --color-graph-reference-border: #985264;
   --color-graph-reference-text: #6a3945;
-  --color-graph-workflow-bg: #eef5f7;
-  --color-graph-workflow-border: #4694a3;
-  --color-graph-workflow-text: #316772;
+  --color-graph-workflow-bg: #eef4f7;
+  --color-graph-workflow-border: #3f87ab;
+  --color-graph-workflow-text: #2c5e77;
   /* Edges by relation family (also distinguished by dash pattern and arrowhead). */
   --color-graph-edge: #787d87;
   --color-graph-edge-math: var(--color-graph-math-border);
@@ -297,9 +297,9 @@
   --color-graph-document-bg: #1e2733;
   --color-graph-document-border: #638ac5;
   --color-graph-document-text: #a6bcde;
-  --color-graph-data-bg: #1e3329;
-  --color-graph-data-border: #74b494;
-  --color-graph-data-text: #afd4c2;
+  --color-graph-data-bg: #1e3323;
+  --color-graph-data-border: #6fb882;
+  --color-graph-data-text: #add7b7;
   --color-graph-math-bg: #261e33;
   --color-graph-math-border: #8a6fb8;
   --color-graph-math-text: #bcadd7;
@@ -309,9 +309,9 @@
   --color-graph-reference-bg: #331e25;
   --color-graph-reference-border: #bd6b86;
   --color-graph-reference-text: #d9abba;
-  --color-graph-workflow-bg: #1e3033;
-  --color-graph-workflow-border: #6bafbd;
-  --color-graph-workflow-text: #abd1d9;
+  --color-graph-workflow-bg: #1e2c33;
+  --color-graph-workflow-border: #65a4c3;
+  --color-graph-workflow-text: #a7cbdd;
   --color-graph-edge: #7e838b;
 }
 
@@ -376,9 +376,9 @@
   --color-graph-document-bg: #212b36;
   --color-graph-document-border: #5e90c9;
   --color-graph-document-text: #a3c0e0;
-  --color-graph-data-bg: #21362b;
-  --color-graph-data-border: #74b494;
-  --color-graph-data-text: #afd4c2;
+  --color-graph-data-bg: #213624;
+  --color-graph-data-border: #72b67d;
+  --color-graph-data-text: #aed5b5;
   --color-graph-math-bg: #282136;
   --color-graph-math-border: #8a6fb8;
   --color-graph-math-text: #bcadd7;
@@ -388,9 +388,9 @@
   --color-graph-reference-bg: #362128;
   --color-graph-reference-border: #bd6b86;
   --color-graph-reference-text: #d9abba;
-  --color-graph-workflow-bg: #213635;
-  --color-graph-workflow-border: #74b4b2;
-  --color-graph-workflow-text: #afd4d3;
+  --color-graph-workflow-bg: #213236;
+  --color-graph-workflow-border: #69aebf;
+  --color-graph-workflow-text: #a9d0da;
   --color-graph-edge: #6781a2;
 }
 
@@ -455,9 +455,9 @@
   --color-graph-document-bg: #ebeff5;
   --color-graph-document-border: #4b72a0;
   --color-graph-document-text: #34506f;
-  --color-graph-data-bg: #ecf4eb;
-  --color-graph-data-border: #5a9651;
-  --color-graph-data-text: #406a39;
+  --color-graph-data-bg: #ecf5eb;
+  --color-graph-data-border: #57974e;
+  --color-graph-data-text: #3e6c37;
   --color-graph-math-bg: #efecf3;
   --color-graph-math-border: #6e5b8f;
   --color-graph-math-text: #4d4064;
@@ -467,9 +467,9 @@
   --color-graph-reference-bg: #f4ebee;
   --color-graph-reference-border: #965465;
   --color-graph-reference-text: #683b46;
-  --color-graph-workflow-bg: #edf2f0;
-  --color-graph-workflow-border: #638875;
-  --color-graph-workflow-text: #455f52;
+  --color-graph-workflow-bg: #ebf2f5;
+  --color-graph-workflow-border: #4d889d;
+  --color-graph-workflow-text: #365f6d;
   --color-graph-edge: #888877;
 }
 

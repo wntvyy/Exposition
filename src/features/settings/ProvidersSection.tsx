@@ -201,79 +201,89 @@ function ProviderGroup({ provider, status, catalog }: { provider: Keyed; status:
           {connection.credentialError}
         </Banner>
       )}
-      <SettingRow label="API key" description={configured ? undefined : "Exposition never shows a saved key again."}>
-        <span data-testid="agents-key-status" data-provider={provider}>
-          {configured ? `Configured — stored in ${status.credentialStore}` : "Not configured"}
-        </span>
+      {/* The key's state, its actions, and (when there is no key, or while
+          replacing it) the field, all in the API key row. */}
+      <SettingRow label="API key">
+        <div className="exp-settings__key">
+          <div className="exp-settings__key-line">
+            <span data-testid="agents-key-status" data-provider={provider}>
+              {configured ? `Configured — stored in ${status.credentialStore}` : "Not configured"}
+            </span>
+            {configured && (
+              <span className="exp-settings__value-actions">
+                {!replacing && (
+                  <Button
+                    size="sm"
+                    icon={KeyRound}
+                    isDisabled={busy}
+                    onPress={() => {
+                      setReplacing(true);
+                      focusKeyField(provider);
+                    }}
+                    data-testid="agents-key-replace"
+                  >
+                    Replace key
+                  </Button>
+                )}
+                <Button size="sm" variant="ghost" icon={Trash2} isDisabled={busy} onPress={() => void removeKey()} data-testid="agents-key-remove">
+                  Remove
+                </Button>
+              </span>
+            )}
+          </div>
+          {showForm && (
+            <div className="exp-settings__key-form">
+              <TextField
+                aria-label={configured ? "New API key" : "API key"}
+                type="password"
+                autoComplete="off"
+                code
+                placeholder={KEY_PLACEHOLDER[provider]}
+                value={key}
+                onChange={setKey}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void saveKey();
+                  } else event.continuePropagation();
+                }}
+                className="exp-settings__grow"
+                data-testid="agents-key-input"
+              />
+              <Button icon={KeyRound} isDisabled={busy || !key.trim()} onPress={() => void saveKey()} data-testid="agents-key-save">
+                Save key
+              </Button>
+              {replacing && (
+                <Button
+                  variant="ghost"
+                  onPress={() => {
+                    setReplacing(false);
+                    setKey("");
+                  }}
+                >
+                  Cancel
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
       </SettingRow>
-      {showForm && (
-        <div className="exp-settings__key-form">
-          <TextField
-            label={configured ? "New API key" : "API key"}
-            type="password"
-            autoComplete="off"
-            code
-            placeholder={KEY_PLACEHOLDER[provider]}
-            value={key}
-            onChange={setKey}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void saveKey();
-              } else event.continuePropagation();
-            }}
-            className="exp-settings__grow"
-            data-testid="agents-key-input"
-          />
-          <Button icon={KeyRound} isDisabled={busy || !key.trim()} onPress={() => void saveKey()} data-testid="agents-key-save">
-            Save key
-          </Button>
-          {replacing && (
-            <Button
-              variant="ghost"
-              onPress={() => {
-                setReplacing(false);
-                setKey("");
-              }}
-            >
-              Cancel
-            </Button>
-          )}
-        </div>
-      )}
-      {configured && (
-        <div className="exp-settings__key-actions">
-          {!replacing && (
-            <Button
-              size="sm"
-              icon={KeyRound}
-              isDisabled={busy}
-              onPress={() => {
-                setReplacing(true);
-                focusKeyField(provider);
-              }}
-              data-testid="agents-key-replace"
-            >
-              Replace key
-            </Button>
-          )}
-          <Button size="sm" variant="ghost" icon={Trash2} isDisabled={busy} onPress={() => void removeKey()} data-testid="agents-key-remove">
-            Remove
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            icon={RefreshCw}
-            isPending={catalog.loading}
-            onPress={catalog.refresh}
-            data-testid="settings-provider-refresh"
-          >
-            Refresh model list
-          </Button>
-        </div>
-      )}
       <SettingRow label="Model list" testId="settings-provider-catalog">
         <CatalogState name={name} catalog={catalog} />
+        {configured && (
+          <span className="exp-settings__value-actions">
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={RefreshCw}
+              isPending={catalog.loading}
+              onPress={catalog.refresh}
+              data-testid="settings-provider-refresh"
+            >
+              Refresh model list
+            </Button>
+          </span>
+        )}
       </SettingRow>
       {provider === "openai" && (
         <>
@@ -313,8 +323,12 @@ function ProviderGroup({ provider, status, catalog }: { provider: Keyed; status:
         </>
       )}
       <FeedbackLine feedback={feedback} />
-      <p className="ui-meta exp-settings__footnote">{BILLING[provider]}</p>
-      {provider === "openai" && <p className="ui-meta exp-settings__footnote">Sign in with ChatGPT is not available</p>}
+      <SettingRow label="Billing" testId="settings-provider-billing">
+        <div className="exp-settings__stack">
+          <span>{BILLING[provider]}</span>
+          {provider === "openai" && <span className="ui-meta">Sign in with ChatGPT is not available</span>}
+        </div>
+      </SettingRow>
     </SettingsGroup>
   );
 }
@@ -340,13 +354,12 @@ function DefaultsGroup({ status, catalogs }: { status: ProviderStatus; catalogs:
   return (
     <SettingsGroup
       title="Defaults for new tasks"
-      description="New tasks start with these; a task or a message can choose another model without changing them."
       testId="agents-default"
     >
-      <SettingRow label="Model and effort">
-        {({ labelId }) => (
+      <SettingRow label="Model and effort" description="A task or a message can choose another model without changing this.">
+        {({ labelId, descriptionId }) => (
           <DialogTrigger isOpen={open} onOpenChange={setOpen}>
-            <Button aria-labelledby={`${labelId} ${valueId}`} data-testid="agents-default-model">
+            <Button aria-labelledby={`${labelId} ${valueId}`} aria-describedby={descriptionId} data-testid="agents-default-model">
               <span id={valueId} className="exp-settings__model-label">
                 {choiceSummary(choice, descriptor)}
               </span>

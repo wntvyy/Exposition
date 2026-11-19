@@ -122,6 +122,31 @@ describe("design tokens", () => {
     }
   });
 
+  it.each(themeNames)("keeps every pair of graph categories distinguishable (%s)", (theme) => {
+    // CIE76 ΔE between node outlines/edge colors; 15 is clearly visible side by side.
+    const lab = (value: string) => {
+      const { r, g, b } = parseColor(value);
+      const lin = [r, g, b].map((x) => {
+        const v = x / 255;
+        return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+      }) as [number, number, number];
+      const X = (lin[0] * 0.4124 + lin[1] * 0.3576 + lin[2] * 0.1805) / 0.95047;
+      const Y = lin[0] * 0.2126 + lin[1] * 0.7152 + lin[2] * 0.0722;
+      const Z = (lin[0] * 0.0193 + lin[1] * 0.1192 + lin[2] * 0.9505) / 1.08883;
+      const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+      return [116 * f(Y) - 16, 500 * (f(X) - f(Y)), 200 * (f(Y) - f(Z))];
+    };
+    const close: string[] = [];
+    for (const [i, a] of graphCategories.entries()) {
+      for (const b of graphCategories.slice(i + 1)) {
+        const [la, lb] = [lab(palettes[theme][`graph-${a}-border`]), lab(palettes[theme][`graph-${b}-border`])];
+        const dE = Math.hypot(la[0]! - lb[0]!, la[1]! - lb[1]!, la[2]! - lb[2]!);
+        if (dE < 15) close.push(`${a}/${b}: ${dE.toFixed(1)}`);
+      }
+    }
+    expect(close).toEqual([]);
+  });
+
   it("defines no color custom property that tokens.ts lacks", () => {
     const declared = Object.keys(themeProperties("light"))
       .filter((p) => p.startsWith("--color-"))
