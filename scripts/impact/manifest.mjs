@@ -35,6 +35,7 @@ export const SCENARIOS = {
   // Four-theme tours of populated surfaces (UI standard V2); shots in ui-reference/v2/<area>/.
   tourWorkbench: ["v2-tour-workbench"],
   tourResearch: ["v2-tour-research"],
+  tourAgents: ["v2-tour-agents"],
   editor: [
     "editor-find-outline",
     "workspace-files",
@@ -476,8 +477,8 @@ export const AREAS = [
     id: "agents",
     paths: ["crates/exposition-agents/**", "src/features/agents/**", "src-tauri/src/agents.rs"],
     level: "local",
-    e2e: SCENARIOS.agents,
-    visual: ["a1-responses"],
+    e2e: [...SCENARIOS.agents, ...SCENARIOS.tourAgents],
+    visual: ["a1-responses", ...SCENARIOS.tourAgents],
     live: LIVE_AGENTS,
     note: "The scripted provider replaces only the model; provider requests, tool schemas, and prompts are qualified only by live runs.",
   },
