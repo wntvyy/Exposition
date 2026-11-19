@@ -29,7 +29,8 @@
 }
 
 .ui-response[data-density="compact"] {
-  --ui-response-pad-x: var(--space-2);
+  /* Balanced: the same inner padding as the cards and payloads beside it. */
+  --ui-response-pad-x: var(--block-padding);
   --ui-response-pad-y: var(--space-1-5);
 }
 

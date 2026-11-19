@@ -2384,6 +2384,10 @@ th.ui-data-table__cell {
 }
 .ui-chip__label {
   min-width: 0;
+  /* The chip sets line-height 1; the clipping label needs room for descenders
+     (underscores and g/p/y vanished in attachment names). */
+  padding-block: 2px;
+  line-height: var(--line-height-tight);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
