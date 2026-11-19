@@ -32,6 +32,8 @@ export const SCENARIOS = {
   visual: ["ui-shell", "pages-review"],
   // Theme switches keep drafts, undo, editor identity, and graph state (UI standard V2).
   themes: ["v2-theme-preservation"],
+  // Four-theme tours of populated surfaces (UI standard V2); shots in ui-reference/v2/<area>/.
+  tourWorkbench: ["v2-tour-workbench"],
   editor: [
     "editor-find-outline",
     "workspace-files",
@@ -396,8 +398,8 @@ export const AREAS = [
     id: "shell",
     paths: ["src/app/**", "src/App.tsx", "src/main.tsx", "src/features/index.ts", "src/vite-env.d.ts", "index.html"],
     level: "broad",
-    e2e: SCENARIOS.shell,
-    visual: SCENARIOS.visual,
+    e2e: [...SCENARIOS.shell, ...SCENARIOS.tourWorkbench],
+    visual: [...SCENARIOS.visual, ...SCENARIOS.tourWorkbench],
     note: "Workbench wiring (registry, layout, keybindings, pages) hosts every feature.",
   },
   {
@@ -420,8 +422,8 @@ export const AREAS = [
     id: "explorer",
     paths: ["src/features/workspace/**", "src-tauri/src/files.rs", "src-tauri/src/clipboard.rs"],
     level: "local",
-    e2e: SCENARIOS.explorer,
-    visual: ["qol-files", "p1-files"],
+    e2e: [...SCENARIOS.explorer, ...SCENARIOS.tourWorkbench],
+    visual: ["qol-files", "p1-files", ...SCENARIOS.tourWorkbench],
   },
   {
     id: "operations",
@@ -498,8 +500,8 @@ export const AREAS = [
     id: "settings",
     paths: ["src/features/settings/**", "src-tauri/src/settings.rs"],
     level: "local",
-    e2e: SCENARIOS.settings,
-    visual: ["settings"],
+    e2e: [...SCENARIOS.settings, ...SCENARIOS.tourWorkbench],
+    visual: ["settings", ...SCENARIOS.tourWorkbench],
   },
 ];
 
