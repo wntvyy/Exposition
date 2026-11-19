@@ -9,7 +9,7 @@ import type { ProposalState } from "../../bindings/ProposalState";
 import type { SyncState } from "../../bindings/SyncState";
 import type { TaskGraphInfo } from "../../bindings/TaskGraphInfo";
 import type { TaskProposal } from "../../bindings/TaskProposal";
-import { Badge, Banner, DataTable, EmptyState, ListRow, Section, StatusText, type BadgeTone } from "../../ui/components";
+import { Badge, Banner, DataTable, EmptyState, FileIcon, ListRow, Section, StatusText, type BadgeTone } from "../../ui/components";
 import { relationDisplay } from "../graph/model";
 import { RelationStatus } from "../graph/RelationStatus";
 import { CONSENT_LABELS, type PillState } from "./format";
@@ -280,6 +280,7 @@ export function GraphContextView({ graph }: { graph: TaskGraphInfo }) {
           <ul className="agents-list" aria-label="Files the task acted on">
             {graph.targets.map((t) => (
               <li key={t.path} data-testid="agents-target" data-path={t.path} data-entity-id={t.entity ?? ""}>
+                <FileIcon name={t.path} className="agents-inline-icon" />
                 <code className="ui-code">{t.path}</code> <span>{t.uses.join(", ")}</span>{" "}
                 <span className="ui-meta">
                   {t.entity ? `→ ${shortId(t.entity)}` : t.note ?? "no graph identity"}

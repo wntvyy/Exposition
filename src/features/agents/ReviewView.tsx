@@ -8,7 +8,7 @@ import type { TaskId } from "../../bindings/TaskId";
 import type { TaskReview } from "../../bindings/TaskReview";
 import { editors } from "../../app/editors";
 import { commands } from "../../lib/ipc";
-import { Banner, Button, EmptyState, IconButton, ListRow, LoadingState, PageHeader, StatusText, type Status } from "../../ui/components";
+import { Banner, Button, EmptyState, FileIcon, IconButton, ListRow, LoadingState, PageHeader, StatusText, type Status } from "../../ui/components";
 import { DiffView } from "./DiffView";
 import { isActive } from "./format";
 import { clickOnControl } from "./TaskList";
@@ -83,6 +83,7 @@ function FileRow(props: {
         if (!clickOnControl(event)) props.onSelect();
       }}
       codeTitle
+      icon={<FileIcon name={file.path} />}
       title={
         <button type="button" className="agents-review-file__name" aria-pressed={props.selected} title={file.path} onClick={props.onSelect}>
           {file.path}
