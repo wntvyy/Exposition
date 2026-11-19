@@ -40,8 +40,8 @@ function NewTaskView() {
       </header>
       <div className="agents-task__scroll">
         <EmptyState
-          title="New task"
-          description={`Describe what the agent should do${workspace ? ` in ${workspace.name}` : ""}. Options sets the model, permissions, and budgets.`}
+          title={`Describe what the agent should do${workspace ? ` in ${workspace.name}` : ""}`}
+          description="Options sets the model, permissions, and budgets."
         />
       </div>
       <div className="agents-task__foot">

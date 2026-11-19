@@ -165,7 +165,7 @@ export function QuestionCard({ task, request, draftKey, onChatAbout }: QuestionC
     >
       {open && (
         <Banner tone="info" title="Needs your answer">
-          The agent waits for your answer before it continues. Your answer is passed to it as your reply; it approves nothing.
+          The agent waits for your answer. It is passed on as your reply and approves nothing.
         </Banner>
       )}
       {open && (group || discussing) && (

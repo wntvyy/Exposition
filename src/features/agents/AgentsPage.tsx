@@ -318,8 +318,8 @@ function NewTaskCenter({ boundary }: { boundary: Element | null }) {
         <div className="agents-task__scroll">
           <EmptyState
             icon={Bot}
-            title="New task"
-            description={`Describe what the agent should do${workspace ? ` in ${workspace.name}` : ""}. These are the same tasks as in the Agent panel. Options sets the model, permissions, and budgets.`}
+            title={`Describe what the agent should do${workspace ? ` in ${workspace.name}` : ""}`}
+            description="These are the same tasks as in the Agent panel. Options sets the model, permissions, and budgets."
           />
         </div>
         <div className="agents-task__foot">

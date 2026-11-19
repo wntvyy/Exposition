@@ -87,7 +87,8 @@
   align-items: center;
   gap: var(--space-1-5);
   min-height: var(--pane-header-height);
-  padding: var(--space-1);
+  /* The back arrow's icon lines up with the pane inset. */
+  padding: var(--space-1) calc(var(--pane-inset) - var(--space-1));
   border-bottom: var(--border-width) solid var(--color-border);
 }
 
@@ -115,7 +116,7 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: var(--space-3) var(--pane-inset) var(--space-4);
+  padding: var(--gap-group) var(--pane-inset);
   user-select: text;
 }
 
@@ -147,7 +148,7 @@
 .agents-column {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--gap-group);
   width: 100%;
   min-width: 0;
   margin: 0 auto;
@@ -158,7 +159,7 @@
 }
 
 .agents-task[data-variant="page"] > .agents-task__scroll {
-  padding: var(--space-4) var(--space-6) var(--space-6);
+  padding: var(--gap-section) var(--space-6);
 }
 
 .agents-task[data-variant="page"] > .agents-task__foot {
@@ -170,7 +171,7 @@
 .agents-composer {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--gap-related);
   min-width: 0;
 }
 
@@ -290,9 +291,9 @@
 .agents-sheet__panel {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--gap-related);
   min-width: 0;
-  padding-top: var(--space-2);
+  padding-top: var(--gap-related);
 }
 
 /* ---------- Needs you (above the composer) ---------- */
@@ -340,10 +341,6 @@
   margin: 0;
 }
 
-.agents-row--end {
-  align-items: flex-end;
-}
-
 .agents-grow {
   flex: 1;
   min-width: 0;
@@ -359,10 +356,14 @@
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
 }
 
-/* A shared content Section or ListRow list inside a padded column spans it. */
+/* A shared content Section or ListRow list inside a padded column spans it.
+   A Section's title carries its own rule; a bare list gets a hairline. */
 .agents-section,
 .agents-rows {
   margin-inline: calc(-1 * var(--pane-inset));
+}
+
+.agents-rows {
   border-top: var(--border-width) solid var(--color-border-subtle);
 }
 
@@ -411,27 +412,6 @@
   display: contents;
 }
 
-/* ---------- Model picker ---------- */
-
-/* The model list scrolls inside its field-like frame (rows are shared ListRows). */
-.agents-model-list {
-  max-height: 288px;
-  overflow: auto;
-  border: var(--border-width) solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  background: var(--color-field);
-}
-
-/* The meta line's parts stay flex items of the ListRow meta line. */
-.agents-model-row__meta {
-  display: contents;
-}
-
-.agents-model-row__note {
-  flex-basis: 100%;
-  overflow-wrap: anywhere;
-}
-
 /* ---------- Attachments ---------- */
 
 .agents-attachments {
@@ -469,13 +449,18 @@
   overflow-wrap: anywhere;
 }
 
+/* Exact payloads, tool input, and results: a framed code block whose fill is
+   the neutral step next to its backdrop (as code in a response): document
+   white in the sunken Agent view and side panel, sunken on the page and in
+   the review tab (--agents-inset-bg). */
 .agents-pre {
   max-height: 240px;
   margin: var(--space-1) 0 0;
-  padding: var(--space-1-5) var(--space-2);
+  padding: var(--space-2) var(--space-3);
   overflow: auto;
+  border: var(--border-width) solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--color-surface-sunken);
+  background: var(--agents-inset-bg, var(--color-surface));
   color: var(--color-text);
   font-family: var(--font-code);
   font-size: var(--font-size-sm);
@@ -486,10 +471,16 @@
 }
 
 /* The approval and the question card are focused from a notification, the
-   status bar, or a "Needs you" link. */
+   status bar, or a "Needs you" link. Their parts (banner, size, payload,
+   buttons, scope line) are related: they sit at the related gap. */
 .agents-approval,
 .agents-question {
   border-radius: var(--radius-md);
+}
+
+.agents-approval,
+.agents-question[data-open="true"] {
+  gap: var(--gap-related);
 }
 
 /* An expanded conversation figure (Dialog lg) uses Research's figure
@@ -569,6 +560,7 @@
 
 /* The review as an editor tab: page header, then a scrolling body. */
 .agents-editor {
+  --agents-inset-bg: var(--color-surface-sunken);
   height: 100%;
   overflow: hidden;
   background: var(--color-surface);
@@ -616,6 +608,7 @@
    panel on demand — an overlay drawer when the page is narrow. */
 
 .agents-page {
+  --agents-inset-bg: var(--color-surface-sunken);
   position: relative;
   flex-direction: row;
   height: 100%;
@@ -700,6 +693,7 @@
 }
 
 .agents-page__side {
+  --agents-inset-bg: var(--color-surface);
   display: flex;
   flex: none;
   flex-direction: column;
@@ -713,7 +707,7 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: var(--space-3) var(--pane-inset) var(--space-4);
+  padding: var(--gap-group) var(--pane-inset);
 }
 
 /* Below 1100 px the right panel is a drawer over the conversation. */

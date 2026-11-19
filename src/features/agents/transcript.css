@@ -23,8 +23,8 @@
 }
 
 .agents-msg[data-role="user"] .agents-msg__text {
-  font-size: var(--font-size-lg);
-  line-height: var(--line-height-normal);
+  font-size: var(--font-size-prose);
+  line-height: var(--line-height-prose);
 }
 
 /* The streaming draft's reasoning disclosure sits above the response text. */
@@ -34,17 +34,18 @@
 
 /* ---------- Turn outline (TurnOutline.tsx) ---------- */
 
+/* Turns are apart by the section gap; the blocks of one turn by the group gap. */
 .agents-outline {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--gap-section);
   min-width: 0;
 }
 
 .agents-turn {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--gap-group);
   min-width: 0;
 }
 
@@ -60,6 +61,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-0-5) var(--space-1-5);
+  min-height: var(--row-height-tree);
   margin: 0 calc(-1 * var(--space-1));
   padding: var(--space-0-5) var(--space-1);
   border: 0;
@@ -81,6 +83,11 @@
   outline-offset: calc(-1 * var(--focus-ring-width));
 }
 
+/* What a turn header summarizes follows it closely. */
+.agents-turn__toggle + * {
+  margin-top: calc(var(--gap-related) - var(--gap-group));
+}
+
 .agents-turn__chevron {
   flex: none;
   transition: transform var(--duration-fast) var(--ease-standard);
@@ -100,7 +107,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-1-5);
-  margin-top: calc(-1 * var(--space-2));
+  margin-top: calc(var(--gap-related) - var(--gap-group));
   padding-left: var(--space-3);
 }
 
