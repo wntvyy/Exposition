@@ -498,13 +498,18 @@ export default async function v2TourResearch({ launchApp, artifactsDir, fixture,
     if (ids.decl) assert.ok(categories.includes("formal"), `the canvas shows a formal node (${categories.join(", ")})`);
     await dismissNotifications(page);
     /** Fit the view to the mathematical cluster with its neighbours of other categories, then select the theorem. */
-    const frameCluster = async () => {
-      const keys = ["fnd", "prf", "thm", "hyp", "lem", "def", "col", "ref", "exp", "wf", "decl"].filter((k) => ids[k]);
+    const frameCluster = async (select = "thm") => {
+      // Every node of the cluster on screen before selecting them.
+      await canvas.getByRole("button", { name: "Fit to view" }).click();
+      await settle(page);
+      const keys = ["fnd", "prf", "thm", "hyp", "lem", "def", "col", "ref", "exp", "wf"].filter((k) => ids[k]);
       await node(ids[keys[0]]).click();
       for (const k of keys.slice(1)) await node(ids[k]).click({ modifiers: ["Control"] });
       await canvas.getByRole("button", { name: "Fit to selection" }).click();
       await settle(page);
-      await node(ids.thm).click();
+      // Clear the multi-selection on the background (the view stays), then select the theorem alone.
+      await canvas.locator(".react-flow__pane").click({ position: { x: 8, y: 8 } });
+      await node(ids[select]).click();
     };
     await frameCluster();
     const inspector = page.getByTestId("graph-entity-inspector");
@@ -537,9 +542,12 @@ export default async function v2TourResearch({ launchApp, artifactsDir, fixture,
     await canvas.waitFor({ timeout: 10_000 });
 
     // ---- 7. Narrow window: the inspector becomes a drawer -----------------------------
+    // Framed while wide (a narrow window's drawer would cover nodes being selected); the view is kept.
+    await frameCluster("lem");
     await setViewport(page, NARROW);
     await dismissNotifications(page);
-    await frameCluster();
+    // Narrowing closes the inspector; a new selection opens it as a drawer.
+    await canvas.locator(".react-flow__pane").click({ position: { x: 8, y: 8 } });
     await node(ids.lem).click();
     await page.locator('[data-region="graph-inspector"][data-narrow]').waitFor({ timeout: 10_000 });
     await shoot("graph-narrow-drawer");
