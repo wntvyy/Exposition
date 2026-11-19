@@ -149,6 +149,11 @@
 .xp-graph-table__title {
   font-weight: var(--font-weight-medium);
 }
+/* The type after a long name stays whole ("Theorem", not "Theore/m"). */
+.xp-graph-table__name > .ui-muted {
+  flex: none;
+  white-space: nowrap;
+}
 
 /* ---------- Inspector ---------- */
 

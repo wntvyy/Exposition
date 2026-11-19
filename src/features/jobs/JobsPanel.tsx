@@ -196,13 +196,14 @@ function JobDetail({ job, now }: { job: JobSummary; now: number }) {
           </Banner>
         ) : (
           status.detail && (
-            <Banner tone={status.status === "unavailable" ? "warning" : "danger"} title={status.label}>
+            // The headline status above names the state; the banner carries its detail.
+            <Banner tone={status.status === "unavailable" ? "warning" : "danger"}>
               <span data-testid="job-status-detail">{status.detail}</span>
             </Banner>
           )
         )}
         {status.key === "canceled" && (
-          <Banner tone="canceled" title="Canceled">
+          <Banner tone="canceled">
             The process tree was stopped; output below is partial.
           </Banner>
         )}

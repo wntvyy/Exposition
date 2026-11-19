@@ -266,6 +266,8 @@ export default async function v2TourResearch({ launchApp, artifactsDir, fixture,
       rel("proofOf", "prf", "thm"),
       rel("memberOf", "lem", "col"),
       rel("references", "fnd", "thm"),
+      rel("references", "thm", "ref"),
+      rel("references", "exp", "thm"),
     ]);
     const ids = Object.fromEntries(seeded.created.map(({ tempId, id }) => [tempId, id]));
 
@@ -348,6 +350,9 @@ export default async function v2TourResearch({ launchApp, artifactsDir, fixture,
       await shoot("jobs");
     }
 
+    await showPage(page, "editor");
+    if (await page.getByTestId("jobs-panel").isVisible()) await runCommand(page, "Toggle Panel", /Toggle Panel/);
+
     // ---- 4. Workflows: plan review and a pending manuscript change -------------------
     // Saved in every case (a workflow item for the graph); reviewed and run with Docker.
     const preset = await invoke(page, "workflow_from_preset", {
@@ -404,10 +409,28 @@ export default async function v2TourResearch({ launchApp, artifactsDir, fixture,
       await proposal.getByTestId("workflow-promotion-review").click();
       await proposal.getByTestId("workflow-promotion-approve").waitFor({ timeout: 15_000 });
       await shoot("workflow-run-pending-approval", async () => {
-        await proposal.getByTestId("workflow-promotion-approve").scrollIntoViewIfNeeded();
+        await proposal.evaluate((el) => el.scrollIntoView({ block: "start" }));
       });
     }
     if (!(await snapshotOf(page, ["workflow"])).entities.length) await change(page, [create("wf", "workflow", "Numerical experiment")]);
+    // The experiment derives from the saved workflow (places the workflow beside the cluster).
+    const workflowEntity = (await snapshotOf(page, ["workflow"])).entities[0].id;
+    {
+      const status = await invoke(page, "graph_status");
+      const proposal = await invoke(page, "graph_propose_change", {
+        request: {
+          baseRevision: status.revision,
+          operations: [
+            { op: "addRelation", kind: "derivedFrom", from: { kind: "id", id: ids.exp }, to: { kind: "id", id: workflowEntity }, evidenceKind: null, evidence: [], note: null },
+          ],
+          summary: "v2 tour: experiment from workflow",
+        },
+      });
+      if (proposal.valid) {
+        await invoke(page, "graph_apply_change", { request: { proposal: proposal.id, expectedRevision: proposal.baseRevision } });
+        ids.wf = workflowEntity;
+      } else console.log(`experiment derivedFrom workflow not proposed: ${JSON.stringify(proposal.diagnostics)}`);
+    }
 
     // ---- 5. Lean: a checked file, evidence recorded, then made stale -----------------
     if (!leanAvailable()) {
@@ -474,7 +497,16 @@ export default async function v2TourResearch({ launchApp, artifactsDir, fixture,
     }
     if (ids.decl) assert.ok(categories.includes("formal"), `the canvas shows a formal node (${categories.join(", ")})`);
     await dismissNotifications(page);
-    await node(ids.thm).click();
+    /** Fit the view to the mathematical cluster with its neighbours of other categories, then select the theorem. */
+    const frameCluster = async () => {
+      const keys = ["fnd", "prf", "thm", "hyp", "lem", "def", "col", "ref", "exp", "wf", "decl"].filter((k) => ids[k]);
+      await node(ids[keys[0]]).click();
+      for (const k of keys.slice(1)) await node(ids[k]).click({ modifiers: ["Control"] });
+      await canvas.getByRole("button", { name: "Fit to selection" }).click();
+      await settle(page);
+      await node(ids.thm).click();
+    };
+    await frameCluster();
     const inspector = page.getByTestId("graph-entity-inspector");
     await inspector.waitFor({ timeout: 10_000 });
     assert.equal(await inspector.getAttribute("data-entity-id"), ids.thm);
@@ -506,9 +538,8 @@ export default async function v2TourResearch({ launchApp, artifactsDir, fixture,
 
     // ---- 7. Narrow window: the inspector becomes a drawer -----------------------------
     await setViewport(page, NARROW);
-    await canvas.getByRole("button", { name: "Fit to view" }).click();
-    await settle(page);
     await dismissNotifications(page);
+    await frameCluster();
     await node(ids.lem).click();
     await page.locator('[data-region="graph-inspector"][data-narrow]').waitFor({ timeout: 10_000 });
     await shoot("graph-narrow-drawer");
