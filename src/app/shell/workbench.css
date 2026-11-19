@@ -171,8 +171,12 @@
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
-  color: var(--color-text-subtle);
+  color: var(--color-text-muted);
   cursor: default;
+}
+/* Layout toggles stay quieter than the views. */
+.wb-rail__group--end .wb-rail__button:not([data-selected]):not([data-hovered]) {
+  color: var(--color-text-subtle);
 }
 .wb-rail__button[data-hovered] {
   background: var(--color-surface-hover);

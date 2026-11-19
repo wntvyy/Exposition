@@ -18,6 +18,8 @@ import {
   Button,
   Checkbox,
   EmptyState,
+  FileIcon,
+  fileTypeOf,
   InspectorBody,
   InspectorHeader,
   KeyValueList,
@@ -84,6 +86,12 @@ function FileInspector({ path }: { path: string }) {
     <div className="exp-rinspector" data-testid="research-inspector" data-kind="file" data-path={path}>
       <InspectorHeader
         title={path.split("/").pop()}
+        meta={
+          <span className="exp-rinspector__type">
+            <FileIcon name={path} />
+            {fileTypeOf(path).label}
+          </span>
+        }
         actions={
           <>
             {script && (

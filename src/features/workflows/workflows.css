@@ -31,16 +31,17 @@
 .xp-wf__page--wide {
   max-width: none;
 }
-/* Top-level parts of a page are separated by rules, not boxes. */
-.xp-wf__page > * + * {
-  border-top: var(--border-width) solid var(--color-border-subtle);
-}
+/* Top-level parts of a page are content sections: space and the rule under
+   each section title separate them (no divider between parts, no boxes). */
 /* Banners and notes under the page header. */
 .xp-wf__lead {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--pane-inset);
+  gap: var(--gap-related);
+  padding: var(--space-3) var(--pane-inset) 0;
+}
+.xp-wf__lead:empty {
+  display: none;
 }
 .xp-wf__stack,
 .xp-wf__multi {
@@ -74,7 +75,7 @@
 .xp-wf__form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-3) var(--space-4);
+  gap: var(--gap-group) var(--space-4);
   align-items: start;
 }
 @container (max-width: 640px) {
@@ -353,7 +354,7 @@
 .xp-wf-plan {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--gap-group);
   user-select: text;
 }
 .xp-wf-banner-line {
@@ -440,14 +441,14 @@
 .xp-wf-canvas-view {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--gap-group);
   padding: var(--space-3) var(--pane-inset);
 }
 /* Canvas-view inspector: a pane with the shared pane header. */
 .xp-wf-inspector {
   overflow: hidden;
   border: var(--border-width) solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
 }
 .xp-wf-inspector .xp-wf-blocks {
   padding: var(--space-2) var(--pane-inset);

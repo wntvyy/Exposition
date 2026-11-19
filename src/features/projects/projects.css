@@ -23,22 +23,27 @@
 .xp-proj__page {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--gap-group);
   max-width: var(--content-max-width);
   padding: var(--space-4) var(--pane-inset) var(--space-10);
 }
 
 /* One group per concern (structure, location, preview, files, choices),
-   separated by a divider; sentence-case section titles. */
+   a section gap apart; the sentence-case title carries the rule (as the
+   shared content Section does). */
 .xp-proj__group {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--gap-related);
 }
 
 .xp-proj__group + .xp-proj__group {
-  padding-top: var(--space-4);
-  border-top: var(--border-width) solid var(--color-border-subtle);
+  margin-top: calc(var(--gap-section) - var(--gap-group));
+}
+
+.xp-proj__group > .ui-section-title {
+  padding-bottom: var(--space-1-5);
+  border-bottom: var(--border-width) solid var(--color-border);
 }
 
 .xp-proj__form {

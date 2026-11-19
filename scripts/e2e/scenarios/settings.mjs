@@ -85,7 +85,8 @@ async function section(page, name) {
 }
 
 async function setTheme(page, assert, label, expected) {
-  await page.getByRole("radiogroup", { name: "Color theme" }).getByRole("radio", { name: label }).click();
+  // The radio input is visually hidden inside its card: click the card (its label), as a user does.
+  await page.getByRole("radiogroup", { name: "Color theme" }).getByRole("radio", { name: label }).locator("xpath=ancestor::label[1]").click();
   await page.waitForFunction((t) => document.documentElement.dataset.theme === t, expected);
   assert.equal(await page.evaluate(() => localStorage.getItem("exposition.theme")), JSON.stringify(label.toLowerCase()));
 }

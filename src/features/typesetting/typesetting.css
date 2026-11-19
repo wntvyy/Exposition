@@ -7,13 +7,55 @@
   font-size: var(--font-size-md);
 }
 
+.problems__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* A file's header row: icon, name, folder, count (the Files view's look). */
+.problems__file {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  min-height: var(--row-height-tree);
+  padding: 0 var(--space-2) 0 var(--pane-inset);
+  white-space: nowrap;
+}
+
+.problems__file-icon {
+  flex: none;
+}
+
+.problems__file-name {
+  overflow: hidden;
+  font-weight: var(--font-weight-medium);
+  text-overflow: ellipsis;
+}
+
+.problems__file-folder {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  text-overflow: ellipsis;
+}
+
+.problems__file-count {
+  flex: none;
+  color: var(--color-text-subtle);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
 .problems__item {
+  --problems-indent: var(--pane-inset);
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
   width: 100%;
   min-height: var(--row-height-tree);
-  padding: var(--space-1) var(--space-2) var(--space-1) var(--pane-inset);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--problems-indent);
   border: 0;
   background: transparent;
   color: var(--color-text);
@@ -56,21 +98,30 @@
 }
 
 .problems__message {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
 }
 
 .problems__location {
   flex: none;
+  margin-right: auto;
   color: var(--color-text-muted);
   font-family: var(--font-code);
   font-size: var(--font-size-sm);
 }
 
+/* A file's rows sit under its name (after the file icon and its gap). */
+.problems__list .problems__item,
+.problems__list .problems__hints,
+.problems__list .problems__actions {
+  --problems-indent: calc(var(--pane-inset) + var(--icon-size-sm) + var(--space-1-5));
+}
+
 /* Hints and actions line up with the message (after the icon and its gap). */
 .problems__hints,
 .problems__actions {
-  padding: 0 var(--space-2) var(--space-1) calc(var(--pane-inset) + var(--icon-size-sm) + var(--space-2));
+  --problems-indent: var(--pane-inset);
+  padding: 0 var(--space-2) var(--space-1) calc(var(--problems-indent) + var(--icon-size-sm) + var(--space-2));
 }
 
 .problems__hints {
