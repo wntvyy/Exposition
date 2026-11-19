@@ -26,7 +26,8 @@ export async function applyTheme(page, theme) {
   const label = THEMES.find(([id]) => id === theme)?.[1];
   if (!label) throw new Error(`unknown theme ${theme}`);
   const title = `Color Theme: ${label}`;
-  await runCommand(page, title, new RegExp(`^\\s*${title}`));
+  // Palette rows read "Preferences: Color Theme: …" (category first).
+  await runCommand(page, title, new RegExp(`Color Theme: ${label}`));
   await page.waitForFunction((t) => document.documentElement.dataset.theme === t, theme);
   // Let Monaco and transitions repaint before a screenshot.
   await page.waitForTimeout(150);
