@@ -172,7 +172,7 @@ export function PaletteSheet({ palette }: { palette: V2Palette }) {
         <SheetSection title="Syntax">
           <CodeSample lang="python" code={PY} />
           <CodeSample lang="typst" code={TYP} />
-          <p className="v2-meta">Keywords use the info role (proposal), so syntax keeps its meaning when the accent changes.</p>
+          <p className="v2-meta">Keywords use the info role, so syntax keeps its meaning when the accent changes.</p>
         </SheetSection>
 
         <SheetSection title="Graph nodes and edges">

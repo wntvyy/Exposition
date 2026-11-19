@@ -34,6 +34,20 @@ describe("V2 sample palettes", () => {
     expect(hueDistance(c["info-text"], c["accent-text"]) + lightnessDistance(c["info-text"], c["accent-text"])).toBeGreaterThan(0.04);
   });
 
+  it("keeps Sage's success green apart from its gray-green accent", () => {
+    const c = V2_PALETTES.sage.colors;
+    expect(hueDistance(c["success-text"], c["accent-text"])).toBeGreaterThan(0.06);
+    expect(chroma(c["success-text"])).toBeGreaterThan(chroma(c["accent-text"]) * 1.5);
+  });
+
+  it.each(PALETTE_IDS)("%s stays restrained: muted accent, near-neutral tints, stale in the warning family", (id) => {
+    const c = V2_PALETTES[id].colors;
+    for (const role of ["accent", "accent-text"] as const) expect(chroma(c[role])).toBeLessThan(0.36);
+    for (const tone of ["danger", "warning", "success", "info"] as const) expect(chroma(c[`${tone}-bg`])).toBeLessThan(0.07);
+    expect(c["status-stale-text"]).toBe(c["warning-text"]);
+    expect(c["status-stale-bg"]).toBe(c["warning-bg"]);
+  });
+
   it("applies a palette as local custom properties only", () => {
     const style = paletteStyle(V2_PALETTES.ocean) as Record<string, string>;
     expect(style["--color-accent"]).toBe(V2_PALETTES.ocean.colors.accent);
@@ -62,6 +76,11 @@ function hsl(hex: string): [number, number] {
 function hueDistance(a: string, b: string): number {
   const d = Math.abs(hsl(a)[0] - hsl(b)[0]);
   return Math.min(d, 1 - d);
+}
+/** RGB chroma (max - min channel), 0..1. */
+function chroma(hex: string): number {
+  const { r, g, b } = parseColor(hex);
+  return (Math.max(r, g, b) - Math.min(r, g, b)) / 255;
 }
 function lightnessDistance(a: string, b: string): number {
   return Math.abs(hsl(a)[1] - hsl(b)[1]);

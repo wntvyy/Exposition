@@ -1,6 +1,6 @@
 // V2 review samples: a tiny line tokenizer for the static code sample (the real
 // editor is Monaco). Token kinds map to the same color roles as the production
-// Monaco theme, except keywords, which the samples propose to draw with the
+// Monaco theme, except keywords, which are drawn with the
 // info role so syntax keeps its meaning when the accent changes (Ocean, Sage).
 import type { Lang } from "./mock";
 
