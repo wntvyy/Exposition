@@ -127,7 +127,7 @@ describe("local changes", () => {
 
   it("a stylesheet-only change runs the area's visual scenarios", () => {
     const p = plan([M("src/features/outline/outline.css")]);
-    expect(e2e(p).sort()).toEqual(["editor-find-outline", "qol-media"]);
+    expect(e2e(p).sort()).toEqual(["editor-find-outline", "pdf-viewer", "qol-media"]);
     expect(p.notes.join("\n")).toMatch(/ui-reference/);
   });
 

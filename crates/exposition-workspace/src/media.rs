@@ -26,6 +26,9 @@ use crate::service::WorkspaceService;
 /// Largest image file that is read (bytes).
 pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Largest PDF file that is read for the read-only PDF tab (bytes).
+pub const MAX_PDF_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Extensions read as images (lowercase). The webview decides whether the
 /// bytes are actually a supported image.
 pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "ico"];
@@ -65,7 +68,7 @@ impl WorkspaceService {
     fn still_open(&self, root: &WorkspaceRoot) -> WorkspaceResult<()> {
         match self.open_root() {
             Some(now) if now.as_path() == root.path() => Ok(()),
-            _ => Err(WorkspaceError::new("workspace.changed", "The project changed while the image was being read.")),
+            _ => Err(WorkspaceError::new("workspace.changed", "The project changed while the file was being read.")),
         }
     }
 
@@ -98,6 +101,35 @@ impl WorkspaceService {
             })?;
         self.still_open(&root)?;
         Ok(bytes)
+    }
+
+    /// The bytes of a project PDF, for display only, with the folder they were
+    /// read from. Same rules as [`Self::read_image`]: a `.pdf` file inside the
+    /// open folder (links and junctions out of it refused), at most
+    /// [`MAX_PDF_BYTES`], answered only while that folder is still open.
+    pub fn read_pdf(&self, path: &WorkspacePath) -> WorkspaceResult<(std::path::PathBuf, Vec<u8>)> {
+        let root = self.root()?;
+        if extension(path).as_deref() != Some("pdf") {
+            return Err(WorkspaceError::new("pdf.notPdf", format!("{path} is not a PDF file.")));
+        }
+        let target = root.resolve_existing(path)?;
+        let meta = fs::metadata(&target).map_err(|e| WorkspaceError::io(path, &e))?;
+        if !meta.is_file() {
+            return Err(WorkspaceError::new("file.isDirectory", format!("{path} is not a file.")));
+        }
+        let bytes =
+            read_limited(&target, MAX_PDF_BYTES).map_err(|e| WorkspaceError::io(path, &e))?.map_err(|size| {
+                WorkspaceError::new(
+                    "pdf.tooLarge",
+                    format!(
+                        "{path} is {} MB; PDF files up to {} MB are shown.",
+                        size / (1024 * 1024),
+                        MAX_PDF_BYTES / (1024 * 1024)
+                    ),
+                )
+            })?;
+        self.still_open(&root)?;
+        Ok((root.path().to_path_buf(), bytes))
     }
 
     /// The first of `candidates` (in order) that is an existing file inside

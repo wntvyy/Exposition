@@ -35,6 +35,8 @@ pub struct AppState {
     pub research: Arc<ResearchService>,
     /// LaTeX/LuaLaTeX builds (through `execution`) and their pages.
     pub tex: TexService,
+    /// Read-only views of project PDF files (the PDF editor tab).
+    pub pdf_views: Arc<exposition_tex::pdf_view::PdfViews>,
     /// Typesetting builds, page maps, and rendering (Typst).
     pub typesetting: Arc<TypesettingRuntime>,
     /// Application data directory (settings, recovery, session metadata).
@@ -216,6 +218,7 @@ impl AppState {
             lean,
             research,
             tex,
+            pdf_views: Arc::new(exposition_tex::pdf_view::PdfViews::new()),
             typesetting,
             data_dir,
             agents,

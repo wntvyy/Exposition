@@ -217,6 +217,10 @@ const COMMANDS: &[&str] = &[
     // QOL q/media: project images for the image tab and inline previews (src/media.rs).
     "media_read_image",
     "media_image_references",
+    // QC qc/pdf: read-only PDF tab for project PDF files (src/media.rs).
+    "media_pdf_open",
+    "media_pdf_page",
+    "media_pdf_close",
     // QOL q/files: explorer New File, Rename, and OS drop import (src/files.rs).
     "file_create",
     "file_rename_check",
