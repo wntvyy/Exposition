@@ -214,6 +214,106 @@ fn a_model_provider_changed_during_the_run_refuses_the_review_step() {
     assert_eq!(reviewer.reviews.load(Ordering::SeqCst), 0, "the review was never dispatched");
 }
 
+/// A database trigger that refuses writes of runs matching `when` (a fault
+/// in the real store: no seam in the service).
+fn refuse_writes(f: &Fixture, when: &str) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER qc_refuse_update BEFORE UPDATE ON runs WHEN {when}
+         BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;"
+    ))
+    .unwrap();
+    conn
+}
+
+fn allow_writes(conn: &rusqlite::Connection) {
+    conn.execute_batch("DROP TRIGGER qc_refuse_update;").unwrap();
+}
+
+fn stored_state(f: &Fixture, run: &WorkflowRunId) -> String {
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    conn.query_row("SELECT state FROM runs WHERE id = ?1", [run.as_str()], |r| r.get(0)).unwrap()
+}
+
+/// WF-5: a run whose final write fails is not left "running" (and later
+/// reported as interrupted by a shutdown that never happened): this session
+/// reads its real terminal state, and the record is written as soon as the
+/// store accepts it.
+#[test]
+fn a_failed_final_write_does_not_leave_the_run_running() {
+    let f = fixture();
+    let id = f.save(numerical(false));
+    let conn = refuse_writes(&f, "NEW.state != 'running'");
+    let run = f.start(&id);
+    assert!(f.service.wait_idle(Duration::from_secs(20)));
+    assert_eq!(stored_state(&f, &run.id), "running", "the injected fault kept the terminal write out");
+    let read = f.service.get(&run.id).unwrap();
+    assert_eq!(read.state, WorkflowRunState::Succeeded, "this session reads the state the run ended in");
+    assert_eq!(read.steps.iter().filter(|s| s.state == WorkflowStepState::Succeeded).count(), 2);
+    // The store works again: the terminal record becomes durable.
+    allow_writes(&conn);
+    drop(conn);
+    assert_eq!(f.service.get(&run.id).unwrap().state, WorkflowRunState::Succeeded);
+    assert_eq!(stored_state(&f, &run.id), "succeeded");
+    let listed = f.service.runs(Some(&id)).unwrap();
+    assert_eq!(listed[0].state, WorkflowRunState::Succeeded);
+    // A restart does not turn it into an interrupted run.
+    let restarted = new_service(&f.db, &f.host, &f.batch, &f.lean, &f.research);
+    assert_eq!(restarted.get(&run.id).unwrap().state, WorkflowRunState::Succeeded);
+}
+
+/// WF-5: a terminal record the store refuses as written (too large) is
+/// written without its attempt logs and reviewed code text, and says so.
+#[test]
+fn a_terminal_record_that_cannot_be_written_whole_is_written_reduced() {
+    let f = fixture();
+    let id = f.save(numerical(false));
+    // The full terminal record carries the attempt log "ok"; the reduced one does not.
+    let conn = refuse_writes(&f, "NEW.state != 'running' AND instr(NEW.body, '\"log\":\"ok\"') > 0");
+    let run = f.start(&id);
+    assert!(f.service.wait_idle(Duration::from_secs(20)));
+    assert_eq!(stored_state(&f, &run.id), "succeeded");
+    drop(conn);
+    let restarted = new_service(&f.db, &f.host, &f.batch, &f.lean, &f.research);
+    let read = restarted.get(&run.id).unwrap();
+    assert_eq!(read.state, WorkflowRunState::Succeeded);
+    assert!(last_attempt(&read, "run").log.is_none());
+    assert_eq!(last_attempt(&read, "run").outputs.len(), 3, "outputs and provenance are kept");
+    assert!(read.message.as_deref().is_some_and(|m| m.contains("could not be written in full")), "{:?}", read.message);
+}
+
+/// WF-11: an association decision whose record could not be written stays
+/// undecided, and deciding it again is accepted once. (The evidence itself
+/// is recorded idempotently by the Lean service: one record per audit and
+/// declaration, `exposition-lean` `evidence_is_service_owned_idempotent…`.)
+#[test]
+fn an_association_decision_that_could_not_be_written_can_be_made_again() {
+    let f = fixture();
+    let id = f.save(formal(None));
+    let run = f.run_to_end(&id);
+    assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?}", run.message);
+    let decide = || {
+        f.service.decide_association(&WorkflowAssociationDecision {
+            run: run.id.clone(),
+            step: "associate".into(),
+            accept: vec!["main_theorem".into()],
+        })
+    };
+    let conn = refuse_writes(&f, "1");
+    assert_eq!(decide().unwrap_err().code, "workflow.store");
+    allow_writes(&conn);
+    let status = |run: &WorkflowRun| match &last_attempt(run, "associate").outputs[0].value {
+        WorkflowOutputValue::AssociationProposal { status, .. } => *status,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(status(&f.service.get(&run.id).unwrap()), WorkflowProposalStatus::Pending, "nothing was decided");
+    let decided = decide().unwrap();
+    assert_eq!(status(&decided), WorkflowProposalStatus::Accepted);
+    assert_eq!(decide().unwrap_err().code, "workflow.decided");
+    // The Lean service was asked twice for the same audit and declaration.
+    assert_eq!(f.lean.recorded.lock().unwrap().len(), 2);
+}
+
 /// The provider and model a review was asked to run with.
 fn asked_model(request: &ReviewRequest) -> Option<(String, String)> {
     request.model.as_ref().map(|m| (m.provider.clone(), m.model.clone()))

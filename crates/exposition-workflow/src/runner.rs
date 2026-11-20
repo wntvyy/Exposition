@@ -1086,7 +1086,8 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
     run.usage.seconds = started.elapsed().as_secs() as u32;
     run.finished_at_ms = Some(crate::now_ms());
     run.explain_outcomes();
-    let _ = inner.persist(&key, &run, None);
+    // The terminal state is made durable before the run stops being active.
+    inner.persist_terminal(&key, &mut run);
     inner.finished(&run.id);
 }
 
