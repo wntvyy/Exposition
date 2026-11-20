@@ -581,4 +581,16 @@ describe("XR-E-03: the mounted Workflows list and drafts created or saved elsewh
     act(() => graphHandlers.forEach((h) => h({ kind: "changed", delta, origin: { kind: "agent", taskId: "task-1" } })));
     await waitFor(() => expect(screen.getByTestId("workflow-drafts").querySelector('[data-workflow="wf-agent"]')).toBeTruthy());
   });
+
+  // GI-6: graph recovery (Restore backup / Start new graph) emits only a `status` event.
+  it("re-reads the list when the graph's status changes (recovery), leaving the error state without Retry", async () => {
+    wfIpc.list.mockRejectedValue({ code: "graph.unavailable", message: "The project graph is unavailable." });
+    render(<WorkflowsView resource={{ key: "workflows:", title: "Workflows" }} mode="source" active />);
+    expect(await screen.findByText("Workflow drafts are unavailable")).toBeTruthy();
+    await waitFor(() => expect(graphHandlers.length).toBeGreaterThan(0));
+    wfIpc.list.mockResolvedValue([summary("wf-child", "Child")]);
+    act(() => graphHandlers.forEach((h) => h({ kind: "status", status: { state: { kind: "ready" } } })));
+    await waitFor(() => expect(screen.getByTestId("workflow-drafts").textContent).toContain("Child"));
+    expect(screen.queryByText("Workflow drafts are unavailable")).toBeNull();
+  });
 });
