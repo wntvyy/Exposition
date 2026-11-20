@@ -79,6 +79,10 @@ impl WorkflowHost for Host {
     ) -> Result<SavedWorkflow, WorkflowRunError> {
         self.graph.workflow(id, revision).map_err(|e| WorkflowRunError::new(&e.code, e.message))
     }
+    // As the application: pinned revisions resolve like validation resolves them.
+    fn pinned_definition(&self, _root: &Path, id: &WorkflowId, revision: u64) -> Option<WorkflowDefinition> {
+        self.graph.workflow_definition(id, revision)
+    }
 }
 
 type BatchBehavior =

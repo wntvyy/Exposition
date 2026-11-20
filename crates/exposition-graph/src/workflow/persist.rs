@@ -462,8 +462,29 @@ impl GraphService {
 
     /// One saved revision (the latest when `revision` is none).
     pub fn workflow(&self, id: &WorkflowId, revision: Option<u64>) -> GraphResult<SavedWorkflow> {
+        self.read_workflow(id, revision, false)
+    }
+
+    /// The revision of a deleted workflow that composites still run, to be
+    /// shown read-only where a composite step pins it (the editor's
+    /// composite card): `None` unless the workflow was deleted with its
+    /// revisions kept and this revision still exists. It lists no other
+    /// revision (nothing newer is offered) and carries no entity; a deleted
+    /// workflow stays out of lists, plans of its own, triggers, and saving.
+    pub fn deleted_pinned_revision(&self, id: &WorkflowId, revision: u64) -> GraphResult<Option<SavedWorkflow>> {
+        let retired = self.with_store(|store| Ok(is_retired(store.connection(), id)?))?;
+        if !retired || self.workflow_definition(id, revision).is_none() {
+            return Ok(None);
+        }
+        let mut saved = self.read_workflow(id, Some(revision), true)?;
+        saved.revisions.retain(|r| r.revision == revision);
+        saved.entity = None;
+        Ok(Some(saved))
+    }
+
+    fn read_workflow(&self, id: &WorkflowId, revision: Option<u64>, deleted: bool) -> GraphResult<SavedWorkflow> {
         self.with_store(|store| {
-            if is_retired(store.connection(), id)? {
+            if !deleted && is_retired(store.connection(), id)? {
                 return Err(GraphError::new("workflow.unknown", "That workflow was deleted from this project."));
             }
             let row = load_row(store.connection(), id, revision)?

@@ -79,6 +79,17 @@ impl WorkflowHost for AppWorkflowHost {
         }
         self.graph.workflow(id, revision).map_err(|e| WorkflowRunError::new(&e.code, e.message))
     }
+
+    fn pinned_definition(
+        &self,
+        root: &Path,
+        id: &WorkflowId,
+        revision: u64,
+    ) -> Option<exposition_graph::workflow::WorkflowDefinition> {
+        // The resolver validation and saving use: a child deleted with its
+        // revisions kept still resolves for the composites that pin it.
+        (self.graph.root().as_deref() == Some(root)).then(|| self.graph.workflow_definition(id, revision)).flatten()
+    }
 }
 
 /// Services the step adapters call.

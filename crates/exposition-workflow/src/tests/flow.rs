@@ -775,3 +775,39 @@ fn run_summaries_count_condition_not_met_steps_as_done() {
     let summary = f.service.runs(Some(&id)).unwrap().into_iter().find(|s| s.id == run.id).unwrap();
     assert_eq!((summary.steps_done, summary.steps_total), (2, 2));
 }
+
+// ------------------------------------------------- QC: PG-2 and PG-1 ----
+
+/// PG-1 / WF-3: a composite keeps resolving the pinned revision of a child
+/// that was deleted with its revisions kept, in validation, in the plan, and
+/// in the run alike; after those revisions are purged every one of them
+/// reports the step missing.
+#[test]
+fn a_parent_of_a_deleted_child_whose_revisions_are_kept_still_plans_and_runs() {
+    let f = fixture();
+    f.set_behavior(json_behavior());
+    let child = child(&f);
+    let id = f.save(parent(&child));
+    f.graph.delete_workflow(&Origin::User, &child, false, false).unwrap();
+    assert_eq!(f.graph.workflow(&child, None).unwrap_err().code, "workflow.unknown", "the child itself is deleted");
+    let read = f.graph.workflow(&id, None).unwrap();
+    assert_eq!(
+        read.validation.state,
+        exposition_graph::workflow::DraftState::WellFormed,
+        "validation resolves the pin"
+    );
+    let plan = f.service.plan(&id, None).unwrap();
+    assert!(plan.blockers.is_empty(), "the plan resolves the pin too: {:?}", plan.blockers);
+    let ids: Vec<&str> = plan.steps.iter().map(|s| s.step.as_str()).collect();
+    assert_eq!(ids, vec!["prep", "comp/clean", "comp/fit", "report"]);
+    let run = f.run_to_end(&id);
+    assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?} {:?}", run.code, run.message);
+    // A deleted workflow itself is never planned.
+    assert_eq!(f.service.plan(&child, None).unwrap_err().code, "workflow.unknown");
+    // Purged: validation and the plan agree that the step is missing.
+    f.graph.delete_workflow(&Origin::User, &child, true, true).unwrap();
+    let read = f.graph.workflow(&id, None).unwrap();
+    assert_eq!(read.validation.state, exposition_graph::workflow::DraftState::Incomplete);
+    let plan = f.service.plan(&id, None).unwrap();
+    assert!(plan.blockers.iter().any(|b| b.code == "workflow.notWellFormed"), "{:?}", plan.blockers);
+}

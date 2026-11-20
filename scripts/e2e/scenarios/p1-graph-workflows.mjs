@@ -17,6 +17,10 @@
 //     Ctrl+V → copies with new ids, offset; the draft is unsaved; nothing runs.
 //  7. Focus: Delete/Ctrl+D in the graph search field and Ctrl+D in Monaco never
 //     act on items.
+//  8. QC PG-1/WF-3: a child workflow that a composite runs is deleted with its
+//     revisions kept: the parent still validates and plans (every step of the
+//     child in the plan), its composite card still shows the pinned child, and
+//     the deleted child itself is unknown except through that pin.
 import { cp, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,7 +28,7 @@ import { join } from "node:path";
 
 import { runCommand } from "../palette.mjs";
 import { consoleErrors, dismissNotifications, expectNoDialog, publishShots, recycleBinItemsFrom, waitForNotification, settle, platformSkip } from "../p1-helpers.mjs";
-import { invoke, waitFor } from "../workspace-helpers.mjs";
+import { invoke, invokeError, waitFor } from "../workspace-helpers.mjs";
 
 const create = (tempId, kind, label) => ({ op: "createEntity", tempId, kind, roles: [], label, key: null, attributes: {}, binding: null });
 
@@ -247,6 +251,71 @@ export default async function p1GraphWorkflows({ launchApp, artifactsDir, assert
       evidence.notes.push("Storage & History lists no recoverable deletions category");
     }
     await shot(page, "p1-storage-light");
+
+    // --- 8. a deleted child whose revisions are kept keeps its parent working (QC PG-1/WF-3) ---
+    const keptChild = await invoke(page, "workflow_save", {
+      request: {
+        id: null,
+        expectedRevision: null,
+        definition: {
+          ...workflow("Kept child", [{ ...pythonStep("fit", "Fit"), payload: { kind: "code", language: "python", source: "print('fit')\n" } }]),
+          schema: "exposition.workflow/1",
+          outcomes: [{ id: "out", kind: "transformedDataset", label: "Result", from: { step: "fit", port: "dataset" }, optional: false }],
+        },
+      },
+    });
+    assert.equal(keptChild.validation.state, "wellFormed", JSON.stringify(keptChild.validation.diagnostics));
+    const keptParent = await invoke(page, "workflow_save", {
+      request: {
+        id: null,
+        expectedRevision: null,
+        definition: {
+          ...workflow("Runs a kept child", [
+            { id: "sub", label: "Run the kept child", operation: { id: "workflow.composite", version: 1 }, parameters: {}, payload: null, composite: { workflow: keptChild.id, revision: keptChild.revision } },
+          ]),
+          outcomes: [{ id: "out", kind: "transformedDataset", label: "Result", from: { step: "sub", port: "out" }, optional: false }],
+        },
+      },
+    });
+    assert.equal(keptParent.validation.state, "wellFormed", JSON.stringify(keptParent.validation.diagnostics));
+    const structural = (plan) => plan.blockers.filter((b) => ["workflow.notWellFormed", "workflow.compositeNotWellFormed"].includes(b.code));
+    const planBefore = await invoke(page, "workflow_run_plan", { id: keptParent.id, revision: null });
+    assert.deepEqual(structural(planBefore), [], "the parent plans before the deletion");
+    // Ordinary (recoverable) deletion of the child: its revisions are kept.
+    const deletion = await invoke(page, "project_op_plan", { request: { kind: { kind: "delete", permanent: false }, targets: [{ kind: "workflow", workflow: keptChild.id }], actor: { kind: "user" } } });
+    const deleted = await invoke(page, "project_op_apply", { apply: { plan: deletion.plan, planHash: deletion.planHash, choices: {} } });
+    assert.equal(deleted.outcomes[0]?.status, "succeeded", JSON.stringify(deleted.outcomes));
+    const listedAfter = await invoke(page, "workflow_list");
+    assert.ok(!listedAfter.some((w) => w.id === keptChild.id), "the deleted child is not listed");
+    assert.equal(listedAfter.find((w) => w.id === keptParent.id)?.state, "wellFormed", "the list still reads the parent as well formed");
+    const parentRead = await invoke(page, "workflow_get", { id: keptParent.id, revision: null });
+    assert.equal(parentRead.validation.state, "wellFormed", JSON.stringify(parentRead.validation.diagnostics));
+    const planAfter = await invoke(page, "workflow_run_plan", { id: keptParent.id, revision: null });
+    assert.deepEqual(structural(planAfter), [], `the plan resolves the kept revision: ${JSON.stringify(planAfter.blockers)}`);
+    assert.deepEqual(planAfter.steps.map((s) => s.step), ["sub/fit"], "the child's step is in the plan");
+    assert.match(JSON.stringify(planAfter.steps[0].payload), /print\('fit'\)/, "with its complete code");
+    assert.equal(planAfter.approvalHash, planBefore.approvalHash, "the same plan as before the deletion");
+    // The deleted child is unknown, except as the revision the composite pins.
+    const pinned = await invoke(page, "workflow_get", { id: keptChild.id, revision: keptChild.revision });
+    assert.equal(pinned.definition.title, "Kept child");
+    assert.deepEqual(pinned.revisions.map((r) => r.revision), [keptChild.revision], "nothing newer is offered");
+    const latestOfDeleted = await invokeError(page, "workflow_get", { id: keptChild.id, revision: null });
+    assert.equal(latestOfDeleted.error?.code, "workflow.unknown", JSON.stringify(latestOfDeleted));
+    const planOfDeleted = await invokeError(page, "workflow_run_plan", { id: keptChild.id, revision: null });
+    assert.equal(planOfDeleted.error?.code, "workflow.unknown", "a deleted workflow itself is never planned");
+    // The editor's composite card shows the pinned child instead of "could not be loaded".
+    await page.evaluate(() => localStorage.setItem("exposition.workflows.view", "form"));
+    await runCommand(page, "Show Workflows", /Workflow: Show Workflows/);
+    await page.getByTestId(`workflow-open-${keptParent.id}`).click();
+    const compositeCard = page.getByTestId("composite-sub");
+    await compositeCard.waitFor({ timeout: 15_000 });
+    await waitFor(async () => /Kept child/.test(await compositeCard.textContent()), { timeout: 15_000, message: "the composite card names the pinned child" });
+    assert.doesNotMatch(await compositeCard.textContent(), /could not be loaded/);
+    assert.equal(await page.getByTestId("composite-use-latest-sub").count(), 0, "no newer revision of a deleted workflow is offered");
+    await page.getByTestId("composite-expand-sub").click();
+    await waitFor(async () => /Fit/.test(await page.getByTestId("composite-children-sub").textContent()), { message: "the child's steps are shown read-only" });
+    await shot(page, "qc-composite-deleted-child-light");
+    evidence.notes.push(`QC PG-1: parent ${keptParent.id} of deleted child ${keptChild.id}@${keptChild.revision}: well formed, plan steps ${planAfter.steps.map((s) => s.step).join(",")}, blockers [${planAfter.blockers.map((b) => b.code).join(",")}]`);
 
     assert.deepEqual(consoleErrors(app), [], "no console errors");
   } finally {

@@ -49,6 +49,16 @@ pub trait WorkflowHost: Send + Sync {
     /// A saved revision (latest when `revision` is none) of a workflow of the
     /// project at `root`.
     fn workflow(&self, root: &Path, id: &WorkflowId, revision: Option<u64>) -> Result<SavedWorkflow, WorkflowRunError>;
+    /// The definition of the revision a composite step pins, by the rule
+    /// validation uses: a workflow that was deleted with its revisions kept
+    /// still resolves (its parents keep running it) until those revisions
+    /// are purged. Only composite children are read this way; the workflow a
+    /// plan is made for always goes through [`Self::workflow`], so a deleted
+    /// workflow itself is never planned. The default knows active workflows
+    /// only; the application reads the stored revision.
+    fn pinned_definition(&self, root: &Path, id: &WorkflowId, revision: u64) -> Option<WorkflowDefinition> {
+        self.workflow(root, id, Some(revision)).ok().map(|s| s.definition)
+    }
 }
 
 pub struct WorkflowRunConfig {
@@ -319,7 +329,7 @@ impl WorkflowRunService {
             active_run: self.active_run(&saved.id),
             pins: &options.pins,
             limits: self.inner.slots.limits(),
-            resolve: &|id, revision| self.inner.host.workflow(root, id, Some(revision)).ok().map(|s| s.definition),
+            resolve: &|id, revision| self.inner.host.pinned_definition(root, id, revision),
         };
         let mut built = plan::build_plan(saved, &facts, crate::now_ms());
         built.plan.notices.extend(options.notices.iter().cloned());

@@ -54,6 +54,32 @@ fn with_runnability(runs: &WorkflowRunService, mut saved: SavedWorkflow) -> Save
     saved
 }
 
+/// The validation of a saved revision as of now. The validation stored with
+/// a revision is from the moment it was saved: an input file created or
+/// removed since would leave it reading "incomplete" or "well formed"
+/// wrongly, and identical content saves nothing, so it could never be
+/// refreshed. Reads therefore validate the stored definition again, by the
+/// rules a save uses (files in the open project, composites against the
+/// saved revisions); a pin whose revision was purged keeps the wording the
+/// graph reports for it.
+fn current_validation(graph: &GraphService, root: &Option<PathBuf>, saved: &SavedWorkflow) -> WorkflowValidation {
+    let exists = |p: &WorkspacePath| exists_in(root, p);
+    let resolve = |wf: &WorkflowId, revision: u64| graph.workflow_definition(wf, revision);
+    let ctx = ValidationContext {
+        ceiling: None,
+        file_exists: Some(&exists),
+        resolve_workflow: Some(&resolve),
+        workflow_id: Some(&saved.id),
+    };
+    let mut now = exposition_graph::validate_workflow(&saved.definition, &ctx);
+    for read in saved.validation.diagnostics.iter().filter(|d| d.code == "workflow.compositeMissing") {
+        if let Some(d) = now.diagnostics.iter_mut().find(|d| d.code == read.code && d.step == read.step) {
+            d.message = read.message.clone();
+        }
+    }
+    now
+}
+
 /// Whether a project file exists inside `root` (links leading outside count
 /// as missing).
 fn exists_in(root: &Option<PathBuf>, path: &WorkspacePath) -> bool {
@@ -119,7 +145,12 @@ pub async fn workflow_save(
     blocking(&state, move |graph, root, runs| {
         let exists = |p: &WorkspacePath| exists_in(&root, p);
         let ctx = ValidationContext { ceiling: None, file_exists: Some(&exists), ..Default::default() };
-        let saved = graph.save_workflow(&Origin::User, &request, &ctx).map_err(CommandError::from)?;
+        let mut saved = graph.save_workflow(&Origin::User, &request, &ctx).map_err(CommandError::from)?;
+        // Nothing new was saved: report the revision as it validates now,
+        // not as it did when it was saved.
+        if saved.unchanged {
+            saved.validation = current_validation(graph, &root, &saved);
+        }
         Ok(with_runnability(runs, saved))
     })
     .await
@@ -139,22 +170,37 @@ pub async fn workflow_import(state: State<'_, AppState>, text: String) -> Result
 
 #[tauri::command]
 pub async fn workflow_list(state: State<'_, AppState>) -> Result<Vec<WorkflowSummary>, CommandError> {
-    blocking(&state, |graph, _, runs| {
-        let mut list = graph.workflows().map_err(CommandError::from)?;
+    blocking(&state, |graph, root, runs| {
         // Each runner is checked once for the whole list.
         let availability = runs.availability();
         let check = |id: &str| {
             availability.get(id).cloned().unwrap_or_else(|| Err("No runner is installed for this operation.".into()))
         };
-        for summary in list.iter_mut().filter(|s| s.state == DraftState::WellFormed) {
-            if let Ok(mut saved) = graph.workflow(&summary.id, Some(summary.revision)) {
-                exposition_graph::workflow::apply_runnability(&mut saved.validation, &saved.definition, &check);
-                summary.runnable = saved.validation.runnable;
-            }
-        }
-        Ok(list)
+        list_workflows(graph, &root, &check)
     })
     .await
+}
+
+/// `workflow_list`: each saved workflow with its state as it validates now
+/// (see [`current_validation`]) and whether it can run in the open project.
+fn list_workflows(
+    graph: &GraphService,
+    root: &Option<PathBuf>,
+    check: &dyn Fn(&str) -> Result<(), String>,
+) -> Result<Vec<WorkflowSummary>, CommandError> {
+    let mut list = graph.workflows().map_err(CommandError::from)?;
+    for summary in list.iter_mut() {
+        let Ok(mut saved) = graph.workflow(&summary.id, Some(summary.revision)) else { continue };
+        saved.validation = current_validation(graph, root, &saved);
+        summary.state = saved.validation.state;
+        summary.errors = saved.validation.errors;
+        summary.warnings = saved.validation.warnings;
+        if summary.state == DraftState::WellFormed {
+            exposition_graph::workflow::apply_runnability(&mut saved.validation, &saved.definition, check);
+            summary.runnable = saved.validation.runnable;
+        }
+    }
+    Ok(list)
 }
 
 #[tauri::command]
@@ -163,11 +209,36 @@ pub async fn workflow_get(
     id: WorkflowId,
     revision: Option<u64>,
 ) -> Result<SavedWorkflow, CommandError> {
-    blocking(&state, move |graph, _, runs| {
-        let saved = graph.workflow(&id, revision).map_err(CommandError::from)?;
-        Ok(with_runnability(runs, saved))
-    })
-    .await
+    blocking(&state, move |graph, root, runs| Ok(with_runnability(runs, get_workflow(graph, &root, &id, revision)?)))
+        .await
+}
+
+/// `workflow_get`: a saved revision of an active workflow, or, asked for by
+/// revision number, the revision of a deleted workflow that another saved
+/// workflow still runs as a composite step (kept when the workflow was
+/// deleted with "keep the revisions other workflows run"). The editor shows
+/// that one read-only inside the composite's card; a deleted workflow is
+/// otherwise unknown here.
+fn get_workflow(
+    graph: &GraphService,
+    root: &Option<PathBuf>,
+    id: &WorkflowId,
+    revision: Option<u64>,
+) -> Result<SavedWorkflow, CommandError> {
+    let mut saved = match graph.workflow(id, revision) {
+        Ok(saved) => saved,
+        Err(unknown) if unknown.code == "workflow.unknown" => {
+            let Some(revision) = revision else { return Err(unknown.into()) };
+            let pinned = graph.workflow_pins(id).is_ok_and(|pins| pins.iter().any(|p| p.revision == revision));
+            match graph.deleted_pinned_revision(id, revision) {
+                Ok(Some(saved)) if pinned => saved,
+                _ => return Err(unknown.into()),
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
+    saved.validation = current_validation(graph, root, &saved);
+    Ok(saved)
 }
 
 // ----- workflow bundles (declarative interchange) -----
@@ -369,6 +440,157 @@ mod tests {
             std::fs::create_dir_all(&p)?;
             Ok(super::Temp(std::fs::canonicalize(&p)?))
         }
+    }
+
+    use exposition_graph::GraphConfig;
+    use exposition_graph::workflow::presets::{NUMERICAL_EXPERIMENT, WorkflowPresetRequest, draft};
+    use exposition_graph::workflow::{COMPOSITE_OPERATION, CompositeRef, PortSource, StepOperation, StepPort};
+    use exposition_graph::workflow::{WORKFLOW_SCHEMA_V2, WorkflowConnection, WorkflowStep};
+
+    struct Project {
+        _data: Temp,
+        _dir: Temp,
+        root: Option<PathBuf>,
+        graph: Arc<GraphService>,
+    }
+
+    fn project() -> Project {
+        let data = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let graph = GraphService::new(GraphConfig { data_dir: data.path().to_path_buf() });
+        assert!(graph.attach(&root).is_usable());
+        Project { _data: data, _dir: dir, root: Some(root), graph }
+    }
+
+    impl Project {
+        /// Save as the `workflow_save` command does (files checked in the project).
+        fn save(&self, id: Option<WorkflowId>, definition: WorkflowDefinition) -> SavedWorkflow {
+            let exists = |p: &WorkspacePath| exists_in(&self.root, p);
+            let ctx = ValidationContext { ceiling: None, file_exists: Some(&exists), ..Default::default() };
+            let request = SaveWorkflowRequest { id, expected_revision: None, definition };
+            self.graph.save_workflow(&Origin::User, &request, &ctx).unwrap()
+        }
+
+        fn write(&self, rel: &str, content: &str) {
+            let path = self.root.as_ref().unwrap().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+
+        fn listed(&self, id: &WorkflowId) -> WorkflowSummary {
+            let all = list_workflows(&self.graph, &self.root, &|_| Ok(())).unwrap();
+            all.into_iter().find(|w| &w.id == id).expect("listed")
+        }
+    }
+
+    fn numerical(data: &str) -> WorkflowDefinition {
+        draft(&WorkflowPresetRequest {
+            preset: NUMERICAL_EXPERIMENT.into(),
+            data: Some(WorkspacePath::parse(data).unwrap()),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// WF-6: the list, `workflow_get`, and a Save that saves nothing report a
+    /// revision as it validates now, not as it did when it was saved.
+    #[test]
+    fn a_saved_revision_is_reported_as_it_validates_now() {
+        let p = project();
+        // Saved before its input file exists: incomplete then.
+        let saved = p.save(None, numerical("data/obs.csv"));
+        assert_eq!(saved.validation.state, DraftState::Incomplete);
+        assert!(saved.validation.diagnostics.iter().any(|d| d.code == "workflow.inputMissing"));
+        assert_eq!(p.listed(&saved.id).state, DraftState::Incomplete);
+        // The file is created: every read agrees that the revision is well formed.
+        p.write("data/obs.csv", "x\n1\n");
+        let listed = p.listed(&saved.id);
+        assert_eq!((listed.state, listed.errors, listed.runnable), (DraftState::WellFormed, 0, true));
+        let read = get_workflow(&p.graph, &p.root, &saved.id, None).unwrap();
+        assert_eq!(read.validation.state, DraftState::WellFormed);
+        assert_eq!(read.revision, 1, "reading never saves anything");
+        // The stored record still holds what was found when it was saved.
+        assert_eq!(p.graph.workflow(&saved.id, None).unwrap().validation.state, DraftState::Incomplete);
+        // Saving the same content saves nothing and reports the current state.
+        let again = p.save(Some(saved.id.clone()), numerical("data/obs.csv"));
+        assert!(again.unchanged);
+        assert_eq!(current_validation(&p.graph, &p.root, &again).state, DraftState::WellFormed);
+        // The reverse: the file is removed after a well-formed save.
+        std::fs::remove_file(p.root.as_ref().unwrap().join("data/obs.csv")).unwrap();
+        let listed = p.listed(&saved.id);
+        assert_eq!((listed.state, listed.runnable), (DraftState::Incomplete, false));
+        assert!(listed.errors >= 1);
+        let read = get_workflow(&p.graph, &p.root, &saved.id, None).unwrap();
+        assert!(read.validation.diagnostics.iter().any(|d| d.code == "workflow.inputMissing"));
+    }
+
+    /// PG-1 / WF-3: the editor's composite card reads the pinned revision of
+    /// a child that was deleted with its revisions kept; a deleted workflow
+    /// is otherwise unknown to `workflow_get`.
+    #[test]
+    fn a_deleted_childs_pinned_revision_is_read_only_through_its_pin() {
+        let p = project();
+        p.write("data/obs.csv", "x\n1\n");
+        let child = p.save(None, numerical("data/obs.csv"));
+        let child_two = {
+            let mut next = numerical("data/obs.csv");
+            next.title = "Numerical experiment, second revision".into();
+            p.save(Some(child.id.clone()), next)
+        };
+        assert_eq!(child_two.revision, 2);
+        // A parent that runs the child at revision 1.
+        let mut parent = numerical("data/obs.csv");
+        parent.schema = WORKFLOW_SCHEMA_V2.into();
+        parent.title = "Parent".into();
+        parent.steps = vec![WorkflowStep {
+            id: "sub".into(),
+            label: "Run the experiment workflow".into(),
+            operation: StepOperation { id: COMPOSITE_OPERATION.into(), version: 1 },
+            parameters: Default::default(),
+            payload: None,
+            composite: Some(CompositeRef { workflow: child.id.clone(), revision: 1 }),
+            condition: None,
+            repeat: None,
+        }];
+        parent.connections = vec![WorkflowConnection::Data {
+            from: PortSource::Input { input: "data".into() },
+            to: StepPort { step: "sub".into(), port: "data".into() },
+        }];
+        parent.outcomes[0].from = StepPort { step: "sub".into(), port: "figure".into() };
+        let parent = p.save(None, parent);
+        assert_eq!(parent.validation.state, DraftState::WellFormed, "{:?}", parent.validation.diagnostics);
+
+        p.graph.delete_workflow(&Origin::User, &child.id, false, false).unwrap();
+        // The parent still validates, and the pinned revision can be shown.
+        assert_eq!(p.listed(&parent.id).state, DraftState::WellFormed);
+        let pinned = get_workflow(&p.graph, &p.root, &child.id, Some(1)).unwrap();
+        assert_eq!(pinned.revision, 1);
+        assert_eq!(pinned.definition, child.definition);
+        assert_eq!(
+            pinned.revisions.iter().map(|r| r.revision).collect::<Vec<_>>(),
+            vec![1],
+            "nothing newer is offered"
+        );
+        assert_eq!(pinned.entity, None);
+        // Not its latest revision, a revision nothing pins, or a list entry.
+        assert_eq!(get_workflow(&p.graph, &p.root, &child.id, None).unwrap_err().code, "workflow.unknown");
+        assert_eq!(get_workflow(&p.graph, &p.root, &child.id, Some(2)).unwrap_err().code, "workflow.unknown");
+        assert!(list_workflows(&p.graph, &p.root, &|_| Ok(())).unwrap().iter().all(|w| w.id != child.id));
+        // Purged: the pin no longer resolves anywhere.
+        p.graph.delete_workflow(&Origin::User, &child.id, true, true).unwrap();
+        assert_eq!(get_workflow(&p.graph, &p.root, &child.id, Some(1)).unwrap_err().code, "workflow.unknown");
+        let listed = p.listed(&parent.id);
+        assert_eq!(listed.state, DraftState::Incomplete);
+        let read = get_workflow(&p.graph, &p.root, &parent.id, None).unwrap();
+        assert!(
+            read.validation
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "workflow.compositeMissing" && d.message.contains("that revision was deleted")),
+            "{:?}",
+            read.validation.diagnostics
+        );
     }
 
     #[test]
