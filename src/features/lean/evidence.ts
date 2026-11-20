@@ -22,6 +22,7 @@ import type { LeanAssociation } from "../../bindings/LeanAssociation";
 import type { LeanAuditRecord } from "../../bindings/LeanAuditRecord";
 import { errorMessage } from "../../lib/ipc";
 import type { BadgeTone, Status } from "../../ui/components";
+import { VERDICT_LABEL } from "./verdicts";
 
 export const leanEvidenceCommands = {
   /** The audit of the last finished revision (declarations, statements, axioms, verdicts). */
@@ -66,19 +67,19 @@ export function isRecordOfAudit(evidence: Evidence, audit: LeanAuditRecord): boo
 export function verdictView(verdict: FormalVerdict | DeclarationVerdict): { status: Status; label: string } {
   switch (verdict) {
     case "checked":
-      return { status: "succeeded", label: "Checked" };
+      return { status: "succeeded", label: VERDICT_LABEL.checked };
     case "checkedWithAxioms":
-      return { status: "warning", label: "Checked with axioms" };
+      return { status: "warning", label: VERDICT_LABEL.checkedWithAxioms };
     case "incomplete":
-      return { status: "warning", label: "Incomplete (sorry)" };
+      return { status: "warning", label: VERDICT_LABEL.incomplete };
     case "reliesOnCompiledCode":
-      return { status: "warning", label: "Relies on compiled code" };
+      return { status: "warning", label: VERDICT_LABEL.reliesOnCompiledCode };
     case "partiallyChecked":
-      return { status: "warning", label: "Partially checked" };
+      return { status: "warning", label: VERDICT_LABEL.partiallyChecked };
     case "notVerified":
-      return { status: "idle", label: "Not verified" };
+      return { status: "idle", label: VERDICT_LABEL.notVerified };
     case "errors":
-      return { status: "failed", label: "Errors" };
+      return { status: "failed", label: VERDICT_LABEL.errors };
   }
 }
 

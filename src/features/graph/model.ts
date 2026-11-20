@@ -50,6 +50,7 @@ import type { Vocabulary } from "../../bindings/Vocabulary";
 import type { IconComponent, Status } from "../../ui/components";
 import type { GraphCategory } from "../../ui/tokens";
 import type { RelationFamily } from "./canvas/types";
+import { VERDICT_LABEL } from "../lean/verdicts";
 
 // ----- vocabulary index ----------------------------------------------------------------
 
@@ -348,27 +349,27 @@ export function originLabel(origin: Origin): string {
 // ----- verification vocabulary ------------------------------------------------------------
 
 /**
- * Exact verifier verdict labels (the Lean status vocabulary of
- * `src/features/lean/status.ts`); only a clean result is ever "Checked".
+ * Exact verifier verdict labels (the one table in
+ * `src/features/lean/verdicts.ts`); only a clean result is ever "Checked".
  * Tones: Checked succeeded, Errors failed, Not verified neutral, the
  * qualified results warning ("No formal evidence" is neutral too).
  */
 export const VERDICT_VIEW: Record<FormalVerdict, { label: string; status: Status; sentence: string }> = {
-  checked: { label: "Checked", status: "succeeded", sentence: "Checked by Lean's kernel with only the standard axioms." },
+  checked: { label: VERDICT_LABEL.checked, status: "succeeded", sentence: "Checked by Lean's kernel with only the standard axioms." },
   checkedWithAxioms: {
-    label: "Checked with axioms",
+    label: VERDICT_LABEL.checkedWithAxioms,
     status: "warning",
     sentence: "Checked, but it depends on axioms beyond Lean's standard ones; it holds only if they do.",
   },
-  incomplete: { label: "Incomplete (sorry)", status: "warning", sentence: "The proof is incomplete: it depends on sorry." },
+  incomplete: { label: VERDICT_LABEL.incomplete, status: "warning", sentence: "The proof is incomplete: it depends on sorry." },
   reliesOnCompiledCode: {
-    label: "Relies on compiled code",
+    label: VERDICT_LABEL.reliesOnCompiledCode,
     status: "warning",
     sentence: "Checked by trusting compiled code (native_decide or similar) instead of the kernel.",
   },
-  partiallyChecked: { label: "Partially checked", status: "warning", sentence: "Only part of the file could be checked." },
-  notVerified: { label: "Not verified", status: "idle", sentence: "The audit could not verify this result." },
-  errors: { label: "Errors", status: "failed", sentence: "Lean reported errors." },
+  partiallyChecked: { label: VERDICT_LABEL.partiallyChecked, status: "warning", sentence: "Only part of the file could be checked." },
+  notVerified: { label: VERDICT_LABEL.notVerified, status: "idle", sentence: "The audit could not verify this result." },
+  errors: { label: VERDICT_LABEL.errors, status: "failed", sentence: "Lean reported errors." },
 };
 
 /** Freshness as a status: stale and unknown are never shown as success. */

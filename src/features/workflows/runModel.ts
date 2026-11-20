@@ -18,6 +18,7 @@ import type {
 } from "./contract";
 import { paramText } from "./orchestration";
 import type { BadgeTone, Status } from "../../ui/components";
+import { storedVerdictLabel } from "../lean/verdicts";
 
 export const WORKFLOW_RUN_KEY_PREFIX = "workflow-run:";
 export const workflowRunKey = (id: string) => `${WORKFLOW_RUN_KEY_PREFIX}${id}`;
@@ -91,6 +92,13 @@ export const PROPOSAL_STATUS_VIEW: Record<WorkflowProposalStatus, { tone: BadgeT
   rejected: { tone: "neutral", label: "Rejected", dashed: true },
   expired: { tone: "neutral", label: "Expired", dashed: true },
 };
+
+/**
+ * A stored verdict label as it is shown: in the Lean view's words
+ * ("Unverified" is stored, "Not verified" is shown). Stored values, condition
+ * values and `data-verdict` attributes keep the stored form.
+ */
+export const verdictLabel = storedVerdictLabel;
 
 /**
  * The audit's exact verdict labels → tone, by class (an overall label such as

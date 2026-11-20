@@ -88,6 +88,7 @@ import {
   shortHash,
   STEP_STATE_VIEW,
   usageRows,
+  verdictLabel,
   verdictTone,
   WORKFLOW_RUN_KEY_PREFIX,
   workflowRunKey,
@@ -327,7 +328,7 @@ function AssociationReview({
                   <StatusText status="canceled" label="Not associated" />
                 ))}
               {facts ? (
-                <Badge tone={verdictTone(facts.verdict)}>{facts.verdict}</Badge>
+                <Badge tone={verdictTone(facts.verdict)}>{verdictLabel(facts.verdict)}</Badge>
               ) : (
                 <Badge tone="neutral" dashed>
                   Verdict not in this run
@@ -389,12 +390,12 @@ function OutputValueView({ run, step, value, onRun }: { run: WorkflowRun; step: 
         <div className="xp-wf__stack">
           <div className="xp-wf-output__facts">
             Lean audit of <code>{value.file}</code> · <FullHash hash={value.fileSha256} label={value.file} /> · file verdict{" "}
-            <Badge tone={verdictTone(value.verdict)}>{value.verdict}</Badge>
+            <Badge tone={verdictTone(value.verdict)}>{verdictLabel(value.verdict)}</Badge>
           </div>
           <ul className="xp-wf-checklist" aria-label="Audited declarations">
             {value.declarations.map((d) => (
               <li key={d.name}>
-                <code>{d.name}</code> <Badge tone={verdictTone(d.verdict)}>{d.verdict}</Badge>
+                <code>{d.name}</code> <Badge tone={verdictTone(d.verdict)}>{verdictLabel(d.verdict)}</Badge>
                 {d.axioms.length > 0 && <span className="ui-meta">Axioms: {d.axioms.join(", ")}</span>}
               </li>
             ))}

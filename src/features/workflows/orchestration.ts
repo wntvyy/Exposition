@@ -10,6 +10,7 @@ import type { OperationContract } from "../../bindings/OperationContract";
 import type { ParameterSpec } from "../../bindings/ParameterSpec";
 import type { ParamValue } from "../../bindings/ParamValue";
 import type { PortType } from "../../bindings/PortType";
+import { storedVerdictLabel } from "../lean/verdicts";
 import {
   COMPOSITE_OPERATION,
   WORKFLOW_SCHEMA_V2,
@@ -205,6 +206,8 @@ export function compositeRefs(def: WorkflowDefinition): CompositeRef[] {
  * `KNOWN_VERDICTS` (crates/exposition-graph/src/workflow.rs; a test pins this
  * list to it). An overall label such as "Errors (2)" belongs to the class it
  * starts with. Rust refuses any other label (`workflow.conditionInvalid`).
+ * These are the stored values; they are shown through `storedVerdictLabel`
+ * (the Lean view's words), never as written here.
  */
 export const KNOWN_VERDICTS = [
   "Checked",
@@ -273,7 +276,7 @@ export function valueText(value: ConditionValue): string {
 export function describeTest(test: ConditionTest, subject: string, negate: boolean): string {
   switch (test.kind) {
     case "verdictIn": {
-      const set = test.verdicts.length ? test.verdicts.map((v) => `“${v}”`).join(", ") : "(no verdict chosen)";
+      const set = test.verdicts.length ? test.verdicts.map((v) => `“${storedVerdictLabel(v)}”`).join(", ") : "(no verdict chosen)";
       return `the audit verdict of ${subject} is ${negate ? "not " : ""}one of ${set}`;
     }
     case "jsonCompare": {
@@ -291,7 +294,7 @@ export function shortTest(test: ConditionTest, negate: boolean): string {
   const not = negate ? "not " : "";
   switch (test.kind) {
     case "verdictIn":
-      return `${not}verdict ∈ {${test.verdicts.join(", ")}}`;
+      return `${not}verdict ∈ {${test.verdicts.map(storedVerdictLabel).join(", ")}}`;
     case "jsonCompare":
       return `${not}${test.pointer || "document"} ${COMPARE_OPS.find((o) => o.id === test.op)?.symbol ?? test.op} ${valueText(test.value)}`;
     case "outputPresent":

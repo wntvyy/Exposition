@@ -517,10 +517,10 @@ describe("run monitor", () => {
         kind: "formalEvidence" as const,
         file: "Proofs/Main.lean",
         fileSha256: HASH,
-        verdict: "Checked with axioms",
+        verdict: "Unverified: the audit list is incomplete",
         declarations: [
           { name: "Main.thm", verdict: "Checked", statement: "theorem thm : 1 + 1 = 2", axioms: [] },
-          { name: "Main.uses_choice", verdict: "Checked with axioms", statement: null, axioms: ["Classical.choice"] },
+          { name: "Main.uses_choice", verdict: "Checked with nonstandard axioms", statement: null, axioms: ["Classical.choice"] },
           { name: "Main.native", verdict: "Relies on compiled code", statement: null, axioms: ["Lean.ofReduceBool"] },
         ],
         evidence: ["ev-1"],
@@ -544,6 +544,14 @@ describe("run monitor", () => {
     const list = screen.getByTestId("workflow-association-checklist");
     expect(list.querySelector('[data-declaration="Main.thm"]')!.textContent).toContain("Checked");
     expect(list.querySelector('[data-declaration="Main.uses_choice"]')!.textContent).toContain("Checked with axioms");
+    // UI-1: the stored label stays in the attribute; the text is the Lean view's wording.
+    expect(list.querySelector('[data-declaration="Main.uses_choice"]')!.getAttribute("data-verdict")).toBe("Checked with nonstandard axioms");
+    expect(list.textContent).not.toContain("nonstandard");
+    const audited = screen.getByRole("list", { name: "Audited declarations" });
+    expect(audited.textContent).toContain("Checked with axioms");
+    expect(audited.textContent).not.toContain("nonstandard");
+    expect(audited.parentElement!.textContent).toContain("Not verified: the audit list is incomplete");
+    expect(audited.parentElement!.textContent).not.toContain("Unverified");
     expect(list.querySelector('[data-declaration="Main.uses_choice"]')!.textContent).toContain("Classical.choice");
     expect(list.querySelector('[data-declaration="Main.native"]')!.textContent).toContain("Relies on compiled code");
     expect(screen.getByText("Runs natively with your account's privileges")).toBeTruthy();
