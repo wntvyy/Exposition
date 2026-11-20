@@ -498,8 +498,13 @@ async function resync() {
   ]);
   useAgents.setState({ status, tasks, workspace });
   syncApprovalNotifications(tasks);
-  const selected = useAgents.getState().selected;
-  if (selected) await refetch(selected);
+  // Every conversation that is loaded may have missed events: the Agent
+  // view's, the Agents page's, and any other read earlier (a hidden surface
+  // shows its detail again without re-reading it).
+  const { selected, page, details } = useAgents.getState();
+  const known = new Set(tasks.map((t) => t.id));
+  const loaded = new Set([selected, page.selected, ...Object.keys(details)].filter((id): id is TaskId => !!id && known.has(id)));
+  await Promise.all([...loaded].map((id) => refetch(id)));
 }
 
 /** Whether a document event can change what a task's review shows. */

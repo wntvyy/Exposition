@@ -196,3 +196,28 @@ describe("attention from a page that shows no agent surface (AG-3)", () => {
     }
   });
 });
+
+describe("resync after missed events (AG-10)", () => {
+  it("re-reads every loaded conversation, not only the Agent view's", async () => {
+    const tasks = ["task-1", "task-2", "task-3"].map((id) => summary({ id }));
+    useAgents.setState({
+      tasks,
+      selected: "task-1",
+      view: "task",
+      page: { ...initialAgentsState.page, selected: "task-2" },
+      details: { "task-3": detailOf(tasks[2]!) },
+    });
+    ipc.agentsTaskList.mockResolvedValueOnce(tasks.map((t) => ({ ...t, status: { kind: "completed" as const } })));
+    ipc.agentsTaskDetail.mockImplementation((id: string) =>
+      Promise.resolve({ ...detailOf(summary({ id, status: { kind: "completed" } })), transcript: [{ kind: "assistantText", seq: 9, text: `fresh ${id}` }] }),
+    );
+    act(() => resync());
+    await settle();
+    await settle();
+    expect(ipc.agentsTaskDetail.mock.calls.map((c) => c[0]).sort()).toEqual(["task-1", "task-2", "task-3"]);
+    const { details } = useAgents.getState();
+    for (const id of ["task-1", "task-2", "task-3"]) {
+      expect(details[id]?.transcript).toEqual([{ kind: "assistantText", seq: 9, text: `fresh ${id}` }]);
+    }
+  });
+});
