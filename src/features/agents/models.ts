@@ -166,7 +166,8 @@ export function modelNote(m: ModelDescriptor): string | null {
 /**
  * The effort to keep after choosing a model: the current one when the model
  * accepts it, else Medium when offered, else the model's first level. Models
- * without an effort control keep the value (it is not sent for them).
+ * without an effort control keep the value: an OpenAI request leaves it out
+ * for them; an Anthropic request always carries the task's effort.
  */
 export function effortFor(current: Effort, efforts: Effort[]): Effort {
   if (!efforts.length || efforts.includes(current)) return current;
