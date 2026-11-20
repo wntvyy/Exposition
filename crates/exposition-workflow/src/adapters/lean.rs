@@ -158,10 +158,6 @@ pub fn current_audit_environment(
     })
 }
 
-pub fn audit_operation(record: &LeanAuditRecord) -> OperationRef {
-    OperationRef { kind: "leanAudit".into(), id: format!("{}@{}", record.path, bare_hash(&record.content_hash)) }
-}
-
 impl StepAdapter for LeanAuditAdapter {
     fn availability(&self, root: &Path) -> Result<(), String> {
         self.auditor.as_ref().ok_or_else(|| NO_LEAN.to_owned())?.availability(root)

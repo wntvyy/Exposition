@@ -245,11 +245,6 @@ impl PageMap {
         self.line(at.page, at.line)?.stops.get(at.stop as usize)
     }
 
-    pub fn cluster_of(&self, at: StopRef) -> Option<&Cluster> {
-        let line = self.line(at.page, at.line)?;
-        line.clusters.get(line.stops.get(at.stop as usize)?.cluster as usize)
-    }
-
     /// All stops of `file`, sorted by offset.
     pub fn stops_by_offset(&self, file: u32) -> &[(u32, StopRef)] {
         self.by_offset.get(file as usize).map(Vec::as_slice).unwrap_or(&[])

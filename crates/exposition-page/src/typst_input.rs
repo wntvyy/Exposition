@@ -11,7 +11,7 @@
 use std::ops::Range;
 
 use exposition_core::document::TextPatch;
-use exposition_core::text::{TextRange, byte_to_utf16, utf16_len, utf16_range_to_bytes};
+use exposition_core::text::{TextRange, byte_to_utf16, utf16_range_to_bytes};
 use typst_syntax::{SyntaxKind, SyntaxNode, parse};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -861,11 +861,6 @@ fn apply(text: &str, patches: &[(Range<usize>, String)]) -> String {
 
 fn to_u16(text: &str, byte: usize) -> Result<u32, EditRefusal> {
     byte_to_utf16(text, byte).map(|v| v as u32).map_err(|_| EditRefusal::InvalidPosition)
-}
-
-/// UTF-16 length helper for callers.
-pub fn len16(text: &str) -> u32 {
-    utf16_len(text) as u32
 }
 
 #[cfg(test)]

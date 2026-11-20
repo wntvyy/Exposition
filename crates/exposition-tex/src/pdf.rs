@@ -110,13 +110,6 @@ pub struct PageGlyph {
     pub ink: Option<PageRect>,
 }
 
-impl PageGlyph {
-    /// Caret x position before (`false`) or after (`true`) the glyph.
-    pub fn caret_x(&self, after: bool) -> f64 {
-        if after { self.origin_x + self.advance } else { self.origin_x }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum PdfError {
     #[error("the PDF could not be loaded: {0}")]

@@ -250,16 +250,6 @@ impl DocumentService {
         Ok(info)
     }
 
-    /// Change the workspace path of a document (rename/move/save-as).
-    pub fn set_path(&self, id: &DocumentId, path: Option<WorkspacePath>) -> Result<DocumentInfo, TransactionError> {
-        let mut inner = self.lock();
-        let doc = get_mut(&mut inner, id)?;
-        doc.path = path;
-        let info = doc.info();
-        self.emit(DocumentEvent::InfoChanged { info: info.clone() });
-        Ok(info)
-    }
-
     /// A renamed or moved file: the same document (text, revisions, undo
     /// history, saved state) under its new path, with the language of its new
     /// name. One `InfoChanged` event.

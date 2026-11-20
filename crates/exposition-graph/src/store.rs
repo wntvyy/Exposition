@@ -820,17 +820,6 @@ impl GraphStore {
         rows.map(|r| r?).collect()
     }
 
-    /// Paths whose coverage reports unresolved bindings or references.
-    pub fn paths_with_unresolved(&self) -> StoreResult<Vec<WorkspacePath>> {
-        let mut stmt = self.conn.prepare_cached("SELECT path FROM coverage WHERE unresolved > 0 LIMIT 50000")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(WorkspacePath::parse(&row?).map_err(|_| untrusted("coverage path"))?);
-        }
-        Ok(out)
-    }
-
     /// Files waiting for link targets, with the targets they wait for.
     pub fn index_wanted(&self) -> StoreResult<Vec<(WorkspacePath, Vec<String>)>> {
         let mut stmt =
@@ -1181,16 +1170,6 @@ impl GraphStore {
         let mut stmt = self.conn.prepare_cached(&format!("SELECT {BINDING_COLUMNS} FROM bindings LIMIT 1000000"))?;
         let rows = stmt.query_map([], read_binding)?;
         rows.map(|r| r?).collect()
-    }
-
-    /// Relations with the given origin kind (`extracted`) whose `from` is one
-    /// of `ids`.
-    pub fn relations_from_all(&self, ids: &[EntityId]) -> StoreResult<Vec<Relation>> {
-        let mut out = Vec::new();
-        for id in ids {
-            out.extend(self.relations_from(id)?);
-        }
-        Ok(out)
     }
 
     /// Coverage as last reconciled, ignoring a pending change (the

@@ -2158,11 +2158,6 @@ impl InteractiveInput {
         bytes.push(b'\n');
         self.write(bytes).await
     }
-
-    /// Blocking variant for non-async callers (never call inside an async task).
-    pub fn blocking_write(&self, bytes: impl Into<Vec<u8>>) -> Result<(), InputClosed> {
-        self.tx.blocking_send(bytes.into()).map_err(|_| InputClosed)
-    }
 }
 
 /// Read side of an interactive job's stdout: the exact bytes, in order.

@@ -127,11 +127,6 @@ impl EntityKind {
         matches!(self, Conjecture | Lemma | Theorem | Proposition | Corollary | Claim)
     }
 
-    /// Informal mathematical entities (excluding formal declarations).
-    pub fn is_informal_math(self) -> bool {
-        self.family() == EntityFamily::Mathematics && self != EntityKind::FormalDeclaration
-    }
-
     /// Entities that must be bound to a source region or file to exist
     /// meaningfully (their text lives in a source).
     pub fn is_file_backed(self) -> bool {

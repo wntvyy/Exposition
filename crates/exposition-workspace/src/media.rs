@@ -41,11 +41,6 @@ fn extension(path: &WorkspacePath) -> Option<String> {
     path.extension().map(str::to_ascii_lowercase)
 }
 
-/// True when `path` has an extension this module reads.
-pub fn is_image_path(path: &WorkspacePath) -> bool {
-    extension(path).is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str()))
-}
-
 /// Where an image reference leads, checked against the open folder.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]

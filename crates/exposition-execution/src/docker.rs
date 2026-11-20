@@ -441,14 +441,6 @@ pub fn remove_stale(docker: &Path, instance: &str, env: &Environment, cwd: &Path
     Ok(removed)
 }
 
-/// Whether a container for the job currently exists (for tests/diagnostics).
-pub fn container_exists(docker: &Path, job_id: &str, env: &Environment, cwd: &Path) -> bool {
-    let filter = format!("name=^{}$", container_name(job_id));
-    helper(docker, &["ps", "-aq", "--filter", &filter], env, cwd, Duration::from_secs(20))
-        .map(|o| !o.stdout.trim().is_empty())
-        .unwrap_or(false)
-}
-
 /// Stable short label identifying one application data directory.
 pub fn instance_label(data_dir: &Path) -> String {
     // FNV-1a over the lower-cased path: stable across runs, not a secret.

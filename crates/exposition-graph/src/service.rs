@@ -2071,8 +2071,3 @@ fn validate_view(input: &GraphViewInput) -> GraphResult<()> {
     }
     Ok(())
 }
-
-/// A binding's state is `Resolved` only when reconciliation confirmed it.
-pub fn is_resolved(state: BindingState) -> bool {
-    state == BindingState::Resolved
-}
