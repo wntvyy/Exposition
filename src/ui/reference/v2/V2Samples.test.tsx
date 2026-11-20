@@ -1,5 +1,5 @@
-// V2 review samples: behavior of the sample module (render, comparable content
-// across directions, the demonstrated interactions, URL round trip). The
+// V2 review samples: behavior of the sample module (render, the demonstrated
+// interactions, URL round trip). The
 // samples are isolated: they set no app theme and touch no stored setting.
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
@@ -25,7 +25,7 @@ describe("V2 samples", () => {
   });
 
   it("selecting a tab shows that file and keeps the unsaved marker on results.typ", () => {
-    show({ sample: "compact", view: "editor" });
+    show({ sample: "balanced", view: "editor" });
     expect(screen.getByRole("tab", { name: "results.typ, unsaved changes" }).getAttribute("aria-selected")).toBe("true");
     fireEvent.click(screen.getByRole("tab", { name: "arrhenius_fit.py" }));
     expect(screen.getByRole("tab", { name: "arrhenius_fit.py" }).getAttribute("aria-selected")).toBe("true");
@@ -44,7 +44,7 @@ describe("V2 samples", () => {
   });
 
   it("Advanced keeps entered values while collapsed; the key error stays until the field changes", () => {
-    show({ sample: "reading", view: "settings" });
+    show({ sample: "balanced", view: "settings" });
     expect(screen.getByTestId("v2-key-error").textContent).toContain("Not saved");
     const toggle = screen.getByTestId("v2-advanced");
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
@@ -82,8 +82,11 @@ describe("V2 samples", () => {
   });
 
   it("round-trips the URL parameters", () => {
-    const p: SampleParams = { ...DEFAULT_PARAMS, sample: "reading", view: "agent", width: 360, chrome: false };
+    const p: SampleParams = { ...DEFAULT_PARAMS, sample: "balanced", view: "agent", width: 360, chrome: false };
     expect(parseSampleParams(sampleSearch(p))).toEqual(p);
     expect(parseSampleParams("?s=nope&view=bad")).toEqual(DEFAULT_PARAMS);
+    // The directions that were not chosen are gone: their links show the accepted one.
+    expect(parseSampleParams("?s=compact").sample).toBe("balanced");
+    expect(parseSampleParams("?s=reading").sample).toBe("balanced");
   });
 });

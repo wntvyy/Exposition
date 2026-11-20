@@ -1,7 +1,7 @@
-// V2 UI standard, phase 1: isolated review samples. Three directions (Compact
-// Calm, Balanced Workspace, Reading Ease) render the same Editor, Settings, and
-// compact Agent content in one base palette (the proposed Light); four palette
-// sheets and the file-icon sample are separate. Everything is scoped under
+// V2 UI standard, phase 1: isolated review samples. The accepted direction
+// (Balanced Workspace) renders the Editor, Settings, and compact Agent content
+// in one base palette (Light); four palette sheets and the file-icon sample
+// are separate. Everything is scoped under
 // `.v2s` with local custom properties: no production view, token, or user
 // setting changes, and all data is mock (no IPC, credentials, writes, or graph).
 import "./v2.css";
@@ -91,9 +91,7 @@ export function sampleSearch(p: SampleParams): string {
 }
 
 const SAMPLE_LABEL: Record<SampleId, string> = {
-  compact: "Compact Calm",
   balanced: "Balanced Workspace",
-  reading: "Reading Ease",
   palette: "Palette sheets",
   icons: "File icons",
 };

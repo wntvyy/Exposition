@@ -106,7 +106,7 @@ function V2SamplesSection() {
   return (
     <RefSection
       title="V2 samples (review)"
-      description="Phase 1 of the V2 visual standard: three directions, four palette sheets, and file icons. Sample-only styling and mock data; nothing here changes the app or your settings."
+      description="Phase 1 of the V2 visual standard: the accepted Balanced direction, four palette sheets, and file icons. Sample-only styling and mock data; nothing here changes the app or your settings."
     >
       {open ? (
         <Suspense fallback={<LoadingState title="Loading samples…" fill={false} />}>

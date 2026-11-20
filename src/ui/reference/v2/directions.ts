@@ -1,11 +1,12 @@
-// V2 review samples: the three directions as geometry. Each direction is a set
-// of local custom properties on the sample frame (plus a `data-direction`
-// attribute for helper-text placement); colors come from one shared palette.
-// Values are pixels unless noted.
+// V2 review samples: the accepted direction (Balanced Workspace) as geometry —
+// a set of local custom properties on the sample frame (plus a
+// `data-direction` attribute for helper-text placement); colors come from one
+// shared palette. The Compact and Reading directions of the phase-1 review
+// were not chosen and are no longer kept. Values are pixels unless noted.
 import type { CSSProperties } from "react";
 
-export type DirectionId = "compact" | "balanced" | "reading";
-export const DIRECTION_IDS: DirectionId[] = ["compact", "balanced", "reading"];
+export type DirectionId = "balanced";
+export const DIRECTION_IDS: DirectionId[] = ["balanced"];
 
 export interface Geometry {
   /** Ordinary UI text and controls. */
@@ -55,37 +56,6 @@ export interface Direction {
 }
 
 export const DIRECTIONS: Record<DirectionId, Direction> = {
-  compact: {
-    id: "compact",
-    name: "Compact Calm",
-    summary: "Familiar compact proportions, quieter boundaries, less repeated text.",
-    helper: "Settings: label left, control right; a needed hint sits under the control.",
-    boundaries: "Faint dividers only between panes; headers separate by tone, not lines.",
-    geometry: {
-      font: 13,
-      fontSm: 12,
-      fontProse: 13,
-      lineProse: 1.45,
-      fontTitle: 14,
-      row: 24,
-      rowMenu: 26,
-      control: 26,
-      controlSm: 22,
-      tab: 32,
-      paneHeader: 32,
-      pageBar: 32,
-      statusBar: 22,
-      sidebar: 252,
-      inset: 10,
-      gapRelated: 6,
-      gapGroup: 12,
-      gapSection: 20,
-      radius: 4,
-      radiusContainer: 5,
-      pad: 8,
-      codeLine: 19,
-    },
-  },
   balanced: {
     id: "balanced",
     name: "Balanced Workspace",
@@ -115,37 +85,6 @@ export const DIRECTIONS: Record<DirectionId, Direction> = {
       radiusContainer: 6,
       pad: 12,
       codeLine: 20,
-    },
-  },
-  reading: {
-    id: "reading",
-    name: "Reading Ease",
-    summary: "Slightly more generous prose and form spacing; navigation stays efficient.",
-    helper: "Settings: one column, label above the control and the hint between them; width capped for reading.",
-    boundaries: "Few rules; whitespace groups sections; navigation rows keep compact height.",
-    geometry: {
-      font: 13,
-      fontSm: 12,
-      fontProse: 15,
-      lineProse: 1.6,
-      fontTitle: 16,
-      row: 26,
-      rowMenu: 30,
-      control: 32,
-      controlSm: 26,
-      tab: 36,
-      paneHeader: 36,
-      pageBar: 34,
-      statusBar: 24,
-      sidebar: 272,
-      inset: 16,
-      gapRelated: 10,
-      gapGroup: 22,
-      gapSection: 40,
-      radius: 6,
-      radiusContainer: 8,
-      pad: 14,
-      codeLine: 21,
     },
   },
 };
