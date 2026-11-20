@@ -127,43 +127,60 @@ pub async fn agents_attachments_add_bytes(
 
 /// Files of recent native drops onto the window, as the desktop shell
 /// reported them. The webview routes a drop to the chat and names the paths
-/// it wants attached; only paths recorded here are read, each once, so the
-/// webview alone can never name a file to read (as with the file dialog).
+/// it wants attached; only paths recorded here are read, each once and only
+/// shortly after the drop, so the webview alone can never name a file to
+/// read (as with the file dialog) and a drop that went elsewhere (the Files
+/// view, no target) does not stay attachable for the rest of the session.
 #[derive(Default)]
-pub struct DroppedFiles(std::sync::Mutex<Vec<std::path::PathBuf>>);
+pub struct DroppedFiles(std::sync::Mutex<Vec<(std::path::PathBuf, std::time::Instant)>>);
 
 /// Dropped paths remembered at most (older ones are forgotten first).
 const MAX_DROPPED: usize = 4096;
 
+/// How long after a native drop its paths can be attached. The chat claims
+/// them as part of handling the same drop; this only has to cover that.
+const DROP_LIFETIME: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl DroppedFiles {
     /// Remember the paths of one native drop.
     pub fn record(&self, paths: &[std::path::PathBuf]) {
+        self.record_at(paths, std::time::Instant::now());
+    }
+
+    fn record_at(&self, paths: &[std::path::PathBuf], now: std::time::Instant) {
         let mut held = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        held.extend(paths.iter().cloned());
+        Self::expire(&mut held, now);
+        held.extend(paths.iter().map(|p| (p.clone(), now)));
         let excess = held.len().saturating_sub(MAX_DROPPED);
         held.drain(..excess);
     }
 
-    /// Take `path` if it was dropped and not yet taken.
-    fn claim(&self, path: &std::path::Path) -> bool {
-        let mut held = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        match held.iter().position(|p| p == path) {
-            Some(i) => {
-                held.remove(i);
-                true
-            }
-            None => false,
-        }
+    /// Forget the drops that are older than [`DROP_LIFETIME`] at `now`.
+    fn expire(held: &mut Vec<(std::path::PathBuf, std::time::Instant)>, now: std::time::Instant) {
+        held.retain(|(_, at)| now.saturating_duration_since(*at) <= DROP_LIFETIME);
     }
 
-    /// Split the requested paths into those a native drop delivered (taken,
-    /// in order) and the positions of those it did not.
+    /// Split the requested paths into those a recent native drop delivered
+    /// (taken, in order) and those it did not.
     pub fn claim_all(&self, requested: &[String]) -> Vec<Result<std::path::PathBuf, String>> {
+        self.claim_all_at(requested, std::time::Instant::now())
+    }
+
+    fn claim_all_at(&self, requested: &[String], now: std::time::Instant) -> Vec<Result<std::path::PathBuf, String>> {
+        let mut held = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        Self::expire(&mut held, now);
         requested
             .iter()
             .map(|raw| {
                 let path = std::path::PathBuf::from(raw);
-                if self.claim(&path) { Ok(path) } else { Err(raw.clone()) }
+                // Take it if it was dropped and not yet taken.
+                match held.iter().position(|(p, _)| p == &path) {
+                    Some(i) => {
+                        held.remove(i);
+                        Ok(path)
+                    }
+                    None => Err(raw.clone()),
+                }
             })
             .collect()
     }
@@ -563,5 +580,27 @@ mod dropped_tests {
         dropped.record(&many);
         assert!(dropped.claim_all(&["f0".into()])[0].is_err());
         assert!(dropped.claim_all(&[format!("f{}", super::MAX_DROPPED + 4)])[0].is_ok());
+    }
+
+    /// Review finding 4: a drop that was not attached (it went to the Files
+    /// view, or nowhere) cannot be attached long afterwards.
+    #[test]
+    fn a_drop_can_be_attached_only_shortly_after_it_happened() {
+        use std::time::{Duration, Instant};
+        let dropped = DroppedFiles::default();
+        let t0 = Instant::now();
+        dropped.record_at(&[PathBuf::from("C:/in/a.txt"), PathBuf::from("C:/in/b.txt")], t0);
+        // Within the lifetime: taken.
+        assert!(dropped.claim_all_at(&["C:/in/a.txt".into()], t0 + super::DROP_LIFETIME)[0].is_ok());
+        // Past it: no longer attachable, and no longer held.
+        let late = t0 + super::DROP_LIFETIME + Duration::from_secs(1);
+        assert!(dropped.claim_all_at(&["C:/in/b.txt".into()], late)[0].is_err());
+        assert!(dropped.0.lock().unwrap().is_empty());
+        // A later drop forgets the stale ones and is itself attachable.
+        dropped.record_at(&[PathBuf::from("C:/in/c.txt")], t0);
+        dropped.record_at(&[PathBuf::from("C:/in/d.txt")], late);
+        assert_eq!(dropped.0.lock().unwrap().len(), 1);
+        assert!(dropped.claim_all_at(&["C:/in/c.txt".into()], late)[0].is_err());
+        assert!(dropped.claim_all_at(&["C:/in/d.txt".into()], late)[0].is_ok());
     }
 }
