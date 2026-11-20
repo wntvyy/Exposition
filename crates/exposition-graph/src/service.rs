@@ -1406,7 +1406,7 @@ impl GraphService {
             state: if content_hash.is_some() { BindingState::Resolved } else { BindingState::Unresolved },
             detail: None,
         };
-        let batch = ServiceBatch {
+        let mut batch = ServiceBatch {
             entities: vec![validate::EntityUpsert {
                 id: None,
                 kind: EntityKind::Resource,
@@ -1421,15 +1421,46 @@ impl GraphService {
             summary: format!("Admit {path}"),
             ..Default::default()
         };
+        let root = self.attached_root();
         // Look up and admit under one lock, so concurrent admissions (the
         // reconciler, another service) never create two identities for one file.
-        let (entity, delta) = self.with_store(|store| {
-            if let Some(existing) = store
-                .entities_by_key(EntityKind::Resource, path.as_str())?
-                .into_iter()
-                .find(|e| e.lifecycle != Lifecycle::Tombstoned)
+        let admit = |store: &mut GraphStore| -> GraphResult<(Entity, Option<crate::model::GraphDelta>)> {
+            let known = store.entities_by_key(EntityKind::Resource, path.as_str())?;
+            if let Some(existing) = known.iter().find(|e| e.lifecycle != Lifecycle::Tombstoned) {
+                return Ok((existing.clone(), None));
+            }
+            // A file that returned unchanged is the same resource (the
+            // reconciler's rule, applied here too so that whichever of the
+            // two meets the file first gives the same answer): exactly one
+            // removed resource of this path recorded the content the file
+            // has now. Without a known content nothing is revived.
+            let removed: Vec<&Entity> = known.iter().filter(|e| e.lifecycle == Lifecycle::Tombstoned).collect();
+            if !removed.is_empty()
+                && let Some(hash) = content_hash.map(str::to_owned).or_else(|| current_hash(root.as_deref(), path))
             {
-                return Ok((existing, None));
+                let mut same: Vec<&Entity> = Vec::new();
+                for e in removed {
+                    let recorded = store.bindings(&e.id)?.first().and_then(|b| b.version.clone());
+                    if recorded.is_some_and(|v| v.content_hash == hash) {
+                        same.push(e);
+                    }
+                }
+                if let [revived] = same.as_slice()
+                    && let Some(upsert) = batch.entities.first_mut()
+                {
+                    upsert.id = Some(revived.id.clone());
+                    upsert.attributes = revived.attributes.clone();
+                    upsert.lifecycle = Some(Lifecycle::Active);
+                    if upsert.roles.is_empty() {
+                        upsert.roles = revived.roles.clone();
+                    }
+                    if let Some(binding) = upsert.bindings.as_mut().and_then(|b| b.first_mut()) {
+                        binding.version =
+                            Some(crate::model::SourceVersion { content_hash: hash, revision: None, saved: true });
+                        binding.state = BindingState::Resolved;
+                    }
+                    batch.summary = format!("Admit {path} (returned unchanged)");
+                }
             }
             let w = Writer::new(store.transaction()?);
             let (mut run, _) =
@@ -1440,7 +1471,11 @@ impl GraphService {
             let id = id.ok_or_else(|| GraphError::new("graph.storage", "admission failed"))?;
             let entity = store.entity(&id)?.ok_or_else(|| GraphError::new("graph.storage", "admission failed"))?;
             Ok((entity, Some(run.delta)))
-        })?;
+        };
+        let (entity, delta) = match &root {
+            Some(root) => self.with_store_for(root, admit),
+            None => self.with_store(admit),
+        }?;
         if let Some(delta) = delta {
             self.emit(GraphEvent::Changed { delta, origin });
         }
@@ -1775,6 +1810,14 @@ fn neighborhood(
         }
     }
     Ok((out, total))
+}
+
+/// The content hash of a project file as it is on disk now (`None` when it
+/// cannot be read or is too large to fingerprint).
+fn current_hash(root: Option<&Path>, path: &WorkspacePath) -> Option<String> {
+    let root = root?;
+    let size = std::fs::metadata(crate::reconcile::scan::absolute(root, path)).ok()?.len();
+    crate::reconcile::scan::read_file(root, path, size, false).hash
 }
 
 /// The file a resource entity stands for (its key; its binding otherwise).

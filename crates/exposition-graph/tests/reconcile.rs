@@ -1248,3 +1248,59 @@ fn an_extracted_declaration_keeps_a_persons_archive_and_refuses_metadata_edits()
     p.paths(&["paper.tex"]);
     assert_eq!(p.entity(&theorem.id).lifecycle, Lifecycle::Tombstoned);
 }
+
+/// GI-2: a file that returns unchanged is the same resource, whoever asks
+/// for its identity first (a service admitting it, or the reconciler).
+#[test]
+fn a_service_admitting_a_returned_file_revives_its_identity() {
+    for with_hash in [true, false] {
+        let p = project(&[("notes/fit.md", "# Fit\n"), ("other.md", "# Other\n")]);
+        p.full();
+        let first = p.resource("notes/fit.md").unwrap();
+        let claim = match p.user(vec![create("c", EntityKind::Claim, "Claim")]) {
+            ApplyOutcome::Applied { created, .. } => created[0].id.clone(),
+            other => panic!("{other:?}"),
+        };
+        p.user(vec![add_rel(RelationKind::References, &claim, &first.id)]);
+        let hash = p.svc.entity_detail(&first.id).unwrap().bindings[0].version.clone().unwrap().content_hash;
+
+        std::fs::remove_file(p.root.join("notes/fit.md")).unwrap();
+        p.paths(&["notes/fit.md"]);
+        assert_eq!(p.entity(&first.id).lifecycle, Lifecycle::Tombstoned);
+        assert!(p.resource("notes/fit.md").is_none());
+
+        // The identical file is put back; a service asks before the reconciler runs.
+        write(&p.root, "notes/fit.md", "# Fit\n");
+        let admitted =
+            p.svc.ensure_resource(&wp("notes/fit.md"), with_hash.then_some(hash.as_str()), false, "research").unwrap();
+        assert_eq!(admitted.id, first.id, "with_hash {with_hash}: the same identity");
+        assert_eq!(admitted.lifecycle, Lifecycle::Active);
+        assert_eq!(admitted.tombstone_reason, None);
+        p.paths(&["notes/fit.md"]);
+        p.full();
+        let live: Vec<Entity> = p
+            .all(EntityKind::Resource)
+            .into_iter()
+            .filter(|e| e.key.as_deref() == Some("notes/fit.md") && e.lifecycle != Lifecycle::Tombstoned)
+            .collect();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(live[0].id, first.id);
+        let detail = p.svc.entity_detail(&first.id).unwrap();
+        assert!(detail.incoming.iter().any(|r| r.kind == RelationKind::References && r.from == claim));
+        assert_eq!(detail.bindings[0].state, BindingState::Resolved);
+    }
+}
+
+/// GI-2: different content at the path is a different file (the reconciler's rule).
+#[test]
+fn a_service_admitting_a_different_file_at_a_removed_path_gets_a_new_identity() {
+    let p = project(&[("notes/fit.md", "# Fit\n")]);
+    p.full();
+    let first = p.resource("notes/fit.md").unwrap();
+    std::fs::remove_file(p.root.join("notes/fit.md")).unwrap();
+    p.paths(&["notes/fit.md"]);
+    write(&p.root, "notes/fit.md", "# Something else\n");
+    let admitted = p.svc.ensure_resource(&wp("notes/fit.md"), None, false, "research").unwrap();
+    assert_ne!(admitted.id, first.id);
+    assert_eq!(p.entity(&first.id).lifecycle, Lifecycle::Tombstoned);
+}
