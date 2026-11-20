@@ -187,6 +187,7 @@ function RecoveryItem({ entry }: { entry: RecoveryEntry }) {
 function RecoveryList({ entries }: { entries: RecoveryEntry[] }) {
   return (
     <Banner tone="warning" title="Unsaved changes from a previous session" className="xp-recovery">
+      <span data-testid="recovery-consequence">Discarded changes cannot be restored. The file on disk stays as it is.</span>
       <ul className="xp-recovery__list" data-testid="recovery-list">
         {entries.map((entry) => (
           <RecoveryItem key={entry.id} entry={entry} />
