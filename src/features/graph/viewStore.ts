@@ -123,10 +123,15 @@ export function createViewStore(name: string, scope: ViewScope, options: { saveD
   let timer: ReturnType<typeof setTimeout> | null = null;
   let saving: Promise<void> | null = null;
   let dirtyAgain = false;
+  // The store outlives a project (the page keeps one per scope). Each load starts a new epoch:
+  // a save that was waiting or in flight belongs to the view loaded before, possibly of another
+  // project, so it is neither sent to nor adopted by the view loaded now.
+  let epoch = 0;
 
   const update = (fn: (view: SavedView) => SavedView) => {
     const view = use.getState().view;
-    if (!view) return;
+    // While a load is in flight the loaded view will replace this one.
+    if (!view || use.getState().loading) return;
     use.setState({ view: fn(view), save: "pending" });
     schedule();
   };
@@ -161,14 +166,17 @@ export function createViewStore(name: string, scope: ViewScope, options: { saveD
     }
     const view = use.getState().view;
     if (!view) return;
+    const started = epoch;
     use.setState({ save: "saving", saveError: null });
     saving = (async () => {
       try {
         const saved = await graphApi().viewSave(toGraphViewInput(view));
+        if (started !== epoch) return;
         // Keep edits made while saving; adopt the id and new revision token.
         use.setState((s) => ({ view: s.view ? { ...s.view, id: saved.id, revision: saved.revision } : fromGraphView(saved) }));
         use.setState({ save: dirtyAgain ? "pending" : "saved" });
       } catch (error) {
+        if (started !== epoch) return;
         if (errorCode(error) === "graph.staleView" && view.id) {
           dirtyAgain = false;
           await adoptLatest(view.id);
@@ -199,12 +207,18 @@ export function createViewStore(name: string, scope: ViewScope, options: { saveD
   return {
     use,
     async load() {
+      const mine = ++epoch;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      dirtyAgain = false;
       use.setState({ loading: true, loadError: null });
       try {
         const summary = (await graphApi().views()).find((v) => sameScope(v.scope, scope));
         const view = summary ? fromGraphView(await graphApi().viewGet(summary.id)) : emptyView(name, scope);
-        use.setState({ view, loading: false, save: "idle" });
+        if (mine !== epoch) return;
+        use.setState({ view, loading: false, save: "idle", saveError: null });
       } catch (error) {
+        if (mine !== epoch) return;
         use.setState({ loading: false, loadError: errorText(error) });
       }
     },
