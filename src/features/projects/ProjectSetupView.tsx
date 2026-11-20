@@ -1,7 +1,7 @@
 // Project setup recovery (editor tab `project-setup:<operation>`): what an
 // interrupted creation created and what is missing, with explicit choices.
 // Nothing is replayed automatically and the creation is never shown as complete.
-import { CircleCheck, Undo2 } from "lucide-react";
+import { CircleCheck } from "lucide-react";
 import { useEffect } from "react";
 
 import type { CreationFileState } from "../../bindings/CreationFileState";
@@ -84,7 +84,7 @@ export function ProjectSetupView({ resource }: EditorProps) {
                   Finish Setup
                 </Button>
               )}
-              <Button icon={Undo2} isDisabled={resolving} onPress={() => void resolveSetup(setup.operation, "keep")} data-testid="project-setup-keep">
+              <Button isDisabled={resolving} onPress={() => void resolveSetup(setup.operation, "keep")} data-testid="project-setup-keep">
                 Keep as Is
               </Button>
             </div>
