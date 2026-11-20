@@ -968,10 +968,9 @@ async fn a_finished_task_is_announced_before_its_services_are_released() {
         tokio::time::timeout(Duration::from_millis(500), h.service.join(&task.id)).await.is_err(),
         "the terminal taskChanged arrived only after the worker had released its services"
     );
-    // Nothing claims the task is still running, and review works at once.
+    // Nothing claims the task is still running (review at this moment is
+    // covered by `review_actions_work_as_soon_as_the_task_reports_finished`).
     assert!(!h.service.is_running(&task.id));
-    let results = h.service.revert(&task.id, None).expect("revert is allowed once the task is announced finished");
-    assert!(results[0].ok, "{results:?}");
     tokio::time::timeout(Duration::from_secs(20), h.service.join(&task.id)).await.expect("worker exits");
     assert_eq!(h.service.task(&task.id).unwrap().status, TaskStatus::Completed);
     // The run was announced as finished exactly once.
