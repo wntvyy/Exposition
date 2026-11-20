@@ -1,10 +1,11 @@
-// Media contributions: the read-only image editor tab for project images and
-// inline image previews in Markdown/LaTeX/Typst source.
+// Media contributions: the read-only image and PDF editor tabs for project
+// files, and inline image previews in Markdown/LaTeX/Typst source.
 import { registry } from "../../app/registry";
 import { fileExtension } from "../../ui/components";
 import { registerSourceEditorContribution } from "../editor/contributions";
 import { ImageViewer } from "./ImageViewer";
 import { IMAGE_TAB_EXTENSIONS } from "./loader";
+import { PdfViewer } from "./PdfViewer";
 import { activePreviewController, attachImagePreviews } from "./sourcePreviews";
 
 registry.registerEditor({
@@ -16,6 +17,16 @@ registry.registerEditor({
     resource.key.startsWith("file:") && Boolean(resource.path) && IMAGE_TAB_EXTENSIONS.has(fileExtension(resource.path!)),
   modes: ["source"],
   component: ImageViewer,
+});
+
+registry.registerEditor({
+  id: "media.pdf",
+  // As the image tab: a project PDF is never opened as a text or binary
+  // buffer. Source mode only: a PDF tab has no page-editing or split mode.
+  priority: 20,
+  matches: (resource) => resource.key.startsWith("file:") && Boolean(resource.path) && fileExtension(resource.path!) === "pdf",
+  modes: ["source"],
+  component: PdfViewer,
 });
 
 registerSourceEditorContribution("media.imagePreviews", attachImagePreviews);

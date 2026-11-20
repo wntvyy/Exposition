@@ -1589,6 +1589,23 @@ shown only as a picture: its scripts never run and it loads nothing. Viewing
 writes nothing and adds nothing to the project graph. A renamed image's open
 tab shows "Image not found"; open it again under its new name.
 
+**PDF files.** Opening a `.pdf` file of the project (at most 64 MB) from the
+explorer shows its pages read-only in a tab: Previous/Next page, Fit width,
+Actual size, zoom (10–400 %), scrolling and panning. This is a viewer only: a
+PDF tab has no page editing, equation editing, or link to a manuscript's
+source, also when the PDF is an export of one. Pages are shown as pictures
+drawn by the application's own PDF renderer: scripts, open and launch
+actions, forms, and links in the PDF do nothing, nothing is loaded from the
+network, and text cannot be selected or searched. The first 2,000 pages of a
+longer PDF are shown. Password-protected PDFs (and other unsupported
+encryption), damaged or empty files, and files that are too large show one
+short state; a page that cannot be drawn says so in its place. The tab follows
+the file when it is replaced on disk and when it is renamed in the explorer;
+after it is deleted or renamed outside the application the tab shows "PDF not
+found". Viewing writes nothing, starts no build, and adds nothing to the
+project graph. A PDF outside the project is never read. PDFs that use fonts
+which are not embedded may show substituted or missing text.
+
 **Image previews in source.** Markdown `![…](…)` and `<img src>`, LaTeX
 `\includegraphics`, and Typst `image("…")` references show a small preview of
 the project image below the line, with Hide/Show per image and Show/Hide Image

@@ -45,6 +45,7 @@ export const SCENARIOS = {
     "workspace-recovery",
     "qol-media",
     "qol-journey",
+    "pdf-viewer",
   ],
   explorer: ["workspace-files", "qol-files", "qol-journey", "p1-files", "p1-security", "project-switch"],
   operations: [
@@ -419,7 +420,7 @@ export const AREAS = [
     level: "local",
     // Equation writes go through the source editor's document handle.
     e2e: [...SCENARIOS.editor, "equation-source"],
-    visual: ["editor-find-outline", "qol-media"],
+    visual: ["editor-find-outline", "qol-media", "pdf-viewer"],
   },
   {
     id: "explorer",
@@ -451,7 +452,8 @@ export const AREAS = [
     ],
     level: "local",
     // The equation editor reads the page caret (activePage.ts, PageSession.currentCaret).
-    e2e: [...SCENARIOS.pages, "equation-page"],
+    // The read-only PDF tab rasterizes through exposition-tex (pdf.rs, pdf_view.rs).
+    e2e: [...SCENARIOS.pages, "equation-page", "pdf-viewer"],
     visual: ["page-typst", "pages-review"],
   },
   {

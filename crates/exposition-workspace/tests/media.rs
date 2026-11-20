@@ -143,3 +143,32 @@ fn bound_to_the_open_project() {
     f.service.open_workspace(&other).unwrap();
     assert_eq!(f.service.read_image(&wp("figs/plot one.png")).unwrap_err().code, "path.notFound");
 }
+
+#[test]
+fn reads_project_pdf_files_only_within_scope_and_size() {
+    use exposition_workspace::media::MAX_PDF_BYTES;
+    let f = fixture();
+    let (root, bytes) = f.service.read_pdf(&wp("figs/diagram.pdf")).unwrap();
+    assert_eq!(bytes, b"%PDF-1.7");
+    assert_eq!(Some(root), f.service.open_root());
+    fs::write(f.file("figs/UPPER.PDF"), b"%PDF-1.4").unwrap();
+    assert_eq!(f.service.read_pdf(&wp("figs/UPPER.PDF")).unwrap().1, b"%PDF-1.4");
+    // Not a way to read other project files as bytes.
+    assert_eq!(f.service.read_pdf(&wp("secret.env")).unwrap_err().code, "pdf.notPdf");
+    assert_eq!(f.service.read_pdf(&wp("figs/plot one.png")).unwrap_err().code, "pdf.notPdf");
+    assert_eq!(f.service.read_pdf(&wp("figs/missing.pdf")).unwrap_err().code, "path.notFound");
+    fs::create_dir_all(f.file("dir.pdf")).unwrap();
+    assert_eq!(f.service.read_pdf(&wp("dir.pdf")).unwrap_err().code, "file.isDirectory");
+    // Links and junctions out of the folder are refused.
+    fs::write(f.outside().join("out.pdf"), b"%PDF-1.7").unwrap();
+    junction(&f.file("out-link"), &f.outside());
+    assert_eq!(f.service.read_pdf(&wp("out-link/out.pdf")).unwrap_err().code, "path.outsideWorkspace");
+    // Size cap: refused unread above it, read at it.
+    let big = fs::File::create(f.file("big.pdf")).unwrap();
+    big.set_len(MAX_PDF_BYTES + 1).unwrap();
+    drop(big);
+    assert_eq!(f.service.read_pdf(&wp("big.pdf")).unwrap_err().code, "pdf.tooLarge");
+    // Bound to the open project.
+    f.service.close_workspace();
+    assert_eq!(f.service.read_pdf(&wp("figs/diagram.pdf")).unwrap_err().code, "workspace.notOpen");
+}

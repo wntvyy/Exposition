@@ -83,6 +83,57 @@
   image-rendering: pixelated;
 }
 
+/* ----- PDF tab: the image tab's toolbar and states; pages stacked in a scroller ----- */
+
+.xp-pdf-viewer__pages {
+  min-width: 7.5em;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.xp-pdf-viewer__stage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  /* Fit width measures the stage: its width must not change when the scrollbar appears. */
+  scrollbar-gutter: stable;
+  outline: none;
+}
+.xp-pdf-viewer__stage[data-dragging] {
+  cursor: grabbing;
+}
+.xp-pdf-viewer__stage:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--color-focus-ring);
+}
+
+.xp-pdf-viewer__pages-area {
+  position: relative;
+}
+
+/* A page frame as in the page editor. The picture keeps the PDF's own colors in every theme. */
+.xp-pdf-viewer__page {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+  user-select: none;
+}
+.xp-pdf-viewer__page img {
+  display: block;
+  max-width: none;
+  pointer-events: none;
+}
+.xp-pdf-viewer__page-note {
+  padding: var(--space-2);
+  text-align: center;
+}
+
 /* ----- inline previews in Monaco source (view zones) ----- */
 
 .xp-source-image {

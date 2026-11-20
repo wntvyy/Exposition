@@ -211,6 +211,9 @@
     "allow-research-selection-get",
     "allow-research-selection-set",
     "allow-media-read-image",
-    "allow-media-image-references"
+    "allow-media-image-references",
+    "allow-media-pdf-open",
+    "allow-media-pdf-page",
+    "allow-media-pdf-close"
   ]
 }

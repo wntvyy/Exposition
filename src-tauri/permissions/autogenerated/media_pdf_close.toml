@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-media-pdf-close"
+description = "Enables the media_pdf_close command without any pre-configured scope."
+commands.allow = ["media_pdf_close"]
+
+[[permission]]
+identifier = "deny-media-pdf-close"
+description = "Denies the media_pdf_close command without any pre-configured scope."
+commands.deny = ["media_pdf_close"]

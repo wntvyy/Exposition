@@ -36,6 +36,7 @@ import type { ExportArtifact } from "../bindings/ExportArtifact";
 import type { FileDiff } from "../bindings/FileDiff";
 import type { FileEntry } from "../bindings/FileEntry";
 import type { ImageReference } from "../bindings/ImageReference";
+import type { PdfViewInfo } from "../bindings/PdfViewInfo";
 import type { JobEvent } from "../bindings/JobEvent";
 import type { JobId } from "../bindings/JobId";
 import type { JobSummary } from "../bindings/JobSummary";
@@ -335,6 +336,15 @@ export const commands = {
   /** Image references in the current text of a source file, located in the open folder. */
   mediaImageReferences: (path: string, text: string) =>
     invoke<ImageReference[]>("media_image_references", { path, text }),
+
+  // QC qc/pdf: project PDF files for the read-only PDF tab (scoped to the open folder).
+  /** Open a project PDF (`.pdf`, at most 64 MiB): page count, page sizes, and a view token. */
+  mediaPdfOpen: (path: string) => invoke<PdfViewInfo>("media_pdf_open", { path }),
+  /** PNG bytes of one page (0-based) of an open PDF view at `scale` pixels per point. */
+  mediaPdfPage: (token: number, page: number, scale: number) =>
+    invoke<ArrayBuffer>("media_pdf_page", { token, page, scale }),
+  /** Release an open PDF view. */
+  mediaPdfClose: (token: number) => invoke<void>("media_pdf_close", { token }),
 };
 
 export const events = {

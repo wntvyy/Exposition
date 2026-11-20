@@ -14,7 +14,7 @@ use hayro::hayro_interpret::{
     BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageDrawProps, InterpreterCache,
     InterpreterSettings, SoftMask, interpret_page,
 };
-use hayro::hayro_syntax::Pdf;
+use hayro::hayro_syntax::{LoadPdfError, Pdf};
 use hayro::kurbo::{Affine, BezPath, Point, Rect, Shape};
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
@@ -121,6 +121,9 @@ impl PageGlyph {
 pub enum PdfError {
     #[error("the PDF could not be loaded: {0}")]
     Load(String),
+    /// Password-protected, or encrypted in a way that is not supported.
+    #[error("the PDF is encrypted and cannot be opened: {0}")]
+    Encrypted(String),
     #[error("page {0} does not exist")]
     NoSuchPage(usize),
     #[error("page rendering failed: {0}")]
@@ -147,7 +150,10 @@ pub struct PdfDocument {
 
 impl PdfDocument {
     pub fn open(bytes: Vec<u8>) -> Result<Self, PdfError> {
-        let pdf = Pdf::new(bytes).map_err(|e| PdfError::Load(format!("{e:?}")))?;
+        let pdf = Pdf::new(bytes).map_err(|e| match e {
+            LoadPdfError::Decryption(reason) => PdfError::Encrypted(format!("{reason:?}")),
+            other => PdfError::Load(format!("{other:?}")),
+        })?;
         Ok(Self { pdf })
     }
 

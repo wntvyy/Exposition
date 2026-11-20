@@ -286,6 +286,10 @@ pub fn run() {
             // QOL q/media: project images for the image tab and inline previews (src/media.rs).
             media::media_read_image,
             media::media_image_references,
+            // QC qc/pdf: read-only PDF tab for project PDF files (src/media.rs).
+            media::media_pdf_open,
+            media::media_pdf_page,
+            media::media_pdf_close,
             // QOL q/files: explorer New File, Rename, and OS drop import.
             files::file_create,
             files::file_rename_check,
