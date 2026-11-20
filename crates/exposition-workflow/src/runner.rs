@@ -1286,18 +1286,49 @@ fn validate_outputs(
     if let Some((code, reason)) = first {
         return Err((code, format!("an output was refused: {reason}; the step's outputs are discarded"), rejected));
     }
-    // Ports a consumer or a required outcome needs must be present.
+    // Ports a consumer or a required outcome needs must be present. A
+    // consumer that runs only when the port was produced (its condition is
+    // "the output was produced" on that very port) does not need it: without
+    // it that step reads Condition not met instead of this one failing.
+    let gated_on = |consumer: &WorkflowPlanStep, port: &str| {
+        consumer.condition.as_ref().is_some_and(|c| {
+            c.test == ConditionTest::OutputPresent
+                && !c.negate
+                && c.source.step == planned.step
+                && c.source.port == port
+        })
+    };
     let mut needed: Vec<String> = run
         .plan
         .steps
         .iter()
-        .flat_map(|s| s.bindings.iter())
-        .filter_map(|b| match &b.from {
-            PortSource::Step { step, port } if step == &planned.step => Some(port.clone()),
+        .flat_map(|s| s.bindings.iter().map(move |b| (s, b)))
+        .filter_map(|(consumer, b)| match &b.from {
+            PortSource::Step { step, port } if step == &planned.step && !gated_on(consumer, port) => Some(port.clone()),
             _ => None,
         })
         .collect();
     needed.extend(run.outcomes.iter().filter(|o| !o.optional && o.step == planned.step).map(|o| o.port.clone()));
+    // "Repeat until the output was produced": an iteration without that
+    // output is one whose predicate does not hold, so the step runs again
+    // (or, exhausted, fails as such). Only when the last iteration's outputs
+    // are used does a consumer need the port from it.
+    if let (
+        Some(StepRepeat::Until {
+            port,
+            test: ConditionTest::OutputPresent,
+            negate: false,
+            max_iterations,
+            on_exhausted,
+        }),
+        Some(index),
+    ) = (&planned.repeat, attempt.1)
+    {
+        let last = index + 1 >= (*max_iterations).clamp(1, crate::plan::MAX_UNTIL);
+        if !last || *on_exhausted == Exhausted::Fail {
+            needed.retain(|p| p != port);
+        }
+    }
     needed.sort();
     needed.dedup();
     let missing: Vec<&String> = needed.iter().filter(|p| !valid.iter().any(|v| &&v.port == p)).collect();
