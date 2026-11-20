@@ -407,6 +407,39 @@ export default async function graphCanvas({ launchApp, artifactsDir, assert, fix
     await page.getByRole("button", { name: "Cancel" }).click();
     await dialog.waitFor({ state: "detached" });
     assert.deepEqual(await semanticRelations(page), relationsAfterValid, "the refused connection changed nothing");
+
+    // An evidence relationship states its kind of support: the dialog asks for it (only the kinds a
+    // person can state), checks nothing before it is chosen, and stores it with the relationship.
+    await connect(page, ids.prf, ids.thm);
+    await dialog.waitFor({ timeout: 5000 });
+    await chooseOption(page, dialog, "Relationship", /^is evidence for$/);
+    await dialog.getByText("Choose the kind of support.").waitFor({ timeout: 5000 });
+    assert.equal(await page.getByRole("button", { name: "Add relationship" }).isDisabled(), true, "nothing to add before the kind of support is chosen");
+    const support = dialog.locator(".ui-select", { has: page.locator(".ui-field__label", { hasText: "Kind of support" }) });
+    await support.getByRole("button").click();
+    const kinds = page.getByRole("listbox");
+    await kinds.waitFor();
+    assert.equal(await kinds.getByRole("option").count(), 2, "Review and Literature only: service-owned evidence is not offered");
+    await kinds.getByRole("option", { name: /^Review/ }).click();
+    await kinds.waitFor({ state: "detached" });
+    await waitFor(async () => (await review.getAttribute("data-state")) === "valid", { message: "valid evidence proposal" });
+    await shot(page, "graph-relate-evidence-light");
+    await page.getByRole("button", { name: "Add relationship" }).click();
+    await dialog.waitFor({ state: "detached" });
+    const supportRelation = await waitFor(async () => {
+      const detail = await invoke(page, "graph_entity", { entity: ids.prf });
+      return detail.outgoing.find((r) => r.kind === "evidenceFor" && r.to === ids.thm);
+    }, { message: "evidence relation applied" });
+    assert.equal(supportRelation.evidenceKind, "review");
+    assert.equal(supportRelation.status, "accepted");
+    assert.deepEqual(supportRelation.evidence, []);
+    assert.equal((await invoke(page, "graph_entity", { entity: ids.thm })).evidence.length, 0, "a stated support is not an evidence record of the theorem");
+    // Removed again, so the rest of the walkthrough shows the same graph as before.
+    const removal = await invoke(page, "graph_propose_change", {
+      request: { baseRevision: (await invoke(page, "graph_status")).revision, operations: [{ op: "removeRelation", relation: supportRelation.id }], summary: null },
+    });
+    await invoke(page, "graph_apply_change", { request: { proposal: removal.id, expectedRevision: removal.baseRevision } });
+    await waitFor(async () => (await semanticRelations(page)).length === relationsAfterValid.length, { message: "evidence relation removed" });
     assert.equal(await page.locator('[data-testid="graph-canvas"] .xp-edge--math').count() >= 3, true);
 
     // --- 5a. Keyboard alternative: table ---------------------------------------------
