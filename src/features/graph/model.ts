@@ -37,6 +37,7 @@ import type { AssertionStatus } from "../../bindings/AssertionStatus";
 import type { Entity } from "../../bindings/Entity";
 import type { EntityFamily } from "../../bindings/EntityFamily";
 import type { EntityKind } from "../../bindings/EntityKind";
+import type { EvidenceKind } from "../../bindings/EvidenceKind";
 import type { FormalAssociationState } from "../../bindings/FormalAssociationState";
 import type { FormalVerdict } from "../../bindings/FormalVerdict";
 import type { Freshness } from "../../bindings/Freshness";
@@ -169,6 +170,16 @@ export const READINGS: Record<RelationKind, string> = {
   derivedFrom: "is derived from",
   formalizes: "formalizes",
 };
+
+/**
+ * The kinds of support a person can state for an "is evidence for" relationship without citing a
+ * record. Computational, formal-check and build evidence is recorded by its service (Research,
+ * Lean, typesetting) and is never offered for a hand-made relationship; the backend refuses it.
+ */
+export const STATED_EVIDENCE_KINDS: { id: EvidenceKind; label: string; description: string }[] = [
+  { id: "review", label: "Review", description: "A person's or an agent's review supports it" },
+  { id: "literature", label: "Literature", description: "A source in the literature supports it" },
+];
 
 /** Display-only reverse readings (the vocabulary gives the forward reading). */
 const INVERSE: Record<RelationKind, string> = {
