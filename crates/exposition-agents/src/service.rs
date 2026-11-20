@@ -2942,6 +2942,12 @@ fn sanitize_stop_reason(reason: &str) -> String {
     if clean.is_empty() { "unknown".to_owned() } else { clean }
 }
 
+/// The most output tokens one request asks for: the per-turn limit, or the
+/// model's own limit when the provider applies a smaller one.
+fn turn_output_limit(provider: &dyn Provider) -> u32 {
+    provider.output_cap().map_or(MAX_TOKENS_PER_TURN, |cap| cap.min(MAX_TOKENS_PER_TURN))
+}
+
 /// Why a tool call of a stopped response did not run (sent to the model on continuation).
 fn skip_reason(stop_reason: &str) -> String {
     match stop_reason {
@@ -2957,7 +2963,7 @@ fn skip_reason(stop_reason: &str) -> String {
 }
 
 /// The user-facing explanation of a response that stopped without finishing its turn.
-fn stop_message(stop_reason: &str, unrun_calls: usize) -> String {
+fn stop_message(stop_reason: &str, unrun_calls: usize, output_limit: u32) -> String {
     let calls = match unrun_calls {
         0 => String::new(),
         1 => " Its tool call was not run.".to_owned(),
@@ -2965,7 +2971,7 @@ fn stop_message(stop_reason: &str, unrun_calls: usize) -> String {
     };
     match stop_reason {
         "max_tokens" => format!(
-            "The response reached the per-turn output limit ({MAX_TOKENS_PER_TURN} tokens) and was cut off.{calls} \
+            "The response reached the per-turn output limit ({output_limit} tokens) and was cut off.{calls} \
              Continue the task to resume."
         ),
         "model_context_window_exceeded" => format!(
@@ -3080,9 +3086,13 @@ impl Run<'_> {
                 },
                 Err(e) => return TaskStatus::Failed { message: e.to_string() },
             };
+            // One request asks for the remaining output budget, at most the
+            // per-turn limit or the model's own smaller limit. Only a request
+            // that asked for less than that limit was limited by the budget.
             let remaining_output = self.spec.budgets.max_output_tokens.saturating_sub(self.usage.output_tokens);
-            let max_tokens = remaining_output.min(u64::from(MAX_TOKENS_PER_TURN)) as u32;
-            let limited_by_budget = u64::from(max_tokens) < u64::from(MAX_TOKENS_PER_TURN);
+            let output_limit = turn_output_limit(provider);
+            let max_tokens = remaining_output.min(u64::from(output_limit)) as u32;
+            let limited_by_budget = max_tokens < output_limit;
             let request = ProviderRequest {
                 system: prompt::SYSTEM_PROMPT.to_owned(),
                 tools: tools::task_definitions(self.interactive),
@@ -3167,7 +3177,10 @@ impl Run<'_> {
                 reason => {
                     let stop_reason = sanitize_stop_reason(reason);
                     self.skip_calls(&content, turn, &skip_reason(&stop_reason));
-                    return TaskStatus::Stopped { message: stop_message(&stop_reason, calls), stop_reason };
+                    return TaskStatus::Stopped {
+                        message: stop_message(&stop_reason, calls, output_limit),
+                        stop_reason,
+                    };
                 }
             }
         }
@@ -3731,7 +3744,7 @@ impl Run<'_> {
                 }
             };
             let remaining_output = self.spec.budgets.max_output_tokens.saturating_sub(self.usage.output_tokens);
-            let max_tokens = remaining_output.min(u64::from(MAX_TOKENS_PER_TURN)) as u32;
+            let max_tokens = remaining_output.min(u64::from(turn_output_limit(provider))) as u32;
             let request = ProviderRequest {
                 system: prompt::SYSTEM_PROMPT.to_owned(),
                 tools: tools::discussion_definitions(),

@@ -131,6 +131,14 @@ pub type EventSink<'a> = &'a (dyn Fn(StreamEvent) + Send + Sync);
 pub trait Provider: Send + Sync {
     fn kind(&self) -> ProviderKind;
 
+    /// The most output tokens one response of this model can have, when the
+    /// adapter applies a limit of the model's own (below the per-turn limit
+    /// every request has). The task loop asks for no more, and tells a
+    /// cut-off at this limit apart from the task's output budget running out.
+    fn output_cap(&self) -> Option<u32> {
+        None
+    }
+
     /// Stream one model response. Cancellation aborts the request/stream.
     async fn stream(
         &self,

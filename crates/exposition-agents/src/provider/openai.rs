@@ -313,6 +313,10 @@ impl Provider for OpenAiProvider {
         ProviderKind::OpenAi
     }
 
+    fn output_cap(&self) -> Option<u32> {
+        self.output_cap.map(|cap| cap.min(u64::from(MAX_OUTPUT_TOKENS)) as u32)
+    }
+
     async fn stream(
         &self,
         request: &ProviderRequest,
@@ -599,14 +603,19 @@ impl ResponseAssembler {
             }
         }
         let (stop_reason, stop_details) = if let Some(text) = refusal {
-            content.push(json!({"type": "text", "text": text}));
-            ("refusal".to_owned(), None)
+            // What the provider said is the explanation of the declined
+            // response (shown with the task's status); it is not the agent's
+            // text and is never stored as such.
+            let text = text.trim();
+            ("refusal".to_owned(), (!text.is_empty()).then(|| json!({"explanation": bounded(text)})))
         } else if self.status.as_deref() == Some("incomplete") {
             let reason = self.incomplete_reason.clone().unwrap_or_else(|| "unknown".into());
-            if reason == "content_filter" {
-                ("refusal".to_owned(), Some(json!({"reason": reason})))
-            } else {
-                ("max_tokens".to_owned(), Some(json!({"reason": reason})))
+            match reason.as_str() {
+                "content_filter" => ("refusal".to_owned(), Some(json!({"category": reason, "reason": reason}))),
+                "max_output_tokens" => ("max_tokens".to_owned(), Some(json!({"reason": reason}))),
+                // Not a known cut-off: reported as what it is, never as the
+                // output limit or the task's budget.
+                _ => (format!("incomplete_{reason}"), Some(json!({"reason": reason}))),
             }
         } else if tool_use {
             ("tool_use".to_owned(), None)
@@ -907,6 +916,22 @@ mod tests {
         let r =
             provider(&base, None).stream(&request(vec![user("hi")]), &sink, &CancellationToken::new()).await.unwrap();
         assert_eq!(r.stop_reason, "refusal");
+        assert_eq!(r.stop_details, Some(json!({"explanation": "I can't help with that."})));
+        assert!(r.content.is_empty(), "the refusal is not the agent's text: {:?}", r.content);
+
+        for (reason, stop, category) in
+            [("content_filter", "refusal", Some("content_filter")), ("something_new", "incomplete_something_new", None)]
+        {
+            let body = sse(&[completed(json!([]), "incomplete", json!({"incomplete_details": {"reason": reason}}))]);
+            let (base, _) = serve(vec![ok_stream(&body)]).await;
+            let r = provider(&base, None)
+                .stream(&request(vec![user("hi")]), &sink, &CancellationToken::new())
+                .await
+                .unwrap();
+            assert_eq!(r.stop_reason, stop);
+            let details = r.stop_details.unwrap_or_default();
+            assert_eq!(details.get("category").and_then(Value::as_str), category);
+        }
 
         let partial = json!({"type": "message", "content": [{"type": "output_text", "text": "Partial"}]});
         let body = sse(&[completed(

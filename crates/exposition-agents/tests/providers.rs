@@ -847,3 +847,82 @@ async fn a_folder_is_rejected_without_reading_what_is_inside() {
     assert_eq!(added(outcomes[1].clone()).name, "main.typ");
     assert_eq!(outcomes.len(), 2);
 }
+
+/// A streamed OpenAI response that ended `incomplete` for `reason`.
+fn incomplete_response(model: &str, reason: &str, output: Value, output_tokens: u64) -> String {
+    sse(&[
+        json!({"type": "response.created", "response": {"id": "resp_1", "model": model, "status": "in_progress"}}),
+        json!({"type": "response.incomplete", "response": {"id": "resp_1", "model": model, "status": "incomplete",
+            "incomplete_details": {"reason": reason}, "output": output,
+            "usage": {"input_tokens": 100, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": output_tokens}}}),
+    ])
+}
+
+/// AG-5: a response cut off at the model's own output limit is a cut-off
+/// response ("Stopped"), not the task's output budget running out, as long
+/// as the budget had room for more than the model's limit.
+#[tokio::test]
+async fn a_cut_off_at_the_models_own_output_limit_is_not_reported_as_the_budget() {
+    let mock = Mock::start().await;
+    let h = harness(&mock).await;
+    use_openai(&h, "gpt-4.1");
+    let partial =
+        json!([{"type": "message", "content": [{"type": "output_text", "text": "A long answer that was cut"}]}]);
+    // The budget (30 000) is above the model's limit (16 384): the model's limit ended the response.
+    mock.reply("/v1/responses", incomplete_response("gpt-4.1", "max_output_tokens", partial.clone(), 16_384));
+    let mut req = request(&h, "Write a lot");
+    req.budgets = Some(Budgets { max_output_tokens: 30_000, ..Budgets::default() });
+    let task = h.service.create_task(req).unwrap();
+    let done = finish(&h, &task.id).await;
+    assert_eq!(mock.seen()[0].body["max_output_tokens"], 16_384);
+    match &done.status {
+        TaskStatus::Stopped { stop_reason, message } => {
+            assert_eq!(stop_reason, "max_tokens");
+            assert!(message.contains("16384") && !message.contains("64000"), "{message}");
+        }
+        other => panic!("reported as {other:?}"),
+    }
+    // With less budget left than the model's limit, the budget is what ended it.
+    mock.reply("/v1/responses", incomplete_response("gpt-4.1", "max_output_tokens", partial, 5_000));
+    let mut req = request(&h, "Write a lot");
+    req.budgets = Some(Budgets { max_output_tokens: 5_000, ..Budgets::default() });
+    let task = h.service.create_task(req).unwrap();
+    let done = finish(&h, &task.id).await;
+    assert_eq!(mock.seen()[1].body["max_output_tokens"], 5_000);
+    assert!(
+        matches!(&done.status, TaskStatus::BudgetExceeded { budget: BudgetKind::OutputTokens, .. }),
+        "{:?}",
+        done.status
+    );
+}
+
+/// AG-9: an OpenAI refusal keeps what the provider said, and a content
+/// filter its category; nothing of the declined response is stored.
+#[tokio::test]
+async fn openai_refusals_keep_their_explanation_and_category() {
+    let mock = Mock::start().await;
+    let h = harness(&mock).await;
+    use_openai(&h, "gpt-6.2-sol");
+    let refusal =
+        json!([{"type": "message", "content": [{"type": "refusal", "refusal": "I cannot help with that request."}]}]);
+    mock.reply("/v1/responses", openai_response(refusal));
+    let task = h.service.create_task(request(&h, "One")).unwrap();
+    let done = finish(&h, &task.id).await;
+    assert_eq!(
+        done.status,
+        TaskStatus::Refused { category: None, explanation: Some("I cannot help with that request.".into()) }
+    );
+    let detail = h.service.task_detail(&task.id).unwrap();
+    assert!(
+        !detail.transcript.iter().any(|i| matches!(i, TranscriptItem::AssistantText { .. })),
+        "the declined response was stored as the agent's text"
+    );
+    assert!(detail.transcript.iter().any(
+        |i| matches!(i, TranscriptItem::Notice { message, .. } if message.contains("I cannot help with that request."))
+    ));
+
+    mock.reply("/v1/responses", incomplete_response("gpt-6.2-sol", "content_filter", json!([]), 3));
+    let task = h.service.create_task(request(&h, "Two")).unwrap();
+    let done = finish(&h, &task.id).await;
+    assert_eq!(done.status, TaskStatus::Refused { category: Some("content_filter".into()), explanation: None });
+}
