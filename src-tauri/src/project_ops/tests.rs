@@ -1352,9 +1352,9 @@ fn a_source_removal_plan_names_what_refers_to_the_item_not_what_the_item_support
     decl.origin = Origin::Extracted { extractor: "lean/1".into() };
     let mut statement = entity(EntityKind::Theorem, "Basel theorem", None);
     statement.origin = Origin::User;
-    let mut formalizes = relation(RelationKind::Formalizes, &decl, &statement);
+    let mut formalizes = relation(exposition_graph::vocabulary::RelationKind::Formalizes, &decl, &statement);
     formalizes.origin = Origin::User;
-    formalizes.status = AssertionStatus::Accepted;
+    formalizes.status = exposition_graph::model::AssertionStatus::Accepted;
     let b = binding(&decl, "lean/LeanBasic/Basel.lean", basel, "lean.theorem", Some("LeanBasic.basel"));
     let mut d = detail(decl.clone(), vec![b], Vec::new(), vec![statement.clone()]);
     d.outgoing = vec![formalizes];
