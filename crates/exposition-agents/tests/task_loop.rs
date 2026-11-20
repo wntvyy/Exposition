@@ -945,3 +945,41 @@ async fn an_active_task_is_stopped_before_its_record_is_deleted() {
     assert_eq!(h.service.task_record(&task.id).unwrap_err().code, "agents.notFound");
     assert!(h.service.deleted_task_records().unwrap().is_empty());
 }
+
+/// AG-2: the finished state is announced when it is recorded, not after the
+/// worker has released the task's services (a slow research-session
+/// shutdown): lists must not show a stale "Running" meanwhile. One terminal
+/// event per run: a second one would read as the end of the next run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_task_is_announced_before_its_services_are_released() {
+    let mut h = harness_with(Arc::new(SlowFinishServices));
+    h.service.load_script(read_edit_done("cat sat", "dog sat")).unwrap();
+    let task = h.service.create_task(request(&h, PermissionProfile::AutoApply)).unwrap();
+    let id = task.id.clone();
+    let event = wait_for(
+        &mut h.events,
+        |e| matches!(e, AgentEvent::TaskChanged { task } if task.id == id && !task.status.is_active()),
+    )
+    .await;
+    let AgentEvent::TaskChanged { task: announced } = event else { unreachable!() };
+    assert_eq!(announced.status, TaskStatus::Completed);
+    // The worker is still releasing services (2 s) when the event arrives.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), h.service.join(&task.id)).await.is_err(),
+        "the terminal taskChanged arrived only after the worker had released its services"
+    );
+    // Nothing claims the task is still running, and review works at once.
+    assert!(!h.service.is_running(&task.id));
+    let results = h.service.revert(&task.id, None).expect("revert is allowed once the task is announced finished");
+    assert!(results[0].ok, "{results:?}");
+    tokio::time::timeout(Duration::from_secs(20), h.service.join(&task.id)).await.expect("worker exits");
+    assert_eq!(h.service.task(&task.id).unwrap().status, TaskStatus::Completed);
+    // The run was announced as finished exactly once.
+    let mut again = 0;
+    while let Ok(event) = h.events.try_recv() {
+        if matches!(&event, AgentEvent::TaskChanged { task } if task.id == id && !task.status.is_active()) {
+            again += 1;
+        }
+    }
+    assert_eq!(again, 0, "a second terminal taskChanged for the same run");
+}

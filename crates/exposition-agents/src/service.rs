@@ -2804,16 +2804,20 @@ impl Inner {
         };
         if let Some((status, usage)) = &status {
             inner.finish(&id, status, usage);
-            inner.close_pending(&id, status);
         }
-        // The terminal status is stored: review actions may proceed while the
-        // worker releases services below.
         if let Some(running) = lock(&inner.running).get_mut(&id) {
             running.finished = true;
         }
-        // Release what the services hold for this run (agent research sessions).
+        // Release what the services hold for this run (agent research
+        // sessions). This can take seconds; the finished task was announced
+        // in `finish`. Exactly one terminal `TaskChanged` is emitted per
+        // run: listeners take it as "this run ended", and a second one would
+        // be read as the end of the task's next run.
         inner.services.task_finished(&id.0).await;
         lock(&inner.running).remove(&id);
+        if status.is_some() {
+            return;
+        }
         if let Ok(summary) = inner.summary(&id) {
             inner.emit(AgentEvent::TaskChanged { task: Box::new(summary) });
         }
@@ -2844,6 +2848,20 @@ impl Inner {
         }
         if let Err(e) = self.store.update_task(id, status, usage) {
             tracing::error!("failed to record task status: {e}");
+        }
+        // What waited for the user ended with the run.
+        self.close_pending(id, status);
+        // The terminal status is stored: review actions may proceed while the
+        // worker still releases services, and the finished task is announced
+        // now rather than after that release (lists would show it running
+        // meanwhile). The summary goes before the transcript event, so a view
+        // that re-reads the conversation has already seen the task finish.
+        if let Some(running) = lock(&self.running).get_mut(id) {
+            running.finished = true;
+        }
+        match self.summary(id) {
+            Ok(summary) => self.emit(AgentEvent::TaskChanged { task: Box::new(summary) }),
+            Err(e) => tracing::error!("failed to read the finished task: {}", e.message),
         }
         self.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
         self.emit(AgentEvent::ReviewChanged { task_id: id.clone() });

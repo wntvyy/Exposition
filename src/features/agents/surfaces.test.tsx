@@ -197,6 +197,31 @@ describe("attention from a page that shows no agent surface (AG-3)", () => {
   });
 });
 
+describe("a finished task (AG-2)", () => {
+  it("is announced once when its detail is read before the task event arrives", async () => {
+    const finished = summary({ status: { kind: "completed" }, pendingReview: 2 });
+    useAgents.setState({ tasks: [summary()], details: { "task-1": detailOf(summary()) } });
+    ipc.agentsTaskDetail.mockResolvedValue(detailOf(finished));
+    act(() => emit({ kind: "transcriptChanged", taskId: "task-1" }));
+    await settle();
+    expect(useAgents.getState().tasks[0]?.status.kind).toBe("completed");
+    const announced = () => useNotifications.getState().items.filter((n) => n.id === "agents-task-1");
+    expect(announced()).toHaveLength(1);
+    expect(announced()[0]).toMatchObject({ tone: "success", title: "Task completed: Draft a note", body: "2 files to review." });
+    act(() => emit({ kind: "taskChanged", task: finished }));
+    expect(announced()).toHaveLength(1);
+  });
+
+  it("reading the detail of a task that was not running announces nothing", async () => {
+    const finished = summary({ status: { kind: "completed" } });
+    useAgents.setState({ tasks: [finished] });
+    ipc.agentsTaskDetail.mockResolvedValue(detailOf(finished));
+    act(() => agents.show("task", "task-1"));
+    await settle();
+    expect(notificationIds()).toEqual([]);
+  });
+});
+
 describe("resync after missed events (AG-10)", () => {
   it("re-reads every loaded conversation, not only the Agent view's", async () => {
     const tasks = ["task-1", "task-2", "task-3"].map((id) => summary({ id }));

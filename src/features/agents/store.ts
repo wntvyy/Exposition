@@ -376,7 +376,13 @@ async function refetch(id: TaskId): Promise<void> {
     do {
       inflight.set(id, false);
       const detail = await commands.agentsTaskDetail(id);
+      // The read can show the task finished before its `taskChanged` arrives
+      // (or when that event was missed): announce it from here as well. The
+      // later event then finds the task already finished and adds nothing.
+      const previous = useAgents.getState().tasks.find((t) => t.id === id);
       useAgents.setState((state) => mergeDetail(state, detail));
+      const finished = finishedNotification(previous, detail.summary);
+      if (finished) notify(finished);
     } while (inflight.get(id));
   } catch (e) {
     useAgents.setState({ error: errorMessage(e) });
