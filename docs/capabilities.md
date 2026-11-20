@@ -117,7 +117,7 @@ file. Version-control, tool, environment, and cache folders (`.git`,
 records are never entities, and run outputs become resources only when you
 keep or attach them. Links and junctions are never followed. A scan covers
 at most 32 folder levels, 200,000 folder entries, and 20,000 files; files
-beyond a bound are unknown, not removed. Files over 8 MB are listed but not
+beyond a bound are unknown, not removed. Files over 8 MiB are listed but not
 interpreted.
 
 **What is extracted.** Extraction reads source text literally: it never
@@ -147,7 +147,32 @@ an agent (as a suggestion), or a project preset do. File inclusion and asset
 use are separate kinds again. Relationships found in the sources are shown
 as observed and change only when the source changes; ones you add are
 accepted; ones an agent adds stay suggestions until you accept or reject
-them.
+them. A rejection is kept: an agent that proposes the same relationship
+again is refused, and only you can add it after all. When the source itself
+states a relationship that so far was only suggested or rejected, it is
+shown as observed from then on. The earlier rejection is not kept beside
+it: if the source later stops stating the relationship, it is removed like
+any observed one, and an agent can suggest it again.
+
+**What an item's source decides.** The name and attributes of an item that
+its source states (a theorem, proof, or bibliography entry found by
+extraction, and every Lean declaration) cannot be edited in the graph, by you
+or by an agent; the refusal says to edit the source. Archiving such an item
+is your choice and is kept when its file is indexed again; only "Removed
+from source" is undone by the source.
+
+**Evidence and relationships.** Only an "is evidence for" relationship has a
+kind of support and can cite evidence records; any other relationship that
+tries to carry a record is refused. A cited record must be of the
+relationship's kind, and a formal-check record can be cited only from the
+Lean declaration it was recorded for, so no relationship can present one
+item's Lean verdict as another's. Adding "is evidence for" by hand asks for
+the kind of support (Review or Literature); computational and formal-check
+evidence is recorded by Research and Lean. An item's Evidence section lists
+the records recorded about that item; records that one of its "is evidence
+for" relationships cites are listed apart, under "Cited by a relationship",
+and are not counted as its own. Relationships stored before these rules are
+kept but not read as support.
 
 **Identities.** A renamed or moved file keeps its identity when the old and
 new paths are seen in the same reconciliation and match uniquely by file
@@ -157,14 +182,17 @@ text, then by surrounding context; a name declared twice is shown as
 ambiguous instead of being merged. Items whose file or declaration
 disappears are marked "Removed from source" and are revived if it returns
 unchanged; reconciliation never deletes an item, changes a record you or a
-service created, or reassigns an identity on an uncertain match. A move
+service created (except a suggested or rejected relationship that the source
+now states, above), or reassigns an identity on an uncertain match. A move
 whose old and new paths are seen in different reconciliations gets a new
 identity.
 
 **Unsaved edits.** While a buffer has unsaved changes, answers about it
 (the Dependencies view at the caret) come from its text and are labelled
-"Unsaved buffer (revision N)"; nothing from an unsaved buffer is written to
-the graph, and saving or undoing back to the saved text removes the overlay.
+"Unsaved buffer (revision N)"; extraction writes nothing from an unsaved
+buffer to the graph, and saving or undoing back to the saved text removes the
+overlay. (Lean evidence is the one record that can come from an unsaved
+revision, and only when you ask for it: see Lean.)
 Changed files read as "Reconciliation pending" until a reconciliation has
 processed them (one starts once changes pause for 250 ms, and at most 2
 seconds after the first change), and the Graph page says so.
@@ -173,8 +201,10 @@ seconds after the first change), and the Graph page says so.
 relationships by meaning, up to 4 steps by default (at most 8): dependents
 and proofs need review, citing items need citation review, files that
 include or use the item are stale. Rejected relationships are not followed,
-suggested ones are labelled, cycles are reported, and files whose coverage
-is unknown are listed, because a missing result there is not evidence of
+suggested ones are labelled, cycles of dependency are reported (every kind
+of relationship except containment may form one; a proof, evidence, or formal
+link that is followed in both directions is not a cycle by itself), and files
+whose coverage is unknown are listed, because a missing result there is not evidence of
 absence. Asked of a file, the answer also lists the items located in that
 file: the declarations it declares and every other item bound to it (for
 example a theorem you or an agent recorded and bound to a manuscript). These
@@ -241,7 +271,7 @@ qualifier, for example "Checked (suggested link)"; while it needs re-review,
 association is shown unqualified.
 
 **Storage, backups, and recovery.** The graph database is treated as
-untrusted input: it is opened only if it is a regular file of at most 1 GB
+untrusted input: it is opened only if it is a regular file of at most 1 GiB
 inside the project's own `.exposition` folder, with SQLite's defensive mode
 and with triggers and views disabled; every schema object and column must be
 exactly the expected ones, and every row is checked before use. A database
@@ -305,7 +335,7 @@ choose "Create and Start Agent").
 Every blueprint (from a preset, an agent, or an import) is validated before
 anything is written. It has no fields for trust, running code, startup
 hooks, or permissions (unknown fields are refused); it is limited to 200
-files of at most 1 MB each (8 MB in total); its paths are relative, confined
+files of at most 1 MiB each (8 MiB in total); its paths are relative, confined
 to the project, and may not create version-control or tool folders, files
 that tools run on startup (such as `latexmkrc`, `texmf.cnf`,
 `sitecustomize.py`, `.Rprofile`, `lakefile.lean`, `CLAUDE.md`), executable
@@ -884,7 +914,10 @@ itself produced for an exact revision, one declaration at a time, with the
 declaration's own verdict next to the file's, and only when you ask for it:
 Record evidence or Associate with… in the Lean view, or accepting the
 association a workflow's Lean audit proposes. A check by itself (opening the
-file, an agent's check) records none. For a file in a Lake package the
+file, an agent's check) records none. Record evidence does not require the
+file to be saved: for an audited revision with unsaved changes the record
+keeps the digest of exactly that text and marks the input as an unsaved
+buffer (the Research graph inspector shows "unsaved buffer (digest only)"). For a file in a Lake package the
 record also names the package folder, the toolchain, the SHA-256 of the
 package's `lake-manifest.json`, and the Mathlib commit that manifest pins,
 and it lists `lean-toolchain` and `lake-manifest.json` with their digests as
@@ -983,7 +1016,7 @@ may behave differently.
   existing manifest are never changed. A package without a `lean-toolchain`
   file, one whose `lean-toolchain` names a channel such as `stable` instead
   of one Lean version (write the exact release, then set up again), one
-  whose lakefile cannot be read (not a regular file of at most 1 MB), one
+  whose lakefile cannot be read (not a regular file of at most 1 MiB), one
   that does not require Mathlib (Exposition does not edit an existing
   lakefile), one already prepared, and one whose Mathlib revision is made
   for another Lean version than the package pins are refused with the
@@ -1582,22 +1615,24 @@ last successful build, with "Showing pages from an earlier revision" after a
 failed one; pages and outline rows are never graph items.
 
 **Images.** Opening a PNG, JPEG, GIF, WebP, BMP, SVG, AVIF, or ICO file
-(at most 32 MB and 64 megapixels) from the explorer shows it read-only, with
+(at most 32 MiB and 64 megapixels) from the explorer shows it read-only, with
 Fit, Actual size, zoom, and panning; TIFF and HEIC show "Can't show this image
 format", and damaged, missing, or too-large files show one short state. SVG is
 shown only as a picture: its scripts never run and it loads nothing. Viewing
 writes nothing and adds nothing to the project graph. A renamed image's open
 tab shows "Image not found"; open it again under its new name.
 
-**PDF files.** Opening a `.pdf` file of the project (at most 64 MB) from the
+**PDF files.** Opening a `.pdf` file of the project (at most 64 MiB) from the
 explorer shows its pages read-only in a tab: Previous/Next page, Fit width,
 Actual size, zoom (10–400 %), scrolling and panning. This is a viewer only: a
 PDF tab has no page editing, equation editing, or link to a manuscript's
 source, also when the PDF is an export of one. Pages are shown as pictures
 drawn by the application's own PDF renderer: scripts, open and launch
 actions, forms, and links in the PDF do nothing, nothing is loaded from the
-network, and text cannot be selected or searched. The first 2,000 pages of a
-longer PDF are shown. Password-protected PDFs (and other unsupported
+network, and text cannot be selected or searched. The first 2,000
+pages of a longer PDF are shown, and a page is drawn with at most about 16
+million pixels (a very large page or a high zoom is drawn at a lower
+resolution). A page that is being drawn cannot be interrupted. Password-protected PDFs (and other unsupported
 encryption), damaged or empty files, and files that are too large show one
 short state; a page that cannot be drawn says so in its place. The tab follows
 the file when it is replaced on disk and when it is renamed in the explorer;
@@ -1772,14 +1807,15 @@ move, rename, and copying a whole project are not offered.
 
 ## Interface
 
-The interface follows one visual standard (UI rework of 14 November 2026):
-a page bar switches between the Editor, Research, Agents, and Graph pages
+The interface follows one visual standard (UI rework of 14 November 2026,
+revised as "UI standard V2" on 19 November 2026: four themes and
+file-type icons in the explorers and editor tabs): a page bar switches between the Editor, Research, Agents, and Graph pages
 (Mod+1–4), the activity rail belongs to the Editor page, and every page uses
 the same headers, sections, lists, tables, dialogs, and status treatments.
 
 | Area | Status |
 |---|---|
-| Light, dark, and follow-system themes | Supported; contrast of every text and boundary pair is tested in both themes |
+| Light, Dark, Ocean, and Sage themes, and Follow system (light or dark with the operating system) | Supported; contrast of every text and boundary pair is tested in all four themes |
 | Keyboard use: F6 region cycling, command palette, page and region shortcuts, focus-scoped project-operation keys, keyboard-resizable splitters, visible focus | Supported; exercised in the real app |
 | Reduced motion | Supported (transitions off; spinners slow down) |
 | Narrow windows (down to the 720×480 minimum) | Partial: side panels collapse below 1100 and 860 px; Graph and Research inspectors become drawers; long pages scroll |
