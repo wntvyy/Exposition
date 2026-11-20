@@ -15,7 +15,6 @@ exposition-page = { path = "../exposition-page", default-features = false }
 tokio.workspace = true
 ts-rs.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
 hayro.workspace = true
