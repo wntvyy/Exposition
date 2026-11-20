@@ -1881,7 +1881,11 @@ fn declaration_entity(
 ) -> Entity {
     let mut e = before.clone();
     e.kind = d.kind;
-    e.lifecycle = Lifecycle::Active;
+    // Archived or discarded is a person's choice, not something the source
+    // states: only "Removed from source" is undone by the source.
+    if before.lifecycle == Lifecycle::Tombstoned {
+        e.lifecycle = Lifecycle::Active;
+    }
     e.tombstone_reason = None;
     e.key = d.name.clone();
     e.label = declaration_label(d, path);

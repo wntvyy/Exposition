@@ -365,3 +365,50 @@ fn a_rejected_relation_is_not_replaced_by_an_agent_and_its_revision_never_decrea
     assert!(accepted.revision > rejected.revision, "{} → {}", rejected.revision, accepted.revision);
     assert_eq!(accepted.created_at_ms, rejected.created_at_ms);
 }
+
+/// RL-5 (validator side): what a declaration's source or its service states
+/// about it is not edited as graph metadata; archiving is a person's choice.
+#[test]
+fn a_formal_declaration_cannot_be_relabelled_or_re_attributed() {
+    let (_d, _p, svc) = service();
+    let (d, _) = declaration_with_evidence(&svc, "Demo.main");
+    let revision = svc.entity_detail(&d).unwrap().entity.revision;
+    for origin in [Origin::User, agent("task-1")] {
+        let code = refused(
+            &svc,
+            origin.clone(),
+            GraphOperation::UpdateEntity {
+                entity: d.clone(),
+                expected_revision: revision,
+                label: Some("Main theorem".into()),
+                attributes: None,
+            },
+        );
+        assert_eq!(code, "graph.sourceDerived", "{origin:?}");
+        let code = refused(
+            &svc,
+            origin.clone(),
+            GraphOperation::UpdateEntity {
+                entity: d.clone(),
+                expected_revision: revision,
+                label: None,
+                attributes: Some(BTreeMap::from([("lean.module".to_owned(), "Other".to_owned())])),
+            },
+        );
+        assert_eq!(code, "graph.sourceDerived", "{origin:?}");
+    }
+    let entity = svc.entity_detail(&d).unwrap().entity;
+    assert_eq!((entity.label.as_str(), entity.revision), ("Demo.main", revision));
+    // A hand-made item is still edited freely.
+    let ids = created(&svc, vec![create("c", EntityKind::Claim, "Claim")]);
+    applied(
+        &svc,
+        Origin::User,
+        vec![GraphOperation::UpdateEntity {
+            entity: ids[0].clone(),
+            expected_revision: 1,
+            label: Some("Claim, renamed".into()),
+            attributes: None,
+        }],
+    );
+}

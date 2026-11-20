@@ -327,13 +327,32 @@ pub fn run_operations(w: &Writer<'_>, origin: &Origin, ops: &[GraphOperation], a
                         cx.err(i, "graph.fileBacked", "a file's label is its name; rename the file instead");
                         continue;
                     }
+                }
+                if let Some(a) = attributes
+                    && let Err(m) = check_attributes(a)
+                {
+                    cx.err(i, "graph.invalidAttributes", m);
+                    continue;
+                }
+                // The label and attributes of an item declared in a source
+                // (or admitted by the Lean service) say what the source says.
+                // Indexing writes them: an edit here would misstate the
+                // source until the next index silently undid it.
+                if (label.is_some() || attributes.is_some()) && source_stated(&e) {
+                    cx.err(
+                        i,
+                        "graph.sourceDerived",
+                        format!(
+                            "the name and attributes of “{}” come from its source; edit the source to change them",
+                            e.label
+                        ),
+                    );
+                    continue;
+                }
+                if let Some(l) = label {
                     e.label = l.trim().to_owned();
                 }
                 if let Some(a) = attributes {
-                    if let Err(m) = check_attributes(a) {
-                        cx.err(i, "graph.invalidAttributes", m);
-                        continue;
-                    }
                     e.attributes = a.clone();
                 }
                 e.revision += 1;
@@ -491,6 +510,13 @@ fn finish(cx: Ctx<'_, '_>) -> Run {
         created: cx.created,
         wrote: false,
     }
+}
+
+/// Whether an entity's label and attributes are written from its source:
+/// everything an extractor admitted, and formal declarations (admitted by
+/// the extractor or by the Lean service from an audit).
+fn source_stated(e: &Entity) -> bool {
+    matches!(e.origin, Origin::Extracted { .. }) || e.kind == EntityKind::FormalDeclaration
 }
 
 fn dedup_roles(roles: &[ResourceRole]) -> Vec<ResourceRole> {

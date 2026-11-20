@@ -1192,3 +1192,59 @@ fn an_accepted_relation_is_kept_when_the_source_states_the_same() {
         p.svc.entity_detail(&theorem.id).unwrap().outgoing.into_iter().filter(|r| r.to == knuth.id).collect();
     assert_eq!(after, vec![before]);
 }
+
+/// RL-5: an extracted declaration's label and attributes come from its
+/// source and are not edited as metadata; archiving it is the person's
+/// choice and survives indexing of its file.
+#[test]
+fn an_extracted_declaration_keeps_a_persons_archive_and_refuses_metadata_edits() {
+    let p = project(&[("paper.tex", PAPER)]);
+    p.full();
+    let theorem = by_key(&p, EntityKind::Theorem, "thm:b").unwrap();
+    let edit = |label: Option<&str>, attributes: Option<BTreeMap<String, String>>| {
+        let (proposal, _) = p
+            .svc
+            .propose_and_apply(
+                Origin::Agent { task_id: "task-5".into() },
+                &ChangeRequest {
+                    base_revision: p.svc.status().revision,
+                    operations: vec![GraphOperation::UpdateEntity {
+                        entity: theorem.id.clone(),
+                        expected_revision: theorem.revision,
+                        label: label.map(str::to_owned),
+                        attributes,
+                    }],
+                    summary: None,
+                },
+            )
+            .unwrap();
+        proposal.diagnostics.first().map(|d| d.code.clone())
+    };
+    assert_eq!(edit(Some("Main theorem (verified)"), None).as_deref(), Some("graph.sourceDerived"));
+    assert_eq!(
+        edit(None, Some(BTreeMap::from([("source.title".to_owned(), "Verified".to_owned())]))).as_deref(),
+        Some("graph.sourceDerived")
+    );
+    assert_eq!(p.entity(&theorem.id), theorem, "nothing changed");
+
+    p.user(vec![GraphOperation::SetLifecycle {
+        entity: theorem.id.clone(),
+        expected_revision: theorem.revision,
+        lifecycle: Lifecycle::Archived,
+    }]);
+    // The file is edited (inside the theorem, and elsewhere) and saved.
+    write(&p.root, "paper.tex", &PAPER.replace("By Lemma", "Now by Lemma").replace("Trivial.", "Obvious."));
+    p.paths(&["paper.tex"]);
+    let after = p.entity(&theorem.id);
+    assert_eq!(after.lifecycle, Lifecycle::Archived, "indexing does not undo a person's archive");
+    p.svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: true }).unwrap();
+    assert_eq!(p.entity(&theorem.id).lifecycle, Lifecycle::Archived);
+    // Removed from the source it reads "Removed from source".
+    write(
+        &p.root,
+        "paper.tex",
+        PAPER_UNCITED.replace("\\begin{theorem}\\label{thm:b}\nB.\n\\end{theorem}\n", "").as_str(),
+    );
+    p.paths(&["paper.tex"]);
+    assert_eq!(p.entity(&theorem.id).lifecycle, Lifecycle::Tombstoned);
+}
