@@ -198,7 +198,7 @@ pub async fn agents_attachments_add_dropped(
                 Err(raw) => IngestOutcome::Rejected {
                     name: exposition_agents::attachments::safe_name(&raw, "file"),
                     code: "attachments.notDropped".into(),
-                    message: "This file was not part of a drop onto the window; drop it again or use Attach files…."
+                    message: "This file was not part of a drop onto the window. Drop it again, or choose it with Attach files."
                         .into(),
                 },
             })

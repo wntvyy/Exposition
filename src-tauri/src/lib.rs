@@ -303,7 +303,13 @@ pub fn run() {
         .expect("error while building Exposition")
         .run(|app, event| {
             // Remember what a native drop delivered (see `agents::DroppedFiles`).
-            if let RunEvent::WebviewEvent {
+            // The main window's own webview reports it as a window event; a
+            // child webview would report a webview event.
+            if let RunEvent::WindowEvent {
+                event: tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }),
+                ..
+            }
+            | RunEvent::WebviewEvent {
                 event: tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }),
                 ..
             } = &event

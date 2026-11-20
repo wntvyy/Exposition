@@ -785,7 +785,8 @@ async fn pasted_text_reaches_each_provider_adapter_unchanged() {
             &attachments::base64_encode(pasted.as_bytes()),
         ))
     };
-    let expected = format!("<attachment name=\"pasted-text-1.txt\" media_type=\"text/plain\">\n{pasted}\n</attachment>");
+    let expected =
+        format!("<attachment name=\"pasted-text-1.txt\" media_type=\"text/plain\">\n{pasted}\n</attachment>");
 
     // OpenAI (Responses API): an input_text part.
     use_openai(&h, "gpt-6.2-sol");
@@ -802,7 +803,8 @@ async fn pasted_text_reaches_each_provider_adapter_unchanged() {
     let seen = mock.seen();
     let openai = seen.iter().find(|s| s.line.contains("/v1/responses")).expect("an OpenAI request");
     let parts = openai.body["input"].as_array().unwrap().last().unwrap()["content"].as_array().unwrap().clone();
-    let texts: Vec<&str> = parts.iter().filter(|p| p["type"] == "input_text").filter_map(|p| p["text"].as_str()).collect();
+    let texts: Vec<&str> =
+        parts.iter().filter(|p| p["type"] == "input_text").filter_map(|p| p["text"].as_str()).collect();
     assert!(texts.contains(&expected.as_str()), "OpenAI input_text parts: {} parts", texts.len());
     // The prompt is its own part: the paste is not merged into the request text.
     assert!(texts.contains(&"Review the paste"));
@@ -839,10 +841,8 @@ async fn a_folder_is_rejected_without_reading_what_is_inside() {
     std::fs::write(folder.join("inside.txt"), "inside\n").unwrap();
     let file = h.project.path().join("main.typ");
     let outcomes = h.service.add_attachment_files(&[folder, file]);
-    assert!(
-        matches!(&outcomes[0], IngestOutcome::Rejected { name, code, message }
-            if name == "figures" && code == "attachments.folder" && message.contains("Folders cannot be attached"))
-    );
+    assert!(matches!(&outcomes[0], IngestOutcome::Rejected { name, code, message }
+            if name == "figures" && code == "attachments.folder" && message.contains("Folders cannot be attached")));
     // The rest of the batch is still attached (partial success).
     assert_eq!(added(outcomes[1].clone()).name, "main.typ");
     assert_eq!(outcomes.len(), 2);
