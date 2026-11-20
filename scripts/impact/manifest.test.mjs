@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { AREAS, DEFERRED, INVARIANT_SCENARIOS, SCENARIO_POLICY, VITEST_INCLUDE } from "./manifest.mjs";
+import { AREAS, DEFERRED, INVARIANT_SCENARIOS, SCENARIO_POLICY, SCENARIOS, VITEST_INCLUDE } from "./manifest.mjs";
 import { areasFor, buildPlan, GATES } from "./plan.mjs";
 import { buildIndex, changeFacts } from "./repo.mjs";
 
@@ -110,6 +110,36 @@ describe("representative plans on the real repository", { timeout: 30_000 }, () 
     expect(planFor("src-tauri/src/agents.rs").checks.map((c) => c.id)).toContain("e2e:review-sec-acl");
     expect(planFor(".gitattributes").level).toBe("full");
     expect(planFor("src/ui/components/Badge.tsx").level).toBe("broad");
+  });
+
+  it("a stylesheet-only change to the Markdown component runs the agent response scenarios (QC mapping gap)", () => {
+    const ids = planFor("src/ui/components/Markdown.css").checks.map((c) => c.id);
+    expect(ids).toEqual(expect.arrayContaining(["e2e:a1-responses", "e2e:v2-tour-agents", "e2e:ui-shell"]));
+  });
+
+  it("the native-dialog and OS-drag helpers select every scenario that uses them (QC mapping gap)", () => {
+    const importers = (helper) =>
+      scenarioFiles.filter((s) => readFileSync(join(ROOT, "scripts/e2e/scenarios", `${s}.mjs`), "utf8").includes(`from "../${helper}"`)).sort();
+    // The named lists are exactly the importing scenarios, so a new user of a helper cannot be forgotten.
+    expect([...SCENARIOS.nativeDialog].sort()).toEqual(importers("native-dialog.mjs"));
+    expect([...SCENARIOS.osDrag].sort()).toEqual(importers("os-drag.mjs"));
+    for (const file of ["scripts/e2e/native-dialog.ps1", "scripts/e2e/native-dialog.mjs"]) {
+      const p = planFor(file);
+      expect(p.checks.map((c) => c.id)).toEqual(expect.arrayContaining(SCENARIOS.nativeDialog.map((s) => `e2e:${s}`)));
+      expect(p.uncovered).toEqual([]);
+    }
+    for (const file of ["scripts/e2e/os-drag.ps1", "scripts/e2e/os-drag.mjs"]) {
+      const p = planFor(file);
+      expect(p.checks.map((c) => c.id)).toEqual(expect.arrayContaining(SCENARIOS.osDrag.map((s) => `e2e:${s}`)));
+      expect(p.uncovered).toEqual([]);
+    }
+  });
+
+  it("the shared formatter selects its importers' tests and the scenarios that assert formatted text", () => {
+    const p = planFor("src/lib/format.ts");
+    expect(p.level).toBe("local");
+    expect(command(p, "frontend-tests").slice(3)).toEqual(expect.arrayContaining(["src/lib/format.test.ts", "src/features/jobs/model.test.ts"]));
+    expect(p.checks.map((c) => c.id)).toEqual(expect.arrayContaining(["e2e:qol-media", "e2e:pdf-viewer", "e2e:agents-composer-input"]));
   });
 
   it("permissions are a security boundary", () => {

@@ -36,6 +36,9 @@ export const SCENARIOS = {
   tourWorkbench: ["v2-tour-workbench"],
   tourResearch: ["v2-tour-research"],
   tourAgents: ["v2-tour-agents"],
+  // Scenarios that import scripts/e2e/native-dialog.mjs / os-drag.mjs (manifest.test.mjs keeps the lists exact).
+  nativeDialog: ["page-export", "project-switch", "qol-journey", "agents-composer", "m6-paper-project"],
+  osDrag: ["qol-files", "agents-composer-input"],
   editor: [
     "editor-find-outline",
     "workspace-files",
@@ -300,6 +303,23 @@ export const AREAS = [
     e2e: [],
     note: "Scenario helpers: scenarios that import them run (import analysis).",
   },
+  {
+    // native-dialog.mjs finds its PowerShell driver through import.meta.dirname,
+    // which analysis cannot follow: the scenarios that drive a native dialog are named.
+    id: "e2e-native-dialog",
+    paths: ["scripts/e2e/native-dialog.mjs", "scripts/e2e/native-dialog.ps1"],
+    level: "local",
+    e2e: SCENARIOS.nativeDialog,
+    note: "The native file-dialog driver (UI Automation): every scenario that drives a dialog runs.",
+  },
+  {
+    // The scenarios reach os-drag.ps1 through os-drag.mjs, not by a path of their own.
+    id: "e2e-os-drag",
+    paths: ["scripts/e2e/os-drag.mjs", "scripts/e2e/os-drag.ps1"],
+    level: "local",
+    e2e: SCENARIOS.osDrag,
+    note: "The real OS drag-and-drop helper: every scenario that drops onto the app runs.",
+  },
   { id: "e2e-scenarios", paths: ["scripts/e2e/scenarios/*.mjs"], level: "local", e2e: [] },
   {
     id: "e2e-repro",
@@ -413,6 +433,25 @@ export const AREAS = [
     e2e: [...SCENARIOS.shell, ...SCENARIOS.themes, "editor-find-outline", "graph-canvas"],
     visual: [...SCENARIOS.visual, "editor-find-outline", "graph-canvas"],
     note: "Shared UI tokens and components: compare the refreshed ui-reference screens with the previous ones.",
+  },
+  {
+    // The agent response surface renders through the shared Markdown component:
+    // its stylesheet is seen in the agent response scenarios, not in the shell ones.
+    id: "ui-markdown-styles",
+    paths: ["src/ui/components/Markdown.css"],
+    level: "local",
+    e2e: ["a1-responses", ...SCENARIOS.tourAgents],
+    visual: ["a1-responses", ...SCENARIOS.tourAgents],
+    note: "Markdown rendering styles: compare the agent response screens (a1-responses, v2-tour-agents).",
+  },
+  {
+    // Sizes, durations, and times as every feature shows them; the scenarios
+    // named here assert formatted text in the real app.
+    id: "shared-format",
+    paths: ["src/lib/format.ts", "src/lib/format.test.ts"],
+    level: "local",
+    e2e: ["qol-media", "pdf-viewer", "agents-composer-input"],
+    note: "The shared size/duration/time notation: importing tests run (import analysis) plus the scenarios that assert it.",
   },
   {
     id: "editor",
