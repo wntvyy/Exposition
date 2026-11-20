@@ -241,6 +241,8 @@ export const commands = {
   /** Snapshot pasted bytes (base64). */
   agentsAttachmentsAddBytes: (name: string | null, mediaType: string | null, data: string) =>
     invoke<IngestOutcome>("agents_attachments_add_bytes", { name, mediaType, data }),
+  /** Snapshot files of a native drop (only paths the desktop shell recorded from that drop are read). */
+  agentsAttachmentsAddDropped: (paths: string[]) => invoke<IngestOutcome[]>("agents_attachments_add_dropped", { paths }),
   agentsAttachmentPreview: (id: AttachmentId) => invoke<string | null>("agents_attachment_preview", { id }),
   agentsAttachmentsDiscard: (ids: AttachmentId[]) => invoke<void>("agents_attachments_discard", { ids }),
   agentsTaskList: () => invoke<TaskSummary[]>("agents_task_list"),

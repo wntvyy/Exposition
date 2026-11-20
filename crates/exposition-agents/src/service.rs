@@ -751,7 +751,9 @@ impl AgentService {
 
     // ---- attachments
 
-    /// Ingest files the user chose (paths come from the native file dialog).
+    /// Ingest files the user chose (paths come from the native file dialog
+    /// or from a native drop the desktop shell recorded; never from the
+    /// webview alone). A folder is rejected, never read recursively.
     pub fn add_attachment_files(&self, paths: &[PathBuf]) -> Vec<IngestOutcome> {
         paths
             .iter()
@@ -759,6 +761,11 @@ impl AgentService {
                 let name = att::safe_name(&path.to_string_lossy(), "file");
                 let limit = att::MAX_PDF_BYTES.max(att::MAX_IMAGE_BYTES).max(att::MAX_TEXT_BYTES);
                 match std::fs::metadata(path) {
+                    Ok(meta) if meta.is_dir() => rejected(
+                        &name,
+                        "attachments.folder",
+                        "Folders cannot be attached. Attach the files inside it instead.",
+                    ),
                     Ok(meta) if !meta.is_file() => rejected(&name, "attachments.notAFile", "This is not a file."),
                     Ok(meta) if meta.len() > limit => rejected(
                         &name,

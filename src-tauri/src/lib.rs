@@ -44,6 +44,8 @@ pub fn run() {
         .setup(|app| {
             let state = AppState::initialize(app.handle())?;
             app.manage(state);
+            // Native drops onto the window (the chat attaches only what was really dropped).
+            app.manage(agents::DroppedFiles::default());
             documents::forward_events(app.handle().clone());
             workspace::start(app.handle().clone());
             execution::forward_events(app.handle().clone());
@@ -91,6 +93,7 @@ pub fn run() {
             agents::agents_models_list,
             agents::agents_attachments_pick,
             agents::agents_attachments_add_bytes,
+            agents::agents_attachments_add_dropped,
             agents::agents_attachment_preview,
             agents::agents_attachments_discard,
             agents::agents_task_list,
@@ -299,6 +302,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Exposition")
         .run(|app, event| {
+            // Remember what a native drop delivered (see `agents::DroppedFiles`).
+            if let RunEvent::WebviewEvent {
+                event: tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }),
+                ..
+            } = &event
+            {
+                app.state::<agents::DroppedFiles>().record(paths);
+            }
             // Kill every supervised process tree before exiting. (If the app
             // crashes instead, job-object kill-on-close does the same.)
             if let RunEvent::Exit = event {

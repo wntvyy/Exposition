@@ -27,12 +27,12 @@ vi.mock("../../lib/ipc", () => ({
 // Monaco needs a real browser (register.ts reaches the review diff).
 vi.mock("./DiffView", () => ({ DiffView: () => null }));
 
-const { QuestionCard, continueSentence } = await import("./QuestionCard");
+const { QuestionCard, continueSentence, ANSWER_KEY_HINT } = await import("./QuestionCard");
 const questions = await import("./questions");
 const { drafts, useDrafts } = await import("./drafts");
 const store = await import("./store");
 const format = await import("./format");
-const { DEFAULT_BUDGETS } = await import("./TaskComposer");
+const { Composer, DEFAULT_BUDGETS } = await import("./TaskComposer");
 const { AgentStatusItem } = await import("./register");
 const { useNotifications } = await import("../../app/notifications");
 const { layout } = await import("../../app/layout");
@@ -40,6 +40,15 @@ const { layout } = await import("../../app/layout");
 const { initialAgentsState, reduceEvent, useAgents, questionNotificationId } = store;
 
 const TASK = "task-1";
+
+const providerStatus = {
+  settings: { provider: "anthropic", model: "claude-opus-5-5", effort: "medium", consent: "scopeContent" },
+  configured: true,
+  connections: [{ provider: "anthropic", auth: "apiKey", configured: true, credentialError: null, context: null, version: 1 }],
+  credentialStore: "test store",
+  credentialError: null,
+  scriptedAvailable: false,
+} as never;
 
 function summary(overrides: Partial<TaskSummary> = {}): TaskSummary {
   return {
@@ -218,6 +227,76 @@ describe("QuestionCard", () => {
     fireEvent.click(screen.getByText("Celsius"));
     expect(other.value).toBe("");
     expect(radio("celsius").checked).toBe(true);
+  });
+
+  it("Enter in Other answer sends the answer once, as Send answer does; an IME's Enter and an incomplete group send nothing", async () => {
+    const r = request();
+    put([r]);
+    const pending = deferred<void>();
+    ipc.agentsQuestionAnswer.mockReturnValue(pending.promise);
+    render(<QuestionCard task={TASK} request={r} />);
+    const other = screen.getByRole("textbox", { name: /Other answer/ }) as HTMLInputElement;
+    const enter = (init: KeyboardEventInit & { keyCode?: number } = {}) => fireEvent.keyDown(other, { key: "Enter", ...init });
+    // Nothing typed and nothing chosen: Send answer is unavailable, so is Enter.
+    enter();
+    expect(ipc.agentsQuestionAnswer).not.toHaveBeenCalled();
+    expect(other.getAttribute("aria-describedby")).toBeNull();
+    fireEvent.change(other, { target: { value: "ランキン度" } });
+    expect(screen.getByText(ANSWER_KEY_HINT)).toBeTruthy();
+    // Confirming the composition, a held key, and Shift+Enter send nothing.
+    enter({ isComposing: true });
+    enter({ keyCode: 229 });
+    enter({ repeat: true });
+    enter({ shiftKey: true });
+    expect(ipc.agentsQuestionAnswer).not.toHaveBeenCalled();
+    await act(async () => {
+      enter();
+      enter();
+    });
+    expect(ipc.agentsQuestionAnswer).toHaveBeenCalledTimes(1);
+    // The answer route, at the request's revision: never a new task or a follow-up.
+    expect(ipc.agentsQuestionAnswer).toHaveBeenCalledWith(TASK, r.id, 1, [{ questionId: "q1", value: { kind: "custom", text: "ランキン度" } }]);
+    await act(async () => pending.resolve());
+    expect(await screen.findByText("Answer sent")).toBeTruthy();
+    cleanup();
+
+    // A group: Enter sends only when every question has an answer.
+    ipc.agentsQuestionAnswer.mockClear();
+    const group = twoQuestions();
+    put([group]);
+    render(<QuestionCard task={TASK} request={group} />);
+    const second = screen.getByRole("textbox", { name: /Other answer: Report the activation energy/ });
+    fireEvent.change(second, { target: { value: "Both" } });
+    fireEvent.keyDown(second, { key: "Enter" });
+    expect(ipc.agentsQuestionAnswer).not.toHaveBeenCalled();
+    expect((second as HTMLInputElement).value).toBe("Both");
+  });
+
+  it("Enter in the composer sends a discussion through the discussion route, once; Shift+Enter does not", async () => {
+    const r = request();
+    put([r]);
+    const sent = deferred<void>();
+    ipc.agentsQuestionDiscuss.mockReturnValue(sent.promise);
+    act(() => useAgents.setState({ status: providerStatus, workspace: { root: "C:/paper", name: "paper" } as never }));
+    render(<Composer task={summary()} />);
+    const field = screen.getByTestId("agents-follow-up-text") as HTMLTextAreaElement;
+    // A question waits: an ordinary message is not sent by Enter (as by Send).
+    fireEvent.change(field, { target: { value: "Why Kelvin?" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(ipc.agentsQuestionDiscuss).not.toHaveBeenCalled();
+    act(() => drafts.chatAbout(TASK, r));
+    expect(fireEvent.keyDown(field, { key: "Enter", shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(field, { key: "Enter", isComposing: true })).toBe(true);
+    expect(ipc.agentsQuestionDiscuss).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.keyDown(field, { key: "Enter" });
+      fireEvent.keyDown(field, { key: "Enter" });
+    });
+    expect(ipc.agentsQuestionDiscuss).toHaveBeenCalledTimes(1);
+    expect(ipc.agentsQuestionDiscuss).toHaveBeenCalledWith(TASK, r.id, 1, "Why Kelvin?");
+    expect(ipc.agentsQuestionAnswer).not.toHaveBeenCalled();
+    await act(async () => sent.resolve());
+    expect(field.value).toBe("");
   });
 
   it("offers no Other answer when custom answers are not allowed", () => {

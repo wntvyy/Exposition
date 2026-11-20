@@ -7,7 +7,7 @@ import { useEffect, useState, type ClipboardEvent } from "react";
 import type { AttachmentInfo } from "../../bindings/AttachmentInfo";
 import { commands } from "../../lib/ipc";
 import { Banner, Button, Chip, FileIcon, StatusText } from "../../ui/components";
-import { clipboardImages, drafts, useDraft } from "./drafts";
+import { clipboardHasFiles, clipboardImages, drafts, isLargePaste, useDraft } from "./drafts";
 
 /** "12.3 KB" (the backend's units). */
 export function humanSize(bytes: number): string {
@@ -94,6 +94,35 @@ export function MessageAttachments({ items }: { items: AttachmentInfo[] }) {
 }
 
 /**
+ * The latest large paste that became an attachment: what happened, with
+ * Insert as text (the text goes into the request instead, when it fits) and
+ * Undo (the attachment goes, the text it replaced comes back).
+ */
+function PasteNotice({ draftKey, sending }: { draftKey: string; sending: boolean }) {
+  const draft = useDraft(draftKey);
+  const paste = (draft.pastes ?? []).at(-1);
+  const info = paste ? draft.attachments.find((a) => a.id === paste.id) : undefined;
+  if (!paste || !info || sending) return null;
+  const fits = drafts.pasteFitsInline(draftKey, paste.id);
+  return (
+    <div className="agents-row" role="status" data-testid="agents-paste-notice" data-attachment-id={paste.id}>
+      <span className="ui-meta">
+        The pasted text was attached as {info.name}
+        {fits ? "." : "; it is too long to insert as text."}
+      </span>
+      {fits && (
+        <Button size="sm" variant="ghost" onPress={() => drafts.insertPasteInline(draftKey, paste.id)} data-testid="agents-paste-inline">
+          Insert as text
+        </Button>
+      )}
+      <Button size="sm" variant="ghost" onPress={() => drafts.undoPaste(draftKey, paste.id)} data-testid="agents-paste-undo">
+        Undo
+      </Button>
+    </div>
+  );
+}
+
+/**
  * A composer's attachments: the attached files (each removable), ingestion
  * in progress, and why files were not attached. Attach is in the composer's bar.
  */
@@ -139,18 +168,30 @@ export function DraftAttachments({ draftKey, sending = false }: { draftKey: stri
           ))}
         </div>
       )}
+      <PasteNotice draftKey={draftKey} sending={sending} />
     </div>
   );
 }
 
 /**
- * Paste handler for a composer's text field: image bytes become attachments
- * of that draft; text is left to the field (a mixed paste does both).
+ * Paste handler for a composer's text field. Image bytes become attachments
+ * of that draft, and text beside files or images is left to the field as
+ * before (never also attached). A text-only paste is left to the field when
+ * it is short; a large one (`isLargePaste`) becomes a text attachment instead
+ * of being inserted, and the selection it would have replaced is removed
+ * only once that attachment exists.
  */
 export function pasteHandler(draftKey: string) {
   return (event: ClipboardEvent<HTMLElement>) => {
-    if (!(event.target instanceof HTMLTextAreaElement)) return;
-    const images = clipboardImages(event.clipboardData);
+    const field = event.target;
+    if (!(field instanceof HTMLTextAreaElement)) return;
+    const data = event.clipboardData;
+    const images = clipboardImages(data);
     if (images.length) void drafts.pasteImages(draftKey, images);
+    if (clipboardHasFiles(data)) return;
+    const text = data?.getData("text/plain") ?? "";
+    if (!isLargePaste(text)) return;
+    event.preventDefault();
+    void drafts.pasteText(draftKey, text, { value: field.value, start: field.selectionStart, end: field.selectionEnd });
   };
 }
