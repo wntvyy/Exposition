@@ -404,7 +404,7 @@ function OutputValueView({ run, step, value, onRun }: { run: WorkflowRun; step: 
       );
     case "report":
       return (
-        <pre className="xp-wf-log" tabIndex={0} aria-label="Report">
+        <pre className="xp-wf-log" role="region" tabIndex={0} aria-label="Report">
           {value.text}
         </pre>
       );
@@ -536,7 +536,7 @@ function AttemptView({
         </div>
       )}
       {attempt.log && (
-        <pre className="xp-wf-log" tabIndex={0} aria-label={`Log of ${step.label}, attempt ${attempt.attempt}`} data-testid={`workflow-log-${id}`}>
+        <pre className="xp-wf-log" role="region" tabIndex={0} aria-label={`Log of ${step.label}, attempt ${attempt.attempt}`} data-testid={`workflow-log-${id}`}>
           {attempt.log}
         </pre>
       )}
@@ -717,7 +717,7 @@ function ManifestView({ run }: { run: WorkflowRun }) {
         </Banner>
       )}
       {state.kind === "ready" && (
-        <pre className="xp-wf-log xp-wf-manifest" tabIndex={0} aria-label="Run manifest (JSON)">
+        <pre className="xp-wf-log xp-wf-manifest" role="region" tabIndex={0} aria-label="Run manifest (JSON)">
           {state.text}
         </pre>
       )}

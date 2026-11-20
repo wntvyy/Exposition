@@ -217,6 +217,7 @@ describe("plan review", () => {
     expect(screen.getByTestId("plan-step-review").textContent).toContain("Sends material to the model provider");
     // The complete code (every line, numbered) and the complete prompt.
     const code = screen.getByTestId("plan-code-run");
+    expect(code.getAttribute("role")).toBe("region");
     expect(code.textContent).toBe(`${CODE}\n`);
     expect(code.querySelectorAll("[data-line]")).toHaveLength(3);
     expect(screen.getByTestId("plan-prompt-review").textContent).toContain("List caveats.");
@@ -328,6 +329,9 @@ describe("run monitor", () => {
     expect(screen.getByTestId("workflow-run-failure").getAttribute("data-code")).toBe("research.batchFailed");
     expect(screen.getByTestId("workflow-attempt-error-run").textContent).toContain("ZeroDivisionError");
     expect(screen.getByTestId("workflow-log-run").tagName).toBe("PRE");
+    // UI-18: a focusable scroll area is a named region (the Markdown renderer's convention).
+    expect(screen.getByTestId("workflow-log-run").getAttribute("role")).toBe("region");
+    expect(screen.getByTestId("workflow-log-run").getAttribute("aria-label")).toMatch(/^Log of /);
     rerender(<RunMonitor run={run({ state: "canceled" })} onRun={vi.fn()} />);
     expect(screen.getByText("This run was canceled")).toBeTruthy();
     expect(screen.getByTestId("workflow-run-state").textContent).toContain("Run canceled");

@@ -29,7 +29,7 @@ import { CONTAINMENT_VIEW, EFFECT_LABELS, EXECUTION_CEILING_LABEL, formatBytes, 
 export function CodeListing({ text, label, testId }: { text: string; label: string; testId?: string }) {
   const lines = text.split("\n");
   return (
-    <pre className="xp-wf-code" aria-label={label} data-testid={testId} tabIndex={0}>
+    <pre className="xp-wf-code" aria-label={label} data-testid={testId} role="region" tabIndex={0}>
       {lines.map((line, i) => (
         <span key={i} className="xp-wf-code__line" data-line={i + 1}>
           {line}

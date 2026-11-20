@@ -283,6 +283,8 @@ describe("environment setup", () => {
     expect(screen.getByTestId("setup-progress").getAttribute("data-step")).toBe("1");
     expect(screen.getByText("Step 2 of 2: Install packages from PyPI")).toBeTruthy();
     expect(screen.getByTestId("setup-log").textContent).toContain("Downloading ipykernel");
+    // UI-18: a focusable scroll area is a named region (the Markdown renderer's convention).
+    expect(screen.getByRole("region", { name: "Setup output" })).toBe(screen.getByTestId("setup-log"));
     useSetup.setState({ status: status() });
     fireEvent.click(screen.getByTestId("setup-cancel"));
     await waitFor(() => expect(setupIpc.cancel).toHaveBeenCalledWith("setup-1"));

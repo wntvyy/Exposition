@@ -321,6 +321,8 @@ describe("Mathlib setup", () => {
     );
     expect(useLeanSetup.getState().log).toEqual(["Downloaded: 70 file(s)", "error: no route"]);
     expect(screen.getByTestId("lean-setup-log").textContent).toContain("error: no route");
+    // UI-18: a focusable scroll area is a named region (the Markdown renderer's convention).
+    expect(screen.getByRole("region", { name: "Setup output" })).toBe(screen.getByTestId("lean-setup-log"));
     const message = "Download Mathlib's prebuilt cache for the pinned revision failed (exit code 1): error: no route. The new package's files were removed; nothing else in the project changed.";
     act(() =>
       applyLeanSetupEvent({

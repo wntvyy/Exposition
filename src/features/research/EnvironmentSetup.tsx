@@ -300,7 +300,7 @@ export function SetupDialog({ choice, isOpen, onOpenChange }: SetupDialogProps) 
         )}
         {plan && (
           <Section title="Commands" count={plan.steps.length} collapsible defaultExpanded={false}>
-            <pre className="exp-setup__commands" data-testid="setup-commands" tabIndex={0} aria-label="Commands the setup runs">
+            <pre className="exp-setup__commands" data-testid="setup-commands" role="region" tabIndex={0} aria-label="Commands the setup runs">
               {plan.steps.map((step, i) => `${i + 1}. ${step.label}\n   ${commandLine(step.program, step.args)}`).join("\n")}
             </pre>
             <p className="ui-meta">Each runs directly (no shell) in an empty working folder Exposition owns, not in the project folder.</p>
@@ -344,7 +344,7 @@ export function SetupProgress({ status }: { status: SetupStatus }) {
       >
         <ProgressBar label={label} />
         {log.length > 0 && (
-          <pre ref={viewer} className="exp-setup__log" tabIndex={0} aria-label="Setup output" data-testid="setup-log">
+          <pre ref={viewer} className="exp-setup__log" role="region" tabIndex={0} aria-label="Setup output" data-testid="setup-log">
             {log.slice(-12).join("\n")}
           </pre>
         )}
@@ -399,7 +399,7 @@ export function SetupOutcome({
       >
         <span data-testid="setup-outcome-message">{status.message}</span>
         {showLog && (
-          <pre className="exp-setup__log" tabIndex={0} aria-label="Setup output">
+          <pre className="exp-setup__log" role="region" tabIndex={0} aria-label="Setup output">
             {log.join("\n")}
           </pre>
         )}

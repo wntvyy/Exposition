@@ -242,6 +242,7 @@ function JobDetail({ job, now }: { job: JobSummary; now: number }) {
           ref={viewer}
           className="exp-jobs__output"
           data-testid="job-output"
+          role="region"
           tabIndex={0}
           aria-label={`Output of ${job.info.label}`}
         >
