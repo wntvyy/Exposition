@@ -594,7 +594,7 @@ impl ResearchProject {
             ));
         }
         let _ = self.graph_root()?;
-        let retained = self.retain_verified(manifest, artifact, RetainState::Active, None)?;
+        let retained = self.retain_verified(manifest, artifact, RetainState::Active, None, "")?;
         let manuscript = self.graph.ensure_resource(path, None, false, super::SERVICE)?;
         let graph_revision = self.add_relations(
             vec![(

@@ -51,7 +51,9 @@ pub enum PromotionReview {
 /// The research operations workflow steps use (a seam for tests).
 pub trait ResearchActions: Send + Sync {
     fn available(&self, root: &Path) -> Result<(), String>;
-    fn retain(&self, research_run: &str, artifact: &str) -> Result<RetainedRecord, StepFailure>;
+    /// Keep a run's output; `label` (the step's `label` parameter, when set)
+    /// names the retained result.
+    fn retain(&self, research_run: &str, artifact: &str, label: Option<&str>) -> Result<RetainedRecord, StepFailure>;
     /// Prepare a reviewed promotion; returns the promotion id.
     fn prepare_promotion(
         &self,
@@ -99,16 +101,14 @@ impl ResearchActions for ProjectResearch {
         }
     }
 
-    fn retain(&self, research_run: &str, artifact: &str) -> Result<RetainedRecord, StepFailure> {
-        let outcome = self
-            .project
-            .retain(&RetainRequest {
-                run_id: research_run.to_owned(),
-                artifact_id: artifact.to_owned(),
-                state: RetainState::Active,
-                experiment: None,
-            })
-            .map_err(research_failure)?;
+    fn retain(&self, research_run: &str, artifact: &str, label: Option<&str>) -> Result<RetainedRecord, StepFailure> {
+        let request = RetainRequest {
+            run_id: research_run.to_owned(),
+            artifact_id: artifact.to_owned(),
+            state: RetainState::Active,
+            experiment: None,
+        };
+        let outcome = self.project.retain_labelled(&request, label).map_err(research_failure)?;
         let sha256 = outcome.result.content_hash.as_deref().map(bare_hash).unwrap_or_default();
         Ok(RetainedRecord {
             entity: outcome.result.entity,
@@ -220,7 +220,9 @@ impl StepAdapter for RetainAdapter {
         };
         let operation = OperationRef { kind: "retain".into(), id: format!("{run}/{artifact}") };
         (control.on_dispatched)(&operation);
-        let kept = research.retain(run, artifact)?;
+        // The step's Label names the retained result (blank: its file name).
+        let label = request.text_parameter("label").map(str::trim).filter(|l| !l.is_empty());
+        let kept = research.retain(run, artifact, label)?;
         let value = WorkflowOutputValue::Retained {
             entity: kept.entity,
             path: kept.path,

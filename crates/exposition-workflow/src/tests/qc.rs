@@ -218,3 +218,55 @@ fn a_model_provider_changed_during_the_run_refuses_the_review_step() {
 fn asked_model(request: &ReviewRequest) -> Option<(String, String)> {
     request.model.as_ref().map(|m| (m.provider.clone(), m.model.clone()))
 }
+
+/// PG-3: the Retain artifact step's `label` parameter (shown in the editor,
+/// reviewed in the plan, part of the approval) names the retained result.
+#[test]
+fn the_retain_label_reaches_the_retention_service() {
+    let f = fixture();
+    let mut def = numerical(false);
+    def.steps[1].parameters.insert("label".into(), ParamValue::Text("  Figure 2: residuals ".into()));
+    let run = f.run_to_end(&f.save(def));
+    assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?}", run.message);
+    assert_eq!(*f.research.labels.lock().unwrap(), vec![Some("Figure 2: residuals".to_owned())]);
+    // Without the parameter (or with a blank one) the result keeps its file name.
+    let f = fixture();
+    f.run_to_end(&f.save(numerical(false)));
+    let mut blank = numerical(false);
+    blank.title = "Blank label".into();
+    blank.steps[1].parameters.insert("label".into(), ParamValue::Text("   ".into()));
+    f.run_to_end(&f.save(blank));
+    assert_eq!(*f.research.labels.lock().unwrap(), vec![None, None]);
+}
+
+/// PG-3: no registered parameter is decoration. Each one is read by the
+/// adapter of its runner (or, for batches, handed to the code and the time
+/// limit), so what the editor offers and the plan shows is what runs.
+#[test]
+fn every_registered_parameter_is_read_by_its_runner() {
+    let adapters = [
+        include_str!("../adapters/research.rs"),
+        include_str!("../adapters/associate.rs"),
+        include_str!("../adapters/agent.rs"),
+        include_str!("../adapters/lean.rs"),
+    ]
+    .concat();
+    let batch = include_str!("../adapters/batch.rs");
+    let plan = include_str!("../plan.rs");
+    for operation in exposition_graph::workflow::registry::operations() {
+        for parameter in &operation.parameters {
+            let name = &parameter.name;
+            let code =
+                matches!(operation.payload, Some(exposition_graph::workflow::registry::PayloadSpec::Code { .. }));
+            let read = if code {
+                // A batch gets every parameter as EXPOSITION_PARAM_<NAME>;
+                // `timeoutSeconds` is also its time limit.
+                batch.contains("parameter_texts(&request.step.parameters)")
+                    && (name != "timeoutSeconds" || plan.contains("\"timeoutSeconds\""))
+            } else {
+                adapters.contains(&format!("text_parameter(\"{name}\")"))
+            };
+            assert!(read, "{}: parameter `{name}` is registered but nothing reads it", operation.id);
+        }
+    }
+}

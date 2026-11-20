@@ -412,7 +412,8 @@ impl ResearchProject {
             .ok_or_else(|| ResearchError::coded("graph.storage", format!("{} has no path", e.label)))?;
         Ok(RetainedResult {
             entity: e.id.clone(),
-            label: e.label.clone(),
+            // The name it was retained under, or its file name.
+            label: attr(e, super::retain::RESULT_LABEL).unwrap_or_else(|| e.label.clone()),
             path,
             lifecycle: e.lifecycle,
             roles: e.roles.clone(),

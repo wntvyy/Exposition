@@ -77,6 +77,22 @@ fn kind_name(kind: ArtifactKind) -> &'static str {
     }
 }
 
+/// The attribute holding the name a retained result was given.
+pub(crate) const RESULT_LABEL: &str = "retained.label";
+/// A retained result's name is at most this long (bytes).
+pub const MAX_RESULT_LABEL: usize = 200;
+
+/// `label` as it is stored: one line, trimmed, at most [`MAX_RESULT_LABEL`]
+/// bytes (cut at a character boundary); empty when blank.
+fn result_label(label: &str) -> String {
+    let line: String = label.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let mut line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    while line.len() > MAX_RESULT_LABEL {
+        line.pop();
+    }
+    line.trim_end().to_owned()
+}
+
 impl ResearchProject {
     /// The artifact of a run in the open workspace, with its file verified
     /// against the digest the run recorded (an altered file is refused).
@@ -110,6 +126,21 @@ impl ResearchProject {
 
     /// Keep, archive, or discard a run's output (see the module docs).
     pub fn retain(&self, request: &RetainRequest) -> Result<RetainOutcome, ResearchError> {
+        self.retain_labelled(request, None)
+    }
+
+    /// [`Self::retain`] naming the result: `label` (one line, at most
+    /// [`MAX_RESULT_LABEL`] bytes; blank is no label) is what the retained
+    /// result is called in the research space instead of its file name. The
+    /// file, its path, and its graph entity's own label are unchanged, and
+    /// retaining again without a label keeps the one it has. This is the
+    /// `label` parameter of a workflow's Retain artifact step.
+    pub fn retain_labelled(
+        &self,
+        request: &RetainRequest,
+        label: Option<&str>,
+    ) -> Result<RetainOutcome, ResearchError> {
+        let label = label.map(result_label).unwrap_or_default();
         let _ = self.graph_root()?;
         let (manifest, record) = self.verified_artifact(&request.run_id, &request.artifact_id)?;
         let path = record.path.clone().ok_or_else(|| ResearchError::UnknownArtifact(request.artifact_id.clone()))?;
@@ -124,7 +155,7 @@ impl ResearchProject {
         {
             return Err(ResearchError::coded("research.notExperiment", "That entity is not an experiment."));
         }
-        self.retain_verified(&manifest, &record, request.state, request.experiment.as_ref())
+        self.retain_verified(&manifest, &record, request.state, request.experiment.as_ref(), &label)
     }
 
     /// Retain an artifact already verified against its recorded digest.
@@ -134,6 +165,7 @@ impl ResearchProject {
         record: &ArtifactRecord,
         state: RetainState,
         experiment: Option<&EntityId>,
+        label: &str,
     ) -> Result<RetainOutcome, ResearchError> {
         let path = record.path.clone().ok_or_else(|| ResearchError::UnknownArtifact(record.id.0.clone()))?;
         let hash = bare_hash(&record.content_hash);
@@ -145,6 +177,9 @@ impl ResearchProject {
         attributes.insert("retained.mediaType".into(), record.media_type.clone());
         attributes.insert("retained.contentHash".into(), hash.clone());
         attributes.entry("retained.at".into()).or_insert_with(|| now_ms().to_string());
+        if !label.is_empty() {
+            attributes.insert(RESULT_LABEL.into(), label.to_owned());
+        }
         self.update_entity(
             &entity,
             Some(attributes),

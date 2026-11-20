@@ -907,3 +907,40 @@ fn deletion_times_are_recorded_moves_never_replace_and_batches_name_their_run() 
     crate::records::move_no_replace(&a, &f.root.join("c.txt")).unwrap();
     assert!(!a.exists() && f.root.join("c.txt").is_file());
 }
+
+/// QC PG-3: a result retained under a name (a workflow's Retain artifact
+/// step with its Label set) is called that in the research space; its file
+/// and its graph entity keep their own names.
+#[test]
+fn a_result_retained_under_a_label_is_listed_by_it() {
+    let f = fixture();
+    f.project.enable().unwrap();
+    record_run(&f.root, "run-a1", vec![script_input()], vec![path("analysis/fit.py")]);
+    let request = RetainRequest {
+        run_id: "run-a1".into(),
+        artifact_id: "run-a1/output-2.csv".into(),
+        state: RetainState::Active,
+        experiment: None,
+    };
+    let plain = f.project.retain(&request).unwrap();
+    let file_name = plain.result.label.clone();
+    assert!(file_name.ends_with(".csv"), "{file_name}");
+    let named = f.project.retain_labelled(&request, Some("  Table 2:\tfit residuals \n")).unwrap();
+    assert_eq!(named.result.entity, plain.result.entity, "the same result");
+    assert_eq!(named.result.label, "Table 2: fit residuals");
+    assert_eq!(named.result.path, plain.result.path);
+    assert_eq!(
+        f.graph.entity_detail(&named.result.entity).unwrap().entity.label,
+        file_name,
+        "a file's label is its name"
+    );
+    let listed = f.project.listing().unwrap();
+    assert!(listed.results.iter().any(|r| r.entity == named.result.entity && r.label == "Table 2: fit residuals"));
+    // Retaining again without a label, or with a blank one, keeps the name.
+    assert_eq!(f.project.retain(&request).unwrap().result.label, "Table 2: fit residuals");
+    assert_eq!(f.project.retain_labelled(&request, Some("   ")).unwrap().result.label, "Table 2: fit residuals");
+    // A long label is cut to the limit at a character boundary.
+    let long = "é".repeat(300);
+    let cut = f.project.retain_labelled(&request, Some(&long)).unwrap().result.label;
+    assert!(cut.len() <= super::retain::MAX_RESULT_LABEL && cut.chars().all(|c| c == 'é'), "{}", cut.len());
+}
