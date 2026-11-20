@@ -983,3 +983,74 @@ async fn a_finished_task_is_announced_before_its_services_are_released() {
     }
     assert_eq!(again, 0, "a second terminal taskChanged for the same run");
 }
+
+/// AG-11: a Continue that is refused changes nothing durable: neither the
+/// budgets it carried, nor the transcript, nor the status.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_continue_leaves_the_task_as_it_was() {
+    let h = harness();
+    let done = run(&h, read_edit_done("cat sat", "dog sat"), request(&h, PermissionProfile::AutoApply)).await;
+    assert_eq!(done.status, TaskStatus::Completed);
+    let before = h.service.task(&done.id).unwrap();
+    let transcript = h.service.task_detail(&done.id).unwrap().transcript;
+    // The project folder is gone: the task cannot continue there.
+    let moved = h.project.path().with_extension("moved");
+    std::fs::rename(h.project.path(), &moved).unwrap();
+    let raised = Budgets { max_turns: before.spec.budgets.max_turns + 7, ..before.spec.budgets.clone() };
+    let refused = h.service.continue_task(&done.id, "Go on", Some(raised)).unwrap_err();
+    std::fs::rename(&moved, h.project.path()).unwrap();
+    assert_eq!(refused.code, "agents.invalidWorkspace", "{}", refused.message);
+    let after = h.service.task(&done.id).unwrap();
+    assert_eq!(after.spec, before.spec, "a refused Continue changed the task's settings");
+    assert_eq!(after.status, before.status);
+    assert_eq!(h.service.task_detail(&done.id).unwrap().transcript, transcript);
+    // An accepted Continue applies them.
+    h.service.load_script(json!({"turns": [{"steps": [{"text": "More."}]}]})).unwrap();
+    let raised = Budgets { max_turns: before.spec.budgets.max_turns + 7, ..before.spec.budgets.clone() };
+    h.service.continue_task(&done.id, "Go on", Some(raised.clone())).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), h.service.join(&done.id)).await.expect("task finished");
+    assert_eq!(h.service.task(&done.id).unwrap().spec.budgets, raised);
+}
+
+/// AG-12: two Continues of the same stopped task at the same moment start
+/// one run; the other is refused and adds nothing to the conversation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_continues_start_one_run() {
+    for round in 0..8 {
+        let h = harness();
+        // Turns are used in order across runs: the follow-up run waits to be canceled.
+        let script = json!({"turns": [{"steps": [{"text": "First."}]}, {"steps": [{"waitForCancel": true}]}]});
+        let done = run(&h, script, request(&h, PermissionProfile::ReadOnly)).await;
+        assert_eq!(done.status, TaskStatus::Completed);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let attempts: Vec<_> = (0..2)
+            .map(|n| {
+                let (service, id, barrier) = (h.service.clone(), done.id.clone(), Arc::clone(&barrier));
+                tokio::task::spawn_blocking(move || {
+                    barrier.wait();
+                    service.continue_task(&id, &format!("Follow-up {n}"), None).map(|_| ()).map_err(|e| e.code)
+                })
+            })
+            .collect();
+        let mut outcomes = Vec::new();
+        for attempt in attempts {
+            outcomes.push(attempt.await.unwrap());
+        }
+        let started = outcomes.iter().filter(|o| o.is_ok()).count();
+        let refused: Vec<&String> = outcomes.iter().filter_map(|o| o.as_ref().err()).collect();
+        assert_eq!(started, 1, "round {round}: {outcomes:?}");
+        assert!(refused.iter().all(|code| *code == "agents.taskRunning"), "round {round}: {outcomes:?}");
+        let follow_ups = h
+            .service
+            .task_detail(&done.id)
+            .unwrap()
+            .transcript
+            .iter()
+            .filter(|i| matches!(i, TranscriptItem::UserText { text, .. } if text.starts_with("Follow-up")))
+            .count();
+        assert_eq!(follow_ups, 1, "round {round}: the refused Continue left a message");
+        h.service.cancel_task(&done.id).unwrap();
+        tokio::time::timeout(Duration::from_secs(20), h.service.join(&done.id)).await.expect("worker exits");
+        assert_eq!(h.service.task(&done.id).unwrap().status, TaskStatus::Canceled);
+    }
+}

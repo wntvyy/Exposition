@@ -191,6 +191,41 @@ struct Running {
     finished: bool,
 }
 
+impl Running {
+    fn new() -> Self {
+        Self {
+            cancel: CancellationToken::new(),
+            approvals: HashMap::new(),
+            questions: HashMap::new(),
+            stop_reason: None,
+            join: None,
+            finished: false,
+        }
+    }
+}
+
+/// A task's worker slot reserved for a run that has not started yet; given
+/// back when dropped unless the worker took it over (`keep`).
+struct RunSlot<'a> {
+    running: &'a Mutex<HashMap<TaskId, Running>>,
+    id: TaskId,
+    kept: bool,
+}
+
+impl RunSlot<'_> {
+    fn keep(&mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for RunSlot<'_> {
+    fn drop(&mut self) {
+        if !self.kept {
+            lock(self.running).remove(&self.id);
+        }
+    }
+}
+
 /// A question request the worker waits on. Its state is changed only under
 /// the `running` lock (answers, discussions, revisions), and stored at once.
 struct QuestionSlot {
@@ -1051,7 +1086,17 @@ impl AgentService {
             return Err(AgentError::new("agents.emptyPrompt", "Describe what the agent should do next."));
         }
         let budgets = request.budgets;
+        if let Some(budgets) = &budgets {
+            budgets.validate().map_err(|e| AgentError::new("agents.invalidBudgets", e))?;
+        }
+        // One run per task: the task's worker slot is taken here, before
+        // anything is read or decided, and given back if the request is
+        // refused. A second Continue arriving meanwhile finds it taken.
+        let mut slot = self.reserve_run(id)?;
         let mut row = self.inner.store.task(id)?.ok_or_else(|| not_found(id))?;
+        if row.status.is_active() {
+            return Err(AgentError::new("agents.taskRunning", "The task is still running."));
+        }
         let switched = match request.provider {
             Some(choice) if choice != row.spec.provider => {
                 if choice.provider == ProviderKind::Scripted && !self.inner.allow_scripted {
@@ -1080,19 +1125,8 @@ impl AgentService {
                 ),
             ));
         }
-        // A finished worker may still be releasing this task's services
-        // (research sessions); a new run must wait until it has exited.
-        if row.status.is_active() || self.is_running(id) {
-            return Err(AgentError::new("agents.taskRunning", "The task is still running."));
-        }
-        if lock(&self.inner.running).contains_key(id) {
-            return Err(AgentError::new("agents.taskFinishing", "The task is finishing up; try again in a moment."));
-        }
-        if let Some(budgets) = budgets {
-            budgets.validate().map_err(|e| AgentError::new("agents.invalidBudgets", e))?;
-            row.spec.budgets = budgets;
-            self.inner.store.update_task_spec(id, &row.spec)?;
-        }
+        // Nothing is stored until the request can no longer be refused: a
+        // refused Continue leaves the task exactly as it was.
         crate::workspace::check_root(self.inner.workspace.as_deref(), Path::new(&row.spec.workspace_root))
             .map_err(|e| AgentError::new("agents.workspaceNotOpen", e))?;
         // A fresh graph context for this run, from the graph the task is bound to.
@@ -1105,12 +1139,22 @@ impl AgentService {
         }
         let recorded = self.inner.store.graph_project(id)?;
         let graph_context = self.inner.graph_context(files.root(), &row.spec, recorded.as_ref())?;
-        if switched.is_some() && target.provider == ProviderKind::OpenAi {
-            // A switch resolves the connection context again (the current settings).
-            let current = self.inner.settings()?.openai.unwrap_or_default();
-            self.inner.store.set_task_connection(id, &serde_json::to_value(&current).unwrap_or(Value::Null))?;
+        // A switch resolves the connection context again (the current
+        // settings); it is recorded only once the provider could be made.
+        let connection = match &switched {
+            Some(_) if target.provider == ProviderKind::OpenAi => {
+                Some(self.inner.settings()?.openai.unwrap_or_default())
+            }
+            _ => None,
+        };
+        let provider = self.inner.make_provider_with(&target, id, connection.clone())?;
+        if let Some(connection) = &connection {
+            self.inner.store.set_task_connection(id, &serde_json::to_value(connection).unwrap_or(Value::Null))?;
         }
-        let provider = self.inner.make_provider(&target, id)?;
+        if let Some(budgets) = budgets {
+            row.spec.budgets = budgets;
+            self.inner.store.update_task_spec(id, &row.spec)?;
+        }
         if let Some(choice) = &switched {
             let previous = row.spec.provider.clone();
             row.spec.provider = choice.clone();
@@ -1147,11 +1191,31 @@ impl AgentService {
         content.extend(attachments.iter().map(att::reference_block));
         self.inner.store.append_message(id, "user", &content)?;
         self.inner.store.update_task(id, &TaskStatus::Queued, &row.usage)?;
+        // The worker takes over the reserved slot.
+        slot.keep();
         self.spawn(id.clone(), provider);
         let summary = self.inner.summary(id)?;
         self.inner.emit(AgentEvent::TaskChanged { task: Box::new(summary.clone()) });
         self.inner.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
         Ok(summary)
+    }
+
+    /// Take the task's worker slot for a new run of an existing task, or
+    /// refuse: while its loop runs (`agents.taskRunning`), or while a finished
+    /// worker still releases the task's services, e.g. research sessions
+    /// (`agents.taskFinishing`; a new run must wait until it has exited). The
+    /// check and the reservation are one step under the lock, so two requests
+    /// can never both start a worker.
+    fn reserve_run(&self, id: &TaskId) -> Result<RunSlot<'_>> {
+        let mut running = lock(&self.inner.running);
+        match running.get(id) {
+            Some(r) if !r.finished => Err(AgentError::new("agents.taskRunning", "The task is still running.")),
+            Some(_) => Err(AgentError::new("agents.taskFinishing", "The task is finishing up; try again in a moment.")),
+            None => {
+                running.insert(id.clone(), Running::new());
+                Ok(RunSlot { running: &self.inner.running, id: id.clone(), kept: false })
+            }
+        }
     }
 
     /// Cancel a running task: aborts the stream or the running tool.
@@ -1360,18 +1424,9 @@ impl AgentService {
     }
 
     fn spawn(&self, id: TaskId, provider: Arc<dyn Provider>) {
-        let cancel = CancellationToken::new();
-        lock(&self.inner.running).insert(
-            id.clone(),
-            Running {
-                cancel: cancel.clone(),
-                approvals: HashMap::new(),
-                questions: HashMap::new(),
-                stop_reason: None,
-                join: None,
-                finished: false,
-            },
-        );
+        // A continued task's slot was reserved by `reserve_run` (a cancel
+        // that arrived since then is kept); a new task takes its slot here.
+        let cancel = lock(&self.inner.running).entry(id.clone()).or_insert_with(Running::new).cancel.clone();
         let inner = Arc::clone(&self.inner);
         let task_id = id.clone();
         let handle = self.inner.runtime.spawn(async move {
@@ -2448,14 +2503,27 @@ impl Inner {
     }
 
     fn make_provider(&self, choice: &ProviderChoice, task: &TaskId) -> Result<Arc<dyn Provider>> {
+        self.make_provider_with(choice, task, None)
+    }
+
+    /// `make_provider` with the OpenAI connection context to use instead of
+    /// the one the task recorded (a model switch resolves it again; the
+    /// caller records it once the switch is accepted).
+    fn make_provider_with(
+        &self,
+        choice: &ProviderChoice,
+        task: &TaskId,
+        resolved: Option<OpenAiConnection>,
+    ) -> Result<Arc<dyn Provider>> {
         match choice.provider {
             ProviderKind::OpenAi => {
                 let (key, current) = self.connection_key(ProviderKind::OpenAi)?;
                 // The context the task resolved when it started (or switched)
                 // stays its billing context; a new task records the current one.
-                let connection = match self.store.task_connection(task)? {
-                    Some(recorded) => serde_json::from_value(recorded).unwrap_or(current),
-                    None => {
+                let connection = match (resolved, self.store.task_connection(task)?) {
+                    (Some(resolved), _) => resolved,
+                    (None, Some(recorded)) => serde_json::from_value(recorded).unwrap_or(current),
+                    (None, None) => {
                         let value = serde_json::to_value(&current).unwrap_or(Value::Null);
                         if self.store.task(task)?.is_some() {
                             self.store.set_task_connection(task, &value)?;

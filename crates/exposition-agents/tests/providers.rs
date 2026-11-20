@@ -926,3 +926,43 @@ async fn openai_refusals_keep_their_explanation_and_category() {
     let done = finish(&h, &task.id).await;
     assert_eq!(done.status, TaskStatus::Refused { category: Some("content_filter".into()), explanation: None });
 }
+
+/// AG-11: a model switch that is refused keeps the connection context the
+/// task recorded (its billing context), not the one in the settings now.
+#[tokio::test]
+async fn a_refused_switch_keeps_the_recorded_connection_context() {
+    let mock = Mock::start().await;
+    let h = harness(&mock).await;
+    use_openai(&h, "gpt-6.2-sol");
+    let with_project = |project: &str| {
+        let mut settings = h.service.settings().unwrap();
+        settings.openai = Some(OpenAiConnection { organization: None, project: Some(project.into()) });
+        h.service.update_settings(settings).unwrap();
+    };
+    with_project("proj_a");
+    mock.reply("/v1/responses", text_reply("one"));
+    let task = h.service.create_task(request(&h, "One")).unwrap();
+    finish(&h, &task.id).await;
+    let before = h.service.task(&task.id).unwrap();
+    with_project("proj_b");
+    // The switch cannot be made: the connection has no key at this moment.
+    h.service.clear_provider_key(ProviderKind::OpenAi).unwrap();
+    let to = ProviderChoice { provider: ProviderKind::OpenAi, model: "gpt-6.2-astra".into(), effort: Effort::Medium };
+    let refused = h
+        .service
+        .continue_task_with(
+            &task.id,
+            ContinueTaskRequest { prompt: "Two".into(), budgets: None, attachments: vec![], provider: Some(to) },
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, "agents.notConfigured", "{}", refused.message);
+    assert_eq!(h.service.task(&task.id).unwrap().spec, before.spec);
+    // A later follow-up without a switch still uses the recorded context.
+    h.service.set_provider_key(ProviderKind::OpenAi, OPENAI_KEY).unwrap();
+    mock.reply("/v1/responses", text_reply("two"));
+    h.service.continue_task(&task.id, "Two", None).unwrap();
+    finish(&h, &task.id).await;
+    let projects: Vec<Option<String>> =
+        mock.seen().iter().filter(|s| s.line.contains("/v1/responses")).map(|s| header(s, "OpenAI-Project")).collect();
+    assert_eq!(projects, [Some("proj_a".to_owned()), Some("proj_a".to_owned())]);
+}
