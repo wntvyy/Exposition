@@ -129,8 +129,29 @@ pub(crate) struct Inner {
 
 impl Inner {
     /// Write a run through and announce the change.
+    ///
+    /// `run` is the newest record of its id. A final record still waiting in
+    /// `unwritten` is therefore superseded: dropped once the store took this
+    /// one, replaced by it when the store did not, so that a later flush
+    /// never writes the older copy over a newer stored record. The waiting
+    /// records stay locked across the write (same order as
+    /// [`Self::flush_unwritten`]) so that no flush runs in between.
     pub(crate) fn persist(&self, key: &str, run: &WorkflowRun, step: Option<&str>) -> Result<(), WorkflowRunError> {
-        let result = self.store.lock().unwrap_or_else(|p| p.into_inner()).put(key, run);
+        let result = {
+            let mut pending = self.unwritten.lock().unwrap_or_else(|p| p.into_inner());
+            let result = self.store.lock().unwrap_or_else(|p| p.into_inner()).put(key, run);
+            match &result {
+                Ok(()) => {
+                    pending.remove(&run.id);
+                }
+                Err(_) => {
+                    if let Some(parked) = pending.get_mut(&run.id) {
+                        *parked = (key.to_owned(), run.clone());
+                    }
+                }
+            }
+            result
+        };
         let step_state = step.and_then(|s| run.steps.iter().find(|x| x.step == s)).map(|s| s.state);
         let _ = self.events.send(WorkflowRunEvent {
             run: run.id.clone(),
@@ -213,8 +234,12 @@ impl Inner {
         self.unwritten.lock().unwrap_or_else(|p| p.into_inner()).get(id).cloned()
     }
 
-    /// A stored run of any project (the seed basis of a reproduction).
+    /// A stored run of any project (the seed basis of a reproduction): as
+    /// it ended when its final record is still waiting to be written.
     pub(crate) fn stored_run(&self, id: &WorkflowRunId) -> Option<WorkflowRun> {
+        if let Some((_, run)) = self.unwritten_run(id) {
+            return Some(run);
+        }
         self.store.lock().unwrap_or_else(|p| p.into_inner()).get(id).ok().flatten().map(|(_, run)| run)
     }
 
@@ -225,7 +250,12 @@ impl Inner {
     /// The runner thread stopped without finishing the run: record it as
     /// failed (in-flight attempts interrupted; nothing repeated) and release it.
     pub(crate) fn abandoned(&self, key: &str, id: &WorkflowRunId) {
-        let found = self.store.lock().unwrap_or_else(|p| p.into_inner()).get(id);
+        // A run whose final record waits to be written did end: the stored
+        // "running" row is not its state.
+        let found = match self.unwritten_run(id) {
+            Some(_) => Ok(None),
+            None => self.store.lock().unwrap_or_else(|p| p.into_inner()).get(id),
+        };
         if let Ok(Some((_, mut run))) = found
             && run.state == WorkflowRunState::Running
         {
