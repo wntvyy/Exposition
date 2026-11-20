@@ -216,9 +216,14 @@ struct Harness {
 }
 
 fn harness(graph: Option<Arc<GraphService>>, data: &Path) -> Harness {
+    harness_at(graph, data.join(format!("agents-{}.sqlite3", uuid_like())))
+}
+
+/// A service over `database`: opening one over an existing database is what
+/// the next start of the application does.
+fn harness_at(graph: Option<Arc<GraphService>>, database: PathBuf) -> Harness {
     let recorder = Recorder::new();
     let documents = Arc::new(DocumentService::new());
-    let database = data.join(format!("agents-{}.sqlite3", uuid_like()));
     let service = AgentService::new(AgentConfig {
         database: Some(database.clone()),
         documents: Arc::clone(&documents),
@@ -2466,4 +2471,84 @@ async fn agents_never_rewrite_a_workflow_that_uses_v2_features() {
     let (_, err, text) = call(&h, &task, "w");
     assert!(!err, "{text}");
     assert_eq!(f.graph.workflow(&v1, None).unwrap().revision, 2);
+}
+
+// ---------------------------------------------------------------------------
+// A proposal that waits for approval when its task ends (AG-1).
+// ---------------------------------------------------------------------------
+
+/// Start a review-edits task whose only call is a `graph_propose`, and return
+/// once its approval is requested (unanswered).
+async fn proposal_awaiting_approval(h: &mut Harness, f: &Fixture) -> (TaskId, ApprovalRequest) {
+    let (_, input) = GraphKind::Propose.call(&f.ids.lemma);
+    h.service.load_script(script(vec![tool("t", tools::GRAPH_PROPOSE, input)])).unwrap();
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReviewEdits, ContextConsent::ScopeContent);
+    let task = h.service.create_task(req).unwrap();
+    let approval = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match h.events.recv().await {
+                Ok(AgentEvent::ApprovalRequested { approval }) if approval.task_id == task.id => break approval,
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(e) => panic!("events closed: {e}"),
+            }
+        }
+    })
+    .await
+    .expect("approval requested");
+    let proposals = h.service.task_detail(&task.id).unwrap().graph.proposals;
+    assert_eq!(proposals.iter().map(|p| p.state).collect::<Vec<_>>(), vec![ProposalState::AwaitingApproval]);
+    (task.id, approval)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canceling_a_task_resolves_its_waiting_proposal_once_and_it_cannot_be_approved() {
+    let f = fixture();
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let before = f.graph.status().revision;
+    let (id, approval) = proposal_awaiting_approval(&mut h, &f).await;
+    h.service.cancel_task(&id).unwrap();
+    wait(&mut h, &id, true).await;
+    let detail = h.service.task_detail(&id).unwrap();
+    assert_eq!(detail.summary.status, TaskStatus::Canceled);
+    let proposals = detail.graph.proposals;
+    assert_eq!(proposals.len(), 1, "{proposals:?}");
+    assert_eq!(proposals[0].state, ProposalState::Failed, "{proposals:?}");
+    let message = proposals[0].message.clone().unwrap_or_default();
+    assert!(message.contains("canceled") && message.contains("not approved"), "{message}");
+    // Nothing waits any more: the approval is gone and nothing was applied.
+    assert!(detail.approvals.is_empty());
+    assert_eq!(h.service.resolve_approval(&id, &approval.id, true).unwrap_err().code, "agents.noApproval");
+    assert_eq!(f.graph.status().revision, before);
+    assert_eq!(call(&h, &id, "t").0, ToolCallStatus::NotRun);
+    // The record does not change again.
+    let again = h.service.task_detail(&id).unwrap().graph.proposals;
+    assert_eq!(again[0].updated_at_ms, proposals[0].updated_at_ms);
+    assert_eq!(again[0].message, proposals[0].message);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_resolves_a_waiting_proposal_and_it_cannot_be_approved() {
+    let f = fixture();
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let before = f.graph.status().revision;
+    let (id, approval) = proposal_awaiting_approval(&mut h, &f).await;
+    // The next start of the application, over the same database.
+    let restarted = harness_at(Some(Arc::clone(&f.graph)), h.database.clone());
+    let detail = restarted.service.task_detail(&id).unwrap();
+    assert_eq!(detail.summary.status, TaskStatus::Interrupted);
+    let proposals = detail.graph.proposals;
+    assert_eq!(proposals.len(), 1, "{proposals:?}");
+    assert_eq!(proposals[0].state, ProposalState::Failed, "{proposals:?}");
+    let message = proposals[0].message.clone().unwrap_or_default();
+    assert!(message.contains("Exposition restarted") && message.contains("not approved"), "{message}");
+    assert!(detail.approvals.is_empty());
+    assert_eq!(restarted.service.resolve_approval(&id, &approval.id, true).unwrap_err().code, "agents.noApproval");
+    assert_eq!(f.graph.status().revision, before);
+    // A further start changes nothing.
+    let third = harness_at(Some(Arc::clone(&f.graph)), h.database.clone());
+    let again = third.service.task_detail(&id).unwrap().graph.proposals;
+    assert_eq!(again[0].updated_at_ms, proposals[0].updated_at_ms);
+    // Stop the first process's worker.
+    h.service.cancel_task(&id).unwrap();
+    h.service.join(&id).await;
 }

@@ -498,6 +498,9 @@ impl AgentService {
         }
         // No worker of a previous process waits for an answer any more.
         store.supersede_open_questions(None, "Exposition restarted")?;
+        // Nor can anyone approve a graph proposal a previous process showed
+        // (approvals live in memory): none is left "waiting for approval".
+        store.close_waiting_proposals(None, &unapproved_proposal("Exposition restarted"))?;
         let (events, _) = broadcast::channel(4096);
         // Project permissions live in the application's data directory (the
         // task database's folder), under execution/ beside trust.json.
@@ -2113,9 +2116,11 @@ impl Inner {
         }
     }
 
-    /// Supersede the task's open questions once its run ended (cancel, a
-    /// budget stop, a failure, a permission change), and drop their slots.
-    fn supersede_questions(&self, id: &TaskId, status: &TaskStatus) {
+    /// Once a run ended (cancel, a budget stop, a failure, a permission
+    /// change): supersede the task's open questions and drop their slots, and
+    /// close a graph proposal that still waits for an approval (its approval
+    /// request ended with the run, so it can never be approved).
+    fn close_pending(&self, id: &TaskId, status: &TaskStatus) {
         let reason = {
             let mut running = lock(&self.running);
             let entry = running.get_mut(id);
@@ -2131,6 +2136,9 @@ impl Inner {
             TaskStatus::Failed { message } => format!("The task stopped: {}", message.trim_end_matches('.')),
             _ => "The task stopped".to_owned(),
         });
+        if let Err(e) = self.store.close_waiting_proposals(Some(id), &unapproved_proposal(&reason)) {
+            tracing::error!("failed to close a waiting graph proposal: {e}");
+        }
         match self.store.supersede_open_questions(Some(id), &reason) {
             Ok(changed) => {
                 for (task_id, request_id) in changed {
@@ -2794,9 +2802,9 @@ impl Inner {
             Ok(None) => None,
             Err(e) => row_failure(&TaskUsage::default(), e.to_string()),
         };
-        if let Some((status, usage)) = status {
-            inner.finish(&id, &status, &usage);
-            inner.supersede_questions(&id, &status);
+        if let Some((status, usage)) = &status {
+            inner.finish(&id, status, usage);
+            inner.close_pending(&id, status);
         }
         // The terminal status is stored: review actions may proceed while the
         // worker releases services below.
@@ -2840,6 +2848,11 @@ impl Inner {
         self.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
         self.emit(AgentEvent::ReviewChanged { task_id: id.clone() });
     }
+}
+
+/// The record of a graph proposal whose approval can no longer be given.
+fn unapproved_proposal(reason: &str) -> String {
+    format!("{reason} before this proposal was answered: it was not approved, and nothing was applied.")
 }
 
 fn row_failure(usage: &TaskUsage, message: String) -> Option<(TaskStatus, TaskUsage)> {

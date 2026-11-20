@@ -20,6 +20,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "../palette.mjs";
+import { waitFor } from "../workspace-helpers.mjs";
 
 const MAIN = "= Notes\n\nLemma: the squares grow quickly.\n";
 const LEMMA = "Square monotonicity LEMMA-MARK";
@@ -113,7 +114,7 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     shots.push(path);
   };
 
-  const app = await launchApp({ env: { EXPOSITION_CREDENTIAL_NAMESPACE: namespace } });
+  let app = await launchApp({ env: { EXPOSITION_CREDENTIAL_NAMESPACE: namespace } });
   const info = await app.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("app_info"));
   if (!info.debugBuild) {
     await app.close();
@@ -273,6 +274,64 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     assert.equal(investigation.entity.origin.kind, "user");
     assert.ok(investigation.evidence.some((e) => e.operation.kind === "agentTask" && e.operation.id === task1.id));
     step("task kept as an investigation referencing the task", { investigation: investigation.entity.id });
+
+    // --- A proposal that waits for approval when its task is stopped (AG-1):
+    // it is recorded as not applied, once, and can no longer be approved.
+    const proposeOnly = async (label) => {
+      const revision = (await invoke(page, "graph_status")).revision;
+      await invoke(page, "agents_dev_load_script", {
+        script: {
+          turns: [
+            {
+              steps: [
+                tool("propose", "graph_propose", {
+                  summary: `Record ${label}`,
+                  base_revision: revision,
+                  operations: [
+                    { op: "create_entity", temp_id: "c", kind: "claim", label, attributes: [], bind_path: "main.typ", bind_start: -1, bind_end: -1 },
+                  ],
+                }),
+              ],
+            },
+            { steps: [{ text: "Recorded." }] },
+          ],
+        },
+      });
+      const task = await createTask(page, opened.root, { prompt: `Propose ${label}`, permission: "reviewEdits", consent: "scopeContent" });
+      await waitStatus(page, task.id, "awaitingApproval");
+      return task;
+    };
+    const beforeStop = await invoke(page, "graph_status");
+    const stopped = await proposeOnly("STOPPED-CLAIM-MARK");
+    await agentsPage.locator(`[data-testid=agents-page-task][data-task-id="${stopped.id}"]`).click();
+    await openSide("agents-page-proposals", "proposals");
+    await side.locator("[data-testid=agents-proposal][data-state=awaitingApproval]").waitFor();
+    const proposalsToggle = agentsPage.getByTestId("agents-page-proposals");
+    assert.equal((await proposalsToggle.textContent())?.trim(), "Proposals 1 · 1 waiting");
+    const shownApproval = (await invoke(page, "agents_task_detail", { task: stopped.id })).approvals[0];
+    assert.ok(shownApproval, "the proposal's approval is pending");
+    // Stop on the composer cancels the task.
+    await agentsPage.getByTestId("agents-cancel").click();
+    await waitStatus(page, stopped.id, "canceled");
+    const closedRow = side.locator("[data-testid=agents-proposal][data-state=failed]");
+    await closedRow.waitFor({ timeout: 10_000 });
+    assert.equal(await side.locator("[data-testid=agents-proposal][data-state=awaitingApproval]").count(), 0);
+    const closedText = (await closedRow.textContent()) ?? "";
+    assert.match(closedText, /Not applied/);
+    assert.match(closedText, /The task was canceled before this proposal was answered: it was not approved, and nothing was applied\./);
+    await waitFor(async () => ((await proposalsToggle.textContent()) ?? "").trim() === "Proposals 1", {
+      message: "the header no longer counts a waiting proposal",
+    });
+    const lateApproval = await attempt(page, "agents_approval_resolve", { task: stopped.id, approval: shownApproval.id, approved: true });
+    assert.equal(lateApproval.ok, false, "the approval is gone with the run");
+    assert.equal(lateApproval.error.code, "agents.noApproval", JSON.stringify(lateApproval));
+    const stoppedRecord = (await invoke(page, "agents_task_detail", { task: stopped.id })).graph.proposals;
+    assert.deepEqual(stoppedRecord.map((p) => p.state), ["failed"]);
+    assert.equal((await invoke(page, "graph_status")).revision, beforeStop.revision, "nothing was applied");
+    await shot(page, "agents-graph-proposal-stopped-light");
+    step("AG-1: Stop while a proposal waits: recorded Not applied (once), header count cleared, late approval refused", {
+      message: stoppedRecord[0].message,
+    });
 
     // --- Task 2: metadata-only consent hides labels everywhere the agent looks.
     await invoke(page, "agents_dev_load_script", {
@@ -492,6 +551,69 @@ export default async function agentsGraph({ launchApp, artifactsDir, assert }) {
     step("project B open: project A's task is refused; B's graph holds nothing of A", { project: otherGraph.project });
 
     assert.deepEqual(consoleErrors(app), [], "no console errors");
+
+    // --- The application closes while a proposal waits (AG-1): after the
+    // restart the task is Interrupted and its proposal reads Not applied.
+    const reopened = await invoke(page, "workspace_open", { path: project });
+    const beforeRestart = await invoke(page, "graph_status");
+    await invoke(page, "agents_dev_load_script", {
+      script: {
+        turns: [
+          {
+            steps: [
+              tool("propose", "graph_propose", {
+                summary: "Record a claim before the restart",
+                base_revision: beforeRestart.revision,
+                operations: [
+                  { op: "create_entity", temp_id: "c", kind: "claim", label: "RESTART-CLAIM-MARK", attributes: [], bind_path: "main.typ", bind_start: -1, bind_end: -1 },
+                ],
+              }),
+            ],
+          },
+          { steps: [{ text: "Recorded." }] },
+        ],
+      },
+    });
+    const waitingTask = await createTask(page, reopened.root, { prompt: "Propose before the restart", permission: "reviewEdits", consent: "scopeContent" });
+    await waitStatus(page, waitingTask.id, "awaitingApproval");
+    const before = await invoke(page, "agents_task_detail", { task: waitingTask.id });
+    assert.deepEqual(before.graph.proposals.map((p) => p.state), ["awaitingApproval"]);
+    const { dataDir } = app;
+    await app.close();
+    app = await launchApp({ dataDir, env: { EXPOSITION_CREDENTIAL_NAMESPACE: namespace } });
+    const restarted = app.page;
+    await restarted.setViewportSize({ width: 1440, height: 900 });
+    await restarted.getByTestId("agents-panel").waitFor({ timeout: 15_000 });
+    await invoke(restarted, "workspace_open", { path: project });
+    const after = await invoke(restarted, "agents_task_detail", { task: waitingTask.id });
+    assert.equal(after.summary.status.kind, "interrupted");
+    assert.deepEqual(after.graph.proposals.map((p) => p.state), ["failed"]);
+    assert.match(after.graph.proposals[0].message, /^Exposition restarted before this proposal was answered/);
+    assert.deepEqual(after.approvals, []);
+    const lateAfterRestart = await attempt(restarted, "agents_approval_resolve", {
+      task: waitingTask.id,
+      approval: before.approvals[0].id,
+      approved: true,
+    });
+    assert.equal(lateAfterRestart.error?.code, "agents.noApproval", JSON.stringify(lateAfterRestart));
+    assert.equal((await invoke(restarted, "graph_status")).revision, beforeRestart.revision, "nothing was applied");
+    await restarted.locator('[aria-label="Pages"]').getByRole("button", { name: "Agents", exact: true }).click();
+    const restartedPage = restarted.getByTestId("agents-page");
+    await restartedPage.locator(`[data-testid=agents-page-task][data-task-id="${waitingTask.id}"]`).click();
+    await waitFor(async () => ((await restartedPage.getByTestId("agents-page-proposals").textContent()) ?? "").trim() === "Proposals 1", {
+      message: "no proposal counted as waiting after the restart",
+    });
+    assert.equal(await restartedPage.getByTestId("agents-page-status").getAttribute("data-status"), "interrupted");
+    await restartedPage.getByTestId("agents-page-proposals").click();
+    const restartedRow = restartedPage.locator("[data-testid=agents-page-side] [data-testid=agents-proposal]");
+    await restartedRow.waitFor({ timeout: 10_000 });
+    assert.equal(await restartedRow.getAttribute("data-state"), "failed");
+    assert.match((await restartedRow.textContent()) ?? "", /Not applied/);
+    await shot(restarted, "agents-graph-proposal-after-restart-light");
+    step("AG-1: after a restart the task is Interrupted and its waiting proposal reads Not applied; the old approval is refused", {
+      message: after.graph.proposals[0].message,
+    });
+    assert.deepEqual(consoleErrors(app), [], "no console errors after the restart");
   } finally {
     await app.close();
   }
