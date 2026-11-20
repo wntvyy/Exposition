@@ -66,6 +66,7 @@ import { errorText, graphApi } from "./api";
 import { runChange } from "./changes";
 import { classifyEntity, graphActions } from "./graphOps";
 import {
+  CITED_EVIDENCE,
   entityDisplay,
   RELATION_FAMILY_CATEGORY,
   FAMILY_LABELS,
@@ -654,6 +655,17 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
             </ul>
           ) : (
             <p className="ui-muted">No evidence recorded.</p>
+          )}
+          {detail.citedEvidence.length > 0 && (
+            <div className="xp-graph-group" data-testid="graph-cited-evidence">
+              <h4 className="ui-group-label">{CITED_EVIDENCE.title}</h4>
+              <p className="ui-meta">{CITED_EVIDENCE.note}</p>
+              <ul className="xp-graph-rows" data-divided>
+                {detail.citedEvidence.map((ev) => (
+                  <EvidenceRow key={ev.id} evidence={ev} freshness={freshnessOf(detail, ev.id)} />
+                ))}
+              </ul>
+            </div>
           )}
           {/* The Mathematics view's own Formal verification section already lists the associations. */}
           {(entity.kind === "formalDeclaration" || !children) && (

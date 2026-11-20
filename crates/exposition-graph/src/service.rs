@@ -679,9 +679,28 @@ impl GraphService {
             // adding, relabelling, or keeping a rejected relation never makes
             // another item's record this item's own.
             let evidence = store.evidence_for_subject(id)?;
-            let evidence_freshness = evidence.iter().map(|e| (e.id.clone(), evidence_freshness(store, e))).collect();
-            let imported_evidence =
-                evidence.iter().filter(|e| !store.evidence_is_local(&e.id)).map(|e| e.id.clone()).collect();
+            // What a standing `evidenceFor` relation of this entity cites is
+            // returned apart from it, by the rule impact reads (`validate::cites`).
+            let mut cited_evidence: Vec<Evidence> = Vec::new();
+            'relations: for r in incoming.iter().chain(outgoing.iter()) {
+                for cited in &r.evidence {
+                    // Bounded like the entity's own records.
+                    if cited_evidence.len() >= 200 {
+                        break 'relations;
+                    }
+                    if evidence.iter().chain(cited_evidence.iter()).any(|e| &e.id == cited) {
+                        continue;
+                    }
+                    if let Some(e) = store.evidence(cited)?
+                        && validate::cites(r, &e)
+                    {
+                        cited_evidence.push(e);
+                    }
+                }
+            }
+            let shown = || evidence.iter().chain(cited_evidence.iter());
+            let evidence_freshness = shown().map(|e| (e.id.clone(), evidence_freshness(store, e))).collect();
+            let imported_evidence = shown().filter(|e| !store.evidence_is_local(&e.id)).map(|e| e.id.clone()).collect();
             let coverage = match (&entity.kind, bindings.first()) {
                 (EntityKind::Resource, Some(b)) => store.coverage(&b.path)?,
                 _ => None,
@@ -693,6 +712,7 @@ impl GraphService {
                 incoming,
                 neighbors,
                 evidence,
+                cited_evidence,
                 evidence_freshness,
                 imported_evidence,
                 coverage,

@@ -10,6 +10,8 @@ vi.mock("./reveal", () => ({ revealSource: vi.fn() }));
 const opIpc = vi.hoisted(() => ({ plan: vi.fn(), apply: vi.fn(), restore: vi.fn() }));
 vi.mock("../operations/ipc", () => ({ opCommands: opIpc, opEvents: { projectOp: vi.fn(async () => () => {}) } }));
 
+import type { Evidence } from "../../bindings/Evidence";
+import type { Freshness } from "../../bindings/Freshness";
 import { ipcGraphApi, setGraphApi } from "./api";
 import { createFakeGraph, entity, fakeVocabulary, relation, type FakeGraph } from "./fakeApi";
 import { EntityInspector, ImpactSection, type InspectorActions } from "./Inspector";
@@ -67,6 +69,51 @@ describe("Evidence of a statement with associated formal declarations", () => {
     expect(within(rows[1]!).getByText("Suggested")).toBeTruthy();
     fireEvent.click(within(rows[0]!).getByRole("button", { name: "oddSum_eq_sq" }));
     expect(selected).toEqual(["decl"]);
+  });
+
+  it("lists the records a relationship cites as cited support, apart from the item's own evidence", async () => {
+    // Review finding 1: the declaration's record cited by "decl is evidence for thm".
+    const record: Evidence = {
+      id: "ev-decl",
+      kind: "formalCheck",
+      subject: "decl",
+      operation: { kind: "leanAudit", id: "audit-1" },
+      inputs: [],
+      outcome: { kind: "verdict", verdict: "checked" },
+      environment: [],
+      outputs: [],
+      formal: null,
+      recordedBy: { kind: "service", service: "lean" },
+      recordedAtMs: 1,
+    };
+    const stale: Freshness = { kind: "stale", reasons: ["lean/OddSums.lean changed"] };
+    setGraphApi({
+      ...fake.api,
+      entity: async (id) => {
+        const detail = await fake.api.entity(id);
+        if (id === "thm") return { ...detail, citedEvidence: [record], evidenceFreshness: [[record.id, stale]] };
+        if (id === "decl") return { ...detail, evidence: [record], evidenceFreshness: [[record.id, stale]] };
+        return detail;
+      },
+    });
+    const view = render(<EntityInspector entityId="thm" vocabulary={vocabulary} actions={actions} />);
+    const cited = await screen.findByTestId("graph-cited-evidence", {}, { timeout: 3000 });
+    // Still no evidence of its own: the section says so and counts none.
+    expect(screen.getByText("No evidence recorded.")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Evidence 0" })).toBeTruthy();
+    expect(within(cited).getByRole("heading", { name: "Cited by a relationship" })).toBeTruthy();
+    expect(cited.textContent).toMatch(/Cited as support by an “is evidence for” relationship of this item\. These records are not recorded about it\./);
+    const rows = screen.getAllByTestId("graph-evidence");
+    expect(rows).toHaveLength(1);
+    expect(cited.contains(rows[0]!)).toBe(true);
+    expect(rows[0]!.getAttribute("data-kind")).toBe("formalCheck");
+    expect(within(rows[0]!).getByText("Stale")).toBeTruthy();
+    view.unmount();
+    // On the declaration the same record is its own evidence, not cited support.
+    render(<EntityInspector entityId="decl" vocabulary={vocabulary} actions={actions} />);
+    await screen.findByTestId("graph-evidence", {}, { timeout: 3000 });
+    expect(screen.queryByTestId("graph-cited-evidence")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Evidence 1" })).toBeTruthy();
   });
 
   it("says how a declaration's verdict gets recorded when it has none", async () => {

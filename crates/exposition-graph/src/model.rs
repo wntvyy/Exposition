@@ -649,7 +649,13 @@ pub struct EntityDetail {
     /// The other endpoints of those relations (bounded).
     pub neighbors: Vec<Entity>,
     pub evidence: Vec<Evidence>,
-    /// Applicability of each evidence record to current sources.
+    /// Records about other items (or none) that a standing `evidenceFor`
+    /// relation of this entity cites: support cited through a relationship,
+    /// never this entity's own evidence. The citing relations are the ones
+    /// in `outgoing`/`incoming` whose `evidence` names the record.
+    #[serde(default)]
+    pub cited_evidence: Vec<Evidence>,
+    /// Applicability of each evidence record (own and cited) to current sources.
     pub evidence_freshness: Vec<(EvidenceId, Freshness)>,
     /// Evidence not recorded by this installation (e.g. copied in with the
     /// project's graph): historical claims of their recorded origin, never

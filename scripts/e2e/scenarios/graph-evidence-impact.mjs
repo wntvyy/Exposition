@@ -366,6 +366,7 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     assert.equal(citation.status, "suggested");
     assert.deepEqual(citation.evidence, [evidence.id], "the relationship carries the citation");
     assert.equal(supported.evidence.length, 0, "a relationship citing the record gives the theorem no evidence of its own");
+    assert.deepEqual(supported.citedEvidence.map((e) => e.id), [evidence.id], "the cited record is returned apart, as cited support");
     const rejectCitation = await proposeNow([{ op: "setRelationStatus", relation: citation.id, status: "rejected" }]);
     await invoke(page, "graph_apply_change", { request: { proposal: rejectCitation.id, expectedRevision: rejectCitation.baseRevision } });
     const reproposed = await agent("Cite the Lean check for the theorem again", "autoApply", [
@@ -378,6 +379,7 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     assert.equal(rejectedCitation.status, "rejected", "the user's rejection stands");
     assert.ok(rejectedCitation.revision > citation.revision, "and is the later revision");
     assert.equal((await invoke(page, "graph_entity", { entity: theorem })).evidence.length, 0);
+    assert.deepEqual((await invoke(page, "graph_entity", { entity: theorem })).citedEvidence, [], "a rejected citation shows nothing");
     assert.ok(!(await impactOf(theorem)).evidence.some((e) => e.subject === theorem), "impact names no evidence of the theorem");
     note("the declaration's record cannot be moved, relabelled, or re-proposed after a rejection", { refused: ["graph.evidenceNotCarried", "graph.evidenceKind", "graph.evidenceSubject", "graph.sourceDerived", "graph.rejected"] });
 

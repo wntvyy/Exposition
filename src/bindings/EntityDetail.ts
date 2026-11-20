@@ -16,7 +16,14 @@ export type EntityDetail = { entity: Entity, bindings: Array<SourceBinding>, out
  */
 neighbors: Array<Entity>, evidence: Array<Evidence>, 
 /**
- * Applicability of each evidence record to current sources.
+ * Records about other items (or none) that a standing `evidenceFor`
+ * relation of this entity cites: support cited through a relationship,
+ * never this entity's own evidence. The citing relations are the ones
+ * in `outgoing`/`incoming` whose `evidence` names the record.
+ */
+citedEvidence: Array<Evidence>, 
+/**
+ * Applicability of each evidence record (own and cited) to current sources.
  */
 evidenceFreshness: Array<[EvidenceId, Freshness]>, 
 /**

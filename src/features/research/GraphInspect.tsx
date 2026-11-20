@@ -11,7 +11,7 @@ import type { ImpactReport } from "../../bindings/ImpactReport";
 import type { Relation } from "../../bindings/Relation";
 import { errorMessage } from "../../lib/ipc";
 import { graphCommands } from "../../lib/graphIpc";
-import { evidenceKindLabel, freshnessView, READINGS } from "../graph/model";
+import { CITED_EVIDENCE, evidenceKindLabel, freshnessView, READINGS } from "../graph/model";
 import { RelationStatus } from "../graph/RelationStatus";
 import { verdictView } from "../lean/evidence";
 import { Banner, Section, Spinner, StatusText, type Status } from "../../ui/components";
@@ -184,6 +184,17 @@ export function GraphDependencies({ entity, revision }: { entity: EntityId; revi
               <EvidenceRecord key={e.id} evidence={e} freshness={freshness.get(e.id)} />
             ))}
           </ul>
+        )}
+        {detail.citedEvidence.length > 0 && (
+          <>
+            <h4 className="ui-group-label">{CITED_EVIDENCE.title}</h4>
+            <p className="ui-meta">{CITED_EVIDENCE.note}</p>
+            <ul className="exp-graph__list" data-testid="graph-cited-evidence">
+              {detail.citedEvidence.map((e) => (
+                <EvidenceRecord key={e.id} evidence={e} freshness={freshness.get(e.id)} />
+              ))}
+            </ul>
+          </>
         )}
       </Section>
       <Section title="Change impact" count={impact?.items.length ?? 0} collapsible defaultExpanded={false}>
