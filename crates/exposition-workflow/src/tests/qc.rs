@@ -262,24 +262,51 @@ fn a_failed_final_write_does_not_leave_the_run_running() {
     assert_eq!(restarted.get(&run.id).unwrap().state, WorkflowRunState::Succeeded);
 }
 
-/// WF-5: a terminal record the store refuses as written (too large) is
-/// written without its attempt logs and reviewed code text, and says so.
+/// WF-5: a terminal record the store refuses for its size is written
+/// without its attempt logs and reviewed code text, and says so.
 #[test]
-fn a_terminal_record_that_cannot_be_written_whole_is_written_reduced() {
+fn a_terminal_record_that_is_too_large_is_written_reduced() {
     let f = fixture();
     let id = f.save(numerical(false));
-    // The full terminal record carries the attempt log "ok"; the reduced one does not.
-    let conn = refuse_writes(&f, "NEW.state != 'running' AND instr(NEW.body, '\"log\":\"ok\"') > 0");
-    let run = f.start(&id);
-    assert!(f.service.wait_idle(Duration::from_secs(20)));
-    assert_eq!(stored_state(&f, &run.id), "succeeded");
-    drop(conn);
+    let mut run = f.run_to_end(&id);
+    assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?}", run.message);
+    // The same run ending with a log beyond what one record may hold.
+    let step = run.steps.iter_mut().find(|s| s.step == "run").unwrap();
+    step.attempts.last_mut().unwrap().log = Some("x".repeat(33 * 1024 * 1024));
+    f.service.inner().persist_terminal(&crate::plan::project_key(&f.root), &mut run);
+    assert!(last_attempt(&run, "run").log.is_none(), "the record handed back is the one that was stored");
     let restarted = new_service(&f.db, &f.host, &f.batch, &f.lean, &f.research);
     let read = restarted.get(&run.id).unwrap();
     assert_eq!(read.state, WorkflowRunState::Succeeded);
     assert!(last_attempt(&read, "run").log.is_none());
     assert_eq!(last_attempt(&read, "run").outputs.len(), 3, "outputs and provenance are kept");
     assert!(read.message.as_deref().is_some_and(|m| m.contains("could not be written in full")), "{:?}", read.message);
+}
+
+/// Review finding 3: a final write that fails for a reason other than size
+/// does not cost the record its logs. The whole record waits and is written
+/// whole once the store works, although a reduced record would have been
+/// accepted meanwhile.
+#[test]
+fn a_terminal_record_refused_for_another_reason_is_not_reduced() {
+    let f = fixture();
+    let id = f.save(numerical(false));
+    // The full terminal record carries the attempt log "ok"; a reduced one would not.
+    let conn = refuse_writes(&f, "NEW.state != 'running' AND instr(NEW.body, '\"log\":\"ok\"') > 0");
+    let run = f.start(&id);
+    assert!(f.service.wait_idle(Duration::from_secs(20)));
+    assert_eq!(stored_state(&f, &run.id), "running", "nothing reduced was written in its place");
+    let read = f.service.get(&run.id).unwrap();
+    assert_eq!(read.state, WorkflowRunState::Succeeded);
+    assert_eq!(last_attempt(&read, "run").log.as_deref(), Some("ok"));
+    allow_writes(&conn);
+    drop(conn);
+    assert_eq!(f.service.get(&run.id).unwrap().state, WorkflowRunState::Succeeded);
+    let restarted = new_service(&f.db, &f.host, &f.batch, &f.lean, &f.research);
+    let read = restarted.get(&run.id).unwrap();
+    assert_eq!(read.state, WorkflowRunState::Succeeded);
+    assert_eq!(last_attempt(&read, "run").log.as_deref(), Some("ok"), "the whole record became durable");
+    assert!(read.message.is_none(), "{:?}", read.message);
 }
 
 /// WF-11: an association decision whose record could not be written stays
