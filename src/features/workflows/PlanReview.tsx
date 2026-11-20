@@ -23,13 +23,7 @@ import { Badge, Banner, Button, Dialog, ErrorState, IconButton, KeyValueList, Lo
 import { workflowRunCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
 import { DEFAULT_LIMITS, describeCondition, describeLimits, describeRepeat, paramText } from "./orchestration";
-import { CONTAINMENT_VIEW, EFFECT_LABELS, formatBytes, formatSeconds, formatTime, shortHash, STALE_PLAN_CODES } from "./runModel";
-
-const EXECUTION_CEILING: Record<string, string> = {
-  none: "No code runs",
-  restricted: "Restricted container only",
-  trustedNative: "Trusted native execution allowed (your account's privileges)",
-};
+import { CONTAINMENT_VIEW, EFFECT_LABELS, EXECUTION_CEILING_LABEL, formatBytes, formatSeconds, formatTime, shortHash, STALE_PLAN_CODES } from "./runModel";
 
 /** Full text with line numbers (read-only). Line numbers are not part of the copied text. */
 export function CodeListing({ text, label, testId }: { text: string; label: string; testId?: string }) {
@@ -283,7 +277,7 @@ export function PlanDetails({ plan }: { plan: ReviewPlan }) {
       label: "Most it may do",
       value: (
         <>
-          {EXECUTION_CEILING[ceiling.execution] ?? ceiling.execution}
+          {(EXECUTION_CEILING_LABEL as Record<string, string>)[ceiling.execution] ?? ceiling.execution}
           {ceiling.modelRequests ? "; may send declared inputs to the model provider" : "; no model requests"}
           {ceiling.retainResults ? "; may keep results and record evidence" : ""}
           {ceiling.proposeChanges ? "; may propose reviewable changes" : ""}

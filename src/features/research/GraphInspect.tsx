@@ -11,30 +11,29 @@ import type { ImpactReport } from "../../bindings/ImpactReport";
 import type { Relation } from "../../bindings/Relation";
 import { errorMessage } from "../../lib/ipc";
 import { graphCommands } from "../../lib/graphIpc";
-import { READINGS } from "../graph/model";
+import { evidenceKindLabel, freshnessView, READINGS } from "../graph/model";
 import { RelationStatus } from "../graph/RelationStatus";
 import { verdictView } from "../lean/evidence";
 import { Banner, Section, Spinner, StatusText, type Status } from "../../ui/components";
 
 /**
- * Freshness of evidence as a quiet status. "Current" is neutral (it is the
- * expected state, not an achievement); stale and unknown are never green.
+ * Freshness of one evidence record as a quiet status, in the Graph's words
+ * and tones (`freshnessView`, standalone form: Current, Stale, Freshness
+ * unknown; never green). A record
+ * whose freshness was not part of the answer says so; that is not "No
+ * evidence".
  */
 export function freshnessStatus(f: Freshness | undefined): { status: Status; label: string; detail?: string } {
   if (!f) return { status: "idle", label: "Freshness not computed" };
+  const view = freshnessView(f);
   switch (f.kind) {
     case "current":
-      return { status: "idle", label: "Current" };
+      return { status: view.status, label: view.standalone };
     case "stale":
-      return { status: "stale", label: "Stale (history)", detail: f.reasons[0] };
+      return { status: view.status, label: view.standalone, detail: f.reasons[0] };
     case "unknown":
-      return { status: "unavailable", label: "Freshness unknown", detail: f.reason };
+      return { status: view.status, label: view.standalone, detail: f.reason };
   }
-}
-
-/** The kind of evidence as the Graph inspector names it ("Formal check", "Computational", ...). */
-function kindLabel(kind: Evidence["kind"]): string {
-  return kind === "formalCheck" ? "Formal check" : kind.charAt(0).toUpperCase() + kind.slice(1);
 }
 
 function outcomeText(e: Evidence): string {
@@ -62,7 +61,7 @@ export function EvidenceRecord({ evidence, freshness }: { evidence: Evidence; fr
       <div className="exp-graph__evidence-head">
         <StatusText status={fresh.status} label={fresh.label} />
         <span>
-          {kindLabel(evidence.kind)} ·{" "}
+          {evidenceKindLabel(evidence.kind)} ·{" "}
           {evidence.operation.kind} <code className="ui-code">{evidence.operation.id}</code> · {outcomeText(evidence)}
         </span>
       </div>

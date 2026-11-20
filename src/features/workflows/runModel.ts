@@ -2,6 +2,7 @@
 // Wording follows UI_STANDARD "Workflow runs": containment is stated as what
 // the runner actually does, never "sandboxed" because a schema says so.
 import type { Containment } from "../../bindings/Containment";
+import type { ExecutionCeiling } from "../../bindings/ExecutionCeiling";
 import type { WorkflowAttemptState } from "../../bindings/WorkflowAttemptState";
 import type { WorkflowEffect } from "../../bindings/WorkflowEffect";
 import type { WorkflowOutputValue } from "../../bindings/WorkflowOutputValue";
@@ -56,6 +57,13 @@ export const EFFECT_LABELS: Record<WorkflowEffect, string> = {
   registerFormalEvidence: "Records Lean audit evidence",
   proposeDocumentChange: "Prepares a manuscript change for your review",
   proposeGraphChange: "Proposes project graph changes for your review",
+};
+
+/** What a workflow's execution ceiling allows, in the plan review and the editor (one wording). */
+export const EXECUTION_CEILING_LABEL: Record<ExecutionCeiling, string> = {
+  none: "No code runs",
+  restricted: "Restricted container only",
+  trustedNative: "Trusted native execution allowed (your account's privileges)",
 };
 
 export const RUN_STATE_VIEW: Record<WorkflowRunState, { status: Status; label: string }> = {

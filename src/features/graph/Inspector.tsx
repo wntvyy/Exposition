@@ -70,7 +70,9 @@ import {
   RELATION_FAMILY_CATEGORY,
   FAMILY_LABELS,
   FAMILY_ORDER,
+  evidenceKindLabel,
   freshnessView,
+  LIFECYCLE_LABEL,
   originLabel,
   relationDisplay,
   VERDICT_VIEW,
@@ -271,9 +273,7 @@ export function OutcomeText({ outcome }: { outcome: Evidence["outcome"] }) {
   }
 }
 
-export function evidenceKindLabel(kind: Evidence["kind"]): string {
-  return kind === "formalCheck" ? "Formal check" : kind.charAt(0).toUpperCase() + kind.slice(1);
-}
+export { evidenceKindLabel };
 
 export function EvidenceRow({ evidence, freshness }: { evidence: Evidence; freshness: Freshness | null }) {
   const fresh = freshnessView(freshness);
@@ -485,12 +485,6 @@ export interface EntityInspectorProps {
   /** Extra sections (e.g. Mathematics). */
   children?: (detail: EntityDetail) => ReactNode;
 }
-
-const LIFECYCLE_LABEL: Record<Exclude<Entity["lifecycle"], "active">, string> = {
-  tombstoned: "Removed from source",
-  archived: "Archived",
-  discarded: "Discarded",
-};
 
 export function EntityInspector({ entityId, vocabulary, actions, children }: EntityInspectorProps) {
   const loaded = useGraphLoad(`entity:${entityId}`, () => graphApi().entity(entityId));

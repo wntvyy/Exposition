@@ -128,6 +128,12 @@ describe("GraphDependencies", () => {
     expect(evidence.getAttribute("data-freshness")).toBe("current");
     const fresh = within(evidence).getByText("Current").closest(".ui-status-text")!;
     expect(fresh.getAttribute("data-status")).toBe("idle");
-    expect(freshnessStatus({ kind: "stale", reasons: ["obs.csv changed"] })).toMatchObject({ status: "stale", label: "Stale (history)" });
+    expect(freshnessStatus({ kind: "stale", reasons: ["obs.csv changed"] })).toMatchObject({ status: "stale", label: "Stale", detail: "obs.csv changed" });
+    // UI-3: one wording with the Graph (freshnessView); a record without a computed freshness is not "No evidence".
+    const { freshnessView } = await import("../graph/model");
+    expect(freshnessStatus({ kind: "current" }).label).toBe(freshnessView({ kind: "current" }).label);
+    expect(freshnessStatus({ kind: "unknown", reason: "no fingerprints" })).toMatchObject({ status: "unavailable", label: "Freshness unknown", detail: "no fingerprints" });
+    expect(freshnessView({ kind: "unknown", reason: "no fingerprints" })).toMatchObject({ label: "Unknown", standalone: "Freshness unknown" });
+    expect(freshnessStatus(undefined).label).toBe("Freshness not computed");
   });
 });

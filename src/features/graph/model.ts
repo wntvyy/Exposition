@@ -41,9 +41,11 @@ import type { EvidenceKind } from "../../bindings/EvidenceKind";
 import type { FormalAssociationState } from "../../bindings/FormalAssociationState";
 import type { FormalVerdict } from "../../bindings/FormalVerdict";
 import type { Freshness } from "../../bindings/Freshness";
+import type { Lifecycle } from "../../bindings/Lifecycle";
 import type { Origin } from "../../bindings/Origin";
 import type { RelationFamily as BindingRelationFamily } from "../../bindings/RelationFamily";
 import type { RelationKind } from "../../bindings/RelationKind";
+import type { BindingState } from "../../bindings/BindingState";
 import type { ResourceRole } from "../../bindings/ResourceRole";
 import type { ViewScope } from "../../bindings/ViewScope";
 import type { Vocabulary } from "../../bindings/Vocabulary";
@@ -346,6 +348,27 @@ export function originLabel(origin: Origin): string {
   }
 }
 
+// ----- item state vocabulary ---------------------------------------------------------------
+
+/** An item's lifecycle in words (the one table; "tombstoned" is never shown). */
+export const LIFECYCLE_LABEL: Record<Exclude<Lifecycle, "active">, string> = {
+  tombstoned: "Removed from source",
+  archived: "Archived",
+  discarded: "Discarded",
+};
+
+/** A source binding that is not resolved, as a badge standing on its own. */
+export const BINDING_BADGE_LABEL: Record<Exclude<BindingState, "resolved">, string> = {
+  missing: "Binding missing",
+  ambiguous: "Ambiguous binding",
+  unresolved: "Unresolved binding",
+};
+
+/** The kind of an evidence record ("Formal check", "Computational", ...). */
+export function evidenceKindLabel(kind: EvidenceKind): string {
+  return kind === "formalCheck" ? "Formal check" : kind.charAt(0).toUpperCase() + kind.slice(1);
+}
+
 // ----- verification vocabulary ------------------------------------------------------------
 
 /**
@@ -400,15 +423,20 @@ export function verdictThroughLink(
   return { label: `${view.label} (${qualifier.suffix})`, status: view.status, sentence: `${view.sentence} ${qualifier.sentence}`, qualified: true };
 }
 
-export function freshnessView(freshness: Freshness | null): { label: string; status: Status; detail: string } {
-  if (!freshness) return { label: "No evidence", status: "idle", detail: "There is no evidence to be current or stale." };
+/**
+ * Freshness of evidence, the one wording: `label` under a "Freshness" heading
+ * or column, `standalone` where no heading names it (a status beside a record
+ * in the Research inspector and the Lean panel, a badge on a canvas node).
+ */
+export function freshnessView(freshness: Freshness | null): { label: string; standalone: string; status: Status; detail: string } {
+  if (!freshness) return { label: "No evidence", standalone: "No evidence", status: "idle", detail: "There is no evidence to be current or stale." };
   switch (freshness.kind) {
     case "current":
-      return { label: "Current", status: "idle", detail: "The evidence matches the current sources." };
+      return { label: "Current", standalone: "Current", status: "idle", detail: "The evidence matches the current sources." };
     case "stale":
-      return { label: "Stale", status: "stale", detail: freshness.reasons.join("; ") || "A relevant source changed." };
+      return { label: "Stale", standalone: "Stale", status: "stale", detail: freshness.reasons.join("; ") || "A relevant source changed." };
     case "unknown":
-      return { label: "Unknown", status: "unavailable", detail: freshness.reason };
+      return { label: "Unknown", standalone: "Freshness unknown", status: "unavailable", detail: freshness.reason };
   }
 }
 

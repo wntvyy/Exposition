@@ -73,7 +73,7 @@ import {
   withComposites,
 } from "./orchestration";
 import { PlanReviewDialog } from "./PlanReview";
-import { CONTAINMENT_VIEW, EFFECT_LABELS } from "./runModel";
+import { CONTAINMENT_VIEW, EFFECT_LABELS, EXECUTION_CEILING_LABEL } from "./runModel";
 import { openRun, RunHistory } from "./RunView";
 import { CompositeSection, ConditionSection, RepeatSection } from "./StepOrchestration";
 import { TriggersSection } from "./TriggersPanel";
@@ -106,11 +106,7 @@ import {
   WORKFLOW_KEY_PREFIX,
 } from "./model";
 
-const EXECUTION_LABELS: Record<ExecutionCeiling, string> = {
-  none: "No code runs",
-  restricted: "Restricted container only",
-  trustedNative: "Trusted native execution allowed (your account's privileges)",
-};
+const EXECUTION_LABELS = EXECUTION_CEILING_LABEL;
 
 const UNBOUND = "__unbound";
 
