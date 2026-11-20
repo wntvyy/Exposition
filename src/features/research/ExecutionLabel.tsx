@@ -109,7 +109,7 @@ export function ExecutionModes() {
           </Badge>
           <span className="ui-meta">
             Workflow batch steps in Python, R, and Julia run in a container that sees only their declared inputs, with no
-            network. Runs are never moved to or from a sandbox silently.
+            network. Runs never move between the two modes silently.
           </span>
           {restricted === null ? (
             <StatusText status="running" label="Checking…" />
