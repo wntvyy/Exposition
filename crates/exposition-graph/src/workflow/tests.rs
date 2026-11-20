@@ -542,3 +542,31 @@ fn a_stored_runnable_claim_is_ignored() {
     let read = graph.workflow(&saved.id, None).unwrap();
     assert!(!read.validation.runnable);
 }
+
+/// PG-9: one stored record this version cannot read (damaged, or written by
+/// a newer version) does not hide every other workflow of the project.
+#[test]
+fn one_unreadable_stored_workflow_does_not_fail_the_whole_list() {
+    let (_d, project, graph) = service();
+    let save = |definition: WorkflowDefinition| {
+        let request = SaveWorkflowRequest { id: None, expected_revision: None, definition };
+        graph.save_workflow(&Origin::User, &request, &ValidationContext::default()).unwrap()
+    };
+    let good = save(audit());
+    let bad = save(numerical(false));
+    graph.detach();
+    let db = project.path().join(".exposition").join("graph.sqlite3");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let body: String =
+        conn.query_row("SELECT body FROM workflows WHERE id = ?1", [bad.id.as_str()], |r| r.get(0)).unwrap();
+    // A field this version does not know (the body is parsed strictly).
+    let newer = body.replacen('{', "{\"fromANewerVersion\":true,", 1);
+    conn.execute("UPDATE workflows SET body = ?1 WHERE id = ?2", [newer.as_str(), bad.id.as_str()]).unwrap();
+    drop(conn);
+    graph.attach(&std::fs::canonicalize(project.path()).unwrap());
+    let list = graph.workflows().expect("the readable workflows are listed");
+    assert_eq!(list.iter().map(|w| w.id.clone()).collect::<Vec<_>>(), vec![good.id.clone()]);
+    // The unreadable one is refused when it is opened, never guessed at.
+    assert!(graph.workflow(&bad.id, None).is_err());
+    assert!(graph.workflow(&good.id, None).is_ok());
+}

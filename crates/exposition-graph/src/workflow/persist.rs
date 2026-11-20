@@ -539,8 +539,19 @@ impl GraphService {
             let mut out = Vec::new();
             for row in rows {
                 let (id, rev, hash, state, body, saved) = row.map_err(StoreError::from)?;
-                let id = WorkflowId::parse(&id).map_err(|_| untrusted("id"))?;
-                let row = decode_row(rev, hash, state, body, saved)?;
+                // A record this version cannot read (damaged, or written by a
+                // newer version) is left out, never guessed at, and never
+                // hides the other workflows; opening it reports the problem.
+                let (id, row) = match WorkflowId::parse(&id)
+                    .map_err(|_| untrusted("id"))
+                    .and_then(|parsed| decode_row(rev, hash, state, body, saved).map(|row| (parsed, row)))
+                {
+                    Ok(read) => read,
+                    Err(e) => {
+                        eprintln!("a stored workflow ({}) is not listed: {e}", crate::store::truncate(&id, 64));
+                        continue;
+                    }
+                };
                 let entity = workflow_entity(store.entities_by_key(EntityKind::Workflow, id.as_str())?).map(|e| e.id);
                 let mut validation = row.body.validation.clone();
                 validation.state = row.state;
