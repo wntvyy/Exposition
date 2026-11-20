@@ -699,9 +699,10 @@ pub fn save(
         "warnings": validation.warnings,
         "diagnostics": diagnostics_json(validation),
         "ran": false,
-        // Well-formed only: whether it can be reviewed and run on this
-        // machine is the editor's answer (`summary` says so).
-        "wellFormed": well_formed,
+        // Well-formed only (the key is kept for existing readers): whether
+        // it can be reviewed and run on this machine is the editor's
+        // answer, as `summary` says.
+        "reviewable": well_formed,
         "summary": format!("{saved_text} {validation_text} Nothing was run. {readiness}"),
         "next": next,
         "open": WHERE_TO_OPEN,
