@@ -101,10 +101,6 @@ export async function loadProjectSettings(root: string): Promise<ProjectSettings
   }
 }
 
-export function forgetProjectSettings(): void {
-  useSettings.setState({ project: null, projectRoot: null, projectError: null });
-}
-
 /**
  * Save project settings (validated by the workspace service; open page views
  * of LaTeX entries rebuild with the new targets). Resolves with the refusal

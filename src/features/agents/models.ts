@@ -50,17 +50,6 @@ export function connectionOf(status: ProviderStatus | null, provider: ProviderKi
   return { provider, configured: false, credentialError: null, context: null, version: 0 };
 }
 
-/** The providers a picker offers (the scripted one only where it exists). */
-export function availableProviders(status: ProviderStatus | null): ProviderKind[] {
-  return status?.scriptedAvailable ? [...KEYED_PROVIDERS, "scripted"] : [...KEYED_PROVIDERS];
-}
-
-/** "Anthropic · claude-opus-5-5 · Medium effort" (parts joined by the caller). */
-export function choiceParts(choice: ProviderChoice, effortLabel: (e: Effort) => string): string[] {
-  if (choice.provider === "scripted") return [PROVIDER_NAMES.scripted];
-  return [PROVIDER_NAMES[choice.provider], choice.model || "no model chosen", `${effortLabel(choice.effort)} effort`];
-}
-
 /** Rows whose display name, exact ID, or provider name contain every word of the query. */
 export function filterModels(models: ModelDescriptor[], query: string): ModelDescriptor[] {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -211,20 +200,6 @@ export function effortForModel(model: ModelDescriptor, current: Effort): Effort 
 /** Forget remembered efforts (tests). */
 export function resetRememberedEfforts(): void {
   rememberedEfforts.clear();
-}
-
-/** Why the choice cannot be used yet (`null`: it can). */
-export function choiceProblem(
-  choice: ProviderChoice,
-  selected: ModelDescriptor | null,
-  acknowledged: boolean,
-): string | null {
-  if (choice.provider === "scripted") return null;
-  if (!choice.model.trim()) return "Choose a model.";
-  if (!selected) return null;
-  if (selected.agent.kind === "unsupported") return `${selected.id} cannot run agents: ${selected.agent.reason}`;
-  if (selected.agent.kind === "unverified" && !acknowledged) return "Confirm that you want to use this unverified model.";
-  return null;
 }
 
 // ---------------------------------------------------------------- catalog loading

@@ -28,6 +28,7 @@ use exposition_core::document::{
 use exposition_core::job::ExecutionPolicy;
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::byte_range_to_utf16;
+use exposition_workspace::fsutil::sha256_hex;
 use exposition_workspace::{DocumentService, WorkspaceService};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -2103,11 +2104,6 @@ fn saved_hash(env: &ToolEnv<'_>, path: &WorkspacePath) -> Option<String> {
     })?)
     .ok()?;
     Some(sha256_hex(&bytes))
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The spelling of `path` as it exists on disk (links and case/8.3 aliases

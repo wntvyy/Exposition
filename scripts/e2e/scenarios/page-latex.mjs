@@ -10,6 +10,8 @@
 // themes also to $EXPOSITION_DEV_HOME/ui-reference).
 //
 // Requires TeX (pdflatex, lualatex, bibtex) discoverable by the execution service.
+//
+// Requires a debug build: it calls the debug-only probe command tex_status.
 import { copyFile, cp, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";

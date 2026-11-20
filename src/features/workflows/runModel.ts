@@ -1,11 +1,11 @@
 // Presentation helpers for workflow run plans and runs (pure; no IPC).
 // Wording follows UI_STANDARD "Workflow runs": containment is stated as what
 // the runner actually does, never "sandboxed" because a schema says so.
+import { formatBytes, formatDateTime, formatDuration as formatElapsed, formatSeconds } from "../../lib/format";
 import type { Containment } from "../../bindings/Containment";
 import type { ExecutionCeiling } from "../../bindings/ExecutionCeiling";
 import type { WorkflowAttemptState } from "../../bindings/WorkflowAttemptState";
 import type { WorkflowEffect } from "../../bindings/WorkflowEffect";
-import type { WorkflowOutputValue } from "../../bindings/WorkflowOutputValue";
 import type { WorkflowProposalStatus } from "../../bindings/WorkflowProposalStatus";
 import type { WorkflowRunState } from "../../bindings/WorkflowRunState";
 import type {
@@ -125,31 +125,14 @@ export function shortHash(hash: string): string {
   return hex.length > 12 ? `${hex.slice(0, 12)}…` : hex;
 }
 
-export function formatBytes(size: number): string {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
-  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MiB`;
-  return `${(size / 1024 / 1024 / 1024).toFixed(1)} GiB`;
-}
-
-export function formatSeconds(seconds: number): string {
-  if (seconds < 60) return `${seconds} s`;
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  if (m < 60) return s ? `${m} min ${s} s` : `${m} min`;
-  const h = Math.floor(m / 60);
-  return m % 60 ? `${h} h ${m % 60} min` : `${h} h`;
-}
-
 export function formatDuration(fromMs: number, toMs: number | null): string | undefined {
   if (toMs === null) return undefined;
-  const seconds = Math.max(0, (toMs - fromMs) / 1000);
-  return seconds < 10 ? `${seconds.toFixed(1)} s` : formatSeconds(Math.round(seconds));
+  return formatElapsed(toMs - fromMs);
 }
 
 export function formatTime(ms: number | null): string {
   if (ms === null) return "—";
-  return new Date(ms).toLocaleString();
+  return formatDateTime(ms, { seconds: true });
 }
 
 /**
@@ -201,23 +184,6 @@ export function parseDelimited(text: string, delimiter: "," | "\t", maxRows = 20
   }
   if (cell !== "" || row.length) endRow();
   return { rows, truncated: total > rows.length, totalRows: total };
-}
-
-export function outputValueLabel(value: WorkflowOutputValue): string {
-  switch (value.kind) {
-    case "file":
-      return value.path;
-    case "retained":
-      return value.path;
-    case "formalEvidence":
-      return value.file;
-    case "report":
-      return "Report";
-    case "promotionProposal":
-      return `Manuscript change for ${value.document}`;
-    case "associationProposal":
-      return `${value.declarations.length} declaration association${value.declarations.length === 1 ? "" : "s"}`;
-  }
 }
 
 /** The formal evidence a step's association proposal was made from (same run, upstream). */

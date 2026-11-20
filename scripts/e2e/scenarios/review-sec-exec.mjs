@@ -13,6 +13,9 @@
 // PYTHONPATH/PERL5OPT/... variables.
 //
 // Prints `ok: ...`, `info: ...`, and `DEFECT: ...` lines; fails if any DEFECT.
+//
+// Requires a debug build: it calls the debug-only probe commands tex_build,
+// tex_status.
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { copyFile, cp, mkdir, mkdtemp, writeFile } from "node:fs/promises";

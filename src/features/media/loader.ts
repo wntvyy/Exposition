@@ -295,7 +295,7 @@ export async function readProjectImage(
   }
   if (!isCurrent()) throw stale();
   const bytes = new Uint8Array(buffer);
-  if (bytes.byteLength > MAX_IMAGE_BYTES) throw new ImageLoadError("tooLarge", `${path} is larger than 32 MB.`);
+  if (bytes.byteLength > MAX_IMAGE_BYTES) throw new ImageLoadError("tooLarge", `${path} is larger than 32 MiB.`);
   const format = sniffImage(bytes);
   if (!format) {
     throw new ImageLoadError(
@@ -492,11 +492,4 @@ export function resetImageCacheForTests(): void {
   idle.length = 0;
   listeners.clear();
   projectGeneration += 1;
-}
-
-/** "245 KB", "3.4 MB". */
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

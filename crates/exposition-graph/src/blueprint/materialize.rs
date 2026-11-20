@@ -22,8 +22,8 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use exposition_core::path::WorkspacePath;
+use exposition_workspace::fsutil::sha256_hex;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use ts_rs::TS;
 
 use super::{BlueprintRef, ProjectBlueprint, blueprint_origin, paths};
@@ -162,10 +162,6 @@ pub struct GraphApplied {
     pub entities: Vec<CreatedBlueprintEntity>,
     pub workflows: Vec<CreatedWorkflow>,
     pub research_space: Option<EntityId>,
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn hash_file(path: &Path) -> Option<String> {

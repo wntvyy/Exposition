@@ -24,6 +24,9 @@
 //    there (no commands), visible in the Agents view.
 // Screenshots go to test-results/e2e/project-create/ and, when
 // EXPOSITION_DEV_HOME is set, to $EXPOSITION_DEV_HOME/ui-reference/projects/.
+//
+// Requires a debug build: it calls the debug-only probe command
+// graph_operations.
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

@@ -6,8 +6,6 @@
 
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use crate::error::ResearchError;
 
 /// Helper protocol version this supervisor speaks.
@@ -17,14 +15,7 @@ pub const HELPER_VERSION: &str = "0.1.0";
 pub const HELPER_FILE_NAME: &str = "exposition_kernel_host.py";
 pub const HELPER_SOURCE: &str = include_str!("../../../workers/kernel-host/exposition_kernel_host.py");
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
+pub use exposition_workspace::fsutil::sha256_hex;
 
 /// Install the helper under `dir` (once per content hash) and return its path.
 pub fn install_helper(dir: &Path) -> Result<PathBuf, ResearchError> {

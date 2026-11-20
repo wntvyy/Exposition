@@ -28,7 +28,7 @@ const flag = (name) => {
 const base = flag("--url")[0] ?? "http://127.0.0.1:5175";
 const only = flag("--only").flatMap((v) => v.split(",")).filter(Boolean);
 
-const DIRECTIONS = ["compact", "balanced", "reading"];
+const DIRECTIONS = ["balanced"];
 const PALETTES = ["dark", "light", "ocean", "sage"];
 
 /** @type {{ name: string; q: string; full?: boolean; act?: (page: import("playwright-core").Page) => Promise<void> }[]} */

@@ -13,6 +13,9 @@
 //
 // Nothing is started, so nothing is downloaded. The full path (downloads,
 // several GB) is `mathlib-setup` and `mathlib`, both opt-in.
+//
+// Requires a debug build: it calls the debug-only probe commands lean_check,
+// lean_package_inspect.
 import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";

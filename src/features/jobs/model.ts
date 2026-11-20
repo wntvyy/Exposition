@@ -1,4 +1,5 @@
 // Pure job presentation helpers (status pills, durations, bounded output).
+import { formatDuration as formatElapsed } from "../../lib/format";
 import type { JobSummary } from "../../bindings/JobSummary";
 import type { OutputChunk } from "../../bindings/OutputChunk";
 import type { Status } from "../../ui/components";
@@ -68,13 +69,7 @@ export function jobDurationMs(job: JobSummary, now: number): number | null {
 
 export function formatDuration(ms: number | null): string {
   if (ms === null) return "—";
-  if (ms < 1000) return `${ms} ms`;
-  const seconds = ms / 1000;
-  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = Math.floor(seconds % 60);
-  if (minutes < 60) return `${minutes}m ${rest.toString().padStart(2, "0")}s`;
-  return `${Math.floor(minutes / 60)}h ${(minutes % 60).toString().padStart(2, "0")}m`;
+  return formatElapsed(ms);
 }
 
 /** Output retained by the UI for one job (newest chunks, bounded). */

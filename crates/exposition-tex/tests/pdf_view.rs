@@ -263,7 +263,7 @@ fn files_over_the_size_limit_are_refused_unread() {
     drop(big);
     let error = f.views.open(&f.workspace, &wp("big.pdf")).unwrap_err();
     assert_eq!(error.code, "pdf.tooLarge");
-    assert!(error.message.contains("64 MB"), "{}", error.message);
+    assert!(error.message.contains("64 MiB"), "{}", error.message);
 }
 
 #[test]

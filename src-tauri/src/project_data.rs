@@ -1,18 +1,15 @@
 //! P1 project operations — the data side (graph, workflows, runs, agent tasks,
 //! research records, triggers, Storage & History).
 //!
-//! OWNER: lane L2. The file side and the orchestrator (`project_ops.rs`, lane
-//! L1) call ONLY these functions; their signatures are the shared seam and
-//! change only through the coordinator. The work is done by
-//! `exposition_workflow::project_data` over the owning services (graph,
-//! workflow runs, triggers, research records, agent tasks); this module only
-//! builds its context from the application state.
+//! The file side and the orchestrator (`project_ops.rs`) call only these
+//! functions. The work is done by `exposition_workflow::project_data` over the
+//! owning services (graph, workflow runs, triggers, research records, agent
+//! tasks); this module only builds its context from the application state.
 //!
-//! Seam addition (L2, for the coordinator): [`restore_data`] restores an
-//! app-managed recoverable deletion by its token (`<kind>:<id>`, the
-//! `OpOutcome.restore` of a data target); it returns `None` for any other
-//! token (a file restore), so `project_op_restore` can try it first.
-#![allow(dead_code)]
+//! [`restore_data`] restores an app-managed recoverable deletion by its token
+//! (`<kind>:<id>`, the `OpOutcome.restore` of a data target); it returns `None`
+//! for any other token (a file restore), so `project_op_restore` can try it
+//! first.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

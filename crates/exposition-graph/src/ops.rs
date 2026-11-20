@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::ids::{EntityId, EvidenceId, ProposalId, RelationId};
-use crate::model::{AssertionStatus, Entity, GraphDelta, Lifecycle, Origin, Relation, SourceSelector};
+use crate::model::{AssertionStatus, GraphDelta, Lifecycle, Origin, SourceSelector};
 use crate::vocabulary::{EntityKind, EvidenceKind, RelationKind, ResourceRole};
 
 /// An entity named by id, or by a temporary id created earlier in the same request.
@@ -189,13 +189,4 @@ pub enum ApplyOutcome {
     Conflict { current_revision: u64, diagnostics: Vec<GraphDiagnostic> },
     /// The operations are invalid against the current graph; nothing applied.
     Invalid { current_revision: u64, diagnostics: Vec<GraphDiagnostic> },
-}
-
-/// A result of a validated change for consumers that need the records.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-#[serde(rename_all = "camelCase")]
-pub struct AppliedRecords {
-    pub entities: Vec<Entity>,
-    pub relations: Vec<Relation>,
 }

@@ -40,6 +40,7 @@ const { initialAgentsState, openApproval, useAgents, AGENTS_PAGE_ID } = await im
 const { AgentsPage, keptTaskIds, taskMatches } = await import("./AgentsPage");
 const { AgentPanel } = await import("./AgentPanel");
 const { GraphContextView, ProposalList, freshnessLabel, proposalLabel } = await import("./GraphViews");
+const { syncStateLabel } = await import("../graph/status");
 const { startProjectGeneration } = await import("./generation");
 const { EDITOR_PAGE, pages, resetPagesForTests, usePages } = await import("../../app/pages");
 // The feature's registrations (the Agents page among them), as the app loads them.
@@ -266,6 +267,32 @@ describe("graph context and proposals", () => {
     expect(freshnessLabel("pending").status).toBe("stale");
   });
 
+  it("words entity facts and synchronization as the Graph page does, never as raw enum words", () => {
+    const entities = [
+      { ...context.entities[0]!, binding: "ambiguous" as const, coverage: "unsupported" as const, lifecycle: "tombstoned" as const },
+      { ...context.entities[1]!, binding: "missing" as const, evidence: [{ kind: "formalCheck" as const, freshness: "stale" as const }] },
+    ];
+    render(<GraphContextView graph={{ ...graph, context: { ...context, entities, relations: [], freshness: "unavailable" } }} />);
+    const rows = screen.getAllByTestId("agents-graph-entity");
+    expect(within(rows[0]!).getByText("Ambiguous binding")).toBeTruthy();
+    expect(within(rows[0]!).getByText("Coverage: Not supported")).toBeTruthy();
+    expect(within(rows[0]!).getByText("Removed from source")).toBeTruthy();
+    expect(within(rows[1]!).getByText("Binding missing")).toBeTruthy();
+    expect(within(rows[1]!).getByText("Formal check evidence: Stale")).toBeTruthy();
+    const text = screen.getByTestId("agents-graph-context").textContent ?? "";
+    expect(text).not.toMatch(/tombstoned|binding ambiguous|coverage unsupported|evidence: stale/);
+    expect(text).toContain("No relationships among these entities.");
+    // One wording for synchronization: the Graph page's.
+    expect(screen.getByText("Synchronization unavailable")).toBeTruthy();
+    expect(freshnessLabel("unavailable")).toEqual({ status: "unavailable", label: syncStateLabel({ state: "unavailable" }) });
+    expect(freshnessLabel("pending").label).toBe("Reconciliation pending");
+  });
+
+  it("names relationships in the empty proposals state", () => {
+    render(<ProposalList proposals={[]} />);
+    expect(screen.getByText(/Entities and relationships the agent proposes/)).toBeTruthy();
+  });
+
   it("lists proposals with their state and complete operations", () => {
     render(<ProposalList proposals={[proposal, { ...proposal, toolUseId: "t2", state: "applied", revision: 8 }]} />);
     const items = screen.getAllByTestId("agents-proposal");
@@ -409,6 +436,10 @@ describe("Editor ↔ Agents navigation keeps one task and its approval", () => {
     render(<AgentsPage />);
     await act(async () => pages.show(AGENTS_PAGE_ID));
     act(() => useAgents.setState((s) => ({ page: { ...s.page, selected: "task-1" } })));
+    // Keeping is a bookmark, as in Research; the archive icon means the opposite action there.
+    const keepIcon = screen.getByTestId("agents-keep-investigation").querySelector("svg")?.getAttribute("class") ?? "";
+    expect(keepIcon).toMatch(/lucide-bookmark($| )/);
+    expect(keepIcon).not.toMatch(/archive/);
     await act(async () => {
       fireEvent.click(screen.getByTestId("agents-keep-investigation"));
     });

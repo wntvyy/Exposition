@@ -1,5 +1,6 @@
 // Research view model: pure functions over the Rust research types, so the
 // event reducer, status vocabulary, and attachment helpers are unit-testable.
+import { formatDuration as formatElapsed } from "../../lib/format";
 import type { ArtifactRecord } from "../../bindings/ArtifactRecord";
 import type { OutputEntry } from "../../bindings/OutputEntry";
 import type { ResearchEvent } from "../../bindings/ResearchEvent";
@@ -316,21 +317,10 @@ export function displayArtifacts(run: RunSummary | undefined, ids: string[]): {
   };
 }
 
-export function formatClock(ms: number): string {
-  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
 export function formatDuration(run: RunSummary, now: number): string | undefined {
   const end = run.finishedAtMs ?? (isActiveRun(run) && !run.queued ? now : null);
   if (end === null) return undefined;
-  const seconds = Math.max(0, (end - run.startedAtMs) / 1000);
-  return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
-}
-
-export function formatBytes(size: number): string {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
-  return `${(size / 1024 / 1024).toFixed(1)} MiB`;
+  return formatElapsed(end - run.startedAtMs);
 }
 
 /** Strip terminal escape sequences that some kernels leave in text. */

@@ -273,7 +273,7 @@ describe("PdfViewer", () => {
     await act(async () => open.resolve(info(1, 30)));
     await waitFor(() => expect(viewer().getAttribute("data-status")).toBe("ready"));
     expect(ipc.mediaPdfOpen).toHaveBeenCalledWith("out/paper one.pdf");
-    expect(screen.getByTestId("pdf-facts").textContent).toBe("30 pages · PDF · 2 KB");
+    expect(screen.getByTestId("pdf-facts").textContent).toBe("30 pages · PDF · 2.0 KiB");
     expect(screen.getByTestId("pdf-page-indicator").textContent).toBe("Page 1 of 30");
     // Only pages near the viewport exist, not all 30.
     expect(shownPages()).toEqual([1, 2]);
@@ -366,7 +366,7 @@ describe("PdfViewer", () => {
     ipc.mediaPdfOpen.mockResolvedValueOnce(info(2, 1));
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await screen.findByAltText("Page 1");
-    expect(screen.getByTestId("pdf-facts").textContent).toBe("1 page · PDF · 2 KB");
+    expect(screen.getByTestId("pdf-facts").textContent).toBe("1 page · PDF · 2.0 KiB");
   });
 
   it("says when only the first pages of a very long PDF are shown", async () => {
@@ -375,7 +375,7 @@ describe("PdfViewer", () => {
     await screen.findByAltText("Page 1");
     expect(screen.getByText("Showing the first 2,000 of 2,345 pages.")).toBeTruthy();
     expect(screen.getByTestId("pdf-page-indicator").textContent).toBe("Page 1 of 2000");
-    expect(screen.getByTestId("pdf-facts").textContent).toBe("2,345 pages · PDF · 2 KB");
+    expect(screen.getByTestId("pdf-facts").textContent).toBe("2,345 pages · PDF · 2.0 KiB");
   });
 
   it("shows a page that cannot be rendered as that page's problem, not the file's", async () => {
@@ -418,7 +418,7 @@ describe("PdfViewer", () => {
     expect(viewer().getAttribute("data-view")).toBe("1");
     await act(async () => reopened.resolve(info(2, 5)));
     await waitFor(() => expect(viewer().getAttribute("data-view")).toBe("2"));
-    expect(screen.getByTestId("pdf-facts").textContent).toBe("5 pages · PDF · 2 KB");
+    expect(screen.getByTestId("pdf-facts").textContent).toBe("5 pages · PDF · 2.0 KiB");
     // The replaced view is released: its pictures revoked, its token closed.
     expect(ipc.mediaPdfClose).toHaveBeenCalledWith(1);
     for (const url of firstUrls) expect(revoked).toContain(url);
@@ -469,7 +469,7 @@ describe("PdfViewer", () => {
     await screen.findByAltText("Page 1");
     await act(async () => slow.resolve(info(1, 9)));
     expect(viewer().getAttribute("data-view")).toBe("2");
-    expect(screen.getByTestId("pdf-facts").textContent).toBe("1 page · PDF · 2 KB");
+    expect(screen.getByTestId("pdf-facts").textContent).toBe("1 page · PDF · 2.0 KiB");
     expect(ipc.mediaPdfClose).toHaveBeenCalledWith(1);
     expect(ipc.mediaPdfPage.mock.calls.every(([token]) => token === 2)).toBe(true);
   });

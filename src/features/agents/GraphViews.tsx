@@ -4,28 +4,36 @@
 import { Network } from "lucide-react";
 
 import type { ContextEntity } from "../../bindings/ContextEntity";
+import type { EvidenceState } from "../../bindings/EvidenceState";
+import type { Freshness } from "../../bindings/Freshness";
 import type { GraphContext } from "../../bindings/GraphContext";
 import type { ProposalState } from "../../bindings/ProposalState";
 import type { SyncState } from "../../bindings/SyncState";
 import type { TaskGraphInfo } from "../../bindings/TaskGraphInfo";
 import type { TaskProposal } from "../../bindings/TaskProposal";
 import { Badge, Banner, DataTable, EmptyState, FileIcon, ListRow, Section, StatusText, type BadgeTone } from "../../ui/components";
-import { relationDisplay } from "../graph/model";
+import { BINDING_BADGE_LABEL, LIFECYCLE_LABEL, evidenceKindLabel, freshnessView, relationDisplay } from "../graph/model";
 import { RelationStatus } from "../graph/RelationStatus";
+import { coverageStateLabel, syncStateLabel } from "../graph/status";
 import { CONSENT_LABELS, type PillState } from "./format";
 
-/** Graph synchronization in the shared status vocabulary. */
+const SYNC_STATUS: Record<SyncState, PillState["status"]> = {
+  synchronized: "succeeded",
+  reconciling: "running",
+  pending: "stale",
+  unavailable: "unavailable",
+};
+
+/** Graph synchronization, worded as on the Graph page (`syncStateLabel`). */
 export function freshnessLabel(state: SyncState): PillState {
-  switch (state) {
-    case "synchronized":
-      return { status: "succeeded", label: "Graph synchronized" };
-    case "reconciling":
-      return { status: "running", label: "Graph reconciling" };
-    case "pending":
-      return { status: "stale", label: "Reconciliation pending" };
-    case "unavailable":
-      return { status: "unavailable", label: "Graph unavailable" };
-  }
+  return { status: SYNC_STATUS[state], label: syncStateLabel({ state }) };
+}
+
+/** An evidence record's freshness in the Graph page's words ("Current", "Stale", "Unknown"). */
+function evidenceFreshnessLabel(state: EvidenceState): string {
+  const freshness: Freshness =
+    state === "stale" ? { kind: "stale", reasons: [] } : state === "unknown" ? { kind: "unknown", reason: "" } : { kind: "current" };
+  return freshnessView(freshness).label;
 }
 
 /** A proposal's state with a specific label (never a generic "Done"). */
@@ -68,36 +76,18 @@ function entityName(entity: ContextEntity | undefined, id: string): string {
   return entity.label ?? `${kindTitle(entity.kind)} ${shortId(entity.id)}`;
 }
 
-/** One-line summary for the task view (panel and page). */
-export function graphSummary(context: GraphContext): string {
-  const entities = context.entities.length;
-  return `Graph context sent with the latest run: revision ${context.revision} · ${entities} ${entities === 1 ? "entity" : "entities"} in scope${
-    context.truncated ? " (summarized)" : ""
-  }`;
-}
-
-const EVIDENCE_KIND: Record<string, string> = {
-  computational: "Computational",
-  formalCheck: "Formal check",
-  review: "Review",
-  build: "Build",
-  literature: "Literature",
-};
-
-/** Relation status tones shared with the Graph page (accepted solid; others dashed). */
-
-/** Facts about an entity as badges (text always; dashed when provisional). */
+/** Facts about an entity as badges, in the Graph page's words (text always; dashed when provisional). */
 function EntityBadges({ entity }: { entity: ContextEntity }) {
   const badges: { text: string; tone: BadgeTone; dashed?: boolean }[] = [];
   if (entity.binding && entity.binding !== "resolved") {
-    badges.push({ text: `binding ${entity.binding}`, tone: entity.binding === "ambiguous" ? "warning" : "neutral", dashed: true });
+    badges.push({ text: BINDING_BADGE_LABEL[entity.binding], tone: entity.binding === "ambiguous" ? "warning" : "neutral", dashed: true });
   }
-  if (entity.coverage) badges.push({ text: `coverage ${entity.coverage}`, tone: entity.coverage === "pending" ? "stale" : "neutral" });
-  if (entity.lifecycle !== "active") badges.push({ text: entity.lifecycle, tone: "neutral", dashed: true });
+  if (entity.coverage) badges.push({ text: `Coverage: ${coverageStateLabel(entity.coverage)}`, tone: entity.coverage === "pending" ? "stale" : "neutral" });
+  if (entity.lifecycle !== "active") badges.push({ text: LIFECYCLE_LABEL[entity.lifecycle], tone: "neutral", dashed: true });
   for (const e of entity.evidence) {
     // Current evidence is a fact, not a verification: neutral like the Graph page; stale/unknown never green.
     badges.push({
-      text: `${EVIDENCE_KIND[e.kind] ?? e.kind} evidence: ${e.freshness}`,
+      text: `${evidenceKindLabel(e.kind)} evidence: ${evidenceFreshnessLabel(e.freshness)}`,
       tone: e.freshness === "stale" ? "stale" : "neutral",
       dashed: e.freshness !== "current",
     });
@@ -157,7 +147,7 @@ function ContextEntities({ context }: { context: GraphContext }) {
 
 function ContextRelations({ context }: { context: GraphContext }) {
   const byId = new Map(context.entities.map((e) => [e.id, e]));
-  if (context.relations.length === 0) return <p className="ui-meta">No relations among these entities.</p>;
+  if (context.relations.length === 0) return <p className="ui-meta">No relationships among these entities.</p>;
   return (
     <ul className="agents-list" aria-label="Relationships in the task's graph context">
       {context.relations.map((r) => (
@@ -344,7 +334,7 @@ export function ProposalList({ proposals }: { proposals: TaskProposal[] }) {
       <EmptyState
         icon={Network}
         title="No graph changes proposed"
-        description="Entities and relations the agent proposes for the project graph appear here."
+        description="Entities and relationships the agent proposes for the project graph appear here."
       />
     );
   }

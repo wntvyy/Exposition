@@ -17,9 +17,10 @@ use exposition_lean::evidence::{
 };
 use exposition_lean::setup::{LeanPackageInspection, LeanSetupPlan, LeanSetupRequest, LeanSetupStatus};
 use exposition_lean::{
-    LeanAuditRecord, LeanCheckReport, LeanCheckRequest, LeanCheckTarget, LeanDocumentState, LeanError, LeanGoals,
-    LeanHover, LeanLocation, LeanProjectInfo,
+    LeanAuditRecord, LeanDocumentState, LeanError, LeanGoals, LeanHover, LeanLocation, LeanProjectInfo,
 };
+#[cfg(debug_assertions)]
+use exposition_lean::{LeanCheckReport, LeanCheckRequest, LeanCheckTarget};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
 
@@ -30,7 +31,9 @@ pub const LEAN_EVENT: &str = "lean:event";
 /// Emitted if the frontend fell behind and must re-read `lean_documents`.
 pub const LEAN_RESYNC: &str = "lean:resync";
 
+#[cfg(debug_assertions)]
 const MAX_GOAL_POSITIONS: usize = 32;
+#[cfg(debug_assertions)]
 const MAX_CHECK_TIMEOUT_MS: u64 = 600_000;
 
 fn validate_document(document: &DocumentId) -> Result<(), LeanError> {
@@ -106,6 +109,9 @@ pub async fn lean_install_toolchain(state: State<'_, AppState>, document: Docume
 }
 
 /// Check a Lean file and report the result for the exact text checked.
+/// DEV-ONLY (debug builds): no interface calls this; the end-to-end scenarios use
+/// it as a probe. Compiled, listed (`DEV_COMMANDS`), and granted only in debug builds.
+#[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn lean_check(state: State<'_, AppState>, request: LeanCheckRequest) -> Result<LeanCheckReport, LeanError> {
     if let LeanCheckTarget::Document { document } = &request.target {
@@ -280,6 +286,9 @@ fn validate_request(request: &LeanSetupRequest) -> Result<(), LeanError> {
 }
 
 /// What a folder of the open project holds as a Lake package (reads files only).
+/// DEV-ONLY (debug builds): no interface calls this; the end-to-end scenarios use
+/// it as a probe. Compiled, listed (`DEV_COMMANDS`), and granted only in debug builds.
+#[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn lean_package_inspect(
     state: State<'_, AppState>,
@@ -362,6 +371,18 @@ pub fn forward_setup_events(app: AppHandle) {
             }
         }
     });
+}
+
+/// Grant the debug-only probe commands (never present in release builds).
+#[cfg(debug_assertions)]
+pub fn add_dev_capability(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::ipc::CapabilityBuilder;
+    app.add_capability(
+        CapabilityBuilder::new("dev-lean-probes")
+            .window("main")
+            .permission("allow-lean-check")
+            .permission("allow-lean-package-inspect"),
+    )
 }
 
 /// Forward Lean events to the webview in order.

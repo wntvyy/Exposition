@@ -18,6 +18,9 @@
 //    pending record that reconciliation resolves without touching the source.
 //
 // Observations: test-results/e2e/research-workspace/observations.json.
+//
+// Requires a debug build: it calls the debug-only probe commands
+// graph_operations, research_space.
 import { cp, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";

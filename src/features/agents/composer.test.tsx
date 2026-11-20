@@ -60,7 +60,7 @@ const { TaskComposer, DEFAULT_BUDGETS, resetComposerForTests } = await import(".
 const { TaskView } = await import("./TaskView");
 const { TranscriptEntry } = await import("./Transcript");
 const { drafts, NEW_TASK_DRAFT, clipboardImages, genericPasteName } = await import("./drafts");
-const { attachmentMeta, humanSize } = await import("./Attachments");
+const { attachmentMeta } = await import("./Attachments");
 const { initialAgentsState, useAgents } = await import("./store");
 
 let nextId = 0;
@@ -186,9 +186,9 @@ describe("clipboard and formatting helpers", () => {
     expect(genericPasteName("image.png")).toBe(true);
     expect(genericPasteName("")).toBe(true);
     expect(genericPasteName("chart.png")).toBe(false);
-    expect(humanSize(812)).toBe("812 bytes");
-    expect(attachmentMeta(image("a.png"))).toBe("PNG image · 48.2 KB · 1280×720");
-    expect(attachmentMeta(info("paper.pdf", { kind: "pdf", mediaType: "application/pdf", sizeBytes: 1_200_000 }))).toBe("PDF · 1.1 MB");
+    expect(attachmentMeta(info("notes.txt", { kind: "text", mediaType: "text/plain", sizeBytes: 812 }))).toBe("Text · 812 B");
+    expect(attachmentMeta(image("a.png"))).toBe("PNG image · 48.2 KiB · 1280×720");
+    expect(attachmentMeta(info("paper.pdf", { kind: "pdf", mediaType: "application/pdf", sizeBytes: 1_200_000 }))).toBe("PDF · 1.1 MiB");
   });
 });
 
@@ -207,7 +207,7 @@ describe("new task composer", () => {
     });
     const rows = within(screen.getByRole("list", { name: "Attachments" })).getAllByTestId("agents-attachment");
     expect(rows.map((r) => r.dataset.attachmentId)).toEqual([first.id, second.id]);
-    expect(rows[0]!.textContent).toContain("Text · 812 bytes");
+    expect(rows[0]!.textContent).toContain("Text · 812 B");
     const rejections = screen.getByTestId("agents-attachment-rejections");
     expect(rejections.textContent).toContain("A file was not attached");
     expect(rejections.textContent).toContain("tool.exe: This kind of file cannot be attached.");
@@ -280,11 +280,11 @@ describe("new task composer", () => {
   it("explains a rejected pasted image and keeps the other attachments", async () => {
     ipc.agentsAttachmentsAddBytes
       .mockResolvedValueOnce(added(image("Pasted image 1.png")))
-      .mockResolvedValueOnce({ kind: "rejected", name: "Pasted image 2.png", code: "attachments.imageTooLarge", message: "The image is 9.0 MB; images can be at most 5.0 MB." });
+      .mockResolvedValueOnce({ kind: "rejected", name: "Pasted image 2.png", code: "attachments.imageTooLarge", message: "The image is 9.0 MiB; images can be at most 5.0 MiB." });
     render(<TaskComposer onCreated={() => {}} />);
     fireEvent.paste(screen.getByTestId("agents-prompt"), { clipboardData: clipboard({ files: [png([1]), png([2])], filesAgain: false }) });
     await screen.findByTestId("agents-attachment-rejections");
-    expect(screen.getByTestId("agents-attachment-rejection").textContent).toBe("Pasted image 2.png: The image is 9.0 MB; images can be at most 5.0 MB.");
+    expect(screen.getByTestId("agents-attachment-rejection").textContent).toBe("Pasted image 2.png: The image is 9.0 MiB; images can be at most 5.0 MiB.");
     expect(screen.getAllByTestId("agents-attachment")).toHaveLength(1);
   });
 
@@ -442,7 +442,7 @@ describe("transcript attachments", () => {
     const list = screen.getByRole("list", { name: "Attachments" });
     const rows = within(list).getAllByTestId("agents-attachment");
     expect(rows.map((r) => r.dataset.attachmentId)).toEqual([shot.id, gone.id]);
-    expect(rows[0]!.textContent).toContain("PNG image · 48.2 KB · 1280×720");
+    expect(rows[0]!.textContent).toContain("PNG image · 48.2 KiB · 1280×720");
     expect(rows[1]!.dataset.missing).toBe("true");
     expect(rows[1]!.textContent).toContain("Content no longer available");
     await waitFor(() => expect(within(rows[0]!).getByTestId("agents-attachment-thumb").getAttribute("src")).toMatch(/^data:image\/png;base64,/));

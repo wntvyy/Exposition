@@ -1,5 +1,6 @@
 // The projects' Auto permissions in Settings → Model providers: inspect,
 // change the open project's, revoke any.
+import { formatDate } from "../../lib/format";
 import { useEffect, useState } from "react";
 
 import type { PermissionChoice } from "../../bindings/PermissionChoice";
@@ -124,7 +125,7 @@ export function ProjectPermissionsGroup() {
               static
               codeTitle
               title={entry.root}
-              meta={[profileSummary(entry.permissions), `Updated ${new Date(entry.permissions.updatedAtMs).toLocaleDateString()}`].join(" · ")}
+              meta={[profileSummary(entry.permissions), `Updated ${formatDate(entry.permissions.updatedAtMs)}`].join(" · ")}
               trailing={
                 <div className="agents-row">
                   {!entry.exists && <StatusText status="unavailable" label="Folder no longer exists" />}

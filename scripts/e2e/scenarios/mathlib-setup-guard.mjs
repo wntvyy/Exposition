@@ -21,6 +21,9 @@
 //
 // Self-skips without Lean 4.35 installed through elan (set
 // EXPOSITION_REQUIRE_LEAN=1 to fail instead).
+//
+// Requires a debug build: it calls the debug-only probe command
+// lean_package_inspect.
 import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";

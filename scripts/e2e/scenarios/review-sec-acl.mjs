@@ -93,7 +93,7 @@ export default async function reviewSecAcl({ launchApp, artifactsDir }) {
   record("INFO", "core/plugin grants", pluginGrants.join(", "));
 
   // The debug-only runtime capabilities are created only under cfg(debug_assertions).
-  for (const file of ["execution.rs", "agents.rs", "research.rs", "files.rs"]) {
+  for (const file of ["execution.rs", "agents.rs", "research.rs", "files.rs", "tex.rs", "lean.rs", "graph.rs"]) {
     const text = await readFile(join(tauriDir, "src", file), "utf8");
     const gated = /#\[cfg\(debug_assertions\)\]\s*pub fn add_dev_capability/.test(text);
     check(`${file}-add_dev_capability-is-debug-only`, gated);
@@ -106,7 +106,7 @@ export default async function reviewSecAcl({ launchApp, artifactsDir }) {
     "lib.rs-add_dev_capability-calls-are-debug-only",
     calls >= 3 &&
       gatedCalls === calls &&
-      ["execution", "agents", "research"].every((m) =>
+      ["execution", "agents", "research", "files", "tex", "lean", "graph"].every((m) =>
         new RegExp(String.raw`#\[cfg\(debug_assertions\)\]\s*${m}::add_dev_capability`).test(libRs),
       ),
     `${gatedCalls} of ${calls} calls gated`,

@@ -405,7 +405,7 @@ impl GraphStore {
             && meta.len() > MAX_DATABASE_BYTES
         {
             return Err(StoreError::Untrusted(format!(
-                "the file is {} MB; graphs larger than {} MB are not opened",
+                "the file is {} MiB; graphs larger than {} MiB are not opened",
                 meta.len() / 1_048_576,
                 MAX_DATABASE_BYTES / 1_048_576
             )));
@@ -820,17 +820,6 @@ impl GraphStore {
         rows.map(|r| r?).collect()
     }
 
-    /// Paths whose coverage reports unresolved bindings or references.
-    pub fn paths_with_unresolved(&self) -> StoreResult<Vec<WorkspacePath>> {
-        let mut stmt = self.conn.prepare_cached("SELECT path FROM coverage WHERE unresolved > 0 LIMIT 50000")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(WorkspacePath::parse(&row?).map_err(|_| untrusted("coverage path"))?);
-        }
-        Ok(out)
-    }
-
     /// Files waiting for link targets, with the targets they wait for.
     pub fn index_wanted(&self) -> StoreResult<Vec<(WorkspacePath, Vec<String>)>> {
         let mut stmt =
@@ -1183,16 +1172,6 @@ impl GraphStore {
         rows.map(|r| r?).collect()
     }
 
-    /// Relations with the given origin kind (`extracted`) whose `from` is one
-    /// of `ids`.
-    pub fn relations_from_all(&self, ids: &[EntityId]) -> StoreResult<Vec<Relation>> {
-        let mut out = Vec::new();
-        for id in ids {
-            out.extend(self.relations_from(id)?);
-        }
-        Ok(out)
-    }
-
     /// Coverage as last reconciled, ignoring a pending change (the
     /// reconciler's own view; others use [`Self::coverage`]).
     pub fn coverage_stored(&self, path: &WorkspacePath) -> StoreResult<Option<ResourceCoverage>> {
@@ -1290,10 +1269,6 @@ impl GraphStore {
             ],
         )?;
         Ok(())
-    }
-
-    pub fn delete_view(&mut self, id: &ViewId) -> StoreResult<bool> {
-        Ok(self.conn.execute("DELETE FROM views WHERE id = ?1", [id.as_str()])? > 0)
     }
 }
 

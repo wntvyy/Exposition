@@ -275,22 +275,6 @@ impl PageMapping {
         fallback
     }
 
-    /// Glyphs whose source range intersects `range` (selection painting).
-    pub fn glyphs_in_range(&self, path: &WorkspacePath, range: TextRange) -> Vec<u32> {
-        self.targets
-            .iter()
-            .enumerate()
-            .filter_map(|(i, t)| match t {
-                GlyphTarget::Source { path: p, range: r, .. }
-                    if p == path && r.start < range.end && range.start < r.end =>
-                {
-                    Some(i as u32)
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
     /// The glyph drawn at a page point (ink first, then layout box), mapped
     /// or not — lets a page view show generated/unsupported regions (and
     /// their reason) instead of placing a caret in them.

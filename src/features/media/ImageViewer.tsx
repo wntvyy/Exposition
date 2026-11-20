@@ -8,7 +8,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Keyboar
 
 import type { EditorProps } from "../../app/registry";
 import { Button, ErrorState, IconButton, LoadingState, ToggleButton, Toolbar, UnavailableState } from "../../ui/components";
-import { FORMAT_LABELS, formatBytes, type ImageLoadError } from "./loader";
+import { formatBytes } from "../../lib/format";
+import { FORMAT_LABELS, type ImageLoadError } from "./loader";
 import { useProjectImage } from "./useProjectImage";
 import "./media.css";
 

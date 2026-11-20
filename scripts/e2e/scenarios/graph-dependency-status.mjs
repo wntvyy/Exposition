@@ -13,6 +13,9 @@
 //         still shows the rejected suggestion, labelled; change impact of the
 //         definition excludes both. The same after changing the selection
 //         and after relaunching the app.
+//
+// Requires a debug build: it calls the debug-only probe command
+// graph_reconcile.
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

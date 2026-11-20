@@ -183,10 +183,6 @@ export function isDelete(kind: OpKind): kind is { kind: "delete"; permanent: boo
   return kind.kind === "delete";
 }
 
-export function isPermanent(kind: OpKind): boolean {
-  return kind.kind === "delete" && kind.permanent;
-}
-
 /** Imperative verb of an operation ("Delete", "Delete permanently", "Duplicate", "Paste"). */
 export function verbOf(kind: OpKind): string {
   switch (kind.kind) {
@@ -426,13 +422,4 @@ export function restoreTitle(original: OpTarget, outcome: OpOutcome, labels: Tar
     return `Restored ${name} as ${quoted(targetName(restoredAt))}`;
   }
   return `Restored ${name}`;
-}
-
-/** Sizes in binary units (KiB, MiB, GiB); `null` = not measurable. */
-export function formatBytes(size: number | null): string {
-  if (size === null) return "not measured";
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
-  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MiB`;
-  return `${(size / 1024 / 1024 / 1024).toFixed(2)} GiB`;
 }

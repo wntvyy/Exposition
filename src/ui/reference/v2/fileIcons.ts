@@ -4,9 +4,6 @@
 // sample's explicit theme parameter and rule names for the icon table.
 import {
   fileIconUrl,
-  ICON_EXTENSIONS,
-  ICON_FILE_NAMES,
-  ICON_RELATIVE_PATHS,
   resolveFileIcon as resolveProduction,
   type FileIconAsset,
   type FileTypeId,
@@ -16,10 +13,6 @@ export type IconAsset = FileIconAsset;
 export type NodeKind = "file" | "folder";
 export type ThemeKind = "light" | "dark";
 export type IconRule = "folder" | "path" | "filename" | "extension" | "existing-glyph" | "generic";
-
-export const EXTENSIONS = ICON_EXTENSIONS;
-export const FILE_NAMES = ICON_FILE_NAMES;
-export const RELATIVE_PATHS = ICON_RELATIVE_PATHS;
 
 export interface IconResolution {
   rule: IconRule;

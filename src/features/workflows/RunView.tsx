@@ -16,6 +16,7 @@
 // the run states its cause; each attempt shows its recorded environment.
 // Export manifest writes the run manifest; Reproduce opens a new plan pinned
 // to this run's inputs, with environment drift notices, approved like any.
+import { formatBytes } from "../../lib/format";
 import { Check, Cpu, Eye, FileDown, FileWarning, History, RotateCcw, Square, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -76,7 +77,6 @@ import {
   describeCause,
   environmentFacts,
   filePreviewKind,
-  formatBytes,
   formatDuration,
   formatTime,
   instanceCounts,

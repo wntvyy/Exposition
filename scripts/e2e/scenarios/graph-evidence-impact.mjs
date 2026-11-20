@@ -45,6 +45,9 @@
 //
 // Requires Lean through elan with leanprover/lean4:v4.35.0; without it the
 // scenario reports SKIPPED unless EXPOSITION_REQUIRE_LEAN=1.
+//
+// Requires a debug build: it calls the debug-only probe commands lean_check,
+// graph_reconcile.
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";

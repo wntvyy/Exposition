@@ -1,5 +1,6 @@
 // Pure settings-view logic: sections, tool rows, image state, and the
 // capability summary derived from real service status (never hard-coded).
+import { formatDateTime } from "../../lib/format";
 import type { AppInfo } from "../../bindings/AppInfo";
 import type { DockerImage } from "../../bindings/DockerImage";
 import type { DockerSettings } from "../../bindings/DockerSettings";
@@ -123,7 +124,7 @@ export function imageOptions(images: DockerImage[] | null, configured: string | 
 export function restrictedGuarantees(docker: DockerSettings): string[] {
   return [
     "No network access (--network=none)",
-    "Project folder mounted read-only at /workspace; writes go only to a per-run output folder and a 256 MB /tmp",
+    "Project folder mounted read-only at /workspace; writes go only to a per-run output folder and a 256 MiB /tmp",
     `Runs as a non-root user (${docker.user}) with all capabilities dropped and no privilege escalation`,
     "No host environment: only variables the run sets explicitly; credentials are never passed",
     `Limits: ${docker.memory} memory, ${docker.cpus} CPUs, ${docker.pidsLimit} processes`,
@@ -148,7 +149,7 @@ export function nestedTrustedRoots(target: string, all: string[]): string[] {
 
 export function formatGrantedAt(ms: number | null, locale?: string): string {
   if (ms === null) return "Date not recorded";
-  return new Date(ms).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" });
+  return formatDateTime(ms, { locale });
 }
 
 // ---------- Capabilities ----------

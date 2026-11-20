@@ -41,11 +41,6 @@ fn extension(path: &WorkspacePath) -> Option<String> {
     path.extension().map(str::to_ascii_lowercase)
 }
 
-/// True when `path` has an extension this module reads.
-pub fn is_image_path(path: &WorkspacePath) -> bool {
-    extension(path).is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str()))
-}
-
 /// Where an image reference leads, checked against the open folder.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -93,7 +88,7 @@ impl WorkspaceService {
                 WorkspaceError::new(
                     "image.tooLarge",
                     format!(
-                        "{path} is {} MB; images up to {} MB are shown.",
+                        "{path} is {} MiB; images up to {} MiB are shown.",
                         size / (1024 * 1024),
                         MAX_IMAGE_BYTES / (1024 * 1024)
                     ),
@@ -122,7 +117,7 @@ impl WorkspaceService {
                 WorkspaceError::new(
                     "pdf.tooLarge",
                     format!(
-                        "{path} is {} MB; PDF files up to {} MB are shown.",
+                        "{path} is {} MiB; PDF files up to {} MiB are shown.",
                         size / (1024 * 1024),
                         MAX_PDF_BYTES / (1024 * 1024)
                     ),

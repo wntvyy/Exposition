@@ -1589,10 +1589,6 @@ impl GraphService {
         })
     }
 
-    pub fn delete_view(&self, id: &ViewId) -> GraphResult<bool> {
-        self.with_store(|s| Ok(s.delete_view(id)?))
-    }
-
     fn proposals_clear(&self) {
         let mut cache = self.proposals.lock().unwrap_or_else(|p| p.into_inner());
         cache.order.clear();
@@ -2090,9 +2086,4 @@ fn validate_view(input: &GraphViewInput) -> GraphResult<()> {
         return bad("the local depth is too large");
     }
     Ok(())
-}
-
-/// A binding's state is `Resolved` only when reconciliation confirmed it.
-pub fn is_resolved(state: BindingState) -> bool {
-    state == BindingState::Resolved
 }

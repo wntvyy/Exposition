@@ -180,9 +180,9 @@ fn io_code(error: &io::Error) -> &'static str {
 fn size_text(bytes: u64) -> String {
     match bytes {
         b if b < 1024 => format!("{b} bytes"),
-        b if b < 1024 * 1024 => format!("{:.1} KB", b as f64 / 1024.0),
-        b if b < 1024 * 1024 * 1024 => format!("{:.1} MB", b as f64 / 1_048_576.0),
-        b => format!("{:.1} GB", b as f64 / 1_073_741_824.0),
+        b if b < 1024 * 1024 => format!("{:.1} KiB", b as f64 / 1024.0),
+        b if b < 1024 * 1024 * 1024 => format!("{:.1} MiB", b as f64 / 1_048_576.0),
+        b => format!("{:.1} GiB", b as f64 / 1_073_741_824.0),
     }
 }
 

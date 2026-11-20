@@ -5,6 +5,7 @@
 // list's state with a refresh. Then the defaults every new task inherits and
 // the projects' Auto permissions. Everything goes through the agents service
 // IPC; status changes arrive as provider events in the agents store.
+import { formatRelativeTime } from "../../lib/format";
 import { ChevronDown, KeyRound, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
@@ -24,7 +25,7 @@ import {
   StatusText,
   TextField,
 } from "../../ui/components";
-import { CONSENT_LABELS, relativeTime } from "../agents/format";
+import { CONSENT_LABELS } from "../agents/format";
 import { choiceSummary, defaultChoice, ModelMenuContent } from "../agents/ModelMenu";
 import { catalogRows, PROVIDER_NAMES, useConnectionCatalog } from "../agents/models";
 import { agents, useAgents } from "../agents/store";
@@ -76,7 +77,7 @@ function CatalogState({ name, catalog }: { name: string; catalog: Catalog }) {
   if (!connection.configured) return <span className="ui-meta">Listed once an API key is saved</span>;
   if (error) return <StatusText status="failed" label="Could not load the model list" detail={error} wrap />;
   if (!list) return <span className="ui-meta">{loading ? "Loading…" : "Not loaded"}</span>;
-  const fetched = list.fetchedAtMs ? relativeTime(list.fetchedAtMs) : null;
+  const fetched = list.fetchedAtMs ? formatRelativeTime(list.fetchedAtMs) : null;
   if (list.state === "stale") {
     return (
       <StatusText

@@ -8,10 +8,12 @@ import { Badge, StatusPill } from "../../ui/components";
 
 /**
  * Graph synchronization in words: the one wording for every surface that
- * names it (the Graph page's pill; the Agents graph context should read it
- * here too instead of keeping its own copy).
+ * names it (the Graph page's pill, the Agents graph context). A surface that
+ * does not know the pending count or the last checkpoint leaves them out.
  */
-export function syncStateLabel(freshness: Pick<GraphFreshness, "state" | "pending" | "checkpointMs">): string {
+export function syncStateLabel(
+  freshness: Pick<GraphFreshness, "state"> & Partial<Pick<GraphFreshness, "pending" | "checkpointMs">>,
+): string {
   switch (freshness.state) {
     case "synchronized":
       return "Graph synchronized";

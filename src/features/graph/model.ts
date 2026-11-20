@@ -293,10 +293,6 @@ export function entityDisplay(index: VocabularyIndex | null, entity: Pick<Entity
   return { typeLabel: kind.title, icon: kind.icon, category: kind.category, kind };
 }
 
-export function roleLabel(role: ResourceRole): string {
-  return ROLE_DISPLAY[role].label;
-}
-
 /** Display ordering only: does the vocabulary list this endpoint pair? */
 export function endpointAllowed(relation: RelationKindDisplay, from: EntityKind, to: EntityKind): boolean {
   return relation.endpoints.has(`${from}>${to}`);

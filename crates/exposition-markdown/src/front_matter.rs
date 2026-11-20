@@ -62,11 +62,6 @@ impl FrontMatter {
     pub fn scalar(&self, key: &str) -> Option<&Scalar> {
         self.get(key).and_then(|e| e.values.first())
     }
-
-    /// The scalar whose value range contains byte `p` (boundaries included).
-    pub fn scalar_at(&self, p: usize) -> Option<&Scalar> {
-        self.entries.iter().flat_map(|e| &e.values).find(|s| s.range.start <= p && p <= s.range.end)
-    }
 }
 
 /// Parse the YAML `content` located at byte `base` of the Markdown source.

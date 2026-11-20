@@ -5,6 +5,9 @@
 // DEFECT was reproduced.
 //
 // Runs only when named: `npm run e2e -- review-m7-graph-fs`.
+//
+// Requires a debug build: it calls the debug-only probe commands
+// graph_reconcile, graph_operations, research_space.
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

@@ -3,7 +3,7 @@
 // transcripts, approvals, and reviews are shared; this page only adds its own
 // navigation (selected task, section, filter), so moving between Editor and
 // Agents never duplicates a task or loses an approval or review.
-import { Archive, Bot, BookmarkCheck, FileDiff, FolderOpen, GitPullRequestArrow, Network, PanelLeftClose, PanelLeftOpen, PanelRight, Plus, X } from "lucide-react";
+import { Bookmark, BookmarkCheck, Bot, FileDiff, FolderOpen, GitPullRequestArrow, Network, PanelLeftClose, PanelLeftOpen, PanelRight, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import type { GraphSnapshot } from "../../bindings/GraphSnapshot";
@@ -223,7 +223,7 @@ function TaskHeader({ task, kept, onKept }: { task: TaskSummary; kept: boolean; 
           </ToggleButton>
           <Button
             size="sm"
-            icon={kept ? BookmarkCheck : Archive}
+            icon={kept ? BookmarkCheck : Bookmark}
             isDisabled={active || kept}
             isPending={busy}
             onPress={() => void keep()}

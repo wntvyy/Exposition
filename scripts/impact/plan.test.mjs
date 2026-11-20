@@ -262,8 +262,8 @@ describe("renames, deletions, and no changes", () => {
   });
 
   it("a deleted file nothing visibly uses is uncovered, not silently complete (review finding)", () => {
-    const p = plan([{ status: "D", path: "scripts/e2e/os-drag.ps1" }]);
-    expect(p.uncovered).toEqual(["scripts/e2e/os-drag.ps1"]);
+    const p = plan([{ status: "D", path: "scripts/e2e/unused-helper.ps1" }]);
+    expect(p.uncovered).toEqual(["scripts/e2e/unused-helper.ps1"]);
   });
 
   it("broad plans report uncovered files too (review finding)", () => {

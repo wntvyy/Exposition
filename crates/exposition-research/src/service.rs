@@ -491,14 +491,6 @@ impl ResearchService {
         Ok(())
     }
 
-    /// Stop every session (application exit).
-    pub async fn shutdown_all(&self) {
-        let sessions: Vec<Arc<Session>> = lock(&self.shared.sessions).drain().map(|(_, s)| s).collect();
-        for session in sessions {
-            session.shutdown().await;
-        }
-    }
-
     // ---- runs -----------------------------------------------------------
 
     pub fn execute(&self, request: ExecuteRequest) -> Result<RunSummary, ResearchError> {

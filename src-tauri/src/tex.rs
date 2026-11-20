@@ -1,22 +1,32 @@
-//! LaTeX build commands and event forwarding.
+//! LaTeX builds for the shared typesetting flow, and debug-only build probes.
 //!
-//! The webview can request builds of a LaTeX target of the open workspace
-//! (default: the project's target from `.exposition/project.json`), read
-//! target status, cancel, and fetch the immutable pages of a finished build
-//! (PNG bytes for blob URLs, and the glyph mapping). Builds run in Rust through
+//! `.tex` entries are watched, built and exported through the `typesetting_*`
+//! commands, which dispatch here; builds are reported as the shared
+//! `typesetting:build` / `typesetting:status` events. Builds run in Rust through
 //! the shared execution service and require a trusted workspace; a refusal
 //! arrives as a finished build carrying `refusal.code == "untrustedWorkspace"`
 //! so the frontend can offer `requestWorkspaceTrust`.
+//!
+//! Debug builds also expose `tex_build`, `tex_status`, `tex_page_image` and
+//! `tex_page_map` (default target: the project's target from
+//! `.exposition/project.json`) for the end-to-end scenarios; no interface
+//! calls them.
 
 use std::time::Duration;
 
-use exposition_core::build::{BuildId, BuildStatus, BuildTarget};
+#[cfg(any(debug_assertions, test))]
+use exposition_core::build::BuildId;
+use exposition_core::build::{BuildStatus, BuildTarget};
 use exposition_core::document::DocumentEvent;
 use exposition_core::path::WorkspacePath;
+#[cfg(debug_assertions)]
 use exposition_tex::mapping::PageMapping;
-use exposition_tex::{TexBuildMode, TexBuildSummary, TexEvent, TexServiceError, TexTargetRef, TexTargetStatus};
+use exposition_tex::{TexBuildMode, TexBuildSummary, TexEvent, TexServiceError};
+#[cfg(debug_assertions)]
+use exposition_tex::{TexTargetRef, TexTargetStatus};
 use exposition_typesetting::BuildTimings;
 use exposition_workspace::types::WorkspaceEvent;
+#[cfg(debug_assertions)]
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
@@ -25,11 +35,7 @@ use crate::CommandError;
 use crate::state::AppState;
 use crate::typesetting::{BUILD_EVENT, BuildActivity, BuildEvent, BuildStatusEvent, STATUS_EVENT};
 
-/// Every [`exposition_tex::TexEvent`] (queued, started, finished), in order.
-pub const TEX_EVENT: &str = "tex:event";
-/// Emitted if the frontend fell behind and must re-read target status.
-pub const TEX_RESYNC: &str = "tex:resync";
-
+#[cfg(any(debug_assertions, test))]
 const MAX_PAGE: u32 = 10_000;
 
 fn service_error(error: TexServiceError) -> CommandError {
@@ -48,6 +54,7 @@ fn service_error(error: TexServiceError) -> CommandError {
 }
 
 /// Build ids are `tex-<n>-<n>`; anything else is rejected before lookup.
+#[cfg(any(debug_assertions, test))]
 fn validate_build_id(build: &BuildId) -> Result<(), CommandError> {
     let valid = build.0.len() <= 64
         && build.0.starts_with("tex-")
@@ -55,6 +62,7 @@ fn validate_build_id(build: &BuildId) -> Result<(), CommandError> {
     if valid { Ok(()) } else { Err(CommandError::new("tex.invalidBuildId", "invalid build id")) }
 }
 
+#[cfg(any(debug_assertions, test))]
 fn validate_page(page: u32) -> Result<(), CommandError> {
     if page < MAX_PAGE { Ok(()) } else { Err(CommandError::new("tex.noSuchPage", "page index out of range")) }
 }
@@ -62,6 +70,9 @@ fn validate_page(page: u32) -> Result<(), CommandError> {
 /// Queue a build of `target` (default: the project's LaTeX target) in the
 /// open workspace. Requests coalesce; a newer request cancels a running build
 /// of the same target.
+/// DEV-ONLY (debug builds): no interface calls this; the end-to-end scenarios use
+/// it as a probe. Compiled, listed (`DEV_COMMANDS`), and granted only in debug builds.
+#[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn tex_build(
     state: State<'_, AppState>,
@@ -76,6 +87,9 @@ pub async fn tex_build(
 }
 
 /// Current state of a target (`null` before its first build request).
+/// DEV-ONLY (debug builds): no interface calls this; the end-to-end scenarios use
+/// it as a probe. Compiled, listed (`DEV_COMMANDS`), and granted only in debug builds.
+#[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn tex_status(
     state: State<'_, AppState>,
@@ -87,13 +101,10 @@ pub async fn tex_status(
         .map_err(|e| CommandError::new("tex.io", e.to_string()))
 }
 
-/// Cancel the running build and drop the pending request; `false` when idle.
-#[tauri::command]
-pub async fn tex_cancel(state: State<'_, AppState>, target: Option<BuildTarget>) -> Result<bool, CommandError> {
-    Ok(state.tex.cancel(target.as_ref()))
-}
-
 /// PNG bytes of a page of a finished build (`scale` pixels per point).
+/// DEV-ONLY (debug builds): no interface calls this; the end-to-end scenarios use
+/// it as a probe. Compiled, listed (`DEV_COMMANDS`), and granted only in debug builds.
+#[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn tex_page_image(
     state: State<'_, AppState>,
@@ -112,6 +123,9 @@ pub async fn tex_page_image(
 }
 
 /// Glyph-level mapping of a page of a finished build.
+/// DEV-ONLY (debug builds): no interface calls this; the end-to-end scenarios use
+/// it as a probe. Compiled, listed (`DEV_COMMANDS`), and granted only in debug builds.
+#[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn tex_page_map(state: State<'_, AppState>, build: BuildId, page: u32) -> Result<PageMapping, CommandError> {
     validate_build_id(&build)?;
@@ -216,8 +230,22 @@ fn shared_events(app: &AppHandle, event: &TexEvent) {
     let _ = app.emit(STATUS_EVENT, BuildStatusEvent { entry, activity });
 }
 
-/// Forward TeX build events to the webview in order (as `tex:event`, and as
-/// the shared typesetting build/status events), and rebuild watched entries
+/// Grant the debug-only probe commands (never present in release builds).
+#[cfg(debug_assertions)]
+pub fn add_dev_capability(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::ipc::CapabilityBuilder;
+    app.add_capability(
+        CapabilityBuilder::new("dev-tex-probes")
+            .window("main")
+            .permission("allow-tex-build")
+            .permission("allow-tex-status")
+            .permission("allow-tex-page-image")
+            .permission("allow-tex-page-map"),
+    )
+}
+
+/// Forward TeX build events to the webview in order (as the shared
+/// typesetting build/status events), and rebuild watched entries
 /// when documents or files change.
 pub fn forward_events(app: AppHandle) {
     let mut rx = app.state::<AppState>().tex.subscribe();
@@ -225,13 +253,10 @@ pub fn forward_events(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             match rx.recv().await {
-                Ok(event) => {
-                    let _ = events_app.emit(TEX_EVENT, &event);
-                    shared_events(&events_app, &event);
-                }
-                Err(RecvError::Lagged(_)) => {
-                    let _ = events_app.emit(TEX_RESYNC, ());
-                }
+                Ok(event) => shared_events(&events_app, &event),
+                // A skipped event is not replayed: the next event of the target
+                // carries its current state, as before.
+                Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => break,
             }
         }

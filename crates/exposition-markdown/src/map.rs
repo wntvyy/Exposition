@@ -140,11 +140,6 @@ impl SourceMap {
         (i < self.segments.len() && self.segments[i].generated.start <= g).then_some(i)
     }
 
-    /// The segment containing the generated character at `g`.
-    pub fn segment_at_generated(&self, g: u32) -> Option<&Segment> {
-        self.index_at(g).map(|i| &self.segments[i])
-    }
-
     /// Map a generated offset (a caret position) to Markdown. At a boundary
     /// between two segments the editable one is preferred, then the one
     /// starting at `g`.

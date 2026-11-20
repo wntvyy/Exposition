@@ -206,7 +206,7 @@ fn regression_document_over_the_size_limit_is_not_saved() {
     edit(&f.service, &id, vec![TextPatch::insert(0, big)]);
     let err = f.service.save_document(&id, false).unwrap_err();
     assert_eq!(err.code, "file.tooLarge");
-    assert!(err.message.contains("10 MB"), "{}", err.message);
+    assert!(err.message.contains("10 MiB"), "{}", err.message);
     assert_eq!(fs::read(f.file("main.typ")).unwrap(), b"= Title\n\nBody.\n");
     let info = f.service.documents().info(&id).unwrap();
     assert_ne!(info.saved_revision, Some(info.revision), "buffer stays dirty");

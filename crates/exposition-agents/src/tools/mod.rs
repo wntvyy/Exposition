@@ -1103,10 +1103,6 @@ impl ToolCall {
     pub fn is_process(&self) -> bool {
         self.effects().launch != Launch::None
     }
-
-    pub fn changes_documents(&self) -> bool {
-        self.effects().changes
-    }
 }
 
 /// `""`, `"."`, or `"./"`: the project root.

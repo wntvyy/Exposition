@@ -22,6 +22,8 @@
 //
 // Needs Lean 4.35.0 through elan, TeX Live (pdflatex), and Python with
 // ipykernel/jupyter_client.
+//
+// Requires a debug build: it calls the debug-only probe command lean_check.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp } from "node:fs/promises";

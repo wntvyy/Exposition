@@ -10,6 +10,7 @@
 // observed, resolved) read as muted text, provisional ones (suggested,
 // unresolved, unsaved) as dashed badges, and outcomes/verdicts/freshness as
 // StatusText with their exact labels.
+import { formatDateTime } from "../../lib/format";
 import {
   Archive,
   ArchiveRestore,
@@ -293,7 +294,7 @@ export function EvidenceRow({ evidence, freshness }: { evidence: Evidence; fresh
       ),
     },
     { key: "operation", label: "Operation", value: `${evidence.operation.kind} ${evidence.operation.id}`, code: true },
-    { key: "recorded", label: "Recorded", value: `${new Date(Number(evidence.recordedAtMs)).toLocaleString()} by ${originLabel(evidence.recordedBy)}` },
+    { key: "recorded", label: "Recorded", value: `${formatDateTime(Number(evidence.recordedAtMs), { seconds: true })} by ${originLabel(evidence.recordedBy)}` },
   ];
   return (
     <li className="xp-graph-evidence" data-testid="graph-evidence" data-kind={evidence.kind}>

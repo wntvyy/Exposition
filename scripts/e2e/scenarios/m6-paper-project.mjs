@@ -31,7 +31,8 @@
 // Each step is recorded PASS / FAIL / NOT VERIFIED (with the reason) and its
 // measured time in test-results/e2e/m6-paper-project/results.json; the
 // scenario fails if any step fails. Release/installed builds have no scripted
-// provider and no dev commands: those parts are NOT VERIFIED, never faked.
+// provider and no dev commands (the lean_check probe among them): those parts
+// are NOT VERIFIED, never faked.
 // Provider keys are never set or cleared here (release builds use the user's
 // real credential entry); no live provider request is made.
 //
@@ -674,15 +675,20 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       softly(leanFollowed, "Lean still reports Untrusted 15 s after the folder was trusted from the Research panel");
       // lean_check (the path of the agent tool check_lean) on the file opened
       // while untrusted: it checks instead of reporting a stale refusal.
-      const report = await invoke(page, "lean_check", {
-        request: { target: { kind: "document", document: leanId }, goalsAt: [], timeoutMs: LEAN_TIMEOUT },
-      });
-      note("leanCheckAfterTrust", { status: report.status?.kind, checked: report.checked, note: report.note, ms: Date.now() - trustedAt });
-      softly(
-        report.status?.kind !== "untrusted" && !/is not trusted/.test(report.note ?? ""),
-        `lean_check (the agent tool check_lean) reports the trusted folder as untrusted: ${JSON.stringify(report.status).slice(0, 300)}`,
-      );
-      softly(report.checked === true, `lean_check did not check after the grant: ${JSON.stringify(report).slice(0, 400)}`);
+      // lean_check is a debug-build probe command; a release build has no such command.
+      if (isDebug) {
+        const report = await invoke(page, "lean_check", {
+          request: { target: { kind: "document", document: leanId }, goalsAt: [], timeoutMs: LEAN_TIMEOUT },
+        });
+        note("leanCheckAfterTrust", { status: report.status?.kind, checked: report.checked, note: report.note, ms: Date.now() - trustedAt });
+        softly(
+          report.status?.kind !== "untrusted" && !/is not trusted/.test(report.note ?? ""),
+          `lean_check (the agent tool check_lean) reports the trusted folder as untrusted: ${JSON.stringify(report.status).slice(0, 300)}`,
+        );
+        softly(report.checked === true, `lean_check did not check after the grant: ${JSON.stringify(report).slice(0, 400)}`);
+      } else {
+        notVerified("lean_check after the grant", "lean_check is a debug-build probe command");
+      }
       // The Lean infoview (never clicked since 1a).
       await runCommand(page, "show lean infoview", /Show Lean Infoview/);
       await openInEditor(page, LEMMA);
@@ -1000,12 +1006,12 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       const tableArtifact = await table.getAttribute("data-artifact-id");
       const paperDoc = await docIdOf(PAPER);
       const beforeMismatch = await documentState(page, paperDoc);
-      const mismatch = await invokeError(page, "artifact_attach", {
+      const mismatch = await invokeError(page, "research_promotion_prepare", {
         request: {
-          document: paperDoc,
-          baseRevision: beforeMismatch.info.revision,
           runId: firstRun,
           artifactId: tableArtifact,
+          document: paperDoc,
+          baseRevision: beforeMismatch.info.revision,
           placement: { kind: "update", attachmentKey: userFigKey },
           caption: null,
           attachmentKey: null,
@@ -1441,12 +1447,17 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       );
       const probeId = await openInEditor(page, "Paper/EnvProbe.lean");
       await runCommand(page, "show lean infoview", /Show Lean Infoview/);
-      const report = await invoke(page, "lean_check", {
-        request: { target: { kind: "document", document: probeId }, goalsAt: [], timeoutMs: 180_000 },
-      });
-      const messages = report.diagnostics.map((d) => d.message);
-      note("leanProbe", messages);
-      assert.ok(messages.some((m) => m.includes("credential variables visible to Lean: []")), `Lean saw no credentials: ${JSON.stringify(messages)}`);
+      // lean_check is a debug-build probe command; a release build has no such command.
+      if (isDebug) {
+        const report = await invoke(page, "lean_check", {
+          request: { target: { kind: "document", document: probeId }, goalsAt: [], timeoutMs: 180_000 },
+        });
+        const messages = report.diagnostics.map((d) => d.message);
+        note("leanProbe", messages);
+        assert.ok(messages.some((m) => m.includes("credential variables visible to Lean: []")), `Lean saw no credentials: ${JSON.stringify(messages)}`);
+      } else {
+        notVerified("Lean environment probe", "lean_check is a debug-build probe command");
+      }
       await shot("07f-lean-env-probe-light");
     });
 

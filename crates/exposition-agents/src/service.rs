@@ -2038,11 +2038,6 @@ impl AgentService {
         !self.is_running(id)
     }
 
-    /// Bytes the task database occupies on disk (with its log), if on disk.
-    pub fn task_history_bytes(&self) -> Option<u64> {
-        self.inner.store.file_bytes()
-    }
-
     /// Compact the task database after removals; (before, after) sizes.
     pub fn compact_tasks(&self) -> Result<(Option<u64>, Option<u64>)> {
         Ok(self.inner.store.compact()?)

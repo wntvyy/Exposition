@@ -24,55 +24,13 @@
 //  9. What the native drop handler means for other drops (text dropped on
 //     Monaco; an in-editor drag of selected text) — recorded as evidence.
 // Screens → ui-reference/qol-files/.
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { REPO_ROOT } from "../app.mjs";
+import { clientPoint, osDrag } from "../os-drag.mjs";
 import { consoleErrors, dismissNotifications, expandTo, fileRow, notifications, pressNotificationAction, selectFiles, settle, waitForNotification, platformSkip } from "../p1-helpers.mjs";
 import { editorLocator, focusEditor, invoke, makeProject, openInEditor, openWorkspace, tabLocator, waitFor } from "../workspace-helpers.mjs";
-
-const HELPER = join(REPO_ROOT, "scripts", "e2e", "os-drag.ps1");
-
-/** Run the OS drag helper (asynchronously, so the page can be observed while it holds). */
-function osDrag(args) {
-  const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
-  const parts = [`& ${q(HELPER)}`, `-AppPid ${args.pid}`, `-X ${Math.round(args.x)}`, `-Y ${Math.round(args.y)}`, `-Mode ${args.mode ?? "files"}`];
-  if (args.paths?.length) parts.push(`-Paths @(${args.paths.map(q).join(",")})`);
-  if (args.text) parts.push(`-Text ${q(args.text)}`);
-  if (args.x2 !== undefined) parts.push(`-X2 ${Math.round(args.x2)} -Y2 ${Math.round(args.y2)}`);
-  parts.push(`-HoldMs ${args.holdMs ?? 1500}`);
-  return new Promise((resolve, reject) => {
-    const child = spawn("powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", parts.join(" ")], { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (err += d));
-    child.on("exit", (code) => {
-      const line = out.trim().split(/\r?\n/).pop() ?? "";
-      let result;
-      try {
-        result = JSON.parse(line);
-      } catch {
-        reject(new Error(`os-drag failed (${code}): ${out} ${err}`));
-        return;
-      }
-      // The helper never drags onto another application's window.
-      if (result.ok) resolve(result);
-      else reject(new Error(`os-drag refused: ${line}`));
-    });
-  });
-}
-
-/** Physical client coordinates of an element's center (the window's client area is the webview). */
-async function clientPoint(page, locator) {
-  await locator.scrollIntoViewIfNeeded();
-  await page.waitForTimeout(150);
-  const box = await locator.boundingBox();
-  const dpr = await page.evaluate(() => window.devicePixelRatio);
-  return { x: (box.x + box.width / 2) * dpr, y: (box.y + box.height / 2) * dpr };
-}
 
 async function resources(page) {
   const snapshot = await invoke(page, "graph_snapshot", { query: { kinds: ["resource"], text: null, around: null, includeInactive: true, limit: 2000 } });

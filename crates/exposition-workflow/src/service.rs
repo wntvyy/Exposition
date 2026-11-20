@@ -408,13 +408,6 @@ impl WorkflowRunService {
         self.inner.host.project_root().ok_or_else(no_project)
     }
 
-    /// Whether `runner_id` can run in the open project now (`Err`: why not).
-    pub fn runner_available(&self, runner_id: &str) -> Result<(), String> {
-        let root = self.root().map_err(|e| e.message)?;
-        let trusted = self.inner.host.trusted(&root);
-        plan::runner_availability(runner_id, &root, trusted, &self.inner.adapters).map_err(|(_, reason)| reason)
-    }
-
     /// The registered contracts with each runner's availability in the open project.
     pub fn operations(&self) -> Vec<OperationContract> {
         match self.root() {

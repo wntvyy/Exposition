@@ -1,6 +1,7 @@
 // Files sidebar: open-folder empty state with recent projects, recovery
 // entries from an earlier session, and the lazily loaded, keyboard-accessible
 // file tree (shared Tree component).
+import { formatDateTime } from "../../lib/format";
 import { FilePen, FilePlus, FilePlus2, FileWarning, Folder, FolderOpen, FolderPlus, Link2, RefreshCw, Unlink, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 
@@ -49,10 +50,6 @@ import {
   useWorkspace,
   type DirState,
 } from "./store";
-
-function formatTime(ms: number) {
-  return new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
 
 function EmptyFolder() {
   const recent = useWorkspace((s) => s.recent);
@@ -144,7 +141,7 @@ function RecoveryItem({ entry }: { entry: RecoveryEntry }) {
           Unreadable recovery data{entry.path ? ` for ${entry.path}` : ""}
         </span>
         <span className="xp-recovery__meta">
-          {formatTime(entry.savedAt)} · {entry.problem}
+          {formatDateTime(entry.savedAt)} · {entry.problem}
         </span>
         {entry.location && (
           <span className="xp-recovery__location" title={entry.location}>
@@ -168,7 +165,7 @@ function RecoveryItem({ entry }: { entry: RecoveryEntry }) {
     <li data-recovery-id={entry.id} data-recovery-path={entry.path ?? undefined}>
       <span className="xp-recovery__path">{entry.path}</span>
       <span className="xp-recovery__meta">
-        {formatTime(entry.savedAt)}
+        {formatDateTime(entry.savedAt)}
         {entry.disk === "changed" && " · file changed on disk since"}
         {entry.disk === "missing" && " · file no longer exists"}
       </span>

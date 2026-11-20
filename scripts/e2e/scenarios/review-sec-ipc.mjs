@@ -15,6 +15,9 @@
 //   C. typesetting_export_pdf (Typst) destinations.
 //   D. huge document payloads.
 //   E. quick re-runs of earlier negatives (paths, recovery ids, lean ids).
+//
+// Requires a debug build: it calls the debug-only probe command
+// tex_page_image.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";

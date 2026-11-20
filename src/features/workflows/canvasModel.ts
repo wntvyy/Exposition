@@ -351,11 +351,6 @@ export function removeEdge(def: WorkflowDefinition, edgeId: string): WorkflowDef
   return { ...def, connections: def.connections.filter((_, i) => i !== index) };
 }
 
-/** Diagnostics for one port of a step (by `port`), and the step's others. */
-export function portDiagnostics(diagnostics: WorkflowDiagnostic[], step: string, port: string): WorkflowDiagnostic[] {
-  return diagnostics.filter((d) => d.step === step && d.port === port);
-}
-
 const LAYOUT_PREFIX = "exposition.workflows.layout.";
 
 /** Saved node positions of a workflow (presentation only; never part of the definition). */

@@ -230,7 +230,7 @@ export default async function agentsComposerInput({ launchApp, artifactsDir, ass
     assert.deepEqual(await chipNames(composer), ["pasted-text-1.txt"]);
     const chip = composer.getByTestId("agents-attachment").first();
     assert.equal(await chip.getAttribute("data-kind"), "text");
-    assert.match(await chip.textContent(), /Text · \d+(\.\d)? KB/, "the chip shows the size");
+    assert.match(await chip.textContent(), /Text · \d+(\.\d)? (B|KiB)/, "the chip shows the size");
     assert.equal(await field.inputValue(), typed, "the request text is unchanged by the large paste");
     const notice = composer.getByTestId("agents-paste-notice");
     assert.match(await notice.textContent(), /The pasted text was attached as pasted-text-1\.txt\./);

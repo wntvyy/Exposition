@@ -6,6 +6,7 @@
 // are kept by default: they are never part of "Select all", and including one
 // leads to its impact decision. Nothing is removed automatically, and record
 // removal is not reported as reclaimed disk space.
+import { formatBytes, formatDateTime } from "../../lib/format";
 import { ArchiveRestore, Link2, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -27,7 +28,7 @@ import {
 } from "../../ui/components";
 import { onProjectOp, restoreAndReport, runUserOperation } from "../operations/client";
 import { opCommands } from "../operations/ipc";
-import { formatBytes, targetKey } from "../operations/model";
+import { targetKey } from "../operations/model";
 import { useWorkspace } from "../workspace/store";
 import { SettingsGroup, SettingsPage } from "./parts";
 
@@ -87,7 +88,12 @@ export function purgeTargets(items: ScopedItem[]): OpTarget[] {
 }
 
 function formatDate(ms: number | null): string {
-  return ms === null ? "—" : new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return ms === null ? "—" : formatDateTime(ms);
+}
+
+/** A size, or that it could not be measured. */
+function sizeText(bytes: number | null): string {
+  return bytes === null ? "not measured" : formatBytes(bytes);
 }
 
 /** Referenced/shared (kept by default; a settled fact) and active work (running). */
@@ -143,7 +149,7 @@ function CategoryGroup({
       title: "Size",
       numeric: true,
       width: "1%",
-      render: (item) => <span className="exp-storage__nowrap">{formatBytes(item.bytes)}</span>,
+      render: (item) => <span className="exp-storage__nowrap">{sizeText(item.bytes)}</span>,
     },
     {
       id: "created",

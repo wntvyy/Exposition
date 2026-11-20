@@ -5,7 +5,6 @@ import type { AuthorizedBy } from "../../bindings/AuthorizedBy";
 import type { BudgetKind } from "../../bindings/BudgetKind";
 import type { CodeAccess } from "../../bindings/CodeAccess";
 import type { FilesAccess } from "../../bindings/FilesAccess";
-import type { TaskSpec } from "../../bindings/TaskSpec";
 import type { ContextConsent } from "../../bindings/ContextConsent";
 import type { Effort } from "../../bindings/Effort";
 import type { ExecutionMode } from "../../bindings/ExecutionMode";
@@ -282,19 +281,6 @@ export function authorizationLabel(by: AuthorizedBy | null | undefined): string 
   }
 }
 
-/** The task's settings for its meta line (joined with middle dots by the caller). */
-export function specLabels(spec: TaskSpec): string[] {
-  if (spec.approvalMode === "auto") {
-    const ceiling = [
-      spec.permission === "readOnly" ? PERMISSION_LABELS.readOnly : null,
-      spec.execution === "disabled" ? EXECUTION_LABELS.disabled : null,
-      spec.execution === "restricted" ? EXECUTION_LABELS.restricted : null,
-    ].filter((part): part is string => part !== null);
-    return ["Auto: project permissions", ...ceiling, CONSENT_LABELS[spec.consent]];
-  }
-  return [PERMISSION_LABELS[spec.permission], EXECUTION_LABELS[spec.execution], CONSENT_LABELS[spec.consent]];
-}
-
 export const EFFORT_LABELS: Record<Effort, string> = {
   low: "Low",
   medium: "Medium",
@@ -406,14 +392,4 @@ export function toolSummary(name: string, input: unknown): string {
     default:
       return "";
   }
-}
-
-export function relativeTime(ms: number, now = Date.now()): string {
-  const seconds = Math.max(0, Math.round((now - ms) / 1000));
-  if (seconds < 60) return "just now";
-  const mins = Math.round(seconds / 60);
-  if (mins < 60) return `${mins} min ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours} h ago`;
-  return new Date(ms).toLocaleDateString();
 }

@@ -6,6 +6,9 @@
 // build (bibliography resolved), and validates command input.
 //
 // Requires TeX (pdflatex + bibtex) discoverable by the execution service.
+//
+// Requires a debug build: it calls the debug-only probe commands tex_build,
+// tex_status, tex_page_image, tex_page_map.
 import { readFile, writeFile, mkdir, mkdtemp, cp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

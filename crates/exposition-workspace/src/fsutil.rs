@@ -79,10 +79,6 @@ impl FileIdentity {
             Ok(Self { volume: meta.dev(), index: meta.ino() })
         }
     }
-
-    pub fn of_path(path: &Path) -> io::Result<Self> {
-        Self::of(&File::open(path)?)
-    }
 }
 
 /// A file read for opening as a document.
@@ -187,11 +183,6 @@ fn move_no_replace_imp(from: &Path, to: &Path) -> io::Result<()> {
         fs::hard_link(from, to)?;
         fs::remove_file(from)
     }
-}
-
-/// True if the file exists and carries the OS read-only attribute/permission.
-pub fn is_read_only(path: &Path) -> bool {
-    fs::metadata(path).map(|m| m.permissions().readonly()).unwrap_or(false)
 }
 
 #[cfg(test)]
