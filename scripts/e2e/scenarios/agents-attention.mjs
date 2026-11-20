@@ -511,6 +511,68 @@ export default async function agentsAttention({ launchApp, artifactsDir, assert 
       result: real.calls[0]?.result,
     });
 
+    // --- 7. An approval from a page that shows no agent surface (AG-3) --------
+    // The Agent view stays mounted on the hidden Editor page; it is not "on
+    // screen" there, so the approval is announced and can be opened.
+    const pageButton = (id) => page.locator(`[data-page-button="${id}"]`);
+    const onPage = async (id) => (await pageButton(id).getAttribute("aria-current")) === "page";
+    await pageButton("editor").click();
+    await waitFor(async () => (await approvalNotices(page)).length === 0, { message: "no approval notification left over" });
+    const two = await startTask(
+      page,
+      {
+        turns: [
+          { steps: [tool("a", "create_file", { path: "notes/first.typ", content: "= First\n" })] },
+          { steps: [tool("b", "create_file", { path: "notes/second.typ", content: "= Second\n" })] },
+          { steps: [{ text: "Created both notes." }] },
+        ],
+      },
+      request(project, { permission: "reviewEdits", prompt: "Two notes, one approval each" }),
+    );
+    const first = (await waitStatus(page, two.id, ["awaitingApproval"])).approvals[0];
+    // Open the first approval in the Agent view, on the Editor page.
+    const openApprovalAction = () =>
+      page.locator("[data-testid=notification]", { hasText: "Agent needs your approval" }).getByRole("button", { name: "Open approval" });
+    await openApprovalAction().click();
+    await panel.getByTestId("agents-approval").waitFor({ timeout: 5000 });
+    await waitFor(async () => (await approvalNotices(page)).length === 0, { message: "notification retired: the card is on screen" });
+    // Leave for the Research page: the Agent view still has this task selected, but is hidden.
+    await pageButton("research").click();
+    await waitFor(() => onPage("research"), { message: "Research page shown" });
+    assert.ok(!(await panel.isVisible().catch(() => false)), "the Agent view is not on screen on the Research page");
+    await invoke(page, "agents_approval_resolve", { task: two.id, approval: first.id, approved: true });
+    await waitFor(
+      async () => {
+        const next = (await invoke(page, "agents_task_detail", { task: two.id })).approvals[0];
+        return next && next.id !== first.id ? next : null;
+      },
+      { message: "second approval requested" },
+    );
+    await waitFor(async () => (await approvalNotices(page)).length === 1, {
+      timeout: 5000,
+      message: "the approval is announced on a page that does not show the Agent view",
+    });
+    assert.equal((await page.getByTestId("agents-status-approval").textContent())?.trim(), "Agent: waiting for approval");
+    await shot(page, "approval-from-research-page-light");
+    // "Open approval" brings the Editor page, the Agent view, and the card on screen.
+    await openApprovalAction().click();
+    await waitFor(() => onPage("editor"), { timeout: 5000, message: "Open approval shows the Editor page" });
+    await panel.waitFor({ state: "visible", timeout: 5000 });
+    await page.waitForFunction(() => document.activeElement?.getAttribute("data-testid") === "agents-approval", null, {
+      timeout: 5000,
+    });
+    assert.match((await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))) ?? "", /Create notes\/second\.typ/);
+    // The same from the status bar item.
+    await pageButton("research").click();
+    await waitFor(() => onPage("research"), { message: "Research page shown again" });
+    await page.getByTestId("agents-status-approval").click();
+    await waitFor(() => onPage("editor"), { timeout: 5000, message: "the status item shows the Editor page" });
+    await panel.getByTestId("agents-approval").waitFor({ state: "visible", timeout: 5000 });
+    await panel.getByTestId("agents-approval").getByRole("button", { name: "Approve", exact: true }).click();
+    await waitStatus(page, two.id, ["completed"]);
+    await waitFor(async () => (await approvalNotices(page)).length === 0, { message: "notification retired once answered" });
+    step("AG-3: on the Research page a new approval is announced; Open approval and the status item show the Editor page with the card focused");
+
     const errors = app.consoleMessages.filter((m) => m.startsWith("error:") || m.startsWith("pageerror:"));
     assert.deepEqual(errors, [], "no console errors");
   } finally {

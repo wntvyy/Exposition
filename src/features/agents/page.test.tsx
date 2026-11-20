@@ -388,6 +388,19 @@ describe("Editor ↔ Agents navigation keeps one task and its approval", () => {
     expect(useAgents.getState().page).toMatchObject({ selected: "task-1", tab: "graph" });
   });
 
+  it("names stopping a task the same in the task menu and on the composer (UI-10)", async () => {
+    ipc.agentsTaskCancel.mockResolvedValue(undefined);
+    render(<AgentPanel />);
+    act(() => useAgents.setState({ view: "task", selected: "task-1" }));
+    expect(await screen.findByRole("button", { name: "Stop" })).toBeTruthy();
+    fireEvent.click(await screen.findByTestId("agents-task-menu"));
+    expect(screen.queryByRole("menuitem", { name: "Cancel task" })).toBeNull();
+    await act(async () => {
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Stop task" }));
+    });
+    expect(ipc.agentsTaskCancel).toHaveBeenCalledWith("task-1");
+  });
+
   it("keeps a stopped task as an investigation", async () => {
     const done = detail({ summary: summary({ status: { kind: "completed" } }), approvals: [] });
     ipc.agentsTaskDetail.mockResolvedValue(done);

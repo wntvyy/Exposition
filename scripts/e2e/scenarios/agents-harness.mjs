@@ -366,7 +366,13 @@ export default async function agentsHarness({ launchApp, artifactsDir, assert, f
     await shot(page, "agents-python-approval-light");
     await panel.getByRole("button", { name: "Approve", exact: true }).click();
     await waitForStatus(page, "completed", 180_000);
+    // AG-2: the finished task is announced although its conversation is open
+    // (its detail is re-read first) and while its research session shuts down.
+    await page
+      .locator("[data-testid=notification]", { hasText: "Task completed: Plot the squares" })
+      .waitFor({ timeout: 5000 });
     const pyTask = (await invoke(page, "agents_task_list"))[0];
+    assert.equal(pyTask.status.kind, "completed", "the task list agrees as soon as the conversation shows the task finished");
     const pyDetail = await invoke(page, "agents_task_detail", { task: pyTask.id });
     const pyCall = pyDetail.transcript.find((i) => i.kind === "toolCall" && i.name === "run_python");
     assert.equal(pyCall.status, "succeeded", pyCall.result);

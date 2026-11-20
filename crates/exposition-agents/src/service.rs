@@ -191,6 +191,41 @@ struct Running {
     finished: bool,
 }
 
+impl Running {
+    fn new() -> Self {
+        Self {
+            cancel: CancellationToken::new(),
+            approvals: HashMap::new(),
+            questions: HashMap::new(),
+            stop_reason: None,
+            join: None,
+            finished: false,
+        }
+    }
+}
+
+/// A task's worker slot reserved for a run that has not started yet; given
+/// back when dropped unless the worker took it over (`keep`).
+struct RunSlot<'a> {
+    running: &'a Mutex<HashMap<TaskId, Running>>,
+    id: TaskId,
+    kept: bool,
+}
+
+impl RunSlot<'_> {
+    fn keep(&mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for RunSlot<'_> {
+    fn drop(&mut self) {
+        if !self.kept {
+            lock(self.running).remove(&self.id);
+        }
+    }
+}
+
 /// A question request the worker waits on. Its state is changed only under
 /// the `running` lock (answers, discussions, revisions), and stored at once.
 struct QuestionSlot {
@@ -498,6 +533,9 @@ impl AgentService {
         }
         // No worker of a previous process waits for an answer any more.
         store.supersede_open_questions(None, "Exposition restarted")?;
+        // Nor can anyone approve a graph proposal a previous process showed
+        // (approvals live in memory): none is left "waiting for approval".
+        store.close_waiting_proposals(None, &unapproved_proposal("Exposition restarted"))?;
         let (events, _) = broadcast::channel(4096);
         // Project permissions live in the application's data directory (the
         // task database's folder), under execution/ beside trust.json.
@@ -1048,7 +1086,17 @@ impl AgentService {
             return Err(AgentError::new("agents.emptyPrompt", "Describe what the agent should do next."));
         }
         let budgets = request.budgets;
+        if let Some(budgets) = &budgets {
+            budgets.validate().map_err(|e| AgentError::new("agents.invalidBudgets", e))?;
+        }
+        // One run per task: the task's worker slot is taken here, before
+        // anything is read or decided, and given back if the request is
+        // refused. A second Continue arriving meanwhile finds it taken.
+        let mut slot = self.reserve_run(id)?;
         let mut row = self.inner.store.task(id)?.ok_or_else(|| not_found(id))?;
+        if row.status.is_active() {
+            return Err(AgentError::new("agents.taskRunning", "The task is still running."));
+        }
         let switched = match request.provider {
             Some(choice) if choice != row.spec.provider => {
                 if choice.provider == ProviderKind::Scripted && !self.inner.allow_scripted {
@@ -1077,19 +1125,8 @@ impl AgentService {
                 ),
             ));
         }
-        // A finished worker may still be releasing this task's services
-        // (research sessions); a new run must wait until it has exited.
-        if row.status.is_active() || self.is_running(id) {
-            return Err(AgentError::new("agents.taskRunning", "The task is still running."));
-        }
-        if lock(&self.inner.running).contains_key(id) {
-            return Err(AgentError::new("agents.taskFinishing", "The task is finishing up; try again in a moment."));
-        }
-        if let Some(budgets) = budgets {
-            budgets.validate().map_err(|e| AgentError::new("agents.invalidBudgets", e))?;
-            row.spec.budgets = budgets;
-            self.inner.store.update_task_spec(id, &row.spec)?;
-        }
+        // Nothing is stored until the request can no longer be refused: a
+        // refused Continue leaves the task exactly as it was.
         crate::workspace::check_root(self.inner.workspace.as_deref(), Path::new(&row.spec.workspace_root))
             .map_err(|e| AgentError::new("agents.workspaceNotOpen", e))?;
         // A fresh graph context for this run, from the graph the task is bound to.
@@ -1102,12 +1139,22 @@ impl AgentService {
         }
         let recorded = self.inner.store.graph_project(id)?;
         let graph_context = self.inner.graph_context(files.root(), &row.spec, recorded.as_ref())?;
-        if switched.is_some() && target.provider == ProviderKind::OpenAi {
-            // A switch resolves the connection context again (the current settings).
-            let current = self.inner.settings()?.openai.unwrap_or_default();
-            self.inner.store.set_task_connection(id, &serde_json::to_value(&current).unwrap_or(Value::Null))?;
+        // A switch resolves the connection context again (the current
+        // settings); it is recorded only once the provider could be made.
+        let connection = match &switched {
+            Some(_) if target.provider == ProviderKind::OpenAi => {
+                Some(self.inner.settings()?.openai.unwrap_or_default())
+            }
+            _ => None,
+        };
+        let provider = self.inner.make_provider_with(&target, id, connection.clone())?;
+        if let Some(connection) = &connection {
+            self.inner.store.set_task_connection(id, &serde_json::to_value(connection).unwrap_or(Value::Null))?;
         }
-        let provider = self.inner.make_provider(&target, id)?;
+        if let Some(budgets) = budgets {
+            row.spec.budgets = budgets;
+            self.inner.store.update_task_spec(id, &row.spec)?;
+        }
         if let Some(choice) = &switched {
             let previous = row.spec.provider.clone();
             row.spec.provider = choice.clone();
@@ -1144,11 +1191,31 @@ impl AgentService {
         content.extend(attachments.iter().map(att::reference_block));
         self.inner.store.append_message(id, "user", &content)?;
         self.inner.store.update_task(id, &TaskStatus::Queued, &row.usage)?;
+        // The worker takes over the reserved slot.
+        slot.keep();
         self.spawn(id.clone(), provider);
         let summary = self.inner.summary(id)?;
         self.inner.emit(AgentEvent::TaskChanged { task: Box::new(summary.clone()) });
         self.inner.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
         Ok(summary)
+    }
+
+    /// Take the task's worker slot for a new run of an existing task, or
+    /// refuse: while its loop runs (`agents.taskRunning`), or while a finished
+    /// worker still releases the task's services, e.g. research sessions
+    /// (`agents.taskFinishing`; a new run must wait until it has exited). The
+    /// check and the reservation are one step under the lock, so two requests
+    /// can never both start a worker.
+    fn reserve_run(&self, id: &TaskId) -> Result<RunSlot<'_>> {
+        let mut running = lock(&self.inner.running);
+        match running.get(id) {
+            Some(r) if !r.finished => Err(AgentError::new("agents.taskRunning", "The task is still running.")),
+            Some(_) => Err(AgentError::new("agents.taskFinishing", "The task is finishing up; try again in a moment.")),
+            None => {
+                running.insert(id.clone(), Running::new());
+                Ok(RunSlot { running: &self.inner.running, id: id.clone(), kept: false })
+            }
+        }
     }
 
     /// Cancel a running task: aborts the stream or the running tool.
@@ -1357,18 +1424,9 @@ impl AgentService {
     }
 
     fn spawn(&self, id: TaskId, provider: Arc<dyn Provider>) {
-        let cancel = CancellationToken::new();
-        lock(&self.inner.running).insert(
-            id.clone(),
-            Running {
-                cancel: cancel.clone(),
-                approvals: HashMap::new(),
-                questions: HashMap::new(),
-                stop_reason: None,
-                join: None,
-                finished: false,
-            },
-        );
+        // A continued task's slot was reserved by `reserve_run` (a cancel
+        // that arrived since then is kept); a new task takes its slot here.
+        let cancel = lock(&self.inner.running).entry(id.clone()).or_insert_with(Running::new).cancel.clone();
         let inner = Arc::clone(&self.inner);
         let task_id = id.clone();
         let handle = self.inner.runtime.spawn(async move {
@@ -2113,9 +2171,11 @@ impl Inner {
         }
     }
 
-    /// Supersede the task's open questions once its run ended (cancel, a
-    /// budget stop, a failure, a permission change), and drop their slots.
-    fn supersede_questions(&self, id: &TaskId, status: &TaskStatus) {
+    /// Once a run ended (cancel, a budget stop, a failure, a permission
+    /// change): supersede the task's open questions and drop their slots, and
+    /// close a graph proposal that still waits for an approval (its approval
+    /// request ended with the run, so it can never be approved).
+    fn close_pending(&self, id: &TaskId, status: &TaskStatus) {
         let reason = {
             let mut running = lock(&self.running);
             let entry = running.get_mut(id);
@@ -2131,6 +2191,9 @@ impl Inner {
             TaskStatus::Failed { message } => format!("The task stopped: {}", message.trim_end_matches('.')),
             _ => "The task stopped".to_owned(),
         });
+        if let Err(e) = self.store.close_waiting_proposals(Some(id), &unapproved_proposal(&reason)) {
+            tracing::error!("failed to close a waiting graph proposal: {e}");
+        }
         match self.store.supersede_open_questions(Some(id), &reason) {
             Ok(changed) => {
                 for (task_id, request_id) in changed {
@@ -2440,14 +2503,27 @@ impl Inner {
     }
 
     fn make_provider(&self, choice: &ProviderChoice, task: &TaskId) -> Result<Arc<dyn Provider>> {
+        self.make_provider_with(choice, task, None)
+    }
+
+    /// `make_provider` with the OpenAI connection context to use instead of
+    /// the one the task recorded (a model switch resolves it again; the
+    /// caller records it once the switch is accepted).
+    fn make_provider_with(
+        &self,
+        choice: &ProviderChoice,
+        task: &TaskId,
+        resolved: Option<OpenAiConnection>,
+    ) -> Result<Arc<dyn Provider>> {
         match choice.provider {
             ProviderKind::OpenAi => {
                 let (key, current) = self.connection_key(ProviderKind::OpenAi)?;
                 // The context the task resolved when it started (or switched)
                 // stays its billing context; a new task records the current one.
-                let connection = match self.store.task_connection(task)? {
-                    Some(recorded) => serde_json::from_value(recorded).unwrap_or(current),
-                    None => {
+                let connection = match (resolved, self.store.task_connection(task)?) {
+                    (Some(resolved), _) => resolved,
+                    (None, Some(recorded)) => serde_json::from_value(recorded).unwrap_or(current),
+                    (None, None) => {
                         let value = serde_json::to_value(&current).unwrap_or(Value::Null);
                         if self.store.task(task)?.is_some() {
                             self.store.set_task_connection(task, &value)?;
@@ -2794,18 +2870,22 @@ impl Inner {
             Ok(None) => None,
             Err(e) => row_failure(&TaskUsage::default(), e.to_string()),
         };
-        if let Some((status, usage)) = status {
-            inner.finish(&id, &status, &usage);
-            inner.supersede_questions(&id, &status);
+        if let Some((status, usage)) = &status {
+            inner.finish(&id, status, usage);
         }
-        // The terminal status is stored: review actions may proceed while the
-        // worker releases services below.
         if let Some(running) = lock(&inner.running).get_mut(&id) {
             running.finished = true;
         }
-        // Release what the services hold for this run (agent research sessions).
+        // Release what the services hold for this run (agent research
+        // sessions). This can take seconds; the finished task was announced
+        // in `finish`. Exactly one terminal `TaskChanged` is emitted per
+        // run: listeners take it as "this run ended", and a second one would
+        // be read as the end of the task's next run.
         inner.services.task_finished(&id.0).await;
         lock(&inner.running).remove(&id);
+        if status.is_some() {
+            return;
+        }
         if let Ok(summary) = inner.summary(&id) {
             inner.emit(AgentEvent::TaskChanged { task: Box::new(summary) });
         }
@@ -2837,9 +2917,28 @@ impl Inner {
         if let Err(e) = self.store.update_task(id, status, usage) {
             tracing::error!("failed to record task status: {e}");
         }
+        // What waited for the user ended with the run.
+        self.close_pending(id, status);
+        // The terminal status is stored: review actions may proceed while the
+        // worker still releases services, and the finished task is announced
+        // now rather than after that release (lists would show it running
+        // meanwhile). The summary goes before the transcript event, so a view
+        // that re-reads the conversation has already seen the task finish.
+        if let Some(running) = lock(&self.running).get_mut(id) {
+            running.finished = true;
+        }
+        match self.summary(id) {
+            Ok(summary) => self.emit(AgentEvent::TaskChanged { task: Box::new(summary) }),
+            Err(e) => tracing::error!("failed to read the finished task: {}", e.message),
+        }
         self.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
         self.emit(AgentEvent::ReviewChanged { task_id: id.clone() });
     }
+}
+
+/// The record of a graph proposal whose approval can no longer be given.
+fn unapproved_proposal(reason: &str) -> String {
+    format!("{reason} before this proposal was answered: it was not approved, and nothing was applied.")
 }
 
 fn row_failure(usage: &TaskUsage, message: String) -> Option<(TaskStatus, TaskUsage)> {
@@ -2911,6 +3010,12 @@ fn sanitize_stop_reason(reason: &str) -> String {
     if clean.is_empty() { "unknown".to_owned() } else { clean }
 }
 
+/// The most output tokens one request asks for: the per-turn limit, or the
+/// model's own limit when the provider applies a smaller one.
+fn turn_output_limit(provider: &dyn Provider) -> u32 {
+    provider.output_cap().map_or(MAX_TOKENS_PER_TURN, |cap| cap.min(MAX_TOKENS_PER_TURN))
+}
+
 /// Why a tool call of a stopped response did not run (sent to the model on continuation).
 fn skip_reason(stop_reason: &str) -> String {
     match stop_reason {
@@ -2926,7 +3031,7 @@ fn skip_reason(stop_reason: &str) -> String {
 }
 
 /// The user-facing explanation of a response that stopped without finishing its turn.
-fn stop_message(stop_reason: &str, unrun_calls: usize) -> String {
+fn stop_message(stop_reason: &str, unrun_calls: usize, output_limit: u32) -> String {
     let calls = match unrun_calls {
         0 => String::new(),
         1 => " Its tool call was not run.".to_owned(),
@@ -2934,7 +3039,7 @@ fn stop_message(stop_reason: &str, unrun_calls: usize) -> String {
     };
     match stop_reason {
         "max_tokens" => format!(
-            "The response reached the per-turn output limit ({MAX_TOKENS_PER_TURN} tokens) and was cut off.{calls} \
+            "The response reached the per-turn output limit ({output_limit} tokens) and was cut off.{calls} \
              Continue the task to resume."
         ),
         "model_context_window_exceeded" => format!(
@@ -3049,9 +3154,13 @@ impl Run<'_> {
                 },
                 Err(e) => return TaskStatus::Failed { message: e.to_string() },
             };
+            // One request asks for the remaining output budget, at most the
+            // per-turn limit or the model's own smaller limit. Only a request
+            // that asked for less than that limit was limited by the budget.
             let remaining_output = self.spec.budgets.max_output_tokens.saturating_sub(self.usage.output_tokens);
-            let max_tokens = remaining_output.min(u64::from(MAX_TOKENS_PER_TURN)) as u32;
-            let limited_by_budget = u64::from(max_tokens) < u64::from(MAX_TOKENS_PER_TURN);
+            let output_limit = turn_output_limit(provider);
+            let max_tokens = remaining_output.min(u64::from(output_limit)) as u32;
+            let limited_by_budget = max_tokens < output_limit;
             let request = ProviderRequest {
                 system: prompt::SYSTEM_PROMPT.to_owned(),
                 tools: tools::task_definitions(self.interactive),
@@ -3136,7 +3245,10 @@ impl Run<'_> {
                 reason => {
                     let stop_reason = sanitize_stop_reason(reason);
                     self.skip_calls(&content, turn, &skip_reason(&stop_reason));
-                    return TaskStatus::Stopped { message: stop_message(&stop_reason, calls), stop_reason };
+                    return TaskStatus::Stopped {
+                        message: stop_message(&stop_reason, calls, output_limit),
+                        stop_reason,
+                    };
                 }
             }
         }
@@ -3700,7 +3812,7 @@ impl Run<'_> {
                 }
             };
             let remaining_output = self.spec.budgets.max_output_tokens.saturating_sub(self.usage.output_tokens);
-            let max_tokens = remaining_output.min(u64::from(MAX_TOKENS_PER_TURN)) as u32;
+            let max_tokens = remaining_output.min(u64::from(turn_output_limit(provider))) as u32;
             let request = ProviderRequest {
                 system: prompt::SYSTEM_PROMPT.to_owned(),
                 tools: tools::discussion_definitions(),

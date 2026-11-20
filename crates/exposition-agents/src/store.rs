@@ -1405,6 +1405,36 @@ impl Store {
         raw.map(|r| from_json(&r)).transpose()
     }
 
+    /// Close graph proposals that still wait for an approval nobody can give
+    /// any more (their task's run ended, or the application restarted): each
+    /// becomes `Failed` with `message`, once. `None` covers every task.
+    /// Nothing of such a proposal was applied. Returns how many changed.
+    pub fn close_waiting_proposals(&self, task: Option<&TaskId>, message: &str) -> StoreResult<usize> {
+        use crate::graph::{ProposalState, TaskProposal};
+        let rows: Vec<(String, String)> = {
+            let conn = self.lock();
+            let mut stmt = conn.prepare("SELECT task_id, record FROM task_proposals ORDER BY rowid")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?
+        };
+        let mut changed = 0;
+        for (task_id, raw) in rows {
+            if task.is_some_and(|t| t.0 != task_id) {
+                continue;
+            }
+            // An unreadable record is left as it is (it is not shown as waiting).
+            let Ok(mut proposal) = serde_json::from_str::<TaskProposal>(&raw) else { continue };
+            if proposal.state != ProposalState::AwaitingApproval {
+                continue;
+            }
+            proposal.state = ProposalState::Failed;
+            proposal.message = Some(message.to_owned());
+            proposal.updated_at_ms = now_ms();
+            self.upsert_proposal(&TaskId(task_id), &proposal)?;
+            changed += 1;
+        }
+        Ok(changed)
+    }
+
     pub fn proposals(&self, task: &TaskId) -> StoreResult<Vec<crate::graph::TaskProposal>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(

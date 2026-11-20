@@ -140,7 +140,9 @@ export function turnSummary(calls: readonly ToolCallItem[], reviews: ReadonlyMap
   parts.push(other ? plural(other, "other action") : null);
 
   const text = parts.filter((p): p is string => p !== null).join(" · ");
-  const running = calls.find((c) => c.status === "running" || c.status === "pending");
+  // A queued call (`pending`: an earlier call of the response runs or waits
+  // first) has not started; its own row says "Pending".
+  const running = calls.find((c) => c.status === "running");
   return {
     text: text || (calls.length ? plural(calls.length, "action") : ""),
     failed: calls.filter((c) => c.status === "failed").length,
