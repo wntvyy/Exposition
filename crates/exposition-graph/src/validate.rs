@@ -581,54 +581,59 @@ fn add_relation(
         cx.err(i, "graph.invalidNote", m);
         return Ok(());
     }
-    // Evidence: only `evidenceFor` carries a kind; privileged kinds can only
-    // cite records their service registered (never minted here).
+    // Evidence: only `evidenceFor` carries a kind and cites records; a cited
+    // record must be of that kind, and a formal check is cited only from its
+    // own declaration (`citation_refusal`), so a relation can never relabel
+    // a record or state a Lean verdict for another item. Privileged kinds
+    // can only cite records their service registered.
     match (kind, evidence_kind) {
         (RelationKind::EvidenceFor, None) => {
             cx.err(i, "graph.evidenceKind", "an evidence relationship needs the kind of support it gives");
             return Ok(());
         }
         (RelationKind::EvidenceFor, Some(ek)) => {
-            if ek.is_service_owned() && manual_origin(&cx.origin) {
-                if evidence.is_empty() {
-                    cx.err(
-                        i,
-                        "graph.serviceOwnedEvidence",
-                        format!("{} evidence is recorded only by its service; cite an existing record", ek.as_str()),
-                    );
-                    return Ok(());
-                }
-                for id in evidence {
-                    let Some(rec) = cx
-                        .w
-                        .tx
-                        .query_row("SELECT kind FROM evidence WHERE id = ?1", [id.as_str()], |r| r.get::<_, String>(0))
-                        .ok()
-                    else {
-                        cx.err(i, "graph.unknownEvidence", format!("evidence {id} does not exist"));
-                        return Ok(());
-                    };
-                    if EvidenceKind::parse(&rec) != Some(ek) {
-                        cx.err(i, "graph.evidenceKind", format!("evidence {id} is not {} evidence", ek.as_str()));
-                        return Ok(());
-                    }
-                }
+            if ek.is_service_owned() && manual_origin(&cx.origin) && evidence.is_empty() {
+                cx.err(
+                    i,
+                    "graph.serviceOwnedEvidence",
+                    format!("{} evidence is recorded only by its service; cite an existing record", ek.as_str()),
+                );
+                return Ok(());
             }
         }
         (_, Some(_)) => {
             cx.err(i, "graph.evidenceKind", "only evidence relationships carry an evidence kind");
             return Ok(());
         }
-        (_, None) => {}
+        (_, None) => {
+            if !evidence.is_empty() {
+                cx.err(
+                    i,
+                    "graph.evidenceNotCarried",
+                    format!(
+                        "only “{}” relationships cite evidence records; “{}” cannot carry one",
+                        RelationKind::EvidenceFor.reading(),
+                        kind.reading()
+                    ),
+                );
+                return Ok(());
+            }
+        }
     }
     if evidence.len() > 64 {
         cx.err(i, "graph.tooLarge", "at most 64 evidence records per relationship");
         return Ok(());
     }
-    for id in evidence {
-        if !cx.w.evidence_exists(id)? {
-            cx.err(i, "graph.unknownEvidence", format!("evidence {id} does not exist"));
-            return Ok(());
+    if let Some(ek) = evidence_kind {
+        for id in evidence {
+            let Some((record_kind, subject)) = cx.w.evidence_head(id)? else {
+                cx.err(i, "graph.unknownEvidence", format!("evidence {id} does not exist"));
+                return Ok(());
+            };
+            if let Some((code, why)) = citation_refusal(ek, &from.id, record_kind, subject.as_ref()) {
+                cx.err(i, code, format!("evidence {id} {why}"));
+                return Ok(());
+            }
         }
     }
     let key = (kind, from.id.clone(), to.id.clone());
@@ -695,6 +700,45 @@ fn add_relation(
         cx.mark_relation(|d| &mut d.relations_added, &relation.id);
     }
     Ok(())
+}
+
+/// Why an `evidenceFor` relation of `evidence_kind` from `from` may not cite
+/// a record of `record_kind` about `subject` (`None`: it may). One rule for
+/// the validator and for reading stored relations:
+/// - the record is of the relation's kind (a formal check is never cited as
+///   a review, a review never as a computation);
+/// - a formal check is cited only from the declaration it was recorded for:
+///   Lean evidence is on the declaration, and no relation states it for
+///   another item. Other kinds may be cited from an item that reports them
+///   (a finding citing the computational record of a retained result).
+pub fn citation_refusal(
+    evidence_kind: EvidenceKind,
+    from: &EntityId,
+    record_kind: Option<EvidenceKind>,
+    subject: Option<&EntityId>,
+) -> Option<(&'static str, String)> {
+    if record_kind != Some(evidence_kind) {
+        return Some(("graph.evidenceKind", format!("is not {} evidence", evidence_kind.as_str())));
+    }
+    if evidence_kind == EvidenceKind::FormalCheck && subject != Some(from) {
+        return Some((
+            "graph.evidenceSubject",
+            "was recorded for another item; formal-check evidence is cited only from its own declaration".into(),
+        ));
+    }
+    None
+}
+
+/// Whether a stored relation's citation of `record` counts when evidence is
+/// read: rows written before the rule above (or restored, or imported with
+/// the graph) are kept as they are and simply not read as support.
+pub fn cites(relation: &Relation, record: &Evidence) -> bool {
+    relation.kind == RelationKind::EvidenceFor
+        && relation.status != AssertionStatus::Rejected
+        && relation.evidence.contains(&record.id)
+        && relation.evidence_kind.is_some_and(|ek| {
+            citation_refusal(ek, &relation.from, Some(record.kind), record.subject.as_ref()).is_none()
+        })
 }
 
 fn creates_containment_cycle(w: &Writer<'_>, parent: &EntityId, child: &EntityId) -> StoreResult<bool> {

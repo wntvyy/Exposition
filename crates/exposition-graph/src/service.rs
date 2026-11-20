@@ -666,19 +666,11 @@ impl GraphService {
             neighbor_ids.dedup();
             neighbor_ids.truncate(500);
             let neighbors = store.entities(&neighbor_ids)?;
-            let mut evidence = store.evidence_for_subject(id)?;
-            for r in outgoing.iter().chain(incoming.iter()) {
-                for e in &r.evidence {
-                    if evidence.len() >= 200 {
-                        break;
-                    }
-                    if !evidence.iter().any(|x| &x.id == e)
-                        && let Some(rec) = store.evidence(e)?
-                    {
-                        evidence.push(rec);
-                    }
-                }
-            }
+            // An entity's evidence is what was recorded about it. Records a
+            // relation cites stay on that relation (`Relation::evidence`):
+            // adding, relabelling, or keeping a rejected relation never makes
+            // another item's record this item's own.
+            let evidence = store.evidence_for_subject(id)?;
             let evidence_freshness = evidence.iter().map(|e| (e.id.clone(), evidence_freshness(store, e))).collect();
             let imported_evidence =
                 evidence.iter().filter(|e| !store.evidence_is_local(&e.id)).map(|e| e.id.clone()).collect();
@@ -979,11 +971,11 @@ impl GraphService {
             'subjects: for (subject, label, why, only_input) in subjects {
                 let mut records = store.evidence_for_subject(&subject)?;
                 for r in store.relations_to(&subject)?.into_iter().chain(store.relations_from(&subject)?) {
-                    if r.kind == RelationKind::EvidenceFor {
-                        for id in &r.evidence {
-                            if let Some(e) = store.evidence(id)? {
-                                records.push(e);
-                            }
+                    for id in &r.evidence {
+                        if let Some(e) = store.evidence(id)?
+                            && validate::cites(&r, &e)
+                        {
+                            records.push(e);
                         }
                     }
                 }
