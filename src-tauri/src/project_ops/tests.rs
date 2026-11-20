@@ -1334,6 +1334,37 @@ fn permanent_agent_unlocated_and_covered_items_are_refused_without_changes() {
     assert_eq!(buffer(&fx, "paper.tex").text, WITHOUT_THEOREM_AND_PROOF);
 }
 
+/// RL-9 (QC audit), recorded as the plan's present contract: Delete from
+/// Source lists what refers to the item in the sources (references that
+/// become undefined, its proofs, literal Lean mentions). It is not the
+/// impact query: what the item itself supports or formalizes (its outgoing
+/// `formalizes` / `evidenceFor`) is not a consequence the plan names, so no
+/// decision is asked for it. Whether it should be named is a product
+/// decision (see the lane report); this test fails if the behavior changes.
+#[test]
+fn a_source_removal_plan_names_what_refers_to_the_item_not_what_the_item_supports() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let basel = "namespace LeanBasic\n\ntheorem basel : True := by\n  trivial\n\nend LeanBasic\n";
+    fs::create_dir_all(fx.file("lean/LeanBasic")).unwrap();
+    fs::write(fx.file("lean/LeanBasic/Basel.lean"), basel).unwrap();
+    let mut decl = entity(EntityKind::FormalDeclaration, "LeanBasic.basel", Some("LeanBasic.basel"));
+    decl.origin = Origin::Extracted { extractor: "lean/1".into() };
+    let mut statement = entity(EntityKind::Theorem, "Basel theorem", None);
+    statement.origin = Origin::User;
+    let mut formalizes = relation(exposition_graph::vocabulary::RelationKind::Formalizes, &decl, &statement);
+    formalizes.origin = Origin::User;
+    formalizes.status = exposition_graph::model::AssertionStatus::Accepted;
+    let b = binding(&decl, "lean/LeanBasic/Basel.lean", basel, "lean.theorem", Some("LeanBasic.basel"));
+    let mut d = detail(decl.clone(), vec![b], Vec::new(), vec![statement.clone()]);
+    d.outgoing = vec![formalizes];
+    let data = FakeData { details: vec![d], ..FakeData::default() };
+    let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+    assert!(plan.refusals.is_empty(), "{:?}", plan.refusals);
+    assert!(plan.impacts.is_empty(), "the formalized statement is not named: {:?}", plan.impacts);
+    assert!(!plan.needs_decision);
+}
+
 #[test]
 fn a_lean_declaration_lists_literal_uses_of_its_name_in_other_lean_files() {
     let fx = fixture();

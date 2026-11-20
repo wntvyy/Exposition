@@ -179,6 +179,74 @@ describe("saved views", () => {
   });
 });
 
+// GI-4: the view stores outlive a project (module singletons). A layout change that is still
+// waiting to be saved, or being saved, when the next project loads belongs to the previous
+// project: it is never written into the next one and never renames the next project's view.
+describe("saved views across a project change", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    setGraphApi(ipcGraphApi);
+  });
+
+  const slow = <A extends unknown[], R>(fn: (...args: A) => Promise<R>, ms: number) => async (...args: A): Promise<R> => {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    return fn(...args);
+  };
+
+  it("drops a pending layout save when the next project's view is loading", async () => {
+    const a = createFakeGraph();
+    setGraphApi(a.api);
+    const store = createViewStore("Project", { kind: "project" }, { saveDelayMs: 100 });
+    await store.load();
+    store.moveNodes(new Map([["entity-of-a", { x: 1, y: 1 }]]));
+    expect(store.use.getState().save).toBe("pending");
+
+    // The project changes: the graph now answers for project B, and its view takes a moment to load.
+    const b = createFakeGraph();
+    b.api.views = slow(b.api.views.bind(b.api), 300);
+    setGraphApi(b.api);
+    const loading = store.load();
+    await vi.advanceTimersByTimeAsync(150); // the old timer would fire here
+    expect(b.calls.filter((c) => c.method === "viewSave")).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(300);
+    await loading;
+    expect(b.views.size).toBe(0);
+    expect(a.views.size).toBe(0);
+    expect(store.use.getState()).toMatchObject({ save: "idle", view: { id: null, positions: {} } });
+    // A change made while a load is in flight would be replaced by the loaded view: it is not queued.
+    const again = store.load();
+    store.moveNodes(new Map([["x", { x: 5, y: 5 }]]));
+    await vi.advanceTimersByTimeAsync(500);
+    await again;
+    expect(b.calls.filter((c) => c.method === "viewSave")).toHaveLength(0);
+  });
+
+  it("does not let a save of the previous project rename the next project's view", async () => {
+    const a = createFakeGraph();
+    a.api.viewSave = slow(a.api.viewSave.bind(a.api), 300);
+    setGraphApi(a.api);
+    const store = createViewStore("Project", { kind: "project" }, { saveDelayMs: 100 });
+    await store.load();
+    store.moveNodes(new Map([["entity-of-a", { x: 1, y: 1 }]]));
+    await vi.advanceTimersByTimeAsync(150); // the save to A is in flight
+
+    const b = createFakeGraph();
+    const own = await b.api.viewSave(toGraphViewInput(view({ positions: { "entity-of-b": { x: 7, y: 7 } } })));
+    setGraphApi(b.api);
+    await store.load();
+    expect(store.use.getState().view).toMatchObject({ id: own.id, revision: 1 });
+    await vi.advanceTimersByTimeAsync(400); // A's save returns now
+    expect(a.views.size).toBe(1);
+    expect(store.use.getState()).toMatchObject({ save: "idle", view: { id: own.id, revision: 1, positions: { "entity-of-b": { x: 7, y: 7 } } } });
+    // The next project's view still saves normally afterwards.
+    store.moveNodes(new Map([["entity-of-b", { x: 9, y: 9 }]]));
+    await vi.advanceTimersByTimeAsync(150);
+    expect(b.views.get(own.id)).toMatchObject({ revision: 2, nodes: [{ entity: "entity-of-b", x: 9, y: 9 }] });
+    expect(store.use.getState().save).toBe("saved");
+  });
+});
+
 describe("graph store", () => {
   afterEach(() => {
     resetGraphForTests();

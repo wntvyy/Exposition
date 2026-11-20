@@ -6,6 +6,9 @@
 //     focused row explains instead of acting); Copy Reference / Copy Text.
 //  2. A manual claim: Duplicate (Ctrl+D) makes a new item without evidence,
 //     the original intact; Delete (key) removes the copy at once.
+//  2b. Two connected manual claims deleted in one request and restored in the
+//     order Undo restores them (the request's order): both return with the
+//     relationship between them, the same record.
 //  3. A manual relationship: Delete relationship at once (no generic alert).
 //  4. A file-backed resource: "Delete Source File" moves the file to the
 //     Recycle Bin.
@@ -97,6 +100,32 @@ export default async function p1GraphWorkflows({ launchApp, artifactsDir, assert
     const claim = (await change(page, [create("c", "claim", "Conjecture P1")])).created[0].id;
     const rel = await change(page, [{ op: "addRelation", kind: "dependsOn", from: { kind: "id", id: claim }, to: { kind: "id", id: theorem.id }, evidenceKind: null, evidence: [], note: null }]);
     const relationId = rel.created?.[0]?.id ?? null;
+
+    // 2b. connected claims: delete both, restore both (Undo's order) — GI-1
+    const linked = (
+      await change(page, [
+        create("a", "claim", "Linked claim A"),
+        create("b", "claim", "Linked claim B"),
+        { op: "addRelation", kind: "dependsOn", from: { kind: "temp", tempId: "a" }, to: { kind: "temp", tempId: "b" }, evidenceKind: null, evidence: [], note: null },
+      ])
+    ).created.map((c) => c.id);
+    const linkOf = async () => (await invoke(page, "graph_entity", { entity: linked[0] })).outgoing.find((r) => r.kind === "dependsOn" && r.to === linked[1]);
+    const linkBefore = await linkOf();
+    assert.ok(linkBefore, "the two claims are related");
+    const bothPlan = await invoke(page, "project_op_plan", {
+      request: { kind: { kind: "delete", permanent: false }, targets: linked.map((entity) => ({ kind: "graphEntity", entity })), actor: { kind: "user" } },
+    });
+    assert.deepEqual(bothPlan.refusals, [], JSON.stringify(bothPlan.refusals));
+    const bothGone = await invoke(page, "project_op_apply", { apply: { plan: bothPlan.plan, planHash: bothPlan.planHash, choices: {} } });
+    assert.deepEqual(bothGone.outcomes.map((o) => o.status), ["succeeded", "succeeded"], JSON.stringify(bothGone.outcomes));
+    assert.equal((await entities(page, "Linked claim")).length, 0, "both claims are deleted");
+    for (const outcome of bothGone.outcomes) {
+      const restored = await invoke(page, "project_op_restore", { restore: { restore: outcome.restore, onCollision: "cancel" } });
+      assert.equal(restored.status, "succeeded", JSON.stringify(restored));
+      assert.doesNotMatch(restored.message ?? "", /not restored/, "no relationship is reported lost");
+    }
+    assert.deepEqual(await linkOf(), linkBefore, "the relationship between the two restored claims is back, the same record");
+    evidence.notes.push(`two connected claims deleted and restored with their relationship ${linkBefore.id}`);
 
     // --- Graph page, table mode (keyboard alternative), focus on rows -----------------------
     await page.evaluate(() => localStorage.setItem("exposition.graph.mode.project", "table"));

@@ -184,6 +184,14 @@ impl GraphService {
         &self.journal
     }
 
+    /// When this session of the service started. Journal records that are
+    /// still pending and older than this were interrupted; newer ones are
+    /// operations this session is running
+    /// ([`OperationJournal::unresolved_before`]).
+    pub fn session_started_at_ms(&self) -> u64 {
+        self.started_at_ms
+    }
+
     pub fn data_dir(&self) -> &Path {
         &self.config.data_dir
     }
@@ -503,7 +511,6 @@ impl GraphService {
         state
     }
 
-    /// The attached project folder (not a failed one).
     /// The LaTeX main files the reconciler knows for the attached project,
     /// without waiting for a running pass (then read from the store). Empty
     /// when no graph is attached.
@@ -523,6 +530,7 @@ impl GraphService {
         .unwrap_or_default()
     }
 
+    /// The attached project folder (not a failed one).
     pub(crate) fn attached_root(&self) -> Option<PathBuf> {
         self.lock().open.as_ref().map(|o| o.root.clone())
     }
@@ -666,19 +674,11 @@ impl GraphService {
             neighbor_ids.dedup();
             neighbor_ids.truncate(500);
             let neighbors = store.entities(&neighbor_ids)?;
-            let mut evidence = store.evidence_for_subject(id)?;
-            for r in outgoing.iter().chain(incoming.iter()) {
-                for e in &r.evidence {
-                    if evidence.len() >= 200 {
-                        break;
-                    }
-                    if !evidence.iter().any(|x| &x.id == e)
-                        && let Some(rec) = store.evidence(e)?
-                    {
-                        evidence.push(rec);
-                    }
-                }
-            }
+            // An entity's evidence is what was recorded about it. Records a
+            // relation cites stay on that relation (`Relation::evidence`):
+            // adding, relabelling, or keeping a rejected relation never makes
+            // another item's record this item's own.
+            let evidence = store.evidence_for_subject(id)?;
             let evidence_freshness = evidence.iter().map(|e| (e.id.clone(), evidence_freshness(store, e))).collect();
             let imported_evidence =
                 evidence.iter().filter(|e| !store.evidence_is_local(&e.id)).map(|e| e.id.clone()).collect();
@@ -811,8 +811,10 @@ impl GraphService {
             let mut items: Vec<ImpactItem> = Vec::new();
             let mut seen: BTreeSet<EntityId> = roots.clone();
             let mut cycles: Vec<Vec<EntityId>> = Vec::new();
-            let mut queue: VecDeque<(EntityId, u32, Vec<ImpactStep>)> =
-                roots.iter().map(|r| (r.clone(), 0, Vec::new())).collect();
+            // Each entry: the entity, its depth, the relations followed to it,
+            // and the entities passed on the way (starting with its root).
+            let mut queue: VecDeque<(EntityId, u32, Vec<ImpactStep>, Vec<EntityId>)> =
+                roots.iter().map(|r| (r.clone(), 0, Vec::new(), vec![r.clone()])).collect();
             let mut work = 0usize;
             let mut work_limit_reached = false;
             let mut truncated = false;
@@ -827,7 +829,7 @@ impl GraphService {
                     root_entities.push(e);
                 }
             }
-            while let Some((current, depth, path)) = queue.pop_front() {
+            while let Some((current, depth, path, chain)) = queue.pop_front() {
                 if depth >= max_depth {
                     continue;
                 }
@@ -884,14 +886,19 @@ impl GraphService {
                         from: r.from.clone(),
                         to: r.to.clone(),
                     });
-                    if roots.contains(&other) || path.iter().any(|s| s.from == other || s.to == other) {
-                        if r.kind.allows_cycles() && cycles.len() < 50 {
-                            let mut cycle: Vec<EntityId> = step_path.iter().map(|s| s.from.clone()).collect();
-                            cycle.push(other.clone());
-                            cycle.dedup();
-                            if !cycles.contains(&cycle) {
-                                cycles.push(cycle);
-                            }
+                    if let Some(start) = chain.iter().position(|e| e == &other) {
+                        // Back at an entity this path already passed. That is
+                        // a cycle only when the loop is made of distinct
+                        // relations that each say "this one depends on the
+                        // previous one": walking back over the relation just
+                        // followed (proofOf, evidenceFor and formalizes are
+                        // followed both ways), or closing a loop through such
+                        // a two-way link, is the same link seen twice.
+                        if cycles.len() < 50
+                            && let Some(cycle) = dependency_cycle(&chain[start..], &step_path[start..])
+                            && !cycles.contains(&cycle)
+                        {
+                            cycles.push(cycle);
                         }
                         continue;
                     }
@@ -921,7 +928,9 @@ impl GraphService {
                     // changed itself: it is listed, its dependents are not
                     // (name it as a root to follow it).
                     if r.kind != RelationKind::AnchoredIn {
-                        queue.push_back((other, depth + 1, step_path));
+                        let mut chain = chain.clone();
+                        chain.push(other.clone());
+                        queue.push_back((other, depth + 1, step_path, chain));
                     }
                 }
                 if truncated || work_limit_reached {
@@ -979,11 +988,11 @@ impl GraphService {
             'subjects: for (subject, label, why, only_input) in subjects {
                 let mut records = store.evidence_for_subject(&subject)?;
                 for r in store.relations_to(&subject)?.into_iter().chain(store.relations_from(&subject)?) {
-                    if r.kind == RelationKind::EvidenceFor {
-                        for id in &r.evidence {
-                            if let Some(e) = store.evidence(id)? {
-                                records.push(e);
-                            }
+                    for id in &r.evidence {
+                        if let Some(e) = store.evidence(id)?
+                            && validate::cites(&r, &e)
+                        {
+                            records.push(e);
                         }
                     }
                 }
@@ -1405,7 +1414,7 @@ impl GraphService {
             state: if content_hash.is_some() { BindingState::Resolved } else { BindingState::Unresolved },
             detail: None,
         };
-        let batch = ServiceBatch {
+        let mut batch = ServiceBatch {
             entities: vec![validate::EntityUpsert {
                 id: None,
                 kind: EntityKind::Resource,
@@ -1420,15 +1429,46 @@ impl GraphService {
             summary: format!("Admit {path}"),
             ..Default::default()
         };
+        let root = self.attached_root();
         // Look up and admit under one lock, so concurrent admissions (the
         // reconciler, another service) never create two identities for one file.
-        let (entity, delta) = self.with_store(|store| {
-            if let Some(existing) = store
-                .entities_by_key(EntityKind::Resource, path.as_str())?
-                .into_iter()
-                .find(|e| e.lifecycle != Lifecycle::Tombstoned)
+        let admit = |store: &mut GraphStore| -> GraphResult<(Entity, Option<crate::model::GraphDelta>)> {
+            let known = store.entities_by_key(EntityKind::Resource, path.as_str())?;
+            if let Some(existing) = known.iter().find(|e| e.lifecycle != Lifecycle::Tombstoned) {
+                return Ok((existing.clone(), None));
+            }
+            // A file that returned unchanged is the same resource (the
+            // reconciler's rule, applied here too so that whichever of the
+            // two meets the file first gives the same answer): exactly one
+            // removed resource of this path recorded the content the file
+            // has now. Without a known content nothing is revived.
+            let removed: Vec<&Entity> = known.iter().filter(|e| e.lifecycle == Lifecycle::Tombstoned).collect();
+            if !removed.is_empty()
+                && let Some(hash) = content_hash.map(str::to_owned).or_else(|| current_hash(root.as_deref(), path))
             {
-                return Ok((existing, None));
+                let mut same: Vec<&Entity> = Vec::new();
+                for e in removed {
+                    let recorded = store.bindings(&e.id)?.first().and_then(|b| b.version.clone());
+                    if recorded.is_some_and(|v| v.content_hash == hash) {
+                        same.push(e);
+                    }
+                }
+                if let [revived] = same.as_slice()
+                    && let Some(upsert) = batch.entities.first_mut()
+                {
+                    upsert.id = Some(revived.id.clone());
+                    upsert.attributes = revived.attributes.clone();
+                    upsert.lifecycle = Some(Lifecycle::Active);
+                    if upsert.roles.is_empty() {
+                        upsert.roles = revived.roles.clone();
+                    }
+                    if let Some(binding) = upsert.bindings.as_mut().and_then(|b| b.first_mut()) {
+                        binding.version =
+                            Some(crate::model::SourceVersion { content_hash: hash, revision: None, saved: true });
+                        binding.state = BindingState::Resolved;
+                    }
+                    batch.summary = format!("Admit {path} (returned unchanged)");
+                }
             }
             let w = Writer::new(store.transaction()?);
             let (mut run, _) =
@@ -1439,7 +1479,11 @@ impl GraphService {
             let id = id.ok_or_else(|| GraphError::new("graph.storage", "admission failed"))?;
             let entity = store.entity(&id)?.ok_or_else(|| GraphError::new("graph.storage", "admission failed"))?;
             Ok((entity, Some(run.delta)))
-        })?;
+        };
+        let (entity, delta) = match &root {
+            Some(root) => self.with_store_for(root, admit),
+            None => self.with_store(admit),
+        }?;
         if let Some(delta) = delta {
             self.emit(GraphEvent::Changed { delta, origin });
         }
@@ -1501,7 +1545,9 @@ impl GraphService {
                         format!("The view changed since it was opened (revision {}).", v.revision),
                     ));
                 }
-                (None, Some(_)) if input.id.is_some() => {
+                // Ids are minted here: a save that names an id this graph does
+                // not hold is a view of another project or a deleted one.
+                (None, _) if input.id.is_some() => {
                     return Err(GraphError::new("graph.unknownView", "That view no longer exists."));
                 }
                 (None, _) => 1,
@@ -1776,12 +1822,42 @@ fn neighborhood(
     Ok((out, total))
 }
 
+/// The content hash of a project file as it is on disk now (`None` when it
+/// cannot be read or is too large to fingerprint).
+fn current_hash(root: Option<&Path>, path: &WorkspacePath) -> Option<String> {
+    let root = root?;
+    let size = std::fs::metadata(crate::reconcile::scan::absolute(root, path)).ok()?.len();
+    crate::reconcile::scan::read_file(root, path, size, false).hash
+}
+
 /// The file a resource entity stands for (its key; its binding otherwise).
 fn resource_path(store: &GraphStore, resource: &Entity) -> Result<Option<WorkspacePath>, StoreError> {
     if let Some(path) = resource.key.as_deref().and_then(|k| WorkspacePath::parse(k).ok()) {
         return Ok(Some(path));
     }
     Ok(store.bindings(&resource.id)?.into_iter().next().map(|b| b.path))
+}
+
+/// The cycle closed by `steps` (`steps[i]` leads from `entities[i]` to the
+/// next entity, the last one back to `entities[0]`), if it is one: every
+/// step is a distinct relation of a kind that may cycle, followed from the
+/// item depended on to its dependent. Listed from its smallest id, so one
+/// cycle reads the same from every starting point.
+fn dependency_cycle(entities: &[EntityId], steps: &[ImpactStep]) -> Option<Vec<EntityId>> {
+    if entities.is_empty() || entities.len() != steps.len() {
+        return None;
+    }
+    for (i, step) in steps.iter().enumerate() {
+        let dependent = entities.get(i + 1).unwrap_or(&entities[0]);
+        let directed = step.to == entities[i] && &step.from == dependent;
+        if !directed || !step.kind.allows_cycles() || steps[..i].iter().any(|s| s.relation == step.relation) {
+            return None;
+        }
+    }
+    let first = entities.iter().enumerate().min_by_key(|(_, e)| *e).map(|(i, _)| i).unwrap_or(0);
+    let mut cycle: Vec<EntityId> = entities[first..].iter().chain(entities[..first].iter()).cloned().collect();
+    cycle.push(cycle[0].clone());
+    Some(cycle)
 }
 
 /// Relation kinds whose meaning propagates from `to` back to `from` when `to` changes.

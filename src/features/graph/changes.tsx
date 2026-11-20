@@ -10,12 +10,13 @@ import type { ApplyOutcome } from "../../bindings/ApplyOutcome";
 import type { ChangeProposal } from "../../bindings/ChangeProposal";
 import type { Entity } from "../../bindings/Entity";
 import type { EntityKind } from "../../bindings/EntityKind";
+import type { EvidenceKind } from "../../bindings/EvidenceKind";
 import type { GraphDiagnostic } from "../../bindings/GraphDiagnostic";
 import type { GraphOperation } from "../../bindings/GraphOperation";
 import type { RelationKind } from "../../bindings/RelationKind";
 import { Badge, Button, Dialog, Select, TextField, type SelectOption } from "../../ui/components";
 import { errorText, graphApi } from "./api";
-import { endpointAllowed, entityDisplay, kindDisplay, relationDisplay, type VocabularyIndex } from "./model";
+import { endpointAllowed, entityDisplay, kindDisplay, relationDisplay, STATED_EVIDENCE_KINDS, type VocabularyIndex } from "./model";
 import { graph, useGraph } from "./store";
 
 export type ChangeResult =
@@ -142,7 +143,11 @@ export function useProposal(operations: GraphOperation[] | null, summary: string
   useEffect(() => {
     setProposal(null);
     setError(null);
-    if (!key) return;
+    if (!key) {
+      // A check that was superseded never clears the flag itself.
+      setBusy(false);
+      return;
+    }
     let cancelled = false;
     setBusy(true);
     const timer = setTimeout(() => {
@@ -231,9 +236,13 @@ export function RelateDialog({ vocabulary, from: initialFrom, to: initialTo, can
   useEffect(() => {
     if (ends.to && (!kind || !options.some((o) => o.id === kind))) setKind(options[0]?.id ?? null);
   }, [options, ends.to, kind]);
+  // An evidence relationship states its kind of support (the backend requires it); no other kind carries one.
+  const [support, setSupport] = useState<EvidenceKind | null>(null);
+  const needsSupport = kind === "evidenceFor";
+  const evidenceKind = needsSupport ? support : null;
   const operations: GraphOperation[] | null =
-    kind && ends.to
-      ? [{ op: "addRelation", kind, from: { kind: "id", id: ends.from.id }, to: { kind: "id", id: ends.to.id }, evidenceKind: null, evidence: [], note: null }]
+    kind && ends.to && (!needsSupport || evidenceKind)
+      ? [{ op: "addRelation", kind, from: { kind: "id", id: ends.from.id }, to: { kind: "id", id: ends.to.id }, evidenceKind, evidence: [], note: null }]
       : null;
   const { proposal, busy, error, setError } = useProposal(operations, "Add a relationship");
   const reading = kind ? relationDisplay(vocabulary, kind).reading : "…";
@@ -299,7 +308,22 @@ export function RelateDialog({ vocabulary, from: initialFrom, to: initialTo, can
             Swap direction
           </Button>
         </div>
-        <ProposalReview proposal={proposal} busy={busy} error={error} idle={ends.to ? "Choose a relationship." : "Choose the related item."} />
+        {needsSupport && (
+          <Select<EvidenceKind>
+            label="Kind of support"
+            placeholder="Choose the kind of support"
+            description="Computational and formal-check evidence is recorded by Research and Lean, not added by hand."
+            options={STATED_EVIDENCE_KINDS}
+            value={support}
+            onChange={setSupport}
+          />
+        )}
+        <ProposalReview
+          proposal={proposal}
+          busy={busy}
+          error={error}
+          idle={!ends.to ? "Choose the related item." : needsSupport && !support ? "Choose the kind of support." : "Choose a relationship."}
+        />
       </div>
     </Dialog>
   );

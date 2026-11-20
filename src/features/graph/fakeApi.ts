@@ -57,6 +57,7 @@ export function fakeVocabulary(): Vocabulary {
       { kind: "proofOf", family: "mathematics", reading: "is a proof of", rule: "A proof targets a statement.", endpoints: pairs(["proof"], STATEMENT), manual: true },
       { kind: "references", family: "citation", reading: "references", rule: "Anything citable.", endpoints: pairs([...MATH, "resource"], ALL), manual: true },
       { kind: "formalizes", family: "formal", reading: "formalizes", rule: "A formal declaration formalizes a statement.", endpoints: pairs(["formalDeclaration"], STATEMENT), manual: true },
+      { kind: "evidenceFor", family: "evidence", reading: "is evidence for", rule: "A proof, finding, or declaration supports a statement.", endpoints: pairs(["proof", "finding", "formalDeclaration"], STATEMENT), manual: true },
     ],
   };
 }
@@ -158,6 +159,13 @@ export function createFakeGraph(seed: { entities?: Entity[]; relations?: Relatio
         if (!from || !to) return err(i, "graph.unknownEntity", "unknown entity");
         if (op.from.kind === "id" && op.to.kind === "id" && op.from.id === op.to.id) return err(i, "graph.selfRelation", "an entity cannot relate to itself");
         if (!info.endpoints.has(`${from}>${to}`)) return err(i, "graph.endpointRule", `${info.reading} cannot go from a ${from} to a ${to}: ${info.rule}`);
+        // As the validator does: an evidence relationship states its kind of support, only it does,
+        // and a kind a service owns must cite that service's record.
+        if (op.kind === "evidenceFor" && !op.evidenceKind) return err(i, "graph.evidenceKind", "an evidence relationship needs the kind of support it gives");
+        if (op.kind !== "evidenceFor" && op.evidenceKind) return err(i, "graph.evidenceKind", "only evidence relationships carry an evidence kind");
+        if (op.evidenceKind && ["computational", "formalCheck", "build"].includes(op.evidenceKind) && op.evidence.length === 0) {
+          return err(i, "graph.serviceOwnedEvidence", `${op.evidenceKind} evidence is recorded only by its service; cite an existing record`);
+        }
         if (op.from.kind === "id" && op.to.kind === "id") {
           const [a, b] = [op.from.id, op.to.id];
           if (relations.some((r) => r.kind === op.kind && r.from === a && r.to === b && r.status !== "rejected")) {
@@ -333,7 +341,7 @@ export function createFakeGraph(seed: { entities?: Entity[]; relations?: Relatio
           const to = op.to.kind === "id" ? op.to.id : temps.get(op.to.tempId)!;
           const id = `r${nextId++}`;
           added.push(id);
-          relations.push(relation(id, op.kind, from, to));
+          relations.push({ ...relation(id, op.kind, from, to), evidenceKind: op.evidenceKind, evidence: op.evidence });
         }
         if (op.op === "removeRelation") relations.splice(relations.findIndex((r) => r.id === op.relation), 1);
         if (op.op === "setRelationStatus") {

@@ -382,7 +382,7 @@ export function DependsOnSection({ entityId, vocabulary, onSelectEntity }: { ent
   );
 }
 
-function MathSections({
+export function MathSections({
   detail,
   row,
   vocabulary,
@@ -399,9 +399,12 @@ function MathSections({
   canWrite: boolean;
 }) {
   const neighbors = new Map(detail.neighbors.map((n) => [n.id, n]));
-  const proofs = detail.incoming.filter((r) => r.kind === "proofOf");
-  const targets = detail.outgoing.filter((r) => r.kind === "proofOf");
-  const formalizations = detail.incoming.filter((r) => r.kind === "formalizes");
+  // A rejected link is not a link (the table, the evidence pointer and the service leave it out too);
+  // it stays listed with its status under Relationships in the Graph inspector.
+  const standing = (r: Relation) => r.status !== "rejected";
+  const proofs = detail.incoming.filter((r) => r.kind === "proofOf" && standing(r));
+  const targets = detail.outgoing.filter((r) => r.kind === "proofOf" && standing(r));
+  const formalizations = detail.incoming.filter((r) => r.kind === "formalizes" && standing(r));
   const isStatement = kindDisplay(vocabulary, detail.entity.kind).statement;
   const relationList = (relations: Relation[], pick: (r: Relation) => string, testId: string) => (
     <ul className="xp-graph-rows">

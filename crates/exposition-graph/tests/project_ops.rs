@@ -856,3 +856,93 @@ fn evidence_recorded_from_a_run_is_found_by_its_operation() {
     assert!(p.svc.evidence_for_operation("researchRun", "run-ffffffffffffffff").unwrap().is_empty());
     assert!(p.svc.evidence_for_operation("leanAudit", "run-0123456789abcdef").unwrap().is_empty());
 }
+
+/// GI-1: a relationship between two deleted items is kept by one snapshot
+/// only. Whichever item is restored first, the relationship returns when
+/// both are back, as the same record.
+#[test]
+fn a_relationship_between_two_deleted_items_returns_in_either_restore_order() {
+    for first_restored in [0usize, 1] {
+        let p = project(&[("main.tex", MAIN), ("fig.png", "png")]);
+        let a = p.create(EntityKind::Claim, "Claim A");
+        let b = p.create(EntityKind::Claim, "Claim B");
+        let c = p.create(EntityKind::Claim, "Claim C");
+        let ab = p.relate(RelationKind::DependsOn, &a, &b);
+        let ca = p.relate(RelationKind::DependsOn, &c, &a);
+        let before = p.svc.entity_detail(&a).unwrap().outgoing.remove(0);
+        // Deleted one after the other, as a multi-selection is.
+        let tokens = [
+            p.svc.delete_entity(&Origin::User, &a, false).unwrap().unwrap(),
+            p.svc.delete_entity(&Origin::User, &b, false).unwrap().unwrap(),
+        ];
+        let order = [first_restored, 1 - first_restored];
+        let first = p.svc.restore_recoverable(&Origin::User, &tokens[order[0]]).unwrap();
+        assert_eq!(first.skipped_relations, 0, "order {order:?}: a relationship that is only waiting is not lost");
+        assert!(p.svc.recoverables().unwrap().iter().any(|r| r.id == tokens[order[1]]));
+        let second = p.svc.restore_recoverable(&Origin::User, &tokens[order[1]]).unwrap();
+        assert_eq!(second.skipped_relations, 0, "order {order:?}");
+        assert!(p.svc.recoverables().unwrap().is_empty());
+        assert_eq!(p.relation(RelationKind::DependsOn, &a, &b), Some(ab.clone()), "order {order:?}");
+        assert_eq!(p.relation(RelationKind::DependsOn, &c, &a), Some(ca.clone()), "order {order:?}");
+        let after = p.svc.entity_detail(&a).unwrap().outgoing.remove(0);
+        assert_eq!(after, before, "the same record, unchanged");
+        // Through persistence.
+        p.svc.detach();
+        assert!(p.svc.attach(&p.root).is_usable());
+        assert_eq!(p.relation(RelationKind::DependsOn, &a, &b), Some(ab));
+    }
+}
+
+/// GI-1: the relationship waits with the item that is still deleted.
+#[test]
+fn a_waiting_relationship_follows_the_item_that_is_still_deleted() {
+    let p = project(&[("main.tex", MAIN), ("fig.png", "png")]);
+    let a = p.create(EntityKind::Claim, "Claim A");
+    let b = p.create(EntityKind::Claim, "Claim B");
+    let ab = p.relate(RelationKind::DependsOn, &a, &b);
+    let ta = p.svc.delete_entity(&Origin::User, &a, false).unwrap().unwrap();
+    let tb = p.svc.delete_entity(&Origin::User, &b, false).unwrap().unwrap();
+    p.svc.restore_recoverable(&Origin::User, &ta).unwrap();
+    // A is deleted again while B is still deleted: the relationship now waits
+    // in B's record only, and returns whichever comes back last.
+    let ta = p.svc.delete_entity(&Origin::User, &a, false).unwrap().unwrap();
+    p.svc.restore_recoverable(&Origin::User, &tb).unwrap();
+    assert_eq!(p.svc.entity_detail(&b).unwrap().incoming.len(), 0);
+    p.svc.restore_recoverable(&Origin::User, &ta).unwrap();
+    assert_eq!(p.relation(RelationKind::DependsOn, &a, &b), Some(ab));
+    assert!(p.svc.recoverables().unwrap().is_empty());
+}
+
+/// RL-10: a recoverable record is project data. A relationship in it that
+/// breaks the vocabulary's endpoint rules is not restored (and the graph
+/// still opens afterwards).
+#[test]
+fn restore_does_not_admit_a_relationship_the_vocabulary_refuses() {
+    let p = project(&[("main.tex", MAIN), ("fig.png", "png")]);
+    let a = p.create(EntityKind::Claim, "Claim A");
+    let b = p.create(EntityKind::Claim, "Claim B");
+    p.relate(RelationKind::DependsOn, &a, &b);
+    let token = p.svc.delete_entity(&Origin::User, &a, false).unwrap().unwrap();
+    // The stored snapshot is edited outside the app: a claim "is a proof of" a claim.
+    p.svc
+        .with_store(|s| {
+            let body: String = s
+                .connection()
+                .query_row("SELECT body FROM recoverable WHERE id = ?1", [token.as_str()], |r| r.get(0))
+                .map_err(exposition_graph::store::StoreError::from)?;
+            assert!(body.contains("\"kind\":\"dependsOn\""), "{body}");
+            let forged = body.replace("\"kind\":\"dependsOn\"", "\"kind\":\"proofOf\"");
+            s.connection()
+                .execute("UPDATE recoverable SET body = ?1 WHERE id = ?2", [forged.as_str(), token.as_str()])
+                .map_err(exposition_graph::store::StoreError::from)?;
+            Ok(())
+        })
+        .unwrap();
+    let restored = p.svc.restore_recoverable(&Origin::User, &token).unwrap();
+    assert_eq!(restored.skipped_relations, 1, "the refused relationship is reported, not restored");
+    let detail = p.svc.entity_detail(&a).unwrap();
+    assert!(detail.outgoing.is_empty(), "{:?}", detail.outgoing);
+    p.svc.detach();
+    let status = p.svc.attach(&p.root);
+    assert!(status.is_usable(), "the graph must still open: {status:?}");
+}

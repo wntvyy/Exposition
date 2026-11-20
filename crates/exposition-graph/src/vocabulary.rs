@@ -373,8 +373,10 @@ impl RelationKind {
         }
     }
 
-    /// Mathematical relations may form cycles (traversal terminates and
-    /// explains them); structural containment may not.
+    /// Every kind except containment may form cycles: mathematical
+    /// dependencies legitimately, and membership, inclusion, use, and
+    /// derivation because nothing orders work by them (traversal terminates;
+    /// impact reports a cycle of dependency steps). Containment is a tree.
     pub fn allows_cycles(self) -> bool {
         !matches!(self, RelationKind::Contains)
     }
@@ -501,7 +503,11 @@ impl EvidenceKind {
     }
 
     /// Privileged kinds are registered only by their owning service, never
-    /// through proposals from people, agents, or workflow steps.
+    /// through proposals from people, agents, or workflow steps. Formal
+    /// checks belong to the Lean service and computational evidence to
+    /// Research (`GraphService::apply_service_batch`); nothing records build
+    /// evidence yet, so it has no registering service and cannot be asserted
+    /// by hand either.
     pub fn is_service_owned(self) -> bool {
         matches!(self, EvidenceKind::FormalCheck | EvidenceKind::Computational | EvidenceKind::Build)
     }

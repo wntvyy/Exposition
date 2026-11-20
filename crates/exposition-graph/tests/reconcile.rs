@@ -1095,3 +1095,221 @@ fn a_saved_change_makes_the_evidence_of_a_file_historical_and_flags_changed_bind
     assert!(report.unknown_coverage.contains(&wp("main.typ")), "an unresolved binding makes the file's impact unknown");
     assert!(report.items.iter().any(|i| i.entity.id == theorem), "still listed with the file it was bound to");
 }
+
+// ----- QC audit: relation semantics (RL-4, RL-5) and identity (GI-2) -----
+
+const PAPER_UNCITED: &str = "\\documentclass{article}\n\\begin{document}\n\\section{Main}\n\\begin{lemma}\\label{lem:a}\nA.\n\\end{lemma}\n\\begin{proof}\nTrivial.\n\\end{proof}\n\\begin{theorem}\\label{thm:b}\nB.\n\\end{theorem}\n\\end{document}\n";
+const PAPER_CITED: &str = "\\documentclass{article}\n\\begin{document}\n\\section{Main}\n\\begin{lemma}\\label{lem:a}\nA, see \\cite{knuth}.\n\\end{lemma}\n\\begin{proof}\nTrivial.\n\\end{proof}\n\\begin{theorem}\\label{thm:b}\nB, by \\cite{knuth}.\n\\end{theorem}\n\\end{document}\n";
+
+/// RL-4: what the source states is observed, whatever was suggested or
+/// rejected about the same relationship before.
+#[test]
+fn a_rejected_or_suggested_relation_does_not_hide_what_the_source_states() {
+    let p = project(&[("paper.tex", PAPER_UNCITED), ("refs.bib", "@book{knuth, title = {The TeXbook}}\n")]);
+    p.full();
+    let lemma = by_key(&p, EntityKind::Lemma, "lem:a").unwrap();
+    let theorem = by_key(&p, EntityKind::Theorem, "thm:b").unwrap();
+    let knuth = by_key(&p, EntityKind::Reference, "knuth").unwrap();
+    let agent = Origin::Agent { task_id: "task-4".into() };
+    let (proposal, out) = p
+        .svc
+        .propose_and_apply(
+            agent,
+            &ChangeRequest {
+                base_revision: p.svc.status().revision,
+                operations: vec![
+                    add_rel(RelationKind::References, &theorem.id, &knuth.id),
+                    add_rel(RelationKind::References, &lemma.id, &knuth.id),
+                ],
+                summary: None,
+            },
+        )
+        .unwrap();
+    assert!(matches!(out, ApplyOutcome::Applied { .. }), "{:?}", proposal.diagnostics);
+    let cites = |from: &EntityId| -> Vec<Relation> {
+        p.svc
+            .entity_detail(from)
+            .unwrap()
+            .outgoing
+            .into_iter()
+            .filter(|r| r.kind == RelationKind::References && r.to == knuth.id)
+            .collect()
+    };
+    let rejected = cites(&theorem.id).remove(0);
+    let suggested = cites(&lemma.id).remove(0);
+    p.user(vec![GraphOperation::SetRelationStatus {
+        relation: rejected.id.clone(),
+        status: AssertionStatus::Rejected,
+    }]);
+    let rejected = cites(&theorem.id).remove(0);
+    let flagged = |p: &Project| -> Vec<EntityId> {
+        impact_of(p, &knuth.id)
+            .items
+            .into_iter()
+            .filter(|i| i.action == ImpactAction::CitationReview)
+            .map(|i| i.entity.id)
+            .collect()
+    };
+    assert!(!flagged(&p).contains(&theorem.id), "a rejected suggestion is not followed");
+
+    // The author now cites the book in both statements and saves.
+    write(&p.root, "paper.tex", PAPER_CITED);
+    p.paths(&["paper.tex"]);
+    for (from, before) in [(&theorem.id, &rejected), (&lemma.id, &suggested)] {
+        let now = cites(from);
+        assert_eq!(now.len(), 1, "one relationship per pair: {now:?}");
+        assert_eq!(now[0].status, AssertionStatus::Observed, "{:?}", now[0]);
+        assert!(matches!(now[0].origin, Origin::Extracted { .. }), "{:?}", now[0].origin);
+        assert_eq!(now[0].id, before.id, "the same record");
+        assert!(now[0].revision > before.revision, "{} → {}", before.revision, now[0].revision);
+    }
+    let flagged_now = flagged(&p);
+    assert!(flagged_now.contains(&theorem.id) && flagged_now.contains(&lemma.id), "{flagged_now:?}");
+    // Through persistence, and stable under a forced reindex.
+    p.svc.detach();
+    assert!(p.svc.attach(&p.root).is_usable());
+    p.svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: true }).unwrap();
+    assert_eq!(cites(&theorem.id)[0].status, AssertionStatus::Observed);
+    // An observed relation follows the source: removed from it, it is gone.
+    write(&p.root, "paper.tex", PAPER_UNCITED);
+    p.paths(&["paper.tex"]);
+    assert!(cites(&theorem.id).is_empty() && cites(&lemma.id).is_empty());
+}
+
+/// RL-4: a relationship a person accepted is their record; the source
+/// stating the same thing does not take it over.
+#[test]
+fn an_accepted_relation_is_kept_when_the_source_states_the_same() {
+    let p = project(&[("paper.tex", PAPER_UNCITED), ("refs.bib", "@book{knuth, title = {The TeXbook}}\n")]);
+    p.full();
+    let theorem = by_key(&p, EntityKind::Theorem, "thm:b").unwrap();
+    let knuth = by_key(&p, EntityKind::Reference, "knuth").unwrap();
+    p.user(vec![add_rel(RelationKind::References, &theorem.id, &knuth.id)]);
+    let before = p.svc.entity_detail(&theorem.id).unwrap().outgoing.into_iter().find(|r| r.to == knuth.id).unwrap();
+    write(&p.root, "paper.tex", PAPER_CITED);
+    p.paths(&["paper.tex"]);
+    let after: Vec<Relation> =
+        p.svc.entity_detail(&theorem.id).unwrap().outgoing.into_iter().filter(|r| r.to == knuth.id).collect();
+    assert_eq!(after, vec![before]);
+}
+
+/// RL-5: an extracted declaration's label and attributes come from its
+/// source and are not edited as metadata; archiving it is the person's
+/// choice and survives indexing of its file.
+#[test]
+fn an_extracted_declaration_keeps_a_persons_archive_and_refuses_metadata_edits() {
+    let p = project(&[("paper.tex", PAPER)]);
+    p.full();
+    let theorem = by_key(&p, EntityKind::Theorem, "thm:b").unwrap();
+    let edit = |label: Option<&str>, attributes: Option<BTreeMap<String, String>>| {
+        let (proposal, _) = p
+            .svc
+            .propose_and_apply(
+                Origin::Agent { task_id: "task-5".into() },
+                &ChangeRequest {
+                    base_revision: p.svc.status().revision,
+                    operations: vec![GraphOperation::UpdateEntity {
+                        entity: theorem.id.clone(),
+                        expected_revision: theorem.revision,
+                        label: label.map(str::to_owned),
+                        attributes,
+                    }],
+                    summary: None,
+                },
+            )
+            .unwrap();
+        proposal.diagnostics.first().map(|d| d.code.clone())
+    };
+    assert_eq!(edit(Some("Main theorem (verified)"), None).as_deref(), Some("graph.sourceDerived"));
+    assert_eq!(
+        edit(None, Some(BTreeMap::from([("source.title".to_owned(), "Verified".to_owned())]))).as_deref(),
+        Some("graph.sourceDerived")
+    );
+    assert_eq!(p.entity(&theorem.id), theorem, "nothing changed");
+    // A file's attributes are not rewritten by indexing: they stay editable and survive it.
+    let file = p.resource("paper.tex").unwrap();
+    p.user(vec![GraphOperation::UpdateEntity {
+        entity: file.id.clone(),
+        expected_revision: file.revision,
+        label: None,
+        attributes: Some(BTreeMap::from([("note".to_owned(), "camera-ready".to_owned())])),
+    }]);
+
+    p.user(vec![GraphOperation::SetLifecycle {
+        entity: theorem.id.clone(),
+        expected_revision: theorem.revision,
+        lifecycle: Lifecycle::Archived,
+    }]);
+    // The file is edited (inside the theorem, and elsewhere) and saved.
+    write(&p.root, "paper.tex", &PAPER.replace("By Lemma", "Now by Lemma").replace("Trivial.", "Obvious."));
+    p.paths(&["paper.tex"]);
+    let after = p.entity(&theorem.id);
+    assert_eq!(after.lifecycle, Lifecycle::Archived, "indexing does not undo a person's archive");
+    p.svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: true }).unwrap();
+    assert_eq!(p.entity(&theorem.id).lifecycle, Lifecycle::Archived);
+    assert_eq!(p.entity(&file.id).attributes.get("note").map(String::as_str), Some("camera-ready"));
+    // Removed from the source it reads "Removed from source".
+    write(
+        &p.root,
+        "paper.tex",
+        PAPER_UNCITED.replace("\\begin{theorem}\\label{thm:b}\nB.\n\\end{theorem}\n", "").as_str(),
+    );
+    p.paths(&["paper.tex"]);
+    assert_eq!(p.entity(&theorem.id).lifecycle, Lifecycle::Tombstoned);
+}
+
+/// GI-2: a file that returns unchanged is the same resource, whoever asks
+/// for its identity first (a service admitting it, or the reconciler).
+#[test]
+fn a_service_admitting_a_returned_file_revives_its_identity() {
+    for with_hash in [true, false] {
+        let p = project(&[("notes/fit.md", "# Fit\n"), ("other.md", "# Other\n")]);
+        p.full();
+        let first = p.resource("notes/fit.md").unwrap();
+        let claim = match p.user(vec![create("c", EntityKind::Claim, "Claim")]) {
+            ApplyOutcome::Applied { created, .. } => created[0].id.clone(),
+            other => panic!("{other:?}"),
+        };
+        p.user(vec![add_rel(RelationKind::References, &claim, &first.id)]);
+        let hash = p.svc.entity_detail(&first.id).unwrap().bindings[0].version.clone().unwrap().content_hash;
+
+        std::fs::remove_file(p.root.join("notes/fit.md")).unwrap();
+        p.paths(&["notes/fit.md"]);
+        assert_eq!(p.entity(&first.id).lifecycle, Lifecycle::Tombstoned);
+        assert!(p.resource("notes/fit.md").is_none());
+
+        // The identical file is put back; a service asks before the reconciler runs.
+        write(&p.root, "notes/fit.md", "# Fit\n");
+        let admitted =
+            p.svc.ensure_resource(&wp("notes/fit.md"), with_hash.then_some(hash.as_str()), false, "research").unwrap();
+        assert_eq!(admitted.id, first.id, "with_hash {with_hash}: the same identity");
+        assert_eq!(admitted.lifecycle, Lifecycle::Active);
+        assert_eq!(admitted.tombstone_reason, None);
+        p.paths(&["notes/fit.md"]);
+        p.full();
+        let live: Vec<Entity> = p
+            .all(EntityKind::Resource)
+            .into_iter()
+            .filter(|e| e.key.as_deref() == Some("notes/fit.md") && e.lifecycle != Lifecycle::Tombstoned)
+            .collect();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(live[0].id, first.id);
+        let detail = p.svc.entity_detail(&first.id).unwrap();
+        assert!(detail.incoming.iter().any(|r| r.kind == RelationKind::References && r.from == claim));
+        assert_eq!(detail.bindings[0].state, BindingState::Resolved);
+    }
+}
+
+/// GI-2: different content at the path is a different file (the reconciler's rule).
+#[test]
+fn a_service_admitting_a_different_file_at_a_removed_path_gets_a_new_identity() {
+    let p = project(&[("notes/fit.md", "# Fit\n")]);
+    p.full();
+    let first = p.resource("notes/fit.md").unwrap();
+    std::fs::remove_file(p.root.join("notes/fit.md")).unwrap();
+    p.paths(&["notes/fit.md"]);
+    write(&p.root, "notes/fit.md", "# Something else\n");
+    let admitted = p.svc.ensure_resource(&wp("notes/fit.md"), None, false, "research").unwrap();
+    assert_ne!(admitted.id, first.id);
+    assert_eq!(p.entity(&first.id).lifecycle, Lifecycle::Tombstoned);
+}

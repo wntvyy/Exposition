@@ -611,6 +611,10 @@ fn interrupted_promotions_are_marked_for_reconciliation_on_open_and_attachments_
         .journal()
         .begin(exposition_graph::OperationKind::Promotion, &f.root, None, "interrupted", vec!["attach".into()])
         .unwrap();
+    // Exposition stopped there and is started again: the record belongs to an
+    // earlier session of the graph service (GI-3: a record of the running
+    // session is an operation still in progress, not an interrupted one).
+    restart_session(&f);
     // The document was reverted outside the session (e.g. reloaded from disk).
     f.documents.undo(&doc, EditOrigin::Source).unwrap();
     let state = f.project.load_promotions().unwrap();
@@ -623,6 +627,109 @@ fn interrupted_promotions_are_marked_for_reconciliation_on_open_and_attachments_
     let tracked = state.tracked.iter().find(|t| t.operation == outcome.operation).unwrap();
     assert!(!tracked.present);
     let PromotionGraphState::Recorded { manuscript, artifact, .. } = &outcome.graph else { panic!() };
+    assert!(!relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact));
+}
+
+/// A new session of the graph service for the same data folder has attached
+/// the project once (as a restart of Exposition does); the fixture's own
+/// service then attaches again.
+fn restart_session(f: &Fixture) {
+    f.graph.detach();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let restarted = GraphService::new(GraphConfig { data_dir: f._dir.path().join("data") });
+    assert!(restarted.attach(&f.root).is_usable());
+    restarted.detach();
+    assert!(f.graph.attach(&f.root).is_usable());
+}
+
+/// GI-3: opening a project labels operations an earlier session left
+/// pending; an operation this session is still running stays pending.
+#[test]
+fn an_operation_still_running_in_this_session_is_not_labelled_interrupted_on_open() {
+    let f = fixture();
+    let journal = f.graph.journal();
+    let running = journal
+        .begin(exposition_graph::OperationKind::ProjectCreation, &f.root, None, "creating", vec!["graph".into()])
+        .unwrap();
+    let promoting = journal
+        .begin(exposition_graph::OperationKind::Promotion, &f.root, None, "promoting", vec!["attach".into()])
+        .unwrap();
+    let state = f.project.load_promotions().unwrap();
+    for id in [&running.id, &promoting.id] {
+        assert_eq!(journal.get(&f.root, id).unwrap().state, OperationState::Pending, "still running");
+    }
+    assert!(state.unresolved.iter().any(|r| r.id == promoting.id && r.state == OperationState::Pending));
+    // The operation finishes normally afterwards.
+    assert_eq!(journal.complete(&f.root, &running.id).unwrap().state, OperationState::Completed);
+
+    // A later session (Exposition restarted) labels what is still pending,
+    // also when research reads the journal before the graph is attached.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let later = GraphService::new(GraphConfig { data_dir: f._dir.path().join("data") });
+    let research = Arc::new(ResearchService::new(ResearchConfig::new(
+        f._dir.path().join("data"),
+        Arc::new(NoLauncher),
+        f.documents.clone(),
+    )));
+    research.set_workspace(&f.root, true).unwrap();
+    let reopened = ResearchProject::new(later, research, f.documents.clone());
+    let state = reopened.load_promotions().unwrap();
+    assert!(
+        state
+            .unresolved
+            .iter()
+            .any(|r| r.id == promoting.id && matches!(r.state, OperationState::NeedsReconciliation { .. })),
+        "{:?}",
+        state.unresolved
+    );
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// GI-5: during a project switch research already follows the new folder
+/// while the graph is still attached to another one. Following an attachment
+/// then writes nothing: with a copy of a project the two graphs hold the same
+/// identities, so an unchecked write would land in the wrong project.
+#[test]
+fn attachments_are_not_followed_into_a_graph_attached_to_another_folder() {
+    let f = fixture();
+    record_run(&f.root, "run-h1", vec![script_input()], vec![]);
+    let doc = open(&f, "paper.typ");
+    let preview = promote(&f, &doc, "run-h1", "run-h1/output-1.png");
+    let outcome = f.project.approve_promotion(&preview.promotion).unwrap();
+    let PromotionGraphState::Recorded { manuscript, artifact, .. } = &outcome.graph else { panic!() };
+    assert!(relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact));
+
+    // The graph is attached to a copy of the project in another folder;
+    // research still follows the first folder.
+    f.graph.detach();
+    let copy = f._dir.path().join("copy");
+    copy_dir(&f.root, &copy);
+    let copy = std::fs::canonicalize(&copy).unwrap();
+    assert!(f.graph.attach(&copy).is_usable());
+    assert!(relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact), "the copy holds the same record");
+    let before = f.graph.status().revision;
+
+    // The attachment leaves the first folder's manuscript.
+    f.project.observe_text(&path("paper.typ"), "= Paper\n\nIntro.\n", true);
+    assert!(relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact), "the other project is not written");
+    assert_eq!(f.graph.status().revision, before);
+
+    // Back on its own folder the change is followed.
+    f.graph.detach();
+    assert!(f.graph.attach(&f.root).is_usable());
+    f.project.observe_text(&path("paper.typ"), "= Paper\n\nIntro.\n", true);
     assert!(!relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact));
 }
 

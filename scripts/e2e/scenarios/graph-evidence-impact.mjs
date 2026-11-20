@@ -22,6 +22,13 @@
 //     freshness never "current"; graph_query lists it under formalEvidence;
 //     through a link that is only suggested the same verdict reads
 //     "Checked (suggested link)" (Mathematics) and the agent is told so
+//  4b that record cannot be moved or relabelled by a relationship (people and
+//     agents: a record on another kind of relation, a formal check cited as a
+//     review, the declaration's record cited from the proof are refused); an
+//     agent's legitimate citation (declaration is-evidence-for theorem) is a
+//     suggestion that gives the theorem no evidence of its own; once the user
+//     rejects it no agent can propose it again; the declaration cannot be
+//     renamed as graph metadata; all of it is the same after a restart
 //   5 the Lean source changes and is saved: the evidence is stale everywhere
 //     (declaration, theorem row, agent result, file impact); after a restart
 //     it is still stale and the association still accepted
@@ -33,6 +40,8 @@
 //     untouched; binding the theorem to the new text and choosing Confirm
 //     link records the new statement and the association is reviewed again
 //   7 a rejected relation drops out of impact
+//   8 archiving the indexed declaration is the user's choice: it survives a
+//     save of its Lean file and a restart
 //
 // Requires Lean through elan with leanprover/lean4:v4.35.0; without it the
 // scenario reports SKIPPED unless EXPOSITION_REQUIRE_LEAN=1.
@@ -320,6 +329,58 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     assert.match(pinned.reason, /records lean\/OddSums\.lean as an input; a change to the file makes this evidence historical/);
     note("Record evidence in the Lean panel records service evidence on the declaration", { evidence: evidence.id, digest: evidence.formal.sourceDigest });
 
+    // ---- 4b: the record cannot be moved, relabelled, or re-proposed --------
+    const proposeNow = async (operations) =>
+      invoke(page, "graph_propose_change", { request: { baseRevision: (await invoke(page, "graph_status")).revision, operations, summary: null } });
+    const relate = (kind, from, to, evidenceKind, cited) => ({ op: "addRelation", kind, from: { kind: "id", id: from }, to: { kind: "id", id: to }, evidenceKind, evidence: cited, note: null });
+    const agentRelate = (relation, from, to, evidenceKind) => ({ op: "add_relation", relation, from, to, evidence_kind: evidenceKind, evidence: [evidence.id], note: "" });
+    for (const [what, op, code] of [
+      ["a record on a reference", relate("references", finding, theorem, null, [evidence.id]), "graph.evidenceNotCarried"],
+      ["a formal check cited as a review", relate("evidenceFor", proof, theorem, "review", [evidence.id]), "graph.evidenceKind"],
+      ["the declaration's record cited from the proof", relate("evidenceFor", proof, theorem, "formalCheck", [evidence.id]), "graph.evidenceSubject"],
+    ]) {
+      const refusedChange = await proposeNow([op]);
+      assert.equal(refusedChange.valid, false, `${what}: ${JSON.stringify(refusedChange.diagnostics)}`);
+      assert.equal(refusedChange.diagnostics[0].code, code, what);
+    }
+    const declarationBefore = (await invoke(page, "graph_entity", { entity: declaration })).entity;
+    const renameRefused = await proposeNow([{ op: "updateEntity", entity: declaration, expectedRevision: declarationBefore.revision, label: "Main theorem", attributes: null }]);
+    assert.equal(renameRefused.diagnostics[0]?.code, "graph.sourceDerived", JSON.stringify(renameRefused.diagnostics));
+    const propose = (id, operations) => tool(id, "graph_propose", { summary: "", base_revision: "$ref:inspect/graph/revision", operations });
+    const forging = await agent("Make the theorem read as verified", "autoApply", [
+      query("inspect", "inspect", { path: LEAN }),
+      propose("carried", [agentRelate("references", finding, theorem, "")]),
+      propose("relabel", [agentRelate("evidenceFor", proof, theorem, "review")]),
+      propose("othersubject", [agentRelate("evidenceFor", proof, theorem, "formalCheck")]),
+      propose("rename", [{ op: "update_entity", entity: declaration, expected_revision: declarationBefore.revision, label: "Main theorem", attributes: [], replace_attributes: false }]),
+      propose("cite", [agentRelate("evidenceFor", declaration, theorem, "formalCheck")]),
+    ]);
+    for (const [call, code] of [["carried", "graph.evidenceNotCarried"], ["relabel", "graph.evidenceKind"], ["othersubject", "graph.evidenceSubject"], ["rename", "graph.sourceDerived"]]) {
+      assert.equal(forging[call].isError, true, `${call}: ${JSON.stringify(forging[call])}`);
+      assert.equal(forging[call].value.diagnostics[0].code, code, call);
+    }
+    assert.equal(forging.cite.value.applied, true, JSON.stringify(forging.cite));
+    assert.deepEqual((await invoke(page, "graph_entity", { entity: declaration })).entity, declarationBefore, "the declaration is as its source states it");
+    const supported = await invoke(page, "graph_entity", { entity: theorem });
+    const citation = supported.incoming.find((r) => r.kind === "evidenceFor");
+    assert.equal(citation.status, "suggested");
+    assert.deepEqual(citation.evidence, [evidence.id], "the relationship carries the citation");
+    assert.equal(supported.evidence.length, 0, "a relationship citing the record gives the theorem no evidence of its own");
+    const rejectCitation = await proposeNow([{ op: "setRelationStatus", relation: citation.id, status: "rejected" }]);
+    await invoke(page, "graph_apply_change", { request: { proposal: rejectCitation.id, expectedRevision: rejectCitation.baseRevision } });
+    const reproposed = await agent("Cite the Lean check for the theorem again", "autoApply", [
+      query("inspect", "inspect", { path: LEAN }),
+      propose("again", [agentRelate("evidenceFor", declaration, theorem, "formalCheck")]),
+    ]);
+    assert.equal(reproposed.again.isError, true, JSON.stringify(reproposed.again));
+    assert.equal(reproposed.again.value.diagnostics[0].code, "graph.rejected");
+    const rejectedCitation = (await invoke(page, "graph_entity", { entity: theorem })).incoming.find((r) => r.id === citation.id);
+    assert.equal(rejectedCitation.status, "rejected", "the user's rejection stands");
+    assert.ok(rejectedCitation.revision > citation.revision, "and is the later revision");
+    assert.equal((await invoke(page, "graph_entity", { entity: theorem })).evidence.length, 0);
+    assert.ok(!(await impactOf(theorem)).evidence.some((e) => e.subject === theorem), "impact names no evidence of the theorem");
+    note("the declaration's record cannot be moved, relabelled, or re-proposed after a rejection", { refused: ["graph.evidenceNotCarried", "graph.evidenceKind", "graph.evidenceSubject", "graph.sourceDerived", "graph.rejected"] });
+
     // A second item linked to the same declaration only by an agent's
     // suggestion: the verdict is shown, labelled as coming through a
     // suggested link, and never like the reviewed association's.
@@ -404,7 +465,7 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     await waitFor(async () => (await latest.getAttribute("data-freshness")) === "stale", { timeout: 300_000, interval: 250, message: "the Lean panel shows the record as history" });
     assert.match(await declRow.getByTestId("lean-evidence-history").innerText(), /changed since revision/);
     const fifth = await agent("Is the evidence still current?", "readOnly", [query("theorem", "entity", { entity: theorem })]);
-    assert.equal(fifth.theorem.value.formalEvidence[0].evidence[0].freshness, "stale");
+    assert.equal(field(fifth.theorem, "formalEvidence")[0].evidence[0].freshness, "stale");
     await shot("lean-panel-evidence-history-light");
     note("a saved change to the Lean source makes the evidence stale on every surface", "stale");
 
@@ -418,6 +479,10 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     await settle();
     await stale("after a restart");
     assert.equal((await invoke(page, "graph_entity", { entity: theorem })).entity.id, theorem, "stable identity");
+    const reopened = await invoke(page, "graph_entity", { entity: theorem });
+    assert.equal(reopened.evidence.length, 0, "after a restart the theorem still has no evidence of its own");
+    assert.deepEqual(reopened.incoming.find((r) => r.id === citation.id), rejectedCitation, "the rejected citation is stored as it was");
+    assert.equal((await invoke(page, "graph_entity", { entity: declaration })).entity.label, declarationBefore.label);
     note("after a restart the evidence is still stale and the association still reviewed", "stable");
 
     // ---- 6: the manuscript statement changes and is saved -----------------
@@ -570,6 +635,28 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     assert.ok(!after.items.some((i) => i.entity.id === finding), "the rejected reference is not followed");
     assert.ok(after.items.some((i) => i.entity.id === proof && /\(suggested relationship\)$/.test(i.reason)), "the suggested proof link still is, labelled");
     note("rejected relations drop out; suggested ones are labelled", after.items.map((i) => i.reason));
+
+    // ---- 8: archiving an indexed declaration survives indexing -------------
+    const toArchive = (await invoke(page, "graph_entity", { entity: declaration })).entity;
+    const archive = await invoke(page, "graph_propose_change", {
+      request: { baseRevision: (await invoke(page, "graph_status")).revision, operations: [{ op: "setLifecycle", entity: declaration, expectedRevision: toArchive.revision, lifecycle: "archived" }], summary: null },
+    });
+    assert.equal(archive.valid, true, JSON.stringify(archive.diagnostics));
+    await invoke(page, "graph_apply_change", { request: { proposal: archive.id, expectedRevision: archive.baseRevision } });
+    const leanDoc8 = await openInEditor(page, LEAN);
+    await rewrite(leanDoc8, (text) => `${text}-- another edit\n`);
+    await invoke(page, "graph_reconcile", { force: true });
+    assert.equal((await invoke(page, "graph_entity", { entity: declaration })).entity.lifecycle, "archived", "indexing the file does not undo the archive");
+    await app.close();
+    app = await launchApp({ dataDir, env });
+    page = app.page;
+    await invoke(page, "workspace_open", { path: root });
+    await page.locator('[data-testid="file-tree"] [data-path="main.typ"]').waitFor({ timeout: 15_000 });
+    await settle();
+    const archived = (await invoke(page, "graph_entity", { entity: declaration })).entity;
+    assert.equal(archived.lifecycle, "archived", "still archived after a restart");
+    assert.equal(archived.label, declarationBefore.label);
+    note("an archived indexed declaration stays archived across a save of its file and a restart", archived.lifecycle);
 
     const errors = app.consoleMessages.filter((m) => m.startsWith("error:") || m.startsWith("pageerror:"));
     assert.deepEqual(errors, [], "no console errors");

@@ -740,10 +740,12 @@ impl ResearchProject {
     /// Project opened: mark promotions left pending by an earlier run as
     /// needing reconciliation (never re-run), load the attachments research
     /// follows, and bring their `usesAsset` relations in line with the text.
+    /// An operation this session started is still running (this is called on
+    /// every open, close, and event lag): it stays pending.
     pub fn load_promotions(&self) -> Result<PromotionsState, ResearchError> {
         let root = self.root()?;
         let journal = self.graph.journal();
-        let _ = journal.unresolved(&root, true);
+        let _ = journal.unresolved_before(&root, self.graph.session_started_at_ms());
         let mut items = Vec::new();
         for record in journal.list(&root).into_iter().take(MAX_TRACKED) {
             if record.kind != OperationKind::Promotion
@@ -804,6 +806,14 @@ impl ResearchProject {
     /// attachments in it. Returns the attachments whose presence changed.
     pub fn observe_text(&self, path: &WorkspacePath, text: &str, force: bool) -> Vec<TrackedAttachment> {
         let Ok(root) = self.root() else { return Vec::new() };
+        // The relations live in this project's graph. While the graph is
+        // attached to another folder (a project switch announces the new
+        // folder before its graph is attached) nothing is read or written,
+        // and nothing is marked as observed, so the next observation still
+        // sees the change.
+        if self.graph.root().as_deref() != Some(root.as_path()) {
+            return Vec::new();
+        }
         let mut changed = Vec::new();
         let pairs: Vec<(EntityId, EntityId, bool)> = {
             let mut tracked = self.promotions.tracked.lock().unwrap_or_else(|p| p.into_inner());

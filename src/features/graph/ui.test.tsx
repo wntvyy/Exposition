@@ -102,6 +102,56 @@ describe("typed relationship authoring", () => {
   });
 });
 
+// RL-6: "is evidence for" needs the kind of support. The dialog asks for it (only kinds a person
+// can state; a service's evidence is never offered) instead of sending a change that is always refused.
+describe("an evidence relationship", () => {
+  const proof = entity("prf", "proof", "Proof by induction");
+
+  it("asks for the kind of support before checking, and adds the relationship with it", async () => {
+    fake = createFakeGraph({ entities: [entity("thm", "theorem", "Main theorem"), proof] });
+    setGraphApi(fake.api);
+    const onClose = vi.fn();
+    render(<RelateDialog vocabulary={vocabulary} from={proof} to={fake.entities[0]!} candidates={fake.entities} onClose={onClose} />);
+    await chooseOption("Relationship", /^is evidence for$/);
+    expect(await screen.findByText("Choose the kind of support.")).toBeTruthy();
+    // Nothing that the backend always refuses is sent.
+    const sent = () => fake.calls.filter((c) => c.method === "propose").map((c) => (c.args[0] as { operations: { kind: string; evidenceKind: string | null }[] }).operations[0]!);
+    await new Promise((r) => setTimeout(r, 250));
+    expect(sent().filter((op) => op.kind === "evidenceFor" && !op.evidenceKind)).toEqual([]);
+
+    // Only the kinds a person can state are offered.
+    const field = screen.getByText("Kind of support", { selector: ".ui-field__label" }).closest(".ui-select") as HTMLElement;
+    fireEvent.click(within(field).getByRole("button"));
+    const listbox = await screen.findByRole("listbox");
+    const offered = within(listbox).getAllByRole("option").map((o) => o.textContent ?? "");
+    expect(offered).toHaveLength(2);
+    expect(offered[0]).toMatch(/^Review/);
+    expect(offered[1]).toMatch(/^Literature/);
+    fireEvent.click(within(listbox).getByRole("option", { name: /^Review/ }));
+
+    const review = await screen.findByTestId("graph-proposal-review");
+    await waitFor(() => expect(review.getAttribute("data-state")).toBe("valid"));
+    expect(sent().at(-1)).toMatchObject({ kind: "evidenceFor", evidenceKind: "review", evidence: [] });
+    fireEvent.click(screen.getByRole("button", { name: "Add relationship" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(fake.relations.map((r) => [r.kind, r.from, r.to, r.evidenceKind])).toEqual([["evidenceFor", "prf", "thm", "review"]]);
+  });
+
+  it("sends no evidence kind for any other relationship", async () => {
+    fake = createFakeGraph({ entities: [entity("thm", "theorem", "Main theorem"), proof] });
+    setGraphApi(fake.api);
+    render(<RelateDialog vocabulary={vocabulary} from={proof} to={fake.entities[0]!} candidates={fake.entities} onClose={() => {}} />);
+    await chooseOption("Relationship", /^is evidence for$/);
+    await chooseOption("Kind of support", /^Literature/);
+    await chooseOption("Relationship", /^is a proof of$/);
+    expect(screen.queryByText("Kind of support", { selector: ".ui-field__label" })).toBeNull();
+    const review = await screen.findByTestId("graph-proposal-review");
+    await waitFor(() => expect(review.getAttribute("data-state")).toBe("valid"));
+    const last = fake.calls.filter((c) => c.method === "propose").at(-1)!.args[0] as { operations: unknown[] };
+    expect(last.operations[0]).toMatchObject({ kind: "proofOf", evidenceKind: null });
+  });
+});
+
 describe("Project graph table (keyboard alternative)", () => {
   it("lists items, selects one into the inspector, and keeps view-only and semantic actions apart", async () => {
     localStorage.setItem("exposition.graph.mode.project", "table");

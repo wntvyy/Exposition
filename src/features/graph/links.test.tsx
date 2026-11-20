@@ -17,7 +17,7 @@ import { ipcGraphApi, setGraphApi } from "./api";
 import { EdgeLabelContent } from "./canvas/RelationEdge";
 import { createFakeGraph, entity, fakeVocabulary, relation, type FakeGraph } from "./fakeApi";
 import { EntityInspector, type InspectorActions } from "./Inspector";
-import { DependsOnSection, mathBadges, VerificationTable } from "./Mathematics";
+import { DependsOnSection, mathBadges, MathSections, VerificationTable } from "./Mathematics";
 import { indexVocabulary, verdictThroughLink, type SavedView } from "./model";
 import { project } from "./projection";
 import { RelationReviewNote, RelationStatus } from "./RelationStatus";
@@ -258,5 +258,53 @@ describe("the inspector of a statement whose reviewed link needs re-review", () 
     fireEvent.click(confirm);
     expect((within(link).getByRole("button", { name: "Reject link" }) as HTMLButtonElement).disabled).toBe(false);
     expect(fake.calls.some((c) => c.method === "propose")).toBe(false);
+  });
+});
+
+// RL-7: a rejected proof or formal link is not a link of the statement; the
+// Mathematics inspector neither lists nor counts it (as the Verification
+// table, the Graph inspector's evidence pointer, and the service do not).
+describe("Mathematics inspector sections", () => {
+  const prf = entity("prf", "proof", "Proof by induction");
+  const old = entity("old", "proof", "Withdrawn proof");
+  const other = entity("other", "formalDeclaration", "oddSum_wrong");
+
+  it("leaves rejected proof and formal links out of the lists and their counts", async () => {
+    const fake = createFakeGraph({
+      entities: [thm, decl, prf, old, other],
+      relations: [
+        relation("p1", "proofOf", "prf", "thm", "accepted"),
+        relation("p2", "proofOf", "old", "thm", "rejected"),
+        relation("f1", "formalizes", "decl", "thm", "suggested"),
+        relation("f2", "formalizes", "other", "thm", "rejected"),
+      ],
+    });
+    setGraphApi(fake.api);
+    const detail = await fake.api.entity("thm");
+    render(<MathSections detail={detail} row={undefined} vocabulary={vocabulary} onSelectEntity={() => {}} declarations={[decl, other]} canWrite />);
+    expect(screen.getAllByTestId("graph-proof").map((li) => li.getAttribute("data-entity-id"))).toEqual(["prf"]);
+    expect(screen.getAllByTestId("graph-formalization").map((li) => li.getAttribute("data-entity-id"))).toEqual(["decl"]);
+    expect(screen.queryByText("Withdrawn proof")).toBeNull();
+    expect(screen.queryByText("oddSum_wrong")).toBeNull();
+    const proofs = screen.getByText("Proofs targeting this").closest(".ui-section") as HTMLElement;
+    expect(proofs.textContent).toMatch(/Proofs targeting this\s*1/);
+  });
+
+  it("says no proof is linked when the only proof link was rejected", async () => {
+    const fake = createFakeGraph({
+      entities: [thm, old, other],
+      relations: [relation("p2", "proofOf", "old", "thm", "rejected"), relation("f2", "formalizes", "other", "thm", "rejected")],
+    });
+    setGraphApi(fake.api);
+    const detail = await fake.api.entity("thm");
+    render(<MathSections detail={detail} row={undefined} vocabulary={vocabulary} onSelectEntity={() => {}} declarations={[other]} canWrite />);
+    expect(screen.getByText("No proof is linked to this statement.")).toBeTruthy();
+    expect(screen.getByText("No formal declaration is associated with this item.")).toBeTruthy();
+    expect(screen.queryByTestId("graph-proof")).toBeNull();
+    // The proof's own view: a rejected target is not what it proves.
+    cleanup();
+    const proofDetail = await fake.api.entity("old");
+    render(<MathSections detail={proofDetail} row={undefined} vocabulary={vocabulary} onSelectEntity={() => {}} declarations={[other]} canWrite />);
+    expect(screen.getByText("This proof targets no statement yet.")).toBeTruthy();
   });
 });

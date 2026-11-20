@@ -1521,6 +1521,18 @@ impl<'a> Writer<'a> {
         Ok(self.tx.query_row("SELECT 1 FROM evidence WHERE id = ?1", [id.as_str()], |_| Ok(())).optional()?.is_some())
     }
 
+    /// The kind and subject of an evidence record (`None`: no such record).
+    /// A kind this version does not know reads as `None`, never as a match.
+    pub fn evidence_head(&self, id: &EvidenceId) -> StoreResult<Option<(Option<EvidenceKind>, Option<EntityId>)>> {
+        let row: Option<(String, Option<String>)> = self
+            .tx
+            .query_row("SELECT kind, subject FROM evidence WHERE id = ?1", [id.as_str()], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        Ok(row.map(|(kind, subject)| (EvidenceKind::parse(&kind), subject.and_then(|s| EntityId::parse(&s).ok()))))
+    }
+
     pub fn set_coverage(&self, c: &ResourceCoverage) -> StoreResult<()> {
         check_field(c.detail.as_deref(), MAX_FIELD, "a coverage detail")?;
         check_field(c.extractor.as_deref(), MAX_SHORT_FIELD, "an extractor name")?;
