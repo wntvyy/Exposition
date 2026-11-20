@@ -860,6 +860,7 @@ async fn file_impact_and_formal_evidence_are_stated_not_left_to_guess() {
     // the service's record, or a review-kind relation, is accepted (as a
     // suggestion); the user's rejection then drops it from impact.
     let before = f.graph.status().revision;
+    let declaration_revision = f.graph.entity_detail(&declaration).unwrap().entity.revision;
     let evidence_for = |kind: &str, cited: Value| {
         json!({"summary": "", "base_revision": before, "operations": [{"op": "add_relation", "relation": "evidenceFor",
             "from": declaration.as_str(), "to": lemma, "evidence_kind": kind, "evidence": cited, "note": ""}]})
@@ -871,11 +872,47 @@ async fn file_impact_and_formal_evidence_are_stated_not_left_to_guess() {
         vec![
             tool("forge", tools::GRAPH_PROPOSE, evidence_for("computational", json!([]))),
             tool("wrongkind", tools::GRAPH_PROPOSE, evidence_for("computational", json!([evidence.as_str()]))),
+            // RL-1: the record cannot be relabelled as a review, cited from an
+            // item it is not about, or carried by another kind of relation.
+            tool("relabel", tools::GRAPH_PROPOSE, evidence_for("review", json!([evidence.as_str()]))),
+            tool(
+                "othersubject",
+                tools::GRAPH_PROPOSE,
+                json!({"summary": "", "base_revision": before, "operations": [{"op": "add_relation",
+                    "relation": "evidenceFor", "from": f.ids.notes.as_str(), "to": lemma,
+                    "evidence_kind": "formalCheck", "evidence": [evidence.as_str()], "note": ""}]}),
+            ),
+            tool(
+                "carried",
+                tools::GRAPH_PROPOSE,
+                json!({"summary": "", "base_revision": before, "operations": [{"op": "add_relation",
+                    "relation": "references", "from": f.ids.claim.as_str(), "to": lemma,
+                    "evidence_kind": "", "evidence": [evidence.as_str()], "note": ""}]}),
+            ),
+            // RL-5: a formal declaration is not relabelled as graph metadata.
+            tool(
+                "rename",
+                tools::GRAPH_PROPOSE,
+                json!({"summary": "", "base_revision": before, "operations": [{"op": "update_entity",
+                    "entity": declaration.as_str(), "expected_revision": declaration_revision,
+                    "label": "Main theorem", "attributes": [], "replace_attributes": false}]}),
+            ),
             tool("cite", tools::GRAPH_PROPOSE, evidence_for("formalCheck", json!([evidence.as_str()]))),
         ],
         true,
     )
     .await;
+    for (call_id, code) in [
+        ("relabel", "graph.evidenceKind"),
+        ("othersubject", "graph.evidenceSubject"),
+        ("carried", "graph.evidenceNotCarried"),
+        ("rename", "graph.sourceDerived"),
+    ] {
+        let (_, err, result) = call(&h, &id, call_id);
+        assert!(err && result.contains(code), "{call_id}: {result}");
+    }
+    assert!(f.graph.entity_detail(&f.ids.lemma).unwrap().evidence.is_empty(), "no record became the lemma's own");
+    assert_eq!(f.graph.entity_detail(&declaration).unwrap().entity.revision, declaration_revision);
     let (_, err, forged) = call(&h, &id, "forge");
     assert!(err && code_of(&forged).as_deref() == Some(codes::GRAPH_INVALID), "{forged}");
     let forged = parse(&forged);
@@ -928,6 +965,23 @@ async fn file_impact_and_formal_evidence_are_stated_not_left_to_guess() {
         rejected["items"].as_array().unwrap().iter().any(|i| i["via"][0]["kind"] == json!("formalizes")),
         "the accepted association still is: {rejected}"
     );
+    // RL-3: the user's rejection stands; a task (this one or another)
+    // proposing the same relationship again is refused and changes nothing.
+    let before = f.graph.status().revision;
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+    let (id, _) = run(
+        &mut h,
+        req,
+        vec![tool("again", tools::GRAPH_PROPOSE, evidence_for("formalCheck", json!([evidence.as_str()])))],
+        true,
+    )
+    .await;
+    let (_, err, again) = call(&h, &id, "again");
+    assert!(err && again.contains("graph.rejected"), "{again}");
+    let kept = f.graph.entity_detail(&f.ids.lemma).unwrap().incoming.into_iter().find(|r| r.id == relation.id).unwrap();
+    assert_eq!(kept.status, AssertionStatus::Rejected);
+    assert!(kept.revision > relation.revision, "the rejection is the later revision");
+    assert_eq!(f.graph.status().revision, before);
 }
 
 // ---------------------------------------------------------------------------
