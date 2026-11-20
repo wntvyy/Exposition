@@ -108,6 +108,10 @@ pub struct ProjectPresetInfo {
     pub research_only: bool,
     /// Whether an optional workflow draft can be included.
     pub workflow: Option<String>,
+    /// The only research runtime that workflow draft exists for (`None`:
+    /// it does not depend on the runtime). With another runtime selected no
+    /// draft is created, so the option is not offered.
+    pub workflow_runtime: Option<ResearchRuntime>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -145,6 +149,7 @@ pub fn catalog() -> Vec<ProjectPresetInfo> {
             lean,
             research_only,
             workflow: workflow.map(str::to_owned),
+            workflow_runtime: (workflow == Some(NUMERICAL_EXPERIMENT)).then_some(ResearchRuntime::Python),
         }
     };
     vec![
@@ -417,7 +422,9 @@ pub fn blueprint(request: &ProjectPresetRequest) -> Result<ProjectBlueprint, Str
                 lean_file: lean_path.and_then(|l| WorkspacePath::parse(l).ok()),
                 ..Default::default()
             }),
-            // The initial workflow adapters are Python and Lean only.
+            // The Numerical experiment draft is a Python workflow
+            // (`ProjectPresetInfo::workflow_runtime`); R and Julia projects
+            // get no draft.
             _ => None,
         };
         if let Some(definition) = draft_request.as_ref().and_then(draft) {

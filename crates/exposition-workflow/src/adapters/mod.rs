@@ -22,7 +22,8 @@ use exposition_graph::workflow::registry::PortType;
 
 use crate::environment::WorkflowEnvironment;
 use crate::model::{
-    WorkflowOutputProvenance, WorkflowOutputValue, WorkflowPlanStep, WorkflowRejectedOutput, WorkflowStepOutput,
+    WorkflowOutputProvenance, WorkflowOutputValue, WorkflowPlanModel, WorkflowPlanStep, WorkflowRejectedOutput,
+    WorkflowStepOutput,
 };
 
 pub mod agent;
@@ -55,6 +56,9 @@ pub struct StepRequest<'a> {
     pub model_requests_remaining: u32,
     /// The restricted image identity the run's plan was approved for.
     pub restricted_image_id: Option<String>,
+    /// The model provider and model the run's plan was approved for (model
+    /// steps; `None`: the plan bound none).
+    pub model: Option<WorkflowPlanModel>,
     /// Seeds of this run's steps derive from this run id: the run itself, or
     /// the original a reproduction reproduces
     /// ([`crate::environment::seed_basis`]).
@@ -186,6 +190,13 @@ pub trait StepAdapter: Send + Sync {
     /// identity now, or why it is unavailable. `None`: the default image (or
     /// no container at all). Plans bind it; the runner re-checks it.
     fn restricted_image(&self) -> Option<Result<(String, Option<String>), String>> {
+        None
+    }
+    /// The model provider and model a step of this runner would send its
+    /// material to now (agent review steps). `None`: the runner uses no
+    /// model, or cannot tell. Plans bind it; the runner re-checks it before
+    /// each such step and the step runs with exactly the approved one.
+    fn model_binding(&self) -> Option<WorkflowPlanModel> {
         None
     }
 }

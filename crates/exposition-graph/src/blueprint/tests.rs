@@ -567,3 +567,74 @@ fn a_bare_git_repository_layout_is_refused() {
     bp.files.push(BlueprintFile { path: "notes/config".into(), content: String::new() });
     assert!(validate_blueprint(&bp).valid);
 }
+
+/// PG-4: keys beside a unit variant of a tagged value (which serde accepts
+/// and drops) are refused in a blueprint as they are in a workflow
+/// definition or a bundle.
+#[test]
+fn unit_variants_in_a_blueprint_cannot_smuggle_fields() {
+    let mut r = request(COMPUTATIONAL);
+    r.include_workflow = true;
+    let bp = blueprint(&r).unwrap();
+    assert_eq!(bp.workflows.len(), 1);
+    let base = serde_json::to_value(&bp).unwrap();
+    assert_eq!(parse_blueprint(&base.to_string()).unwrap(), bp, "the unchanged blueprint parses");
+    let refused = |json: &serde_json::Value, at: &str| {
+        let err = parse_blueprint(&json.to_string()).expect_err(at);
+        assert_eq!(err.code, "blueprint.schema", "{at}");
+        assert!(err.message.contains(&format!("unknown field at {at}")), "{}", err.message);
+    };
+    // A workflow input source and version inside the blueprint.
+    let mut json = base.clone();
+    json["workflows"][0]["definition"]["inputs"][0]["source"] = serde_json::json!({ "kind": "unset", "trust": true });
+    refused(&json, "/workflows/0/definition/inputs/0/source/trust");
+    let mut json = base.clone();
+    json["workflows"][0]["definition"]["inputs"][0]["source"]["version"] =
+        serde_json::json!({ "kind": "atRunStart", "approved": true });
+    refused(&json, "/workflows/0/definition/inputs/0/source/version/approved");
+    // The blueprint's own unit variants.
+    let mut json = base.clone();
+    json["collections"] = serde_json::json!([
+        { "tempId": "c", "label": "Everything", "members": [{ "kind": "project", "grants": ["run"] }] }
+    ]);
+    refused(&json, "/collections/0/members/0/grants");
+    let mut json = base;
+    json["collections"] = serde_json::json!([
+        { "tempId": "c", "label": "Everything", "members": [{ "kind": "researchSpace", "trusted": true }] }
+    ]);
+    refused(&json, "/collections/0/members/0/trusted");
+}
+
+/// PG-4: a workflow draft with a composite step cannot be checked in a
+/// blueprint (a new project has no saved workflow to run), and it is saved
+/// incomplete; the preview says so instead of "well formed".
+#[test]
+fn a_blueprint_workflow_with_a_composite_step_is_reported_incomplete() {
+    let mut r = request(COMPUTATIONAL);
+    r.include_workflow = true;
+    let mut bp = blueprint(&r).unwrap();
+    assert!(validate_blueprint(&bp).summary.unwrap().workflows[0].well_formed, "the preset draft is well formed");
+    let definition = &mut bp.workflows[0].definition;
+    definition.schema = crate::workflow::WORKFLOW_SCHEMA_V2.into();
+    definition.steps.push(crate::workflow::WorkflowStep {
+        id: "sub".into(),
+        label: "Run another workflow".into(),
+        operation: crate::workflow::StepOperation { id: crate::workflow::COMPOSITE_OPERATION.into(), version: 1 },
+        parameters: Default::default(),
+        payload: None,
+        composite: Some(crate::workflow::CompositeRef { workflow: crate::ids::WorkflowId::mint(), revision: 1 }),
+        condition: None,
+        repeat: None,
+    });
+    let v = validate_blueprint(&bp);
+    let summary = &v.summary.as_ref().unwrap().workflows[0];
+    assert!(!summary.well_formed, "a composite step cannot be resolved in a new project");
+    assert!(summary.errors >= 1);
+    assert!(
+        v.diagnostics
+            .iter()
+            .any(|d| d.code == "blueprint.workflowIncomplete" && d.message.contains("saved incomplete")),
+        "{:?}",
+        v.diagnostics
+    );
+}

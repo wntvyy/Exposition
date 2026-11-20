@@ -249,6 +249,13 @@ pub fn suspends_on(plan: &WorkflowRunPlan, watched: &[String]) -> Vec<String> {
                 .into(),
         );
     }
+    // Review steps send material only to the approved provider and model.
+    if let Some(model) = &plan.execution.model {
+        list.push(format!(
+            "Another model provider or model for its agent review steps (approved: {}).",
+            model.describe()
+        ));
+    }
     list.push("Trust being revoked for the project folder: every trigger of the folder is suspended.".into());
     list.push("Any step's runner becoming unavailable (or available), and any step, budget, or limit changing.".into());
     list

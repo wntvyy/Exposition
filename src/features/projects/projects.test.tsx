@@ -1,7 +1,7 @@
 // New Project: pure helpers, the preset and objective creation flows (Rust
 // calls mocked at the feature's IPC boundary), interrupted-setup detection,
 // and the page rendered through the real shared components.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BlueprintValidation } from "../../bindings/BlueprintValidation";
@@ -72,8 +72,8 @@ const { NewProjectView } = await import("./NewProjectView");
 
 const catalog: PresetCatalog = {
   presets: [
-    { id: "paper", title: "Mathematical paper", description: "A manuscript.", manuscript: true, computation: false, lean: false, researchOnly: false, workflow: null },
-    { id: "research", title: "Blank research project", description: "Research only.", manuscript: false, computation: false, lean: false, researchOnly: true, workflow: null },
+    { id: "paper", title: "Mathematical paper", description: "A manuscript.", manuscript: true, computation: false, lean: false, researchOnly: false, workflow: null, workflowRuntime: null },
+    { id: "research", title: "Blank research project", description: "Research only.", manuscript: false, computation: false, lean: false, researchOnly: true, workflow: null, workflowRuntime: null },
   ],
   defaultLeanToolchain: "leanprover/lean4:v4.35.0",
 };
@@ -184,6 +184,21 @@ describe("model", () => {
       includeWorkflow: true,
     });
     expect(request).toEqual({ preset: "research", title: "Notes", format: null, runtime: null, leanToolchain: null, includeWorkflow: false, purpose: null });
+  });
+
+  // QC PG-5: the Numerical experiment draft is a Python workflow; with R or Julia none is created.
+  it("includes a workflow draft only for the runtime the draft exists for", () => {
+    const study = { id: "computational", title: "Computational study", description: "A study.", manuscript: false, computation: true, lean: false, researchOnly: true, workflow: "numericalExperiment", workflowRuntime: "python" as const };
+    const options = { title: "", format: "typst" as const, leanToolchain: null, includeWorkflow: true };
+    expect(model.workflowDraftBlock(study, "python")).toBeNull();
+    expect(model.presetRequest(study, { ...options, runtime: "python" }).includeWorkflow).toBe(true);
+    expect(model.workflowDraftBlock(study, "r")).toBe("The Numerical experiment draft is a Python workflow, so a project with the R runtime is created without one.");
+    expect(model.presetRequest(study, { ...options, runtime: "r" }).includeWorkflow).toBe(false);
+    expect(model.presetRequest(study, { ...options, runtime: "julia" }).includeWorkflow).toBe(false);
+    // A draft that does not depend on the runtime (Formal audit) is never blocked.
+    const leanPreset = { ...study, id: "lean", computation: false, lean: true, workflow: "formalAudit", workflowRuntime: null };
+    expect(model.workflowDraftBlock(leanPreset, "julia")).toBeNull();
+    expect(model.presetRequest(leanPreset, { ...options, runtime: "julia" }).includeWorkflow).toBe(true);
   });
 
   it("reports declared tools only once discovery answers, checking Lean's exact pin", () => {
@@ -419,6 +434,29 @@ describe("New Project page", () => {
     expect(lean?.textContent).toMatch(/Install one with elan/);
     expect(screen.getByTestId("project-authorization").textContent).toMatch(/does not grant trust, run any code, install anything/);
     await waitFor(() => expect(screen.getByTestId("project-create").hasAttribute("disabled")).toBe(false));
+  });
+
+  // QC PG-5: an option that would do nothing is not offered as if it did.
+  it("does not offer the workflow draft for a runtime it does not exist for, and says why", async () => {
+    const study = { id: "computational", title: "Computational study", description: "A study.", manuscript: false, computation: true, lean: false, researchOnly: true, workflow: "numericalExperiment", workflowRuntime: "python" as const };
+    projectIpc.presets.mockResolvedValue({ ...catalog, presets: [study] });
+    render(<NewProjectView resource={{ key: "new-project:", title: "New Project" }} mode="source" active />);
+    await screen.findByTestId("preset-select");
+    act(() => store.setOptions({ presetId: "computational", runtime: "python", includeWorkflow: true }));
+    await screen.findByTestId("include-workflow");
+    const box = () => screen.getByTestId("include-workflow").querySelector("input")!;
+    await waitFor(() => expect(box().checked).toBe(true));
+    expect(box().disabled).toBe(false);
+    expect(screen.queryByTestId("include-workflow-reason")).toBeNull();
+    act(() => store.setOptions({ runtime: "r" }));
+    await waitFor(() => expect(box().disabled).toBe(true));
+    expect(box().checked).toBe(false);
+    expect(screen.getByTestId("include-workflow-reason").textContent).toBe("The Numerical experiment draft is a Python workflow, so a project with the R runtime is created without one.");
+    await waitFor(() => expect(projectIpc.presetBlueprint.mock.lastCall?.[0]).toMatchObject({ runtime: "r", includeWorkflow: false }));
+    // Python again: the choice the user made is back.
+    act(() => store.setOptions({ runtime: "python" }));
+    await waitFor(() => expect(box().disabled).toBe(false));
+    expect(box().checked).toBe(true);
   });
 
   it("asks before creating a project inside a trusted folder", async () => {

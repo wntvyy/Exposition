@@ -557,16 +557,17 @@ pub fn prepare_paths(cx: &DataContext<'_>, plan: &OpPlan, choices: &BTreeMap<Str
                 for c in &impact.consumers {
                     let ok = cx.triggers.is_some_and(|t| {
                         WorkflowTriggerId::parse(&c.id).is_ok_and(|id| {
-                            let done = t.disable(&id).is_ok();
-                            if done && let Some(key) = deletion_key(cx, &impact.target) {
+                            let Ok(off) = t.disable_for_deletion(&id) else { return false };
+                            // What it was is kept, to be put back if the path is kept.
+                            if let (Some(off), Some(key)) = (off, deletion_key(cx, &impact.target)) {
                                 DISABLED_FOR_DELETION
                                     .lock()
                                     .unwrap_or_else(|p| p.into_inner())
                                     .entry(key)
                                     .or_default()
-                                    .push(id);
+                                    .push(off);
                             }
-                            done
+                            true
                         })
                     });
                     if !ok {
@@ -584,7 +585,7 @@ pub fn prepare_paths(cx: &DataContext<'_>, plan: &OpPlan, choices: &BTreeMap<Str
             _ => {}
         }
     }
-    // A refused path is not deleted: its triggers go back on.
+    // A refused path is not deleted: its triggers go back to what they were.
     for r in &refusals {
         reenable_for(cx, &r.target);
     }
@@ -634,9 +635,9 @@ fn in_project(cx: &DataContext<'_>, root: &str) -> bool {
 }
 
 /// Triggers `prepare_paths` turned off for a path whose deletion is under
-/// way, keyed by (project, path): turned back on when the deletion does not
-/// happen (refused, failed, skipped).
-type DisabledTriggers = BTreeMap<(String, String), Vec<WorkflowTriggerId>>;
+/// way, keyed by (project, path), each with the state it had: put back as
+/// they were when the deletion does not happen (refused, failed, skipped).
+type DisabledTriggers = BTreeMap<(String, String), Vec<crate::triggers::TurnedOff>>;
 static DISABLED_FOR_DELETION: std::sync::Mutex<DisabledTriggers> = std::sync::Mutex::new(BTreeMap::new());
 
 fn deletion_key(cx: &DataContext<'_>, target: &OpTarget) -> Option<(String, String)> {
@@ -645,13 +646,14 @@ fn deletion_key(cx: &DataContext<'_>, target: &OpTarget) -> Option<(String, Stri
     Some((root, path.as_str().to_owned()))
 }
 
-/// Turn back on the triggers turned off for `target` (its deletion did not
-/// happen). Returns how many were turned back on.
+/// Put the triggers turned off for `target` back as they were (its deletion
+/// did not happen): an active one listens again, a suspended one stays
+/// suspended. Returns how many were put back.
 fn reenable_for(cx: &DataContext<'_>, target: &OpTarget) -> usize {
     let Some(key) = deletion_key(cx, target) else { return 0 };
-    let ids = DISABLED_FOR_DELETION.lock().unwrap_or_else(|p| p.into_inner()).remove(&key).unwrap_or_default();
+    let off = DISABLED_FOR_DELETION.lock().unwrap_or_else(|p| p.into_inner()).remove(&key).unwrap_or_default();
     let Some(triggers) = cx.triggers else { return 0 };
-    ids.iter().filter(|id| triggers.reenable(id).is_ok()).count()
+    off.iter().filter(|o| triggers.put_back(o).is_ok()).count()
 }
 
 /// After file work: reconcile project data with the ACTUAL outcomes.
@@ -661,7 +663,8 @@ fn reenable_for(cx: &DataContext<'_>, target: &OpTarget) -> usize {
 /// provenance. Restored paths are indexed (an unrelated file at an old path
 /// gets a new identity; evidence is re-evaluated by content).
 pub fn after_paths(cx: &DataContext<'_>, outcomes: &[OpOutcome]) {
-    // Triggers turned off for a deletion that did not happen go back on.
+    // Triggers turned off for a deletion that did not happen go back to
+    // what they were.
     for o in outcomes {
         if o.status == OpStatus::Succeeded {
             if let Some(key) = deletion_key(cx, &o.target) {
@@ -1542,7 +1545,7 @@ fn apply_delete(
             ) {
                 return Ok(o);
             }
-            let mut turned_off: Vec<WorkflowTriggerId> = Vec::new();
+            let mut turned_off: Vec<crate::triggers::TurnedOff> = Vec::new();
             if let Some(triggers) = cx.triggers {
                 let enabled = triggers
                     .list(Some(&id))
@@ -1565,10 +1568,11 @@ fn apply_delete(
             let deletion = match cx.graph.delete_workflow(origin, &id, permanent, purge_pinned) {
                 Ok(d) => d,
                 Err(e) => {
-                    // Not deleted: the triggers turned off for it go back on.
+                    // Not deleted: the triggers turned off for it go back to
+                    // what they were (a suspended one stays suspended).
                     if let Some(triggers) = cx.triggers {
                         for t in &turned_off {
-                            let _ = triggers.reenable(t);
+                            let _ = triggers.put_back(t);
                         }
                     }
                     return Err(e);

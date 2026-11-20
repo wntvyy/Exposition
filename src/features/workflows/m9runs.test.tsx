@@ -844,6 +844,27 @@ describe("docs audit polish", () => {
     expect(images.querySelector('[data-runner="restrictedR"]')!.textContent).toMatch(/^Restricted R batch runs in r-base:4\.6\.2/);
   });
 
+  // QC WF-2: the provider and model a review step sends material to are part of the reviewed plan.
+  it("names the model provider and model that the plan's review steps are approved for", async () => {
+    const base = plan();
+    runIpc.plan.mockResolvedValue(plan({ execution: { ...base.execution, model: { provider: "anthropic", providerTitle: "Anthropic", model: "claude-opus-5-5" } } }));
+    const view = render(<PlanReviewDialog workflow="wf-1" revision={2} isOpen onOpenChange={() => {}} onStarted={vi.fn()} />);
+    const model = await screen.findByTestId("plan-model");
+    expect(model.textContent).toBe(" (to Anthropic, model claude-opus-5-5; another provider or model is refused)");
+    expect(screen.getByTestId("plan-execution").textContent).toContain("sends material to the model provider: “Review” (to Anthropic");
+    view.unmount();
+    // A plan without review steps, or one made before the binding was recorded, names none.
+    runIpc.plan.mockResolvedValue(plan({ execution: { ...base.execution, modelSteps: [], model: { provider: "anthropic", providerTitle: "Anthropic", model: "x" } } }));
+    const none = render(<PlanReviewDialog workflow="wf-1" revision={2} isOpen onOpenChange={() => {}} onStarted={vi.fn()} />);
+    await screen.findByTestId("plan-execution");
+    expect(screen.queryByTestId("plan-model")).toBeNull();
+    none.unmount();
+    runIpc.plan.mockResolvedValue(plan());
+    render(<PlanReviewDialog workflow="wf-1" revision={2} isOpen onOpenChange={() => {}} onStarted={vi.fn()} />);
+    await screen.findByTestId("plan-execution");
+    expect(screen.queryByTestId("plan-model")).toBeNull();
+  });
+
   it("says nothing about replacing when re-reviewing the workflow's own trigger", async () => {
     triggerIpc.list.mockResolvedValue([trigger({ id: "wtrg-own", state: { kind: "suspended", code: "trigger.planChanged", message: "Changed." } })]);
     triggerIpc.plan.mockResolvedValue(standing({ nativeSteps: [], modelRequestsPerRun: 0 }));

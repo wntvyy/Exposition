@@ -1317,7 +1317,12 @@ mod strict_tests {
             }
             for parameter in &op.parameters {
                 assert!(line.contains(&format!("{} [kind ", parameter.name)), "{}: {line}", op.id);
+                // PG-7: a text limit is stated in the unit validation measures (bytes).
+                if let exposition_graph::workflow::registry::ParameterKind::Text { max_len } = parameter.kind {
+                    assert!(line.contains(&format!("at most {max_len} bytes (UTF-8)")), "{}: {line}", op.id);
+                }
             }
+            assert!(!line.contains("characters"), "{}: limits are bytes, not characters: {line}", op.id);
             assert!(line.contains(&op.purpose), "{}: purpose", op.id);
         }
         // The walkthrough's two steps, exactly.

@@ -79,6 +79,10 @@ impl WorkflowHost for Host {
     ) -> Result<SavedWorkflow, WorkflowRunError> {
         self.graph.workflow(id, revision).map_err(|e| WorkflowRunError::new(&e.code, e.message))
     }
+    // As the application: pinned revisions resolve like validation resolves them.
+    fn pinned_definition(&self, _root: &Path, id: &WorkflowId, revision: u64) -> Option<WorkflowDefinition> {
+        self.graph.workflow_definition(id, revision)
+    }
 }
 
 type BatchBehavior =
@@ -264,6 +268,8 @@ impl LeanAuditor for FakeLean {
 struct FakeResearch {
     root: PathBuf,
     calls: Arc<Calls>,
+    /// The label each retention was asked to keep the result under.
+    labels: Mutex<Vec<Option<String>>>,
     /// The research service's view of prepared reviews (default: still pending).
     reviews: Mutex<BTreeMap<String, PromotionReview>>,
 }
@@ -272,8 +278,9 @@ impl ResearchActions for FakeResearch {
     fn available(&self, _root: &Path) -> Result<(), String> {
         Ok(())
     }
-    fn retain(&self, research_run: &str, artifact: &str) -> Result<RetainedRecord, StepFailure> {
+    fn retain(&self, research_run: &str, artifact: &str, label: Option<&str>) -> Result<RetainedRecord, StepFailure> {
         self.calls.enter(format!("retain:{research_run}/{artifact}"));
+        self.labels.lock().unwrap().push(label.map(str::to_owned));
         let name = if artifact == "a-figure" { "figure.svg" } else { "table.csv" };
         let rel = format!(".exposition/artifacts/{research_run}/{name}");
         let bytes = std::fs::read(self.root.join(&rel)).map_err(|e| StepFailure::new("research.io", e.to_string()))?;
@@ -389,7 +396,12 @@ fn fixture() -> Fixture {
         counter: AtomicUsize::new(1),
     });
     let lean = Arc::new(FakeLean { root: root.clone(), calls: calls.clone(), recorded: Mutex::new(Vec::new()) });
-    let research = Arc::new(FakeResearch { root: root.clone(), calls: calls.clone(), reviews: Mutex::default() });
+    let research = Arc::new(FakeResearch {
+        root: root.clone(),
+        calls: calls.clone(),
+        labels: Mutex::default(),
+        reviews: Mutex::default(),
+    });
     let host = Arc::new(Host {
         root: Mutex::new(Some(root.clone())),
         trusted: AtomicBool::new(true),
@@ -1669,4 +1681,5 @@ fn the_plan_hash_covers_payloads() {
 }
 
 mod flow;
+mod qc;
 mod sched;

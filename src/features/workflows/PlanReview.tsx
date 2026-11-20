@@ -310,6 +310,12 @@ export function PlanDetails({ plan }: { plan: ReviewPlan }) {
           {execution.trustedFolder ? "folder trusted for native execution" : "folder not trusted for native execution"}
           {execution.nativeSteps.length > 0 && ` · runs natively with your account's privileges: ${stepNames(execution.nativeSteps)}`}
           {execution.modelSteps.length > 0 && ` · sends material to the model provider: ${stepNames(execution.modelSteps)}`}
+          {execution.modelSteps.length > 0 && execution.model && (
+            <span data-testid="plan-model">
+              {" "}
+              (to {execution.model.providerTitle}, model <code>{execution.model.model}</code>; another provider or model is refused)
+            </span>
+          )}
           {execution.runnerImages && execution.runnerImages.length > 0 && (
             <ul className="xp-wf-bullets" data-testid="plan-runner-images" aria-label="Images of the R and Julia runners">
               {execution.runnerImages.map((r) => (

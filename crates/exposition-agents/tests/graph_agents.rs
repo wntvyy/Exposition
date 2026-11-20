@@ -1220,6 +1220,12 @@ async fn a_corrected_proposal_is_a_revision_and_results_separate_saved_from_vali
     assert_eq!(second["state"], json!("wellFormed"), "{second}");
     assert_eq!(second["errors"], json!(0));
     assert_eq!(second["reviewable"], json!(true));
+    let summary = second["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("Well-formed is not runnable")
+            && summary.contains("only once every step's runner is available"),
+        "{summary}"
+    );
     assert_eq!(second["ran"], json!(false));
     assert_eq!(second["title"], json!("Check Main.lean and attach the result"));
     let summary = second["summary"].as_str().unwrap();
@@ -2466,4 +2472,15 @@ async fn agents_never_rewrite_a_workflow_that_uses_v2_features() {
     let (_, err, text) = call(&h, &task, "w");
     assert!(!err, "{text}");
     assert_eq!(f.graph.workflow(&v1, None).unwrap().revision, 2);
+    // PG-6: so can a workflow that only carries the /2 schema name (it once
+    // used a /2 field and no longer does): nothing would be removed.
+    let bare_v2 = save_user("exposition.workflow/2", Value::Null);
+    assert!(!f.graph.workflow(&bare_v2, None).unwrap().definition.uses_v2());
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+    let (task, _) = run(&mut h, req, vec![tool("w", tools::WORKFLOW_PROPOSE, revise(&bare_v2))], true).await;
+    let (_, err, text) = call(&h, &task, "w");
+    assert!(!err, "{text}");
+    let revised = f.graph.workflow(&bare_v2, None).unwrap();
+    assert_eq!(revised.revision, 2);
+    assert_eq!(revised.definition.schema, "exposition.workflow/1", "agents write schema /1");
 }

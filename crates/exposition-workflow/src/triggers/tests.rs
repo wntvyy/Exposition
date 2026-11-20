@@ -130,11 +130,20 @@ impl BatchRunner for FakeBatch {
     }
 }
 
-struct FakeReviewer;
+/// The configured provider and model of review steps (`None`: not reported).
+type ReviewModelSetting = Arc<Mutex<Option<(String, String)>>>;
+
+struct FakeReviewer {
+    model: ReviewModelSetting,
+}
 
 impl AgentReviewer for FakeReviewer {
     fn availability(&self, _root: &Path) -> Result<(), String> {
         Ok(())
+    }
+    fn model(&self, _task: Option<&str>) -> Option<crate::adapters::agent::ReviewModel> {
+        let (provider, configured) = self.model.lock().unwrap().clone()?;
+        Some(crate::adapters::agent::ReviewModel { provider, configured, served_by: None, effort: None })
     }
     fn review(
         &self,
@@ -243,6 +252,7 @@ struct Fx {
     starter: Arc<TestStarter>,
     clock: Arc<ManualClock>,
     triggers: TriggerService,
+    review_model: ReviewModelSetting,
 }
 
 fn path(p: &str) -> WorkspacePath {
@@ -270,6 +280,7 @@ fn fixture() -> Fx {
     });
     let batch =
         Arc::new(FakeBatch { available: Mutex::new(Ok(())), runs: AtomicUsize::new(0), gate: Mutex::new(None) });
+    let review_model: ReviewModelSetting = Arc::default();
     let mut adapters: Adapters = BTreeMap::new();
     let runner: Arc<dyn BatchRunner> = batch.clone();
     adapters.insert(
@@ -280,7 +291,7 @@ fn fixture() -> Fx {
         .insert(runner_ids::NATIVE_PYTHON.into(), Arc::new(BatchAdapter::new(Some(runner), BatchMode::TrustedNative)));
     adapters.insert(
         runner_ids::READ_ONLY_AGENT.into(),
-        Arc::new(AgentReviewAdapter { reviewer: Some(Arc::new(FakeReviewer)) }),
+        Arc::new(AgentReviewAdapter { reviewer: Some(Arc::new(FakeReviewer { model: review_model.clone() })) }),
     );
     adapters.insert(runner_ids::LEAN_AUDIT.into(), Arc::new(LeanAuditAdapter { auditor: Some(Arc::new(FakeLean)) }));
     adapters.insert(runner_ids::GRAPH_PROPOSAL.into(), Arc::new(AssociateAdapter));
@@ -309,7 +320,7 @@ fn fixture() -> Fx {
         starter: starter.clone(),
         clock: clock.clone(),
     });
-    Fx { _data: data, _project: project, root, store, host, graph, batch, runs, starter, clock, triggers }
+    Fx { _data: data, _project: project, root, store, host, graph, batch, runs, starter, clock, triggers, review_model }
 }
 
 /// One restricted Python step reading a script (code), the observations
@@ -1424,3 +1435,57 @@ fn suspension_messages_say_what_to_do_once() {
 /// P1 project operations (the data side) against this fixture.
 #[path = "project_data_tests.rs"]
 mod project_data;
+
+/// WF-2: the provider and model of a review step are part of the standing
+/// plan. A change suspends the trigger; nothing is sent under the earlier
+/// approval.
+#[test]
+fn a_changed_model_provider_suspends_a_trigger_with_review_steps() {
+    let f = fixture();
+    *f.review_model.lock().unwrap() = Some(("anthropic".into(), "model-a".into()));
+    let id = f.save(definition(false, true));
+    f.open_ready();
+    let with_model = WorkflowTriggerSettings { max_model_requests_per_day: 100, ..settings() };
+    let review = f.review(&id, watch(&["data"]));
+    assert!(
+        review.suspends_on.iter().any(|s| s.contains("Another model provider or model") && s.contains("model-a")),
+        "{:?}",
+        review.suspends_on
+    );
+    let t = f.enable_with(&id, watch(&["data"]), with_model.clone());
+    f.save_file(
+        "data/obs.csv",
+        "x
+first
+",
+    );
+    f.advance(2 * SECOND);
+    assert_eq!(f.started().len(), 1, "the approved provider: the run starts");
+    *f.review_model.lock().unwrap() = Some(("openai".into(), "model-b".into()));
+    f.save_file(
+        "data/obs.csv",
+        "x
+second
+",
+    );
+    f.advance(2 * SECOND);
+    assert_eq!(f.started().len(), 1, "nothing starts under the earlier approval");
+    let (code, message) = f.suspended(&t.id);
+    assert_eq!(code, "trigger.planChanged");
+    assert!(message.contains("model provider"), "{message}");
+    // A new review names the new provider and turns it on again.
+    let again = f.enable_with(&id, watch(&["data"]), with_model);
+    assert_eq!(again.state, TriggerState::Active);
+    // A plan without review steps is not bound to any provider.
+    let plain = f.save(definition(false, false));
+    let t = f.enable(&plain, watch(&["data"]));
+    *f.review_model.lock().unwrap() = Some(("anthropic".into(), "model-c".into()));
+    f.save_file(
+        "data/obs.csv",
+        "x
+third
+",
+    );
+    f.advance(2 * SECOND);
+    assert_eq!(f.trigger(&t.id).state, TriggerState::Active);
+}

@@ -49,6 +49,16 @@ pub trait WorkflowHost: Send + Sync {
     /// A saved revision (latest when `revision` is none) of a workflow of the
     /// project at `root`.
     fn workflow(&self, root: &Path, id: &WorkflowId, revision: Option<u64>) -> Result<SavedWorkflow, WorkflowRunError>;
+    /// The definition of the revision a composite step pins, by the rule
+    /// validation uses: a workflow that was deleted with its revisions kept
+    /// still resolves (its parents keep running it) until those revisions
+    /// are purged. Only composite children are read this way; the workflow a
+    /// plan is made for always goes through [`Self::workflow`], so a deleted
+    /// workflow itself is never planned. The default knows active workflows
+    /// only; the application reads the stored revision.
+    fn pinned_definition(&self, root: &Path, id: &WorkflowId, revision: u64) -> Option<WorkflowDefinition> {
+        self.workflow(root, id, Some(revision)).ok().map(|s| s.definition)
+    }
 }
 
 pub struct WorkflowRunConfig {
@@ -102,6 +112,11 @@ pub(crate) struct Inner {
     lean: Option<Arc<dyn LeanAuditor>>,
     research: Option<Arc<dyn ResearchActions>>,
     store: Mutex<RunStore>,
+    /// Runs that ended but whose final record the store has not accepted
+    /// yet (project key, record): read from here, and written as soon as the
+    /// store takes them. Without this a run that really ended would stay
+    /// "running" in the store and read as interrupted after a restart.
+    unwritten: Mutex<HashMap<WorkflowRunId, (String, WorkflowRun)>>,
     plans: Mutex<HashMap<WorkflowPlanId, CachedPlan>>,
     active: Mutex<HashMap<WorkflowRunId, ActiveRun>>,
     /// Serializes read-modify-write of finished runs (acknowledge, decide,
@@ -125,6 +140,69 @@ impl Inner {
             step_state,
         });
         result
+    }
+
+    /// Write the record a run ended with, so that its terminal state is
+    /// durable: the whole record (tried again briefly when the store is
+    /// busy); when the store refuses it as it is (too large), the record
+    /// without its attempt logs and the reviewed text of code inputs, which
+    /// says so; and when the store accepts neither, the record is kept for
+    /// this session and written by the next read that finds the store
+    /// working ([`Self::flush_unwritten`]). Announces the state once.
+    pub(crate) fn persist_terminal(&self, key: &str, run: &mut WorkflowRun) {
+        let put = |record: &WorkflowRun| self.store.lock().unwrap_or_else(|p| p.into_inner()).put(key, record);
+        let mut result = put(run);
+        for wait_ms in [50u64, 250] {
+            // A record that is too large is not retried as it is.
+            if !matches!(&result, Err(e) if e.code != "workflow.tooLarge") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(wait_ms));
+            result = put(run);
+        }
+        if let Err(whole) = result {
+            let reduced = reduced_record(run, &whole.message);
+            match put(&reduced) {
+                Ok(()) => {
+                    tracing::warn!("workflow run {} was recorded without its logs: {}", run.id, whole.message);
+                    *run = reduced;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "the final record of workflow run {} ({:?}) could not be written: {}",
+                        run.id,
+                        run.state,
+                        e.message
+                    );
+                    self.unwritten
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(run.id.clone(), (key.to_owned(), run.clone()));
+                }
+            }
+        }
+        let _ = self.events.send(WorkflowRunEvent {
+            run: run.id.clone(),
+            workflow: run.workflow.clone(),
+            state: run.state,
+            step: None,
+            step_state: None,
+        });
+    }
+
+    /// Write the final records the store did not accept earlier, if it does now.
+    pub(crate) fn flush_unwritten(&self) {
+        let mut pending = self.unwritten.lock().unwrap_or_else(|p| p.into_inner());
+        if pending.is_empty() {
+            return;
+        }
+        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        pending.retain(|_, (key, run)| store.put(key, run).is_err());
+    }
+
+    /// The final record of `id` that is not in the store yet, with its project.
+    fn unwritten_run(&self, id: &WorkflowRunId) -> Option<(String, WorkflowRun)> {
+        self.unwritten.lock().unwrap_or_else(|p| p.into_inner()).get(id).cloned()
     }
 
     /// A stored run of any project (the seed basis of a reproduction).
@@ -152,6 +230,31 @@ impl Inner {
         }
         self.finished(id);
     }
+}
+
+/// `run` as it is stored when the whole record cannot be: no attempt logs
+/// and no reviewed text of code inputs (their digests stay), with a note of
+/// what is missing and why. States, outputs, and provenance are unchanged.
+fn reduced_record(run: &WorkflowRun, why: &str) -> WorkflowRun {
+    let mut reduced = run.clone();
+    for step in &mut reduced.steps {
+        let attempts = step.attempts.iter_mut().chain(step.instances.iter_mut().flat_map(|i| i.attempts.iter_mut()));
+        for attempt in attempts {
+            attempt.log = None;
+        }
+    }
+    for input in &mut reduced.plan.inputs {
+        input.text = None;
+    }
+    let note = format!(
+        "The record of this run could not be written in full ({}), so it is kept without the steps' logs and without the reviewed text of its code inputs; states, outputs, and digests are complete.",
+        why.trim_end_matches('.')
+    );
+    reduced.message = Some(match reduced.message.take() {
+        Some(message) => format!("{message} {note}"),
+        None => note,
+    });
+    reduced
 }
 
 /// Workflow runs of the application (one instance).
@@ -222,6 +325,7 @@ impl WorkflowRunService {
                 lean: config.lean,
                 research: config.research,
                 store: Mutex::new(store),
+                unwritten: Mutex::new(HashMap::new()),
                 plans: Mutex::new(HashMap::new()),
                 active: Mutex::new(HashMap::new()),
                 edits: Mutex::new(()),
@@ -233,6 +337,25 @@ impl WorkflowRunService {
 
     pub fn subscribe(&self) -> broadcast::Receiver<WorkflowRunEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// One event per listed run of the open project with its state now, for
+    /// a listener that fell behind and lost events ([`Self::subscribe`]'s
+    /// channel keeps the latest 256): views that re-read a run on its events
+    /// would otherwise keep showing what they read last, for example
+    /// "Running" for a run whose final event was among the lost ones.
+    pub fn resync_events(&self) -> Vec<WorkflowRunEvent> {
+        self.runs(None)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|run| WorkflowRunEvent {
+                run: run.id,
+                workflow: run.workflow,
+                state: run.state,
+                step: None,
+                step_state: None,
+            })
+            .collect()
     }
 
     fn root(&self) -> Result<PathBuf, WorkflowRunError> {
@@ -319,7 +442,7 @@ impl WorkflowRunService {
             active_run: self.active_run(&saved.id),
             pins: &options.pins,
             limits: self.inner.slots.limits(),
-            resolve: &|id, revision| self.inner.host.workflow(root, id, Some(revision)).ok().map(|s| s.definition),
+            resolve: &|id, revision| self.inner.host.pinned_definition(root, id, revision),
         };
         let mut built = plan::build_plan(saved, &facts, crate::now_ms());
         built.plan.notices.extend(options.notices.iter().cloned());
@@ -526,6 +649,11 @@ impl WorkflowRunService {
 
     fn load(&self, id: &WorkflowRunId) -> Result<(String, WorkflowRun), WorkflowRunError> {
         let root = self.root()?;
+        // A run that ended while the store refused its final record.
+        self.inner.flush_unwritten();
+        if let Some((project, run)) = self.inner.unwritten_run(id) {
+            return if project == project_key(&root) { Ok((project, run)) } else { Err(unknown_run()) };
+        }
         let found = self.inner.store.lock().unwrap_or_else(|p| p.into_inner()).get(id)?;
         match found {
             Some((project, run)) if project == project_key(&root) => Ok((project, run)),
@@ -589,7 +717,18 @@ impl WorkflowRunService {
     /// Runs of the open project, newest first (bounded).
     pub fn runs(&self, workflow: Option<&WorkflowId>) -> Result<Vec<WorkflowRunSummary>, WorkflowRunError> {
         let root = self.root()?;
-        self.inner.store.lock().unwrap_or_else(|p| p.into_inner()).list(&project_key(&root), workflow, 100)
+        let key = project_key(&root);
+        self.inner.flush_unwritten();
+        let mut list = self.inner.store.lock().unwrap_or_else(|p| p.into_inner()).list(&key, workflow, 100)?;
+        // Runs whose final record is still not stored read as they ended.
+        let pending = self.inner.unwritten.lock().unwrap_or_else(|p| p.into_inner());
+        for (_, run) in pending.values().filter(|(project, _)| project == &key) {
+            if let Some(listed) = list.iter_mut().find(|s| s.id == run.id) {
+                *listed = store::summary(run);
+            }
+        }
+        drop(pending);
+        Ok(list)
     }
 
     /// Cancel a run: its current step's job is canceled through its service;

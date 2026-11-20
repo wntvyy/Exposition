@@ -273,7 +273,9 @@ lists every file and folder, the starting project structure (for example a
 main result that depends on a key definition and assumes standing
 assumptions, a research question, a baseline experiment), and the tools the
 preset needs with whether each is installed. Tools are declared, never
-installed or run. "Describe an objective" creates an empty project with a
+installed or run. The optional workflow draft of a computational preset is
+the Numerical experiment, a Python workflow: with R or Julia selected the
+option is unavailable and says so, and no draft is created. "Describe an objective" creates an empty project with a
 research space and then starts an ordinary agent task (whole project,
 commands off unless you choose otherwise) that proposes the structure; its
 changes are reviewed like any agent's.
@@ -326,7 +328,10 @@ reported as runnable only when it is well formed and every step's runner is
 available in the open project right now (for example, a native step needs
 a trusted folder, a restricted step a configured container image that is
 present locally, an agent review step a configured model provider); a
-stored or imported claim of runnability is ignored. Duplicating or pasting
+stored or imported claim of runnability is ignored. Whether a draft is well
+formed is also read now, not taken from the moment it was saved: an input
+file created or removed since then changes what the Workflows list and the
+editor report, without a new save. Duplicating or pasting
 a workflow makes a new draft ("… (copy)", revision 1, fresh step ids) with no
 triggers, runs, or approvals; deleting one turns its triggers off and keeps
 it restorable in Storage & History; steps and inputs copied on the workflow
@@ -368,7 +373,15 @@ not change, and a `/1` definition that names one is refused.
   ceiling allows more than the parent's. A composite step cannot carry a
   condition, a repeat, parameters, or code. The plan review shows every
   step of the child in full (code and prompts) under the composite's name,
-  and each child step runs through its own runner.
+  and each child step runs through its own runner. Inside a composite the
+  child's own settings for its inputs and for parallel steps do not apply:
+  its inputs are whatever the parent connects (a version the child pins for
+  an input is not checked), and the parent's "steps that may run at the same
+  time" governs; the plan review shows the parent's inputs and limit, so
+  what you approve is what runs. A child that is deleted with its revisions
+  kept keeps running in its parents at the pinned revision (validation, the
+  plan, the run, and the editor's composite card all still read it) until
+  those revisions are deleted too; then the parents read Incomplete.
 - **Conditions.** A step can run only when a fixed predicate on an earlier
   step's validated output holds; there is no expression language. The
   predicates: the Lean audit's verdict is one of a chosen set (Checked,
@@ -377,7 +390,10 @@ not change, and a `/1` definition that names one is refused.
   "Errors (2)" counts as its class); a value at a JSON pointer (RFC 6901)
   in a JSON dataset of at most 1 MiB compared with a number (=, ≠, <, ≤, >,
   ≥) or with text or true/false (equal or not equal); or an optional output
-  was produced. Each can be negated. The step waits for the step whose
+  was produced. Each can be negated. A step that runs only when an output
+  was produced may also take that output as its input: when it was not
+  produced the step reads Condition not met. Any other step that needs a
+  missing output fails the step that should have produced it. The step waits for the step whose
   output its condition reads. When the predicate does not hold the step
   reads **Condition not met** with what was observed, and the steps that
   need its outputs are **Skipped**, each with its reason; the run can still
@@ -393,7 +409,9 @@ not change, and a `/1` definition that names one is refused.
   sources, never an outcome directly. *Until*: the step runs again, one
   iteration after another, at most 1 to 10 times, until a predicate (as
   above) on one of its own outputs holds; if it never does, the step fails
-  or uses the last iteration's outputs, as the definition says. Every
+  or uses the last iteration's outputs, as the definition says. With "the
+  output was produced" as the predicate, an iteration without that output
+  runs again like any other whose predicate did not hold. Every
   instance is recorded and counts as one step against the run's step
   budget. A composite step runs once. Batch code (Python, R, or Julia)
   sees which instance it is: `EXPOSITION_ITERATION` is the 0-based
@@ -408,7 +426,9 @@ Agents' workflow proposals stay `exposition.workflow/1`: an agent cannot
 propose parallel steps, composites, conditions, or repeats, and it cannot
 revise a workflow that uses any of them (the proposal is refused and
 nothing is saved, because saving it would remove them; an agent can still
-propose a new workflow).
+propose a new workflow). A workflow that used one of them and no longer
+does can be revised by an agent again; the revision is saved as
+`exposition.workflow/1`.
 
 ### Workflow runs
 
@@ -425,17 +445,33 @@ will run with its complete code (inline, the full text of the script file
 it runs, or the full text of the Lean file it audits, since elaborating
 Lean can run code) or model instructions, parameters, runner, containment,
 effects, and limits, the run's budgets, the restricted image (by name and
-by its exact image identity) and folder trust it relies on, how many steps
+by its exact image identity) and folder trust it relies on, the model
+provider and model its agent review steps send material to, how many steps
 may run at the same time and the application-wide limits, each composite's
 steps grouped under it, each condition and repeat in plain words, notices
 (native privileges, material sent to the model provider, proposals you
 review later), and anything that blocks it. **Start run** approves exactly
-that plan. If anything in it changed before the run starts (the workflow
-was saved again, an input file changed, folder trust or the restricted
-image changed, including the same image name now naming a different image
-after a re-tag or pull, a runner became available or unavailable, or
-another project is open), the start is refused and you review the new
-plan. A plan must be started within 30 minutes.
+that plan. If anything in it changed before the run starts (an input file
+changed, folder trust or the restricted image changed, including the same
+image name now naming a different image after a re-tag or pull, the model
+provider or model configured for agent review steps changed, a runner
+became available or unavailable, or another project is open), the start
+is refused and you review the new plan. A review step is checked again
+when it starts and runs with exactly the approved provider and model. A
+plan is the plan of one saved revision, the one the editor shows when you
+open the review: saving the workflow again does not change that plan, and
+it still starts exactly the revision you reviewed. Only a plan of "the
+latest revision", which triggers use, is refused once a newer revision is
+saved. A plan must be started within 30 minutes.
+
+Not part of the approval, and so neither a reason to refuse a start nor to
+suspend a trigger: the natively installed interpreter and its packages,
+the container's memory, CPU, and process limits, the Exposition version
+(a trigger stays on across an upgrade), and for a Lean audit the Lean
+toolchain, the Lake manifest and lakefile, and other Lean files of the
+project that the audited file imports (only the audited file is shown and
+bound). They are recorded with each attempt (see Reproducibility), where a
+reproduction lists the differences.
 
 Steps run in dependency order. With the default of one step at a time,
 each step waits for the previous one. A workflow that allows more (up to
@@ -479,7 +515,13 @@ recorded before its service is called. If Exposition stops during a run,
 the next start marks the run **Interrupted** (every step or instance that
 was running has an unknown outcome) and never resumes or repeats anything;
 you mark it as reviewed and start a new run if needed. Run records are kept
-in the application data folder on this computer, not in the project. Each
+in the application data folder on this computer, not in the project. A run
+that ended is recorded as ended even when its record cannot be written at
+once: a record too large to store is kept without the steps' logs and the
+reviewed text of code inputs (and says so), and one the store refuses is
+written as soon as the store works again in the same session, during which
+the run reads as it ended. Only if Exposition closes before that does such
+a run read Interrupted. Each
 run records why it started: by you from a reviewed plan, by a trigger
 (with the inputs that changed), or as a reproduction of an earlier run.
 
@@ -491,7 +533,7 @@ run records why it started: by you from a reviewed plan, by a trigger
 | Lean audit | The Lean service with the project's toolchain, natively, in a trusted folder | The audit's own per-declaration verdicts, statements, and axioms for exactly the audited text |
 | Associate audited declarations | Exposition | A proposal you accept or reject per declaration; only accepted declarations get Lean evidence recorded |
 | Read-only agent review | A read-only agent task with commands off, scoped to the declared material, which it sends to the model provider; a tool that would write or run is refused and the review continues; up to 2 reviews run at once, each its own task, sharing the run's model-request budget | A review report (prose, never evidence); a later step can take several reports |
-| Retain artifact | Research | A kept result with computational evidence naming the mode it actually ran in |
+| Retain artifact | Research | A kept result with computational evidence naming the mode it actually ran in; the step's Label, when set, is the name the result is listed under in Research (its file name otherwise; the file and its path are unchanged) |
 | Request reviewed promotion | Research | A prepared insertion at the end of the manuscript that you review and approve in the run view |
 | Run a saved workflow (composite) | Each of the child's steps through its own runner, as listed here | The child's outcomes, as this step's outputs |
 
@@ -599,14 +641,18 @@ limit allows it.
 **Suspension.** Any other difference suspends the trigger until you review
 and enable it again: a new revision, a change to a code input, a Lean
 source, or another unwatched input, folder trust (for a plan with native
-steps), a restricted image name now naming a different image, a runner
-becoming unavailable or available (for example Docker not running when it
-fires), or any step, budget, or limit. The card and a notification
+steps), a restricted image name now naming a different image, the model
+provider or model configured for agent review steps, a runner becoming
+unavailable or available (for example Docker not running when it fires),
+or any step, budget, or limit. The card and a notification
 ("Workflow trigger: suspended: …") give the reason. Revoking trust for the
 folder suspends all of its triggers, as every standing plan says. Closing
 or switching the project stops listening and drops pending and queued
 fires; the trigger stays on and listens again the next time the project is
-open and indexed. Triggers are stored in the application data folder, never
+open and indexed. A deletion that turned a trigger off and then did
+not happen (it failed or was refused) puts the trigger back exactly as it
+was: one that was on listens again, one that was suspended stays suspended.
+Triggers are stored in the application data folder, never
 in the project, a workflow definition, or a bundle; they stay on across
 restarts, and a restarted Exposition does not catch up on missed intervals
 or changes. If that file cannot be read, it is never overwritten: triggers

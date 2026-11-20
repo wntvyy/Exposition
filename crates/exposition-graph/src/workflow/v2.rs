@@ -287,7 +287,7 @@ pub(super) fn test_fits(test: &ConditionTest, ty: PortType) -> Result<(), String
 /// An RFC 6901 JSON pointer of bounded length.
 pub(super) fn pointer_problem(pointer: &str) -> Option<String> {
     if pointer.len() > MAX_POINTER {
-        return Some(format!("the JSON pointer is longer than {MAX_POINTER} characters"));
+        return Some(format!("the JSON pointer is longer than {MAX_POINTER} bytes"));
     }
     if pointer.chars().any(char::is_control) {
         return Some("the JSON pointer contains control characters".into());

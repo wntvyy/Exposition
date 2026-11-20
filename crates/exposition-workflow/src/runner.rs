@@ -51,8 +51,9 @@ use crate::adapters::{
     BoundInput, StepAdapter, StepControl, StepFailure, StepIteration, StepRequest, StepResult, bare_hash,
 };
 use crate::model::{
-    MAX_PARALLEL, WorkflowAttemptState, WorkflowOutputValue, WorkflowPlanStep, WorkflowRejectedOutput, WorkflowRun,
-    WorkflowRunState, WorkflowStepAttempt, WorkflowStepInstance, WorkflowStepOutput, WorkflowStepState,
+    MAX_PARALLEL, WorkflowAttemptState, WorkflowOutputValue, WorkflowPlanModel, WorkflowPlanStep,
+    WorkflowRejectedOutput, WorkflowRun, WorkflowRunState, WorkflowStepAttempt, WorkflowStepInstance,
+    WorkflowStepOutput, WorkflowStepState,
 };
 use crate::plan::{hash_project_file, instance_parameters, resolve, time_limit_of};
 use crate::service::Inner;
@@ -585,6 +586,23 @@ impl Ctx<'_> {
                 );
             }
         }
+        // A model step sends its material only to the provider and model the
+        // plan was approved for.
+        let approved_model = execution.model.clone().filter(|_| planned.containment == Containment::ReadOnlyModel);
+        if let Some(bound) = &approved_model {
+            let now = adapter.model_binding();
+            if !now.as_ref().is_some_and(|n| n.same(bound)) {
+                return self.refuse(
+                    unit,
+                    crate::adapters::agent::MODEL_CHANGED,
+                    format!(
+                        "Not started: the model provider or model is not the one you approved (approved {}, now {}); nothing was sent.",
+                        bound.describe(),
+                        now.map(|n| n.describe()).unwrap_or_else(|| "unknown".to_owned())
+                    ),
+                );
+            }
+        }
         if let Err(reason) = adapter.availability(root) {
             let code = if planned.containment == Containment::RestrictedContainer {
                 "workflow.restrictedUnavailable"
@@ -654,7 +672,7 @@ impl Ctx<'_> {
                     (unit, attempt),
                     &inputs,
                     &grant,
-                    approved_image_id,
+                    (approved_image_id, approved_model),
                     iteration,
                 )
             }));
@@ -683,7 +701,7 @@ impl Ctx<'_> {
         (unit, attempt): (Unit, u32),
         inputs: &[BoundInput],
         grant: &Grant,
-        restricted_image_id: Option<String>,
+        (restricted_image_id, model): (Option<String>, Option<WorkflowPlanModel>),
         iteration: Option<StepIteration>,
     ) -> Completion {
         let reported: Mutex<Option<OperationRef>> = Mutex::new(None);
@@ -714,6 +732,7 @@ impl Ctx<'_> {
             max_output_bytes: grant.max_output_bytes,
             model_requests_remaining: grant.model_requests,
             restricted_image_id,
+            model,
             seed_basis: self.seed_basis,
             iteration,
         };
@@ -1067,7 +1086,8 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
     run.usage.seconds = started.elapsed().as_secs() as u32;
     run.finished_at_ms = Some(crate::now_ms());
     run.explain_outcomes();
-    let _ = inner.persist(&key, &run, None);
+    // The terminal state is made durable before the run stops being active.
+    inner.persist_terminal(&key, &mut run);
     inner.finished(&run.id);
 }
 
@@ -1267,18 +1287,49 @@ fn validate_outputs(
     if let Some((code, reason)) = first {
         return Err((code, format!("an output was refused: {reason}; the step's outputs are discarded"), rejected));
     }
-    // Ports a consumer or a required outcome needs must be present.
+    // Ports a consumer or a required outcome needs must be present. A
+    // consumer that runs only when the port was produced (its condition is
+    // "the output was produced" on that very port) does not need it: without
+    // it that step reads Condition not met instead of this one failing.
+    let gated_on = |consumer: &WorkflowPlanStep, port: &str| {
+        consumer.condition.as_ref().is_some_and(|c| {
+            c.test == ConditionTest::OutputPresent
+                && !c.negate
+                && c.source.step == planned.step
+                && c.source.port == port
+        })
+    };
     let mut needed: Vec<String> = run
         .plan
         .steps
         .iter()
-        .flat_map(|s| s.bindings.iter())
-        .filter_map(|b| match &b.from {
-            PortSource::Step { step, port } if step == &planned.step => Some(port.clone()),
+        .flat_map(|s| s.bindings.iter().map(move |b| (s, b)))
+        .filter_map(|(consumer, b)| match &b.from {
+            PortSource::Step { step, port } if step == &planned.step && !gated_on(consumer, port) => Some(port.clone()),
             _ => None,
         })
         .collect();
     needed.extend(run.outcomes.iter().filter(|o| !o.optional && o.step == planned.step).map(|o| o.port.clone()));
+    // "Repeat until the output was produced": an iteration without that
+    // output is one whose predicate does not hold, so the step runs again
+    // (or, exhausted, fails as such). Only when the last iteration's outputs
+    // are used does a consumer need the port from it.
+    if let (
+        Some(StepRepeat::Until {
+            port,
+            test: ConditionTest::OutputPresent,
+            negate: false,
+            max_iterations,
+            on_exhausted,
+        }),
+        Some(index),
+    ) = (&planned.repeat, attempt.1)
+    {
+        let last = index + 1 >= (*max_iterations).clamp(1, crate::plan::MAX_UNTIL);
+        if !last || *on_exhausted == Exhausted::Fail {
+            needed.retain(|p| p != port);
+        }
+    }
     needed.sort();
     needed.dedup();
     let missing: Vec<&String> = needed.iter().filter(|p| !valid.iter().any(|v| &&v.port == p)).collect();

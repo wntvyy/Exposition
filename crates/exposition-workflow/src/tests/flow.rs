@@ -775,3 +775,134 @@ fn run_summaries_count_condition_not_met_steps_as_done() {
     let summary = f.service.runs(Some(&id)).unwrap().into_iter().find(|s| s.id == run.id).unwrap();
     assert_eq!((summary.steps_done, summary.steps_total), (2, 2));
 }
+
+// ------------------------------------------------- QC: PG-2 and PG-1 ----
+
+/// The numerical preset with a `run` step whose figure is optional in
+/// practice: "Keep the figure" runs only when the figure was produced.
+fn keep_figure_when_produced(code: &str) -> WorkflowDefinition {
+    let mut def = numerical(false);
+    def.steps[0] = code_step("run", code);
+    def.steps[1].condition = when("run", "figure", ConditionTest::OutputPresent, false);
+    def.outcomes[0].optional = true;
+    // The run always yields its dataset: one required outcome remains.
+    def.outcomes.push(dataset_outcome("run"));
+    v2(def, 1)
+}
+
+/// PG-2: a step gated on "the output was produced" may also consume that
+/// output. When it was not produced the gated step reads Condition not met;
+/// the producer does not fail for an output only that step needed.
+#[test]
+fn an_output_present_condition_on_a_consumed_port_gates_instead_of_failing_the_producer() {
+    let f = fixture();
+    f.set_behavior(json_behavior());
+    let run = f.run_to_end(&f.save(keep_figure_when_produced("# nothing drawn")));
+    assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?} {:?}", run.code, run.message);
+    assert_eq!(state_of(&run, "run"), WorkflowStepState::Succeeded);
+    assert_eq!(state_of(&run, "retain"), WorkflowStepState::ConditionNotMet);
+    assert!(step_of(&run, "retain").reason.as_deref().unwrap().contains("was not produced"));
+    assert_eq!(f.calls.log(), vec!["batch:run".to_owned()], "nothing was retained");
+    // Produced: the gated step runs and consumes it.
+    let f = fixture();
+    f.set_behavior(json_behavior());
+    let run = f.run_to_end(&f.save(keep_figure_when_produced("# figure")));
+    assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?} {:?}", run.code, run.message);
+    assert_eq!(state_of(&run, "retain"), WorkflowStepState::Succeeded);
+    // An ungated consumer still needs the output: the producer fails.
+    let f = fixture();
+    f.set_behavior(json_behavior());
+    let mut def = keep_figure_when_produced("# nothing drawn");
+    def.steps[1].condition = None;
+    let run = f.run_to_end(&f.save(def));
+    assert_eq!(run.code.as_deref(), Some("workflow.missingOutput"), "{:?}", run.message);
+    // So does a consumer gated on the output being absent.
+    let f = fixture();
+    f.set_behavior(json_behavior());
+    let mut def = keep_figure_when_produced("# nothing drawn");
+    def.steps[1].condition = when("run", "figure", ConditionTest::OutputPresent, true);
+    let run = f.run_to_end(&f.save(def));
+    assert_eq!(run.code.as_deref(), Some("workflow.missingOutput"), "{:?}", run.message);
+}
+
+/// PG-2: "repeat until the output was produced" keeps iterating while the
+/// output is missing, also when a later step consumes it.
+#[test]
+fn until_output_present_iterates_while_a_consumed_output_is_missing() {
+    let until = |on_exhausted: Exhausted, max_iterations: u32| {
+        let mut def = numerical(false);
+        def.steps[0] = code_step("run", "");
+        def.steps[0].repeat = Some(StepRepeat::Until {
+            port: "figure".into(),
+            test: ConditionTest::OutputPresent,
+            negate: false,
+            max_iterations,
+            on_exhausted,
+        });
+        v2(def, 1)
+    };
+    // The figure appears in the third iteration.
+    let drawing = || {
+        let n = Arc::new(AtomicUsize::new(0));
+        let behavior: Arc<BatchBehavior> = Arc::new(move |root, _req, _control, run| {
+            let mut ports = vec![artifact(root, run, "dataset", "dataset.json", b"{}", ArtifactKind::Data)];
+            if n.fetch_add(1, Ordering::SeqCst) == 2 {
+                ports.push(artifact(root, run, "figure", "figure.svg", b"<svg/>", ArtifactKind::Figure));
+            }
+            Ok(succeeded(run, ports))
+        });
+        behavior
+    };
+    let f = fixture();
+    f.set_behavior(drawing());
+    let run = f.run_to_end(&f.save(until(Exhausted::Fail, 5)));
+    assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?} {:?}", run.code, run.message);
+    assert_eq!(step_of(&run, "run").instances.len(), 3);
+    assert_eq!(state_of(&run, "retain"), WorkflowStepState::Succeeded);
+    // Never produced, fail: the step reports the exhausted repeat.
+    let f = fixture();
+    f.set_behavior(drawing());
+    let run = f.run_to_end(&f.save(until(Exhausted::Fail, 2)));
+    assert_eq!(run.code.as_deref(), Some("workflow.untilExhausted"), "{:?}", run.message);
+    assert_eq!(step_of(&run, "run").instances.len(), 2);
+    // Never produced, use the last iteration: the consumer's output is missing.
+    let f = fixture();
+    f.set_behavior(drawing());
+    let run = f.run_to_end(&f.save(until(Exhausted::UseLast, 2)));
+    assert_eq!(run.code.as_deref(), Some("workflow.missingOutput"), "{:?}", run.message);
+    assert_eq!(step_of(&run, "run").instances.len(), 2);
+}
+
+/// PG-1 / WF-3: a composite keeps resolving the pinned revision of a child
+/// that was deleted with its revisions kept, in validation, in the plan, and
+/// in the run alike; after those revisions are purged every one of them
+/// reports the step missing.
+#[test]
+fn a_parent_of_a_deleted_child_whose_revisions_are_kept_still_plans_and_runs() {
+    let f = fixture();
+    f.set_behavior(json_behavior());
+    let child = child(&f);
+    let id = f.save(parent(&child));
+    f.graph.delete_workflow(&Origin::User, &child, false, false).unwrap();
+    assert_eq!(f.graph.workflow(&child, None).unwrap_err().code, "workflow.unknown", "the child itself is deleted");
+    let read = f.graph.workflow(&id, None).unwrap();
+    assert_eq!(
+        read.validation.state,
+        exposition_graph::workflow::DraftState::WellFormed,
+        "validation resolves the pin"
+    );
+    let plan = f.service.plan(&id, None).unwrap();
+    assert!(plan.blockers.is_empty(), "the plan resolves the pin too: {:?}", plan.blockers);
+    let ids: Vec<&str> = plan.steps.iter().map(|s| s.step.as_str()).collect();
+    assert_eq!(ids, vec!["prep", "comp/clean", "comp/fit", "report"]);
+    let run = f.run_to_end(&id);
+    assert_eq!(run.state, WorkflowRunState::Succeeded, "{:?} {:?}", run.code, run.message);
+    // A deleted workflow itself is never planned.
+    assert_eq!(f.service.plan(&child, None).unwrap_err().code, "workflow.unknown");
+    // Purged: validation and the plan agree that the step is missing.
+    f.graph.delete_workflow(&Origin::User, &child, true, true).unwrap();
+    let read = f.graph.workflow(&id, None).unwrap();
+    assert_eq!(read.validation.state, exposition_graph::workflow::DraftState::Incomplete);
+    let plan = f.service.plan(&id, None).unwrap();
+    assert!(plan.blockers.iter().any(|b| b.code == "workflow.notWellFormed"), "{:?}", plan.blockers);
+}

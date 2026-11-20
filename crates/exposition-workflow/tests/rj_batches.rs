@@ -368,6 +368,7 @@ fn a_script_of_another_language_is_refused_before_the_runner_is_called() {
             max_output_bytes: 1 << 20,
             model_requests_remaining: 0,
             restricted_image_id: Some(IMAGE_A.into()),
+            model: None,
             seed_basis: "basis",
             iteration: None,
         };

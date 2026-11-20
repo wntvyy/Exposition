@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use exposition_agents::{
     AgentService, ApprovalMode, Budgets, ContextConsent, CreateTaskRequest, ExecutionMode, PermissionProfile,
-    ProviderKind, TaskId, TaskScope, TaskStatus, TranscriptItem,
+    ProviderChoice, ProviderKind, TaskId, TaskScope, TaskStatus, TranscriptItem,
 };
 use exposition_core::path::WorkspacePath;
 use exposition_graph::OperationRef;
@@ -22,7 +22,7 @@ use exposition_graph::workflow::registry::PortType;
 
 use super::{StepAdapter, StepControl, StepFailure, StepRequest, StepResult};
 use crate::environment::{WorkflowEnvironment, WorkflowEnvironmentModel};
-use crate::model::{MAX_REPORT_CHARS, WorkflowOutputValue, WorkflowPlanStep};
+use crate::model::{MAX_REPORT_CHARS, WorkflowOutputValue, WorkflowPlanModel, WorkflowPlanStep};
 
 /// What one review asks for.
 pub struct ReviewRequest {
@@ -31,6 +31,10 @@ pub struct ReviewRequest {
     pub files: Vec<WorkspacePath>,
     pub max_requests: u32,
     pub time_limit: Duration,
+    /// The provider and model the plan was approved for: the review runs
+    /// with exactly these, whatever the settings say by now (`None`: the
+    /// plan bound none, and the configured default applies).
+    pub model: Option<WorkflowPlanModel>,
 }
 
 /// What a finished review returns.
@@ -66,6 +70,16 @@ pub trait AgentReviewer: Send + Sync {
     fn model(&self, _task: Option<&str>) -> Option<ReviewModel> {
         None
     }
+    /// The provider and model a review started now would use: what a plan
+    /// binds and shows. The default names the provider by its id.
+    fn binding(&self) -> Option<WorkflowPlanModel> {
+        let model = self.model(None)?;
+        Some(WorkflowPlanModel {
+            provider_title: model.provider.clone(),
+            provider: model.provider,
+            model: model.configured,
+        })
+    }
 }
 
 /// The environment of a review with `model`.
@@ -93,6 +107,8 @@ pub struct AgentReviewAdapter {
 }
 
 const NO_AGENTS: &str = "The agents service is not available.";
+/// A review step's provider or model is not the one the plan was approved for.
+pub const MODEL_CHANGED: &str = "workflow.modelChanged";
 const MAX_MATERIAL_TEXT: usize = 32 * 1024;
 
 fn bounded(text: &str, max: usize) -> String {
@@ -175,6 +191,7 @@ impl StepAdapter for AgentReviewAdapter {
             files,
             max_requests: request.model_requests_remaining,
             time_limit: request.time_limit,
+            model: request.model.clone(),
         };
         let started: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
         let on_task = |task: &str| {
@@ -203,6 +220,10 @@ impl StepAdapter for AgentReviewAdapter {
     fn current_environment(&self, _root: &Path, step: &WorkflowPlanStep) -> Option<WorkflowEnvironment> {
         let model = self.reviewer.as_ref()?.model(None)?;
         Some(review_environment(step, Some(model)))
+    }
+
+    fn model_binding(&self) -> Option<WorkflowPlanModel> {
+        self.reviewer.as_ref()?.binding()
     }
 }
 
@@ -258,6 +279,15 @@ impl AgentReviewer for AgentServiceReviewer {
         }
     }
 
+    fn binding(&self) -> Option<WorkflowPlanModel> {
+        let settings = self.agents.provider_status().settings;
+        Some(WorkflowPlanModel {
+            provider: wire_name(&settings.provider),
+            provider_title: settings.provider.label().to_owned(),
+            model: settings.model,
+        })
+    }
+
     fn availability(&self, _root: &Path) -> Result<(), String> {
         let status = self.agents.provider_status();
         match status.settings.provider {
@@ -283,6 +313,24 @@ impl AgentReviewer for AgentServiceReviewer {
             max_commands: 0,
             ..Budgets::default()
         };
+        // The approved provider and model, not whatever is configured by now.
+        let provider = match &request.model {
+            None => None,
+            Some(bound) => {
+                let kind: ProviderKind = serde_json::from_value(serde_json::Value::String(bound.provider.clone()))
+                    .map_err(|_| {
+                        StepFailure::new(
+                            MODEL_CHANGED,
+                            format!(
+                                "The approved model provider “{}” is not one this version can use.",
+                                bound.provider
+                            ),
+                        )
+                    })?;
+                let effort = self.agents.provider_status().settings.effort;
+                Some(ProviderChoice { provider: kind, model: bound.model.clone(), effort })
+            }
+        };
         // No user is in the loop of a workflow step: the task is never
         // offered structured questions, so it cannot wait for an answer.
         let summary = self
@@ -298,7 +346,7 @@ impl AgentReviewer for AgentServiceReviewer {
                 // A workflow's agent step keeps its own contract (read only,
                 // no execution) and never runs as Auto.
                 approval_mode: Some(ApprovalMode::Ask),
-                provider: None,
+                provider,
                 attachments: None,
             })
             .map_err(|e| StepFailure::new(&e.code, e.message))?;
