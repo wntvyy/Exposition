@@ -59,6 +59,12 @@ pub fn run() {
             agents::add_dev_capability(app.handle())?;
             #[cfg(debug_assertions)]
             research::add_dev_capability(app.handle())?;
+            #[cfg(debug_assertions)]
+            tex::add_dev_capability(app.handle())?;
+            #[cfg(debug_assertions)]
+            lean::add_dev_capability(app.handle())?;
+            #[cfg(debug_assertions)]
+            graph::add_dev_capability(app.handle())?;
             research::forward_events(app.handle().clone());
             graph::forward_events(app.handle().clone());
             workflow_runs::forward_events(app.handle().clone());
@@ -146,11 +152,15 @@ pub fn run() {
             lean::lean_restart,
             lean::lean_restart_file,
             lean::lean_install_toolchain,
+            #[cfg(debug_assertions)]
             lean::lean_check,
+            #[cfg(debug_assertions)]
             tex::tex_build,
+            #[cfg(debug_assertions)]
             tex::tex_status,
-            tex::tex_cancel,
+            #[cfg(debug_assertions)]
             tex::tex_page_image,
+            #[cfg(debug_assertions)]
             tex::tex_page_map,
             #[cfg(debug_assertions)]
             execution::dev_start_probe_job,
@@ -171,7 +181,6 @@ pub fn run() {
             research::research_run,
             research::research_run_output,
             research::research_artifact,
-            research::artifact_attach,
             typesetting::typesetting_watch,
             typesetting::typesetting_unwatch,
             typesetting::typesetting_build,
@@ -194,9 +203,10 @@ pub fn run() {
             graph::graph_views,
             graph::graph_view_get,
             graph::graph_view_save,
-            graph::graph_view_delete,
             graph::graph_recover,
+            #[cfg(debug_assertions)]
             graph::graph_operations,
+            #[cfg(debug_assertions)]
             research::research_space,
             research::research_space_enable,
             research::research_listing,
@@ -218,8 +228,11 @@ pub fn run() {
             lean::lean_record_evidence,
             lean::lean_associate_declaration,
             lean::lean_declaration_evidence,
+            #[cfg(debug_assertions)]
             graph::graph_reconcile,
+            #[cfg(debug_assertions)]
             graph::graph_backup,
+            #[cfg(debug_assertions)]
             graph::graph_backups,
             projects::project_presets,
             projects::project_capabilities,
@@ -274,6 +287,7 @@ pub fn run() {
             setup::research_setup_cancel,
             setup::research_setup_status,
             // Mathlib lane: Lake package inspection and guided Mathlib setup.
+            #[cfg(debug_assertions)]
             lean::lean_package_inspect,
             lean::lean_package_for,
             lean::lean_setup_plan,

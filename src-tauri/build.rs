@@ -56,12 +56,6 @@ const COMMANDS: &[&str] = &[
     "lean_restart",
     "lean_restart_file",
     "lean_install_toolchain",
-    "lean_check",
-    "tex_build",
-    "tex_status",
-    "tex_cancel",
-    "tex_page_image",
-    "tex_page_map",
     "agents_provider_status",
     "agents_provider_update",
     "agents_provider_set_key",
@@ -82,7 +76,7 @@ const COMMANDS: &[&str] = &[
     "agents_review_diff",
     "agents_review_revert",
     "agents_review_accept",
-    // Research (M4) and the format-owned artifact attachment command.
+    // Research (M4).
     "research_workspace",
     "research_environments",
     "research_session_start",
@@ -96,7 +90,6 @@ const COMMANDS: &[&str] = &[
     "research_run",
     "research_run_output",
     "research_artifact",
-    "artifact_attach",
     "typesetting_watch",
     "typesetting_unwatch",
     "typesetting_build",
@@ -120,11 +113,8 @@ const COMMANDS: &[&str] = &[
     "graph_views",
     "graph_view_get",
     "graph_view_save",
-    "graph_view_delete",
     "graph_recover",
-    "graph_operations",
     // Research in the project graph (src/research.rs) and Lean evidence (src/lean.rs).
-    "research_space",
     "research_space_enable",
     "research_listing",
     "research_space_create_file",
@@ -143,9 +133,6 @@ const COMMANDS: &[&str] = &[
     "lean_record_evidence",
     "lean_associate_declaration",
     "lean_declaration_evidence",
-    "graph_reconcile",
-    "graph_backup",
-    "graph_backups",
     // Project creation and workflow drafts (src/projects.rs, src/workflows.rs).
     "project_presets",
     "project_capabilities",
@@ -205,8 +192,7 @@ const COMMANDS: &[&str] = &[
     "research_setup_start",
     "research_setup_cancel",
     "research_setup_status",
-    // Mathlib lane: Lake package inspection and guided Mathlib setup (src/lean.rs).
-    "lean_package_inspect",
+    // Mathlib lane: guided Mathlib setup (src/lean.rs).
     "lean_package_for",
     "lean_setup_plan",
     "lean_setup_start",
@@ -245,6 +231,19 @@ const DEV_COMMANDS: &[&str] = &[
     "research_dev_fail_next_graph_write",
     // Fault injection for the rename graph-record e2e (src/files.rs).
     "files_dev_fail_next_graph_record",
+    // Probes of live services that no interface calls; the end-to-end scenarios
+    // drive them (src/tex.rs, src/lean.rs, src/graph.rs, src/research.rs).
+    "tex_build",
+    "tex_status",
+    "tex_page_image",
+    "tex_page_map",
+    "lean_check",
+    "lean_package_inspect",
+    "graph_reconcile",
+    "graph_backup",
+    "graph_backups",
+    "graph_operations",
+    "research_space",
 ];
 
 fn main() {

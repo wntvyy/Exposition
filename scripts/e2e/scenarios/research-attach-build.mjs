@@ -7,8 +7,13 @@
 // - LaTeX: a document with attachments builds with pdfLaTeX, and a figure
 //   attached to chapters/ch1.tex (included by the root book.tex) builds,
 //   because its graphics path is relative to book.tex;
-// - artifact_attach takes identifiers only: caller-supplied artifact records
-//   (forged paths/kinds/hashes) and artifact ids no run produced are refused.
+// - reviewed promotion (research_promotion_prepare / _approve, the one route
+//   that inserts a run's figure or table) takes identifiers only:
+//   caller-supplied artifact records (forged paths/kinds/hashes) and artifact
+//   ids no run produced are refused.
+//
+// Requires a debug build: the LaTeX builds are driven through the debug-only
+// probe commands tex_build / tex_status.
 //
 // Observations: test-results/e2e/research-attach-build/observations.json.
 import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
@@ -49,17 +54,20 @@ async function attach(page, document, runId, artifactId, placement, caption) {
       : placement === "beforeClosing"
         ? state.text.indexOf("Closing paragraph.")
         : placement;
-  return invokeError(page, "artifact_attach", {
+  // Reviewed promotion: prepare the exact insertion, then approve it unchanged.
+  const prepared = await invokeError(page, "research_promotion_prepare", {
     request: {
-      document,
-      baseRevision: state.info.revision,
       runId,
       artifactId,
+      document,
+      baseRevision: state.info.revision,
       placement: { kind: "insert", offset },
       caption,
       attachmentKey: null,
     },
   });
+  if (prepared.error) return prepared;
+  return invokeError(page, "research_promotion_approve", { promotion: prepared.unexpectedSuccess.promotion });
 }
 
 async function texBuild(page, target) {
@@ -199,7 +207,7 @@ export default async function researchAttachBuild({ launchApp, artifactsDir, fix
     // ---- #11 identifiers only ------------------------------------------------
     await writeFile(join(root, "not-from-a-run.csv"), "made,up\n1,2\n");
     const state = await invoke(page, "document_state", { document: docs["notes.md"] });
-    const forgedRecord = await invokeError(page, "artifact_attach", {
+    const forgedRecord = await invokeError(page, "research_promotion_prepare", {
       request: {
         document: docs["notes.md"],
         baseRevision: state.info.revision,

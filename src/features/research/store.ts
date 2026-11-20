@@ -22,8 +22,6 @@ import {
   EMPTY_RUN_OUTPUT,
   applyEvent,
   appendEntries,
-  defaultInsertOffset,
-  documentFormat,
   mergeSnapshot,
   type RunOutput,
 } from "./model";
@@ -98,12 +96,6 @@ export function flushEvents(): void {
     }
     return { sessions: model.sessions, runs: model.runs, outputs: model.outputs, selectedRun };
   });
-}
-
-/** Queue an event as if it came from Rust (tests). */
-export function queueEventForTest(event: ResearchEvent): void {
-  noteChange(event);
-  pending.push(event);
 }
 
 // When each session and run last changed (by event arrival order), so a
@@ -518,56 +510,4 @@ export async function artifactUrl(runId: string, artifact: ArtifactRecord): Prom
 export async function artifactText(runId: string, artifact: ArtifactRecord): Promise<string> {
   const bytes = await commands.researchArtifact(runId, artifact.id);
   return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-}
-
-export interface AttachTarget {
-  document: DocumentId;
-  path: string;
-}
-
-/** Open documents that accept attachments (Typst, LaTeX, Markdown). */
-export async function attachTargets(): Promise<AttachTarget[]> {
-  const docs = await commands.documentList();
-  return docs
-    .filter((d) => d.path && documentFormat(d.path) && !d.readOnly)
-    .map((d) => ({ document: d.id, path: d.path as string }));
-}
-
-export async function attachArtifact(options: {
-  run: RunSummary;
-  artifact: ArtifactRecord;
-  target: AttachTarget;
-  mode: { kind: "insert" } | { kind: "update"; key: string };
-  caption: string | null;
-}): Promise<boolean> {
-  const { run, artifact, target, mode, caption } = options;
-  const format = documentFormat(target.path);
-  if (!format) return false;
-  try {
-    const state = await commands.documentState(target.document);
-    const placement =
-      mode.kind === "insert"
-        ? ({ kind: "insert", offset: defaultInsertOffset(state.text, format) } as const)
-        : ({ kind: "update", attachmentKey: mode.key } as const);
-    const result = await commands.artifactAttach({
-      document: target.document,
-      baseRevision: state.info.revision,
-      runId: run.id,
-      artifactId: artifact.id,
-      placement,
-      caption: caption && caption.trim() ? caption.trim() : null,
-      attachmentKey: null,
-    });
-    const what = artifact.kind === "table" ? "Table" : "Figure";
-    notify({
-      tone: "success",
-      title: `${what} ${mode.kind === "insert" ? "inserted into" : "updated in"} ${target.path}`,
-      body: `Attachment ${result.outcome.attachmentKey} (revision ${result.outcome.revision}). Undo is available in the document.`,
-    });
-    for (const warning of result.warnings) notify({ tone: "warning", title: "Check the document", body: warning });
-    return true;
-  } catch (e) {
-    notify({ tone: "danger", title: "Could not attach the artifact", body: errorMessage(e) });
-    return false;
-  }
 }

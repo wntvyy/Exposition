@@ -16,12 +16,10 @@ import type { PromotionPreview } from "../../bindings/PromotionPreview";
 import type { PromotionRequest } from "../../bindings/PromotionRequest";
 import type { PromotionsState } from "../../bindings/PromotionsState";
 import type { ReconcileOutcome } from "../../bindings/ReconcileOutcome";
-import type { ResearchExecuteRequest } from "../../bindings/ResearchExecuteRequest";
 import type { ResearchListing } from "../../bindings/ResearchListing";
 import type { ResearchSpaceInfo } from "../../bindings/ResearchSpaceInfo";
 import type { RetainOutcome } from "../../bindings/RetainOutcome";
 import type { RetainRequest } from "../../bindings/RetainRequest";
-import type { RunSummary } from "../../bindings/RunSummary";
 import type { SetResultStateRequest } from "../../bindings/SetResultStateRequest";
 import type { SetupEvent } from "../../bindings/SetupEvent";
 import type { SetupPlan } from "../../bindings/SetupPlan";
@@ -30,8 +28,6 @@ import type { SetupStatus } from "../../bindings/SetupStatus";
 import type { SpaceFile } from "../../bindings/SpaceFile";
 
 export const researchCommands = {
-  /** The project's research space, or null when Research is not enabled. */
-  space: () => invoke<ResearchSpaceInfo | null>("research_space"),
   /** Enable Research (one typed research space and its folders; runs nothing). */
   enable: () => invoke<ResearchSpaceInfo>("research_space_enable"),
   listing: () => invoke<ResearchListing>("research_listing"),
@@ -46,8 +42,6 @@ export const researchCommands = {
   cancelPromotion: (promotion: string) => invoke<boolean>("research_promotion_cancel", { promotion }),
   promotions: () => invoke<PromotionsState>("research_promotions"),
   reconcilePromotion: (operation: OperationId) => invoke<ReconcileOutcome>("research_promotion_reconcile", { operation }),
-  /** `research_execute` with declared inputs pinned in the run. */
-  execute: (request: ResearchExecuteRequest) => invoke<RunSummary>("research_execute", { request }),
 };
 
 /**

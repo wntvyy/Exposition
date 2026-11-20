@@ -20,6 +20,9 @@
 //    Mathlib release of the pinned Lean; the starter file is Checked.
 // 4. Reopen: a new app session on the same data folder needs no trust prompt,
 //    no setup, and no download; the manifest is unchanged; the file is Checked.
+//
+// Requires a debug build: it calls the debug-only probe command
+// lean_package_inspect.
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";

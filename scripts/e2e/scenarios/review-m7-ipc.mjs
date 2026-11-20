@@ -15,6 +15,8 @@
 //   D. lean_* evidence/association refusals.
 //   E. project_* destinations and hostile blueprints.
 //   F. workflow_* hostile imports and forged evidence ports.
+//
+// Requires a debug build: it calls the debug-only probe command graph_backup.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";

@@ -22,6 +22,9 @@
 //
 // Shots: test-results/e2e/v2-tour-research/<name>-<theme>.png and, with
 // EXPOSITION_DEV_HOME set, $EXPOSITION_DEV_HOME/ui-reference/v2/research/.
+//
+// Requires a debug build: it calls the debug-only probe command
+// graph_reconcile.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, writeFile } from "node:fs/promises";

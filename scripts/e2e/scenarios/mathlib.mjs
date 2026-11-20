@@ -16,6 +16,9 @@
 // Optional: EXPOSITION_MATHLIB_PROJECT=<absolute folder> is an Exposition
 // project that contains the package in a subfolder (the package folder must
 // then be inside it); the project folder is opened instead of the package.
+//
+// Requires a debug build: it calls the debug-only probe commands lean_check,
+// lean_package_inspect.
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";

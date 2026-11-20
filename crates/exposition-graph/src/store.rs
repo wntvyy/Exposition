@@ -1270,10 +1270,6 @@ impl GraphStore {
         )?;
         Ok(())
     }
-
-    pub fn delete_view(&mut self, id: &ViewId) -> StoreResult<bool> {
-        Ok(self.conn.execute("DELETE FROM views WHERE id = ?1", [id.as_str()])? > 0)
-    }
 }
 
 // ----- writes inside a transaction -----

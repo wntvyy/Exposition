@@ -9,6 +9,9 @@
 // dependencies; impact explains itself; coverage is visible; a hostile graph
 // database is refused and restorable from a consistent backup. Latencies are
 // measured on a generated 3,000-file project and written to timings.json.
+//
+// Requires a debug build: it calls the debug-only probe commands
+// graph_reconcile, graph_backup, graph_backups.
 import { execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";

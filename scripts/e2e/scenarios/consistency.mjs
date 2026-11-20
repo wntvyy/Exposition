@@ -14,6 +14,8 @@
 //
 // Requires Typst (bundled) and TeX (pdflatex, lualatex) discoverable by the
 // execution service.
+//
+// Requires a debug build: it calls the debug-only probe command tex_status.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readdir, readFile, rename, writeFile } from "node:fs/promises";

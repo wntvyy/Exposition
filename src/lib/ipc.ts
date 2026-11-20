@@ -9,14 +9,10 @@ import type { AgentEvent } from "../bindings/AgentEvent";
 import type { AppInfo } from "../bindings/AppInfo";
 import type { AppSettings } from "../bindings/AppSettings";
 import type { AppSettingsState } from "../bindings/AppSettingsState";
-import type { AttachArtifactResult } from "../bindings/AttachArtifactResult";
 import type { AttachmentId } from "../bindings/AttachmentId";
-import type { AttachRunArtifactRequest } from "../bindings/AttachRunArtifactRequest";
 import type { Budgets } from "../bindings/Budgets";
 import type { BuildEvent } from "../bindings/BuildEvent";
-import type { BuildId } from "../bindings/BuildId";
 import type { BuildStatusEvent } from "../bindings/BuildStatusEvent";
-import type { BuildTarget } from "../bindings/BuildTarget";
 import type { CaretGeometry } from "../bindings/CaretGeometry";
 import type { CommandError } from "../bindings/CommandError";
 import type { CreateTaskRequest } from "../bindings/CreateTaskRequest";
@@ -40,8 +36,6 @@ import type { PdfViewInfo } from "../bindings/PdfViewInfo";
 import type { JobEvent } from "../bindings/JobEvent";
 import type { JobId } from "../bindings/JobId";
 import type { JobSummary } from "../bindings/JobSummary";
-import type { LeanCheckReport } from "../bindings/LeanCheckReport";
-import type { LeanCheckRequest } from "../bindings/LeanCheckRequest";
 import type { LeanDocumentState } from "../bindings/LeanDocumentState";
 import type { LeanEvent } from "../bindings/LeanEvent";
 import type { LeanGoals } from "../bindings/LeanGoals";
@@ -88,11 +82,6 @@ import type { TaskDetail } from "../bindings/TaskDetail";
 import type { TaskId } from "../bindings/TaskId";
 import type { TaskReview } from "../bindings/TaskReview";
 import type { TaskSummary } from "../bindings/TaskSummary";
-import type { TexBuildMode } from "../bindings/TexBuildMode";
-import type { TexEvent } from "../bindings/TexEvent";
-import type { TexPageMapping } from "../bindings/TexPageMapping";
-import type { TexTargetRef } from "../bindings/TexTargetRef";
-import type { TexTargetStatus } from "../bindings/TexTargetStatus";
 import type { ToolchainInfo } from "../bindings/ToolchainInfo";
 import type { TransactionError } from "../bindings/TransactionError";
 import type { TransactionOutcome } from "../bindings/TransactionOutcome";
@@ -201,11 +190,8 @@ export const commands = {
   leanRestartFile: (document: DocumentId) => invoke<void>("lean_restart_file", { document }),
   /** Explicit user action only: install the toolchain the project pins (runs a job). */
   leanInstallToolchain: (document: DocumentId) => invoke<JobId>("lean_install_toolchain", { document }),
-  leanCheck: (request: LeanCheckRequest) => invoke<LeanCheckReport>("lean_check", { request }),
-  // Mathlib lane: Lake package inspection and guided Mathlib setup. Rust
-  // chooses the toolchain and the Mathlib revision and builds every command.
-  /** What a folder of the open project holds as a Lake package (`""` is the project folder). Runs nothing. */
-  leanPackageInspect: (folder: string) => invoke<LeanPackageInspection>("lean_package_inspect", { folder }),
+  // Mathlib lane: guided Mathlib setup. Rust chooses the toolchain and the
+  // Mathlib revision and builds every command.
   /** The Lake package an open Lean document belongs to (`null` for a standalone file). */
   leanPackageFor: (document: DocumentId) => invoke<LeanPackageInspection | null>("lean_package_for", { document }),
   leanSetupPlan: (request: LeanSetupRequest) => invoke<LeanSetupPlan>("lean_setup_plan", { request }),
@@ -215,15 +201,6 @@ export const commands = {
   leanSetupStatus: () => invoke<LeanSetupStatus | null>("lean_setup_status"),
   /** Check the document's package without Mathlib's prebuilt cache (builds from source), this session. */
   leanAllowLocalBuild: (document: DocumentId) => invoke<void>("lean_allow_local_build", { document }),
-  /** Build a LaTeX target of the open workspace (`null`: the project's default target). */
-  texBuild: (target: BuildTarget | null, mode: TexBuildMode) =>
-    invoke<TexTargetRef>("tex_build", { target, mode }),
-  texStatus: (target: BuildTarget | null) => invoke<TexTargetStatus | null>("tex_status", { target }),
-  texCancel: (target: BuildTarget | null) => invoke<boolean>("tex_cancel", { target }),
-  /** PNG bytes of a page of a finished build (`scale` pixels per point); wrap in a Blob for an object URL. */
-  texPageImage: (build: BuildId, page: number, scale: number) =>
-    invoke<ArrayBuffer>("tex_page_image", { build, page, scale }),
-  texPageMap: (build: BuildId, page: number) => invoke<TexPageMapping>("tex_page_map", { build, page }),
 
   // Agents. The API key is sent once to be stored in OS credential storage;
   // no command ever returns it.
@@ -274,8 +251,6 @@ export const commands = {
   /** Bytes of a figure the task's own tool call recorded (render only as an image). */
   agentsFigure: (task: TaskId, runId: string, artifactId: string) =>
     invoke<ArrayBuffer>("agents_figure", { task, runId, artifactId }),
-  /** Development builds only (scripted provider); rejected in release builds. */
-  agentsDevLoadScript: (script: unknown) => invoke<void>("agents_dev_load_script", { script }),
 
   // Research (M4). The project root comes from the workspace service; trust from the execution service.
   researchWorkspace: () => invoke<WorkspaceStatus | null>("research_workspace"),
@@ -298,9 +273,6 @@ export const commands = {
   /** Raw artifact bytes, fetched on demand for display (never pushed in events). */
   researchArtifact: (runId: string, artifactId: string) =>
     invoke<ArrayBuffer>("research_artifact", { runId, artifactId }),
-  /** Format-owned insert/update of a figure or table in an open document. */
-  /** The artifact record is resolved from the run's manifest in Rust; pass identifiers only. */
-  artifactAttach: (request: AttachRunArtifactRequest) => invoke<AttachArtifactResult>("artifact_attach", { request }),
 
   // Typesetting (builds, rendered pages, export).
   typesettingWatch: (entry: string) => invoke<BuildEvent | null>("typesetting_watch", { entry }),
@@ -370,11 +342,6 @@ export const events = {
   leanSetup: (handler: (event: LeanSetupEvent) => void): Promise<UnlistenFn> =>
     listen<LeanSetupEvent>("lean:setup", (e) => handler(e.payload)),
   leanSetupResync: (handler: () => void): Promise<UnlistenFn> => listen("lean:setup-resync", () => handler()),
-  /** LaTeX build lifecycle (queued, started, finished with the build result). */
-  tex: (handler: (event: TexEvent) => void): Promise<UnlistenFn> =>
-    listen<TexEvent>("tex:event", (e) => handler(e.payload)),
-  /** The frontend fell behind; re-read TeX target status. */
-  texResync: (handler: () => void): Promise<UnlistenFn> => listen("tex:resync", () => handler()),
   /** Agent task events (status, streamed text, tool calls, approvals, review). */
   agents: (handler: (event: AgentEvent) => void): Promise<UnlistenFn> =>
     listen<AgentEvent>("agents:event", (e) => handler(e.payload)),

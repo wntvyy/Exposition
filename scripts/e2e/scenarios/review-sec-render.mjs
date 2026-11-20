@@ -18,6 +18,8 @@
 // `ok:` / `DEFECT:` / `INFO:` lines; findings in
 // test-results/e2e/review-sec-render/findings.json. Fails if any DEFECT (or a
 // phase could not run: `SETUP-FAIL:`).
+//
+// Requires a debug build: it calls the debug-only probe command lean_check.
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";

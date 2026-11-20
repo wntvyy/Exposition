@@ -1569,10 +1569,6 @@ impl GraphService {
         })
     }
 
-    pub fn delete_view(&self, id: &ViewId) -> GraphResult<bool> {
-        self.with_store(|s| Ok(s.delete_view(id)?))
-    }
-
     fn proposals_clear(&self) {
         let mut cache = self.proposals.lock().unwrap_or_else(|p| p.into_inner());
         cache.order.clear();
