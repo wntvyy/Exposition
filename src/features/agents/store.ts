@@ -11,7 +11,7 @@ import type { WorkspaceInfo } from "../../bindings/WorkspaceInfo";
 import type { DocumentEvent } from "../../bindings/DocumentEvent";
 import type { PermissionsChange } from "../../bindings/PermissionsChange";
 import { layout, useLayout } from "../../app/layout";
-import { pages } from "../../app/pages";
+import { EDITOR_PAGE, pages } from "../../app/pages";
 import type { Notification } from "../../app/notifications";
 import { dismiss, notify } from "../../app/notifications";
 import { registry } from "../../app/registry";
@@ -387,9 +387,13 @@ async function refetch(id: TaskId): Promise<void> {
 
 let initialized: Promise<void> | null = null;
 
-/** Whether the Agent view is on screen (its region visible and the view active). */
+/**
+ * Whether the Agent view is on screen: the Editor page (the only page with
+ * the auxiliary region; it stays mounted but hidden behind other pages) is
+ * the page shown, the region is visible, and the view is the active one.
+ */
 function agentViewShowing(): boolean {
-  if (!layout.isVisible("auxiliary")) return false;
+  if (pages.active() !== EDITOR_PAGE || !layout.isVisible("auxiliary")) return false;
   const active = useLayout.getState().auxiliary.activeView ?? registry.viewsAt("auxiliary")[0]?.id;
   return active === AGENT_VIEW_ID;
 }
@@ -405,6 +409,12 @@ function approvalShowing(taskId: TaskId): boolean {
   // The page shows the conversation beside its right panel (Changes, Graph context, Proposals).
   if (agentsPageShowing()) return page.selected === taskId && !page.composing;
   return agentViewShowing() && view === "task" && selected === taskId;
+}
+
+/** Bring the Agent view on screen: the Editor page it lives on, its region, and the view. */
+export function showAgentView(): void {
+  pages.show(EDITOR_PAGE);
+  layout.showView("auxiliary", AGENT_VIEW_ID);
 }
 
 function focusApprovalIn(container: string, selector = "[data-testid=agents-approval]") {
@@ -434,7 +444,7 @@ export function openApproval(taskId: TaskId): void {
     focusApprovalIn("agents-page");
     return;
   }
-  layout.showView("auxiliary", AGENT_VIEW_ID);
+  showAgentView();
   agents.show("task", taskId);
   focusApprovalIn("agents-panel");
 }
@@ -453,7 +463,7 @@ export function openQuestion(taskId: TaskId): void {
     focusApprovalIn("agents-page", OPEN_QUESTION);
     return;
   }
-  layout.showView("auxiliary", AGENT_VIEW_ID);
+  showAgentView();
   agents.show("task", taskId);
   focusApprovalIn("agents-panel", OPEN_QUESTION);
 }
