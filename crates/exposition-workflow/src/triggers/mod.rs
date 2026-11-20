@@ -54,6 +54,15 @@ use exposition_graph::{WorkflowId, WorkflowPlanId, WorkflowRunId};
 use tokio::sync::broadcast;
 
 pub use model::*;
+
+/// A trigger that a deletion turned off, and the state it had before: what
+/// [`TriggerService::put_back`] restores when the deletion does not happen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnedOff {
+    pub id: WorkflowTriggerId,
+    pub previous: TriggerState,
+}
+
 pub use starter::{RunServiceStarter, TriggerRunStarter};
 use store::{FireRecord, StoredTrigger};
 
@@ -751,14 +760,30 @@ impl TriggerService {
 
     /// Turn a trigger off (pending checks and the queued follow-up are dropped).
     pub fn disable(&self, id: &WorkflowTriggerId) -> Result<WorkflowTrigger, WorkflowRunError> {
+        self.turn_off(id).map(|(view, _)| view)
+    }
+
+    /// [`Self::disable`] for a deletion that may still not happen: also
+    /// returns what to put back with [`Self::put_back`] (`None`: the trigger
+    /// was already off).
+    pub fn disable_for_deletion(&self, id: &WorkflowTriggerId) -> Result<Option<TurnedOff>, WorkflowRunError> {
+        let (_, previous) = self.turn_off(id)?;
+        Ok(previous.map(|previous| TurnedOff { id: id.clone(), previous }))
+    }
+
+    /// Turn a trigger off; returns its view and the state it had when it
+    /// was not already off.
+    fn turn_off(&self, id: &WorkflowTriggerId) -> Result<(WorkflowTrigger, Option<TriggerState>), WorkflowRunError> {
         let now = self.now();
         let mut engine = lock(&self.shared.engine);
         self.ensure_store(&mut engine)?;
         let Some(i) = engine.find(id) else {
             return Err(WorkflowRunError::new("trigger.unknown", "That trigger does not exist."));
         };
+        let mut previous = None;
         if engine.entries[i].stored.trigger.state != TriggerState::Disabled {
             let before = engine.entries[i].clone();
+            previous = Some(before.stored.trigger.state.clone());
             let entry = &mut engine.entries[i];
             entry.stored.trigger.state = TriggerState::Disabled;
             entry.rt = Runtime::default();
@@ -774,7 +799,7 @@ impl TriggerService {
         let event = engine.event(&engine.entries[i], None);
         drop(engine);
         self.emit(event);
-        Ok(view)
+        Ok((view, previous))
     }
 
     /// Triggers of the open project (of one workflow when given).
@@ -1317,8 +1342,10 @@ impl TriggerService {
     /// Turn off every trigger of `workflow` in the open project (one saved
     /// change; nothing is applied when it cannot be saved). Disabled triggers
     /// stay disabled until the user enables them again; nothing re-enables
-    /// them (a restored workflow included). Returns the triggers turned off.
-    pub fn disable_workflow(&self, workflow: &WorkflowId) -> Result<Vec<WorkflowTriggerId>, WorkflowRunError> {
+    /// them (a restored workflow included). Returns the triggers turned off,
+    /// each with the state it had (for [`Self::put_back`] when the deletion
+    /// they were turned off for does not happen).
+    pub fn disable_workflow(&self, workflow: &WorkflowId) -> Result<Vec<TurnedOff>, WorkflowRunError> {
         let root = self.shared.starter.project_root().ok_or_else(no_project)?;
         let key = project_key(&root);
         let now = self.now();
@@ -1331,11 +1358,11 @@ impl TriggerService {
                 && &entry.stored.trigger.workflow == workflow
                 && entry.stored.trigger.state != TriggerState::Disabled
             {
-                entry.stored.trigger.state = TriggerState::Disabled;
+                let previous = std::mem::replace(&mut entry.stored.trigger.state, TriggerState::Disabled);
                 entry.rt = Runtime::default();
                 entry.version += 1;
                 record(entry, now, TriggerHistoryEvent::Disabled);
-                changed.push(entry.stored.trigger.id.clone());
+                changed.push(TurnedOff { id: entry.stored.trigger.id.clone(), previous });
             }
         }
         if changed.is_empty() {
@@ -1348,7 +1375,7 @@ impl TriggerService {
         let events: Vec<_> = engine
             .entries
             .iter()
-            .filter(|e| changed.contains(&e.stored.trigger.id))
+            .filter(|e| changed.iter().any(|c| c.id == e.stored.trigger.id))
             .map(|e| engine.event(e, None))
             .collect();
         drop(engine);
@@ -1358,25 +1385,31 @@ impl TriggerService {
         Ok(changed)
     }
 
-    /// Turn a trigger that was turned off for a deletion back on, when that
-    /// deletion did not happen: back to listening with its standing plan as
-    /// the user approved it (nothing else changes; a trigger that is no
-    /// longer off is left as it is).
-    pub fn reenable(&self, id: &WorkflowTriggerId) -> Result<WorkflowTrigger, WorkflowRunError> {
+    /// Put a trigger that was turned off for a deletion back as it was, when
+    /// that deletion did not happen: exactly the state it had. One that was
+    /// Active listens again under its standing plan as approved; one that
+    /// was Suspended stays suspended with its reason, because only a new
+    /// review turns a suspended trigger on. Nothing is granted: the
+    /// "Turned off" entry the deletion recorded is taken back and no
+    /// "Enabled" entry is written. A trigger that is no longer off is left
+    /// as it is.
+    pub fn put_back(&self, off: &TurnedOff) -> Result<WorkflowTrigger, WorkflowRunError> {
         let now = self.now();
         let mut engine = lock(&self.shared.engine);
         self.ensure_store(&mut engine)?;
-        let Some(i) = engine.find(id) else {
+        let Some(i) = engine.find(&off.id) else {
             return Err(WorkflowRunError::new("trigger.unknown", "That trigger does not exist."));
         };
-        if engine.entries[i].stored.trigger.state == TriggerState::Disabled {
+        if engine.entries[i].stored.trigger.state == TriggerState::Disabled && off.previous != TriggerState::Disabled {
             let before = engine.entries[i].clone();
             let entry = &mut engine.entries[i];
-            entry.stored.trigger.state = TriggerState::Active;
+            entry.stored.trigger.state = off.previous.clone();
             entry.rt = Runtime::default();
             entry.version += 1;
-            let revision = entry.stored.trigger.revision;
-            record(entry, now, TriggerHistoryEvent::Enabled { revision });
+            let history = &mut entry.stored.trigger.history;
+            if history.last().is_some_and(|h| h.event == TriggerHistoryEvent::Disabled) {
+                history.pop();
+            }
             if let Err(e) = self.persist(&mut engine) {
                 engine.entries[i] = before;
                 return Err(e);

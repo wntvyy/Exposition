@@ -1203,3 +1203,75 @@ fn a_newer_run_history_is_left_unchanged_and_an_older_one_is_backed_up_first() {
         .collect();
     assert!(names.iter().all(|n| !n.contains(".bad-")), "never set aside: {names:?}");
 }
+
+// ------------------------------------------------- WF-1: rollback state ----
+
+fn enabled_events(e: &Env, id: &WorkflowId) -> usize {
+    let t = e.fx.triggers.list(Some(id)).unwrap().remove(0);
+    t.history.iter().filter(|h| matches!(h.event, TriggerHistoryEvent::Enabled { .. })).count()
+}
+
+/// WF-1: a workflow deletion that fails after it turned the triggers off
+/// puts each trigger back exactly as it was. A suspended trigger stays
+/// suspended (only a new review turns it on), with no "Enabled" entry.
+#[test]
+fn a_failed_workflow_deletion_leaves_a_suspended_trigger_suspended() {
+    let e = env();
+    let id = e.workflow();
+    e.fx.enable(&id, watch(&["data"]));
+    e.fx.triggers.trust_revoked(&e.fx.root);
+    let suspended = e.trigger_state(&id);
+    assert!(matches!(&suspended, TriggerState::Suspended { code, .. } if code == "trigger.trustRevoked"));
+    let enabled_before = enabled_events(&e, &id);
+    let target = OpTarget::Workflow { workflow: id.to_string() };
+    let plan = e.plan(e.request(delete(false), vec![target]));
+    // The graph deletion fails: the workflow was already deleted elsewhere.
+    e.fx.graph.delete_workflow(&exposition_graph::Origin::User, &id, false, false).unwrap();
+    let outcomes = e.apply(&plan, &[]);
+    assert_eq!(outcomes[0].status, OpStatus::Failed, "{outcomes:?}");
+    assert_eq!(e.trigger_state(&id), suspended, "the rollback never grants Active");
+    assert_eq!(enabled_events(&e, &id), enabled_before, "a rollback is not an enabling review");
+}
+
+/// WF-1: the same for a trigger that was Active (it goes back on).
+#[test]
+fn a_failed_workflow_deletion_turns_an_active_trigger_back_on() {
+    let e = env();
+    let id = e.workflow();
+    e.fx.enable(&id, watch(&["data"]));
+    let target = OpTarget::Workflow { workflow: id.to_string() };
+    let plan = e.plan(e.request(delete(false), vec![target]));
+    e.fx.graph.delete_workflow(&exposition_graph::Origin::User, &id, false, false).unwrap();
+    let outcomes = e.apply(&plan, &[]);
+    assert_eq!(outcomes[0].status, OpStatus::Failed, "{outcomes:?}");
+    assert_eq!(e.trigger_state(&id), TriggerState::Active);
+}
+
+/// WF-1 (files): a trigger that was Active when the deletion was planned and
+/// suspended before it was applied stays suspended when the file is kept.
+#[test]
+fn a_file_deletion_that_does_not_happen_leaves_a_suspended_trigger_suspended() {
+    let e = env();
+    let id = e.workflow();
+    e.fx.enable(&id, watch(&["data"]));
+    let target = p("data/obs.csv");
+    let plan = e.plan(e.request(delete(false), vec![target.clone()]));
+    e.fx.triggers.trust_revoked(&e.fx.root);
+    let suspended = e.trigger_state(&id);
+    assert!(matches!(suspended, TriggerState::Suspended { .. }));
+    assert_eq!(e.prepare(&plan, &[]), vec![]);
+    assert_eq!(e.trigger_state(&id), TriggerState::Disabled);
+    after_paths(
+        &e.cx(),
+        &[OpOutcome {
+            target,
+            status: OpStatus::Failed,
+            code: None,
+            message: None,
+            created: None,
+            recovery: exposition_core::ops::OpRecovery::OsTrash,
+            restore: None,
+        }],
+    );
+    assert_eq!(e.trigger_state(&id), suspended, "the rollback never grants Active");
+}
