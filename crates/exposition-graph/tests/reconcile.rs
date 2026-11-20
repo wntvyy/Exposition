@@ -1226,6 +1226,14 @@ fn an_extracted_declaration_keeps_a_persons_archive_and_refuses_metadata_edits()
         Some("graph.sourceDerived")
     );
     assert_eq!(p.entity(&theorem.id), theorem, "nothing changed");
+    // A file's attributes are not rewritten by indexing: they stay editable and survive it.
+    let file = p.resource("paper.tex").unwrap();
+    p.user(vec![GraphOperation::UpdateEntity {
+        entity: file.id.clone(),
+        expected_revision: file.revision,
+        label: None,
+        attributes: Some(BTreeMap::from([("note".to_owned(), "camera-ready".to_owned())])),
+    }]);
 
     p.user(vec![GraphOperation::SetLifecycle {
         entity: theorem.id.clone(),
@@ -1239,6 +1247,7 @@ fn an_extracted_declaration_keeps_a_persons_archive_and_refuses_metadata_edits()
     assert_eq!(after.lifecycle, Lifecycle::Archived, "indexing does not undo a person's archive");
     p.svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: true }).unwrap();
     assert_eq!(p.entity(&theorem.id).lifecycle, Lifecycle::Archived);
+    assert_eq!(p.entity(&file.id).attributes.get("note").map(String::as_str), Some("camera-ready"));
     // Removed from the source it reads "Removed from source".
     write(
         &p.root,

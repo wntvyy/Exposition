@@ -512,11 +512,14 @@ fn finish(cx: Ctx<'_, '_>) -> Run {
     }
 }
 
-/// Whether an entity's label and attributes are written from its source:
-/// everything an extractor admitted, and formal declarations (admitted by
-/// the extractor or by the Lean service from an audit).
+/// Whether an entity's label and attributes are written from its source on
+/// every index: declarations an extractor admitted (statements, proofs,
+/// bibliography entries) and formal declarations (admitted by the extractor
+/// or by the Lean service from an audit). A file's label is its name
+/// (refused separately); indexing leaves a file's attributes alone.
 fn source_stated(e: &Entity) -> bool {
-    matches!(e.origin, Origin::Extracted { .. }) || e.kind == EntityKind::FormalDeclaration
+    (matches!(e.origin, Origin::Extracted { .. }) && !e.kind.is_file_backed())
+        || e.kind == EntityKind::FormalDeclaration
 }
 
 fn dedup_roles(roles: &[ResourceRole]) -> Vec<ResourceRole> {
