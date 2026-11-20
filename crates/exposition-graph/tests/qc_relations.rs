@@ -412,3 +412,31 @@ fn a_formal_declaration_cannot_be_relabelled_or_re_attributed() {
         }],
     );
 }
+
+/// GI-4 (identity audit): a view id is minted by the graph that stores the
+/// view. A save that names an id this graph does not hold (a layout of
+/// another project, saved after a switch) creates nothing, with or without
+/// an expected revision.
+#[test]
+fn saving_a_view_under_an_id_this_graph_does_not_hold_is_refused() {
+    let (_d, _p, svc) = service();
+    let input = |id: Option<ViewId>, expected_revision: Option<u64>| GraphViewInput {
+        id,
+        name: "Project".into(),
+        scope: ViewScope::Project,
+        nodes: vec![],
+        viewport: Viewport { x: 0.0, y: 0.0, zoom: 1.0 },
+        filters: ViewFilters::default(),
+        hidden: vec![],
+        collapsed: vec![],
+        expected_revision,
+    };
+    for expected in [None, Some(1)] {
+        let err = svc.save_view(&input(Some(ViewId::mint()), expected)).unwrap_err();
+        assert_eq!(err.code, "graph.unknownView", "expected revision {expected:?}");
+    }
+    assert!(svc.views().unwrap().is_empty(), "nothing was created");
+    // A new view (no id) is created, and saved again under the id it was given.
+    let saved = svc.save_view(&input(None, None)).unwrap();
+    assert_eq!(svc.save_view(&input(Some(saved.id.clone()), Some(saved.revision))).unwrap().revision, 2);
+}

@@ -1537,7 +1537,9 @@ impl GraphService {
                         format!("The view changed since it was opened (revision {}).", v.revision),
                     ));
                 }
-                (None, Some(_)) if input.id.is_some() => {
+                // Ids are minted here: a save that names an id this graph does
+                // not hold is a view of another project or a deleted one.
+                (None, _) if input.id.is_some() => {
                     return Err(GraphError::new("graph.unknownView", "That view no longer exists."));
                 }
                 (None, _) => 1,
