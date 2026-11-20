@@ -363,14 +363,28 @@ pub fn parse_blueprint(text: &str) -> Result<ProjectBlueprint, BlueprintDiagnost
             None,
         ));
     }
-    serde_json::from_str(text).map_err(|e| {
+    let schema = |problem: String| {
         diag(
             DiagnosticSeverity::Error,
             "blueprint.schema",
-            format!("the blueprint does not match {BLUEPRINT_SCHEMA}: {e}"),
+            format!("the blueprint does not match {BLUEPRINT_SCHEMA}: {problem}"),
             None,
         )
-    })
+    };
+    // Parsed from the text itself, so a refusal names the first unknown
+    // field in the order it was written.
+    let blueprint: ProjectBlueprint = serde_json::from_str(text).map_err(|e| schema(e.to_string()))?;
+    let raw: serde_json::Value = serde_json::from_str(text).map_err(|e| schema(e.to_string()))?;
+    // `deny_unknown_fields` does not see a key beside a unit variant of a
+    // tagged value (`{"kind": "project", "grants": […]}`, or in a workflow
+    // draft `{"kind": "unset", "trust": true}`): serde accepts and drops it.
+    // Every key of the input must be carried by what was parsed, as for
+    // workflow definitions and bundles.
+    let carried = serde_json::to_value(&blueprint).map_err(|e| schema(e.to_string()))?;
+    if let Some(at) = crate::workflow::dropped_key(&raw, &carried, String::new()) {
+        return Err(schema(format!("unknown field at {at}")));
+    }
+    Ok(blueprint)
 }
 
 /// Parse and validate in one step (what IPC and agents use).
@@ -672,17 +686,27 @@ pub fn validate_blueprint(bp: &ProjectBlueprint) -> BlueprintValidation {
             &w.definition,
             &ValidationContext { ceiling: None, file_exists: Some(&exists), ..Default::default() },
         );
-        if v.errors > 0 {
-            let first =
-                v.diagnostics.iter().find(|d| d.severity == DiagnosticSeverity::Error).map(|d| d.message.clone());
+        // A step that runs a saved workflow cannot be checked here (nothing
+        // resolves in a blueprint, and a new project has no saved workflow):
+        // the draft is saved incomplete, so it is reported incomplete.
+        let unchecked: Vec<&crate::workflow::WorkflowDiagnostic> =
+            v.diagnostics.iter().filter(|d| d.code == "workflow.compositeUnchecked").collect();
+        let problems = v.errors + unchecked.len() as u32;
+        if problems > 0 {
+            let first = v
+                .diagnostics
+                .iter()
+                .find(|d| d.severity == DiagnosticSeverity::Error)
+                .or(unchecked.first().copied())
+                .map(|d| d.message.clone());
             ds.push(diag(
                 DiagnosticSeverity::Warning,
                 "blueprint.workflowIncomplete",
                 format!(
                     "workflow draft “{}” will be saved incomplete ({} problem{}{})",
                     w.definition.title,
-                    v.errors,
-                    if v.errors == 1 { "" } else { "s" },
+                    problems,
+                    if problems == 1 { "" } else { "s" },
                     first.map(|m| format!(": {m}")).unwrap_or_default()
                 ),
                 Some(&w.temp_id),
@@ -690,8 +714,8 @@ pub fn validate_blueprint(bp: &ProjectBlueprint) -> BlueprintValidation {
         }
         workflow_summary.push(SummaryWorkflow {
             title: w.definition.title.clone(),
-            well_formed: v.errors == 0,
-            errors: v.errors,
+            well_formed: problems == 0,
+            errors: problems,
         });
     }
 
