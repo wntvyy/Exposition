@@ -96,7 +96,8 @@ export function statusLabel(status: TaskStatus): PillState {
     case "stopped":
       return { status: "warning", label: stopLabel(status.stopReason) };
     case "interrupted":
-      return { status: "canceled", label: "Interrupted" };
+      // Exposition closed mid-run (not the user's cancel): a warning, as in its banner.
+      return { status: "warning", label: "Interrupted" };
   }
 }
 

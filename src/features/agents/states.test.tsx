@@ -113,6 +113,11 @@ describe("tool-call states", () => {
     expect(toolStatusLabel("declined").status).toBe("canceled");
   });
 
+  it("an interrupted task has the tone of its banner: a warning, not the user's cancel (UI-2)", () => {
+    expect(statusLabel({ kind: "interrupted" })).toEqual({ status: "warning", label: "Interrupted" });
+    expect(statusLabel({ kind: "canceled" })).toEqual({ status: "canceled", label: "Canceled" });
+  });
+
   it("a task waiting for approval says so in the same words as its tool call", () => {
     expect(statusLabel({ kind: "awaitingApproval" })).toEqual({ status: "warning", label: "Waiting for approval" });
     expect(toolStatusLabel("awaitingApproval").label).toBe(statusLabel({ kind: "awaitingApproval" }).label);
