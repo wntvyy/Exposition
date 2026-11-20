@@ -15,6 +15,11 @@
 //      the call must be refused and the review must still finish (R-m8-F4:
 //      the step's agent task has a 0-command budget, so the attempt ends the
 //      whole task as "budget exceeded" before the read-only refusal).
+//   A3. QC WF-2: the provider and model a review step sends its material to
+//      are part of the approved plan. The plan (and the review dialog) names
+//      them; when the configured model changes after the review, the start is
+//      refused as changed since review and nothing is sent; a new review
+//      names the new model and its run uses exactly that one.
 //   B. A review that runs out of its model-request budget: the run's usage
 //      must count the requests that were made (R-m8-F3).
 //   C. Cancel while the review waits on the provider: the run, step, and
@@ -28,7 +33,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { hardKill } from "../app.mjs";
-import { invoke, waitFor } from "../workspace-helpers.mjs";
+import { runCommand } from "../palette.mjs";
+import { invoke, invokeError, waitFor } from "../workspace-helpers.mjs";
 
 const NOTES = "# Notes\n\nThe slope is 2 (claimed).\n";
 const SECRET = "TOP-SECRET-UNDECLARED-7f3a9\n";
@@ -199,6 +205,54 @@ export default async function reviewM8Agent({ launchApp, artifactsDir }) {
       { state: runA2?.state, code: aA2?.code, message: aA2?.message },
     );
     r.expect("A2 no code ran", !existsSync(join(root, "pwned2.txt")), "");
+
+    // ---- A3. QC WF-2: the model provider and model are bound by the plan ------
+    const MODEL_A = "claude-opus-5-5";
+    const MODEL_B = "claude-sonnet-5-5";
+    const provider = (model) => invoke(page, "agents_provider_update", { settings: { provider: "scripted", model, effort: "medium", consent: "scopeContent" } });
+    const savedM = await save(reviewWorkflow("Review bound to its model", material.slice(0, 1)));
+    const planM = await invoke(page, "workflow_run_plan", { id: savedM.id, revision: null });
+    r.expect(
+      "WF-2 A3 the plan names the provider and model its review step sends material to",
+      planM.blockers.length === 0 && planM.execution.model?.provider === "scripted" && planM.execution.model?.model === MODEL_A && planM.notices.some((n) => n.includes(`model ${MODEL_A}`)),
+      { execution: planM.execution, notices: planM.notices, blockers: planM.blockers },
+    );
+    // The configured model changes after the plan was reviewed.
+    await provider(MODEL_B);
+    const tasksBefore = (await invoke(page, "agents_task_list").catch(() => [])).length;
+    const refusedM = await invokeError(page, "workflow_run_start", { request: { plan: planM.plan, approvalHash: planM.approvalHash } });
+    r.expect(
+      "WF-2 A3 the start is refused as changed since review when the model changed",
+      refusedM.error?.code === "workflow.planStale" && refusedM.error.message.includes(MODEL_A) && refusedM.error.message.includes(MODEL_B) && /model provider or model/.test(refusedM.error.message),
+      refusedM,
+    );
+    r.expect(
+      "WF-2 A3 nothing ran and no review task was created under the earlier approval",
+      (await invoke(page, "workflow_runs", { workflow: savedM.id })).length === 0 && (await invoke(page, "agents_task_list").catch(() => [])).length === tasksBefore,
+      "",
+    );
+    // A new review names the new model; its run uses exactly that one.
+    await loadScript([{ steps: [{ text: "Reviewed with the newly approved model." }] }]);
+    const { plan: planN, run: startN } = await planAndStart(savedM);
+    const runN = startN ? await finish(startN.id) : null;
+    const envN = runN && attempt(runN)?.environment?.model;
+    r.expect(
+      "WF-2 A3 a new review binds the new model and the run uses it",
+      planN.execution.model?.model === MODEL_B && planN.approvalHash !== planM.approvalHash && runN?.state === "succeeded" && envN?.model === MODEL_B,
+      { execution: planN.execution, state: runN?.state, environment: envN, message: runN?.message },
+    );
+    // "Run again" on that run after the model changed back: the plan differs, so a review opens instead of starting.
+    await provider(MODEL_A);
+    const planBack = await invoke(page, "workflow_run_plan", { id: savedM.id, revision: savedM.revision });
+    r.expect("WF-2 A3 a run approved with another model is not repeated without a review", planBack.approvalHash !== runN?.plan.approvalHash, { now: planBack.execution.model, then: runN?.plan.execution.model });
+    // The review dialog shows the provider and model.
+    await runCommand(page, "Show Workflows", /Workflow: Show Workflows/);
+    await page.getByTestId(`workflow-open-${savedM.id}`).click();
+    await page.getByTestId("workflow-review-run").click();
+    const shown = await page.getByTestId("plan-model").textContent({ timeout: 15_000 }).catch((e) => `not shown: ${e.message}`);
+    r.expect("WF-2 A3 the review dialog names the provider and model", shown.includes(MODEL_A) && /another provider or model is refused/.test(shown), shown);
+    await page.screenshot({ path: join(artifactsDir, "qc-wf2-plan-model.png") });
+    await page.keyboard.press("Escape");
 
     // ---- B. budget exhausted: usage must count the requests made -----------
     const savedB = await save(reviewWorkflow("Review B", material.slice(0, 1)));

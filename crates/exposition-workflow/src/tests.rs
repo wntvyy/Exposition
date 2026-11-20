@@ -1669,4 +1669,5 @@ fn the_plan_hash_covers_payloads() {
 }
 
 mod flow;
+mod qc;
 mod sched;

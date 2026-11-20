@@ -24,8 +24,8 @@ use serde::Serialize;
 use crate::adapters::Adapters;
 use crate::model::{
     MAX_PARALLEL, PLAN_TTL_MS, WorkflowConcurrencyLimits, WorkflowPlanBinding, WorkflowPlanBlocker,
-    WorkflowPlanExecution, WorkflowPlanInput, WorkflowPlanStep, WorkflowRunBudgets, WorkflowRunOutcome,
-    WorkflowRunPlan, WorkflowRunnerImage,
+    WorkflowPlanExecution, WorkflowPlanInput, WorkflowPlanModel, WorkflowPlanStep, WorkflowRunBudgets,
+    WorkflowRunOutcome, WorkflowRunPlan, WorkflowRunnerImage,
 };
 
 /// A run never takes longer than this in total.
@@ -278,6 +278,19 @@ struct ApprovedExecution<'a> {
     model_steps: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
     runner_images: &'a Option<Vec<WorkflowRunnerImage>>,
+    /// Absent for a plan without model steps: its hash is what it was
+    /// before the model was bound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<ApprovedModel<'a>>,
+}
+
+/// The provider and model the review steps are approved for (its shown name
+/// is not part of the approval).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApprovedModel<'a> {
+    provider: &'a str,
+    model: &'a str,
 }
 
 /// SHA-256 over a canonical serialization of everything the user approves.
@@ -325,6 +338,7 @@ pub fn approval_hash(plan: &WorkflowRunPlan, root: &Path) -> String {
             native_steps: &plan.execution.native_steps,
             model_steps: &plan.execution.model_steps,
             runner_images: &plan.execution.runner_images,
+            model: plan.execution.model.as_ref().map(|m| ApprovedModel { provider: &m.provider, model: &m.model }),
         },
     };
     crate::adapters::sha256_hex(&serde_json::to_vec(&approved).unwrap_or_default())
@@ -578,6 +592,12 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
         }
     }
     let default_restricted = !default_image_steps.is_empty();
+    // The provider and model the review steps send their material to: part
+    // of the plan only when it has such a step.
+    let model: Option<WorkflowPlanModel> = steps
+        .iter()
+        .filter(|s| s.containment == Containment::ReadOnlyModel)
+        .find_map(|s| facts.adapters.get(&s.runner).and_then(|a| a.model_binding()));
     let execution = WorkflowPlanExecution {
         restricted_backend: facts.restricted_backend.clone().filter(|_| restricted),
         restricted_image: facts.restricted_image.clone().filter(|_| default_restricted),
@@ -586,6 +606,7 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
         native_steps: native_steps.clone(),
         model_steps: model_steps.clone(),
         runner_images: (!runner_images.is_empty()).then(|| runner_images.clone()),
+        model,
     };
 
     // ----- notices -----
@@ -634,9 +655,13 @@ pub fn build_plan(saved: &SavedWorkflow, facts: &PlanFacts<'_>, now_ms: u64) -> 
     }
     if !model_steps.is_empty() {
         notices.push(format!(
-            "{} send{} the declared material to the model provider.",
+            "{} send{} the declared material to the model provider{}.",
             label_list(&steps, &model_steps),
-            if model_steps.len() == 1 { "s" } else { "" }
+            if model_steps.len() == 1 { "s" } else { "" },
+            match &execution.model {
+                Some(m) => format!(" ({}); with another provider or model the run does not start", m.describe()),
+                None => String::new(),
+            }
         ));
     }
     // Bounded control flow, in plain words.
@@ -829,6 +854,24 @@ pub fn describe_changes(approved: &WorkflowRunPlan, now: &WorkflowRunPlan) -> St
             added.image,
             short_id(added.image_id.as_deref())
         ));
+    }
+    match (&approved.execution.model, &now.execution.model) {
+        (Some(a), Some(b)) if a.same(b) => {}
+        (Some(a), Some(b)) => changes.push(format!(
+            "the model provider or model of the agent review steps changed ({} → {})",
+            a.describe(),
+            b.describe()
+        )),
+        (Some(a), None) => changes.push(format!(
+            "the model provider of the agent review steps is no longer known (approved: {})",
+            a.describe()
+        )),
+        // A plan approved before the provider was part of it.
+        (None, Some(b)) => changes.push(format!(
+            "the plan now names the model provider and model its agent review steps send material to ({})",
+            b.describe()
+        )),
+        (None, None) => {}
     }
     for step in &approved.steps {
         if let Some(current) = now.steps.iter().find(|s| s.step == step.step)

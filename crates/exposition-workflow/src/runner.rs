@@ -51,8 +51,9 @@ use crate::adapters::{
     BoundInput, StepAdapter, StepControl, StepFailure, StepIteration, StepRequest, StepResult, bare_hash,
 };
 use crate::model::{
-    MAX_PARALLEL, WorkflowAttemptState, WorkflowOutputValue, WorkflowPlanStep, WorkflowRejectedOutput, WorkflowRun,
-    WorkflowRunState, WorkflowStepAttempt, WorkflowStepInstance, WorkflowStepOutput, WorkflowStepState,
+    MAX_PARALLEL, WorkflowAttemptState, WorkflowOutputValue, WorkflowPlanModel, WorkflowPlanStep,
+    WorkflowRejectedOutput, WorkflowRun, WorkflowRunState, WorkflowStepAttempt, WorkflowStepInstance,
+    WorkflowStepOutput, WorkflowStepState,
 };
 use crate::plan::{hash_project_file, instance_parameters, resolve, time_limit_of};
 use crate::service::Inner;
@@ -585,6 +586,23 @@ impl Ctx<'_> {
                 );
             }
         }
+        // A model step sends its material only to the provider and model the
+        // plan was approved for.
+        let approved_model = execution.model.clone().filter(|_| planned.containment == Containment::ReadOnlyModel);
+        if let Some(bound) = &approved_model {
+            let now = adapter.model_binding();
+            if !now.as_ref().is_some_and(|n| n.same(bound)) {
+                return self.refuse(
+                    unit,
+                    crate::adapters::agent::MODEL_CHANGED,
+                    format!(
+                        "Not started: the model provider or model is not the one you approved (approved {}, now {}); nothing was sent.",
+                        bound.describe(),
+                        now.map(|n| n.describe()).unwrap_or_else(|| "unknown".to_owned())
+                    ),
+                );
+            }
+        }
         if let Err(reason) = adapter.availability(root) {
             let code = if planned.containment == Containment::RestrictedContainer {
                 "workflow.restrictedUnavailable"
@@ -654,7 +672,7 @@ impl Ctx<'_> {
                     (unit, attempt),
                     &inputs,
                     &grant,
-                    approved_image_id,
+                    (approved_image_id, approved_model),
                     iteration,
                 )
             }));
@@ -683,7 +701,7 @@ impl Ctx<'_> {
         (unit, attempt): (Unit, u32),
         inputs: &[BoundInput],
         grant: &Grant,
-        restricted_image_id: Option<String>,
+        (restricted_image_id, model): (Option<String>, Option<WorkflowPlanModel>),
         iteration: Option<StepIteration>,
     ) -> Completion {
         let reported: Mutex<Option<OperationRef>> = Mutex::new(None);
@@ -714,6 +732,7 @@ impl Ctx<'_> {
             max_output_bytes: grant.max_output_bytes,
             model_requests_remaining: grant.model_requests,
             restricted_image_id,
+            model,
             seed_basis: self.seed_basis,
             iteration,
         };

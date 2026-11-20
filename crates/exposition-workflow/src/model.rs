@@ -273,6 +273,38 @@ pub struct WorkflowPlanExecution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub runner_images: Option<Vec<WorkflowRunnerImage>>,
+    /// The model provider and model the agent review steps send their
+    /// material to, bound like an image: a start or a review step is refused
+    /// when it differs. `None` when the plan has no such step (such plans
+    /// hash as before) or was made before this was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<WorkflowPlanModel>,
+}
+
+/// The model provider and model a plan's agent review steps are approved for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowPlanModel {
+    /// The provider's id (`anthropic`, `openai`; `scripted` in debug builds).
+    pub provider: String,
+    /// The provider's name as shown (`Anthropic`).
+    pub provider_title: String,
+    /// The configured model id.
+    pub model: String,
+}
+
+impl WorkflowPlanModel {
+    /// The same provider and model (the shown name does not count).
+    pub fn same(&self, other: &Self) -> bool {
+        self.provider == other.provider && self.model == other.model
+    }
+
+    /// `Anthropic, model claude-…`.
+    pub fn describe(&self) -> String {
+        format!("{}, model {}", self.provider_title, self.model)
+    }
 }
 
 /// The image of a restricted runner that does not run in the default
