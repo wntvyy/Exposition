@@ -19,13 +19,6 @@ export const gridSlot = (row: number, col: number): string => `r${row}c${col}`;
 /** The slot name of a caret inside a text node (path ends with [index, "text"]). */
 export const TEXT_SLOT = "text";
 
-/** The caret is inside the text node at `index` of the row at `rowPath`. */
-export const isTextCaret = (caretPath: SlotPath, rowPath: SlotPath, index: number): boolean =>
-  caretPath.length === rowPath.length + 2 &&
-  caretPath[caretPath.length - 1] === TEXT_SLOT &&
-  caretPath[caretPath.length - 2] === index &&
-  rowPath.every((p, i) => caretPath[i] === p);
-
 /** The editable child rows of a node, in reading order. */
 export function slotsOf(node: MathNode): Slot[] {
   switch (node.kind) {

@@ -21,11 +21,3 @@ export const useProblems = create<{ sources: Record<string, ProblemSource> }>(()
 export function publishProblems(source: ProblemSource): void {
   useProblems.setState((state) => ({ sources: { ...state.sources, [source.id]: source } }));
 }
-
-export function clearProblems(id: string): void {
-  useProblems.setState((state) => {
-    if (!(id in state.sources)) return state;
-    const { [id]: _removed, ...rest } = state.sources;
-    return { sources: rest };
-  });
-}

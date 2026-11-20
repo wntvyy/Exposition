@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApprovalRequest } from "../../bindings/ApprovalRequest";
 import type { ProjectPermissionsState } from "../../bindings/ProjectPermissionsState";
-import type { TaskSpec } from "../../bindings/TaskSpec";
 
 const core = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => core);
@@ -19,23 +18,11 @@ vi.mock("../../lib/ipc", () => ({
   errorMessage: (e: unknown) => String(e),
 }));
 
-const { authorizationLabel, environmentText, forTaskSentence, profileSummary, specLabels, toolSummary } = await import("./format");
+const { authorizationLabel, environmentText, forTaskSentence, profileSummary, toolSummary } = await import("./format");
 const { ApprovalCard } = await import("./ApprovalCard");
-const { TaskComposer, DEFAULT_BUDGETS } = await import("./TaskComposer");
+const { TaskComposer } = await import("./TaskComposer");
 const { TaskAllowances } = await import("./permissions");
 const { initialAgentsState, permissionsNotification, reduceEvent, useAgents } = await import("./store");
-
-const spec: TaskSpec = {
-  prompt: "p",
-  workspaceRoot: "C:/paper",
-  scope: { kind: "workspace" },
-  permission: "autoApply",
-  execution: "approveEach",
-  consent: "scopeContent",
-  budgets: DEFAULT_BUDGETS,
-  provider: { provider: "scripted", model: "m", effort: "low" },
-  approvalMode: "auto",
-};
 
 describe("permission wording", () => {
   it("names how each call was authorized, quietly", () => {
@@ -46,21 +33,6 @@ describe("permission wording", () => {
     expect(authorizationLabel({ kind: "taskAllowance", kinds: ["nativeCode"] })).toBe("Allowed for this task");
     expect(authorizationLabel({ kind: "approved", forTask: false })).toBe("Approved by you");
     expect(authorizationLabel({ kind: "approved", forTask: true })).toBe("Approved by you for this task");
-  });
-
-  it("describes Auto tasks by their mode and any ceiling, Ask tasks by their settings", () => {
-    expect(specLabels(spec)).toEqual(["Auto: project permissions", "File contents in scope"]);
-    expect(specLabels({ ...spec, permission: "readOnly", execution: "disabled" })).toEqual([
-      "Auto: project permissions",
-      "Read only",
-      "No commands",
-      "File contents in scope",
-    ]);
-    expect(specLabels({ ...spec, approvalMode: "ask", permission: "reviewEdits", execution: "disabled" })).toEqual([
-      "Ask before each change",
-      "No commands",
-      "File contents in scope",
-    ]);
   });
 
   it("states the execution environment as enforced, never calling native a sandbox", () => {

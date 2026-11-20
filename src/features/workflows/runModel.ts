@@ -5,7 +5,6 @@ import type { Containment } from "../../bindings/Containment";
 import type { ExecutionCeiling } from "../../bindings/ExecutionCeiling";
 import type { WorkflowAttemptState } from "../../bindings/WorkflowAttemptState";
 import type { WorkflowEffect } from "../../bindings/WorkflowEffect";
-import type { WorkflowOutputValue } from "../../bindings/WorkflowOutputValue";
 import type { WorkflowProposalStatus } from "../../bindings/WorkflowProposalStatus";
 import type { WorkflowRunState } from "../../bindings/WorkflowRunState";
 import type {
@@ -201,23 +200,6 @@ export function parseDelimited(text: string, delimiter: "," | "\t", maxRows = 20
   }
   if (cell !== "" || row.length) endRow();
   return { rows, truncated: total > rows.length, totalRows: total };
-}
-
-export function outputValueLabel(value: WorkflowOutputValue): string {
-  switch (value.kind) {
-    case "file":
-      return value.path;
-    case "retained":
-      return value.path;
-    case "formalEvidence":
-      return value.file;
-    case "report":
-      return "Report";
-    case "promotionProposal":
-      return `Manuscript change for ${value.document}`;
-    case "associationProposal":
-      return `${value.declarations.length} declaration association${value.declarations.length === 1 ? "" : "s"}`;
-  }
 }
 
 /** The formal evidence a step's association proposal was made from (same run, upstream). */

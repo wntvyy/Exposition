@@ -68,11 +68,3 @@ export function focusNextRegion(backwards = false, doc: Document = document): vo
   const next = current < 0 ? (backwards ? regions.length - 1 : 0) : (current + step + regions.length) % regions.length;
   focusRegion(regions[next]!);
 }
-
-/** Focus a region by name (`sidebar`, `editor`, `panel`, `auxiliary`, `statusbar`). Returns false if hidden. */
-export function focusRegionByName(name: string, doc: Document = document): boolean {
-  const region = regionElements(doc).find((r) => r.dataset.region === name);
-  if (!region) return false;
-  focusRegion(region);
-  return true;
-}

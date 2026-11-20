@@ -183,10 +183,6 @@ export function isDelete(kind: OpKind): kind is { kind: "delete"; permanent: boo
   return kind.kind === "delete";
 }
 
-export function isPermanent(kind: OpKind): boolean {
-  return kind.kind === "delete" && kind.permanent;
-}
-
 /** Imperative verb of an operation ("Delete", "Delete permanently", "Duplicate", "Paste"). */
 export function verbOf(kind: OpKind): string {
   switch (kind.kind) {

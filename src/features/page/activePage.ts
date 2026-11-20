@@ -58,8 +58,3 @@ export function lastPageSurface(path: string): { surface: PageSurface; focusedAt
 export function focusTick(): number {
   return ++clock;
 }
-
-export function subscribePageSurfaces(listener: Listener): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}

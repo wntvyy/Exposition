@@ -2,7 +2,7 @@
 // nodes without one are placed beside the existing layout (never moving the
 // user's positioned nodes) and that placement is saved. Moves, pans/zooms, and
 // collapsed groups save to the view; Arrange is explicit and undoable.
-import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useMemo, type MouseEvent, type ReactNode } from "react";
 
 import { notify } from "../../app/notifications";
 import { GraphCanvas, type CanvasSelection } from "./canvas/GraphCanvas";
@@ -106,9 +106,4 @@ export function arrange(store: ViewStore, projection: Projection, onArranged: ()
     body: "Positions changed for this view only; relationships are unchanged.",
     actions: [{ label: "Undo", run: () => store.placeNodes(previous, { replace: true }) }],
   });
-}
-
-/** Selection state helper for canvases and tables. */
-export function useSelection() {
-  return useState<CanvasSelection>({ nodes: [], edge: null });
 }

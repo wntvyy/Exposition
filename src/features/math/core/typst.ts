@@ -1196,9 +1196,6 @@ const LATEX_SPACING_TO_TYPST: Record<string, string> = {
   "\\nonumber": "",
   "\\notag": "",
 };
-/** Typst spacing names and their LaTeX commands. */
-export const TYPST_SPACING_TO_LATEX: Record<string, string> = { thin: "\\,", med: "\\:", thick: "\\;", quad: "\\quad", wide: "\\qquad" };
-
 const LITERAL_ASCII = new Set(["+", "=", "<", ">", "!", ",", ";", ":", ".", "?", "|", "(", ")", "[", "]", "{", "}"]);
 const SHORTHAND_PREFIXES = new Set(SHORTHANDS.flatMap(([k]) => [...Array(k.length).keys()].slice(1).map((n) => k.slice(0, n + 1))));
 

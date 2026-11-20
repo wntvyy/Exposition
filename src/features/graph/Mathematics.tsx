@@ -10,7 +10,6 @@ import {
   CircleDashed,
   CircleHelp,
   CircleX,
-  FileSearch,
   History,
   LayoutGrid,
   Plus,
@@ -61,7 +60,6 @@ import { entityDisplay, freshnessView, kindDisplay, verdictThroughLink, type Voc
 import { RelationLine } from "./RelationStatus";
 import { countLabel, GraphDialogs, InspectorPanel, useInspectorOpen, type DialogState } from "./ProjectGraph";
 import { project } from "./projection";
-import { revealSource } from "./reveal";
 import { SaveIndicator } from "./SaveIndicator";
 import { takeRequest, useGraphNavigation } from "./navigation";
 import { coverageSentence } from "./status";
@@ -697,13 +695,5 @@ export function Mathematics({ store }: { store: ViewStore }) {
       </div>
       <GraphDialogs dialog={dialog} vocabulary={vocabulary} entities={[...entities.values()]} onClose={() => setDialog(null)} />
     </div>
-  );
-}
-
-export function OpenSourceButton({ path, range }: { path: string; range: { start: number; end: number } | null }) {
-  return (
-    <Button size="sm" variant="ghost" icon={FileSearch} onPress={() => void revealSource(path, range)}>
-      Open source
-    </Button>
   );
 }
