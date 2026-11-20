@@ -803,8 +803,10 @@ impl GraphService {
             let mut items: Vec<ImpactItem> = Vec::new();
             let mut seen: BTreeSet<EntityId> = roots.clone();
             let mut cycles: Vec<Vec<EntityId>> = Vec::new();
-            let mut queue: VecDeque<(EntityId, u32, Vec<ImpactStep>)> =
-                roots.iter().map(|r| (r.clone(), 0, Vec::new())).collect();
+            // Each entry: the entity, its depth, the relations followed to it,
+            // and the entities passed on the way (starting with its root).
+            let mut queue: VecDeque<(EntityId, u32, Vec<ImpactStep>, Vec<EntityId>)> =
+                roots.iter().map(|r| (r.clone(), 0, Vec::new(), vec![r.clone()])).collect();
             let mut work = 0usize;
             let mut work_limit_reached = false;
             let mut truncated = false;
@@ -819,7 +821,7 @@ impl GraphService {
                     root_entities.push(e);
                 }
             }
-            while let Some((current, depth, path)) = queue.pop_front() {
+            while let Some((current, depth, path, chain)) = queue.pop_front() {
                 if depth >= max_depth {
                     continue;
                 }
@@ -876,14 +878,19 @@ impl GraphService {
                         from: r.from.clone(),
                         to: r.to.clone(),
                     });
-                    if roots.contains(&other) || path.iter().any(|s| s.from == other || s.to == other) {
-                        if r.kind.allows_cycles() && cycles.len() < 50 {
-                            let mut cycle: Vec<EntityId> = step_path.iter().map(|s| s.from.clone()).collect();
-                            cycle.push(other.clone());
-                            cycle.dedup();
-                            if !cycles.contains(&cycle) {
-                                cycles.push(cycle);
-                            }
+                    if let Some(start) = chain.iter().position(|e| e == &other) {
+                        // Back at an entity this path already passed. That is
+                        // a cycle only when the loop is made of distinct
+                        // relations that each say "this one depends on the
+                        // previous one": walking back over the relation just
+                        // followed (proofOf, evidenceFor and formalizes are
+                        // followed both ways), or closing a loop through such
+                        // a two-way link, is the same link seen twice.
+                        if cycles.len() < 50
+                            && let Some(cycle) = dependency_cycle(&chain[start..], &step_path[start..])
+                            && !cycles.contains(&cycle)
+                        {
+                            cycles.push(cycle);
                         }
                         continue;
                     }
@@ -913,7 +920,9 @@ impl GraphService {
                     // changed itself: it is listed, its dependents are not
                     // (name it as a root to follow it).
                     if r.kind != RelationKind::AnchoredIn {
-                        queue.push_back((other, depth + 1, step_path));
+                        let mut chain = chain.clone();
+                        chain.push(other.clone());
+                        queue.push_back((other, depth + 1, step_path, chain));
                     }
                 }
                 if truncated || work_limit_reached {
@@ -1774,6 +1783,28 @@ fn resource_path(store: &GraphStore, resource: &Entity) -> Result<Option<Workspa
         return Ok(Some(path));
     }
     Ok(store.bindings(&resource.id)?.into_iter().next().map(|b| b.path))
+}
+
+/// The cycle closed by `steps` (`steps[i]` leads from `entities[i]` to the
+/// next entity, the last one back to `entities[0]`), if it is one: every
+/// step is a distinct relation of a kind that may cycle, followed from the
+/// item depended on to its dependent. Listed from its smallest id, so one
+/// cycle reads the same from every starting point.
+fn dependency_cycle(entities: &[EntityId], steps: &[ImpactStep]) -> Option<Vec<EntityId>> {
+    if entities.is_empty() || entities.len() != steps.len() {
+        return None;
+    }
+    for (i, step) in steps.iter().enumerate() {
+        let dependent = entities.get(i + 1).unwrap_or(&entities[0]);
+        let directed = step.to == entities[i] && &step.from == dependent;
+        if !directed || !step.kind.allows_cycles() || steps[..i].iter().any(|s| s.relation == step.relation) {
+            return None;
+        }
+    }
+    let first = entities.iter().enumerate().min_by_key(|(_, e)| *e).map(|(i, _)| i).unwrap_or(0);
+    let mut cycle: Vec<EntityId> = entities[first..].iter().chain(entities[..first].iter()).cloned().collect();
+    cycle.push(cycle[0].clone());
+    Some(cycle)
 }
 
 /// Relation kinds whose meaning propagates from `to` back to `from` when `to` changes.

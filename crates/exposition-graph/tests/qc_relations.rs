@@ -267,3 +267,61 @@ fn a_stored_relation_that_breaks_the_citation_rule_is_kept_and_not_read_as_evide
     let impact = svc.impact(&ImpactRequest { entities: vec![t.clone()], max_depth: None, max_items: None }).unwrap();
     assert!(impact.evidence.is_empty(), "{:?}", impact.evidence);
 }
+
+/// RL-2: a relation followed in both directions is not a cycle, nor is a
+/// relation between two roots; a real dependency cycle still is.
+#[test]
+fn impact_reports_only_real_cycles() {
+    let (_d, _p, svc) = service();
+    let ids = created(
+        &svc,
+        vec![
+            create("t", EntityKind::Theorem, "T"),
+            create("p", EntityKind::Proof, "P"),
+            create("l", EntityKind::Lemma, "L"),
+            create("s", EntityKind::Claim, "S"),
+        ],
+    );
+    let (t, p, l, s) = (&ids[0], &ids[1], &ids[2], &ids[3]);
+    let (d, _) = declaration_with_evidence(&svc, "Demo.main");
+    applied(
+        &svc,
+        Origin::User,
+        vec![
+            plain(RelationKind::ProofOf, p, t),
+            plain(RelationKind::Formalizes, &d, t),
+            relation(RelationKind::EvidenceFor, p, t, Some(EvidenceKind::Review), &[]),
+            plain(RelationKind::DependsOn, t, l),
+        ],
+    );
+    let impact = |roots: &[&EntityId]| {
+        svc.impact(&ImpactRequest {
+            entities: roots.iter().map(|r| (*r).clone()).collect(),
+            max_depth: None,
+            max_items: None,
+        })
+        .unwrap()
+    };
+    for root in [t, p, &d, l] {
+        let report = impact(&[root]);
+        assert_eq!(report.cycles, Vec::<Vec<EntityId>>::new(), "root {root}");
+        assert!(!report.items.is_empty());
+    }
+    // Two roots joined by a relation.
+    assert_eq!(impact(&[t, l]).cycles, Vec::<Vec<EntityId>>::new());
+    assert_eq!(impact(&[t, p]).cycles, Vec::<Vec<EntityId>>::new());
+    // A real cycle: T depends on L, L depends on S, S depends on T.
+    applied(&svc, Origin::User, vec![plain(RelationKind::DependsOn, l, s), plain(RelationKind::DependsOn, s, t)]);
+    let report = impact(&[t]);
+    assert_eq!(report.cycles.len(), 1, "{:?}", report.cycles);
+    let cycle = &report.cycles[0];
+    assert_eq!(cycle.first(), cycle.last());
+    let mut members: Vec<&EntityId> = cycle[1..].iter().collect();
+    members.sort();
+    let mut expected = vec![t, l, s];
+    expected.sort();
+    assert_eq!(members, expected);
+    // Asked of an item outside the cycle, the cycle is still found once.
+    let report = impact(&[p]);
+    assert_eq!(report.cycles.len(), 1, "{:?}", report.cycles);
+}
