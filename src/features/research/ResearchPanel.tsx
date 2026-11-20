@@ -1,6 +1,7 @@
 // Research panel: environment and session controls, code input, streamed run
 // output (text, figures, inert tables), run history with provenance, and
 // insert/update of figures and tables into documents.
+import { formatBytes, formatClock } from "../../lib/format";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import {
   FlaskConical,
@@ -44,8 +45,6 @@ import {
   EMPTY_RUN_OUTPUT,
   ENTRY_PREVIEW_CHARS,
   displayArtifacts,
-  formatBytes,
-  formatClock,
   formatDuration,
   isActiveRun,
   runPill,

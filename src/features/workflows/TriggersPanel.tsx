@@ -8,6 +8,7 @@
 // `trigger.planStale` when the plan changed). Any other change suspends the
 // trigger with a visible reason until it is reviewed again. Agents, imports,
 // and generated graphs never enable one (no agent tool; the backend refuses).
+import { formatSeconds } from "../../lib/format";
 import { BellOff, ChevronLeft, Plus, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useId, useState } from "react";
 
@@ -42,7 +43,7 @@ import { workflowEvents, workflowTriggerCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
 import { FullHash, PlanDetails } from "./PlanReview";
 import { openRun } from "./RunView";
-import { formatSeconds, formatTime, shortHash } from "./runModel";
+import { formatTime, shortHash } from "./runModel";
 
 /** A standing plan that no longer matches what was reviewed: review it again. */
 export const STALE_TRIGGER_CODES = ["trigger.planStale", "workflow.planStale"];

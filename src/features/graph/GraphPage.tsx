@@ -2,6 +2,7 @@
 // projection, not a whiteboard). Project and Mathematics subsections share the
 // canonical entities; their saved views keep layout only. Opening the page is
 // what starts graph reads; the rest of the app never needs it.
+import { formatDateTime } from "../../lib/format";
 import { FolderOpen, Network, RotateCcw, Sigma } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -39,7 +40,7 @@ function recoveryLabel(option: RecoveryOption): string {
     case "startNew":
       return "Start a new project graph";
     case "restoreBackup":
-      return `Restore the backup from ${new Date(option.takenAtMs).toLocaleString()}`;
+      return `Restore the backup from ${formatDateTime(option.takenAtMs, { seconds: true })}`;
   }
 }
 

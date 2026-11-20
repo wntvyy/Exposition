@@ -158,7 +158,7 @@ export default async function pdfViewer({ launchApp, artifactsDir, assert }) {
     assert.equal(await v.getAttribute("data-pages"), "5");
     assert.equal(await v.getAttribute("data-page"), "1");
     assert.equal(await v.getAttribute("data-fit"), "true");
-    assert.match(await v.locator('[data-testid="pdf-facts"]').textContent(), /^5 pages · PDF · [\d.]+ (B|KB|MB)$/);
+    assert.match(await v.locator('[data-testid="pdf-facts"]').textContent(), /^5 pages · PDF · [\d.]+ (B|KiB|MiB)$/);
     assert.equal(await v.locator('[data-testid="pdf-page-indicator"]').textContent(), "Page 1 of 5");
     await pageReady(v, 1);
     const tab = tabLocator(page, "docs/paper.pdf");

@@ -393,13 +393,3 @@ export function toolSummary(name: string, input: unknown): string {
       return "";
   }
 }
-
-export function relativeTime(ms: number, now = Date.now()): string {
-  const seconds = Math.max(0, Math.round((now - ms) / 1000));
-  if (seconds < 60) return "just now";
-  const mins = Math.round(seconds / 60);
-  if (mins < 60) return `${mins} min ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours} h ago`;
-  return new Date(ms).toLocaleDateString();
-}

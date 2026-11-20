@@ -5,18 +5,12 @@
 import { useEffect, useState, type ClipboardEvent } from "react";
 
 import type { AttachmentInfo } from "../../bindings/AttachmentInfo";
+import { formatBytes } from "../../lib/format";
 import { commands } from "../../lib/ipc";
 import { Banner, Button, Chip, FileIcon, StatusText } from "../../ui/components";
 import { clipboardHasFiles, clipboardImages, drafts, isLargePaste, useDraft } from "./drafts";
 
-/** "12.3 KB" (the backend's units). */
-export function humanSize(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${bytes} bytes`;
-}
-
-/** "PNG image · 48.2 KB · 1280×720", "PDF · 1.1 MB", "Text · 812 bytes". */
+/** "PNG image · 48.2 KiB · 1280×720", "PDF · 1.1 MiB", "Text · 812 B". */
 export function attachmentMeta(info: AttachmentInfo): string {
   const kind =
     info.kind === "image"
@@ -25,7 +19,7 @@ export function attachmentMeta(info: AttachmentInfo): string {
         ? "PDF"
         : "Text";
   const dimensions = info.width && info.height ? `${info.width}×${info.height}` : null;
-  return [kind, humanSize(info.sizeBytes), dimensions].filter((part): part is string => part !== null).join(" · ");
+  return [kind, formatBytes(info.sizeBytes), dimensions].filter((part): part is string => part !== null).join(" · ");
 }
 
 /** Recently used thumbnails (data URLs can be several MB): oldest dropped first. */

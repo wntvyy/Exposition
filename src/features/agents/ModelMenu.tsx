@@ -5,6 +5,7 @@
 // chosen model a catalog does not list stays chosen and is marked, never
 // replaced. Choosing changes the caller's draft only; nothing is requested
 // except the model lists themselves.
+import { formatRelativeTime } from "../../lib/format";
 import { Settings as SettingsIcon } from "lucide-react";
 import { useId, useRef, useState, type JSX, type KeyboardEvent, type ReactNode } from "react";
 
@@ -26,7 +27,7 @@ import {
   StatusText,
   TextField,
 } from "../../ui/components";
-import { EFFORT_LABELS, relativeTime } from "./format";
+import { EFFORT_LABELS } from "./format";
 import {
   catalogRows,
   capabilityHints,
@@ -193,7 +194,7 @@ function GroupState({
       </span>
     );
   }
-  const fetched = fetchedAtMs ? relativeTime(fetchedAtMs) : null;
+  const fetched = fetchedAtMs ? formatRelativeTime(fetchedAtMs) : null;
   if (failed || state === "unavailable") {
     return (
       <>

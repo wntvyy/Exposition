@@ -1,5 +1,6 @@
 // Inspector of the selected Research item: provenance, retention state,
 // experiments, and graph dependencies over the canonical identities.
+import { formatBytes, formatClock } from "../../lib/format";
 import { BookmarkCheck, ExternalLink, Play, Save, Trash2, Archive } from "lucide-react";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
@@ -32,7 +33,7 @@ import {
 import { fileKey } from "../editor/documentClient";
 import { workflowKey } from "../workflows/model";
 import { GraphDependencies } from "./GraphInspect";
-import { formatBytes, formatClock, isActiveRun, runPill } from "./model";
+import { isActiveRun, runPill } from "./model";
 import { PromotionControls, lifecyclePill } from "./Promotion";
 import { Provenance, RunRow, useNow } from "./ResearchPanel";
 import {

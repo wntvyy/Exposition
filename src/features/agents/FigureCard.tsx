@@ -20,6 +20,7 @@
 //
 // Frameless, like a Research figure: the image keeps Research's figure
 // treatment (`exp-research__figure`, the image's 1 px border only).
+import { formatBytes } from "../../lib/format";
 import { FlaskConical, ImageOff, Maximize2, RotateCcw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -51,10 +52,6 @@ type Load =
 /** "run-4f2a9c1e…" → "4f2a9c1" (the full id is the title). */
 export function shortRunId(runId: string): string {
   return runId.replace(/^run-/, "").slice(0, 7);
-}
-
-function mebibytes(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 /** The unavailable reason as a sentence: "Figure no longer available — purged from Storage & History". */
@@ -124,7 +121,7 @@ export function FigureCard({ task, figure }: { task: TaskId; figure: FigureRef }
         } else if (size > FIGURE_MAX_BYTES) {
           setLoad({
             kind: "unavailable",
-            text: `Figure too large to show here (${mebibytes(size)}; the limit is ${mebibytes(FIGURE_MAX_BYTES)}). Open it in Research.`,
+            text: `Figure too large to show here (${formatBytes(size)}; the limit is ${formatBytes(FIGURE_MAX_BYTES)}). Open it in Research.`,
           });
         } else {
           url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: figure.mediaType }));

@@ -1,10 +1,11 @@
+import { formatRelativeTime } from "../../lib/format";
 import { Bot, Plus } from "lucide-react";
 import { useId, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 
 import type { TaskSummary } from "../../bindings/TaskSummary";
 import { Button, cx, EmptyState, ListRow, StatusText } from "../../ui/components";
 import { useOpList } from "../operations/useOpList";
-import { relativeTime, statusLabel } from "./format";
+import { statusLabel } from "./format";
 import { agents, useAgents } from "./store";
 import { taskActions } from "./taskOps";
 
@@ -77,7 +78,7 @@ export function TaskRow({
           <StatusText status={pill.status} label={pill.label} />
           {task.pendingReview > 0 && <StatusText status="warning" label={`${task.pendingReview} to review`} />}
           {kept && <span>Kept</span>}
-          <span>{relativeTime(task.updatedAtMs)}</span>
+          <span>{formatRelativeTime(task.updatedAtMs)}</span>
           <span id={hintId} className="ui-visually-hidden">
             Enter opens the task. Space selects it; Control-click adds it to the selection.
           </span>

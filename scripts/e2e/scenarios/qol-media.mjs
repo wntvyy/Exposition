@@ -215,7 +215,7 @@ export default async function qolMedia({ launchApp, artifactsDir, assert }) {
     assert.equal(await iconOf("figs/plot one.png"), "image");
     assert.equal(await png.getAttribute("data-status"), "ready");
     assert.equal(await png.getAttribute("data-fit"), "true");
-    assert.match(await png.locator('[data-testid="image-facts"]').textContent(), /^1600 × 1200 · PNG · [\d.]+ (KB|MB)$/);
+    assert.match(await png.locator('[data-testid="image-facts"]').textContent(), /^1600 × 1200 · PNG · [\d.]+ (KiB|MiB)$/);
     assert.equal(await tabLocator(page, "figs/plot one.png").locator("[data-file-type]").getAttribute("data-file-type"), "image");
     assert.equal(await tabLocator(page, "figs/plot one.png").getAttribute("data-dirty"), null, "an image tab is never dirty");
     assert.equal(await png.locator("textarea, .monaco-editor").count(), 0, "no text/binary buffer");

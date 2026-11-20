@@ -11,6 +11,7 @@
 // max parallel and the application's global limits are listed. A
 // reproduction plan (Reproduce in the run view) is reviewed here the same
 // way, with its environment drift notices first.
+import { formatBytes, formatSeconds } from "../../lib/format";
 import { Copy, Layers, Play, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useId, useState } from "react";
 
@@ -23,7 +24,7 @@ import { Badge, Banner, Button, Dialog, ErrorState, IconButton, KeyValueList, Lo
 import { workflowRunCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
 import { DEFAULT_LIMITS, describeCondition, describeLimits, describeRepeat, paramText } from "./orchestration";
-import { CONTAINMENT_VIEW, EFFECT_LABELS, EXECUTION_CEILING_LABEL, formatBytes, formatSeconds, formatTime, shortHash, STALE_PLAN_CODES } from "./runModel";
+import { CONTAINMENT_VIEW, EFFECT_LABELS, EXECUTION_CEILING_LABEL, formatTime, shortHash, STALE_PLAN_CODES } from "./runModel";
 
 /** Full text with line numbers (read-only). Line numbers are not part of the copied text. */
 export function CodeListing({ text, label, testId }: { text: string; label: string; testId?: string }) {

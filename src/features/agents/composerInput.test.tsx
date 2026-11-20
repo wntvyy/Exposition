@@ -304,7 +304,7 @@ describe("large text paste", () => {
     // The chip is an ordinary text attachment: size and a removal control.
     const chip = screen.getByTestId("agents-attachment");
     expect(chip.dataset.kind).toBe("text");
-    expect(chip.textContent).toContain("Text · 8.8 KB");
+    expect(chip.textContent).toContain("Text · 8.8 KiB");
     expect(screen.getByRole("button", { name: "Remove pasted-text-1.txt" })).toBeTruthy();
     expect(screen.getByTestId("agents-paste-notice").textContent).toContain("The pasted text was attached as pasted-text-1.txt.");
 
@@ -423,11 +423,11 @@ describe("large text paste", () => {
       kind: "rejected",
       name: "pasted-text-1.txt",
       code: "attachments.textTooLarge",
-      message: "The text file is 1.2 MB; text files can be at most 1.0 MB.",
+      message: "The text file is 1.2 MiB; text files can be at most 1.0 MiB.",
     });
     expect(paste(large())).toBe(false);
     const rejections = await screen.findByTestId("agents-attachment-rejections");
-    expect(rejections.textContent).toContain("pasted-text-1.txt: The text file is 1.2 MB; text files can be at most 1.0 MB.");
+    expect(rejections.textContent).toContain("pasted-text-1.txt: The text file is 1.2 MiB; text files can be at most 1.0 MiB.");
     expect(rejections.textContent).toContain("Nothing was pasted and the request is unchanged; the text is still on the clipboard.");
     expect(field().value).toBe("Compare OLD with this");
     expect([field().selectionStart, field().selectionEnd]).toEqual([8, 11]);

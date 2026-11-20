@@ -3,6 +3,7 @@
 // attachment path: the person reviews the exact markup, the target document
 // revision, and the artifact digest, then approves; approval is refused if
 // either changed since the review.
+import { formatBytes } from "../../lib/format";
 import { Archive, BookmarkCheck, Check, FileInput, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -17,7 +18,7 @@ import { graphCommands } from "../../lib/graphIpc";
 import { Banner, Button, KeyValueList, Select, Spinner, StatusText, TextField } from "../../ui/components";
 import { openDocument } from "../editor/documentClient";
 import { researchCommands } from "./ipc";
-import { attachmentsOfKind, defaultInsertOffset, documentFormat, formatBytes } from "./model";
+import { attachmentsOfKind, defaultInsertOffset, documentFormat } from "./model";
 import {
   reconcilePromotion,
   refreshListing,

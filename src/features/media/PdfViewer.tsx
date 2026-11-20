@@ -19,7 +19,7 @@ import {
 
 import type { EditorProps } from "../../app/registry";
 import { Banner, Button, ErrorState, IconButton, LoadingState, ToggleButton, Toolbar, UnavailableState } from "../../ui/components";
-import { formatBytes } from "./loader";
+import { formatBytes } from "../../lib/format";
 import {
   currentPage,
   fitWidthZoom,

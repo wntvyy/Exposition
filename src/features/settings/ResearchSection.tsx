@@ -1,4 +1,5 @@
 // Research: discovered Python/R/Julia environments (read-only) with refresh.
+import { formatDateTime } from "../../lib/format";
 import { useEffect } from "react";
 import { RefreshCw } from "lucide-react";
 
@@ -86,7 +87,7 @@ export function ResearchSection() {
       ) : (
         <SettingsGroup
           title="Environments"
-          description={`Scanned ${new Date(report.scannedAtMs).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}.`}
+          description={`Scanned ${formatDateTime(report.scannedAtMs)}.`}
         >
           {report.runtimes.length === 0 ? (
             <EmptyState size="compact" title="No environments found" description="Install Python, R, or Julia, then refresh." />

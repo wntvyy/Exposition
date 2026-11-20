@@ -237,9 +237,9 @@ function ChipSamples() {
     <Specimen label="Chips (removable attachments and context)" wide>
       <div className="ref-chip-row" role="list" aria-label="Sample attachments">
         {chips.map((name) => (
-          <Chip key={name} role="listitem" icon={FileText} label={name} meta="16 KB" onRemove={() => setChips((c) => c.filter((n) => n !== name))} />
+          <Chip key={name} role="listitem" icon={FileText} label={name} meta="16.0 KiB" onRemove={() => setChips((c) => c.filter((n) => n !== name))} />
         ))}
-        <Chip role="listitem" label="figure-2.png" meta="1.2 MB" thumbnail={<span className="ref-thumbnail" />} />
+        <Chip role="listitem" label="figure-2.png" meta="1.2 MiB" thumbnail={<span className="ref-thumbnail" />} />
         <Chip role="listitem" tone="accent" label="About: Which baseline should the comparison use?" removeLabel="Remove About" onRemove={() => {}} />
         <Chip role="listitem" tone="warning" icon={TriangleAlert} label="scan.pdf" meta="Too large to send" onRemove={() => {}} />
         <Chip role="listitem" icon={File} label="notes.md" isDisabled onRemove={() => {}} />

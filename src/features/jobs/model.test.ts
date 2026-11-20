@@ -42,7 +42,7 @@ describe("job presentation", () => {
     expect(formatDuration(null)).toBe("—");
     expect(formatDuration(250)).toBe("250 ms");
     expect(formatDuration(2_500)).toBe("2.5 s");
-    expect(formatDuration(75_000)).toBe("1m 15s");
+    expect(formatDuration(75_000)).toBe("1 min 15 s");
     expect(jobDurationMs(job({}), 4_000)).toBe(3_000);
   });
 
