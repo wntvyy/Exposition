@@ -754,14 +754,14 @@ impl GraphService {
                             rebind.extend(bindings.iter().map(|b| b.path.clone()));
                         }
                         delta.entities_added.push(entity.id.clone());
-                        skipped = restore_relations(&w, &snapshot.relations, &mut delta)?;
+                        skipped = restore_relations(&w, &snapshot.relations, &mut delta, true)?;
                         OpTarget::GraphEntity { entity: entity.id.to_string() }
                     }
                     RECOVERABLE_RELATION => {
                         let Some(relation) = snapshot.relations.first() else {
                             return Ok(Err(refuse("ops.notFound", "The deleted relationship's record is empty.")));
                         };
-                        if restore_relations(&w, std::slice::from_ref(relation), &mut delta)? > 0 {
+                        if restore_relations(&w, std::slice::from_ref(relation), &mut delta, false)? > 0 {
                             return Ok(Err(refuse(
                                 "ops.restoreConflict",
                                 "The relationship cannot be restored: an item it connects no longer exists, or the same relationship exists again.",
@@ -828,7 +828,7 @@ impl GraphService {
                             entity.updated_at_ms = now_ms();
                             w.put_entity(&entity)?;
                             delta.entities_added.push(entity.id.clone());
-                            skipped = restore_relations(&w, &snapshot.relations, &mut delta)?;
+                            skipped = restore_relations(&w, &snapshot.relations, &mut delta, true)?;
                         }
                         OpTarget::Workflow { workflow: wf.to_string() }
                     }
@@ -1285,17 +1285,43 @@ fn names(consumers: &[OpConsumer]) -> String {
     }
 }
 
-/// Re-insert relationships whose endpoints both exist (live) and that do not
-/// exist again; returns how many were skipped.
-fn restore_relations(w: &Writer<'_>, relations: &[Relation], delta: &mut GraphDelta) -> Result<usize, StoreError> {
+/// Re-insert relationships whose endpoints both exist (live), that the
+/// vocabulary admits between them, and that do not exist again; returns how
+/// many were skipped.
+///
+/// With `defer`, a relationship whose other endpoint is itself a recoverable
+/// deletion is not skipped: it is handed to that deletion's record and
+/// returns when that item is restored (a relationship between two deleted
+/// items is held by one record only, whichever was deleted first).
+fn restore_relations(
+    w: &Writer<'_>,
+    relations: &[Relation],
+    delta: &mut GraphDelta,
+    defer: bool,
+) -> Result<usize, StoreError> {
     let mut skipped = 0;
     for r in relations {
-        let ok_end = |id: &EntityId| -> Result<bool, StoreError> {
-            Ok(w.entity(id)?.is_some_and(|e| e.lifecycle != Lifecycle::Tombstoned))
-        };
         let taken = w.relation(&r.id)?.is_some() || w.find_relation(r.kind, &r.from, &r.to)?.is_some();
         let contained = r.kind == RelationKind::Contains && w.container_of(&r.to)?.is_some();
-        if taken || contained || !ok_end(&r.from)? || !ok_end(&r.to)? {
+        let (from, to) = (w.entity(&r.from)?, w.entity(&r.to)?);
+        // A snapshot is project data: what it holds is admitted under the
+        // rules every stored relation is checked against when a graph opens.
+        let well_formed = r.from != r.to && r.evidence_kind.is_some() == (r.kind == RelationKind::EvidenceFor);
+        if taken || contained || !well_formed {
+            skipped += 1;
+            continue;
+        }
+        let (Some(from), Some(to)) = (from.as_ref(), to.as_ref()) else {
+            let absent = if from.is_none() { &r.from } else { &r.to };
+            if !(defer && hand_over(w, absent, r)?) {
+                skipped += 1;
+            }
+            continue;
+        };
+        if from.lifecycle == Lifecycle::Tombstoned
+            || to.lifecycle == Lifecycle::Tombstoned
+            || !r.kind.allows(from.kind, to.kind)
+        {
             skipped += 1;
             continue;
         }
@@ -1305,6 +1331,27 @@ fn restore_relations(w: &Writer<'_>, relations: &[Relation], delta: &mut GraphDe
         }
     }
     Ok(skipped)
+}
+
+/// Add `relation` to the recoverable record of the deleted entity `absent`
+/// (if there is one and it has room). Returns whether the record holds it.
+fn hand_over(w: &Writer<'_>, absent: &EntityId, relation: &Relation) -> Result<bool, StoreError> {
+    let id = recoverable_id(RECOVERABLE_ENTITY, absent.as_str());
+    let Some((kind, _, mut snapshot)) = load_snapshot(&w.tx, &id)? else { return Ok(false) };
+    if kind != RECOVERABLE_ENTITY || !snapshot.entities.iter().any(|e| &e.id == absent) {
+        return Ok(false);
+    }
+    if snapshot.relations.iter().any(|r| r.id == relation.id) {
+        return Ok(true);
+    }
+    snapshot.relations.push(relation.clone());
+    let body = serde_json::to_string(&snapshot)?;
+    if body.len() > 4 * 1024 * 1024 {
+        return Ok(false);
+    }
+    // The deletion keeps its own time and label; only its content grows.
+    w.tx.execute("UPDATE recoverable SET body = ?1 WHERE id = ?2", params![body, id])?;
+    Ok(true)
 }
 
 /// Pins of `id`'s revisions by any stored revision of another workflow.
