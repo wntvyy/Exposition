@@ -21,6 +21,7 @@ navigation between source and pages, and direct editing on the final pages.
 | Last good pages kept when a build fails | Yes | Yes | Yes | Yes |
 | PDF export from the same layout | Yes | Yes | Yes (the build's own PDF) | Yes (the build's own PDF) |
 | Export never replaces a source, an open document, a file the build read, or a non-PDF file | Yes | Yes | Yes | Yes |
+| Export to a file chosen in the system save dialog, inside or outside the project | Yes | Yes | Yes | Yes |
 | Source ↔ page navigation | Character level | Character level | Character level for mapped text; line level (SyncTeX) otherwise | Same as pdfLaTeX |
 | Direct editing on the page: prose | Yes | Yes | Yes (mapped text) | Yes (mapped text) |
 | Direct editing on the page: an equation token | Yes | Yes (declared LaTeX-math subset) | Yes | Yes |
@@ -72,6 +73,17 @@ page view say so and link to Settings → Tool locations; the status bar names
 the missing engine. The LaTeX engine for each main file is chosen in
 Settings › Project or with the palette commands "LaTeX: Build This File with
 LuaLaTeX" / "...with pdfLaTeX".
+
+**Export PDF** asks where to save in the system's save dialog (starting next
+to the document, as `<name>.pdf`); any folder can be chosen, also outside the
+project, and the system asks before an existing file is replaced. The PDF is
+the build shown on the pages: when the source has errors or changed since,
+the notification says the PDF does not include the latest changes. Exporting
+writes that one file only: the source is not saved or moved, and the PDF does
+not become part of the project. A failed export (no permission, the file open
+in another program, a drive that is not available) says why and leaves an
+existing file as it was. Canceling the dialog writes nothing. (Verified on
+Windows; the dialog is the operating system's.)
 
 Builds, their pages, and their exports are available only while the folder
 that built them is open. Only `.typ`, `.md` (or `.markdown`), and `.tex` files are built. LaTeX

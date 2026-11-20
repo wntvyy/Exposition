@@ -7,6 +7,11 @@ param(
   [Parameter(Mandatory = $true)] [string] $Title,
   [string] $Path = "",
   [switch] $Cancel,
+  # A save dialog: type -Path as the file name (or keep the suggested name
+  # when it is empty) and press Save. -Overwrite Yes/No answers the system's
+  # "Confirm Save As" prompt (No, then Cancel: nothing is saved).
+  [switch] $Save,
+  [string] $Overwrite = "",
   [int] $ProcessId = 0,
   [int] $TimeoutMs = 20000
 )
@@ -88,6 +93,21 @@ public static class XpDialogInput {
   public const uint WM_SETTEXT = 0x000C;
   public const uint WM_COMMAND = 0x0111;
   public static void SetText(IntPtr box, string text) { SendMessage(box, WM_SETTEXT, IntPtr.Zero, text); }
+  [DllImport("user32.dll", EntryPoint = "SendMessageW")]
+  public static extern IntPtr SendMessageRaw(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+  public const uint EM_SETSEL = 0x00B1;
+  public const uint EM_REPLACESEL = 0x00C2;
+  // Replace an Edit's whole text the way typing does (the edit is marked
+  // modified and notifies its dialog; WM_SETTEXT alone does neither, and a
+  // save dialog then keeps the name it suggested).
+  public const uint TDM_CLICK_BUTTON = 0x0466;
+  public static void ClickTaskButton(IntPtr taskDialog, int id) {
+    PostMessage(taskDialog, TDM_CLICK_BUTTON, new IntPtr(id), IntPtr.Zero);
+  }
+  public static void TypeText(IntPtr box, string text) {
+    SendMessageRaw(box, EM_SETSEL, IntPtr.Zero, new IntPtr(-1));
+    SendMessage(box, EM_REPLACESEL, new IntPtr(1), text);
+  }
   public static void Click(IntPtr dialog, int id, IntPtr button) {
     // MAKEWPARAM(id, BN_CLICKED = 0)
     PostMessage(dialog, WM_COMMAND, new IntPtr(id & 0xFFFF), button);
@@ -132,6 +152,39 @@ function Press($dialog, $button, [int] $id) {
   }
 }
 
+# A save dialog's "File name:" box: the Edit with control id 1001 (the
+# address bar has the same id and another class). Its name is its text.
+function Find-SaveBox {
+  $condition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition($AE::AutomationIdProperty, "1001")),
+    (New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, "Edit"))
+  )
+  $until = (Get-Date).AddMilliseconds(8000)
+  while ((Get-Date) -lt $until) {
+    $edit = $dialog.FindFirst($Scope::Descendants, $condition)
+    if ($edit) { return $edit }
+    Start-Sleep -Milliseconds 250
+  }
+  return $null
+}
+$saveBox = $null
+if ($Save) {
+  $saveBox = Find-SaveBox
+  if ($null -eq $saveBox) {
+    $result.error = "no file name box"
+    $all = $dialog.FindAll($Scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    $result.controls = @($all | ForEach-Object { "$($_.Current.ControlType.ProgrammaticName)|$($_.Current.AutomationId)|$($_.Current.Name)|$($_.Current.ClassName)" })
+    Out-Result $result
+    exit 3
+  }
+  try { $result.suggested = $saveBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch { $result.suggested = $saveBox.Current.Name }
+  $address = $dialog.FindFirst($Scope::Descendants, (New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition($AE::AutomationIdProperty, "1001")),
+    (New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, "ToolbarWindow32"))
+  )))
+  if ($address) { $result.folder = ($address.Current.Name -replace '^Address:\s*', '') }
+}
+
 if ($Cancel) {
   $button = Wait-Id $dialog @("2") 8000
   if ($null -eq $button) {
@@ -145,6 +198,91 @@ if ($Cancel) {
   $result.closed = Wait-Closed $dialog 5000
   Out-Result $result
   if (-not $result.closed) { exit 4 }
+  exit 0
+}
+
+if ($Save) {
+  $steps = @()
+  if ($Path -ne "") {
+    [XpDialogInput]::TypeText((Handle $saveBox), $Path)
+    Start-Sleep -Milliseconds 300
+    $steps += "type: EM_REPLACESEL"
+    $result.typed = $Path
+  }
+  $accept = Wait-Id $dialog @("1") 8000
+  if ($null -eq $accept) {
+    $result.error = "no Save button"
+    Out-Result $result
+    exit 3
+  }
+  $result.acceptButton = $accept.Current.Name
+  $steps += "accept: $(Press $dialog $accept 1)"
+  # Either the dialog closes, or the system asks before replacing a file
+  # (a "Confirm Save As" window owned by the dialog, with Yes and No).
+  $result.overwritePrompt = $false
+  $promptCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::Window)),
+    (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Confirm Save As"))
+  )
+  $until = (Get-Date).AddMilliseconds(8000)
+  $prompt = $null
+  while ((Get-Date) -lt $until -and (Is-Open $dialog) -and ($null -ne (Find-Dialog))) {
+    try { $prompt = $dialog.FindFirst($Scope::Descendants, $promptCondition) } catch { $prompt = $null }
+    if ($prompt) { break }
+    Start-Sleep -Milliseconds 200
+  }
+  if ($prompt) {
+    $result.overwritePrompt = $true
+    try {
+      $texts = $prompt.FindAll($Scope::Descendants, (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::Text)))
+      $result.promptText = (@($texts | ForEach-Object { $_.Current.Name }) -join " ")
+    } catch {}
+    if ($Overwrite -eq "") {
+      $result.error = "the system asked to replace a file and no -Overwrite answer was given"
+      $Overwrite = "No"
+    }
+    # The prompt is a task dialog: its buttons (CommandButton_6 Yes,
+    # CommandButton_7 No) have no Invoke pattern here, so it is asked to
+    # click one itself (TDM_CLICK_BUTTON with IDYES 6 / IDNO 7).
+    $answerId = if ($Overwrite -eq "Yes") { 6 } else { 7 }
+    $answer = $prompt.FindFirst($Scope::Descendants, (New-Object System.Windows.Automation.PropertyCondition($AE::AutomationIdProperty, "CommandButton_$answerId")))
+    if ($null -eq $answer) {
+      $result.error = "no $Overwrite button in the overwrite prompt"
+      $all = $prompt.FindAll($Scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+      $result.controls = @($all | ForEach-Object { "$($_.Current.ControlType.ProgrammaticName)|$($_.Current.AutomationId)|$($_.Current.Name)|$($_.Current.ClassName)" })
+      $result.steps = $steps
+      Out-Result $result
+      exit 3
+    }
+    $result.answerButton = $answer.Current.Name
+    try {
+      $answer.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+      $steps += "answer: InvokePattern"
+    } catch {
+      [XpDialogInput]::ClickTaskButton((Handle $prompt), $answerId)
+      $steps += "answer: TDM_CLICK_BUTTON"
+    }
+    $steps += "overwrite: $Overwrite"
+    if ($Overwrite -ne "Yes") {
+      # Back in the save dialog: leave it without saving.
+      Start-Sleep -Milliseconds 400
+      $cancelButton = Wait-Id $dialog @("2") 8000
+      if ($cancelButton) { $steps += "cancel: $(Press $dialog $cancelButton 2)" }
+    }
+  } elseif ($Overwrite -ne "") {
+    $result.error = "the system did not ask before replacing"
+  }
+  $result.steps = $steps
+  $result.action = "save"
+  $result.closed = Wait-Closed $dialog 8000
+  if (-not $result.closed) {
+    # Something else is in the way (a message of the dialog): leave it.
+    $cancelButton = Find-Id $dialog "2"
+    if ($cancelButton) { $null = Press $dialog $cancelButton 2 }
+  }
+  Out-Result $result
+  if (-not $result.closed) { exit 4 }
+  if ($result.error) { exit 6 }
   exit 0
 }
 

@@ -433,19 +433,9 @@ impl TexService {
         let stored = self.build(id).ok_or(TexServiceError::UnknownBuild)?;
         let session = stored.session()?;
         let target = &stored.summary.result.target;
-        let invalid = |message: &str| TexServiceError::InvalidDestination(message.into());
         let path = match destination {
-            Some(path) => {
-                let pdf = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
-                if !path.is_absolute() || !pdf {
-                    return Err(invalid("an absolute .pdf path is required"));
-                }
-                let parent = path
-                    .parent()
-                    .filter(|p| p.is_dir())
-                    .ok_or_else(|| invalid("the destination folder does not exist"))?;
-                parent.join(path.file_name().ok_or_else(|| invalid("an absolute .pdf path is required"))?)
-            }
+            Some(path) => exposition_workspace::export::checked_destination(&path, "pdf")
+                .map_err(TexServiceError::InvalidDestination)?,
             None => {
                 let root = self.open_root()?;
                 let stem = target.entry.file_name().rsplit_once('.').map_or(target.entry.file_name(), |(s, _)| s);
@@ -455,14 +445,10 @@ impl TexService {
             }
         };
         self.check_export_destination(&stored, &path)?;
-        let tmp = path.with_extension(format!("pdf.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, &session.pdf_bytes).and_then(|()| std::fs::rename(&tmp, &path)).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            TexServiceError::Io(e.to_string())
-        })?;
+        exposition_workspace::export::write(&path, &session.pdf_bytes).map_err(TexServiceError::Io)?;
         Ok(ExportArtifact {
             kind: ExportKind::Pdf,
-            path: path.display().to_string(),
+            path: exposition_workspace::root::display_path(&path),
             content_hash: crate::compile::hex_sha256(&session.pdf_bytes),
         })
     }

@@ -40,6 +40,18 @@ export interface PageMessage {
   text: string;
 }
 
+/** A finished PDF export. */
+export interface PdfExport {
+  /** The file written. */
+  path: string;
+  /**
+   * Why the exported build is not the current source: its latest build
+   * `failed` (the last successful build was exported), or the source
+   * `changed` after the exported build. `null` when it is current.
+   */
+  outdated: "failed" | "changed" | null;
+}
+
 export interface PageViewModel {
   phase: "attaching" | "ready" | "missing" | "error";
   error: string | null;
@@ -776,11 +788,29 @@ export class PageSession {
     await commands.typesettingUnwatch(this.path).catch(() => null);
   }
 
-  async exportPdf(): Promise<string> {
+  /**
+   * Export the build shown on this view's pages to a PDF file the person
+   * chooses in the native save dialog (opened by the backend, starting next
+   * to the document). The export is bound to this document and that build;
+   * the source is neither saved nor changed. `null` when the dialog was
+   * canceled (nothing was written).
+   */
+  async exportPdf(): Promise<PdfExport | null> {
     const build = this.build;
     if (!build) throw new Error("Nothing to export yet");
-    const artifact = await commands.typesettingExportPdf(build.id);
-    return artifact.path;
+    let path: string;
+    try {
+      path = (await commands.typesettingExportPdf(build.id, this.path)).path;
+    } catch (error) {
+      if (isCommandError(error) && error.code === "typesetting.exportCanceled") return null;
+      throw error;
+    }
+    // The file holds the build shown when the export started. Say so when
+    // that is not the current source: the latest build failed (the last good
+    // pages stay visible), or the source changed since (also while the
+    // dialog was open).
+    const outdated = this.model.failed ? "failed" : this.build?.id !== build.id || this.model.stale ? "changed" : null;
+    return { path, outdated };
   }
 
   /**

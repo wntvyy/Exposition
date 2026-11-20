@@ -46,6 +46,7 @@ import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, write
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { withNativeDialog } from "../native-dialog.mjs";
 import { waitForAsync } from "../wait.mjs";
 import {
   documentState,
@@ -1169,7 +1170,11 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       const shown = await pageEditor()
         .locator('[data-testid="page"]')
         .evaluateAll((els) => els.map((e) => ({ widthPt: Number(e.dataset.widthPt), ratio: e.offsetHeight / e.offsetWidth })));
-      await pageEditor().getByRole("button", { name: "Export PDF" }).click();
+      // The save dialog suggests <entry stem>.pdf next to the entry: accept it.
+      const saveDialog = await withNativeDialog({ title: "Export PDF", save: true, pid: app.child.pid }, () =>
+        pageEditor().getByRole("button", { name: "Export PDF" }).click(),
+      );
+      note("pdfDialog", saveDialog);
       const notice = page.getByTestId("notification").filter({ hasText: "Exported PDF" });
       await notice.waitFor({ timeout: 20_000 });
       const pdfPath = (await notice.locator(".ui-notification__body").innerText()).trim();

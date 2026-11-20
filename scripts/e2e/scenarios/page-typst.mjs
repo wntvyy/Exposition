@@ -432,7 +432,7 @@ export default async function pageTypst({ launchApp, artifactsDir, assert, fixtu
     assert.equal(txt.error?.code, "typesetting.unsupported", `typesetting_build(notes.txt) → ${JSON.stringify(txt).slice(0, 200)}`);
 
     // 9. Export PDF from the shown build: same page count and sizes.
-    const exported = await invoke("typesetting_export_pdf", { build: await build(), destination: null });
+    const exported = await invoke("typesetting_export_pdf", { build: await build(), entry: PATH, destination: join(workspace, "main.pdf") });
     const pdf = (await readFile(exported.path)).toString("latin1");
     const pdfPages = [...pdf.matchAll(/\/Type\/Page(?!s)/g)].length;
     assert.equal(pdfPages, pages, "PDF page count equals rendered pages");

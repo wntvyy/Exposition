@@ -303,8 +303,14 @@ export const commands = {
   typesettingWatch: (entry: string) => invoke<BuildEvent | null>("typesetting_watch", { entry }),
   typesettingUnwatch: (entry: string) => invoke<void>("typesetting_unwatch", { entry }),
   typesettingBuild: (entry: string) => invoke<BuildEvent>("typesetting_build", { entry }),
-  typesettingExportPdf: (build: string, destination: string | null = null) =>
-    invoke<ExportArtifact>("typesetting_export_pdf", { build, destination }),
+  /**
+   * Export `build` (a build of `entry`) to PDF as an output copy. `destination`
+   * null: the backend asks where in the native save dialog, inside or outside
+   * the project (`typesetting.exportCanceled` when dismissed; nothing is
+   * written). A given destination must be inside the open project.
+   */
+  typesettingExportPdf: (build: string, entry: string, destination: string | null = null) =>
+    invoke<ExportArtifact>("typesetting_export_pdf", { build, entry, destination }),
 
   // Exact-page editing (offsets are UTF-16 in the named build's snapshot).
   pageHitTest: (build: string, page: number, x: number, y: number) =>

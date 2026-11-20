@@ -8,11 +8,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalS
 import type { CSSProperties, KeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import { FileDown, FileWarning, RefreshCw, Search, Sigma, ZoomIn, ZoomOut } from "lucide-react";
 
-import { notify } from "../../app/notifications";
 import { registry, type EditorProps } from "../../app/registry";
 import type { Motion } from "../../bindings/Motion";
 import type { PageRect } from "../../bindings/PageRect";
-import { commands, errorMessage } from "../../lib/ipc";
+import { commands } from "../../lib/ipc";
 import {
   Badge,
   Banner,
@@ -35,6 +34,7 @@ import {
 import { handleForPath, MIXED_EOL_REASON, normalizeLineEndings } from "../editor";
 import { FIND_KEYBINDING, findInSource } from "../editor/find";
 import { notePageFocus, releasePageSurface, type PageSurface } from "./activePage";
+import { exportPdfWithNotice } from "./exportPdf";
 import { PageSession } from "./session";
 
 /** The equation editor's insert-or-edit command (registered by the math feature). */
@@ -230,12 +230,7 @@ export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps
     if (text) void session.edit({ kind: "insert", text });
   };
 
-  const exportPdf = () => {
-    session.exportPdf().then(
-      (file) => notify({ tone: "success", title: "Exported PDF", body: file }),
-      (error: unknown) => notify({ tone: "danger", title: "PDF export failed", body: errorMessage(error) }),
-    );
-  };
+  const exportPdf = () => void exportPdfWithNotice(session);
 
   const normalize = async (ending: "lf" | "crlf") => {
     const handle = handleForPath(path);

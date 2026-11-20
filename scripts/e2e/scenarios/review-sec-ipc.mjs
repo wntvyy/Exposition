@@ -268,7 +268,15 @@ export default async function reviewSecIpc({ launchApp, artifactsDir, fixture })
     if (!buildId || build.ok.result.status === "failed") {
       r.info("C Typst export", `no build to export: ${short(build.error ?? build.ok?.result?.status)}`);
     } else {
-      const exportTo = (destination) => call(page, "typesetting_export_pdf", { build: buildId, destination });
+      const exportTo = (destination) => call(page, "typesetting_export_pdf", { build: buildId, entry: "main.typ", destination });
+      // C0 (QC 2.4) a destination outside the project is chosen only in the
+      // backend's save dialog: a caller-supplied one is refused.
+      const c0 = await exportTo(join(project.outside, "from-ipc.pdf"));
+      r.expect(
+        "C a caller-supplied export destination outside the project is refused",
+        !!c0.error && !existsSync(join(project.outside, "from-ipc.pdf")),
+        `→ ${short(c0.ok ?? c0.error)}`,
+      );
       // C1 a non-PDF file named *.pdf outside the project.
       const notes = join(project.outside, "notes.pdf");
       await writeFile(notes, "my notes, not a PDF");
@@ -406,7 +414,7 @@ export default async function reviewSecIpc({ launchApp, artifactsDir, fixture })
       // A PDF already in the project (a previous export of its own).
       const typ = await call(page, "typesetting_build", { entry: "main.typ" });
       const own = join(project.root, "main.pdf");
-      if (typ.ok?.result?.id) await call(page, "typesetting_export_pdf", { build: typ.ok.result.id, destination: own });
+      if (typ.ok?.result?.id) await call(page, "typesetting_export_pdf", { build: typ.ok.result.id, entry: "main.typ", destination: own });
       const ownBefore = existsSync(own) ? await readFile(own) : null;
       const img = await call(page, "tex_page_image", { build: texId, page: 0, scale: 1 });
       r.expect(
@@ -414,13 +422,13 @@ export default async function reviewSecIpc({ launchApp, artifactsDir, fixture })
         !!img.error,
         img.error ? short(img.error) : "tex_page_image returned the other folder's page",
       );
-      const exp = await call(page, "typesetting_export_pdf", { build: texId, destination: null });
+      const exp = await call(page, "typesetting_export_pdf", { build: texId, entry: "main.tex", destination: own });
       const ownAfter = existsSync(own) ? await readFile(own) : null;
       const replaced = ownBefore && ownAfter && !ownAfter.equals(ownBefore);
       r.expect(
         "F a build from the previously open folder is not exported into the open folder",
         !exp.ok,
-        `typesetting_export_pdf(${texId}, default) → ${short(exp.ok?.path ?? exp.error)}${replaced ? "; the project's own main.pdf was replaced by the other folder's PDF" : ""}`,
+        `typesetting_export_pdf(${texId}, main.pdf) → ${short(exp.ok?.path ?? exp.error)}${replaced ? "; the project's own main.pdf was replaced by the other folder's PDF" : ""}`,
       );
       await call(page, "trust_revoke", { root: other });
     }
