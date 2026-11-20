@@ -231,11 +231,7 @@ pub mod runner_ids {
 /// Why read-only agent steps cannot run in this version.
 pub const AGENT_REVIEW_UNAVAILABLE: &str = "Read-only agent review steps are not available in this version of the workflow runner; remove the step or run the review as an agent task.";
 
-/// SHA-256 (hex) of `bytes`.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
-}
+pub use exposition_workspace::fsutil::sha256_hex;
 
 /// A digest without a `sha256:` prefix, lowercase.
 pub fn bare_hash(hash: &str) -> String {

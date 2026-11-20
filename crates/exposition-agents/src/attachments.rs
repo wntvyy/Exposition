@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use ts_rs::TS;
 
 /// Largest text/source attachment (bytes).
@@ -327,10 +326,7 @@ pub fn image_info(b: &[u8]) -> Option<(&'static str, Option<u32>, Option<u32>)> 
     None
 }
 
-/// Lowercase hex SHA-256.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
-}
+pub use exposition_workspace::fsutil::sha256_hex;
 
 // ---------------------------------------------------------------- base64
 

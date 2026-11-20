@@ -226,9 +226,7 @@ pub fn read_file(root: &Path, path: &WorkspacePath, size: u64, want_text: bool) 
     out
 }
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
-}
+pub use exposition_workspace::fsutil::sha256_hex;
 
 #[cfg(test)]
 mod tests {

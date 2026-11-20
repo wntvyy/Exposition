@@ -1089,9 +1089,7 @@ fn file_hash(path: &Path) -> Option<String> {
     std::fs::read(path).ok().map(|b| hex_sha256(&b))
 }
 
-pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
-}
+pub(crate) use exposition_workspace::fsutil::sha256_hex as hex_sha256;
 
 fn short_hash(text: &str) -> String {
     hex_sha256(text.as_bytes())[..16].to_owned()

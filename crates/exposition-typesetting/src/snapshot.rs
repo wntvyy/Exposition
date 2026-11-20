@@ -145,9 +145,7 @@ impl std::fmt::Debug for BuildSnapshot {
     }
 }
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
-}
+pub use exposition_workspace::fsutil::sha256_hex;
 
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

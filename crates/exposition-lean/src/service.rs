@@ -34,7 +34,6 @@ use exposition_execution::{ExecutionService, Located, TrustChanged};
 use exposition_workspace::types::WorkspaceEvent;
 use exposition_workspace::{DocumentService, WorkspaceService};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -608,8 +607,7 @@ fn relative_to(root: &Path, abs: &Path) -> Option<WorkspacePath> {
 }
 
 fn sha256_hex(text: &str) -> String {
-    let digest = Sha256::digest(text.as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    exposition_workspace::fsutil::sha256_hex(text.as_bytes())
 }
 
 fn is_lean(info: &DocumentInfo) -> bool {
