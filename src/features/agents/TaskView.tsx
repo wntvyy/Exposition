@@ -104,7 +104,7 @@ export function TaskMenu({ task, where }: { task: TaskSummary; where: "panel" | 
         ) : null}
         {active ? (
           <MenuItem id="cancel" icon={Square}>
-            Cancel task
+            Stop task
           </MenuItem>
         ) : null}
         {where === "panel" ? (
