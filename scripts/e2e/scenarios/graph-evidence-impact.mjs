@@ -465,7 +465,7 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
     await waitFor(async () => (await latest.getAttribute("data-freshness")) === "stale", { timeout: 300_000, interval: 250, message: "the Lean panel shows the record as history" });
     assert.match(await declRow.getByTestId("lean-evidence-history").innerText(), /changed since revision/);
     const fifth = await agent("Is the evidence still current?", "readOnly", [query("theorem", "entity", { entity: theorem })]);
-    assert.equal(fifth.theorem.value.formalEvidence[0].evidence[0].freshness, "stale");
+    assert.equal(field(fifth.theorem, "formalEvidence")[0].evidence[0].freshness, "stale");
     await shot("lean-panel-evidence-history-light");
     note("a saved change to the Lean source makes the evidence stale on every surface", "stale");
 
