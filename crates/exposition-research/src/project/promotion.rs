@@ -806,6 +806,14 @@ impl ResearchProject {
     /// attachments in it. Returns the attachments whose presence changed.
     pub fn observe_text(&self, path: &WorkspacePath, text: &str, force: bool) -> Vec<TrackedAttachment> {
         let Ok(root) = self.root() else { return Vec::new() };
+        // The relations live in this project's graph. While the graph is
+        // attached to another folder (a project switch announces the new
+        // folder before its graph is attached) nothing is read or written,
+        // and nothing is marked as observed, so the next observation still
+        // sees the change.
+        if self.graph.root().as_deref() != Some(root.as_path()) {
+            return Vec::new();
+        }
         let mut changed = Vec::new();
         let pairs: Vec<(EntityId, EntityId, bool)> = {
             let mut tracked = self.promotions.tracked.lock().unwrap_or_else(|p| p.into_inner());

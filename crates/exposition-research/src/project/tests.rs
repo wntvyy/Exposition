@@ -684,6 +684,55 @@ fn an_operation_still_running_in_this_session_is_not_labelled_interrupted_on_ope
     );
 }
 
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// GI-5: during a project switch research already follows the new folder
+/// while the graph is still attached to another one. Following an attachment
+/// then writes nothing: with a copy of a project the two graphs hold the same
+/// identities, so an unchecked write would land in the wrong project.
+#[test]
+fn attachments_are_not_followed_into_a_graph_attached_to_another_folder() {
+    let f = fixture();
+    record_run(&f.root, "run-h1", vec![script_input()], vec![]);
+    let doc = open(&f, "paper.typ");
+    let preview = promote(&f, &doc, "run-h1", "run-h1/output-1.png");
+    let outcome = f.project.approve_promotion(&preview.promotion).unwrap();
+    let PromotionGraphState::Recorded { manuscript, artifact, .. } = &outcome.graph else { panic!() };
+    assert!(relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact));
+
+    // The graph is attached to a copy of the project in another folder;
+    // research still follows the first folder.
+    f.graph.detach();
+    let copy = f._dir.path().join("copy");
+    copy_dir(&f.root, &copy);
+    let copy = std::fs::canonicalize(&copy).unwrap();
+    assert!(f.graph.attach(&copy).is_usable());
+    assert!(relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact), "the copy holds the same record");
+    let before = f.graph.status().revision;
+
+    // The attachment leaves the first folder's manuscript.
+    f.project.observe_text(&path("paper.typ"), "= Paper\n\nIntro.\n", true);
+    assert!(relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact), "the other project is not written");
+    assert_eq!(f.graph.status().revision, before);
+
+    // Back on its own folder the change is followed.
+    f.graph.detach();
+    assert!(f.graph.attach(&f.root).is_usable());
+    f.project.observe_text(&path("paper.typ"), "= Paper\n\nIntro.\n", true);
+    assert!(!relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact));
+}
+
 #[test]
 fn marker_detection_matches_the_format_adapters() {
     use exposition_attach::Format;
