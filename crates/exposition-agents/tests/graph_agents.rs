@@ -1190,7 +1190,8 @@ async fn a_corrected_proposal_is_a_revision_and_results_separate_saved_from_vali
     assert_eq!(first["saved"], json!(true));
     assert_eq!(first["revision"], json!(1));
     assert_eq!(first["state"], json!("incomplete"), "{first}");
-    assert_eq!(first["reviewable"], json!(false));
+    assert_eq!(first["wellFormed"], json!(false));
+    assert!(first.get("reviewable").is_none(), "well-formed is not called reviewable: {first}");
     assert_eq!(first["ran"], json!(false));
     assert!(
         first["diagnostics"]
@@ -1219,7 +1220,13 @@ async fn a_corrected_proposal_is_a_revision_and_results_separate_saved_from_vali
     assert_eq!(second["saved"], json!(true));
     assert_eq!(second["state"], json!("wellFormed"), "{second}");
     assert_eq!(second["errors"], json!(0));
-    assert_eq!(second["reviewable"], json!(true));
+    assert_eq!(second["wellFormed"], json!(true));
+    let summary = second["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("Well-formed is not runnable")
+            && summary.contains("only once every step's runner is available"),
+        "{summary}"
+    );
     assert_eq!(second["ran"], json!(false));
     assert_eq!(second["title"], json!("Check Main.lean and attach the result"));
     let summary = second["summary"].as_str().unwrap();
@@ -1267,7 +1274,7 @@ async fn workflow_drafts_are_saved_with_diagnostics_and_never_runnable() {
     assert_eq!(result["saved"], json!(true));
     assert_eq!(result["state"], json!("incomplete"), "{result}");
     assert_eq!(result["ran"], json!(false));
-    assert_eq!(result["reviewable"], json!(false), "an incomplete draft cannot be reviewed for a run");
+    assert_eq!(result["wellFormed"], json!(false), "an incomplete draft cannot be reviewed for a run");
     assert!(result["run"].as_str().unwrap().contains("never runs it"));
     assert!(result["summary"].as_str().unwrap().contains("INCOMPLETE"), "{result}");
     assert!(result["errors"].as_u64().unwrap() >= 1);
@@ -2466,4 +2473,15 @@ async fn agents_never_rewrite_a_workflow_that_uses_v2_features() {
     let (_, err, text) = call(&h, &task, "w");
     assert!(!err, "{text}");
     assert_eq!(f.graph.workflow(&v1, None).unwrap().revision, 2);
+    // PG-6: so can a workflow that only carries the /2 schema name (it once
+    // used a /2 field and no longer does): nothing would be removed.
+    let bare_v2 = save_user("exposition.workflow/2", Value::Null);
+    assert!(!f.graph.workflow(&bare_v2, None).unwrap().definition.uses_v2());
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::AutoApply, ContextConsent::ScopeContent);
+    let (task, _) = run(&mut h, req, vec![tool("w", tools::WORKFLOW_PROPOSE, revise(&bare_v2))], true).await;
+    let (_, err, text) = call(&h, &task, "w");
+    assert!(!err, "{text}");
+    let revised = f.graph.workflow(&bare_v2, None).unwrap();
+    assert_eq!(revised.revision, 2);
+    assert_eq!(revised.definition.schema, "exposition.workflow/1", "agents write schema /1");
 }

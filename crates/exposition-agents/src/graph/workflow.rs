@@ -374,7 +374,7 @@ pub fn operation_catalogue() -> String {
             .iter()
             .map(|p| {
                 let kind = match &p.kind {
-                    ParameterKind::Text { max_len } => format!("kind text, at most {max_len} characters"),
+                    ParameterKind::Text { max_len } => format!("kind text, at most {max_len} bytes (UTF-8)"),
                     ParameterKind::Integer { min, max } => format!("kind integer, {min} to {max}"),
                     ParameterKind::Boolean => "kind boolean".to_owned(),
                     ParameterKind::Path { extensions } => {
@@ -539,9 +539,11 @@ pub fn prepare(
         // A new revision of an existing workflow of this project. Agents write
         // schema /1 only: a revision of a workflow that uses /2 features would
         // silently drop them (a safety condition could vanish), so it is
-        // refused, never downgraded.
+        // refused, never downgraded. What counts is whether a /2 field is
+        // used, not the schema name: a draft that once used one and no
+        // longer does keeps the name `/2` and loses nothing by a revision.
         let current = graph.service.workflow(id, None).map_err(|e| refusal(codes::WORKFLOW_INVALID, e.message))?;
-        if current.definition.schema != WORKFLOW_SCHEMA || current.definition.uses_v2() {
+        if current.definition.uses_v2() {
             return Err(refusal(
                 codes::WORKFLOW_UNSUPPORTED,
                 format!(
@@ -665,8 +667,9 @@ pub fn save(
         )
     };
     let readiness = if well_formed {
-        "Whether it can run on this machine (folder trust, toolchains, the container backend) was not checked here; \
-         the run plan the user opens reports that."
+        "Well-formed is not runnable: whether it can run on this machine (folder trust, toolchains, the container \
+         backend, a model provider) was not checked here. The workflow editor reports that and offers “Review and \
+         run…” only once every step's runner is available."
     } else {
         "It cannot be reviewed for a run in this state."
     };
@@ -696,7 +699,9 @@ pub fn save(
         "warnings": validation.warnings,
         "diagnostics": diagnostics_json(validation),
         "ran": false,
-        "reviewable": well_formed,
+        // Well-formed only: whether it can be reviewed and run on this
+        // machine is the editor's answer (`summary` says so).
+        "wellFormed": well_formed,
         "summary": format!("{saved_text} {validation_text} Nothing was run. {readiness}"),
         "next": next,
         "open": WHERE_TO_OPEN,
