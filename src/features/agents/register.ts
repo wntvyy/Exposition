@@ -11,6 +11,7 @@ import { StatusPill } from "../../ui/components";
 import { openSettings } from "../settings/open";
 import { AgentPanel } from "./AgentPanel";
 import { AgentsPage } from "./AgentsPage";
+import { startAgentDrop } from "./dropAttach";
 import { attentionLabel, isActive, needsUser } from "./format";
 import { REVIEW_PREFIX, ReviewView } from "./ReviewView";
 import { AGENT_VIEW_ID, AGENTS_PAGE_ID, agents, openApproval, openQuestion, useAgents } from "./store";
@@ -70,6 +71,9 @@ export function AgentStatusItem() {
 function showAgent() {
   layout.showView("auxiliary", AGENT_VIEW_ID);
 }
+
+// Files dropped from the operating system on the chat are attached to its draft.
+startAgentDrop();
 
 registry.registerPage({
   id: AGENTS_PAGE_ID,

@@ -125,6 +125,89 @@ pub async fn agents_attachments_add_bytes(
         .map_err(|e| CommandError::new("attachments.failed", e.to_string()))
 }
 
+/// Files of recent native drops onto the window, as the desktop shell
+/// reported them. The webview routes a drop to the chat and names the paths
+/// it wants attached; only paths recorded here are read, each once, so the
+/// webview alone can never name a file to read (as with the file dialog).
+#[derive(Default)]
+pub struct DroppedFiles(std::sync::Mutex<Vec<std::path::PathBuf>>);
+
+/// Dropped paths remembered at most (older ones are forgotten first).
+const MAX_DROPPED: usize = 4096;
+
+impl DroppedFiles {
+    /// Remember the paths of one native drop.
+    pub fn record(&self, paths: &[std::path::PathBuf]) {
+        let mut held = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        held.extend(paths.iter().cloned());
+        let excess = held.len().saturating_sub(MAX_DROPPED);
+        held.drain(..excess);
+    }
+
+    /// Take `path` if it was dropped and not yet taken.
+    fn claim(&self, path: &std::path::Path) -> bool {
+        let mut held = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        match held.iter().position(|p| p == path) {
+            Some(i) => {
+                held.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Split the requested paths into those a native drop delivered (taken,
+    /// in order) and the positions of those it did not.
+    pub fn claim_all(&self, requested: &[String]) -> Vec<Result<std::path::PathBuf, String>> {
+        requested
+            .iter()
+            .map(|raw| {
+                let path = std::path::PathBuf::from(raw);
+                if self.claim(&path) { Ok(path) } else { Err(raw.clone()) }
+            })
+            .collect()
+    }
+}
+
+/// Files in one drop onto the chat (the per-message limit applies afterwards).
+const MAX_DROP_FILES: usize = 100;
+
+/// Attach files dropped onto the chat from the operating system. Only paths
+/// the desktop shell itself reported in a native drop are read (snapshotted,
+/// like picked files); the originals stay where they are and nothing is
+/// imported into the project. A folder is rejected, never read recursively.
+#[tauri::command]
+pub async fn agents_attachments_add_dropped(
+    state: State<'_, AppState>,
+    dropped: State<'_, DroppedFiles>,
+    paths: Vec<String>,
+) -> Result<Vec<IngestOutcome>, CommandError> {
+    if paths.len() > MAX_DROP_FILES {
+        return Err(CommandError::new(
+            "attachments.tooMany",
+            format!("At most {MAX_DROP_FILES} files can be dropped at once."),
+        ));
+    }
+    let claimed = dropped.claim_all(&paths);
+    let agents = state.agents.clone();
+    tokio::task::spawn_blocking(move || {
+        claimed
+            .into_iter()
+            .map(|entry| match entry {
+                Ok(path) => agents.add_attachment_files(std::slice::from_ref(&path)).remove(0),
+                Err(raw) => IngestOutcome::Rejected {
+                    name: exposition_agents::attachments::safe_name(&raw, "file"),
+                    code: "attachments.notDropped".into(),
+                    message: "This file was not part of a drop onto the window. Drop it again, or choose it with Attach files."
+                        .into(),
+                },
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| CommandError::new("attachments.failed", e.to_string()))
+}
+
 /// A thumbnail data URL for an image attachment.
 #[tauri::command]
 pub async fn agents_attachment_preview(
@@ -450,4 +533,35 @@ pub fn forward_events(app: AppHandle) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod dropped_tests {
+    use std::path::PathBuf;
+
+    use super::DroppedFiles;
+
+    #[test]
+    fn only_natively_dropped_paths_are_taken_and_each_once() {
+        let dropped = DroppedFiles::default();
+        dropped.record(&[PathBuf::from("C:/in/a.txt"), PathBuf::from("C:/in/b.png")]);
+        let claimed = dropped.claim_all(&["C:/in/b.png".into(), "C:/Users/me/secret.txt".into()]);
+        assert_eq!(claimed[0], Ok(PathBuf::from("C:/in/b.png")));
+        assert_eq!(claimed[1], Err("C:/Users/me/secret.txt".to_owned()));
+        // Taken once: naming it again reads nothing.
+        assert!(dropped.claim_all(&["C:/in/b.png".into()])[0].is_err());
+        // The same file dropped twice can be taken twice.
+        dropped.record(&[PathBuf::from("C:/in/a.txt")]);
+        assert!(dropped.claim_all(&["C:/in/a.txt".into(), "C:/in/a.txt".into()]).iter().all(Result::is_ok));
+        assert!(dropped.claim_all(&["C:/in/a.txt".into()])[0].is_err());
+    }
+
+    #[test]
+    fn old_drops_are_forgotten() {
+        let dropped = DroppedFiles::default();
+        let many: Vec<PathBuf> = (0..super::MAX_DROPPED + 5).map(|i| PathBuf::from(format!("f{i}"))).collect();
+        dropped.record(&many);
+        assert!(dropped.claim_all(&["f0".into()])[0].is_err());
+        assert!(dropped.claim_all(&[format!("f{}", super::MAX_DROPPED + 4)])[0].is_ok());
+    }
 }

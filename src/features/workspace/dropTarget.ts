@@ -4,11 +4,18 @@
 // is over the Files view, the destination folder is highlighted: the folder
 // row under the pointer, a file row's folder, or the whole tree for the
 // project folder. A drop there copies the files into that folder through the
-// backend import (originals untouched). Drops anywhere else do nothing here.
+// backend import (originals untouched).
+//
+// This module owns the one native listener and routes every drag to at most
+// one target: another surface that takes OS files (the Agent chat) registers
+// a zone (`nativeDropZones.ts`); a zone that claims the point under
+// the pointer gets the drag and the drop, and the Files view then neither
+// highlights nor imports. Drops anywhere else do nothing.
 import { create } from "zustand";
 
 import { parentFolder } from "../operations/model";
 import { startImport } from "./explorerActions";
+import { nativeDropZones } from "./nativeDropZones";
 import { useWorkspace } from "./store";
 
 export interface DropDestination {
@@ -54,17 +61,33 @@ interface NativeDrop {
 
 /** Handle one native drag-and-drop event (exported for tests). */
 export function handleNativeDrop(event: NativeDrop, scale: number = globalThis.devicePixelRatio || 1): void {
+  const zones = nativeDropZones();
   if (event.type === "leave" || !event.position) {
     setTarget(undefined);
+    for (const zone of zones) zone.clear();
     return;
   }
-  const target = destinationAt(event.position.x / scale, event.position.y / scale);
+  const x = event.position.x / scale;
+  const y = event.position.y / scale;
+  const element = zones.length ? document.elementFromPoint(x, y) : null;
   if (event.type !== "drop") {
-    setTarget(target);
+    // The first zone that claims the point has the drag; every other highlight goes.
+    let claimed = false;
+    for (const zone of zones) {
+      if (!claimed && zone.hover(element)) claimed = true;
+      else zone.clear();
+    }
+    setTarget(claimed ? undefined : destinationAt(x, y));
     return;
   }
-  setTarget(undefined);
   const paths = event.paths ?? [];
+  let taken = false;
+  for (const zone of zones) {
+    if (!taken && zone.drop(element, paths)) taken = true;
+    zone.clear();
+  }
+  const target = taken ? undefined : destinationAt(x, y);
+  setTarget(undefined);
   if (target && paths.length) void startImport(paths, target.folder);
 }
 

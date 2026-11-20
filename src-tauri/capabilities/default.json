@@ -74,6 +74,7 @@
     "allow-agents-models-list",
     "allow-agents-attachments-pick",
     "allow-agents-attachments-add-bytes",
+    "allow-agents-attachments-add-dropped",
     "allow-agents-attachment-preview",
     "allow-agents-attachments-discard",
     "allow-agents-task-list",

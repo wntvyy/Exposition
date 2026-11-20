@@ -33,7 +33,7 @@ function NewTaskView() {
   const workspace = useAgents((s) => s.workspace);
   const [self, setSelf] = useState<HTMLElement | null>(null);
   return (
-    <section ref={setSelf} className="agents-task" aria-label="New task" data-testid="agents-new-task-view">
+    <section ref={setSelf} className="agents-task" aria-label="New task" data-testid="agents-new-task-view" data-agent-chat>
       <header className="agents-task__header">
         <IconButton icon={ArrowLeft} size="sm" aria-label="Back to tasks" onPress={() => agents.show("tasks", null)} data-testid="agents-show-tasks" />
         <h2 className="agents-task__title">New task</h2>

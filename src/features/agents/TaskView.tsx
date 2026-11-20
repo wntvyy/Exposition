@@ -175,7 +175,7 @@ export function TaskView({
     !active && task.pendingReview > 0 && !reviewShown ? { files: task.pendingReview, unsaved: unsavedCount(reviews, true) } : null;
 
   return (
-    <article ref={setSelf} className="agents-task" aria-label={task.title} data-testid="agents-task-view" data-variant={variant}>
+    <article ref={setSelf} className="agents-task" aria-label={task.title} data-testid="agents-task-view" data-variant={variant} data-agent-chat>
       {variant === "panel" && (
         <header className="agents-task__header">
           <IconButton icon={ArrowLeft} size="sm" aria-label="Back to tasks" onPress={() => agents.show("tasks", null)} data-testid="agents-show-tasks" />

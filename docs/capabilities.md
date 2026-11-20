@@ -1056,7 +1056,16 @@ reasoning is never sent to the other.
 
 Requests can carry attachments: text and source files, PNG/JPEG/GIF/WebP
 images (also pasted from the clipboard into the request field), and PDF
-documents for models that read them. Each attachment is a snapshot taken
+documents for models that read them. Files can be chosen with Attach files…
+or dragged from the operating system onto the chat (the transcript or the
+request field, in the Agent view and on the Agents page): the chat is
+highlighted while they are over it, a drop attaches them to that
+conversation only, never imports them into the project, and sends nothing; a
+folder is refused, never read. A pasted text of more than 8,000 characters
+or 100 lines becomes a text attachment (`pasted-text-1.txt`, the exact text)
+instead of filling the request field, with Undo and Insert as text beside
+it; a shorter paste is ordinary text. In the request field Enter sends and
+Shift+Enter starts a new line. Each attachment is a snapshot taken
 when you add it (later edits to the file do not change the message), sent
 as its real content, shown with the message, and never imported into the
 project. Unsupported files and combinations are refused with a reason; nothing

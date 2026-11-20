@@ -15,8 +15,15 @@
 // takes focus, and Send discusses the question (`sendDiscussion`) instead of
 // continuing the task. While a question waits, that is the only message Send
 // takes; the answer itself is sent from the card.
+//
+// Keys in the field: Enter sends through Send (same rules, once; nothing
+// happens when Send is unavailable and the draft stays), Shift+Enter is a new
+// line, Ctrl/Cmd+Enter also sends. An Enter that confirms an IME composition
+// never sends. A large text paste becomes an attachment (Attachments.tsx);
+// files dropped from the operating system on the chat are attached to this
+// draft (dropAttach.ts) and start nothing.
 import { ArrowUp, FolderOpen, Paperclip, SlidersHorizontal, Square } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { create } from "zustand";
 
 import type { Budgets } from "../../bindings/Budgets";
@@ -32,6 +39,7 @@ import { commands, errorMessage } from "../../lib/ipc";
 import { Badge, Banner, Button, Chip, IconButton, PopoverDialog, Tab, TabList, TabPanel, Tabs, TextArea } from "../../ui/components";
 import { DraftAttachments, pasteHandler } from "./Attachments";
 import { BudgetFields, budgetsCustom, BudgetUsage, DEFAULT_BUDGETS } from "./budgets";
+import { agentDrop, useAgentDrop } from "./dropAttach";
 import { drafts, NEW_TASK_DRAFT, useDraft, useDraftAbout } from "./drafts";
 import { EFFORT_LABELS, environmentText, FILES_LABELS, isActive, PERMISSION_LABELS } from "./format";
 import { ModelMenu } from "./ModelMenu";
@@ -44,6 +52,9 @@ export { DEFAULT_BUDGETS };
 
 /** Why Send is disabled while the task works (typing stays allowed; nothing is queued). */
 export const SEND_WAITS = "You can send when the task stops or asks you something";
+
+/** The field's keyboard hint (its accessible description). */
+export const KEY_HINT = "Enter to send · Shift+Enter for a new line";
 
 /** Why Send is disabled while a question waits and the draft is not about it. */
 export const ANSWER_FIRST = "Answer the question above, or use Chat about it.";
@@ -130,6 +141,12 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
   const [showPath, setShowPath] = useState(false);
   const anchorRef = useRef<HTMLFormElement>(null);
   const closedAt = useRef(0);
+  // Synchronous guard: a second Enter or press arrives before React re-renders.
+  const sending = useRef(false);
+  // This composer as a target for files dropped from the operating system.
+  const zone = useId();
+  const dropping = useAgentDrop((s) => s.zone === zone);
+  useEffect(() => () => agentDrop.leave(zone), [zone, key]);
   // The field takes focus whenever Chat about it is pressed (not when the view mounts).
   const focusedSeq = useRef(about?.seq ?? 0);
   useEffect(() => {
@@ -198,7 +215,16 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
-    if (!canSend || !scope) return;
+    if (!canSend || !scope || sending.current) return;
+    sending.current = true;
+    try {
+      await send(scope);
+    } finally {
+      sending.current = false;
+    }
+  }
+
+  async function send(scope: TaskScope) {
     if (task && about) {
       // One bounded discussion turn; on success the sent text and the About
       // are cleared by `sendDiscussion` (not `completeSend`).
@@ -257,11 +283,20 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
     }
   }
 
-  // Ctrl/Cmd+Enter sends (as in Research); Enter and Shift+Enter are new lines.
+  // Enter sends, as Send does (Ctrl/Cmd+Enter too); Shift+Enter is a new line.
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey) || event.nativeEvent.isComposing) return;
-    if (!(event.target instanceof HTMLTextAreaElement)) return;
+    if (event.key !== "Enter" || !(event.target instanceof HTMLTextAreaElement)) return;
+    // The Enter that confirms an IME composition belongs to the input method.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    const modified = event.ctrlKey || event.metaKey;
+    // Shift+Enter: the field inserts the line break itself (at the caret, replacing a selection).
+    if (!modified && (event.shiftKey || event.altKey)) return;
+    // A control inside the field that already handled this Enter keeps it.
+    if (event.defaultPrevented) return;
+    // No line break; when Send is unavailable nothing happens and the draft stays.
     event.preventDefault();
+    // A held key sends once.
+    if (event.repeat) return;
     void submit();
   };
 
@@ -283,6 +318,9 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
       data-testid="agents-composer"
       data-mode={task ? "follow-up" : "new"}
       data-active={active || undefined}
+      data-agent-drop-zone={zone}
+      data-draft-key={key}
+      data-drop-target={dropping || undefined}
     >
       {above}
       {!task && !providerReady && status && (
@@ -355,6 +393,7 @@ export function Composer({ task, onCreated, boundary, above }: ComposerProps) {
           value={draft.text}
           placeholder={task ? "Reply or give the next instruction" : "Describe what the agent should do in this project."}
           onChange={(text) => drafts.setText(key, text)}
+          description={KEY_HINT}
           testId={task ? "agents-follow-up-text" : "agents-prompt"}
         />
       </div>

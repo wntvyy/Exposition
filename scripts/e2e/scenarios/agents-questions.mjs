@@ -243,7 +243,11 @@ export default async function agentsQuestions({ launchApp, artifactsDir, assert 
     assert.ok(!(await disabled(send)), "Send takes the discussion message");
     await shot(page, "question-chat-about-light");
     await field.fill(DISCUSSION);
-    await send.click();
+    // Shift+Enter is a line break; Enter sends the discussion (as Send does).
+    await field.press("Shift+Enter");
+    assert.equal(await field.inputValue(), `${DISCUSSION}\n`, "Shift+Enter inserts a line break and sends nothing");
+    await field.press("Backspace");
+    await field.press("Enter");
     // The discussion turn: the scripted reply, then the revision with a new option.
     const discussed = await waitFor(
       async () => {
@@ -286,7 +290,8 @@ export default async function agentsQuestions({ launchApp, artifactsDir, assert 
     await card.locator("[data-question-id=q2]").getByText("kJ/mol", { exact: true }).click();
     assert.ok(await card.getByText("2 of 2 answered", { exact: true }).isVisible());
     assert.ok(!(await disabled(sendAnswer)), "complete answers can be sent");
-    await sendAnswer.click();
+    // Enter in an Other answer field sends the complete answer (as Send answer does).
+    await card.locator("[data-question-id=q2]").getByRole("textbox").press("Enter");
     const done = await waitStatus(page, created.id, ["completed"]);
     const answered = done.questions.find((q) => q.id === request.id);
     assert.equal(answered.state.kind, "answered");

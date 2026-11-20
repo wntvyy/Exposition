@@ -69,6 +69,7 @@ const COMMANDS: &[&str] = &[
     "agents_models_list",
     "agents_attachments_pick",
     "agents_attachments_add_bytes",
+    "agents_attachments_add_dropped",
     "agents_attachment_preview",
     "agents_attachments_discard",
     "agents_task_list",

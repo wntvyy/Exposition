@@ -312,7 +312,7 @@ function TaskDetailSections({ id, kept, onKept, boundary }: { id: TaskId; kept: 
 function NewTaskCenter({ boundary }: { boundary: Element | null }) {
   const workspace = useAgents((s) => s.workspace);
   return (
-    <div className="agents-page__task" data-testid="agents-page-compose">
+    <div className="agents-page__task" data-testid="agents-page-compose" data-agent-chat>
       <PageHeader title="New task" className="agents-page__header" />
       <div className="agents-task" data-variant="page">
         <div className="agents-task__scroll">

@@ -2,6 +2,9 @@
 // `ask_user` tool call it belongs to: up to three questions, each an
 // OptionList (nothing preselected; at most one Recommended) with an optional
 // "Other answer…", one Send answer for the whole group, and Chat about it.
+// Enter in an "Other answer…" field sends the answer as Send answer does
+// (same rules, once; never the Enter that confirms an IME composition). The
+// discussion is typed in the composer, which has the same convention.
 //
 // The frame is the approval card's: a shared info Banner ("Needs your
 // answer") with the questions and actions beneath it; an answered or
@@ -41,6 +44,9 @@ import {
   useAnswerInFlight,
   useChatAbout,
 } from "./questions";
+
+/** The keyboard hint of an "Other answer…" field that has text. */
+export const ANSWER_KEY_HINT = "Enter to send the answer";
 
 /** The backend's limit for a custom answer. */
 export const CUSTOM_ANSWER_MAX = 2000;
@@ -208,6 +214,15 @@ export function QuestionCard({ task, request, draftKey, onChatAbout }: QuestionC
                   onChange={(text) => type(q.id, text)}
                   maxLength={CUSTOM_ANSWER_MAX}
                   isDisabled={sent}
+                  description={(custom[q.id] ?? "").trim() ? ANSWER_KEY_HINT : undefined}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" || event.shiftKey || event.altKey) return;
+                    // The Enter that confirms an IME composition belongs to the input method.
+                    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+                    event.preventDefault();
+                    // A held key sends once; `send` applies Send answer's own rules.
+                    if (!event.repeat) void send();
+                  }}
                 />
               )}
             </>

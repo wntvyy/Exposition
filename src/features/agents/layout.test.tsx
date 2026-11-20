@@ -205,8 +205,8 @@ describe("composer Options", () => {
     fireEvent.change(screen.getByTestId("agents-prompt"), { target: { value: "Fit" } });
     openOptions("Budgets");
     fireEvent.change(screen.getByRole("spinbutton", { name: /Commands/ }), { target: { value: "5" } });
-    // Ctrl+Enter sends; Enter alone is a new line.
-    fireEvent.keyDown(screen.getByTestId("agents-prompt"), { key: "Enter" });
+    // Shift+Enter is a new line; Ctrl+Enter sends (as Enter does: composerInput.test.tsx).
+    fireEvent.keyDown(screen.getByTestId("agents-prompt"), { key: "Enter", shiftKey: true });
     expect(ipc.agentsTaskCreate).not.toHaveBeenCalled();
     await act(async () => {
       fireEvent.keyDown(screen.getByTestId("agents-prompt"), { key: "Enter", ctrlKey: true });
