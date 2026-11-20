@@ -314,6 +314,35 @@ fn an_association_decision_that_could_not_be_written_can_be_made_again() {
     assert_eq!(f.lean.recorded.lock().unwrap().len(), 2);
 }
 
+/// WF-4: a plan made for a named revision is a plan of that revision. It
+/// starts exactly what was reviewed even when the workflow was saved again
+/// meanwhile (Run again and Reproduce rely on this); only a plan of "the
+/// latest revision" becomes stale when a newer one is saved.
+#[test]
+fn a_plan_of_a_named_revision_runs_that_revision_after_a_newer_save() {
+    let f = fixture();
+    let id = f.save(numerical(false));
+    let named = f.service.plan(&id, Some(1)).unwrap();
+    let latest = f.service.plan(&id, None).unwrap();
+    assert_eq!(named.approval_hash, latest.approval_hash);
+    let mut def = f.graph.workflow(&id, None).unwrap().definition;
+    def.title = "Numerical experiment v2".into();
+    f.graph
+        .save_workflow(
+            &Origin::User,
+            &SaveWorkflowRequest { id: Some(id.clone()), expected_revision: None, definition: def },
+            &ValidationContext::default(),
+        )
+        .unwrap();
+    let e = f.start_err(latest);
+    assert_eq!(e.code, "workflow.planStale");
+    assert!(e.message.contains("saved again (revision 1 → 2)"), "{}", e.message);
+    let run =
+        f.service.start(&StartWorkflowRunRequest { plan: named.plan, approval_hash: named.approval_hash }).unwrap();
+    assert_eq!(run.revision, 1, "exactly the reviewed revision runs");
+    assert!(f.service.wait_idle(Duration::from_secs(20)));
+}
+
 /// The provider and model a review was asked to run with.
 fn asked_model(request: &ReviewRequest) -> Option<(String, String)> {
     request.model.as_ref().map(|m| (m.provider.clone(), m.model.clone()))
