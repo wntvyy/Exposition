@@ -399,3 +399,32 @@ fn every_registered_parameter_is_read_by_its_runner() {
         }
     }
 }
+
+/// WF-12: a listener that falls behind loses events (the channel keeps the
+/// latest 256), among them a run's final one; the resync events name every
+/// run with its state now, so a view that re-reads on events catches up.
+#[test]
+fn a_listener_that_fell_behind_is_told_every_runs_current_state() {
+    use tokio::sync::broadcast::error::TryRecvError;
+    let f = fixture();
+    let id = f.save(numerical(false));
+    let mut events = f.service.subscribe();
+    let first = f.run_to_end(&id);
+    let mut last = first.id.clone();
+    for _ in 0..60 {
+        last = f.run_to_end(&id).id;
+    }
+    // Nothing was read meanwhile: the oldest events are gone.
+    assert!(matches!(events.try_recv(), Err(TryRecvError::Lagged(_))), "more than 256 events were sent");
+    let mut kept = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        kept.push(event);
+    }
+    assert!(kept.iter().all(|e| e.run != first.id), "the first run's final event was lost");
+    assert!(kept.iter().any(|e| e.run == last && e.state == WorkflowRunState::Succeeded));
+    let resync = f.service.resync_events();
+    let state_of = |run: &WorkflowRunId| resync.iter().find(|e| &e.run == run).map(|e| e.state);
+    assert_eq!(state_of(&first.id), Some(WorkflowRunState::Succeeded), "the lost final state is announced again");
+    assert_eq!(state_of(&last), Some(WorkflowRunState::Succeeded));
+    assert!(resync.iter().all(|e| e.step.is_none() && e.workflow == id));
+}

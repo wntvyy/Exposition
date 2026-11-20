@@ -339,6 +339,25 @@ impl WorkflowRunService {
         self.inner.events.subscribe()
     }
 
+    /// One event per listed run of the open project with its state now, for
+    /// a listener that fell behind and lost events ([`Self::subscribe`]'s
+    /// channel keeps the latest 256): views that re-read a run on its events
+    /// would otherwise keep showing what they read last, for example
+    /// "Running" for a run whose final event was among the lost ones.
+    pub fn resync_events(&self) -> Vec<WorkflowRunEvent> {
+        self.runs(None)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|run| WorkflowRunEvent {
+                run: run.id,
+                workflow: run.workflow,
+                state: run.state,
+                step: None,
+                step_state: None,
+            })
+            .collect()
+    }
+
     fn root(&self) -> Result<PathBuf, WorkflowRunError> {
         self.inner.host.project_root().ok_or_else(no_project)
     }

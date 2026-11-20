@@ -244,14 +244,24 @@ pub fn forward_events(app: AppHandle) {
             }
         }
     });
-    let mut rx = app.state::<AppState>().workflow_runs.subscribe();
+    let runs = app.state::<AppState>().workflow_runs.clone();
+    let mut rx = runs.subscribe();
     tauri::async_runtime::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(event) => {
                     let _ = app.emit(WORKFLOW_RUN_EVENT, &event);
                 }
-                Err(RecvError::Lagged(_)) => continue,
+                // Events were lost: announce every run's current state, so
+                // open run views and histories re-read instead of keeping
+                // what they showed (a run's final event may be among them).
+                Err(RecvError::Lagged(_)) => {
+                    let runs = runs.clone();
+                    let current = tauri::async_runtime::spawn_blocking(move || runs.resync_events()).await;
+                    for event in current.unwrap_or_default() {
+                        let _ = app.emit(WORKFLOW_RUN_EVENT, &event);
+                    }
+                }
                 Err(RecvError::Closed) => break,
             }
         }
