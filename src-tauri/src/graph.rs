@@ -2,9 +2,10 @@
 //!
 //! The webview reads bounded graph projections and proposes typed changes;
 //! every change is validated in Rust (`exposition-graph`), applied as one
-//! graph transaction, and attributed to the user. No SQL, no service-owned
-//! records (evidence, observed relations), and no execution are reachable
-//! from here. Saved views are presentation only.
+//! graph transaction, and attributed to the user. No SQL and no execution
+//! are reachable from here, and service-owned records (evidence, observed
+//! relations) cannot be created or changed: an evidence relationship can
+//! only cite an existing record. Saved views are presentation only.
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -3,8 +3,10 @@
 //!
 //! People (IPC), presets, and agents all use these operations through the
 //! same validator. Service-owned records (formal/computational evidence,
-//! observed relations from indexing) are not expressible here: they enter
-//! only through the owning service's internal API.
+//! observed relations from indexing) cannot be created here: they enter
+//! only through the owning service's internal API. An `evidenceFor`
+//! relation may cite an existing record of its own kind that is about the
+//! relation's source item; that never creates, moves, or relabels a record.
 
 use std::collections::BTreeMap;
 

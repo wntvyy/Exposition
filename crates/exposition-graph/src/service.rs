@@ -511,7 +511,6 @@ impl GraphService {
         state
     }
 
-    /// The attached project folder (not a failed one).
     /// The LaTeX main files the reconciler knows for the attached project,
     /// without waiting for a running pass (then read from the store). Empty
     /// when no graph is attached.
@@ -531,6 +530,7 @@ impl GraphService {
         .unwrap_or_default()
     }
 
+    /// The attached project folder (not a failed one).
     pub(crate) fn attached_root(&self) -> Option<PathBuf> {
         self.lock().open.as_ref().map(|o| o.root.clone())
     }
