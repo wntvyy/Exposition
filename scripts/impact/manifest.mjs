@@ -351,7 +351,7 @@ export const AREAS = [
   },
   {
     id: "release-assets",
-    paths: ["src-tauri/icons/**", "assets/**"],
+    paths: ["src-tauri/icons/**"],
     level: "local",
     e2e: ["smoke"],
     deferred: ["release"],
