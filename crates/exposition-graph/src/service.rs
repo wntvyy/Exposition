@@ -184,6 +184,14 @@ impl GraphService {
         &self.journal
     }
 
+    /// When this session of the service started. Journal records that are
+    /// still pending and older than this were interrupted; newer ones are
+    /// operations this session is running
+    /// ([`OperationJournal::unresolved_before`]).
+    pub fn session_started_at_ms(&self) -> u64 {
+        self.started_at_ms
+    }
+
     pub fn data_dir(&self) -> &Path {
         &self.config.data_dir
     }

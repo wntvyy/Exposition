@@ -611,6 +611,10 @@ fn interrupted_promotions_are_marked_for_reconciliation_on_open_and_attachments_
         .journal()
         .begin(exposition_graph::OperationKind::Promotion, &f.root, None, "interrupted", vec!["attach".into()])
         .unwrap();
+    // Exposition stopped there and is started again: the record belongs to an
+    // earlier session of the graph service (GI-3: a record of the running
+    // session is an operation still in progress, not an interrupted one).
+    restart_session(&f);
     // The document was reverted outside the session (e.g. reloaded from disk).
     f.documents.undo(&doc, EditOrigin::Source).unwrap();
     let state = f.project.load_promotions().unwrap();
@@ -624,6 +628,60 @@ fn interrupted_promotions_are_marked_for_reconciliation_on_open_and_attachments_
     assert!(!tracked.present);
     let PromotionGraphState::Recorded { manuscript, artifact, .. } = &outcome.graph else { panic!() };
     assert!(!relation_exists(&f, RelationKind::UsesAsset, manuscript, artifact));
+}
+
+/// A new session of the graph service for the same data folder has attached
+/// the project once (as a restart of Exposition does); the fixture's own
+/// service then attaches again.
+fn restart_session(f: &Fixture) {
+    f.graph.detach();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let restarted = GraphService::new(GraphConfig { data_dir: f._dir.path().join("data") });
+    assert!(restarted.attach(&f.root).is_usable());
+    restarted.detach();
+    assert!(f.graph.attach(&f.root).is_usable());
+}
+
+/// GI-3: opening a project labels operations an earlier session left
+/// pending; an operation this session is still running stays pending.
+#[test]
+fn an_operation_still_running_in_this_session_is_not_labelled_interrupted_on_open() {
+    let f = fixture();
+    let journal = f.graph.journal();
+    let running = journal
+        .begin(exposition_graph::OperationKind::ProjectCreation, &f.root, None, "creating", vec!["graph".into()])
+        .unwrap();
+    let promoting = journal
+        .begin(exposition_graph::OperationKind::Promotion, &f.root, None, "promoting", vec!["attach".into()])
+        .unwrap();
+    let state = f.project.load_promotions().unwrap();
+    for id in [&running.id, &promoting.id] {
+        assert_eq!(journal.get(&f.root, id).unwrap().state, OperationState::Pending, "still running");
+    }
+    assert!(state.unresolved.iter().any(|r| r.id == promoting.id && r.state == OperationState::Pending));
+    // The operation finishes normally afterwards.
+    assert_eq!(journal.complete(&f.root, &running.id).unwrap().state, OperationState::Completed);
+
+    // A later session (Exposition restarted) labels what is still pending,
+    // also when research reads the journal before the graph is attached.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let later = GraphService::new(GraphConfig { data_dir: f._dir.path().join("data") });
+    let research = Arc::new(ResearchService::new(ResearchConfig::new(
+        f._dir.path().join("data"),
+        Arc::new(NoLauncher),
+        f.documents.clone(),
+    )));
+    research.set_workspace(&f.root, true).unwrap();
+    let reopened = ResearchProject::new(later, research, f.documents.clone());
+    let state = reopened.load_promotions().unwrap();
+    assert!(
+        state
+            .unresolved
+            .iter()
+            .any(|r| r.id == promoting.id && matches!(r.state, OperationState::NeedsReconciliation { .. })),
+        "{:?}",
+        state.unresolved
+    );
 }
 
 #[test]
