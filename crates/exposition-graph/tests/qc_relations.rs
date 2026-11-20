@@ -264,8 +264,73 @@ fn a_stored_relation_that_breaks_the_citation_rule_is_kept_and_not_read_as_evide
     assert!(detail.outgoing.iter().chain(detail.incoming.iter()).all(|r| r.evidence == vec![e.clone()]));
     assert!(detail.evidence.is_empty(), "{:?}", detail.evidence);
     assert!(evidence_ids(&svc, p).is_empty());
+    assert!(detail.cited_evidence.is_empty(), "{:?}", detail.cited_evidence);
+    assert!(cited_ids(&svc, p).is_empty());
     let impact = svc.impact(&ImpactRequest { entities: vec![t.clone()], max_depth: None, max_items: None }).unwrap();
     assert!(impact.evidence.is_empty(), "{:?}", impact.evidence);
+}
+
+fn cited_ids(svc: &GraphService, entity: &EntityId) -> Vec<EvidenceId> {
+    svc.entity_detail(entity).unwrap().cited_evidence.into_iter().map(|e| e.id).collect()
+}
+
+/// Review finding 1: the records a standing `evidenceFor` relation cites are
+/// returned with both of its ends, apart from each end's own evidence, by
+/// the rule impact reads; a rejected or rule-breaking citation shows nothing.
+#[test]
+fn records_cited_by_an_evidence_relation_are_returned_apart_from_own_evidence() {
+    let (_d, _p, svc) = service();
+    let ids = created(&svc, vec![create("t", EntityKind::Theorem, "T"), create("p", EntityKind::Proof, "P")]);
+    let (t, p) = (&ids[0], &ids[1]);
+    let (d, e) = declaration_with_evidence(&svc, "Demo.main");
+    let agents = Origin::Service { service: "agents".into() };
+    let review = svc.register_evidence(&agents, record(EvidenceKind::Review, None, &agents)).unwrap();
+    applied(
+        &svc,
+        agent("task-1"),
+        vec![relation(RelationKind::EvidenceFor, &d, t, Some(EvidenceKind::FormalCheck), &[&e])],
+    );
+    applied(
+        &svc,
+        Origin::User,
+        vec![relation(RelationKind::EvidenceFor, p, t, Some(EvidenceKind::Review), &[&review])],
+    );
+
+    let detail = svc.entity_detail(t).unwrap();
+    assert!(detail.evidence.is_empty(), "cited records are not the theorem's own");
+    let mut cited: Vec<EvidenceId> = detail.cited_evidence.iter().map(|c| c.id.clone()).collect();
+    cited.sort();
+    let mut expected = vec![e.clone(), review.clone()];
+    expected.sort();
+    assert_eq!(cited, expected);
+    // Each cited record has its freshness, like an own record.
+    for id in &expected {
+        assert!(detail.evidence_freshness.iter().any(|(f, _)| f == id), "{id}");
+    }
+    // The citing end shows the record too; a record about the item itself
+    // is its own evidence and is not repeated as cited.
+    assert_eq!(cited_ids(&svc, p), vec![review.clone()]);
+    assert_eq!(evidence_ids(&svc, &d), vec![e.clone()]);
+    assert!(cited_ids(&svc, &d).is_empty());
+    // The same records impact names for the theorem.
+    let impact = |of: &EntityId| {
+        let report =
+            svc.impact(&ImpactRequest { entities: vec![of.clone()], max_depth: None, max_items: None }).unwrap();
+        let mut ids: Vec<EvidenceId> = report.evidence.into_iter().map(|i| i.evidence).collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(impact(t), expected);
+
+    // Rejected: neither the inspector's list nor impact reads the citation.
+    let link = detail.incoming.into_iter().find(|r| r.from == d).unwrap();
+    applied(
+        &svc,
+        Origin::User,
+        vec![GraphOperation::SetRelationStatus { relation: link.id, status: AssertionStatus::Rejected }],
+    );
+    assert_eq!(cited_ids(&svc, t), vec![review.clone()]);
+    assert_eq!(impact(t), vec![review]);
 }
 
 /// RL-2: a relation followed in both directions is not a cycle, nor is a

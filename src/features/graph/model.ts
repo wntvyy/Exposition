@@ -364,6 +364,16 @@ export const BINDING_BADGE_LABEL: Record<Exclude<BindingState, "resolved">, stri
   unresolved: "Unresolved binding",
 };
 
+/**
+ * Records that an "is evidence for" relationship of an item cites
+ * (`EntityDetail.citedEvidence`): shown under the item's evidence as cited
+ * support, in these words everywhere, never as evidence recorded about it.
+ */
+export const CITED_EVIDENCE = {
+  title: "Cited by a relationship",
+  note: "Cited as support by an “is evidence for” relationship of this item. These records are not recorded about it.",
+} as const;
+
 /** The kind of an evidence record ("Formal check", "Computational", ...). */
 export function evidenceKindLabel(kind: EvidenceKind): string {
   return kind === "formalCheck" ? "Formal check" : kind.charAt(0).toUpperCase() + kind.slice(1);

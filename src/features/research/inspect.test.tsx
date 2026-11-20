@@ -108,7 +108,21 @@ describe("GraphDependencies", () => {
           environment: [],
         },
       ],
-      evidenceFreshness: [["ev-1", { kind: "current" }]],
+      citedEvidence: [
+        {
+          id: "ev-2",
+          kind: "review",
+          operation: { kind: "agentTask", id: "task-9" },
+          outcome: { kind: "succeeded" },
+          inputs: [],
+          outputs: [],
+          environment: [],
+        },
+      ],
+      evidenceFreshness: [
+        ["ev-1", { kind: "current" }],
+        ["ev-2", { kind: "stale", reasons: ["obs.csv changed"] }],
+      ],
       graphRevision: 7,
     } as unknown as EntityDetail;
     graph.entity.mockResolvedValue(detail);
@@ -124,7 +138,17 @@ describe("GraphDependencies", () => {
     expect(badge.textContent).toBe("Suggested");
     expect(badge.hasAttribute("data-dashed")).toBe(true);
 
-    const evidence = screen.getByTestId("graph-evidence");
+    // Review finding 1: a record a relationship cites is listed apart, as
+    // cited support with its own freshness; the count is the item's own evidence.
+    expect(screen.getByRole("heading", { name: "Evidence 1" })).toBeTruthy();
+    const [evidence, citedRecord] = screen.getAllByTestId("graph-evidence") as [HTMLElement, HTMLElement];
+    const cited = screen.getByTestId("graph-cited-evidence");
+    expect(cited.contains(evidence)).toBe(false);
+    expect(cited.contains(citedRecord)).toBe(true);
+    expect(citedRecord.getAttribute("data-freshness")).toBe("stale");
+    expect(citedRecord.textContent).toContain("task-9");
+    expect(screen.getByRole("heading", { name: "Cited by a relationship" })).toBeTruthy();
+    expect(screen.getByText(/These records are not recorded about it\./)).toBeTruthy();
     expect(evidence.getAttribute("data-freshness")).toBe("current");
     const fresh = within(evidence).getByText("Current").closest(".ui-status-text")!;
     expect(fresh.getAttribute("data-status")).toBe("idle");

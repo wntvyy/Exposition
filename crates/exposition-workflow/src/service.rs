@@ -129,8 +129,29 @@ pub(crate) struct Inner {
 
 impl Inner {
     /// Write a run through and announce the change.
+    ///
+    /// `run` is the newest record of its id. A final record still waiting in
+    /// `unwritten` is therefore superseded: dropped once the store took this
+    /// one, replaced by it when the store did not, so that a later flush
+    /// never writes the older copy over a newer stored record. The waiting
+    /// records stay locked across the write (same order as
+    /// [`Self::flush_unwritten`]) so that no flush runs in between.
     pub(crate) fn persist(&self, key: &str, run: &WorkflowRun, step: Option<&str>) -> Result<(), WorkflowRunError> {
-        let result = self.store.lock().unwrap_or_else(|p| p.into_inner()).put(key, run);
+        let result = {
+            let mut pending = self.unwritten.lock().unwrap_or_else(|p| p.into_inner());
+            let result = self.store.lock().unwrap_or_else(|p| p.into_inner()).put(key, run);
+            match &result {
+                Ok(()) => {
+                    pending.remove(&run.id);
+                }
+                Err(_) => {
+                    if let Some(parked) = pending.get_mut(&run.id) {
+                        *parked = (key.to_owned(), run.clone());
+                    }
+                }
+            }
+            result
+        };
         let step_state = step.and_then(|s| run.steps.iter().find(|x| x.step == s)).map(|s| s.state);
         let _ = self.events.send(WorkflowRunEvent {
             run: run.id.clone(),
@@ -146,9 +167,10 @@ impl Inner {
     /// durable: the whole record (tried again briefly when the store is
     /// busy); when the store refuses it as it is (too large), the record
     /// without its attempt logs and the reviewed text of code inputs, which
-    /// says so; and when the store accepts neither, the record is kept for
-    /// this session and written by the next read that finds the store
-    /// working ([`Self::flush_unwritten`]). Announces the state once.
+    /// says so; and when the store does not take it (any other failure, or
+    /// the reduced record refused too), the whole record is kept for this
+    /// session and written by the next read that finds the store working
+    /// ([`Self::flush_unwritten`]). Announces the state once.
     pub(crate) fn persist_terminal(&self, key: &str, run: &mut WorkflowRun) {
         let put = |record: &WorkflowRun| self.store.lock().unwrap_or_else(|p| p.into_inner()).put(key, record);
         let mut result = put(run);
@@ -161,13 +183,20 @@ impl Inner {
             result = put(run);
         }
         if let Err(whole) = result {
-            let reduced = reduced_record(run, &whole.message);
-            match put(&reduced) {
-                Ok(()) => {
+            // Only a record refused for its size is cut down; a store that
+            // failed for another reason gets the whole record later.
+            let reduced = (whole.code == "workflow.tooLarge").then(|| reduced_record(run, &whole.message));
+            let stored = match &reduced {
+                Some(reduced) => put(reduced),
+                None => Err(whole.clone()),
+            };
+            match (stored, reduced) {
+                (Ok(()), Some(reduced)) => {
                     tracing::warn!("workflow run {} was recorded without its logs: {}", run.id, whole.message);
                     *run = reduced;
                 }
-                Err(e) => {
+                (Ok(()), None) => {}
+                (Err(e), _) => {
                     tracing::error!(
                         "the final record of workflow run {} ({:?}) could not be written: {}",
                         run.id,
@@ -205,8 +234,12 @@ impl Inner {
         self.unwritten.lock().unwrap_or_else(|p| p.into_inner()).get(id).cloned()
     }
 
-    /// A stored run of any project (the seed basis of a reproduction).
+    /// A stored run of any project (the seed basis of a reproduction): as
+    /// it ended when its final record is still waiting to be written.
     pub(crate) fn stored_run(&self, id: &WorkflowRunId) -> Option<WorkflowRun> {
+        if let Some((_, run)) = self.unwritten_run(id) {
+            return Some(run);
+        }
         self.store.lock().unwrap_or_else(|p| p.into_inner()).get(id).ok().flatten().map(|(_, run)| run)
     }
 
@@ -217,7 +250,12 @@ impl Inner {
     /// The runner thread stopped without finishing the run: record it as
     /// failed (in-flight attempts interrupted; nothing repeated) and release it.
     pub(crate) fn abandoned(&self, key: &str, id: &WorkflowRunId) {
-        let found = self.store.lock().unwrap_or_else(|p| p.into_inner()).get(id);
+        // A run whose final record waits to be written did end: the stored
+        // "running" row is not its state.
+        let found = match self.unwritten_run(id) {
+            Some(_) => Ok(None),
+            None => self.store.lock().unwrap_or_else(|p| p.into_inner()).get(id),
+        };
         if let Ok(Some((_, mut run))) = found
             && run.state == WorkflowRunState::Running
         {
@@ -269,6 +307,14 @@ fn no_project() -> WorkflowRunError {
 
 fn unknown_run() -> WorkflowRunError {
     WorkflowRunError::new("workflow.unknownRun", "That workflow run does not exist in this project.")
+}
+
+#[cfg(test)]
+impl WorkflowRunService {
+    /// The service internals (final-record handling is exercised directly).
+    pub(crate) fn inner(&self) -> &Inner {
+        &self.inner
+    }
 }
 
 impl WorkflowRunService {

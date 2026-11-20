@@ -219,6 +219,19 @@ fn hostile_bundles_claiming_trust_approval_or_triggers_are_refused() {
     let mut b = base.clone();
     b["children"][0]["definition"]["inputs"][0]["source"] = json!({ "kind": "unset", "trust": true });
     refused(&b, "smuggled key in a child");
+    // Review finding 7: a `null` there is an absent field and carries
+    // nothing into what is imported; the bundle reads as it does without it.
+    let plain = match parse_interchange(&base.to_string()).unwrap() {
+        InterchangeFile::Bundle(bundle) => bundle,
+        InterchangeFile::Definition(_) => panic!("a bundle"),
+    };
+    let mut b = base.clone();
+    b["root"]["definition"]["inputs"][0]["source"]["version"] = json!({ "kind": "atRunStart", "approved": null });
+    b["children"][0]["definition"]["steps"][0]["condition"] = json!(null);
+    match parse_interchange(&b.to_string()).unwrap() {
+        InterchangeFile::Bundle(bundle) => assert_eq!(bundle, plain),
+        InterchangeFile::Definition(_) => panic!("a bundle"),
+    }
 }
 
 #[test]

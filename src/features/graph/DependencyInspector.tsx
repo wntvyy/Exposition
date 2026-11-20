@@ -9,6 +9,7 @@ import { Network, Sigma } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type { Entity } from "../../bindings/Entity";
+import type { Evidence } from "../../bindings/Evidence";
 import type { InspectedEntity } from "../../bindings/InspectedEntity";
 import type { Relation } from "../../bindings/Relation";
 import type { SourceInspection } from "../../bindings/SourceInspection";
@@ -18,7 +19,7 @@ import { useWorkspace } from "../workspace/store";
 import { graphApi } from "./api";
 import { evidenceKindLabel, FormalEvidencePointer, OutcomeText, RelationStatus, TypeLabel } from "./Inspector";
 import { RelationLine } from "./RelationStatus";
-import { BINDING_BADGE_LABEL, entityDisplay, FAMILY_LABELS, FAMILY_ORDER, freshnessView, kindDisplay, LIFECYCLE_LABEL, relationDisplay, type VocabularyIndex } from "./model";
+import { BINDING_BADGE_LABEL, CITED_EVIDENCE, entityDisplay, FAMILY_LABELS, FAMILY_ORDER, freshnessView, kindDisplay, LIFECYCLE_LABEL, relationDisplay, type VocabularyIndex } from "./model";
 import { openInGraph } from "./navigation";
 import { coverageStateLabel, FreshnessPill } from "./status";
 import "./graph.css";
@@ -107,32 +108,47 @@ function EvidenceSummary({ entityId }: { entityId: string }) {
   const loaded = useGraphLoad(`deps-evidence:${entityId}`, () => graphApi().entity(entityId));
   const detail = loaded.data;
   if (!detail) return null;
+  const row = (ev: Evidence) => {
+    const fresh = freshnessView(detail.evidenceFreshness.find(([id]) => id === ev.id)?.[1] ?? null);
+    return (
+      <li key={ev.id} className="xp-graph-row">
+        <p className="xp-graph-row__line xp-graph-inline">
+          <span>{evidenceKindLabel(ev.kind)}</span>
+          {ev.outcome.kind === "verdict" && <OutcomeText outcome={ev.outcome} />}
+          <StatusText status={fresh.status} label={fresh.label} />
+        </p>
+      </li>
+    );
+  };
+  // What a relationship of the item cites: support, apart from its own evidence.
+  const cited = detail.citedEvidence.length > 0 && (
+    <div className="xp-graph-group">
+      <h4 className="ui-group-label">{CITED_EVIDENCE.title}</h4>
+      <p className="ui-meta">{CITED_EVIDENCE.note}</p>
+      <ul className="xp-graph-rows" data-testid="deps-cited-evidence" aria-label={CITED_EVIDENCE.title}>
+        {detail.citedEvidence.map(row)}
+      </ul>
+    </div>
+  );
   if (detail.evidence.length === 0) {
     return (
       <>
         <p className="ui-muted" data-testid="deps-evidence">No evidence recorded for this item.</p>
         <FormalEvidencePointer detail={detail} />
+        {cited}
       </>
     );
   }
   return (
-    <div className="xp-graph-group">
-      <h4 className="ui-group-label">Evidence</h4>
-      <ul className="xp-graph-rows" data-testid="deps-evidence" aria-label="Evidence">
-        {detail.evidence.map((ev) => {
-          const fresh = freshnessView(detail.evidenceFreshness.find(([id]) => id === ev.id)?.[1] ?? null);
-          return (
-            <li key={ev.id} className="xp-graph-row">
-              <p className="xp-graph-row__line xp-graph-inline">
-                <span>{evidenceKindLabel(ev.kind)}</span>
-                {ev.outcome.kind === "verdict" && <OutcomeText outcome={ev.outcome} />}
-                <StatusText status={fresh.status} label={fresh.label} />
-              </p>
-            </li>
-          );
-        })}
-      </ul>
-    </div>
+    <>
+      <div className="xp-graph-group">
+        <h4 className="ui-group-label">Evidence</h4>
+        <ul className="xp-graph-rows" data-testid="deps-evidence" aria-label="Evidence">
+          {detail.evidence.map(row)}
+        </ul>
+      </div>
+      {cited}
+    </>
   );
 }
 

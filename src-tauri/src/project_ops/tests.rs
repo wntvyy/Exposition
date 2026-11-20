@@ -1156,6 +1156,7 @@ mod source_items {
             incoming,
             neighbors,
             evidence: Vec::new(),
+            cited_evidence: Vec::new(),
             evidence_freshness: Vec::new(),
             imported_evidence: Vec::new(),
             coverage: None,

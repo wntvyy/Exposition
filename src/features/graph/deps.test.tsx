@@ -1,6 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { Evidence } from "../../bindings/Evidence";
+
 // The editor and workspace modules pull in Monaco and Tauri; the inspector only
 // needs the caret position and whether a folder is open.
 const position = vi.hoisted(() => ({ current: { path: "paper.tex", offset: 12, line: 2, revision: 3, dirty: false, fromEditor: true } as unknown }));
@@ -54,6 +56,39 @@ describe("Dependency inspector", () => {
     fireEvent.click(within(item).getByRole("button", { name: "Open in Mathematics" }));
     expect(useGraphPage.getState().section).toBe("mathematics");
     expect(useGraphNavigation.getState().request).toMatchObject({ section: "mathematics", entity: "thm" });
+  });
+
+  it("lists records a relationship cites as cited support under the item's evidence", async () => {
+    // Review finding 1: the theorem has no evidence of its own; a relationship cites one record.
+    const fake = createFakeGraph({
+      entities: [entity("thm", "theorem", "Main theorem", { attributes: { path: "paper.tex" } }), entity("doc", "resource", "paper.tex", { roles: ["manuscript"], key: "paper.tex" })],
+      relations: [],
+    });
+    const record: Evidence = {
+      id: "ev-1",
+      kind: "review",
+      subject: null,
+      operation: { kind: "agentTask", id: "task-1" },
+      inputs: [],
+      outcome: { kind: "succeeded" },
+      environment: [],
+      outputs: [],
+      formal: null,
+      recordedBy: { kind: "service", service: "agents" },
+      recordedAtMs: 1,
+    };
+    setGraphApi({
+      ...fake.api,
+      entity: async (id) => ({ ...(await fake.api.entity(id)), citedEvidence: [record], evidenceFreshness: [[record.id, { kind: "unknown", reason: "no fingerprints" }]] }),
+    });
+    render(<DependencyInspector />);
+    const cited = await screen.findByTestId("deps-cited-evidence", {}, { timeout: 3000 });
+    expect(screen.getByTestId("deps-evidence").textContent).toBe("No evidence recorded for this item.");
+    expect(screen.getByText("Cited by a relationship")).toBeTruthy();
+    expect(screen.getByText(/These records are not recorded about it\./)).toBeTruthy();
+    expect(within(cited).getAllByRole("listitem")).toHaveLength(1);
+    expect(cited.textContent).toContain("Review");
+    expect(within(cited).getByText("Unknown")).toBeTruthy();
   });
 
   it("says when nothing is bound at the caret", async () => {
