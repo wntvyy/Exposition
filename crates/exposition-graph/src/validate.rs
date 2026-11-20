@@ -652,6 +652,23 @@ fn add_relation(
         );
         return Ok(());
     }
+    // A rejected relationship is a person's decision, kept so that it is not
+    // proposed again: an agent cannot replace it. A person (or a preset or
+    // service acting for one) can assert it after all, which continues the
+    // same record.
+    if existing.is_some() && matches!(cx.origin, Origin::Agent { .. }) {
+        cx.err(
+            i,
+            "graph.rejected",
+            format!(
+                "the user rejected “{}” {} “{}”; only the user can add it again",
+                from.label,
+                kind.reading(),
+                to.label
+            ),
+        );
+        return Ok(());
+    }
     if kind == RelationKind::Contains {
         if cx.pending_contained.contains(&to.id) || cx.w.container_of(&to.id)?.is_some() {
             cx.err(i, "graph.alreadyContained", format!("“{}” already has a container", to.label));
@@ -673,6 +690,10 @@ fn add_relation(
         to.label
     ));
     if cx.apply {
+        // Asserting a rejected relationship again continues its record: the
+        // revision only moves forward and the creation time is kept.
+        let (revision, created_at_ms) =
+            existing.as_ref().map(|e| (e.revision.saturating_add(1), e.created_at_ms)).unwrap_or((1, now));
         let relation = Relation {
             id: existing.map(|e| e.id).unwrap_or_else(RelationId::mint),
             kind,
@@ -692,8 +713,8 @@ fn add_relation(
                 None
             },
             review: None,
-            revision: 1,
-            created_at_ms: now,
+            revision,
+            created_at_ms,
             updated_at_ms: now,
         };
         cx.w.put_relation(&relation)?;

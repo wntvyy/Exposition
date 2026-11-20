@@ -325,3 +325,43 @@ fn impact_reports_only_real_cycles() {
     let report = impact(&[p]);
     assert_eq!(report.cycles.len(), 1, "{:?}", report.cycles);
 }
+
+/// RL-3: a person's rejection is durable against agents, and a relation's
+/// revision never goes backwards.
+#[test]
+fn a_rejected_relation_is_not_replaced_by_an_agent_and_its_revision_never_decreases() {
+    let (_d, _p, svc) = service();
+    let ids = created(&svc, vec![create("t", EntityKind::Theorem, "T"), create("l", EntityKind::Lemma, "L")]);
+    let (t, l) = (&ids[0], &ids[1]);
+    applied(&svc, agent("task-a"), vec![plain(RelationKind::DependsOn, t, l)]);
+    let row =
+        || svc.entity_detail(t).unwrap().outgoing.into_iter().find(|r| r.kind == RelationKind::DependsOn).unwrap();
+    let suggested = row();
+    applied(
+        &svc,
+        Origin::User,
+        vec![GraphOperation::SetRelationStatus { relation: suggested.id.clone(), status: AssertionStatus::Rejected }],
+    );
+    let rejected = row();
+    assert_eq!(rejected.status, AssertionStatus::Rejected);
+    assert!(rejected.revision > suggested.revision);
+
+    // The same task, or another one, proposing it again is refused.
+    for task in ["task-a", "task-b"] {
+        assert_eq!(refused(&svc, agent(task), plain(RelationKind::DependsOn, t, l)), "graph.rejected", "{task}");
+    }
+    assert_eq!(row(), rejected, "the rejected record is unchanged");
+    // Nor can an agent withdraw the record of the rejection.
+    assert_eq!(
+        refused(&svc, agent("task-a"), GraphOperation::RemoveRelation { relation: rejected.id.clone() }),
+        "graph.reviewOnly"
+    );
+
+    // The person can assert it after all: the same record, a later revision.
+    applied(&svc, Origin::User, vec![plain(RelationKind::DependsOn, t, l)]);
+    let accepted = row();
+    assert_eq!(accepted.id, rejected.id);
+    assert_eq!((accepted.status, &accepted.origin), (AssertionStatus::Accepted, &Origin::User));
+    assert!(accepted.revision > rejected.revision, "{} → {}", rejected.revision, accepted.revision);
+    assert_eq!(accepted.created_at_ms, rejected.created_at_ms);
+}
