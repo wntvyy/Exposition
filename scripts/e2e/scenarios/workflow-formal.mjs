@@ -20,6 +20,7 @@ import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { runCommand } from "../palette.mjs";
 import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const TOOLCHAIN_DIR = "leanprover--lean4---v4.35.0";
@@ -131,6 +132,29 @@ export default async function workflowFormal({ launchApp, artifactsDir, assert, 
       "decision-records-only-accepted-evidence",
       decidedValue?.status === "accepted" && afterDecide.some((l) => /clean/.test(l)) && !afterDecide.some((l) => /usesAx/.test(l)),
       { status: decidedValue?.status, afterDecide },
+    );
+    // The run monitor shows the stored verdicts in the Lean view's words (QC UI-1);
+    // the stored labels stay in the data.
+    await runCommand(page, "Show Workflows", /Show Workflows/);
+    await page.getByTestId("workflows-view").waitFor({ timeout: 15_000 });
+    await page.getByTestId(`workflow-run-item-${run.id}`).first().getByRole("button", { name: /^Open run/ }).click();
+    const monitor = page.locator(`[data-testid="workflow-run"][data-run="${run.id}"]`);
+    await monitor.waitFor({ timeout: 15_000 });
+    const audited = monitor.getByRole("list", { name: "Audited declarations" }).first();
+    await audited.waitFor({ timeout: 15_000 });
+    const auditedText = await audited.innerText();
+    const checklist = monitor.getByTestId("workflow-association-checklist").first();
+    const checklistText = await checklist.innerText();
+    const storedAttr = await checklist.locator('[data-declaration="LeanBasic.usesAx"]').getAttribute("data-verdict");
+    note(
+      "run-monitor-shows-lean-verdict-words",
+      /Checked with axioms/.test(auditedText) &&
+        /Incomplete \(sorry\)/.test(auditedText) &&
+        !/nonstandard|Unverified/.test(auditedText + checklistText) &&
+        /Checked with axioms/.test(checklistText) &&
+        storedAttr === verdict("usesAx") &&
+        /nonstandard/.test(storedAttr ?? ""),
+      { auditedText, checklistText, storedAttr },
     );
     await page.screenshot({ path: join(artifactsDir, "workflow-formal-decided.png") }).catch(() => {});
 
