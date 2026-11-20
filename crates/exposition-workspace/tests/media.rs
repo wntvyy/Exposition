@@ -94,7 +94,7 @@ fn refuses_images_over_the_cap_unread() {
     drop(big);
     let error = f.service.read_image(&wp("big.png")).unwrap_err();
     assert_eq!(error.code, "image.tooLarge");
-    assert!(error.message.contains("32 MB"), "{}", error.message);
+    assert!(error.message.contains("32 MiB"), "{}", error.message);
     // Exactly at the cap is read.
     let edge = fs::File::create(f.file("edge.png")).unwrap();
     edge.set_len(MAX_IMAGE_BYTES).unwrap();

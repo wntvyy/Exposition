@@ -93,7 +93,7 @@ impl WorkspaceService {
                 WorkspaceError::new(
                     "image.tooLarge",
                     format!(
-                        "{path} is {} MB; images up to {} MB are shown.",
+                        "{path} is {} MiB; images up to {} MiB are shown.",
                         size / (1024 * 1024),
                         MAX_IMAGE_BYTES / (1024 * 1024)
                     ),
@@ -122,7 +122,7 @@ impl WorkspaceService {
                 WorkspaceError::new(
                     "pdf.tooLarge",
                     format!(
-                        "{path} is {} MB; PDF files up to {} MB are shown.",
+                        "{path} is {} MiB; PDF files up to {} MiB are shown.",
                         size / (1024 * 1024),
                         MAX_PDF_BYTES / (1024 * 1024)
                     ),

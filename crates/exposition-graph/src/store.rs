@@ -405,7 +405,7 @@ impl GraphStore {
             && meta.len() > MAX_DATABASE_BYTES
         {
             return Err(StoreError::Untrusted(format!(
-                "the file is {} MB; graphs larger than {} MB are not opened",
+                "the file is {} MiB; graphs larger than {} MiB are not opened",
                 meta.len() / 1_048_576,
                 MAX_DATABASE_BYTES / 1_048_576
             )));

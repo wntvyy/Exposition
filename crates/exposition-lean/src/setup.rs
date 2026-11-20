@@ -1613,7 +1613,7 @@ pub fn build_plan(context: &PlanContext<'_>, request: &LeanSetupRequest) -> Resu
             let Some(lakefile_digest) = inspection.lakefile_digest.clone() else {
                 return Err(refused(
                     "invalidLakefile",
-                    format!("{lakefile} in {shown} could not be read (it is not a regular file of at most 1 MB)."),
+                    format!("{lakefile} in {shown} could not be read (it is not a regular file of at most 1 MiB)."),
                 ));
             };
             let pinned_by_manifest = inspection.manifest_digest.is_some();

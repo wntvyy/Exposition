@@ -290,7 +290,7 @@ fn too_large(path: &WorkspacePath, size: u64) -> WorkspaceError {
     WorkspaceError::new(
         "file.tooLarge",
         format!(
-            "{path} is {:.1} MB; Exposition opens text files up to {} MB.",
+            "{path} is {:.1} MiB; Exposition opens text files up to {} MiB.",
             size as f64 / 1_048_576.0,
             MAX_TEXT_BYTES / 1_048_576
         ),
@@ -890,7 +890,7 @@ impl WorkspaceService {
             SaveRefusal::TooLarge { size } => WorkspaceError::new(
                 "file.tooLarge",
                 format!(
-                    "{path} would be {:.1} MB; Exposition saves and opens text files up to {} MB. Your changes are kept in the editor.",
+                    "{path} would be {:.1} MiB; Exposition saves and opens text files up to {} MiB. Your changes are kept in the editor.",
                     size as f64 / 1_048_576.0,
                     MAX_TEXT_BYTES / 1_048_576
                 ),
@@ -977,7 +977,7 @@ impl WorkspaceService {
             SaveRefusal::TooLarge { size } => WorkspaceError::new(
                 "file.tooLarge",
                 format!(
-                    "The copy would be {:.1} MB; Exposition saves text files up to {} MB.",
+                    "The copy would be {:.1} MiB; Exposition saves text files up to {} MiB.",
                     size as f64 / 1_048_576.0,
                     MAX_TEXT_BYTES / 1_048_576
                 ),

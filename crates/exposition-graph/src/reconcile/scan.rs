@@ -189,7 +189,7 @@ pub fn read_file(root: &Path, path: &WorkspacePath, size: u64, want_text: bool) 
     let abs = absolute(root, path);
     let mut out = FileContent { identity: identity_key(&abs), ..Default::default() };
     if size > MAX_HASH_BYTES {
-        out.problem = Some(format!("{:.0} MB is too large to fingerprint", size as f64 / 1_048_576.0));
+        out.problem = Some(format!("{:.0} MiB is too large to fingerprint", size as f64 / 1_048_576.0));
         return out;
     }
     let mut file = match std::fs::File::open(&abs) {
@@ -212,7 +212,7 @@ pub fn read_file(root: &Path, path: &WorkspacePath, size: u64, want_text: bool) 
     if want_text {
         if bytes.len() > super::extract::MAX_EXTRACT_BYTES {
             out.problem = Some(format!(
-                "{:.1} MB is larger than the {} MB indexing limit",
+                "{:.1} MiB is larger than the {} MiB indexing limit",
                 bytes.len() as f64 / 1_048_576.0,
                 super::extract::MAX_EXTRACT_BYTES / 1_048_576
             ));
