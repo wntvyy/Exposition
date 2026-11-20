@@ -57,6 +57,19 @@ export function parentOf(path: string): string | null {
   return m && m[1] ? m[1] : null;
 }
 
+/** The name of a preset's optional workflow draft, as the page calls it. */
+export const workflowDraftTitle = (preset: ProjectPresetInfo) => (preset.workflow === "formalAudit" ? "Formal audit" : "Numerical experiment");
+
+/**
+ * Why the preset's workflow draft is not created with the selected research
+ * runtime (null: it is created when chosen). Rust decides which runtime a
+ * draft exists for (`ProjectPresetInfo.workflowRuntime`); the page only says so.
+ */
+export function workflowDraftBlock(preset: ProjectPresetInfo, runtime: ResearchRuntime): string | null {
+  if (!preset.workflow || !preset.computation || !preset.workflowRuntime || preset.workflowRuntime === runtime) return null;
+  return `The ${workflowDraftTitle(preset)} draft is a ${RUNTIME_LABELS[preset.workflowRuntime]} workflow, so a project with the ${RUNTIME_LABELS[runtime]} runtime is created without one.`;
+}
+
 /** The request for a preset with the page's options. */
 export function presetRequest(
   preset: ProjectPresetInfo,
@@ -74,7 +87,7 @@ export function presetRequest(
     format: preset.manuscript ? options.format : null,
     runtime: preset.computation ? options.runtime : null,
     leanToolchain: preset.lean ? options.leanToolchain : null,
-    includeWorkflow: options.includeWorkflow && preset.workflow !== null,
+    includeWorkflow: options.includeWorkflow && preset.workflow !== null && workflowDraftBlock(preset, options.runtime) === null,
     purpose: null,
   };
 }

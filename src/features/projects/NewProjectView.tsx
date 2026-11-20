@@ -5,7 +5,7 @@
 // no installs, nothing sent to a model (the objective path's agent task
 // follows the provider settings and the permission chosen here).
 import { FolderOpen, FolderPlus, Sparkles } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useId } from "react";
 
 import type { BlueprintDiagnostic } from "../../bindings/BlueprintDiagnostic";
 import type { CapabilityStatus } from "../../bindings/CapabilityStatus";
@@ -25,7 +25,7 @@ import {
   TextField,
 } from "../../ui/components";
 import { EXECUTION_LABELS, PERMISSION_LABELS } from "../agents/format";
-import { declaredCapabilities, FORMAT_LABELS, RUNTIME_LABELS } from "./model";
+import { declaredCapabilities, FORMAT_LABELS, RUNTIME_LABELS, workflowDraftBlock, workflowDraftTitle } from "./model";
 import {
   browseLocation,
   createFromObjective,
@@ -215,6 +215,7 @@ function PresetForm() {
   const runtime = useProjects((s) => s.runtime);
   const leanToolchain = useProjects((s) => effectiveLeanToolchain(s));
   const includeWorkflow = useProjects((s) => s.includeWorkflow);
+  const workflowBlockId = useId();
   if (!catalog) return null;
   const preset = catalog.presets.find((p) => p.id === presetId) ?? catalog.presets[0];
   if (!preset) return null;
@@ -222,6 +223,7 @@ function PresetForm() {
   const lean = [...installedLean];
   if (!lean.includes(catalog.defaultLeanToolchain)) lean.push(catalog.defaultLeanToolchain);
   const runtimes = report?.runtimes ?? (["python", "r", "julia"] as const).map((runtime) => ({ runtime, available: false, detail: "Checking…" }));
+  const workflowBlock = workflowDraftBlock(preset, runtime);
   return (
     <section className="xp-proj__group" aria-label="Starting structure">
       <h3 className="ui-section-title">Starting structure</h3>
@@ -267,9 +269,20 @@ function PresetForm() {
           />
         )}
         {preset.workflow && (
-          <Checkbox isSelected={includeWorkflow} onChange={(v) => setOptions({ includeWorkflow: v })}>
-            Include a {preset.workflow === "formalAudit" ? "Formal audit" : "Numerical experiment"} workflow draft (saved; nothing runs until you review and start it)
+          <Checkbox
+            isSelected={includeWorkflow && workflowBlock === null}
+            isDisabled={workflowBlock !== null}
+            onChange={(v) => setOptions({ includeWorkflow: v })}
+            aria-describedby={workflowBlock ? workflowBlockId : undefined}
+            data-testid="include-workflow"
+          >
+            Include a {workflowDraftTitle(preset)} workflow draft (saved; nothing runs until you review and start it)
           </Checkbox>
+        )}
+        {workflowBlock && (
+          <p className="ui-meta xp-proj__wide" id={workflowBlockId} data-testid="include-workflow-reason">
+            {workflowBlock}
+          </p>
         )}
       </div>
     </section>
