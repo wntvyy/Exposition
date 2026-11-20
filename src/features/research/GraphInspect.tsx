@@ -11,24 +11,10 @@ import type { ImpactReport } from "../../bindings/ImpactReport";
 import type { Relation } from "../../bindings/Relation";
 import { errorMessage } from "../../lib/ipc";
 import { graphCommands } from "../../lib/graphIpc";
+import { READINGS } from "../graph/model";
 import { RelationStatus } from "../graph/RelationStatus";
 import { verdictView } from "../lean/evidence";
 import { Banner, Section, Spinner, StatusText, type Status } from "../../ui/components";
-
-const READING: Record<string, string> = {
-  contains: "contains",
-  memberOf: "is a member of",
-  anchoredIn: "is declared in",
-  imports: "imports",
-  usesAsset: "uses",
-  dependsOn: "depends on",
-  assumes: "assumes",
-  proofOf: "is a proof of",
-  references: "references",
-  evidenceFor: "is evidence for",
-  derivedFrom: "is derived from",
-  formalizes: "formalizes",
-};
 
 /**
  * Freshness of evidence as a quiet status. "Current" is neutral (it is the
@@ -116,8 +102,8 @@ function RelationRow({ relation, detail, outgoing }: { relation: Relation; detai
   const other = detail.neighbors.find((n) => n.id === otherId);
   const self = detail.entity.label;
   const text = outgoing
-    ? `${self} ${READING[relation.kind] ?? relation.kind} ${other?.label ?? otherId}`
-    : `${other?.label ?? otherId} ${READING[relation.kind] ?? relation.kind} ${self}`;
+    ? `${self} ${READINGS[relation.kind]} ${other?.label ?? otherId}`
+    : `${other?.label ?? otherId} ${READINGS[relation.kind]} ${self}`;
   return (
     <li data-testid="graph-relation" data-kind={relation.kind} data-direction={outgoing ? "out" : "in"} data-status={relation.status}>
       <span className="exp-graph__relation">{text}</span> <RelationStatus status={relation.status} review={relation.review} />
