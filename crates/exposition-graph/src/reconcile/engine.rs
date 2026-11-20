@@ -737,8 +737,11 @@ impl<'a> Planner<'a> {
         self.index_records.insert(path.clone(), std::sync::Arc::new(body));
     }
 
-    /// Add an observed relation unless one of this kind between these
-    /// endpoints exists (any origin/status) or the vocabulary refuses it.
+    /// Add an observed relation unless the vocabulary refuses it or one of
+    /// this kind between these endpoints already stands (observed by anyone,
+    /// or accepted by a person). A record that is only a suggestion, or a
+    /// rejected one, does not decide what the source states: it becomes the
+    /// observed relation (same id, later revision).
     /// Returns whether the relation exists afterwards.
     pub(crate) fn relate(
         &mut self,
@@ -755,15 +758,25 @@ impl<'a> Planner<'a> {
             return Ok(true);
         }
         let fresh_endpoint = self.created_now.contains(&from.id) || self.created_now.contains(&to.id);
-        if !fresh_endpoint && let Some(existing) = self.store.find_relation(kind, &from.id, &to.id)? {
-            if self.remove.remove(&existing.id) {
-                // Kept after all.
-                self.unmark_removed(&existing.id);
+        let existing = if fresh_endpoint { None } else { self.store.find_relation(kind, &from.id, &to.id)? };
+        let superseded = match existing {
+            Some(e)
+                if matches!(e.status, AssertionStatus::Suggested | AssertionStatus::Rejected)
+                    && !matches!(e.origin, Origin::Extracted { .. }) =>
+            {
+                Some(e)
             }
-            return Ok(true);
-        }
+            Some(e) => {
+                if self.remove.remove(&e.id) {
+                    // Kept after all.
+                    self.unmark_removed(&e.id);
+                }
+                return Ok(true);
+            }
+            None => None,
+        };
         let relation = Relation {
-            id: RelationId::mint(),
+            id: superseded.as_ref().map(|e| e.id.clone()).unwrap_or_else(RelationId::mint),
             kind,
             from: from.id.clone(),
             to: to.id.clone(),
@@ -776,12 +789,14 @@ impl<'a> Planner<'a> {
             note: None,
             reviewed_statement: None,
             review: None,
-            revision: 1,
-            created_at_ms: self.now,
+            revision: superseded.as_ref().map_or(1, |e| e.revision.saturating_add(1)),
+            created_at_ms: superseded.as_ref().map_or(self.now, |e| e.created_at_ms),
             updated_at_ms: self.now,
         };
-        if self.delta.relations_added.len() < DELTA_LIMIT {
-            self.delta.relations_added.push(relation.id.clone());
+        let listed =
+            if superseded.is_some() { &mut self.delta.relations_updated } else { &mut self.delta.relations_added };
+        if listed.len() < DELTA_LIMIT {
+            listed.push(relation.id.clone());
         } else {
             self.delta.truncated = true;
         }
@@ -807,6 +822,7 @@ impl<'a> Planner<'a> {
             self.add_keys.remove(&key);
             self.report.relations_added = self.report.relations_added.saturating_sub(1);
             self.delta.relations_added.retain(|x| x != &r.id);
+            self.delta.relations_updated.retain(|x| x != &r.id);
             return;
         }
         if self.remove.insert(r.id.clone()) {

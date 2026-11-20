@@ -1095,3 +1095,100 @@ fn a_saved_change_makes_the_evidence_of_a_file_historical_and_flags_changed_bind
     assert!(report.unknown_coverage.contains(&wp("main.typ")), "an unresolved binding makes the file's impact unknown");
     assert!(report.items.iter().any(|i| i.entity.id == theorem), "still listed with the file it was bound to");
 }
+
+// ----- QC audit: relation semantics (RL-4, RL-5) and identity (GI-2) -----
+
+const PAPER_UNCITED: &str = "\\documentclass{article}\n\\begin{document}\n\\section{Main}\n\\begin{lemma}\\label{lem:a}\nA.\n\\end{lemma}\n\\begin{proof}\nTrivial.\n\\end{proof}\n\\begin{theorem}\\label{thm:b}\nB.\n\\end{theorem}\n\\end{document}\n";
+const PAPER_CITED: &str = "\\documentclass{article}\n\\begin{document}\n\\section{Main}\n\\begin{lemma}\\label{lem:a}\nA, see \\cite{knuth}.\n\\end{lemma}\n\\begin{proof}\nTrivial.\n\\end{proof}\n\\begin{theorem}\\label{thm:b}\nB, by \\cite{knuth}.\n\\end{theorem}\n\\end{document}\n";
+
+/// RL-4: what the source states is observed, whatever was suggested or
+/// rejected about the same relationship before.
+#[test]
+fn a_rejected_or_suggested_relation_does_not_hide_what_the_source_states() {
+    let p = project(&[("paper.tex", PAPER_UNCITED), ("refs.bib", "@book{knuth, title = {The TeXbook}}\n")]);
+    p.full();
+    let lemma = by_key(&p, EntityKind::Lemma, "lem:a").unwrap();
+    let theorem = by_key(&p, EntityKind::Theorem, "thm:b").unwrap();
+    let knuth = by_key(&p, EntityKind::Reference, "knuth").unwrap();
+    let agent = Origin::Agent { task_id: "task-4".into() };
+    let (proposal, out) = p
+        .svc
+        .propose_and_apply(
+            agent,
+            &ChangeRequest {
+                base_revision: p.svc.status().revision,
+                operations: vec![
+                    add_rel(RelationKind::References, &theorem.id, &knuth.id),
+                    add_rel(RelationKind::References, &lemma.id, &knuth.id),
+                ],
+                summary: None,
+            },
+        )
+        .unwrap();
+    assert!(matches!(out, ApplyOutcome::Applied { .. }), "{:?}", proposal.diagnostics);
+    let cites = |from: &EntityId| -> Vec<Relation> {
+        p.svc
+            .entity_detail(from)
+            .unwrap()
+            .outgoing
+            .into_iter()
+            .filter(|r| r.kind == RelationKind::References && r.to == knuth.id)
+            .collect()
+    };
+    let rejected = cites(&theorem.id).remove(0);
+    let suggested = cites(&lemma.id).remove(0);
+    p.user(vec![GraphOperation::SetRelationStatus {
+        relation: rejected.id.clone(),
+        status: AssertionStatus::Rejected,
+    }]);
+    let rejected = cites(&theorem.id).remove(0);
+    let flagged = |p: &Project| -> Vec<EntityId> {
+        impact_of(p, &knuth.id)
+            .items
+            .into_iter()
+            .filter(|i| i.action == ImpactAction::CitationReview)
+            .map(|i| i.entity.id)
+            .collect()
+    };
+    assert!(!flagged(&p).contains(&theorem.id), "a rejected suggestion is not followed");
+
+    // The author now cites the book in both statements and saves.
+    write(&p.root, "paper.tex", PAPER_CITED);
+    p.paths(&["paper.tex"]);
+    for (from, before) in [(&theorem.id, &rejected), (&lemma.id, &suggested)] {
+        let now = cites(from);
+        assert_eq!(now.len(), 1, "one relationship per pair: {now:?}");
+        assert_eq!(now[0].status, AssertionStatus::Observed, "{:?}", now[0]);
+        assert!(matches!(now[0].origin, Origin::Extracted { .. }), "{:?}", now[0].origin);
+        assert_eq!(now[0].id, before.id, "the same record");
+        assert!(now[0].revision > before.revision, "{} → {}", before.revision, now[0].revision);
+    }
+    let flagged_now = flagged(&p);
+    assert!(flagged_now.contains(&theorem.id) && flagged_now.contains(&lemma.id), "{flagged_now:?}");
+    // Through persistence, and stable under a forced reindex.
+    p.svc.detach();
+    assert!(p.svc.attach(&p.root).is_usable());
+    p.svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: true }).unwrap();
+    assert_eq!(cites(&theorem.id)[0].status, AssertionStatus::Observed);
+    // An observed relation follows the source: removed from it, it is gone.
+    write(&p.root, "paper.tex", PAPER_UNCITED);
+    p.paths(&["paper.tex"]);
+    assert!(cites(&theorem.id).is_empty() && cites(&lemma.id).is_empty());
+}
+
+/// RL-4: a relationship a person accepted is their record; the source
+/// stating the same thing does not take it over.
+#[test]
+fn an_accepted_relation_is_kept_when_the_source_states_the_same() {
+    let p = project(&[("paper.tex", PAPER_UNCITED), ("refs.bib", "@book{knuth, title = {The TeXbook}}\n")]);
+    p.full();
+    let theorem = by_key(&p, EntityKind::Theorem, "thm:b").unwrap();
+    let knuth = by_key(&p, EntityKind::Reference, "knuth").unwrap();
+    p.user(vec![add_rel(RelationKind::References, &theorem.id, &knuth.id)]);
+    let before = p.svc.entity_detail(&theorem.id).unwrap().outgoing.into_iter().find(|r| r.to == knuth.id).unwrap();
+    write(&p.root, "paper.tex", PAPER_CITED);
+    p.paths(&["paper.tex"]);
+    let after: Vec<Relation> =
+        p.svc.entity_detail(&theorem.id).unwrap().outgoing.into_iter().filter(|r| r.to == knuth.id).collect();
+    assert_eq!(after, vec![before]);
+}
