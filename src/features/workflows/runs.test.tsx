@@ -217,6 +217,7 @@ describe("plan review", () => {
     expect(screen.getByTestId("plan-step-review").textContent).toContain("Sends material to the model provider");
     // The complete code (every line, numbered) and the complete prompt.
     const code = screen.getByTestId("plan-code-run");
+    expect(code.getAttribute("role")).toBe("region");
     expect(code.textContent).toBe(`${CODE}\n`);
     expect(code.querySelectorAll("[data-line]")).toHaveLength(3);
     expect(screen.getByTestId("plan-prompt-review").textContent).toContain("List caveats.");
@@ -328,6 +329,9 @@ describe("run monitor", () => {
     expect(screen.getByTestId("workflow-run-failure").getAttribute("data-code")).toBe("research.batchFailed");
     expect(screen.getByTestId("workflow-attempt-error-run").textContent).toContain("ZeroDivisionError");
     expect(screen.getByTestId("workflow-log-run").tagName).toBe("PRE");
+    // UI-18: a focusable scroll area is a named region (the Markdown renderer's convention).
+    expect(screen.getByTestId("workflow-log-run").getAttribute("role")).toBe("region");
+    expect(screen.getByTestId("workflow-log-run").getAttribute("aria-label")).toMatch(/^Log of /);
     rerender(<RunMonitor run={run({ state: "canceled" })} onRun={vi.fn()} />);
     expect(screen.getByText("This run was canceled")).toBeTruthy();
     expect(screen.getByTestId("workflow-run-state").textContent).toContain("Run canceled");
@@ -517,10 +521,10 @@ describe("run monitor", () => {
         kind: "formalEvidence" as const,
         file: "Proofs/Main.lean",
         fileSha256: HASH,
-        verdict: "Checked with axioms",
+        verdict: "Unverified: the audit list is incomplete",
         declarations: [
           { name: "Main.thm", verdict: "Checked", statement: "theorem thm : 1 + 1 = 2", axioms: [] },
-          { name: "Main.uses_choice", verdict: "Checked with axioms", statement: null, axioms: ["Classical.choice"] },
+          { name: "Main.uses_choice", verdict: "Checked with nonstandard axioms", statement: null, axioms: ["Classical.choice"] },
           { name: "Main.native", verdict: "Relies on compiled code", statement: null, axioms: ["Lean.ofReduceBool"] },
         ],
         evidence: ["ev-1"],
@@ -544,6 +548,14 @@ describe("run monitor", () => {
     const list = screen.getByTestId("workflow-association-checklist");
     expect(list.querySelector('[data-declaration="Main.thm"]')!.textContent).toContain("Checked");
     expect(list.querySelector('[data-declaration="Main.uses_choice"]')!.textContent).toContain("Checked with axioms");
+    // UI-1: the stored label stays in the attribute; the text is the Lean view's wording.
+    expect(list.querySelector('[data-declaration="Main.uses_choice"]')!.getAttribute("data-verdict")).toBe("Checked with nonstandard axioms");
+    expect(list.textContent).not.toContain("nonstandard");
+    const audited = screen.getByRole("list", { name: "Audited declarations" });
+    expect(audited.textContent).toContain("Checked with axioms");
+    expect(audited.textContent).not.toContain("nonstandard");
+    expect(audited.parentElement!.textContent).toContain("Not verified: the audit list is incomplete");
+    expect(audited.parentElement!.textContent).not.toContain("Unverified");
     expect(list.querySelector('[data-declaration="Main.uses_choice"]')!.textContent).toContain("Classical.choice");
     expect(list.querySelector('[data-declaration="Main.native"]')!.textContent).toContain("Relies on compiled code");
     expect(screen.getByText("Runs natively with your account's privileges")).toBeTruthy();

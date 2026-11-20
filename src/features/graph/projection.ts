@@ -6,7 +6,7 @@
 import type { Entity } from "../../bindings/Entity";
 import type { Relation } from "../../bindings/Relation";
 import type { CanvasBadge, CanvasEdge, CanvasNode } from "./canvas/types";
-import { entityDisplay, relationDisplay, STATUS_LABELS, type SavedView, type VocabularyIndex } from "./model";
+import { entityDisplay, LIFECYCLE_LABEL, relationDisplay, STATUS_LABELS, type SavedView, type VocabularyIndex } from "./model";
 import { needsReReview } from "./RelationStatus";
 
 /** Structure relations that make one entity a member of a group. */
@@ -34,9 +34,9 @@ export interface Projection {
 }
 
 const LIFECYCLE_BADGE: Record<Exclude<Entity["lifecycle"], "active">, CanvasBadge> = {
-  archived: { label: "Archived", tone: "neutral", dashed: true },
-  discarded: { label: "Discarded", tone: "neutral", dashed: true },
-  tombstoned: { label: "Removed from source", tone: "warning", dashed: true, title: "Its file or declaration no longer exists" },
+  archived: { label: LIFECYCLE_LABEL.archived, tone: "neutral", dashed: true },
+  discarded: { label: LIFECYCLE_LABEL.discarded, tone: "neutral", dashed: true },
+  tombstoned: { label: LIFECYCLE_LABEL.tombstoned, tone: "warning", dashed: true, title: "Its file or declaration no longer exists" },
 };
 
 /** Extra per-entity badges supplied by the caller (binding state, verdicts, freshness). */

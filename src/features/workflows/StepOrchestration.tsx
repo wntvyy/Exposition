@@ -15,6 +15,7 @@ import type { ParameterSpec } from "../../bindings/ParameterSpec";
 import type { ParamValue } from "../../bindings/ParamValue";
 import type { PortType } from "../../bindings/PortType";
 import { Banner, Button, Checkbox, IconButton, Select, TextField } from "../../ui/components";
+import { storedVerdictLabel } from "../lean/verdicts";
 import type { CompareOp, ConditionTest, ConditionValue, StepRepeat, WorkflowDefinition, WorkflowStep } from "./contract";
 import { conditionSources, contractOf, outputLabel, PORT_TYPE_LABELS } from "./model";
 import {
@@ -88,7 +89,7 @@ export function TestFields({
                 isSelected={test.verdicts.includes(v)}
                 onChange={(on) => onChange({ ...test, verdicts: on ? [...test.verdicts, v] : test.verdicts.filter((x) => x !== v) })}
               >
-                {v}
+                {storedVerdictLabel(v)}
               </Checkbox>
             ))}
           </div>

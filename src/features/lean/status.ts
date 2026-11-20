@@ -5,6 +5,7 @@
 // result (standard axioms only) is ever labelled "Checked".
 import type { LeanStatus } from "../../bindings/LeanStatus";
 import type { Status } from "../../ui/components";
+import { VERDICT_LABEL } from "./verdicts";
 
 export interface StatusView {
   status: Status;
@@ -36,27 +37,27 @@ export function statusView(status: LeanStatus): StatusView {
         detail: `rev ${status.revision}`,
       };
     case "checked":
-      return { kind: status.kind, status: "succeeded", label: "Checked", detail: `rev ${status.revision}` };
+      return { kind: status.kind, status: "succeeded", label: VERDICT_LABEL.checked, detail: `rev ${status.revision}` };
     case "checkedWithSorry":
       return {
         kind: status.kind,
         status: "warning",
-        label: "Incomplete (sorry)",
+        label: VERDICT_LABEL.incomplete,
         detail: `${status.count} · rev ${status.revision}`,
       };
     case "checkedWithAxioms":
       return {
         kind: status.kind,
         status: "warning",
-        label: "Checked with axioms",
+        label: VERDICT_LABEL.checkedWithAxioms,
         detail: `${status.axioms.length} · rev ${status.revision}`,
       };
     case "reliesOnCompiledCode":
-      return { kind: status.kind, status: "warning", label: "Relies on compiled code", detail: `rev ${status.revision}` };
+      return { kind: status.kind, status: "warning", label: VERDICT_LABEL.reliesOnCompiledCode, detail: `rev ${status.revision}` };
     case "partiallyChecked":
-      return { kind: status.kind, status: "warning", label: "Partially checked", detail: `rev ${status.revision}` };
+      return { kind: status.kind, status: "warning", label: VERDICT_LABEL.partiallyChecked, detail: `rev ${status.revision}` };
     case "unverified":
-      return { kind: status.kind, status: "idle", label: "Not verified", detail: `rev ${status.revision}` };
+      return { kind: status.kind, status: "idle", label: VERDICT_LABEL.notVerified, detail: `rev ${status.revision}` };
     case "errors":
       return {
         kind: status.kind,

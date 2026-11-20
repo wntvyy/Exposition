@@ -267,7 +267,7 @@ export function MathlibSetupProgress({ status }: { status: LeanSetupStatus }) {
       >
         <ProgressBar label={label} />
         {log.length > 0 && (
-          <pre ref={viewer} className="exp-lean-setup__log" tabIndex={0} aria-label="Setup output" data-testid="lean-setup-log">
+          <pre ref={viewer} className="exp-lean-setup__log" role="region" tabIndex={0} aria-label="Setup output" data-testid="lean-setup-log">
             {log.slice(-12).join("\n")}
           </pre>
         )}
@@ -315,7 +315,7 @@ export function MathlibSetupOutcome({ status, onRetry }: { status: LeanSetupStat
       >
         <span data-testid="lean-setup-outcome-message">{status.message}</span>
         {showLog && (
-          <pre className="exp-lean-setup__log" tabIndex={0} aria-label="Setup output">
+          <pre className="exp-lean-setup__log" role="region" tabIndex={0} aria-label="Setup output">
             {log.join("\n")}
           </pre>
         )}
@@ -483,7 +483,7 @@ function usePlanView(target: MathlibSetupTarget, active: boolean, onStarted: () 
             )}
             {plan && (
               <Section title="Commands" count={plan.steps.length} collapsible defaultExpanded={false}>
-                <pre className="exp-lean-setup__commands" data-testid="lean-setup-commands" tabIndex={0} aria-label="Commands the setup runs">
+                <pre className="exp-lean-setup__commands" data-testid="lean-setup-commands" role="region" tabIndex={0} aria-label="Commands the setup runs">
                   {plan.steps
                     .map((step, i) => {
                       const env = Object.entries(step.environment)

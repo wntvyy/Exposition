@@ -153,6 +153,19 @@ describe("Files explorer operations", () => {
     expect(within(folderMenu).getByRole("menuitem", { name: /Paste into chapters\// })).toBeTruthy();
   });
 
+  // UI-8: Discard removes the only copy of recovered text; the banner says so.
+  it("states that discarded recovered changes cannot be restored", () => {
+    useWorkspace.setState({
+      recovery: [{ id: "r1", path: "main.typ", savedAt: 0, length: 3, disk: "unchanged", problem: null, location: null }],
+    } as never);
+    render(<FilesView />);
+    const list = screen.getByTestId("recovery-list");
+    expect(within(list).getByRole("button", { name: "Restore" })).toBeTruthy();
+    expect(within(list).getByRole("button", { name: "Discard" })).toBeTruthy();
+    expect(screen.getByTestId("recovery-consequence").textContent).toBe("Discarded changes cannot be restored. The file on disk stays as it is.");
+    act(() => useWorkspace.setState({ recovery: [] } as never));
+  });
+
   it("Ctrl+V pastes the OS clipboard's files into the selected folder", async () => {
     opIpc.clipboardFilesRead.mockResolvedValue(["C:\\proj\\notes.md", "D:\\elsewhere\\data.csv"]);
     render(<FilesView />);

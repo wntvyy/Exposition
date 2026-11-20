@@ -314,9 +314,8 @@
   color: var(--color-text-subtle);
   font-style: italic;
 }
-.ui-md-tok-keyword,
-.ui-md-tok-tag {
-  color: var(--color-accent-text);
+.ui-md-tok-keyword {
+  color: var(--color-info-text);
 }
 .ui-md-tok-string,
 .ui-md-tok-regexp {
@@ -327,9 +326,10 @@
   color: var(--color-warning-text);
 }
 .ui-md-tok-type,
+.ui-md-tok-tag,
 .ui-md-tok-attribute,
 .ui-md-tok-predefined {
-  color: var(--color-status-stale-text);
+  color: var(--color-accent-text);
 }
 .ui-md-tok-delimiter,
 .ui-md-tok-operator {

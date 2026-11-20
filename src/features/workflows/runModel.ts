@@ -2,6 +2,7 @@
 // Wording follows UI_STANDARD "Workflow runs": containment is stated as what
 // the runner actually does, never "sandboxed" because a schema says so.
 import type { Containment } from "../../bindings/Containment";
+import type { ExecutionCeiling } from "../../bindings/ExecutionCeiling";
 import type { WorkflowAttemptState } from "../../bindings/WorkflowAttemptState";
 import type { WorkflowEffect } from "../../bindings/WorkflowEffect";
 import type { WorkflowOutputValue } from "../../bindings/WorkflowOutputValue";
@@ -18,6 +19,7 @@ import type {
 } from "./contract";
 import { paramText } from "./orchestration";
 import type { BadgeTone, Status } from "../../ui/components";
+import { storedVerdictLabel } from "../lean/verdicts";
 
 export const WORKFLOW_RUN_KEY_PREFIX = "workflow-run:";
 export const workflowRunKey = (id: string) => `${WORKFLOW_RUN_KEY_PREFIX}${id}`;
@@ -57,6 +59,13 @@ export const EFFECT_LABELS: Record<WorkflowEffect, string> = {
   proposeGraphChange: "Proposes project graph changes for your review",
 };
 
+/** What a workflow's execution ceiling allows, in the plan review and the editor (one wording). */
+export const EXECUTION_CEILING_LABEL: Record<ExecutionCeiling, string> = {
+  none: "No code runs",
+  restricted: "Restricted container only",
+  trustedNative: "Trusted native execution allowed (your account's privileges)",
+};
+
 export const RUN_STATE_VIEW: Record<WorkflowRunState, { status: Status; label: string }> = {
   running: { status: "running", label: "Running" },
   succeeded: { status: "succeeded", label: "Run succeeded" },
@@ -91,6 +100,13 @@ export const PROPOSAL_STATUS_VIEW: Record<WorkflowProposalStatus, { tone: BadgeT
   rejected: { tone: "neutral", label: "Rejected", dashed: true },
   expired: { tone: "neutral", label: "Expired", dashed: true },
 };
+
+/**
+ * A stored verdict label as it is shown: in the Lean view's words
+ * ("Unverified" is stored, "Not verified" is shown). Stored values, condition
+ * values and `data-verdict` attributes keep the stored form.
+ */
+export const verdictLabel = storedVerdictLabel;
 
 /**
  * The audit's exact verdict labels → tone, by class (an overall label such as

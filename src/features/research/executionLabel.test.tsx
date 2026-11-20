@@ -97,6 +97,18 @@ describe("C4: restricted research names every restricted batch language", () => 
 });
 
 describe("XR-K-03: the Restricted research row follows the configured images", () => {
+  // UI-6: the container is never called a sandbox; the two modes stay named apart.
+  it("names both execution modes and never calls the container a sandbox", async () => {
+    render(<ExecutionModes />);
+    await waitFor(() => expect(restrictedRow().textContent).toMatch(/no container image is configured/i));
+    const modes = screen.getByTestId("research-execution-modes");
+    expect(modes.querySelector('[data-mode="trustedNative"]')!.textContent).toContain("Trusted native");
+    expect(modes.querySelector('[data-mode="trustedNative"]')!.textContent).toContain("privileges");
+    expect(restrictedRow().textContent).toContain("Restricted research");
+    expect(restrictedRow().textContent).toContain("Runs never move between the two modes silently.");
+    expect(modes.textContent).not.toMatch(/sandbox/i);
+  });
+
   it("shows a language available once its image is configured, without reopening Research", async () => {
     render(<ExecutionModes />);
     await waitFor(() => expect(restrictedRow().textContent).toMatch(/no container image is configured/i));

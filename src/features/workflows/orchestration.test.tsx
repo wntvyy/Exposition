@@ -333,7 +333,7 @@ describe("repeats", () => {
     const edge = canvasModel.edgesOf(cond, contracts, []).find((e) => e.kind === "condition")!;
     expect(edge).toMatchObject({ id: "cond:review", source: "step:audit", sourceHandle: "out:evidence", target: "step:review", targetHandle: "pre-in" });
     expect(edge.label).toBe("condition (no data)");
-    expect(edge.description).toMatch(/Review runs only if the audit verdict of Audit → Audited declarations is one of “Checked”, “Checked with nonstandard axioms”/);
+    expect(edge.description).toMatch(/Review runs only if the audit verdict of Audit → Audited declarations is one of “Checked”, “Checked with axioms”/);
     expect(canvasModel.removeEdge(cond, "cond:review")).toBeNull();
     const layout = canvasModel.autoLayout(cond, contracts);
     expect(layout.get("step:audit")!.x).toBeLessThan(layout.get("step:review")!.x);
@@ -409,7 +409,7 @@ describe("WorkflowEditor (M9)", () => {
     expect(offered.some((t) => t?.includes("Review"))).toBe(false);
     fireEvent.click(screen.getByRole("option", { name: /Audit → Audited declarations/ }));
     await waitFor(() => expect(screen.getByTestId("condition-review-test").getAttribute("data-kind")).toBe("verdictIn"));
-    fireEvent.click(within(screen.getByTestId("condition-review-verdicts")).getByRole("checkbox", { name: "Checked with nonstandard axioms" }));
+    fireEvent.click(within(screen.getByTestId("condition-review-verdicts")).getByRole("checkbox", { name: "Checked with axioms" }));
     fireEvent.click(within(section).getByRole("checkbox", { name: /Negate/ }));
     await waitFor(() =>
       expect(wfIpc.validate.mock.lastCall?.[0]).toEqual(
@@ -424,7 +424,7 @@ describe("WorkflowEditor (M9)", () => {
         }),
       ),
     );
-    expect(screen.getByTestId("condition-summary-review").textContent).toMatch(/Runs only if the audit verdict of “Audit → Audited declarations” is not one of “Checked”, “Checked with nonstandard axioms”/);
+    expect(screen.getByTestId("condition-summary-review").textContent).toMatch(/Runs only if the audit verdict of “Audit → Audited declarations” is not one of “Checked”, “Checked with axioms”/);
   });
 
   it("edits a JSON comparison on a dataset output and shows the backend's condition diagnostics inline", async () => {
@@ -537,6 +537,36 @@ describe("docs audit: the editor offers only what validation accepts", () => {
     const labels = [...block.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
     expect(labels.length).toBeGreaterThan(0);
     expect([...orch.KNOWN_VERDICTS]).toEqual(labels);
+  });
+
+  // UI-1: the stored labels are shown in the Lean view's words, one table for every surface.
+  it("shows every stored verdict class with the Lean view's label, and keeps details and unknown labels", async () => {
+    const { STORED_VERDICT_CLASS, storedVerdictLabel, VERDICT_LABEL } = await import("../lean/verdicts");
+    const { verdictView } = await import("../lean/evidence");
+    const { VERDICT_VIEW } = await import("../graph/model");
+    expect(Object.keys(STORED_VERDICT_CLASS)).toEqual([...orch.KNOWN_VERDICTS]);
+    for (const stored of orch.KNOWN_VERDICTS) {
+      const verdict = STORED_VERDICT_CLASS[stored]!;
+      expect(storedVerdictLabel(stored)).toBe(VERDICT_LABEL[verdict]);
+      expect(verdictView(verdict).label).toBe(VERDICT_LABEL[verdict]);
+      expect(VERDICT_VIEW[verdict].label).toBe(VERDICT_LABEL[verdict]);
+    }
+    expect(orch.KNOWN_VERDICTS.map(storedVerdictLabel)).toEqual([
+      "Checked",
+      "Checked with axioms",
+      "Incomplete (sorry)",
+      "Relies on compiled code",
+      "Partially checked",
+      "Not verified",
+      "Errors",
+    ]);
+    expect(storedVerdictLabel("Unverified: no audit evidence")).toBe("Not verified: no audit evidence");
+    expect(storedVerdictLabel("Incomplete (2 sorry)")).toBe("Incomplete (2 sorry)");
+    expect(storedVerdictLabel("Errors (2)")).toBe("Errors (2)");
+    expect(storedVerdictLabel("Partially checked: imports failed")).toBe("Partially checked: imports failed");
+    expect(storedVerdictLabel("Not checked")).toBe("Not checked");
+    expect(storedVerdictLabel("Checked with axioms")).toBe("Checked with axioms");
+    expect(orch.shortTest({ kind: "verdictIn", verdicts: ["Unverified", "Incomplete"] }, false)).toBe("verdict ∈ {Not verified, Incomplete (sorry)}");
   });
 
   it("does not offer a condition on a composite step (the backend refuses it), and lets an existing one be removed", async () => {

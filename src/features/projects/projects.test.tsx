@@ -404,6 +404,18 @@ describe("interrupted creation", () => {
     expect(editorsMock.open).toHaveBeenCalledWith({ key: "project-setup:op-7", title: "Project Setup" });
   });
 
+  // UI-7: Keep as Is reverts nothing; it carries no Undo arrow (that icon means Revert in the agent review).
+  it("shows Finish Setup as the one primary with its icon and Keep as Is as a plain secondary", async () => {
+    projectIpc.creationStatus.mockResolvedValue([setup]);
+    await store.checkSetups();
+    const { ProjectSetupView } = await import("./ProjectSetupView");
+    render(<ProjectSetupView resource={{ key: "project-setup:op-7", title: "Project Setup" }} mode="source" active />);
+    const keep = await screen.findByTestId("project-setup-keep");
+    expect(keep.textContent).toBe("Keep as Is");
+    expect(keep.querySelector("svg")).toBeNull();
+    expect(screen.getByTestId("project-setup-finish").querySelector("svg")).not.toBeNull();
+  });
+
   it("resolves with the chosen action", async () => {
     projectIpc.creationResolve.mockResolvedValue({ statuses: [], applied: null, entry: { kind: "editor", path: "main.typ" } });
     expect(await store.resolveSetup("op-7", "finish")).toBe(true);

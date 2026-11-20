@@ -491,7 +491,7 @@ export function RunOutputView() {
           Older output was dropped (output limit).
         </p>
       )}
-      <div ref={viewer} className="exp-research__entries" tabIndex={0} aria-label={`Output of run ${run.id}`}>
+      <div ref={viewer} className="exp-research__entries" role="region" tabIndex={0} aria-label={`Output of run ${run.id}`}>
         {output.entries.map((entry) => (
           <OutputEntryView key={`${run.id}:${entry.seq}`} entry={entry} run={run} />
         ))}
@@ -607,7 +607,7 @@ function TableView({ run, table, html }: { run: RunSummary; table: ArtifactRecor
       ) : grid === null ? (
         <p className="ui-meta">The output contained no table.</p>
       ) : (
-        <div className="exp-research__grid-scroll" tabIndex={0} aria-label="Table output">
+        <div className="exp-research__grid-scroll" role="region" tabIndex={0} aria-label="Table output">
           <table className="exp-research__grid">
             {grid.head.length > 0 && (
               <thead>

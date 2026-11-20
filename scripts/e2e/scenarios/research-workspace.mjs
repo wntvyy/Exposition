@@ -88,6 +88,8 @@ export default async function researchWorkspace({ launchApp, artifactsDir, asser
     note("execution-labelled-trusted-native", /Trusted native/.test(mode) && /privileges/.test(mode) && /only for workflow batch steps in Python, R, and Julia/.test(mode), mode);
     const restricted = rp.locator('[data-testid="research-execution-modes"] [data-mode="restricted"]');
     note("restricted-research-not-available-without-image", (await restricted.getAttribute("data-available")) === "false" && /declared inputs/.test(await restricted.innerText()), await restricted.innerText());
+    const modesText = await rp.getByTestId("research-execution-modes").innerText();
+    note("execution-section-names-two-modes-never-a-sandbox", /Trusted native/.test(modesText) && /Restricted research/.test(modesText) && /never move between the two modes silently/.test(modesText) && !/sandbox/i.test(modesText), modesText);
     await shot("research-page-disabled-light");
     const sessionsBefore = await invoke(page, "research_sessions");
     await rp.getByRole("button", { name: "Enable Research" }).click();

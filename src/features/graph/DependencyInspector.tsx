@@ -18,7 +18,7 @@ import { useWorkspace } from "../workspace/store";
 import { graphApi } from "./api";
 import { evidenceKindLabel, FormalEvidencePointer, OutcomeText, RelationStatus, TypeLabel } from "./Inspector";
 import { RelationLine } from "./RelationStatus";
-import { entityDisplay, FAMILY_LABELS, FAMILY_ORDER, freshnessView, kindDisplay, relationDisplay, type VocabularyIndex } from "./model";
+import { BINDING_BADGE_LABEL, entityDisplay, FAMILY_LABELS, FAMILY_ORDER, freshnessView, kindDisplay, LIFECYCLE_LABEL, relationDisplay, type VocabularyIndex } from "./model";
 import { openInGraph } from "./navigation";
 import { coverageStateLabel, FreshnessPill } from "./status";
 import "./graph.css";
@@ -27,12 +27,6 @@ import { useGraphLoad } from "./useGraphData";
 import type { RelationFamily } from "./canvas/types";
 
 export const DEPENDENCIES_VIEW_ID = "graph.dependencies";
-
-const LIFECYCLE_LABEL: Record<Exclude<Entity["lifecycle"], "active">, string> = {
-  tombstoned: "Removed from source",
-  archived: "Archived",
-  discarded: "Discarded",
-};
 
 function useDebounced<T>(value: T, delay: number): T {
   const [current, setCurrent] = useState(value);
@@ -65,7 +59,7 @@ function InspectedEntityView({ item, vocabulary, primary }: { item: InspectedEnt
           <div className="xp-graph-inline">
             {binding.state !== "resolved" && (
               <Badge tone="warning" dashed>
-                {binding.state === "missing" ? "Binding missing" : binding.state === "ambiguous" ? "Ambiguous binding" : "Unresolved binding"}
+                {BINDING_BADGE_LABEL[binding.state]}
               </Badge>
             )}
             {entity.lifecycle !== "active" && <Badge dashed>{LIFECYCLE_LABEL[entity.lifecycle]}</Badge>}

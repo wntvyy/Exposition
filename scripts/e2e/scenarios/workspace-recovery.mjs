@@ -99,6 +99,8 @@ export default async function workspaceRecovery({ launchApp, artifactsDir, asser
     const notesEntry = list.locator('[data-recovery-path="notes.md"]');
     assert.match(await notesEntry.innerText(), /changed on disk/);
     assert.doesNotMatch(await list.locator('[data-recovery-path="main.typ"]').innerText(), /changed on disk/);
+    // Discard removes the only copy of recovered text; the banner says so (QC UI-8).
+    assert.match(await page.getByTestId("recovery-consequence").innerText(), /Discarded changes cannot be restored\. The file on disk stays as it is\./);
     await shot("02-recovery-offered");
 
     // Restore main.typ: text back, disk untouched, undo returns to the disk text.

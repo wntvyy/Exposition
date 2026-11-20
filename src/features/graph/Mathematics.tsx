@@ -112,7 +112,7 @@ export function mathBadges(row: MathRow | undefined): CanvasBadge[] {
     const f = freshnessView(row.freshness);
     const stale = row.freshness.kind === "stale";
     badges.push({
-      label: stale ? "Stale evidence" : "Freshness unknown",
+      label: stale ? "Stale evidence" : f.standalone,
       tone: stale ? "stale" : "neutral",
       icon: stale ? History : CircleHelp,
       dashed: true,

@@ -1,29 +1,44 @@
 // Shared graph status displays: synchronization freshness and extraction
 // coverage. Pending or unavailable synchronization is never shown as current.
-// Wording matches the Agents page's graph context ("Graph synchronized" etc.).
+// `syncStateLabel` and `coverageStateLabel` are the single wordings.
 import type { CoverageState } from "../../bindings/CoverageState";
 import type { CoverageSummary } from "../../bindings/CoverageSummary";
 import type { GraphFreshness } from "../../bindings/GraphFreshness";
 import { Badge, StatusPill } from "../../ui/components";
 
+/**
+ * Graph synchronization in words: the one wording for every surface that
+ * names it (the Graph page's pill; the Agents graph context should read it
+ * here too instead of keeping its own copy).
+ */
+export function syncStateLabel(freshness: Pick<GraphFreshness, "state" | "pending" | "checkpointMs">): string {
+  switch (freshness.state) {
+    case "synchronized":
+      return "Graph synchronized";
+    case "reconciling":
+      return "Graph reconciling";
+    case "pending":
+      return freshness.pending === 0 && freshness.checkpointMs === null ? "Not yet reconciled" : "Reconciliation pending";
+    case "unavailable":
+      return "Synchronization unavailable";
+  }
+}
+
 /** The headline synchronization state of a surface (its one StatusPill). */
 export function FreshnessPill({ freshness, size = "md" }: { freshness: GraphFreshness; size?: "sm" | "md" }) {
   const overlay = freshness.overlay.length;
+  const label = syncStateLabel(freshness);
   const pill = (() => {
     switch (freshness.state) {
       case "synchronized":
-        return <StatusPill size={size} status="succeeded" label="Graph synchronized" />;
+        return <StatusPill size={size} status="succeeded" label={label} />;
       case "reconciling":
-        return <StatusPill size={size} status="running" label="Graph reconciling" detail={freshness.pending ? `${freshness.pending} files` : undefined} />;
+        return <StatusPill size={size} status="running" label={label} detail={freshness.pending ? `${freshness.pending} files` : undefined} />;
       case "pending":
-        // Same wording and treatment as the Agents page: answers may lag the sources (stale).
-        return freshness.pending > 0 ? (
-          <StatusPill size={size} status="stale" label="Reconciliation pending" detail={`${freshness.pending} files`} />
-        ) : (
-          <StatusPill size={size} status="stale" label={freshness.checkpointMs === null ? "Not yet reconciled" : "Reconciliation pending"} />
-        );
+        // Answers may lag the sources (stale).
+        return <StatusPill size={size} status="stale" label={label} detail={freshness.pending > 0 ? `${freshness.pending} files` : undefined} />;
       case "unavailable":
-        return <StatusPill size={size} status="unavailable" label="Synchronization unavailable" />;
+        return <StatusPill size={size} status="unavailable" label={label} />;
     }
   })();
   return (

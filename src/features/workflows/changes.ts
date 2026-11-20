@@ -31,9 +31,11 @@ function ensureListening(): void {
   listening = true;
   try {
     // Workflow saves are graph transactions; file extraction never saves one.
+    // A status change (attach, recovery: Restore backup / Start new graph)
+    // replaces what the graph holds without a `changed` event.
     void graphEvents
       .graph((event) => {
-        if (event.kind === "changed" && event.origin.kind !== "extracted") schedule();
+        if (event.kind === "status" || (event.kind === "changed" && event.origin.kind !== "extracted")) schedule();
       })
       .catch(() => {
         // Not running inside the desktop shell (unit tests).
