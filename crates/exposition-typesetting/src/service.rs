@@ -336,23 +336,18 @@ impl TypesettingService {
 
     /// Export a build's document to PDF from the same layout used for its pages.
     /// Without a destination, writes `<entry stem>.pdf` next to the entry in
-    /// the workspace. The file is written atomically (temp file + rename).
+    /// the workspace. A destination is a file the person chose, inside or
+    /// outside the project (`exposition_workspace::export`): checked, then
+    /// written atomically, so a failed export leaves an existing file as it
+    /// was. The export is an output copy: no document, buffer, or project
+    /// record changes.
     pub fn export_pdf(&self, build: &str, destination: Option<PathBuf>) -> Result<ExportArtifact, TypesettingError> {
         let record = self.record(build).ok_or_else(|| TypesettingError::UnknownBuild(build.into()))?;
         let document = record.document.as_ref().ok_or_else(|| TypesettingError::NoOutput(build.into()))?;
         let bytes = typst_adapter::export_pdf(document).map_err(TypesettingError::Export)?;
         let path = match destination {
-            Some(path) => {
-                if !path.is_absolute()
-                    || path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() != Some("pdf")
-                {
-                    return Err(TypesettingError::InvalidDestination("an absolute .pdf path is required".into()));
-                }
-                let parent = path.parent().filter(|p| p.is_dir()).ok_or_else(|| {
-                    TypesettingError::InvalidDestination("the destination folder does not exist".into())
-                })?;
-                parent.join(path.file_name().expect("has extension"))
-            }
+            Some(path) => exposition_workspace::export::checked_destination(&path, "pdf")
+                .map_err(TypesettingError::InvalidDestination)?,
             None => {
                 // The display root (no verbatim prefix) of the open folder.
                 let root = PathBuf::from(self.workspace.current().ok_or(TypesettingError::NoWorkspace)?.root);
@@ -365,8 +360,12 @@ impl TypesettingService {
             }
         };
         self.check_export_destination(&record, &path)?;
-        write_atomically(&path, &bytes).map_err(|e| TypesettingError::Export(e.to_string()))?;
-        Ok(ExportArtifact { kind: ExportKind::Pdf, path: path.display().to_string(), content_hash: sha256_hex(&bytes) })
+        exposition_workspace::export::write(&path, &bytes).map_err(TypesettingError::Export)?;
+        Ok(ExportArtifact {
+            kind: ExportKind::Pdf,
+            path: exposition_workspace::root::display_path(&path),
+            content_hash: sha256_hex(&bytes),
+        })
     }
 
     /// The TeX export's rules (R-m23 F6): an existing destination must be a PDF
@@ -413,12 +412,4 @@ impl PageMapProvider for TypesettingService {
     fn revision_text(&self, document: &DocumentId, revision: u64) -> Option<Arc<str>> {
         TypesettingService::revision_text(self, document, revision)
     }
-}
-
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("pdf.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
 }

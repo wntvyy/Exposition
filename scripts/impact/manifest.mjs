@@ -58,7 +58,7 @@ export const SCENARIOS = {
     "p1-source-removal",
     "p1-security",
   ],
-  pages: ["page-typst", "page-latex", "page-markdown", "page-recovery", "tex-build", "research-attach-build"],
+  pages: ["page-typst", "page-latex", "page-markdown", "page-export", "page-recovery", "tex-build", "research-attach-build"],
   equation: ["equation-source", "equation-page"],
   research: [
     "research-python",

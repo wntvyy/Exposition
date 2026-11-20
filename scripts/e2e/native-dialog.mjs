@@ -8,15 +8,21 @@ import { join } from "node:path";
 const SCRIPT = join(import.meta.dirname, "native-dialog.ps1");
 
 /**
- * @param {{ title: string, path?: string, cancel?: boolean, pid?: number, timeoutMs?: number }} options
+ * A save dialog (`save: true`): `path` is typed as the file name (the
+ * suggested name is kept when it is empty) and Save is pressed; `overwrite`
+ * ("Yes" | "No") answers the system's replace prompt (No, then Cancel). The
+ * report then has `suggested`, `overwritePrompt` and `closed`.
+ * @param {{ title: string, path?: string, cancel?: boolean, save?: boolean, overwrite?: string, pid?: number, timeoutMs?: number }} options
  * @returns {Promise<Record<string, unknown>>} what the driver found and did
  */
-export function driveNativeDialog({ title, path = "", cancel = false, pid = 0, timeoutMs = 20_000 }) {
+export function driveNativeDialog({ title, path = "", cancel = false, save = false, overwrite = "", pid = 0, timeoutMs = 20_000 }) {
   if (process.platform !== "win32") return Promise.reject(new Error("native dialogs are driven on Windows only"));
   const args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", SCRIPT, "-Title", title, "-TimeoutMs", String(timeoutMs)];
   if (pid) args.push("-ProcessId", String(pid));
+  if (save) args.push("-Save");
+  if (overwrite) args.push("-Overwrite", overwrite);
   if (cancel) args.push("-Cancel");
-  else args.push("-Path", path);
+  else if (path || !save) args.push("-Path", path);
   return new Promise((resolve, reject) => {
     execFile("powershell.exe", args, { timeout: timeoutMs + 20_000, windowsHide: true }, (error, stdout, stderr) => {
       const line = String(stdout).trim().split(/\r?\n/).filter(Boolean).at(-1) ?? "";

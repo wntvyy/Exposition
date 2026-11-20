@@ -408,7 +408,7 @@ export default async function pageMarkdown({ launchApp, artifactsDir, assert, fi
 
     // 8. Export PDF from the shown build: same page count and sizes.
     const pages = await page.locator('[data-testid="page"]').count();
-    const exported = await invoke("typesetting_export_pdf", { build: await build(), destination: null });
+    const exported = await invoke("typesetting_export_pdf", { build: await build(), entry: PATH, destination: join(workspace, "main.pdf") });
     assert.ok(exported.path.endsWith("main.pdf"), exported.path);
     const pdf = (await readFile(exported.path)).toString("latin1");
     // Page objects only (not /Pages or /PageLabel), and the page tree's count.

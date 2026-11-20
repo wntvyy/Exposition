@@ -8,10 +8,9 @@
 //! arrives as a finished build carrying `refusal.code == "untrustedWorkspace"`
 //! so the frontend can offer `requestWorkspaceTrust`.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
-use exposition_core::build::{BuildId, BuildStatus, BuildTarget, ExportArtifact};
+use exposition_core::build::{BuildId, BuildStatus, BuildTarget};
 use exposition_core::document::DocumentEvent;
 use exposition_core::path::WorkspacePath;
 use exposition_tex::mapping::PageMapping;
@@ -191,18 +190,6 @@ pub async fn build_now(state: &State<'_, AppState>, entry: &WorkspacePath) -> Re
 
 pub fn is_tex_build(build: &str) -> bool {
     build.starts_with("tex-")
-}
-
-pub async fn export_pdf(
-    state: &State<'_, AppState>,
-    build: String,
-    destination: Option<String>,
-) -> Result<ExportArtifact, CommandError> {
-    let tex = state.tex.clone();
-    tauri::async_runtime::spawn_blocking(move || tex.export_pdf(&BuildId(build), destination.map(PathBuf::from)))
-        .await
-        .map_err(|e| CommandError::new("typesetting.export", e.to_string()))?
-        .map_err(|e| CommandError::new("typesetting.export", e.to_string()))
 }
 
 fn shared_events(app: &AppHandle, event: &TexEvent) {

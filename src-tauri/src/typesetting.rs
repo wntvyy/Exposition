@@ -6,17 +6,19 @@
 //! for the compiler. Each finished build is emitted as `typesetting:build`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
-use exposition_core::build::{BuildResult, BuildTarget, DocumentFormat, Engine, ExportArtifact};
+use exposition_core::build::{BuildId, BuildResult, BuildTarget, DocumentFormat, Engine, ExportArtifact};
 use exposition_core::document::DocumentEvent;
 use exposition_core::path::WorkspacePath;
 use exposition_execution::JobRefusal;
 use exposition_typesetting::{BuildRecord, BuildTimings, TypesettingService};
+use exposition_workspace::WorkspaceService;
 use exposition_workspace::types::WorkspaceEvent;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::broadcast::error::RecvError;
 use ts_rs::TS;
 
@@ -284,23 +286,167 @@ pub async fn typesetting_build(state: State<'_, AppState>, entry: WorkspacePath)
     .map_err(|e| command_error("typesetting.build", e))?
 }
 
-/// Export a build to PDF from the same layout as its pages. Without a
-/// destination the PDF is written next to the entry in the workspace.
+/// The service that owns a build, as the export needs it.
+pub(crate) trait PdfExporter {
+    /// The entry a retained build of the open folder was made from; an error
+    /// when the build is unknown here or has no pages to export.
+    fn exportable_entry(&self, build: &str) -> Result<WorkspacePath, CommandError>;
+    /// Write the build's PDF to a checked destination.
+    fn export(&self, build: &str, destination: PathBuf) -> Result<ExportArtifact, CommandError>;
+}
+
+impl PdfExporter for TypesettingService {
+    fn exportable_entry(&self, build: &str) -> Result<WorkspacePath, CommandError> {
+        let record = self.record(build).ok_or_else(|| export_error(format!("build {build} is not available")))?;
+        if record.document.is_none() {
+            return Err(export_error(format!("build {build} has no output")));
+        }
+        Ok(record.entry.clone())
+    }
+
+    fn export(&self, build: &str, destination: PathBuf) -> Result<ExportArtifact, CommandError> {
+        self.export_pdf(build, Some(destination)).map_err(export_error)
+    }
+}
+
+impl PdfExporter for exposition_tex::TexService {
+    fn exportable_entry(&self, build: &str) -> Result<WorkspacePath, CommandError> {
+        let stored = self
+            .build(&BuildId(build.to_owned()))
+            .ok_or_else(|| export_error(exposition_tex::TexServiceError::UnknownBuild))?;
+        if !stored.summary.has_output {
+            return Err(export_error(exposition_tex::TexServiceError::NoOutput));
+        }
+        Ok(stored.summary.result.target.entry.clone())
+    }
+
+    fn export(&self, build: &str, destination: PathBuf) -> Result<ExportArtifact, CommandError> {
+        self.export_pdf(&BuildId(build.to_owned()), Some(destination)).map_err(export_error)
+    }
+}
+
+fn export_error(error: impl std::fmt::Display) -> CommandError {
+    command_error("typesetting.export", error)
+}
+
+/// Where the save dialog starts: the entry's folder and `<entry stem>.pdf`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExportSuggestion {
+    pub folder: PathBuf,
+    pub file_name: String,
+}
+
+/// Export `build` of `entry` to PDF as an output copy.
+///
+/// The build is bound to its document: it must be a retained build of the
+/// open folder, have pages, and be a build of `entry` (the document the
+/// person exported from). This is checked before the dialog opens, and the
+/// owning service looks the build up again when it writes, so nothing of
+/// another document or project is exported.
+///
+/// `destination` none: `choose` asks the person (the native save dialog) and
+/// its answer is the only place a location outside the project comes from; no
+/// answer means canceled and nothing is written. The project that was open
+/// when the dialog opened must still be the open one.
+/// `destination` some: a location given by the caller, accepted only inside
+/// the open project (where its file commands already write).
+///
+/// Either way the destination is checked (`exposition_workspace::export`),
+/// never inside the project's `.exposition` records or the app's data folder,
+/// and written atomically by the service, which refuses to replace anything
+/// but an earlier PDF that is not a source of the document. The location is
+/// used for this one write and is not remembered or admitted anywhere.
+pub(crate) fn export_pdf_to(
+    exporter: &dyn PdfExporter,
+    workspace: &WorkspaceService,
+    data_dir: &Path,
+    build: &str,
+    entry: &WorkspacePath,
+    destination: Option<String>,
+    choose: impl FnOnce(&ExportSuggestion) -> Option<PathBuf>,
+) -> Result<ExportArtifact, CommandError> {
+    let open_root = || workspace.open_root().and_then(|root| std::fs::canonicalize(root).ok());
+    let root = open_root().ok_or_else(|| CommandError::new("typesetting.noWorkspace", "no workspace is open"))?;
+    let built = exporter.exportable_entry(build)?;
+    if &built != entry {
+        return Err(export_error(format!("build {build} is a build of {built}, not of {entry}; nothing was exported")));
+    }
+    let checked = |path: &Path| exposition_workspace::export::checked_destination(path, "pdf").map_err(export_error);
+    let target = match destination {
+        Some(raw) => {
+            let target = checked(Path::new(raw.trim()))?;
+            if !target.starts_with(&root) {
+                return Err(export_error(
+                    "a destination outside the project is chosen in the Export PDF dialog; nothing was exported",
+                ));
+            }
+            target
+        }
+        None => {
+            let folder =
+                entry.parent().map_or(root.clone(), |parent| parent.components().fold(root.clone(), |p, c| p.join(c)));
+            let folder = if folder.is_dir() { folder } else { root.clone() };
+            let stem = entry.file_name().rsplit_once('.').map_or(entry.file_name(), |(stem, _)| stem);
+            let suggestion = ExportSuggestion {
+                folder: PathBuf::from(exposition_workspace::root::display_path(&folder)),
+                file_name: format!("{stem}.pdf"),
+            };
+            let picked = choose(&suggestion)
+                .ok_or_else(|| CommandError::new("typesetting.exportCanceled", "The export was canceled."))?;
+            if open_root().as_ref() != Some(&root) {
+                return Err(export_error(
+                    "the open project changed while the destination was chosen; nothing was exported",
+                ));
+            }
+            checked(&picked)?
+        }
+    };
+    let data = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    if target.starts_with(root.join(".exposition")) || target.starts_with(data) {
+        return Err(export_error("that location holds Exposition's own records; choose another folder"));
+    }
+    exporter.export(build, target)
+}
+
+/// Export a build of `entry` to PDF from the same layout as its pages, as an
+/// output copy. `destination` none: the backend opens the native save dialog
+/// (starting at `<entry stem>.pdf` next to the entry) and the person chooses
+/// any location, inside or outside the project; `typesetting.exportCanceled`
+/// when dismissed, and nothing is written. The dialog asks before replacing
+/// an existing file. `destination` some: an absolute `.pdf` path inside the
+/// open project. See [`export_pdf_to`] for the checks.
 #[tauri::command]
 pub async fn typesetting_export_pdf(
+    app: AppHandle,
     state: State<'_, AppState>,
     build: String,
+    entry: WorkspacePath,
     destination: Option<String>,
 ) -> Result<ExportArtifact, CommandError> {
-    if crate::tex::is_tex_build(&build) {
-        return crate::tex::export_pdf(&state, build, destination).await;
-    }
-    let runtime = Arc::clone(runtime(&state));
-    let destination = destination.map(PathBuf::from);
-    tauri::async_runtime::spawn_blocking(move || runtime.service.export_pdf(&build, destination))
-        .await
-        .map_err(|e| command_error("typesetting.export", e))?
-        .map_err(|e| command_error("typesetting.export", e))
+    let typesetting = Arc::clone(&runtime(&state).service);
+    let tex = state.tex.clone();
+    let workspace = Arc::clone(&state.workspace);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let exporter: &dyn PdfExporter = if crate::tex::is_tex_build(&build) { &tex } else { typesetting.as_ref() };
+        export_pdf_to(exporter, &workspace, &data_dir, &build, &entry, destination, |suggestion| {
+            let mut dialog = app
+                .dialog()
+                .file()
+                .set_title("Export PDF")
+                .add_filter("PDF document", &["pdf"])
+                .set_directory(&suggestion.folder)
+                .set_file_name(&suggestion.file_name);
+            // Modal to the workbench: no other tab or project is reached
+            // while the destination is chosen.
+            if let Some(window) = app.get_webview_window("main") {
+                dialog = dialog.set_parent(&window);
+            }
+            dialog.blocking_save_file().and_then(|picked| picked.as_path().map(Path::to_path_buf))
+        })
+    })
+    .await
+    .map_err(export_error)?
 }
 
 #[cfg(test)]
@@ -353,6 +499,270 @@ mod tests {
             let error = target(refused).unwrap_err();
             assert_eq!(error.code, "typesetting.unsupported", "{refused}");
             assert!(error.message.contains(refused), "{}", error.message);
+        }
+    }
+
+    // ----- PDF export to a chosen destination (QC 2.4) -----
+
+    use std::path::{Path, PathBuf};
+
+    use exposition_core::build::{BuildTarget, DocumentFormat, Engine};
+
+    use super::{ExportSuggestion, export_pdf_to};
+
+    /// A temporary project (`main.typ`, `chapters/intro.typ`, `broken.typ`),
+    /// an app data folder, and a folder outside both. src-tauri has no
+    /// tempfile dev-dependency.
+    struct ExportFixture {
+        base: PathBuf,
+        project: PathBuf,
+        data: PathBuf,
+        outside: PathBuf,
+        workspace: Arc<WorkspaceService>,
+        service: TypesettingService,
+    }
+
+    impl Drop for ExportFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    impl ExportFixture {
+        fn new(name: &str) -> Self {
+            let base = std::env::temp_dir().join(format!("xp-export-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            let project = base.join("project");
+            let data = base.join("data");
+            // Unicode and spaces in the outside folder.
+            let outside = base.join("Mes exports — été 数学");
+            for dir in [&project.join("chapters"), &data, &outside] {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            std::fs::write(project.join("main.typ"), "= Main\n\nThe main document.\n").unwrap();
+            std::fs::write(project.join("chapters").join("intro.typ"), "= Intro\n\nAnother document.\n").unwrap();
+            std::fs::write(project.join("broken.typ"), "#this-function-does-not-exist()\n").unwrap();
+            let documents = Arc::new(DocumentService::new());
+            let workspace = WorkspaceService::new(documents, data.clone());
+            workspace.open_workspace(&project).expect("open workspace");
+            let service = TypesettingService::new(Arc::clone(&workspace), Fonts::embedded_only);
+            Self { base, project, data, outside, workspace, service }
+        }
+
+        fn build(&self, entry: &str) -> String {
+            let entry = WorkspacePath::parse(entry).unwrap();
+            let target = BuildTarget { format: DocumentFormat::Typst, engine: Engine::Typst, entry };
+            self.service.build(&target).expect("build runs").id().to_owned()
+        }
+
+        fn export(
+            &self,
+            build: &str,
+            entry: &str,
+            destination: Option<&Path>,
+            choose: impl FnOnce(&ExportSuggestion) -> Option<PathBuf>,
+        ) -> Result<exposition_core::build::ExportArtifact, crate::error::CommandError> {
+            export_pdf_to(
+                &self.service,
+                &self.workspace,
+                &self.data,
+                build,
+                &WorkspacePath::parse(entry).unwrap(),
+                destination.map(|d| d.display().to_string()),
+                choose,
+            )
+        }
+
+        /// Every file under the base folder with its bytes, except the app
+        /// data folder (its list of recent projects follows the open project).
+        fn files(&self) -> Vec<(PathBuf, Vec<u8>)> {
+            fn walk(dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+                let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+                entries.sort();
+                for path in entries {
+                    if path.is_dir() {
+                        walk(&path, out)
+                    } else {
+                        out.push((path.clone(), std::fs::read(&path).unwrap()))
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(&self.base, &mut out);
+            out.retain(|(path, _)| !path.starts_with(&self.data));
+            out
+        }
+    }
+
+    fn never(_: &ExportSuggestion) -> Option<PathBuf> {
+        panic!("the save dialog must not open")
+    }
+
+    #[test]
+    fn export_writes_the_chosen_destination_outside_the_project_and_nothing_else() {
+        let fx = ExportFixture::new("outside");
+        let build = fx.build("main.typ");
+        let before = fx.files();
+        let documents_before = fx.workspace.documents().list().len();
+        let destination = fx.outside.join("Thèse finale (v2).pdf");
+        let mut suggested = None;
+        let artifact = fx
+            .export(&build, "main.typ", None, |suggestion| {
+                suggested = Some(suggestion.clone());
+                Some(destination.clone())
+            })
+            .unwrap();
+        // The dialog starts at `<entry stem>.pdf` in the entry's folder.
+        let suggested = suggested.unwrap();
+        assert_eq!(suggested.file_name, "main.pdf");
+        assert_eq!(std::fs::canonicalize(&suggested.folder).unwrap(), std::fs::canonicalize(&fx.project).unwrap());
+        assert!(!suggested.folder.display().to_string().starts_with(r"\\?\"), "{suggested:?}");
+
+        let written = std::fs::read(&destination).unwrap();
+        assert!(written.starts_with(b"%PDF-"));
+        assert_eq!(std::fs::canonicalize(&artifact.path).unwrap(), std::fs::canonicalize(&destination).unwrap());
+        assert!(!artifact.path.starts_with(r"\\?\"), "{}", artifact.path);
+        // An output copy: the one new file, no project file, no document.
+        let after = fx.files();
+        let added: Vec<_> = after.iter().filter(|f| !before.contains(f)).map(|(p, _)| p.clone()).collect();
+        assert_eq!(added, vec![destination.clone()]);
+        assert!(before.iter().all(|f| after.contains(f)), "an existing file changed");
+        assert_eq!(fx.workspace.documents().list().len(), documents_before, "no document was opened or admitted");
+
+        // Replacing the earlier export (the dialog asked) works; the entry
+        // in a subfolder is suggested next to itself.
+        let intro = fx.build("chapters/intro.typ");
+        let replaced = fx
+            .export(&intro, "chapters/intro.typ", None, |suggestion| {
+                assert_eq!(suggestion.file_name, "intro.pdf");
+                assert!(suggestion.folder.ends_with("chapters"), "{suggestion:?}");
+                Some(destination.clone())
+            })
+            .unwrap();
+        assert_ne!(replaced.content_hash, artifact.content_hash, "the other document's build was written");
+        assert_ne!(std::fs::read(&destination).unwrap(), written);
+    }
+
+    #[test]
+    fn a_canceled_export_writes_nothing() {
+        let fx = ExportFixture::new("cancel");
+        let build = fx.build("main.typ");
+        let before = fx.files();
+        let error = fx.export(&build, "main.typ", None, |_| None).unwrap_err();
+        assert_eq!(error.code, "typesetting.exportCanceled");
+        assert_eq!(fx.files(), before);
+    }
+
+    #[test]
+    fn export_is_bound_to_the_document_and_build_of_the_open_project() {
+        let fx = ExportFixture::new("identity");
+        let main = fx.build("main.typ");
+        let intro = fx.build("chapters/intro.typ");
+        let broken = fx.build("broken.typ");
+        let before = fx.files();
+        let destination = fx.outside.join("out.pdf");
+
+        // Another document's build, an unknown build, a build without pages:
+        // refused before any dialog.
+        let mismatch = fx.export(&intro, "main.typ", None, never).unwrap_err();
+        assert_eq!(mismatch.code, "typesetting.export");
+        assert!(mismatch.message.contains("chapters/intro.typ") && mismatch.message.contains("main.typ"), "{mismatch}");
+        assert!(fx.export("typst-no-such-build", "main.typ", None, never).is_err());
+        let no_pages = fx.export(&broken, "broken.typ", None, never).unwrap_err();
+        assert!(no_pages.message.contains("no output"), "{no_pages}");
+        assert_eq!(fx.files(), before);
+
+        // Another project is opened while the dialog is open: nothing is written.
+        let other = fx.base.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("main.typ"), "= Other\n").unwrap();
+        let before = fx.files();
+        let switched = fx
+            .export(&main, "main.typ", None, |_| {
+                fx.workspace.open_workspace(&other).unwrap();
+                Some(destination.clone())
+            })
+            .unwrap_err();
+        assert!(switched.message.contains("project changed"), "{switched}");
+        // The build of the folder that is no longer open is not exported.
+        let stale = fx.export(&main, "main.typ", None, never).unwrap_err();
+        assert!(stale.message.contains("not available"), "{stale}");
+        assert!(fx.export(&main, "main.typ", Some(&other.join("main.pdf")), never).is_err());
+        assert_eq!(fx.files(), before);
+    }
+
+    #[test]
+    fn a_destination_given_by_the_caller_stays_inside_the_project() {
+        let fx = ExportFixture::new("caller");
+        let build = fx.build("main.typ");
+        let before = fx.files();
+        // Outside the project: only the dialog chooses that.
+        let outside = fx.export(&build, "main.typ", Some(&fx.outside.join("out.pdf")), never).unwrap_err();
+        assert!(outside.message.contains("outside the project"), "{outside}");
+        // `..` out of the project is resolved before the check.
+        let escaping = fx.project.join("chapters").join("..").join("..").join("escaped.pdf");
+        assert!(fx.export(&build, "main.typ", Some(&escaping), never).is_err());
+        // Exposition's own records, given or chosen.
+        std::fs::create_dir_all(fx.project.join(".exposition")).unwrap();
+        let before = {
+            drop(before);
+            fx.files()
+        };
+        let records = fx.project.join(".exposition").join("out.pdf");
+        assert!(fx.export(&build, "main.typ", Some(&records), never).is_err());
+        assert!(fx.export(&build, "main.typ", None, |_| Some(records.clone())).is_err());
+        assert!(fx.export(&build, "main.typ", None, |_| Some(fx.data.join("out.pdf"))).is_err());
+        assert!(!fx.data.join("out.pdf").exists());
+        assert_eq!(fx.files(), before);
+
+        // Inside the project it is written (and replaced by a later export).
+        let inside = fx.project.join("chapters").join("main copy.pdf");
+        let artifact = fx.export(&build, "main.typ", Some(&inside), never).unwrap();
+        fx.export(&build, "main.typ", Some(&inside), never).unwrap();
+        assert!(std::fs::read(&inside).unwrap().starts_with(b"%PDF-"));
+        assert!(artifact.path.ends_with("main copy.pdf"), "{}", artifact.path);
+    }
+
+    #[test]
+    fn a_refused_or_failed_export_keeps_the_existing_file() {
+        let fx = ExportFixture::new("failure");
+        let build = fx.build("main.typ");
+        // A file that is not a PDF is never replaced, whatever the dialog confirmed.
+        let notes = fx.outside.join("notes.pdf");
+        std::fs::write(&notes, "my notes, not a PDF").unwrap();
+        let refused = fx.export(&build, "main.typ", None, |_| Some(notes.clone())).unwrap_err();
+        assert!(refused.message.contains("not a PDF"), "{refused}");
+        assert_eq!(std::fs::read(&notes).unwrap(), b"my notes, not a PDF");
+        // A wrong extension, a folder that does not exist, a device name.
+        for unavailable in [
+            fx.outside.join("out.txt"),
+            fx.outside.join("missing").join("out.pdf"),
+            fx.outside.join("NUL.pdf"),
+            PathBuf::from("relative.pdf"),
+        ] {
+            let error = fx.export(&build, "main.typ", None, |_| Some(unavailable.clone())).unwrap_err();
+            assert_eq!(error.code, "typesetting.export", "{}", unavailable.display());
+        }
+        assert!(!fx.outside.join("missing").exists(), "no folder is created");
+        // The destination is open in another program: the old export stays.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let out = fx.outside.join("out.pdf");
+            fx.export(&build, "main.typ", None, |_| Some(out.clone())).unwrap();
+            let old = std::fs::read(&out).unwrap();
+            let intro = fx.build("chapters/intro.typ");
+            let held = std::fs::OpenOptions::new().read(true).share_mode(1).open(&out).unwrap();
+            let busy = fx.export(&intro, "chapters/intro.typ", None, |_| Some(out.clone())).unwrap_err();
+            assert!(busy.message.contains("another program"), "{busy}");
+            assert!(busy.message.contains("The existing file was not changed."), "{busy}");
+            drop(held);
+            assert_eq!(std::fs::read(&out).unwrap(), old);
+            let names: Vec<_> = std::fs::read_dir(&fx.outside)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            assert!(names.iter().all(|n| !n.contains(".tmp")), "temporary files left: {names:?}");
         }
     }
 }
