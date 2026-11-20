@@ -676,12 +676,16 @@ pub(crate) fn definition_from_value(raw: serde_json::Value) -> Result<WorkflowDe
 
 /// The JSON-pointer path of the first object key in `input` that `parsed`
 /// does not carry (keys only; scalar values may be normalized by parsing).
+/// A key written as `null` that `parsed` leaves out counts as carried: it is
+/// an optional field stated as absent (`"condition": null`), which parsing
+/// drops, and a `null` gives nothing to carry anywhere else either.
 pub(crate) fn dropped_key(input: &serde_json::Value, parsed: &serde_json::Value, at: String) -> Option<String> {
     use serde_json::Value;
     match (input, parsed) {
         (Value::Object(a), Value::Object(b)) => a.iter().find_map(|(k, v)| {
             let here = format!("{at}/{}", k.replace('~', "~0").replace('/', "~1"));
             match b.get(k) {
+                None if v.is_null() => None,
                 None => Some(here),
                 Some(w) => dropped_key(v, w, here),
             }

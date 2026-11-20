@@ -605,6 +605,33 @@ fn unit_variants_in_a_blueprint_cannot_smuggle_fields() {
     refused(&json, "/collections/0/members/0/trusted");
 }
 
+/// Review finding 7: optional workflow fields written as `null` in an
+/// embedded draft are the fields left out (agent-written and hand-written
+/// blueprints state them); a `null` beside a unit variant carries nothing.
+#[test]
+fn explicit_nulls_in_a_blueprint_are_absent_fields() {
+    let mut r = request(COMPUTATIONAL);
+    r.include_workflow = true;
+    let bp = blueprint(&r).unwrap();
+    let base = serde_json::to_value(&bp).unwrap();
+    let mut json = base.clone();
+    json["workflows"][0]["definition"]["execution"] = serde_json::Value::Null;
+    for field in ["condition", "repeat", "composite"] {
+        json["workflows"][0]["definition"]["steps"][0][field] = serde_json::Value::Null;
+    }
+    assert_eq!(parse_blueprint(&json.to_string()).unwrap(), bp);
+    let mut json = base.clone();
+    json["collections"] = serde_json::json!([
+        { "tempId": "c", "label": "Everything", "members": [{ "kind": "project", "grants": null }] }
+    ]);
+    let parsed = parse_blueprint(&json.to_string()).unwrap();
+    assert!(!serde_json::to_string(&parsed).unwrap().contains("grants"));
+    // An empty list is a value, not an absent field.
+    json["collections"][0]["members"][0]["grants"] = serde_json::json!([]);
+    let err = parse_blueprint(&json.to_string()).unwrap_err();
+    assert!(err.message.contains("unknown field at /collections/0/members/0/grants"), "{}", err.message);
+}
+
 /// PG-4: a workflow draft with a composite step cannot be checked in a
 /// blueprint (a new project has no saved workflow to run), and it is saved
 /// incomplete; the preview says so instead of "well formed".

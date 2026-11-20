@@ -241,6 +241,34 @@ fn unit_variants_cannot_smuggle_fields() {
     assert_eq!(parse_definition(&json.to_string()).unwrap(), audit());
 }
 
+/// Review finding 7: an optional field written as `null` is the field left
+/// out, not an unknown field. A `null` beside a unit variant is accepted the
+/// same way and carries nothing; any other value there is still refused.
+#[test]
+fn explicit_nulls_are_absent_fields_and_carry_nothing() {
+    let mut json = serde_json::to_value(audit()).unwrap();
+    json["execution"] = serde_json::Value::Null;
+    for field in ["condition", "repeat", "composite"] {
+        json["steps"][0][field] = serde_json::Value::Null;
+    }
+    assert_eq!(parse_definition(&json.to_string()).unwrap(), audit());
+    // Beside a unit variant: nothing of it reaches the parsed definition.
+    let mut json = serde_json::to_value(audit()).unwrap();
+    json["inputs"][0]["source"] = serde_json::json!({ "kind": "unset", "trust": null });
+    let parsed = parse_definition(&json.to_string()).unwrap();
+    assert_eq!(parsed.inputs[0].source, InputSource::Unset);
+    assert_eq!(serde_json::to_value(&parsed.inputs[0].source).unwrap(), serde_json::json!({ "kind": "unset" }));
+    for smuggled in [serde_json::json!(false), serde_json::json!(0), serde_json::json!(""), serde_json::json!([null])] {
+        json["inputs"][0]["source"]["trust"] = smuggled.clone();
+        let err = parse_definition(&json.to_string()).unwrap_err();
+        assert!(err.contains("/inputs/0/source/trust"), "{smuggled}: {err}");
+    }
+    // A null does not excuse a field the schema does not have.
+    let mut json = serde_json::to_value(audit()).unwrap();
+    json["steps"][0]["trust"] = serde_json::Value::Null;
+    assert!(parse_definition(&json.to_string()).unwrap_err().contains("unknown field `trust`"));
+}
+
 // ---------------------------------------------------------------- fixtures for v2 rules
 
 use std::collections::HashMap;
