@@ -7,6 +7,10 @@ import { join } from "node:path";
 import { REPO_ROOT } from "./app.mjs";
 
 const HELPER = join(REPO_ROOT, "scripts", "e2e", "os-drag.ps1");
+// Allowed on top of the hold. A drag takes a few seconds (compiling the
+// helper type, raising the window, the glide); one has been seen to stay in
+// DoDragDrop for 17 minutes.
+const DRAG_TIMEOUT_MS = 60_000;
 
 /**
  * Run the drag helper against the app (`pid`) at the client point `x`,`y`
@@ -14,8 +18,10 @@ const HELPER = join(REPO_ROOT, "scripts", "e2e", "os-drag.ps1");
  * observed during the drag (the call is asynchronous for that reason).
  * `mode`: "files" drops `paths`, "text" drops `text`, "mouse" drags with the
  * pointer from `x`,`y` to `x2`,`y2`. Resolves with the helper's report.
+ * A helper that has not exited `timeoutMs` after the hold is killed and the
+ * call rejects: a drag that never completes must fail the step, not hang it.
  */
-export function osDrag({ pid, x, y, mode = "files", paths, text, x2, y2, holdMs = 1500 }) {
+export function osDrag({ pid, x, y, mode = "files", paths, text, x2, y2, holdMs = 1500, timeoutMs = DRAG_TIMEOUT_MS }) {
   const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
   const parts = [`& ${q(HELPER)}`, `-AppPid ${pid}`, `-X ${Math.round(x)}`, `-Y ${Math.round(y)}`, `-Mode ${mode}`];
   if (paths?.length) parts.push(`-Paths @(${paths.map(q).join(",")})`);
@@ -29,7 +35,22 @@ export function osDrag({ pid, x, y, mode = "files", paths, text, x2, y2, holdMs 
     let err = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));
+    const limit = holdMs + timeoutMs;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, limit);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(new Error(`os-drag could not start the helper: ${error.message}`));
+    });
     child.on("exit", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`os-drag timed out: the ${mode} drag helper did not finish within ${Math.round(limit / 1000)} s and was killed (the app window may still be topmost and the left button held). Output: ${out} ${err}`.trim()));
+        return;
+      }
       const line = out.trim().split(/\r?\n/).pop() ?? "";
       let result;
       try {
