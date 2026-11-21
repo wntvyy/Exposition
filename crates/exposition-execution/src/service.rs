@@ -750,18 +750,11 @@ impl ExecutionService {
         } else {
             env.insert("TMPDIR", temp_text);
         }
-        docker::preflight(&docker, &image, &env, &self.inner.probe_dir)?;
-        let image_id = docker::helper(
-            &docker,
-            &["image", "inspect", "--format", "{{.Id}}", &image],
-            &env,
-            &self.inner.probe_dir,
-            Duration::from_secs(20),
-        )
-        .ok()
-        .filter(|o| o.code == Some(0))
-        .map(|o| o.stdout.trim().to_owned())
-        .filter(|id| !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == ':'));
+        // One engine query: the image is present, and this is its identity.
+        let reported = docker::preflight_identity(&docker, &image, &env, &self.inner.probe_dir)?;
+        let image_id = Some(reported).filter(|id| {
+            !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == ':')
+        });
         Ok(RestrictedTarget { backend: docker::BACKEND.into(), image, image_id, docker: settings.docker.clone() })
     }
 
@@ -1781,18 +1774,23 @@ impl Inner {
                     *cleaned = docker::remove_stale(&docker_path, &self.instance, &client_env, &self.probe_dir).is_ok();
                 }
             }
-            if let Err(message) = docker::preflight(&docker_path, &launch.image, &client_env, &self.probe_dir) {
-                return fail(
-                    self,
-                    &mut session,
-                    RefusalCode::RestrictedBackendUnavailable,
-                    format!("restricted execution is unavailable: {message} The job was not run natively."),
-                );
-            }
+            // Asked of the engine now, for this job: the image is present,
+            // and (the same answer) which image it is.
+            let reported = match docker::preflight_identity(&docker_path, &launch.image, &client_env, &self.probe_dir) {
+                Ok(reported) => reported,
+                Err(message) => {
+                    return fail(
+                        self,
+                        &mut session,
+                        RefusalCode::RestrictedBackendUnavailable,
+                        format!("restricted execution is unavailable: {message} The job was not run natively."),
+                    );
+                }
+            };
             // A pinned job runs only while the configured image still has the
             // pinned identity, and the container starts from that identity.
             if let Some(pinned) = &launch.pinned_id {
-                let current = docker::image_id(&docker_path, &launch.image, &client_env, &self.probe_dir);
+                let current = Some(reported).filter(|id| docker::valid_image_id(id));
                 if current.as_deref() != Some(pinned.as_str()) {
                     return fail(
                         self,
