@@ -336,7 +336,10 @@ impl HistoryIndex {
     /// Apply `listing` (the folder, newest first) to the index and choose
     /// what a page after `after` reads: the records past the continuation
     /// that are not `live` (those are listed from memory, on the first page)
-    /// and not known to be damaged.
+    /// and not known to be damaged. The service lists the folder itself
+    /// ([`Self::plan_listing`]); tests drive the index with listings in any
+    /// order through this.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn plan(
         &self,
         root: &Path,
