@@ -175,6 +175,8 @@ pub struct WorkspaceService {
     events: broadcast::Sender<WorkspaceEvent>,
     fs_tx: mpsc::UnboundedSender<FsSignal>,
     fs_rx: Mutex<Option<mpsc::UnboundedReceiver<FsSignal>>>,
+    /// Watcher notifications queued for the background loop since start.
+    fs_queued: Arc<AtomicU64>,
     counter: AtomicU64,
 }
 
@@ -331,6 +333,7 @@ impl WorkspaceService {
             events,
             fs_tx,
             fs_rx: Mutex::new(Some(fs_rx)),
+            fs_queued: Arc::new(AtomicU64::new(0)),
             counter: AtomicU64::new(0),
         })
     }
@@ -469,12 +472,29 @@ impl WorkspaceService {
 
     fn start_watcher(&self, root: &WorkspaceRoot, generation: u64) -> Option<RecommendedWatcher> {
         let tx = self.fs_tx.clone();
+        let queued = Arc::clone(&self.fs_queued);
         let mut watcher = notify::recommended_watcher(move |event| {
+            queued.fetch_add(1, Ordering::Relaxed);
             let _ = tx.send(FsSignal { generation, event });
         })
         .ok()?;
         watcher.watch(root.path(), RecursiveMode::Recursive).ok()?;
         Some(watcher)
+    }
+
+    /// Deliver a watcher notification for the open folder exactly as the
+    /// callback of the OS watcher does (benchmarks and tests of event bursts).
+    #[doc(hidden)]
+    pub fn inject_fs_event(&self, event: notify::Result<Event>) {
+        let Some(generation) = lock(&self.state).open.as_ref().map(|o| o.generation) else { return };
+        self.fs_queued.fetch_add(1, Ordering::Relaxed);
+        let _ = self.fs_tx.send(FsSignal { generation, event });
+    }
+
+    /// Watcher notifications queued for the background loop since start.
+    #[doc(hidden)]
+    pub fn fs_signals_queued(&self) -> u64 {
+        self.fs_queued.load(Ordering::Relaxed)
     }
 
     /// Close the folder and every document from it. Unsaved buffers keep their

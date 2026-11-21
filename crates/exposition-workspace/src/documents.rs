@@ -36,6 +36,53 @@ const HISTORY_LIMIT: usize = 2048;
 /// Undo groups retained per document.
 const UNDO_LIMIT: usize = 1000;
 
+/// Deterministic work counters: bytes of document text copied and scanned by
+/// the service on the calling thread. For the scale benchmarks
+/// (`tests/perf_workspace.rs`) and the tests that keep per-edit work bounded;
+/// they do not depend on the build profile or the machine. One thread-local
+/// add per pass over the text.
+#[doc(hidden)]
+pub mod work {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COPIED: Cell<u64> = const { Cell::new(0) };
+        static SCANNED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn copied(bytes: usize) {
+        COPIED.with(|c| c.set(c.get() + bytes as u64));
+    }
+
+    pub(crate) fn scanned(bytes: usize) {
+        SCANNED.with(|c| c.set(c.get() + bytes as u64));
+    }
+
+    /// Reset the counters of the calling thread.
+    pub fn reset() {
+        COPIED.with(|c| c.set(0));
+        SCANNED.with(|c| c.set(0));
+    }
+
+    /// `(bytes copied, bytes scanned)` on the calling thread since the last reset.
+    pub fn totals() -> (u64, u64) {
+        (COPIED.with(Cell::get), SCANNED.with(Cell::get))
+    }
+}
+
+/// Text bytes retained by the histories of one document (see
+/// [`DocumentService::retained`]).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RetainedHistory {
+    pub undo_groups: usize,
+    pub undo_bytes: usize,
+    pub redo_groups: usize,
+    pub redo_bytes: usize,
+    pub history_entries: usize,
+    pub history_bytes: usize,
+}
+
 /// Parameters for opening a document.
 #[derive(Debug, Clone)]
 pub struct OpenDocument {
@@ -146,6 +193,7 @@ impl DocumentService {
         inner.next_id += 1;
         let id = DocumentId(format!("doc-{}", inner.next_id));
         let line_ending = detect_line_ending(&spec.text);
+        work::copied(spec.text.len());
         let state = DocState {
             id: id.clone(),
             path: spec.path,
@@ -191,7 +239,24 @@ impl DocumentService {
     pub fn state(&self, id: &DocumentId) -> Result<DocumentState, TransactionError> {
         let inner = self.lock();
         let doc = get(&inner, id)?;
+        work::copied(doc.text.len());
         Ok(DocumentState { info: doc.info(), text: doc.text.to_string() })
+    }
+
+    /// Text bytes held by the undo, redo, and rebase histories of a document.
+    #[doc(hidden)]
+    pub fn retained(&self, id: &DocumentId) -> Result<RetainedHistory, TransactionError> {
+        let inner = self.lock();
+        let doc = get(&inner, id)?;
+        let bytes = |patches: &[TextPatch]| patches.iter().map(|p| p.text.len()).sum::<usize>();
+        Ok(RetainedHistory {
+            undo_groups: doc.undo.len(),
+            undo_bytes: doc.undo.iter().map(|g| bytes(&g.inverse)).sum(),
+            redo_groups: doc.redo.len(),
+            redo_bytes: doc.redo.iter().map(|g| bytes(&g.inverse)).sum(),
+            history_entries: doc.history.len(),
+            history_bytes: doc.history.iter().map(|e| bytes(&e.patches)).sum(),
+        })
     }
 
     pub fn snapshot(&self, id: &DocumentId) -> Result<DocumentSnapshot, TransactionError> {
@@ -434,6 +499,7 @@ impl DocState {
     /// convention changed (the caller announces the new info).
     fn commit(&mut self, text: String, patches: Vec<TextPatch>, origin: EditOrigin) -> bool {
         self.revision += 1;
+        work::copied(text.len());
         self.text = Arc::from(text);
         self.history.push_back(HistoryEntry { revision: self.revision, patches, origin });
         while self.history.len() > HISTORY_LIMIT {
@@ -536,7 +602,13 @@ impl<'a> Utf16Cursor<'a> {
     /// Byte offset of UTF-16 offset `target`; `None` if it lies before the
     /// previous target, inside a surrogate pair, or past the end.
     fn seek(&mut self, target: u32) -> Option<usize> {
-        let target = target as usize;
+        let from = self.byte;
+        let found = self.seek_chars(target as usize);
+        work::scanned(self.byte - from);
+        found
+    }
+
+    fn seek_chars(&mut self, target: usize) -> Option<usize> {
         if target < self.unit {
             return None;
         }
@@ -573,6 +645,7 @@ fn apply_patches(text: &str, patches: &[TextPatch]) -> Result<String, TextRange>
         copied = end;
     }
     out.push_str(&text[copied..]);
+    work::copied(out.len());
     Ok(out)
 }
 
@@ -746,6 +819,7 @@ fn diff_patch(from: &str, to: &str) -> Option<TextPatch> {
         .sum::<usize>()
         .min(from_rest.len())
         .min(to_rest.len());
+    work::scanned(2 * prefix + suffix);
     let start = utf16_len(&from[..prefix]) as u32;
     let end = start + utf16_len(&from_rest[..from_rest.len() - suffix]) as u32;
     Some(TextPatch { range: TextRange::new(start, end), text: to_rest[..to_rest.len() - suffix].to_owned() })
@@ -754,6 +828,7 @@ fn diff_patch(from: &str, to: &str) -> Option<TextPatch> {
 /// The text's line-ending convention, in one pass (run on every revision).
 fn detect_line_ending(text: &str) -> LineEnding {
     let bytes = text.as_bytes();
+    work::scanned(bytes.len());
     let (mut lf, mut crlf, mut cr) = (false, false, false);
     for (i, &byte) in bytes.iter().enumerate() {
         match byte {
