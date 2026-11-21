@@ -36,7 +36,21 @@ pub(crate) struct RunState {
     pub retained_chars: usize,
     pub interrupt_requested: bool,
     pub cancel_requested: bool,
+    /// The run's final record is being written (it is finished next).
+    pub finishing: bool,
     pub finished: bool,
+    /// The final manifest and transcript are on disk: the copy here is
+    /// derived and can be read back.
+    pub stored: bool,
+    /// Output or an artifact was recorded after the final record's snapshot
+    /// was taken (a notice racing the end of the run, late kernel output):
+    /// the record on disk does not have it yet. Such a run is written again
+    /// before it is released.
+    pub late: bool,
+    /// Set once the heavy part of a finished, stored run (retained output,
+    /// code, the manifest's code text) was released: what the history lists
+    /// for it. Its manifest and output are then read from the project.
+    pub released: Option<RunSummary>,
 }
 
 impl RunState {
@@ -46,6 +60,9 @@ impl RunState {
 
     /// Append an output entry, discarding the oldest retained entries beyond the limits.
     pub fn push(&mut self, item: OutputItem) -> OutputEntry {
+        if self.finishing || self.finished {
+            self.late = true;
+        }
         self.next_seq += 1;
         let entry = OutputEntry { seq: self.next_seq, item };
         let size = entry_chars(&entry);
@@ -69,47 +86,80 @@ impl RunState {
         page_of(self.id(), self.entries.iter(), after, limit, self.manifest.output.truncated, self.next_seq)
     }
 
-    /// Register a file the helper wrote. The file must be a direct child of this
-    /// run's artifact directory; size and hash are recomputed here. Text
-    /// artifacts (HTML, SVG, CSV, JSON) are redacted like stream output first.
-    pub fn register_file(&mut self, file: &HelperFile, redact: &dyn Fn(&str) -> String) -> Option<ArtifactRecord> {
-        let dir = self.output_dir.as_ref()?;
-        if !valid_output_name(&file.name) {
-            return None;
+    /// Record an artifact made by [`display_file_record`] for this run.
+    pub fn add_output(&mut self, record: ArtifactRecord) {
+        if self.finishing || self.finished {
+            self.late = true;
         }
-        let expected = dir.join(&file.name);
-        let canonical = std::fs::canonicalize(&expected).ok()?;
-        let reported = std::fs::canonicalize(Path::new(&file.path)).ok()?;
-        if canonical != reported || canonical.parent() != Some(dir.as_path()) {
-            return None;
-        }
-        let metadata = std::fs::metadata(&canonical).ok()?;
-        if !metadata.is_file() || metadata.len() > ARTIFACT_SIZE_LIMIT {
-            return None;
-        }
-        let bytes = redact_text_artifact(&canonical, std::fs::read(&canonical).ok()?, redact).ok()?;
-        let kind = match file.role.as_str() {
-            "image" => ArtifactKind::Figure,
-            "table" => ArtifactKind::Table,
-            _ => ArtifactKind::Data,
-        };
-        let relative = artifact_dir_path(self.id()).join(&file.name).ok()?;
-        let record = ArtifactRecord {
-            id: ArtifactId(format!("{}/{}", self.id(), file.name)),
-            kind,
-            path: Some(relative),
-            scratch_path: None,
-            media_type: media_type_for(&file.name).to_owned(),
-            size_bytes: bytes.len() as u64,
-            content_hash: format!("sha256:{}", sha256_hex(&bytes)),
-        };
-        self.manifest.record.outputs.push(record.clone());
-        Some(record)
+        self.manifest.record.outputs.push(record);
     }
 
     pub fn summary(&self) -> RunSummary {
-        summary_of(&self.manifest, self.owner.clone(), self.queued)
+        match &self.released {
+            Some(summary) => summary.clone(),
+            None => summary_of(&self.manifest, self.owner.clone(), self.queued),
+        }
     }
+
+    /// Release the retained output and code of a finished run whose final
+    /// manifest and transcript are on disk. The history entry stays (the
+    /// same summary); the manifest and output are read from the project from
+    /// now on. A run that is not finished, or whose record could not be
+    /// written, or that recorded something its record does not hold yet
+    /// (`late`), keeps everything (this copy is then the only one).
+    pub fn release(&mut self) {
+        if !self.finished || !self.stored || self.late || self.released.is_some() {
+            return;
+        }
+        self.released = Some(self.summary());
+        self.entries = VecDeque::new();
+        self.retained_chars = 0;
+        self.code = String::new();
+        self.manifest.code.text = None;
+    }
+}
+
+/// The record of a file the helper wrote into a run's artifact directory
+/// `dir`. The file must be a direct child of it; size and hash are recomputed
+/// here. Text artifacts (HTML, SVG, CSV, JSON) are redacted like stream
+/// output first. Reads, redacts, and hashes the whole file: callers do this
+/// without holding the run table's lock, then record the result with
+/// [`RunState::add_output`].
+pub fn display_file_record(
+    dir: &Path,
+    run_id: &str,
+    file: &HelperFile,
+    redact: &dyn Fn(&str) -> String,
+) -> Option<ArtifactRecord> {
+    if !valid_output_name(&file.name) {
+        return None;
+    }
+    let expected = dir.join(&file.name);
+    let canonical = std::fs::canonicalize(&expected).ok()?;
+    let reported = std::fs::canonicalize(Path::new(&file.path)).ok()?;
+    if canonical != reported || canonical.parent() != Some(dir) {
+        return None;
+    }
+    let metadata = std::fs::metadata(&canonical).ok()?;
+    if !metadata.is_file() || metadata.len() > ARTIFACT_SIZE_LIMIT {
+        return None;
+    }
+    let bytes = redact_text_artifact(&canonical, std::fs::read(&canonical).ok()?, redact).ok()?;
+    let kind = match file.role.as_str() {
+        "image" => ArtifactKind::Figure,
+        "table" => ArtifactKind::Table,
+        _ => ArtifactKind::Data,
+    };
+    let relative = artifact_dir_path(run_id).join(&file.name).ok()?;
+    Some(ArtifactRecord {
+        id: ArtifactId(format!("{run_id}/{}", file.name)),
+        kind,
+        path: Some(relative),
+        scratch_path: None,
+        media_type: media_type_for(&file.name).to_owned(),
+        size_bytes: bytes.len() as u64,
+        content_hash: format!("sha256:{}", sha256_hex(&bytes)),
+    })
 }
 
 pub(crate) fn page_of<'a>(

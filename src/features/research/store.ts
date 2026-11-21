@@ -23,6 +23,7 @@ import {
   applyEvent,
   appendEntries,
   mergeSnapshot,
+  pruneOutputs,
   type RunOutput,
 } from "./model";
 import { activeUserRunId, lastUserRun, pickEnvironment } from "./runloop";
@@ -94,7 +95,9 @@ export function flushEvents(): void {
       }
       model = applyEvent(model, event);
     }
-    return { sessions: model.sessions, runs: model.runs, outputs: model.outputs, selectedRun };
+    // A run finished: only the newest finished runs keep their output here.
+    const outputs = batch.some((event) => event.kind === "runFinished") ? pruneOutputs(model.outputs, model.runs, selectedRun) : model.outputs;
+    return { sessions: model.sessions, runs: model.runs, outputs, selectedRun };
   });
 }
 
@@ -474,7 +477,10 @@ export async function selectRun(runId: string): Promise<void> {
   try {
     let after: number | null = null;
     let output = existing ?? EMPTY_RUN_OUTPUT;
-    for (let page = 0; page < 10; page += 1) {
+    // Every page of the stored transcript (the service retains at most
+    // 10,000 entries per run), so the newest output is what ends up shown;
+    // the view's own bound then drops the oldest and says so.
+    for (let page = 0; page < 40; page += 1) {
       const result = await commands.researchRunOutput(runId, after, 500);
       output = appendEntries(output, result.entries);
       output = { ...output, loaded: true, truncated: output.truncated || result.truncated };

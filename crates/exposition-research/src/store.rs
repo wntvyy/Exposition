@@ -137,6 +137,35 @@ pub fn read_transcript(root: &Path, run_id: &str) -> Vec<OutputEntry> {
     std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
 }
 
+/// A run's stored transcript, read strictly: `Ok(None)` when there is no
+/// transcript file (a run without output has none), an error when the file
+/// cannot be read or is not a transcript. [`read_transcript`] reads both of
+/// those as "no entries"; callers that show the result must not.
+pub fn read_transcript_strict(root: &Path, run_id: &str) -> Result<Option<Vec<OutputEntry>>, ResearchError> {
+    if !valid_run_id(run_id) {
+        return Err(ResearchError::UnknownRun(run_id.to_owned()));
+    }
+    let path = root.join(EXPOSITION_DIR).join(ARTIFACTS_DIR).join(run_id).join(TRANSCRIPT);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(ResearchError::io("reading the stored output of a run", e)),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| ResearchError::Io(format!("the stored output of run {run_id} is damaged: {e}")))
+}
+
+/// Whether the transcript on disk is exactly `entries` in count and last
+/// sequence number (no entries: nothing was written, nothing is expected).
+pub fn transcript_holds(root: &Path, run_id: &str, entries: &[OutputEntry]) -> bool {
+    let Some(last) = entries.last() else { return true };
+    matches!(
+        read_transcript_strict(root, run_id),
+        Ok(Some(stored)) if stored.len() == entries.len() && stored.last().map(|e| e.seq) == Some(last.seq)
+    )
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ResearchError> {
     let partial = path.with_extension(format!("{}.partial", std::process::id()));
     std::fs::write(&partial, bytes).map_err(|e| ResearchError::io("writing run data", e))?;

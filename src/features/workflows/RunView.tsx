@@ -64,6 +64,7 @@ import { useOpList } from "../operations/useOpList";
 import { researchCommands } from "../research/ipc";
 import { PreviewView } from "../research/Promotion";
 import { useWorkspace } from "../workspace/store";
+import { coalesced } from "./coalesce";
 import { workflowEvents, workflowRunCommands } from "./ipc";
 import { PORT_TYPE_LABELS } from "./model";
 import { describeRepeat, describeTest } from "./orchestration";
@@ -1137,9 +1138,11 @@ export function WorkflowRunView({ resource }: EditorProps) {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let disposed = false;
+    // A step attempt emits several events: re-read once per burst, and always after the last one.
+    const reread = coalesced(refresh);
     void workflowEvents
       .run((event) => {
-        if (event.run === id) void refresh();
+        if (event.run === id) reread();
       })
       .then((u) => {
         if (disposed) u();
@@ -1214,9 +1217,11 @@ export function RunHistory({ workflow, title = "Runs" }: { workflow: string | nu
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let disposed = false;
+    // Re-list once per burst of run events, and always after the last one.
+    const relist = coalesced(refresh);
     void workflowEvents
       .run((event) => {
-        if (workflow === null || event.workflow === workflow) void refresh();
+        if (workflow === null || event.workflow === workflow) relist();
       })
       .then((u) => {
         if (disposed) u();

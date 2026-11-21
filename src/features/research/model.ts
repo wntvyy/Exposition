@@ -133,12 +133,43 @@ export function applyEvent(model: ResearchModel, event: ResearchEvent): Research
         runs: model.runs.map((r) => (r.id === event.runId ? { ...r, queued: false, executionCount: event.executionCount } : r)),
       };
     case "output": {
+      // A finished run whose output is not held here (never selected, or
+      // released by `pruneOutputs`) is read whole from the service when it
+      // is selected; a stray late entry must not stand in for that read.
+      if (!model.outputs[event.runId] && model.runs.some((r) => r.id === event.runId && r.status.kind !== "running")) return model;
       const current = model.outputs[event.runId] ?? { ...EMPTY_RUN_OUTPUT, loaded: true };
       const next = appendEntries(current, [event.entry]);
       if (next === current) return model;
       return { ...model, outputs: { ...model.outputs, [event.runId]: next } };
     }
   }
+}
+
+/** Outputs of finished runs kept in the webview besides the selected run's. */
+export const KEPT_FINISHED_OUTPUTS = 8;
+
+/**
+ * Release the output of finished runs beyond the newest `keep` (the selected
+ * run and runs still executing always keep theirs). The service holds every
+ * run's output (its own recent copy, or the stored transcript) and selecting
+ * a run whose output is not held here reads it again, so nothing is lost:
+ * only the copies kept in this window are bounded.
+ */
+export function pruneOutputs(
+  outputs: Record<string, RunOutput>,
+  runs: RunSummary[],
+  selectedRun: string | null,
+  keep = KEPT_FINISHED_OUTPUTS,
+): Record<string, RunOutput> {
+  const started = new Map<string, number>();
+  for (const run of runs) if (run.status.kind !== "running") started.set(run.id, run.startedAtMs);
+  const finished = Object.keys(outputs).filter((id) => id !== selectedRun && started.has(id));
+  if (finished.length <= keep) return outputs;
+  finished.sort((a, b) => started.get(b)! - started.get(a)!);
+  const released = new Set(finished.slice(keep));
+  const next: Record<string, RunOutput> = {};
+  for (const [id, output] of Object.entries(outputs)) if (!released.has(id)) next[id] = output;
+  return next;
 }
 
 export interface PillState {

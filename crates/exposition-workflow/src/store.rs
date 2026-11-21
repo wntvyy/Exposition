@@ -43,6 +43,55 @@ pub struct RunStore {
     conn: Connection,
     /// The database file (`None`: in memory).
     path: Option<PathBuf>,
+    counters: std::cell::Cell<StoreCounters>,
+    /// Summaries of records this store already decoded and checked
+    /// ([`RunStore::list`]).
+    listed: std::cell::RefCell<ListedSummaries>,
+}
+
+/// Summaries [`RunStore::list`] built from records it decoded in full, kept
+/// so that a listing decodes only the records that changed since the last
+/// one (a run in progress is rewritten on every state change; the other
+/// listed runs are not).
+///
+/// Key: the row (`rowid`). An entry is used only while the row's `id` and
+/// `state` columns still read the same and nothing else wrote the database:
+/// this connection drops the entry of every row it rewrites or removes, and
+/// a commit by any other connection (`PRAGMA data_version`) drops them all.
+/// Bounded by [`MAX_LISTED_SUMMARIES`] (all dropped when reached). Lives and
+/// dies with the store; nothing is persisted.
+#[derive(Default)]
+struct ListedSummaries {
+    data_version: i64,
+    by_row: std::collections::HashMap<i64, (String, String, WorkflowRunSummary)>,
+}
+
+/// The rows of a listing, answered from the `runs_listing` index alone (a
+/// row without record text is skipped when its text is read).
+pub(crate) const LIST_SQL: &str =
+    "SELECT rowid, CAST(id AS TEXT), CAST(state AS TEXT) FROM runs INDEXED BY runs_listing
+     WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2) AND deleted_at IS NULL
+     ORDER BY started_at DESC, id LIMIT ?3";
+
+/// [`LIST_SQL`] for a history without the `runs_listing` index.
+pub(crate) const LIST_SQL_UNINDEXED: &str = "SELECT rowid, CAST(id AS TEXT), CAST(state AS TEXT) FROM runs
+     WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2) AND deleted_at IS NULL
+     ORDER BY started_at DESC, id LIMIT ?3";
+
+/// At most this many decoded summaries are kept ([`ListedSummaries`]).
+const MAX_LISTED_SUMMARIES: usize = 2048;
+
+/// Work the store has done since it was opened (benchmarks and
+/// cost-regression tests; deterministic, unlike timings).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoreCounters {
+    /// Record writes (each is one durable transaction).
+    pub puts: u64,
+    /// Bytes of record text given to those writes.
+    pub put_bytes: u64,
+    /// Whole run records decoded from their stored text.
+    pub bodies_decoded: u64,
+    pub decoded_bytes: u64,
 }
 
 /// A run removed from the history with app-managed recovery (P1 project
@@ -116,7 +165,40 @@ impl RunStore {
         )
         .map_err(store_error)?;
         migrate(&conn)?;
-        Ok(Self { conn, path: path.map(Path::to_path_buf) })
+        // Everything a listing filters and orders by, so that it never
+        // touches the rows themselves: `deleted_at` is stored after the
+        // record text, and reading it from a row means walking the whole
+        // text (hundreds of pages for a large record) for every listed run.
+        // An extra index does not change what older versions read.
+        // The index only makes listings cheaper: a history that cannot take
+        // it (a read-only file, a full disk, a lock held by something else)
+        // opens and lists exactly as before, without it.
+        if let Err(e) = conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS runs_listing
+                 ON runs(project, started_at DESC, id, workflow, state, deleted_at);",
+        ) {
+            tracing::warn!("the workflow run history has no listing index ({e}); listings read the rows");
+        }
+        Ok(Self { conn, path: path.map(Path::to_path_buf), counters: Default::default(), listed: Default::default() })
+    }
+
+    pub fn counters(&self) -> StoreCounters {
+        self.counters.get()
+    }
+
+    fn count(&self, change: impl FnOnce(&mut StoreCounters)) {
+        let mut counters = self.counters.get();
+        change(&mut counters);
+        self.counters.set(counters);
+    }
+
+    /// [`decode`], counted.
+    fn decoded(&self, id: &str, state: &str, body: &str) -> Result<WorkflowRun, String> {
+        self.count(|c| {
+            c.bodies_decoded += 1;
+            c.decoded_bytes += body.len() as u64;
+        });
+        decode(id, state, body)
     }
 
     /// Insert or replace a run record (one transaction).
@@ -125,6 +207,12 @@ impl RunStore {
         if body.len() > MAX_BODY {
             return Err(WorkflowRunError::new("workflow.tooLarge", "The run record is too large to keep."));
         }
+        self.count(|c| {
+            c.puts += 1;
+            c.put_bytes += body.len() as u64;
+        });
+        // The row is rewritten: its summary is rebuilt by the next listing.
+        self.forget_listed(run.id.as_str());
         self.conn
             .execute(
                 "INSERT INTO runs (id, project, workflow, state, started_at, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -142,6 +230,10 @@ impl RunStore {
         Ok(())
     }
 
+    fn forget_listed(&self, id: &str) {
+        self.listed.borrow_mut().by_row.retain(|_, (listed, _, _)| listed != id);
+    }
+
     /// A run and the project it belongs to.
     pub fn get(&self, id: &WorkflowRunId) -> Result<Option<(String, WorkflowRun)>, WorkflowRunError> {
         let row: Option<(String, String, String, String)> = self
@@ -155,7 +247,8 @@ impl RunStore {
             .map_err(store_error)?;
         match row {
             None => Ok(None),
-            Some((rid, project, state, body)) => decode(&rid, &state, &body)
+            Some((rid, project, state, body)) => self
+                .decoded(&rid, &state, &body)
                 .map(|run| Some((project, run)))
                 .map_err(|m| WorkflowRunError::new("workflow.untrusted", m)),
         }
@@ -168,25 +261,55 @@ impl RunStore {
         workflow: Option<&WorkflowId>,
         limit: usize,
     ) -> Result<Vec<WorkflowRunSummary>, WorkflowRunError> {
+        // One snapshot for the whole listing: the index columns, the change
+        // check, and the record texts read below all see the same database.
+        let _snapshot = self.conn.unchecked_transaction().map_err(store_error)?;
+        // The index columns only; a record's text is read and decoded when
+        // its summary is not already known.
         let mut stmt = self
             .conn
-            .prepare_cached(
-                "SELECT CAST(id AS TEXT), CAST(state AS TEXT), CAST(body AS TEXT) FROM runs
-                 WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2) AND deleted_at IS NULL
-                 ORDER BY started_at DESC, id LIMIT ?3",
-            )
+            .prepare_cached(LIST_SQL)
+            // No such index (it could not be created, or something removed
+            // it): the same rows, read from the table.
+            .or_else(|_| self.conn.prepare_cached(LIST_SQL_UNINDEXED))
             .map_err(store_error)?;
-        let rows = stmt
+        let rows: Vec<_> = stmt
             .query_map(params![project, workflow.map(|w| w.as_str()), limit.min(MAX_LIST) as i64], |r| {
-                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
             })
-            .map_err(store_error)?;
+            .map_err(store_error)?
+            .collect();
+        // Anything another connection committed makes every kept summary stale.
+        let data_version: i64 =
+            self.conn.pragma_query_value(None, "data_version", |r| r.get(0)).map_err(store_error)?;
+        {
+            let mut listed = self.listed.borrow_mut();
+            if listed.data_version != data_version {
+                listed.by_row.clear();
+                listed.data_version = data_version;
+            }
+        }
+        let mut body_of =
+            self.conn.prepare_cached("SELECT CAST(body AS TEXT) FROM runs WHERE rowid = ?1").map_err(store_error)?;
         let mut out = Vec::new();
         for row in rows {
             // A malformed row is skipped, never fatal.
-            let Ok((Some(id), Some(state), Some(body))) = row else { continue };
-            if let Ok(run) = decode(&id, &state, &body) {
-                out.push(summary(&run));
+            let Ok((rowid, Some(id), Some(state))) = row else { continue };
+            if let Some((_, _, known)) =
+                self.listed.borrow().by_row.get(&rowid).filter(|(i, s, _)| *i == id && *s == state)
+            {
+                out.push(known.clone());
+                continue;
+            }
+            let Ok(Some(body)) = body_of.query_row([rowid], |r| r.get::<_, Option<String>>(0)) else { continue };
+            if let Ok(run) = self.decoded(&id, &state, &body) {
+                let summary = summary(&run);
+                let mut listed = self.listed.borrow_mut();
+                if listed.by_row.len() >= MAX_LISTED_SUMMARIES {
+                    listed.by_row.clear();
+                }
+                listed.by_row.insert(rowid, (id, state, summary.clone()));
+                out.push(summary);
             }
         }
         Ok(out)
@@ -212,7 +335,7 @@ impl RunStore {
         let mut count = 0;
         for (id, project, state, body) in rows {
             let decoded = match (&project, &body) {
-                (Some(_), Some(body)) => decode(&id, &state, body),
+                (Some(_), Some(body)) => self.decoded(&id, &state, body),
                 _ => Err("malformed run row".to_owned()),
             };
             match decoded {
@@ -225,6 +348,7 @@ impl RunStore {
                     self.conn
                         .execute("UPDATE runs SET state = 'interrupted' WHERE id = ?1", [id.as_str()])
                         .map_err(store_error)?;
+                    self.forget_listed(&id);
                 }
             }
             count += 1;
@@ -245,7 +369,8 @@ impl RunStore {
             .map_err(store_error)?;
         match row {
             None => Ok(None),
-            Some((rid, project, state, body, deleted)) => decode(&rid, &state, &body)
+            Some((rid, project, state, body, deleted)) => self
+                .decoded(&rid, &state, &body)
                 .map(|run| Some((project, run, deleted.map(|d| d.max(0) as u64))))
                 .map_err(|m| WorkflowRunError::new("workflow.untrusted", m)),
         }
@@ -263,6 +388,7 @@ impl RunStore {
 
     /// Remove a run record for good.
     pub fn remove(&self, id: &WorkflowRunId) -> Result<bool, WorkflowRunError> {
+        self.forget_listed(id.as_str());
         Ok(self.conn.execute("DELETE FROM runs WHERE id = ?1", [id.as_str()]).map_err(store_error)? > 0)
     }
 
@@ -289,7 +415,7 @@ impl RunStore {
         let mut out = Vec::new();
         for row in rows {
             let Ok((Some(id), Some(state), Some(body), Some(at), bytes)) = row else { continue };
-            if let Ok(run) = decode(&id, &state, &body) {
+            if let Ok(run) = self.decoded(&id, &state, &body) {
                 out.push(DeletedRun {
                     summary: summary(&run),
                     deleted_at_ms: at.max(0) as u64,
@@ -326,6 +452,8 @@ impl RunStore {
     /// and after, so callers report what was actually reclaimed.
     pub fn compact(&self) -> Result<(Option<u64>, Option<u64>), WorkflowRunError> {
         let before = self.file_bytes();
+        // Rebuilding the file may renumber rows.
+        self.listed.borrow_mut().by_row.clear();
         self.conn.execute_batch("VACUUM;").map_err(store_error)?;
         let _ = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
         Ok((before, self.file_bytes()))

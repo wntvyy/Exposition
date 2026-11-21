@@ -277,6 +277,21 @@ impl ResearchService {
         Ok(out)
     }
 
+    /// Records of the runs executing now in the open project: exactly the
+    /// entries [`Self::run_records`] marks active, found from the runs that
+    /// are executing instead of by reading the whole run history.
+    pub fn active_run_records(&self) -> Result<Vec<RunRecordInfo>, ResearchError> {
+        let root = self.records_root()?;
+        let mut out: Vec<RunRecordInfo> = self
+            .active_run_ids()
+            .iter()
+            .filter_map(|id| self.run_manifest(id).ok())
+            .map(|m| info(&root, &m, true, None))
+            .collect();
+        out.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms).then_with(|| b.id.cmp(&a.id)));
+        Ok(out)
+    }
+
     /// Recoverably deleted run records of the open project.
     pub fn deleted_run_records(&self) -> Result<Vec<RunRecordInfo>, ResearchError> {
         let root = self.records_root()?;

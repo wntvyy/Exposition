@@ -17,6 +17,10 @@
 //!   `<exe stem> --version` to `invocations.log` beside the executable.
 //! - `echo-lines`: echo each stdin line as `echo: <line>` until EOF.
 //! - `stdin-count`: read stdin to EOF and print the byte count.
+//! - copied as `docker(.exe)`: a stand-in docker client that appends every
+//!   invocation (`docker <args>`) to `invocations.log` beside the executable,
+//!   answers `image inspect` with a fixed image identity, and exits 0
+//!   otherwise (benchmarks and tests count client process spawns with it).
 
 use std::io::{BufRead, Read, Write};
 use std::process::{Command, Stdio};
@@ -33,6 +37,20 @@ fn secs(value: &str) -> Duration {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let me = std::env::current_exe().expect("current exe");
+    if me.file_stem().is_some_and(|s| s.eq_ignore_ascii_case("docker")) {
+        if let Some(dir) = me.parent() {
+            let mut log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("invocations.log"))
+                .expect("invocation log");
+            let _ = writeln!(log, "docker {}", args.join(" "));
+        }
+        if arg(&args, 0) == "image" && arg(&args, 1) == "inspect" {
+            println!("sha256:{}", "a".repeat(64));
+        }
+        return;
+    }
     match arg(&args, 0) {
         "tree" => {
             let depth: u32 = arg(&args, 1).parse().unwrap_or(0);

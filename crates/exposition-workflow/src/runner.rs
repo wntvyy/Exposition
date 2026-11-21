@@ -1018,6 +1018,7 @@ pub(crate) fn execute(inner: Arc<Inner>, run: WorkflowRun, root: PathBuf, key: S
             sched.flights.remove(&unit);
         };
         loop {
+            inner.scheduler_wakeups.fetch_add(1, Ordering::Relaxed);
             while let Ok(done) = done_rx.try_recv() {
                 finish(done, &mut sched);
             }

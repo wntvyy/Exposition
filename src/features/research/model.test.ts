@@ -9,6 +9,8 @@ import {
   MAX_RETAINED_CHARS,
   appendEntries,
   applyEvent,
+  KEPT_FINISHED_OUTPUTS,
+  pruneOutputs,
   attachmentKeys,
   attachmentKind,
   attachmentsOfKind,
@@ -208,5 +210,30 @@ describe("research model", () => {
     expect(attachmentsOfKind(edited, "typst", "table")).toEqual(["tab-9"]);
     expect(attachmentsOfKind(edited, "typst", "figure")).toEqual([]);
     expect(attachmentKind(edited, "typst", "mine")).toBeNull();
+  });
+});
+
+describe("output retention in the webview", () => {
+  const finished = (id: string, startedAtMs: number) => run({ id, startedAtMs, status: { kind: "succeeded" }, finishedAtMs: startedAtMs + 1 });
+  const held = (seq: number) => appendEntries({ ...EMPTY_RUN_OUTPUT, loaded: true }, [stream(seq, "x\n")]);
+
+  it("keeps the selected run, executing runs, and the newest finished runs", () => {
+    const runs = [...Array.from({ length: 30 }, (_, i) => finished(`run-${i}`, 100 + i)), run({ id: "run-live", startedAtMs: 5 })];
+    const outputs = Object.fromEntries(runs.map((r) => [r.id, held(1)]));
+    const pruned = pruneOutputs(outputs, runs, "run-3");
+    const kept = Object.keys(pruned).sort();
+    const newest = Array.from({ length: KEPT_FINISHED_OUTPUTS }, (_, i) => `run-${29 - i}`);
+    expect(kept).toEqual([...newest, "run-3", "run-live"].sort());
+    // Nothing to release: the same object (no store churn).
+    expect(pruneOutputs(pruned, runs, "run-3")).toBe(pruned);
+  });
+
+  it("does not let a late entry stand in for a finished run whose output is not held", () => {
+    let model: ResearchModel = { sessions: [], runs: [finished("run-old", 1)], outputs: {} };
+    model = applyEvent(model, { kind: "output", runId: "run-old", entry: stream(9, "late\n") });
+    expect(model.outputs["run-old"]).toBeUndefined();
+    // A run that is executing, or not known yet, still accumulates its output.
+    model = applyEvent(model, { kind: "output", runId: "run-new", entry: stream(1, "a\n") });
+    expect(model.outputs["run-new"]?.entries).toHaveLength(1);
   });
 });

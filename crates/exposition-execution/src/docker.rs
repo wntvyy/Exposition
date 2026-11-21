@@ -399,9 +399,17 @@ pub fn image_id(docker: &Path, image: &str, env: &Environment, cwd: &Path) -> Op
 
 /// Check that the engine is reachable and the image is present locally.
 pub fn preflight(docker: &Path, image: &str, env: &Environment, cwd: &Path) -> Result<(), String> {
+    preflight_identity(docker, image, env, cwd).map(|_| ())
+}
+
+/// [`preflight`], also giving what the engine printed as the image's
+/// identity in that same query (trimmed, not validated: callers apply their
+/// own check). One client process answers both "is the image present" and
+/// "which image is it", so a decision that needs both asks the engine once.
+pub fn preflight_identity(docker: &Path, image: &str, env: &Environment, cwd: &Path) -> Result<String, String> {
     let out = helper(docker, &["image", "inspect", "--format", "{{.Id}}", image], env, cwd, Duration::from_secs(20))?;
     if out.code == Some(0) {
-        return Ok(());
+        return Ok(out.stdout.trim().to_owned());
     }
     let err = out.stderr.to_ascii_lowercase();
     if err.contains("no such image") || err.contains("not found") {

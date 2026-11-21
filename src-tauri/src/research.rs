@@ -21,7 +21,7 @@ use exposition_research::types::{
     EnvironmentReport, ExecuteRequest, RunManifest, RunOutputPage, RunSource, RunSummary, SessionInfo, SessionOwner,
     WorkspaceStatus,
 };
-use exposition_research::{ResearchError, ResearchProject, StartSessionRequest};
+use exposition_research::{ResearchError, ResearchProject, ResearchService, StartSessionRequest};
 use exposition_workspace::types::WorkspaceEvent;
 use serde::Deserialize;
 use tauri::ipc::Response;
@@ -145,12 +145,15 @@ pub async fn research_execute(
     state: State<'_, AppState>,
     request: ResearchExecuteRequest,
 ) -> Result<RunSummary, CommandError> {
-    sync_workspace(&state)?;
     let declared = request.declared_inputs.unwrap_or_default();
-    Ok(state.research.execute_with_inputs(
-        ExecuteRequest { session_id: request.session_id, source: request.source, requester: SessionOwner::User },
-        &declared,
-    )?)
+    // Declared inputs are hashed in full (pinned) before the run is queued.
+    service(&state, move |research| {
+        research.execute_with_inputs(
+            ExecuteRequest { session_id: request.session_id, source: request.source, requester: SessionOwner::User },
+            &declared,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -160,14 +163,12 @@ pub async fn research_run_cancel(state: State<'_, AppState>, run_id: String) -> 
 
 #[tauri::command]
 pub async fn research_runs(state: State<'_, AppState>) -> Result<Vec<RunSummary>, CommandError> {
-    sync_workspace(&state)?;
-    Ok(state.research.runs()?)
+    service(&state, |research| research.runs()).await
 }
 
 #[tauri::command]
 pub async fn research_run(state: State<'_, AppState>, run_id: String) -> Result<RunManifest, CommandError> {
-    sync_workspace(&state)?;
-    Ok(state.research.run_manifest(&run_id)?)
+    service(&state, move |research| research.run_manifest(&run_id)).await
 }
 
 #[tauri::command]
@@ -177,8 +178,7 @@ pub async fn research_run_output(
     after: Option<u32>,
     limit: Option<u32>,
 ) -> Result<RunOutputPage, CommandError> {
-    sync_workspace(&state)?;
-    Ok(state.research.run_output(&run_id, after, limit.unwrap_or(200))?)
+    service(&state, move |research| research.run_output(&run_id, after, limit.unwrap_or(200))).await
 }
 
 /// Raw artifact bytes (fetched on demand for display; never pushed in events).
@@ -188,9 +188,24 @@ pub async fn research_artifact(
     run_id: String,
     artifact_id: String,
 ) -> Result<Response, CommandError> {
-    sync_workspace(&state)?;
-    let (_, bytes) = state.research.artifact_bytes(&run_id, &artifact_id)?;
+    let (_, bytes) = service(&state, move |research| research.artifact_bytes(&run_id, &artifact_id)).await?;
     Ok(Response::new(bytes))
+}
+
+/// Run a blocking research-service operation (reading run records and
+/// transcripts, hashing declared inputs, reading artifact bytes) off the
+/// async executor, whose threads also forward events to the webview.
+async fn service<T, F>(state: &State<'_, AppState>, f: F) -> Result<T, CommandError>
+where
+    T: Send + 'static,
+    F: FnOnce(&ResearchService) -> Result<T, ResearchError> + Send + 'static,
+{
+    sync_workspace(state)?;
+    let research = Arc::clone(&state.research);
+    tauri::async_runtime::spawn_blocking(move || f(&research))
+        .await
+        .map_err(|e| CommandError::new("internal.task", format!("Research task failed: {e}")))?
+        .map_err(CommandError::from)
 }
 
 // ---- research in the project graph ------------------------------------------
