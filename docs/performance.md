@@ -299,6 +299,19 @@ addressed: tool-definition size per request, per-event render cost in the
 webview (no app benchmark exists for the agents view), and the remaining
 unflagged `take(300)` relation reads in the agents' graph queries.
 
-The heavy validation slot is a plain lock without ordering; several parallel
-workers starve each other for long periods. A swarm of development agents needs
-a queue there before it needs anything else.
+Several agents running at once in the app multiply every per-run cost above.
+What is known for that case, and what is not:
+
+- Each run holds its own conversation in memory for its lifetime; with N runs
+  that is N conversations. No bound across runs exists.
+- The event channel holds 4,096 events and a webview that falls behind
+  resynchronizes. Joined stream deltas keep one run far below that; the margin
+  with many runs streaming at once is not measured.
+- Task summaries, graph status and run listings were made cheap for one reader
+  at a time. Writers still take the same store and document locks one at a
+  time; contention between agents is not measured.
+- Process launches (LaTeX, Python, Lean, commands) go through the shared
+  execution service; nothing here changes how many may run at once.
+
+The agent benchmarks time one task at a time. A rework that adds concurrent
+agents starts by adding a benchmark that runs several.
