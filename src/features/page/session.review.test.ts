@@ -250,14 +250,14 @@ describe("review: page view attacks", () => {
     // Not shown while hidden; what it holds is older than the document.
     expect(session.getModel().buildId).toBe("typst-1");
     expect(session.getModel().stale).toBe(true);
-    // An included file changes while hidden (the entry's revision does not).
     backend.state.holdImages = false;
     session.setVisible(true);
     await flush();
-    // The retained build is of the current revision, but no build ran since.
+    // A hidden view keeps its entry watched (review decision D2), so the
+    // result it held is the newest build of the current revision.
     expect(session.getModel().buildId).toBe("typst-2");
-    expect(session.getModel().stale).toBe(true);
-    checkImages("retained build shown");
+    expect(session.getModel().stale).toBe(false);
+    checkImages("held build shown");
     backend.state.refs.set(0, "p0-c");
     backend.emitBuild(3);
     await flush();
@@ -287,7 +287,7 @@ describe("review: page view attacks", () => {
     expect(session.getModel().buildId).toBe("typst-3");
   });
 
-  it("shown with no build result arriving (canceled, or the compiler failed to report): the pages stay marked stale", async () => {
+  it("hidden and shown with no build in between: the entry stayed watched, the pages are still current", async () => {
     await session.attach();
     backend.emitBuild(3);
     await flush();
@@ -296,9 +296,30 @@ describe("review: page view attacks", () => {
     session.setVisible(true);
     await flush();
     await flush();
-    // Nothing says these pages are current: they must not be presented so.
-    expect(session.getModel().stale).toBe(true);
+    // Review decision D2: a hidden view keeps watching, so every change that
+    // concerns the entry built it; no result means nothing changed.
+    expect(backend.state.watches - backend.state.unwatches).toBe(1);
+    expect(session.getModel().stale).toBe(false);
     expect(session.getModel().pages.every((p) => p.url !== null)).toBe(true);
+  });
+
+  it("a result that arrives while hidden marks the held pages stale and costs no page request until shown", async () => {
+    await session.attach();
+    backend.emitBuild(3);
+    await flush();
+    session.setVisible(false);
+    const requested = backend.state.requested.length;
+    backend.state.refs.set(0, "p0-b");
+    backend.emitBuild(3); // an included file changed: same revision of the entry
+    await flush();
+    expect(session.getModel().buildId).toBe("typst-1");
+    expect(session.getModel().stale).toBe(true);
+    expect(backend.state.requested.length).toBe(requested);
+    session.setVisible(true);
+    await flush();
+    expect(session.getModel().buildId).toBe("typst-2");
+    expect(session.getModel().stale).toBe(false);
+    expect(backend.state.requested.length).toBe(requested + 1);
   });
 
   // review: defect. startWatching() keeps `watchPending` set while it shows the
@@ -306,7 +327,7 @@ describe("review: page view attacks", () => {
   // trust prompt). A hide in that time unwatches; the show that follows
   // returns early because the watch is "pending", and nothing watches again:
   // the view is displayed, its entry is not watched, so no change rebuilds it.
-  it.skip("review: defect - hidden and shown again while the watch reply loads its pages, the view watches its entry", async () => {
+  it("hidden and shown again while the watch reply loads its pages, the view watches its entry", async () => {
     backend.retainBuild(3); // built earlier (the tab was open before)
     backend.state.holdImages = true;
     void session.attach();
@@ -387,7 +408,9 @@ describe("review: page view attacks", () => {
     backend.emitBuild(30);
     await flush();
     let visible = true;
-    /** A build result of the current revision arrived since the view was last shown. */
+    /** The build on the pages when the view was last displayed. */
+    let shownWhileHidden = session.getModel().buildId;
+    /** A build result of the current revision arrived since the last change. */
     let confirmed = true;
     let pages = 30;
     let generation = 0;
@@ -412,7 +435,8 @@ describe("review: page view attacks", () => {
           const from = random(pages + 1);
           for (let i = from; i < pages; i++) backend.state.refs.set(i, `p${i}-g${generation}`);
           backend.emitBuild(pages);
-          if (visible) confirmed = true;
+          // Hidden or not, the view receives it (its entry stays watched).
+          confirmed = true;
           break;
         }
         case 5:
@@ -422,8 +446,8 @@ describe("review: page view attacks", () => {
           backend.releaseImages();
           await flush();
           visible = !visible;
+          if (!visible) shownWhileHidden = session.getModel().buildId;
           session.setVisible(visible);
-          if (visible) confirmed = false;
           break;
         case 6:
           backend.state.holdImages = !backend.state.holdImages;
@@ -442,7 +466,9 @@ describe("review: page view attacks", () => {
       }
       const held = model.pages.filter((p) => p.url !== null).length;
       expect(held, `${context}: images held`).toBeLessThanOrEqual(4 + IDLE_PAGE_IMAGES);
-      expect(backend.state.watches - backend.state.unwatches, `${context}: watch count`).toBe(visible ? 1 : 0);
+      expect(backend.state.watches - backend.state.unwatches, `${context}: watch count`).toBe(1);
+      if (!visible) expect(model.buildId, `${context}: a hidden view shows no new build`).toBe(shownWhileHidden);
+      else shownWhileHidden = model.buildId;
     }
     // Settle: shown, images delivered, one more build.
     backend.state.holdImages = false;

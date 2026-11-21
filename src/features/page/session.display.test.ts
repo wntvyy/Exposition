@@ -259,7 +259,7 @@ describe("page images follow the displayed pages", () => {
   });
 });
 
-describe("a hidden page view does no work", () => {
+describe("a hidden page view does no page work and keeps its entry watched", () => {
   let session: PageSession;
 
   beforeEach(() => {
@@ -274,27 +274,32 @@ describe("a hidden page view does no work", () => {
     vi.restoreAllMocks();
   });
 
-  it("does not watch its entry when it is attached hidden", async () => {
+  it("attached hidden, it watches its entry (builds and Problems stay live) and requests no page", async () => {
     session.setVisible(false);
     await session.attach();
     backend.emitBuild(5);
     await flush();
-    expect(backend.state.watches).toBe(0);
+    expect(backend.state.watches).toBe(1);
+    expect(backend.state.unwatches).toBe(0);
     expect(backend.state.images).toEqual([]);
     expect(session.getModel().pages).toEqual([]);
+    // Displayed for the first time: the result it received is shown.
+    session.setVisible(true);
+    await flush();
+    expect(session.getModel().buildId).toBe("typst-1");
+    expect(session.getModel().stale).toBe(false);
+    expect(backend.state.images).toEqual(["page0", "page1", "page2"]);
   });
 
-  it("stops watching when hidden and ignores builds, changes cost no requests", async () => {
+  it("hidden, it stays watched; builds and changes cost no page or geometry request", async () => {
     await session.attach();
     backend.emitBuild(5);
     await flush();
     await session.reveal(0);
-    expect(backend.state.watches).toBe(1);
     const images = backend.state.images.length;
     const carets = backend.state.carets;
     session.setVisible(false);
-    expect(backend.state.unwatches).toBe(1);
-    // Another view of the same entry keeps building it; this one does nothing.
+    expect(backend.state.unwatches).toBe(0);
     backend.state.changedFrom = 0;
     backend.state.generation = 1;
     for (let i = 0; i < 5; i++) {
@@ -302,51 +307,50 @@ describe("a hidden page view does no work", () => {
       backend.emitBuild(5);
     }
     await flush();
+    expect(backend.state.watches - backend.state.unwatches).toBe(1);
     expect(backend.state.images).toHaveLength(images);
     expect(backend.state.carets).toBe(carets);
+    // The pages it still holds are older than the newest result: marked stale.
     expect(session.getModel().buildId).toBe("typst-1");
-    // The pages it still holds are older than the document: marked stale.
     expect(session.getModel().stale).toBe(true);
   });
 
-  it("shown again, watches once, stays stale until a build result arrives, then shows the current build", async () => {
+  it("shown again, it presents the newest result it received, requesting only the displayed pages", async () => {
     await session.attach();
     backend.emitBuild(5);
     await flush();
-    expect(session.getModel().stale).toBe(false);
     session.setVisible(false);
-    // A file the document includes changed while it was hidden (its own
-    // revision did not), and nobody built it.
-    session.setVisible(true);
-    await flush();
-    expect(backend.state.watches).toBe(2);
-    expect(backend.state.unwatches).toBe(1);
-    // The retained build is shown, but not presented as current.
-    expect(session.getModel().buildId).toBe("typst-1");
-    expect(session.getModel().stale).toBe(true);
     backend.state.changedFrom = 0;
     backend.state.generation = 1;
+    backend.emitChange();
+    backend.emitBuild(5);
+    backend.state.generation = 2;
+    backend.emitChange();
     backend.emitBuild(5);
     await flush();
+    const images = backend.state.images.length;
+    session.setVisible(true);
+    expect(session.getModel().stale).toBe(true);
+    await flush();
     const model = session.getModel();
-    expect(model.buildId).toBe("typst-2");
+    expect(model.buildId).toBe("typst-3");
+    expect(model.buildRevision).toBe(3);
     expect(model.stale).toBe(false);
-    expect(model.pages[0]!.renderRef).toBe("page0g1");
+    expect(model.pages[0]!.renderRef).toBe("page0g2");
     expect(model.pages[0]!.url).not.toBeNull();
+    // Only the newest build's displayed pages: the build in between cost nothing.
+    expect(backend.state.images.slice(images)).toEqual(["page0g2", "page1g2", "page2g2"]);
+    expect(backend.state.watches).toBe(1);
   });
 
-  it("shown again after the document changed, shows the retained newer build as stale until its own build", async () => {
+  it("shown again while the document is ahead of the newest result, the pages stay stale until its build", async () => {
     await session.attach();
     backend.emitBuild(5);
     await flush();
     session.setVisible(false);
     backend.emitChange();
-    backend.emitChange();
-    // Built for another watcher while this view was hidden: retained, for an
-    // older revision than the document has now.
-    backend.state.revision -= 1;
-    backend.retainBuild(5);
-    backend.state.revision += 1;
+    backend.emitBuild(5);
+    backend.emitChange(); // not built yet
     session.setVisible(true);
     await flush();
     expect(session.getModel().buildId).toBe("typst-2");
@@ -354,11 +358,10 @@ describe("a hidden page view does no work", () => {
     backend.emitBuild(5);
     await flush();
     expect(session.getModel().buildId).toBe("typst-3");
-    expect(session.getModel().buildRevision).toBe(3);
     expect(session.getModel().stale).toBe(false);
   });
 
-  it("a quick hide and show while the watch is pending leaves exactly one watch", async () => {
+  it("hiding and showing at any moment leaves exactly one watch until detach", async () => {
     const attaching = session.attach();
     session.setVisible(false);
     session.setVisible(true);
@@ -369,6 +372,8 @@ describe("a hidden page view does no work", () => {
     session.setVisible(true);
     session.setVisible(false);
     await flush();
+    expect(backend.state.watches - backend.state.unwatches).toBe(1);
+    session.detach();
     expect(backend.state.watches - backend.state.unwatches).toBe(0);
   });
 });

@@ -170,8 +170,10 @@ export class PageSession {
   private readonly loading = new Map<string, Promise<string>>();
   /** Page indexes the view displays now (its viewport and the pages next to it), ascending. */
   private displayed: number[] = [];
-  /** The view is hidden (its tab is not the displayed one): it neither watches nor loads. */
+  /** The view is hidden (its tab is not the displayed one): it shows no build and loads nothing. */
   private suspended = false;
+  /** The newest build result received (shown, or held while the view is hidden). */
+  private latestEvent: BuildEvent | null = null;
   private watchPending = false;
   /** No build result has arrived since this view started watching: the pages
    *  it holds were built before and are not known to be current. */
@@ -233,8 +235,9 @@ export class PageSession {
       this.docRevision = info.info.revision;
       this.eventRevision = info.info.revision;
       this.set({ phase: "ready", documentId: handle.id });
-      // A view that is displayed watches its entry; a hidden one starts when shown.
-      if (!this.suspended) await this.startWatching();
+      // Hidden or not, the view watches its entry: builds, Problems and the
+      // build status stay live for a tab that is not displayed.
+      await this.startWatching();
     } catch (error) {
       if (current()) this.set({ phase: "error", error: errorMessage(error) });
     }
@@ -253,19 +256,23 @@ export class PageSession {
     this.awaitingBuild = true;
     if (!this.model.stale) this.set({ stale: true });
     try {
-      const latest = await commands.typesettingWatch(this.path);
-      if (gen !== this.attachGen || this.disposed || this.suspended) {
+      let latest: BuildEvent | null;
+      try {
+        latest = await commands.typesettingWatch(this.path);
+      } finally {
+        if (gen === this.attachGen) this.watchPending = false;
+      }
+      if (gen !== this.attachGen || this.disposed) {
         void commands.typesettingUnwatch(this.path).catch(() => {});
         return;
       }
+      // Watching from here on, whatever happens while the reply is shown.
       this.watching = true;
       // A newer build may already have arrived as an event; onBuild keeps
       // whichever is newest.
       if (latest) await this.onBuild(latest, true);
     } catch (error) {
       if (gen === this.attachGen && !this.disposed) this.set({ phase: "error", error: errorMessage(error) });
-    } finally {
-      if (gen === this.attachGen) this.watchPending = false;
     }
   }
 
@@ -277,25 +284,33 @@ export class PageSession {
 
   /**
    * The view is displayed (`true`) or hidden behind another tab (`false`).
-   * A hidden view does no work: it stops watching its entry (no builds on its
-   * account), ignores builds, and requests no page images or geometry. It
-   * keeps following the document's changes, so its caret stays mapped. Shown
-   * again, it watches again, which builds the entry; until that result
-   * arrives the pages it still holds are marked stale.
+   * A hidden view keeps watching its entry, so the entry is still built when
+   * a change concerns it and Problems, markers and the build status stay
+   * current. What it does not do is page work: it shows no build, and
+   * requests no page images and no geometry. It keeps following the
+   * document's changes, so its caret stays mapped. The pages it holds are
+   * marked stale as soon as a newer result exists; shown again, it presents
+   * the newest result it received.
    */
   setVisible(visible: boolean): void {
     if (this.suspended === !visible) return;
     this.suspended = !visible;
     if (!visible) {
-      // A build that is still loading its pages is not shown.
+      // A build that is still loading its pages is not shown now: the pages
+      // held are then older than the newest result.
       this.showSeq += 1;
-      this.stopWatching();
+      const latest = this.latestEvent;
+      if (latest && latest.result.id !== this.model.buildId && !this.model.stale) this.set({ stale: true });
       return;
     }
-    if (!this.docId || this.disposed) return; // attach() starts watching
-    void this.startWatching();
-    void this.refreshGeometry();
-    void this.loadDisplayed();
+    if (!this.docId || this.disposed) return; // attach() watches and shows
+    const latest = this.latestEvent;
+    if (latest && (latest.result.id !== this.model.buildId || this.model.stale || this.model.failed)) {
+      void this.present(latest);
+    } else {
+      void this.refreshGeometry();
+      void this.loadDisplayed();
+    }
   }
 
   detach(): void {
@@ -321,7 +336,7 @@ export class PageSession {
 
   /** A build result: an event, or (`retained`) the latest retained build returned when watching started. */
   async onBuild(event: BuildEvent, retained = false): Promise<void> {
-    if (event.result.target.entry !== this.path || this.disposed || !this.docId || this.suspended) return;
+    if (event.result.target.entry !== this.path || this.disposed || !this.docId) return;
     if (!retained) this.awaitingBuild = false;
     // Ignore results older than one already handled (events and the watch
     // reply can arrive in either order).
@@ -331,6 +346,17 @@ export class PageSession {
     const key = { revision, seq: buildSequence(event.result.id) };
     if (this.newestEvent && isOlder(key, this.newestEvent)) return;
     this.newestEvent = key;
+    this.latestEvent = event;
+    if (this.suspended) {
+      // Held until the view is displayed; the pages it holds are older.
+      if (!this.model.stale) this.set({ stale: true });
+      return;
+    }
+    await this.present(event);
+  }
+
+  /** Show a build result on the pages (never while the view is hidden). */
+  private async present(event: BuildEvent): Promise<void> {
     // LaTeX builds run the TeX engine and need a trusted workspace: offer the
     // shared trust prompt (once per view) instead of building. Trust granted
     // or revoked anywhere rebuilds watched entries, so this view follows it;
