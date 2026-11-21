@@ -236,6 +236,11 @@ const LIVE_WORKFLOWS = ["live-workflow", "live-workflow-audit", "live-m9-agents"
  * - level: escalation (see LEVELS).
  * - e2e: scenarios for behavior changes; `visual` replaces it when only
  *   stylesheets in the area changed.
+ * - dependents: scenarios that exercise this area's crates through the crates
+ *   they depend on. They run when a crate one of this area's crates depends on
+ *   changes: the dependent crate's Rust tests run by crate analysis, and these
+ *   are its end-to-end counterpart (a typesetting change runs an agent that
+ *   builds a document, a Lean change runs a workflow that audits a file).
  * - checks: extra named checks (see CHECKS in plan.mjs).
  * - live: live scenarios to list as deferred qualification.
  * - deferred: other qualification that this run cannot do (release, CI).
@@ -542,6 +547,7 @@ export const AREAS = [
     paths: ["crates/exposition-research/**", "crates/exposition-attach/**", "workers/**", "src/features/research/**", "src-tauri/src/research.rs"],
     level: "local",
     e2e: [...SCENARIOS.research, ...SCENARIOS.tourResearch],
+    dependents: ["research-python", "research-attach-build"],
     visual: ["research-workspace", ...SCENARIOS.tourResearch],
     note: "Research execution, retention, and artifact promotion.",
   },
@@ -550,6 +556,7 @@ export const AREAS = [
     paths: ["crates/exposition-agents/**", "src/features/agents/**", "src-tauri/src/agents.rs"],
     level: "local",
     e2e: [...SCENARIOS.agents, ...SCENARIOS.tourAgents],
+    dependents: ["agents-harness", "agent-save", "review-m8-agent"],
     visual: ["a1-responses", ...SCENARIOS.tourAgents],
     live: LIVE_AGENTS,
     note: "The scripted provider replaces only the model; provider requests, tool schemas, and prompts are qualified only by live runs.",
@@ -559,6 +566,7 @@ export const AREAS = [
     paths: ["crates/exposition-lean/**", "src/features/lean/**", "src-tauri/src/lean.rs"],
     level: "local",
     e2e: [...SCENARIOS.lean, ...SCENARIOS.tourResearch],
+    dependents: ["lean-check"],
     visual: ["review-m4-lean-ui", ...SCENARIOS.tourResearch],
     deferred: ["mathlib"],
   },
@@ -567,6 +575,7 @@ export const AREAS = [
     paths: ["crates/exposition-workflow/**", "src/features/workflows/**", "src-tauri/src/workflows.rs", "src-tauri/src/workflow_*.rs"],
     level: "local",
     e2e: [...SCENARIOS.workflows, ...SCENARIOS.tourResearch],
+    dependents: ["workflow-run", "workflow-formal", "review-m8-agent"],
     visual: ["m9-workflow-ui", ...SCENARIOS.tourResearch],
     live: LIVE_WORKFLOWS,
   },

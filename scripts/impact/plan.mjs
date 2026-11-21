@@ -433,6 +433,20 @@ export function buildPlan({ mode, base, changes: unsorted, index, options = {}, 
     }
   };
 
+  // Crates that depend on a changed crate are used through their own areas'
+  // scenarios, which the changed file's area does not list: the dependent
+  // crate's Rust tests alone do not show that its features still work.
+  const addDependentScenarios = (changed, why) => {
+    for (const name of dependentsOf(changed, crates)) {
+      if (name === changed) continue;
+      const dependent = crates.find((c) => c.name === name);
+      for (const area of AREAS) {
+        if (!area.dependents?.length || !area.paths.includes(`${dependent.dir}/**`)) continue;
+        addE2e(builder, area.dependents, `${name} depends on ${changed} (${why})`, scenarios);
+      }
+    }
+  };
+
   // Area policy: levels, scenarios, extra checks, deferred items.
   const areaPaths = new Map();
   for (const path of paths) {
@@ -491,6 +505,7 @@ export function buildPlan({ mode, base, changes: unsorted, index, options = {}, 
       const crate = crates ? crateOf(file, crates) : null;
       if (crate) {
         addRustConsumers(crate.name, `${file} reads ${path}`, compiled && !isRustTestOnly(file));
+        if (compiled && !isRustTestOnly(file)) addDependentScenarios(crate.name, `${file} embeds ${path}`);
         covered.add(path);
       } else builder.escalate("full", `${file} reads ${path} but its crate is unknown (crate graph unavailable)`);
     }
@@ -535,6 +550,7 @@ export function buildPlan({ mode, base, changes: unsorted, index, options = {}, 
     }
     addRustConsumers(crate.name, `${path} changed`, !isRustTestOnly(path));
     covered.add(path);
+    if (!isRustTestOnly(path)) addDependentScenarios(crate.name, `${path} changed`);
   }
 
   if (builder.level === "full") {

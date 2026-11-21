@@ -91,6 +91,27 @@ describe("representative plans on the real repository", { timeout: 30_000 }, () 
     expect(crates(p)).toEqual(["exposition", "exposition-agents"]);
   });
 
+  it("a lower crate's change runs the scenarios of the areas whose crates depend on it", () => {
+    const ids = (p) => p.checks.map((c) => c.id);
+    // Typesetting is used by the agents crate (an agent builds a document): the agent scenarios run.
+    const typesetting = planFor("crates/exposition-typesetting/src/service.rs");
+    expect(typesetting.level).toBe("local");
+    expect(ids(typesetting)).toEqual(expect.arrayContaining(["e2e:page-typst", "e2e:agents-harness", "e2e:agent-save"]));
+    // Lean is used by agents and workflows.
+    const lean = planFor("crates/exposition-lean/src/lib.rs");
+    expect(ids(lean)).toEqual(expect.arrayContaining(["e2e:lean-check", "e2e:agents-harness", "e2e:workflow-formal", "e2e:workflow-run"]));
+    // Research is used by agents and workflows; agents by workflows.
+    expect(ids(planFor("crates/exposition-research/src/lib.rs"))).toEqual(expect.arrayContaining(["e2e:agents-harness", "e2e:workflow-run"]));
+    expect(ids(planFor("crates/exposition-agents/src/lib.rs"))).toEqual(expect.arrayContaining(["e2e:workflow-run", "e2e:review-m8-agent"]));
+    // The embedded kernel host is research code: research's dependents run too.
+    expect(ids(planFor("workers/kernel-host/exposition_kernel_host.py"))).toEqual(expect.arrayContaining(["e2e:agents-harness", "e2e:workflow-run"]));
+    // A test-only change does not reach other crates.
+    const testOnly = planFor("crates/exposition-lean/tests/lean_server.rs");
+    expect(ids(testOnly)).not.toContain("e2e:agents-harness");
+    // Every named scenario exists and is not deferred.
+    for (const area of AREAS) for (const name of area.dependents ?? []) expect(scenarioFiles).toContain(name);
+  });
+
   it("the kernel host compiled into the research crate tests research and its dependents", () => {
     const p = planFor("workers/kernel-host/exposition_kernel_host.py");
     expect(crates(p)).toEqual(expect.arrayContaining(["exposition-research", "exposition-agents", "exposition-workflow", "exposition"]));
