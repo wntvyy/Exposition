@@ -16,16 +16,28 @@ async function instrument(page) {
     const internals = window.__TAURI_INTERNALS__;
     const perf = (window.__perf = { calls: {}, bytes: {}, events: 0, eventBytes: 0, outputEvents: 0, outputTextBytes: 0, longTasks: 0, longTaskMs: 0, maxFrameGapMs: 0, frames: 0 });
     const original = internals.invoke.bind(internals);
-    internals.invoke = (cmd, args, options) => {
-      const result = original(cmd, args, options);
-      if (cmd === "job_list" || cmd === "job_output") {
-        perf.calls[cmd] = (perf.calls[cmd] ?? 0) + 1;
-        result.then(
-          (value) => {
-            perf.bytes[cmd] = (perf.bytes[cmd] ?? 0) + JSON.stringify(value).length;
-          },
-          () => {},
-        );
+    // Commands travel as requests to the IPC origin (`…/<command>`); the
+    // invoke function itself is read-only, so the requests are counted.
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const url = typeof input === "string" ? input : (input?.url ?? String(input));
+      const result = nativeFetch(input, init);
+      if (/ipc/.test(url)) {
+        perf.ipcRequests = (perf.ipcRequests ?? 0) + 1;
+        const cmd = url.split("/").pop();
+        if (cmd === "job_list" || cmd === "job_output") {
+          perf.calls[cmd] = (perf.calls[cmd] ?? 0) + 1;
+          result.then(
+            (response) =>
+              response
+                .clone()
+                .arrayBuffer()
+                .then((body) => {
+                  perf.bytes[cmd] = (perf.bytes[cmd] ?? 0) + body.byteLength;
+                }),
+            () => {},
+          );
+        }
       }
       return result;
     };
@@ -58,6 +70,7 @@ async function instrument(page) {
 const reset = (page) =>
   page.evaluate(() => {
     const p = window.__perf;
+    p.ipcRequests = 0;
     Object.assign(p, { calls: {}, bytes: {}, events: 0, eventBytes: 0, outputEvents: 0, outputTextBytes: 0, longTasks: 0, longTaskMs: 0, maxFrameGapMs: 0, frames: 0 });
   });
 
@@ -66,6 +79,8 @@ const read = (page) => page.evaluate(() => JSON.parse(JSON.stringify(window.__pe
 function counters(sample, windowMs, extra) {
   const perSecond = (n) => Number(((n ?? 0) / (windowMs / 1000)).toFixed(2));
   return {
+    // Every command request the page issued in the window (any command).
+    ipc_requests: sample.ipcRequests ?? 0,
     job_events: sample.events,
     job_event_bytes: sample.eventBytes,
     output_events: sample.outputEvents,
@@ -130,13 +145,10 @@ export default async function jobsOutput(ctx) {
     await reset(page);
     await ctx.sleep(windowMs);
     const open = await read(page);
-    // The viewer shows the newest output of the selected job (nothing was lost).
-    const shown = await page.getByTestId("job-output").innerText();
-    const lastTick = Math.max(...[...shown.matchAll(/^tick (\d+) /gm)].map((m) => Number(m[1])), -1);
     ctx.record({
       bench: "app.jobs.output_stream.panel_open",
       scale,
-      counters: counters(open, windowMs, { viewer_last_tick: lastTick, ...(await ctx.metrics(app, { collect: false })) }),
+      counters: counters(open, windowMs, await ctx.metrics(app, { collect: false })),
     });
     for (const id of ids) await invoke(page, "job_cancel", { job: id });
     await ctx.sleep(1_500);
