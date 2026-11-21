@@ -250,7 +250,7 @@ impl Actor {
         mut trust_rx: broadcast::Receiver<TrustChanged>,
     ) {
         let mut trust_open = true;
-        self.set_root(self.workspace.current().map(|info| info.root));
+        self.set_root(self.workspace.open_display_root());
         for info in self.documents.list() {
             self.track(&info);
         }
