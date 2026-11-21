@@ -1711,7 +1711,7 @@ impl AgentService {
 
     /// Every project-permission record (Settings › Agents).
     pub fn list_project_permissions(&self) -> Vec<ProjectPermissionsEntry> {
-        let open = self.inner.workspace.as_deref().and_then(|w| w.open_display_root()).map(PathBuf::from);
+        let open = self.inner.workspace.as_deref().and_then(|w| w.current()).map(|c| PathBuf::from(c.root));
         let open_project = open.as_deref().and_then(|root| self.inner.graph_project_of(root));
         self.inner
             .permissions
