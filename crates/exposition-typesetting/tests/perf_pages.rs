@@ -25,9 +25,8 @@ fn page_counts() -> Vec<usize> {
 }
 
 fn perf(bench: &str, scale: &[(&str, f64)], samples: &[f64], counters: &[(&str, f64)]) {
-    let object = |pairs: &[(&str, f64)]| {
-        pairs.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",")
-    };
+    let object =
+        |pairs: &[(&str, f64)]| pairs.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",");
     let samples = samples.iter().map(|s| format!("{s:.3}")).collect::<Vec<_>>().join(",");
     println!(
         "PERF {{\"bench\":\"{bench}\",\"scale\":{{{}}},\"samples_ms\":[{samples}],\"counters\":{{{}}}}}",

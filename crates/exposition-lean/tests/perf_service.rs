@@ -37,9 +37,8 @@ fn source(n: usize) -> String {
 }
 
 fn perf(bench: &str, scale: &[(&str, f64)], samples: &[f64], counters: &[(&str, f64)]) {
-    let object = |pairs: &[(&str, f64)]| {
-        pairs.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",")
-    };
+    let object =
+        |pairs: &[(&str, f64)]| pairs.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",");
     let samples = samples.iter().map(|s| format!("{s:.3}")).collect::<Vec<_>>().join(",");
     println!(
         "PERF {{\"bench\":\"{bench}\",\"scale\":{{{}}},\"samples_ms\":[{samples}],\"counters\":{{{}}}}}",
@@ -85,9 +84,8 @@ async fn lean_service_overhead() {
         let before = jobs(&h);
         let started = Instant::now();
         let revision = h.replace(&doc, &format!("-- tail {i}"), &format!("-- tail {}", i + 1));
-        let (_, seen) = h
-            .wait_for(&doc, TIMEOUT, "finished check", |s| s.status.finished_revision() == Some(revision))
-            .await;
+        let (_, seen) =
+            h.wait_for(&doc, TIMEOUT, "finished check", |s| s.status.finished_revision() == Some(revision)).await;
         if i > 0 {
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -126,9 +124,8 @@ async fn lean_service_overhead() {
             tail += 1;
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        let (_, seen) = h
-            .wait_for(&doc, TIMEOUT, "finished check", |s| s.status.finished_revision() == Some(revision))
-            .await;
+        let (_, seen) =
+            h.wait_for(&doc, TIMEOUT, "finished check", |s| s.status.finished_revision() == Some(revision)).await;
         samples.push(started.elapsed().as_secs_f64() * 1000.0);
         let sent: Vec<usize> = seen.iter().skip(1).map(bytes).collect();
         events = sent.len();
