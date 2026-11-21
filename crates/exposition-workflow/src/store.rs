@@ -44,7 +44,30 @@ pub struct RunStore {
     /// The database file (`None`: in memory).
     path: Option<PathBuf>,
     counters: std::cell::Cell<StoreCounters>,
+    /// Summaries of records this store already decoded and checked
+    /// ([`RunStore::list`]).
+    listed: std::cell::RefCell<ListedSummaries>,
 }
+
+/// Summaries [`RunStore::list`] built from records it decoded in full, kept
+/// so that a listing decodes only the records that changed since the last
+/// one (a run in progress is rewritten on every state change; the other
+/// listed runs are not).
+///
+/// Key: the row (`rowid`). An entry is used only while the row's `id` and
+/// `state` columns still read the same and nothing else wrote the database:
+/// this connection drops the entry of every row it rewrites or removes, and
+/// a commit by any other connection (`PRAGMA data_version`) drops them all.
+/// Bounded by [`MAX_LISTED_SUMMARIES`] (all dropped when reached). Lives and
+/// dies with the store; nothing is persisted.
+#[derive(Default)]
+struct ListedSummaries {
+    data_version: i64,
+    by_row: std::collections::HashMap<i64, (String, String, WorkflowRunSummary)>,
+}
+
+/// At most this many decoded summaries are kept ([`ListedSummaries`]).
+const MAX_LISTED_SUMMARIES: usize = 2048;
 
 /// Work the store has done since it was opened (benchmarks and
 /// cost-regression tests; deterministic, unlike timings).
@@ -130,7 +153,7 @@ impl RunStore {
         )
         .map_err(store_error)?;
         migrate(&conn)?;
-        Ok(Self { conn, path: path.map(Path::to_path_buf), counters: Default::default() })
+        Ok(Self { conn, path: path.map(Path::to_path_buf), counters: Default::default(), listed: Default::default() })
     }
 
     pub fn counters(&self) -> StoreCounters {
@@ -162,6 +185,8 @@ impl RunStore {
             c.puts += 1;
             c.put_bytes += body.len() as u64;
         });
+        // The row is rewritten: its summary is rebuilt by the next listing.
+        self.forget_listed(run.id.as_str());
         self.conn
             .execute(
                 "INSERT INTO runs (id, project, workflow, state, started_at, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -179,6 +204,10 @@ impl RunStore {
         Ok(())
     }
 
+    fn forget_listed(&self, id: &str) {
+        self.listed.borrow_mut().by_row.retain(|_, (listed, _, _)| listed != id);
+    }
+
     /// A run and the project it belongs to.
     pub fn get(&self, id: &WorkflowRunId) -> Result<Option<(String, WorkflowRun)>, WorkflowRunError> {
         let row: Option<(String, String, String, String)> = self
@@ -192,7 +221,8 @@ impl RunStore {
             .map_err(store_error)?;
         match row {
             None => Ok(None),
-            Some((rid, project, state, body)) => self.decoded(&rid, &state, &body)
+            Some((rid, project, state, body)) => self
+                .decoded(&rid, &state, &body)
                 .map(|run| Some((project, run)))
                 .map_err(|m| WorkflowRunError::new("workflow.untrusted", m)),
         }
@@ -205,25 +235,61 @@ impl RunStore {
         workflow: Option<&WorkflowId>,
         limit: usize,
     ) -> Result<Vec<WorkflowRunSummary>, WorkflowRunError> {
+        // One snapshot for the whole listing: the index columns, the change
+        // check, and the record texts read below all see the same database.
+        let _snapshot = self.conn.unchecked_transaction().map_err(store_error)?;
+        // The index columns only; a record's text is read and decoded when
+        // its summary is not already known.
         let mut stmt = self
             .conn
             .prepare_cached(
-                "SELECT CAST(id AS TEXT), CAST(state AS TEXT), CAST(body AS TEXT) FROM runs
+                "SELECT rowid, CAST(id AS TEXT), CAST(state AS TEXT), body IS NOT NULL FROM runs
                  WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2) AND deleted_at IS NULL
                  ORDER BY started_at DESC, id LIMIT ?3",
             )
             .map_err(store_error)?;
-        let rows = stmt
+        let rows: Vec<_> = stmt
             .query_map(params![project, workflow.map(|w| w.as_str()), limit.min(MAX_LIST) as i64], |r| {
-                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, bool>(3)?,
+                ))
             })
-            .map_err(store_error)?;
+            .map_err(store_error)?
+            .collect();
+        // Anything another connection committed makes every kept summary stale.
+        let data_version: i64 =
+            self.conn.pragma_query_value(None, "data_version", |r| r.get(0)).map_err(store_error)?;
+        {
+            let mut listed = self.listed.borrow_mut();
+            if listed.data_version != data_version {
+                listed.by_row.clear();
+                listed.data_version = data_version;
+            }
+        }
+        let mut body_of =
+            self.conn.prepare_cached("SELECT CAST(body AS TEXT) FROM runs WHERE rowid = ?1").map_err(store_error)?;
         let mut out = Vec::new();
         for row in rows {
             // A malformed row is skipped, never fatal.
-            let Ok((Some(id), Some(state), Some(body))) = row else { continue };
+            let Ok((rowid, Some(id), Some(state), true)) = row else { continue };
+            if let Some((_, _, known)) =
+                self.listed.borrow().by_row.get(&rowid).filter(|(i, s, _)| *i == id && *s == state)
+            {
+                out.push(known.clone());
+                continue;
+            }
+            let Ok(Some(body)) = body_of.query_row([rowid], |r| r.get::<_, Option<String>>(0)) else { continue };
             if let Ok(run) = self.decoded(&id, &state, &body) {
-                out.push(summary(&run));
+                let summary = summary(&run);
+                let mut listed = self.listed.borrow_mut();
+                if listed.by_row.len() >= MAX_LISTED_SUMMARIES {
+                    listed.by_row.clear();
+                }
+                listed.by_row.insert(rowid, (id, state, summary.clone()));
+                out.push(summary);
             }
         }
         Ok(out)
@@ -262,6 +328,7 @@ impl RunStore {
                     self.conn
                         .execute("UPDATE runs SET state = 'interrupted' WHERE id = ?1", [id.as_str()])
                         .map_err(store_error)?;
+                    self.forget_listed(&id);
                 }
             }
             count += 1;
@@ -282,7 +349,8 @@ impl RunStore {
             .map_err(store_error)?;
         match row {
             None => Ok(None),
-            Some((rid, project, state, body, deleted)) => self.decoded(&rid, &state, &body)
+            Some((rid, project, state, body, deleted)) => self
+                .decoded(&rid, &state, &body)
                 .map(|run| Some((project, run, deleted.map(|d| d.max(0) as u64))))
                 .map_err(|m| WorkflowRunError::new("workflow.untrusted", m)),
         }
@@ -300,6 +368,7 @@ impl RunStore {
 
     /// Remove a run record for good.
     pub fn remove(&self, id: &WorkflowRunId) -> Result<bool, WorkflowRunError> {
+        self.forget_listed(id.as_str());
         Ok(self.conn.execute("DELETE FROM runs WHERE id = ?1", [id.as_str()]).map_err(store_error)? > 0)
     }
 
@@ -363,6 +432,8 @@ impl RunStore {
     /// and after, so callers report what was actually reclaimed.
     pub fn compact(&self) -> Result<(Option<u64>, Option<u64>), WorkflowRunError> {
         let before = self.file_bytes();
+        // Rebuilding the file may renumber rows.
+        self.listed.borrow_mut().by_row.clear();
         self.conn.execute_batch("VACUUM;").map_err(store_error)?;
         let _ = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
         Ok((before, self.file_bytes()))
