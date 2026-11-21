@@ -587,6 +587,11 @@ impl AgentService {
         self.inner.events.subscribe()
     }
 
+    /// Cost counters of the task store (measurement only).
+    pub fn store_stats(&self) -> crate::store::StoreStats {
+        self.inner.store.stats()
+    }
+
     /// How long a tool call waits for the graph to reconcile its targets
     /// before it is paused (tests shorten it).
     pub fn set_graph_settle(&self, settle: Duration) {

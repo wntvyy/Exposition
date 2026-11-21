@@ -7,6 +7,7 @@
 //! `PRAGMA user_version` and applied in order.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use exposition_core::document::TextPatch;
@@ -351,6 +352,31 @@ pub struct Store {
     conn: Mutex<Connection>,
     /// The database file (`None`: in memory).
     path: Option<PathBuf>,
+    counters: Counters,
+}
+
+#[derive(Default)]
+struct Counters {
+    ops: AtomicU64,
+    review_text_bytes: AtomicU64,
+    transcript_bytes: AtomicU64,
+    tool_result_bytes: AtomicU64,
+}
+
+/// Deterministic cost counters of a store since it was opened (measurement
+/// only: nothing reads them to decide anything).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoreStats {
+    /// Store operations (each takes the connection once).
+    pub ops: u64,
+    /// Rows inserted, updated, or deleted.
+    pub changes: u64,
+    /// Bytes of review texts (checkpoint, baseline, tip) read from `task_files`.
+    pub review_text_bytes: u64,
+    /// Bytes of transcript content read (and parsed).
+    pub transcript_bytes: u64,
+    /// Bytes of tool results read from `tool_calls`.
+    pub tool_result_bytes: u64,
 }
 
 pub fn now_ms() -> u64 {
@@ -391,11 +417,24 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&conn, path.as_deref())?;
-        Ok(Self { conn: Mutex::new(conn), path })
+        Ok(Self { conn: Mutex::new(conn), path, counters: Counters::default() })
     }
 
     fn lock(&self) -> MutexGuard<'_, Connection> {
+        self.counters.ops.fetch_add(1, Ordering::Relaxed);
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Cost counters since this store was opened.
+    pub fn stats(&self) -> StoreStats {
+        let changes = self.conn.lock().unwrap_or_else(|p| p.into_inner()).total_changes();
+        StoreStats {
+            ops: self.counters.ops.load(Ordering::Relaxed),
+            changes,
+            review_text_bytes: self.counters.review_text_bytes.load(Ordering::Relaxed),
+            transcript_bytes: self.counters.transcript_bytes.load(Ordering::Relaxed),
+            tool_result_bytes: self.counters.tool_result_bytes.load(Ordering::Relaxed),
+        }
     }
 
     pub fn schema_version(&self) -> StoreResult<i64> {
@@ -744,6 +783,8 @@ impl Store {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let bytes: usize = raws.iter().map(|raw| raw.4.len()).sum();
+        self.counters.transcript_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         raws.into_iter()
             .map(|(seq, created, kind, role, content)| {
                 let entry = match kind.as_str() {
@@ -984,6 +1025,8 @@ impl Store {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let bytes: usize = raws.iter().map(|raw| raw.5.as_ref().map_or(0, String::len)).sum();
+        self.counters.tool_result_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         raws.into_iter()
             .map(|(tool_use_id, turn, name, input, status, result, is_error, authorized_by, figures)| {
                 Ok(ToolCallRow {
@@ -1189,6 +1232,8 @@ impl Store {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let bytes: usize = raws.iter().map(|raw| raw.3.len() + raw.4.len() + raw.5.len()).sum();
+        self.counters.review_text_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         raws.into_iter()
             .map(
                 |(
