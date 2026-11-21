@@ -97,6 +97,36 @@ describe("statuses and exit codes", () => {
   });
 });
 
+describe("evidence for a snapshot", () => {
+  it("records what the results are evidence for", async () => {
+    const p = { ...plan([step("a", node(""))]), base: { head: "h".repeat(40), mergeBase: "b".repeat(40) }, inputs: "feedfacefeedface" };
+    const r = await run(p, { currentPlanHash: () => "testplan0000" });
+    expect(r.exitCode).toBe(EXIT.ok);
+    expect(r.stale).toBeNull();
+    expect(r.snapshot).toEqual({ head: "h".repeat(40), base: "b".repeat(40), inputs: "feedfacefeedface" });
+    expect(r.wallSeconds).toBeGreaterThanOrEqual(0);
+  });
+
+  it("a tree that changed during the run makes the result stale, never a pass", async () => {
+    const r = await run(plan([step("a", node(""))]), { currentPlanHash: () => "otherplan000" });
+    expect(r.results[0].status).toBe("passed");
+    expect(r.stale).toEqual({ planned: "testplan0000", now: "otherplan000" });
+    expect(r.exitCode).toBe(EXIT.usage);
+    expect(r.complete).toBe(false);
+    // A failure is still reported as a failure.
+    const failed = await run(plan([step("a", node("process.exit(1)"))]), { currentPlanHash: () => "otherplan000" });
+    expect(failed.exitCode).toBe(EXIT.failed);
+    expect(failed.stale).not.toBeNull();
+    // A tree that can no longer be resolved is stale as well.
+    const broken = await run(plan([step("a", node(""))]), {
+      currentPlanHash: () => {
+        throw new Error("no base");
+      },
+    });
+    expect(broken.exitCode).toBe(EXIT.usage);
+  });
+});
+
 describe("scheduling", () => {
   // Each check appends "<id> start <ms>" and "<id> end <ms>" to a log file.
   const logged = (log, id, ms) =>
@@ -109,7 +139,15 @@ describe("scheduling", () => {
     }
     return Object.values(spans);
   };
-  const maxOverlap = (spans) => Math.max(...spans.map((s) => spans.filter((o) => o.start < s.end && s.start < o.end).length));
+  // The largest number of checks running at the same instant (a sweep over
+  // starts and ends; an end at the same millisecond as a start comes first).
+  const maxOverlap = (spans) => {
+    const events = spans.flatMap((s) => [[s.start, 1], [s.end, -1]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    let active = 0;
+    let most = 0;
+    for (const [, delta] of events) most = Math.max(most, (active += delta));
+    return most;
+  };
 
   it("bounds light concurrency by jobs and never overlaps heavy checks", async () => {
     const dir = mkdtempSync(join(tmpdir(), "xp-impact-run-"));
@@ -126,6 +164,51 @@ describe("scheduling", () => {
     expect(maxOverlap(intervals(heavyLog))).toBe(1);
     const lastLight = Math.max(...intervals(lightLog).map((s) => s.end));
     expect(Math.min(...intervals(heavyLog).map((s) => s.start))).toBeGreaterThanOrEqual(lastLight);
+  }, 20_000);
+
+  it("runs scenarios up to e2eJobs at once, after the builds, and keeps resource holders apart", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "xp-impact-run-"));
+    dirs.push(dir);
+    const log = join(dir, "e2e.log");
+    const scenario = (id, resources = []) => step(`e2e:${id}`, logged(log, id, 300), { kind: "e2e", weight: "heavy", after: ["build-app"], resources });
+    const checks = [
+      step("build-app", logged(log, "build", 200), { kind: "native-build", weight: "heavy" }),
+      scenario("a"),
+      scenario("drag", ["desktop"]),
+      scenario("b"),
+      scenario("clip1", ["clipboard"]),
+      scenario("clip2", ["clipboard"]),
+      scenario("c"),
+    ];
+    const r = await run(plan(checks), { e2eJobs: 3 });
+    expect(r.exitCode).toBe(EXIT.ok);
+    expect(r.settings.e2eJobs).toBe(3);
+    expect(r.results.map((x) => x.id)).toEqual(checks.map((c) => c.id));
+    const spans = {};
+    for (const line of readFileSync(log, "utf8").trim().split("\n")) {
+      const [id, what, at] = line.split(" ");
+      (spans[id] ??= {})[what] = Number(at);
+    }
+    const overlap = (x, y) => spans[x].start < spans[y].end && spans[y].start < spans[x].end;
+    const ids = ["a", "b", "c", "clip1", "clip2", "drag"];
+    // Nothing overlaps the build or the desktop scenario; the two clipboard scenarios never overlap each other.
+    for (const id of ids) expect(overlap("build", id)).toBe(false);
+    for (const id of ids.filter((i) => i !== "drag")) expect(overlap("drag", id)).toBe(false);
+    expect(overlap("clip1", "clip2")).toBe(false);
+    // Free scenarios do overlap, never more than three at once.
+    expect(overlap("a", "b")).toBe(true);
+    const all = ids.map((id) => spans[id]);
+    expect(maxOverlap(all)).toBeLessThanOrEqual(3);
+  }, 20_000);
+
+  it("runs scenarios one at a time by default", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "xp-impact-run-"));
+    dirs.push(dir);
+    const log = join(dir, "e2e.log");
+    const checks = ["a", "b", "c"].map((id) => step(`e2e:${id}`, logged(log, id, 150), { kind: "e2e", weight: "heavy" }));
+    const r = await run(plan(checks));
+    expect(r.settings.e2eJobs).toBe(1);
+    expect(maxOverlap(intervals(log))).toBe(1);
   }, 20_000);
 
   it("keeps result order equal to plan order", async () => {

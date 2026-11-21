@@ -1,13 +1,14 @@
 // Executes a plan from plan.mjs. Light checks run concurrently (bounded by
-// `jobs`); heavy checks (cargo, app build, e2e) run one at a time so builds and
-// app instances never overlap. Every check ends as passed, failed, skipped, or
+// `jobs`). Heavy checks never overlap a build: cargo and the app build run one
+// at a time, then end-to-end scenarios run up to `e2eJobs` at once (each is an
+// isolated app instance). Every check ends as passed, failed, skipped, or
 // unavailable; the exit status says whether validation is complete.
 import { spawn, spawnSync } from "node:child_process";
 
-/** Exit statuses of `impact run`. */
 /**
  * Exit statuses: 0 every planned check passed and no required gate is pending;
- * 1 a check failed; 2 usage, invalid base, or stale plan; 3 planned checks were
+ * 1 a check failed; 2 usage, invalid base, or stale plan (including a working
+ * tree that changed while the checks ran); 3 planned checks were
  * skipped or unavailable; 4 pending: planned checks passed but required gates
  * were deferred (live, release, CI, manual) or the plan escalated to full
  * validation without --allow-full. Only 0 is a passing result.
@@ -103,11 +104,19 @@ export function classify(check, { code, error, skips }) {
  * @param {object} plan from buildPlan
  * @param {object} opts
  * @param {number} [opts.jobs] concurrent light checks (default 2)
+ * @param {number} [opts.e2eJobs] end-to-end scenarios run at once (default 1);
+ *   scenarios holding a machine-wide resource are still kept apart
+ * @param {() => string} [opts.currentPlanHash] resolves the plan hash of the
+ *   tree as it is now; when it differs from the plan after the run, the result
+ *   is marked stale (exit status 2)
  * @param {string[]} [opts.skip] check kinds or ids not to run (reported skipped)
  * @param {boolean} [opts.failFast] skip the remaining checks after a failure
  * @param {NodeJS.WritableStream} [opts.out] where check output and progress go
  */
-export async function executePlan(plan, { cwd = process.cwd(), env = process.env, jobs = 2, skip = [], failFast = false, out = process.stdout, platform = process.platform } = {}) {
+export async function executePlan(
+  plan,
+  { cwd = process.cwd(), env = process.env, jobs = 2, e2eJobs = 1, skip = [], failFast = false, out = process.stdout, platform = process.platform, currentPlanHash = null } = {},
+) {
   const results = new Map();
   const running = new Set();
   const skipSet = new Set(skip);
@@ -154,6 +163,35 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
     out.write(`=== ${check.id}: ${verdict.status.toUpperCase()} in ${seconds.toFixed(1)}s${verdict.reason ? ` (${verdict.reason})` : ""}\n`);
   };
 
+  // End-to-end scenarios are separate app instances with their own data
+  // directory, WebView2 profile, and debugging port, so up to `e2eJobs` of them
+  // may run at once. A scenario that holds a machine-wide resource is kept
+  // apart: "desktop" (the real pointer, the foreground window, a native
+  // dialog) runs with nothing else; any other resource (the OS clipboard)
+  // never overlaps another holder of the same resource.
+  const e2eWidth = Math.max(1, Math.floor(e2eJobs) || 1);
+  const runScenarios = async (batch) => {
+    const alone = (c) => (c.resources ?? []).includes("desktop");
+    const pending = batch.filter((c) => !alone(c));
+    const active = new Map();
+    const conflicts = (c) => [...active.keys()].some((o) => (o.resources ?? []).some((r) => (c.resources ?? []).includes(r)));
+    while (pending.length || active.size) {
+      let started = false;
+      while (active.size < e2eWidth) {
+        const at = pending.findIndex((c) => !conflicts(c));
+        if (at < 0) break;
+        const [check] = pending.splice(at, 1);
+        const done = run(check, e2eWidth > 1).finally(() => active.delete(check));
+        active.set(check, done);
+        started = true;
+      }
+      if (active.size) await Promise.race(active.values());
+      else if (!started) break;
+    }
+    for (const check of batch.filter(alone)) await run(check, false);
+  };
+
+  const startedAt = Date.now();
   try {
     const light = plan.checks.filter((c) => c.weight !== "heavy");
     const heavy = plan.checks.filter((c) => c.weight === "heavy");
@@ -163,7 +201,17 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
       while (next < light.length) await run(light[next++], width > 1);
     };
     await Promise.all(Array.from({ length: Math.min(width, light.length) }, worker));
-    for (const check of heavy) await run(check, false);
+    // Builds and cargo never overlap anything. Consecutive scenarios form a batch.
+    for (let i = 0; i < heavy.length; ) {
+      if (heavy[i].kind !== "e2e") {
+        await run(heavy[i++], false);
+        continue;
+      }
+      let end = i;
+      while (end < heavy.length && heavy[end].kind === "e2e") end++;
+      await runScenarios(heavy.slice(i, end));
+      i = end;
+    }
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
@@ -171,22 +219,42 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
 
   const ordered = plan.checks.map((c) => results.get(c.id));
   const count = (s) => ordered.filter((r) => r.status === s).length;
+  // The checks read the working tree as they go, not a snapshot. If the tree no
+  // longer resolves to the plan that was started, the results describe a mix of
+  // states and are not evidence for the current one.
+  let stale = null;
+  if (currentPlanHash) {
+    try {
+      const now = currentPlanHash();
+      if (now !== plan.hash) stale = { planned: plan.hash, now };
+    } catch (error) {
+      stale = { planned: plan.hash, now: null, reason: String(error?.message ?? error) };
+    }
+  }
   const exitCode = count("failed")
     ? EXIT.failed
-    : count("skipped") || count("unavailable")
-      ? EXIT.incomplete
-      : plan.deferred.length
-        ? EXIT.pending
-        : EXIT.ok;
+    : stale
+      ? EXIT.usage
+      : count("skipped") || count("unavailable")
+        ? EXIT.incomplete
+        : plan.deferred.length
+          ? EXIT.pending
+          : EXIT.ok;
   return {
     schema: "exposition-impact-run/1",
     plan: plan.hash,
+    // What the results are evidence for, and how they were produced.
+    snapshot: { head: plan.base?.head ?? null, base: plan.base?.mergeBase ?? null, inputs: plan.inputs ?? null },
+    stale,
+    startedAt: new Date(startedAt).toISOString(),
+    wallSeconds: Number(((Date.now() - startedAt) / 1000).toFixed(1)),
+    settings: { jobs: Math.max(1, Math.floor(jobs) || 1), e2eJobs: e2eWidth, cargoBuildJobs: env.CARGO_BUILD_JOBS ?? null, rustTestThreads: env.RUST_TEST_THREADS ?? null },
     results: ordered,
     totals: { passed: count("passed"), failed: count("failed"), skipped: count("skipped"), unavailable: count("unavailable") },
     deferred: plan.deferred.map(({ id, label, why }) => ({ id, label, why })),
     uncovered: plan.uncovered ?? [],
-    // Complete: every planned check passed, nothing is deferred, and every
-    // changed file is exercised by some check.
+    // Complete: every planned check passed on an unchanged tree, nothing is
+    // deferred, and every changed file is exercised by some check.
     complete: exitCode === EXIT.ok && (plan.uncovered ?? []).length === 0,
     exitCode,
   };

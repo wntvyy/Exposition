@@ -5,6 +5,7 @@ import {
   CLOSED_LOOPBACK,
   PROVIDER_ENDPOINTS,
   REAL_CREDENTIAL_OPT_IN,
+  scenarioCredentialNamespace,
   scenarioUsesRealCredential,
 } from "./app-env.mjs";
 
@@ -33,6 +34,17 @@ describe("e2e app environment", () => {
     expect(mocked.EXPOSITION_DEV_ANTHROPIC_BASE_URL).toBe(CLOSED_LOOPBACK);
     const live = appEnvironment(inherited, fixed, { realCredential: true });
     for (const name of PROVIDER_ENDPOINTS) expect(live[name]).toBeUndefined();
+  });
+
+  it("gives each scenario run a namespace a development build accepts", () => {
+    const a = scenarioCredentialNamespace("agents-harness", 1_700_000_000_000);
+    const b = scenarioCredentialNamespace("settings", 1_700_000_000_000);
+    const long = scenarioCredentialNamespace("x".repeat(80), 1_700_000_000_000);
+    for (const ns of [a, b, long]) {
+      expect(ns).toMatch(/^[A-Za-z0-9-]{1,64}$/);
+      expect(ns.startsWith("e2e-")).toBe(true);
+    }
+    expect(a).not.toBe(b);
   });
 
   it("only live-* scenarios use the real credential", () => {

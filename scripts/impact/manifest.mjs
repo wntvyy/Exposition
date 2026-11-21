@@ -162,6 +162,27 @@ export const SCENARIOS = {
 };
 
 /**
+ * Machine-wide resources a scenario holds while it runs. The runner may run
+ * several scenarios at once (each app instance has its own data directory,
+ * WebView2 profile, credential namespace, and debugging port), except:
+ * - desktop: moves the real pointer, needs the foreground window, or drives a
+ *   native dialog through UI Automation. Runs with no other scenario.
+ * - clipboard: reads or writes the OS clipboard. Never overlaps another
+ *   clipboard scenario.
+ * manifest.test.mjs keeps both lists exact (a scenario that imports the drag or
+ * dialog driver, or mentions the clipboard, must be listed).
+ */
+export const SCENARIO_RESOURCES = {
+  desktop: [...SCENARIOS.osDrag, ...SCENARIOS.nativeDialog],
+  clipboard: ["a1-responses", "agents-composer", "agents-composer-input", "p1-decisions", "p1-files", "p1-graph-workflows", "p1-research", "v2-tour-agents"],
+};
+
+/** The resources of one scenario, sorted (empty for most). */
+export function scenarioResources(name) {
+  return Object.keys(SCENARIO_RESOURCES).filter((r) => SCENARIO_RESOURCES[r].includes(name)).sort();
+}
+
+/**
  * Scenarios run for every "broad" change: one pass over the cross-cutting
  * invariants (startup and IPC refusal, shell, file integrity and recovery,
  * graph identity, trust, project switching, the security surface, and the

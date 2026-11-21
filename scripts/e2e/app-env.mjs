@@ -40,6 +40,16 @@ export function appEnvironment(baseEnv, fixed, options = {}) {
   return env;
 }
 
+/**
+ * The credential namespace of one scenario run: letters, digits, and hyphens,
+ * at most 64 characters (what a development build accepts).
+ */
+export function scenarioCredentialNamespace(name, startedMs) {
+  const tail = `-${startedMs}-${process.pid}`;
+  const head = `e2e-${name.replace(/[^A-Za-z0-9-]/g, "-")}`;
+  return `${head.slice(0, 64 - tail.length)}${tail}`;
+}
+
 /** Whether a scenario may use the real credential entry. */
 export function scenarioUsesRealCredential(name) {
   return name.startsWith("live-");

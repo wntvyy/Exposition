@@ -14,7 +14,10 @@
 //   --json-out <file>    run: also write the result JSON to <file>
 //   --expect-plan <hash> run: refuse unless the resolved plan has this hash
 //                        (the hash a preview printed)
-//   --jobs <n>           concurrent light checks (default 2; heavy checks never overlap)
+//   --jobs <n>           concurrent light checks (default 2; builds never overlap)
+//   --e2e-jobs <n>       end-to-end scenarios run at once (default 1, or
+//                        EXPOSITION_E2E_JOBS); scenarios that use the real
+//                        pointer, a native dialog, or the clipboard stay apart
 //   --skip <kinds|ids>   comma list of check kinds (static, frontend, rust, gates,
 //                        native-build, e2e, live, release) or ids not to run;
 //                        they are reported as skipped and the run is incomplete
@@ -27,7 +30,8 @@
 //
 // Exit status: 0 every planned check passed and nothing required is pending;
 // 1 a check failed; 2 usage error, invalid comparison base, or a plan that no
-// longer matches --expect-plan; 3 nothing failed but planned checks were
+// longer matches --expect-plan, or a working tree that changed while the checks
+// ran (the results are stale); 3 nothing failed but planned checks were
 // skipped or unavailable; 4 pending: required gates were deferred (live,
 // release, CI, manual) or full validation was needed and not allowed. Deferred
 // items never run implicitly. Uncovered files keep `complete` false.
@@ -38,7 +42,7 @@ import { buildPlan } from "./impact/plan.mjs";
 import { buildIndex, collectChanges, ImpactError, inputDigest, resolveBase } from "./impact/repo.mjs";
 import { EXIT, executePlan } from "./impact/runner.mjs";
 
-const VALUE_FLAGS = new Set(["--base", "--json-out", "--expect-plan", "--jobs", "--skip"]);
+const VALUE_FLAGS = new Set(["--base", "--json-out", "--expect-plan", "--jobs", "--e2e-jobs", "--skip"]);
 const BOOLEAN_FLAGS = new Set(["--full", "--json", "--fail-fast", "--live", "--release", "--allow-full"]);
 
 export function parseArgs(argv) {
@@ -55,7 +59,9 @@ export function parseArgs(argv) {
       opts[flag.slice(2)] = value;
     } else throw new ImpactError(`unknown option ${arg}`);
   }
-  if (opts.jobs !== undefined && !/^[1-9]\d*$/.test(opts.jobs)) throw new ImpactError("--jobs takes a positive integer");
+  for (const flag of ["jobs", "e2e-jobs"]) {
+    if (opts[flag] !== undefined && !/^[1-9]\d*$/.test(opts[flag])) throw new ImpactError(`--${flag} takes a positive integer`);
+  }
   opts.skip = opts.skip ? opts.skip.split(",").map((s) => s.trim()).filter(Boolean) : [];
   return opts;
 }
@@ -115,13 +121,20 @@ export function formatResult(result) {
   for (const r of result.results) {
     lines.push(`${r.status.toUpperCase().padEnd(11)} ${r.id}${r.seconds ? ` (${r.seconds.toFixed(1)}s)` : ""}${r.reason ? ` — ${r.reason}` : ""}`);
   }
+  if (result.stale) {
+    lines.push(
+      `STALE       the working tree changed while the checks ran (plan ${result.stale.planned} → ${result.stale.now ?? "unresolvable"}); these results are not evidence for the current tree`,
+    );
+  }
   for (const d of result.deferred) lines.push(`DEFERRED    ${d.id} — ${d.why}`);
   for (const p of result.uncovered) lines.push(`UNCOVERED   ${p} — no automated check exercises it`);
   const t = result.totals;
   const verdict =
     result.exitCode === EXIT.failed
       ? "FAILED"
-      : result.exitCode === EXIT.incomplete
+      : result.stale
+        ? "STALE: the working tree changed during the run; rerun on a tree that stays still"
+        : result.exitCode === EXIT.incomplete
         ? "INCOMPLETE: planned checks were skipped or unavailable"
         : result.exitCode === EXIT.pending
           ? "PENDING: planned checks passed; the deferred gates above are still required"
@@ -137,7 +150,7 @@ async function main() {
   try {
     opts = parseArgs(process.argv.slice(2));
   } catch (error) {
-    console.error(`impact: ${error.message}\nusage: node scripts/impact.mjs <plan|run> [--full] [--base <ref>] [--json] [--jobs <n>] [--skip <kinds>] [--live] [--release] [--allow-full] [--expect-plan <hash>] [--json-out <file>] [--fail-fast]`);
+    console.error(`impact: ${error.message}\nusage: node scripts/impact.mjs <plan|run> [--full] [--base <ref>] [--json] [--jobs <n>] [--e2e-jobs <n>] [--skip <kinds>] [--live] [--release] [--allow-full] [--expect-plan <hash>] [--json-out <file>] [--fail-fast]`);
     return EXIT.usage;
   }
   const started = performance.now();
@@ -173,7 +186,16 @@ async function main() {
     );
     return EXIT.pending;
   }
-  const result = await executePlan(plan, { jobs: opts.jobs ? Number(opts.jobs) : 2, skip: opts.skip, failFast: opts["fail-fast"], out: log });
+  const envE2eJobs = /^[1-9]\d*$/.test(process.env.EXPOSITION_E2E_JOBS ?? "") ? Number(process.env.EXPOSITION_E2E_JOBS) : 1;
+  const result = await executePlan(plan, {
+    jobs: opts.jobs ? Number(opts.jobs) : 2,
+    e2eJobs: opts["e2e-jobs"] ? Number(opts["e2e-jobs"]) : envE2eJobs,
+    skip: opts.skip,
+    failFast: opts["fail-fast"],
+    out: log,
+    // Same resolution as at the start: a different hash means the tree moved.
+    currentPlanHash: () => resolvePlan({ cwd: process.cwd(), full: opts.full, base: opts.base, live: opts.live, release: opts.release }).hash,
+  });
   log.write(`${formatResult(result)}\n`);
   if (opts["json-out"]) writeFileSync(opts["json-out"], `${JSON.stringify(result, null, 2)}\n`);
   if (opts.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

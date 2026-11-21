@@ -168,6 +168,15 @@ async function launchOnce(executable, dataDir, webviewDir, options) {
     await waitForCdp(port, child, options.timeoutMs ?? 45_000);
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
     const page = await appPage(browser, options.timeoutMs ?? 45_000);
+    // The page behaves as focused whether or not its window is in front, so a
+    // scenario does not depend on which window the desktop has in front (the
+    // user's, or another scenario's app when several run at once).
+    try {
+      const session = await page.context().newCDPSession(page);
+      await session.send("Emulation.setFocusEmulationEnabled", { enabled: true });
+    } catch {
+      // Not supported by this WebView2: scenarios run as before.
+    }
     const consoleMessages = [];
     page.on("console", (m) => consoleMessages.push(`${m.type()}: ${m.text()}`));
     page.on("pageerror", (e) => consoleMessages.push(`pageerror: ${e.message}`));

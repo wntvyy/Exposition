@@ -10,6 +10,7 @@ import {
   FIXTURE_DIR,
   INVARIANT_SCENARIOS,
   LEVELS,
+  scenarioResources,
   SCENARIO_DIR,
   SCENARIO_POLICY,
   VITEST_INCLUDE,
@@ -317,7 +318,7 @@ function addE2e(builder, names, reason, scenarios) {
     }
     builder.add(
       `e2e:${name}`,
-      { label: `e2e ${name}`, kind: "e2e", weight: "heavy", platform: "win32", command: ["node", "scripts/e2e/run.mjs", name], after: ["build-app"] },
+      { label: `e2e ${name}`, kind: "e2e", weight: "heavy", platform: "win32", command: ["node", "scripts/e2e/run.mjs", name], after: ["build-app"], resources: scenarioResources(name) },
       reason,
     );
   }

@@ -6,8 +6,8 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { AREAS, DEFERRED, INVARIANT_SCENARIOS, SCENARIO_POLICY, SCENARIOS, VITEST_INCLUDE } from "./manifest.mjs";
-import { areasFor, buildPlan, GATES } from "./plan.mjs";
+import { AREAS, DEFERRED, INVARIANT_SCENARIOS, SCENARIO_POLICY, SCENARIO_RESOURCES, SCENARIOS, VITEST_INCLUDE } from "./manifest.mjs";
+import { areasFor, buildPlan, GATES, scenarioPolicy } from "./plan.mjs";
 import { buildIndex, changeFacts } from "./repo.mjs";
 
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -123,6 +123,15 @@ describe("representative plans on the real repository", { timeout: 30_000 }, () 
     // The named lists are exactly the importing scenarios, so a new user of a helper cannot be forgotten.
     expect([...SCENARIOS.nativeDialog].sort()).toEqual(importers("native-dialog.mjs"));
     expect([...SCENARIOS.osDrag].sort()).toEqual(importers("os-drag.mjs"));
+    // Scenarios that hold the desktop or the clipboard are never run next to a conflicting one.
+    expect([...SCENARIO_RESOURCES.desktop].sort()).toEqual([...new Set([...importers("native-dialog.mjs"), ...importers("os-drag.mjs")])].sort());
+    const mentionsClipboard = scenarioFiles
+      .filter((s) => !scenarioPolicy(s) && /clipboard|Control(OrMeta)?\+[CVX]\b/i.test(readFileSync(join(ROOT, "scripts/e2e/scenarios", `${s}.mjs`), "utf8")))
+      .sort();
+    expect([...SCENARIO_RESOURCES.clipboard].sort()).toEqual(mentionsClipboard);
+    expect(planFor("scripts/e2e/os-drag.mjs").checks.find((c) => c.id === "e2e:qol-files").resources).toEqual(["desktop"]);
+    expect(planFor("scripts/e2e/scenarios/p1-files.mjs").checks.find((c) => c.id === "e2e:p1-files").resources).toEqual(["clipboard"]);
+    expect(planFor("scripts/e2e/scenarios/smoke.mjs").checks.find((c) => c.id === "e2e:smoke").resources).toEqual([]);
     for (const file of ["scripts/e2e/native-dialog.ps1", "scripts/e2e/native-dialog.mjs"]) {
       const p = planFor(file);
       expect(p.checks.map((c) => c.id)).toEqual(expect.arrayContaining(SCENARIOS.nativeDialog.map((s) => `e2e:${s}`)));

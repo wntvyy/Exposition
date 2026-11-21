@@ -8,7 +8,7 @@ import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { scenarioUsesRealCredential } from "./app-env.mjs";
+import { scenarioCredentialNamespace, scenarioUsesRealCredential } from "./app-env.mjs";
 import { launchApp, REPO_ROOT } from "./app.mjs";
 
 const scenariosDir = join(import.meta.dirname, "scenarios");
@@ -37,8 +37,13 @@ for (const name of selected) {
   // Only live-* scenarios (named explicitly) may use the real credential entry;
   // every other launch uses a namespaced development entry.
   const realCredential = scenarioUsesRealCredential(name);
+  // One credential namespace per scenario run (kept across its relaunches), so
+  // a key saved by one scenario is never seen by another, in sequence or when
+  // scenarios run at the same time. A scenario's own namespace wins.
+  const namespace = scenarioCredentialNamespace(name, started);
   const launchWithLastState = async (options = {}) => {
-    const app = await launchApp({ ...options, realCredential });
+    const env = realCredential ? options.env : { EXPOSITION_CREDENTIAL_NAMESPACE: namespace, ...options.env };
+    const app = await launchApp({ ...options, env, realCredential });
     const n = ++launched;
     const close = app.close.bind(app);
     app.close = async () => {
