@@ -245,7 +245,13 @@ async fn discussion_is_one_bounded_turn_that_revises_options_while_the_batch_sta
     h.service.discuss_question(&task.id, &question.id, 1, "Why would formal be better?").unwrap();
     // One discussion at a time.
     assert_eq!(h.service.discuss_question(&task.id, &question.id, 1, "And?").unwrap_err().code, "agents.questionBusy");
-    let detail = until(&h, &task.id, |d| d.questions[0].state == QuestionRequestState::Pending).await;
+    // `task_detail` reads the summary before the questions, so a question
+    // that is Pending again can sit beside a summary from a moment earlier:
+    // wait for the summary that follows the discussion as well.
+    let detail = until(&h, &task.id, |d| {
+        d.questions[0].state == QuestionRequestState::Pending && d.summary.usage.turns >= turns_before + 2
+    })
+    .await;
     let revised = &detail.questions[0];
     assert_eq!(revised.revision, 2, "the revision bumped with the options");
     let ids: Vec<&str> = revised.questions[0].options.iter().map(|o| o.id.as_str()).collect();
