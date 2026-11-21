@@ -134,6 +134,27 @@ when it is missing. The runner reads that and reports the scenario as
 *unavailable*, not passed. `mathlib` and `mathlib-setup` need prepared external
 state and are always deferred, as are the live scenarios.
 
+**Scenario inventory.** `scripts/e2e/scenarios/` holds 102 scenario files
+(every `.mjs` file there is a scenario; helper modules live one folder up in
+`scripts/e2e/` and are not counted). `npm run e2e` without names runs the 92
+whose name does not start with `live-`; eight of those (`review-m5-agents`,
+`review-m7-graph-fs`, `review-m7-ipc`, and the five `review-sec-*`) skip
+themselves unless they are named. The other ten are the `live-*` scenarios.
+
+**Scenarios that need a debug build.** Scenarios run against the debug build
+made by `npm run build:app` unless `EXPOSITION_E2E_EXECUTABLE` names another
+executable. Sixteen IPC commands exist only in debug builds (`DEV_COMMANDS`
+in `src-tauri/build.rs`): the scripted model provider's script loader, two
+fixed jobs, two fault injections, and eleven probes of live services that no
+interface calls (`tex_build`, `tex_status`, `tex_page_image`, `tex_page_map`,
+`lean_check`, `lean_package_inspect`, `graph_reconcile`, `graph_backup`,
+`graph_backups`, `graph_operations`, `research_space`). 42 scenario files
+name one of them and need a debug build for those parts; the 21 that call a
+probe say "Requires a debug build" in their header, and `m6-paper-project`
+records its `lean_check` part as not verified in a release build instead. The
+release run uses only `smoke`, `ui-shell`, and `pages-review`, which need
+none of them.
+
 ## Results and exit status
 
 Each planned check ends **passed**, **failed**, **skipped** (by `--skip`,
@@ -228,3 +249,9 @@ listed; everything deferred or uncovered remains unverified.
   items, notes such as the e2e executable) and the content of changed files,
   not the content of unchanged files the analysis read.
 - End-to-end scenarios are verified on Windows only.
+- `agents-composer-input` and `qol-files` perform real operating-system drags
+  (`scripts/e2e/os-drag.mjs`): they move the pointer and raise the app window,
+  so the desktop must not be used while they run. A drag helper that has not
+  finished 60 s after its hold is killed and the step fails with "os-drag
+  timed out"; the app window may then still be topmost and the left button
+  held until the scenario's app exits or the button is pressed again.
