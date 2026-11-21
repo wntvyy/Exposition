@@ -13,7 +13,8 @@ jobs:
     # Windows is the primary verified platform. Other platforms are structurally
     # supported but unverified until they have their own runner job.
     runs-on: windows-latest
-    timeout-minutes: 60
+    # A cold Rust build plus the full check takes about an hour; a cached run about 25 minutes.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -25,6 +26,10 @@ jobs:
         with:
           toolchain: 1.96.0
           components: rustfmt, clippy
+      # Save the build cache after a failed check too, so one failure does not
+      # leave every later run building from scratch.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: npm ci
       - run: npm run check
