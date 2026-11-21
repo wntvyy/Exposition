@@ -81,15 +81,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
             description: "List files and folders of the user's project (only those inside this task's scope). \
                 Call it first to discover the project's structure, and whenever you need a path you have not seen. \
                 Paths are relative to the project root and use forward slashes. A result with truncated: true is \
-                not the whole listing: it gives nextOffset to continue from.",
+                not the whole listing: it gives nextOffset and listing to continue with.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Folder to list, relative to the project root. Use \"\" for the root."},
                     "recursive": {"type": "boolean", "description": "Include subfolders (up to 500 entries per call)."},
-                    "offset": {"type": "integer", "description": "Entries to skip: 0, or the nextOffset of a truncated result."}
+                    "offset": {"type": "integer", "description": "Entries to skip: 0, or the nextOffset of a truncated result."},
+                    "listing": {"type": "string", "description": "With an offset: the listing value of that truncated result; otherwise \"\"."}
                 },
-                "required": ["path", "recursive", "offset"],
+                "required": ["path", "recursive", "offset", "listing"],
                 "additionalProperties": false
             }),
         },
@@ -662,6 +663,10 @@ pub struct ListFilesInput {
     /// before the parameter existed have none.
     #[serde(default)]
     pub offset: u64,
+    /// The `listing` value of the truncated result being continued (empty:
+    /// none given): the continuation then says when the listing changed.
+    #[serde(default)]
+    pub listing: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

@@ -765,6 +765,14 @@ impl Store {
         Ok(u(seq))
     }
 
+    /// A message's content as a read of the store returns it after it was
+    /// appended: through the same serialization and parse. They differ from
+    /// what was handed in where JSON text does not survive the round trip
+    /// (some floating-point numbers).
+    pub fn stored_form(content: &[Value]) -> StoreResult<Vec<Value>> {
+        from_json(&to_json(&content)?)
+    }
+
     pub fn append_message(&self, task: &TaskId, role: &str, content: &[Value]) -> StoreResult<u64> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;

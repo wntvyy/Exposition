@@ -1202,10 +1202,11 @@ impl AgentService {
             "text": prompt::context_update(&row.spec, &self.inner.documents, &authority, &outlook, &changed),
         }));
         if let Some(graph_context) = &graph_context {
-            // When the latest context block the conversation holds carries
-            // this very context (judged from the stored conversation itself),
-            // say that it still holds instead of sending a second copy.
-            let held = last_graph_context(&history).is_some_and(|sent| graph::context::same(&sent, graph_context));
+            // When the latest context block the application itself put into
+            // the conversation carries exactly this context, and nothing the
+            // user wrote since could be taken for a context block, say that
+            // it still holds instead of sending a second copy.
+            let held = held_graph_context(&history).is_some_and(|sent| graph::context::same(&sent, graph_context));
             self.inner.store.insert_graph_context(id, graph_context)?;
             let text = if held {
                 graph::context::unchanged_block(graph_context)
@@ -3008,17 +3009,44 @@ impl Inner {
     }
 }
 
-/// The graph context of the latest whole context block the application put
-/// into a conversation (the short "unchanged" form carries none).
-fn last_graph_context(history: &[(String, Vec<Value>)]) -> Option<graph::GraphContext> {
-    history
-        .iter()
-        .rev()
-        .filter(|(role, _)| role == "user")
-        .flat_map(|(_, content)| content.iter().rev())
-        .filter(|block| block_type(block) == "text")
-        .filter_map(|block| block.get("text").and_then(Value::as_str))
-        .find_map(graph::context::parse_block)
+/// The graph context the model certainly holds as its latest: the one of
+/// the latest whole context block the application itself put into the
+/// conversation. `None` (the caller then sends the whole context) whenever
+/// that is not certain.
+///
+/// The application's block is identified by where the application puts it,
+/// never by looking at text a user wrote: a user message the application
+/// builds for a run has, as its text blocks, the task context first, then
+/// the graph context, then the user's prompt last (tool results and
+/// attachments are not text blocks). Messages are walked from the latest;
+/// the short "unchanged" form refers to an earlier block, so the walk goes
+/// on past it. Anything else in that position, or a prompt at or after the
+/// block that itself begins like a context block (the model could take it
+/// for the latest one), ends the walk with `None`.
+fn held_graph_context(history: &[(String, Vec<Value>)]) -> Option<graph::GraphContext> {
+    for (_, content) in history.iter().rev().filter(|(role, _)| role == "user") {
+        let texts: Vec<&str> = content
+            .iter()
+            .filter(|block| block_type(block) == "text")
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect();
+        // A message of tool results only (with a question's discussion, if any).
+        let [first, middle @ .., prompt] = texts.as_slice() else { continue };
+        if !first.starts_with("<task_context>") {
+            continue;
+        }
+        if prompt.starts_with("<graph_context>") {
+            return None;
+        }
+        match middle {
+            // A run without a graph context block.
+            [] => continue,
+            [block] if graph::context::is_unchanged_block(block) => continue,
+            [block] => return graph::context::parse_block(block),
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// The record of a graph proposal whose approval can no longer be given.
@@ -3337,12 +3365,17 @@ impl Run<'_> {
             .map_err(|message| TaskStatus::Failed { message })
     }
 
-    /// Add a message this run just stored to its copy of the conversation,
-    /// converted exactly as a stored message is.
+    /// Add a message this run just stored to its copy of the conversation:
+    /// exactly what a read of the store returns for it (the content as the
+    /// store serializes and parses it, not as it was handed in), converted
+    /// as a stored message is. A later run reads the store, so both send
+    /// the same.
     fn remember(&mut self, kind: ProviderKind, role: &str, content: &[Value]) {
         let Some(history) = self.history.as_mut() else { return };
-        let message = vec![(role.to_owned(), content.to_vec())];
-        match self.inner.provider_messages(kind, message, &mut self.attachment_bytes) {
+        let added = Store::stored_form(content).map_err(|e| e.to_string()).and_then(|stored| {
+            self.inner.provider_messages(kind, vec![(role.to_owned(), stored)], &mut self.attachment_bytes)
+        });
+        match added {
             Ok(added) => history.extend(added),
             // The next request reads the stored history again (and reports why it cannot).
             Err(_) => self.history = None,

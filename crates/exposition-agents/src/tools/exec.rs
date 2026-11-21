@@ -2238,6 +2238,25 @@ fn list_files(env: &ToolEnv<'_>, input: ListFilesInput) -> Result<ToolOutput, To
         Some(workspace) => list_with_workspace(workspace, dir.as_ref(), input.recursive, limit)?,
         None => env.files.list(dir.as_ref(), input.recursive, limit).map_err(file_error)?,
     };
+    // The earlier pages are only skipped correctly while the walk up to
+    // `offset` is what it was when they were listed. With the fingerprint
+    // of that walk (given with the truncated result) a change is said, not
+    // passed over: an entry may have been skipped or listed twice.
+    if !input.listing.is_empty()
+        && (listing.entries.len() < offset || walk_fingerprint(&listing.entries[..offset]) != input.listing)
+    {
+        return Ok(ToolOutput::ok(json!({
+            "entries": [],
+            "truncated": true,
+            "listingChanged": true,
+            "nextOffset": 0,
+            "note": "The listing changed since the earlier page was listed (files were added, removed, or renamed), \
+                     so continuing from this offset could skip or repeat entries. Nothing is listed here: call \
+                     list_files again with offset 0 and listing \"\", or list a subfolder.",
+        })));
+    }
+    // Of the walk up to where the next page starts (hidden entries included; a hash names none).
+    let fingerprint = listing.truncated.then(|| walk_fingerprint(&listing.entries));
     listing.entries.drain(..offset.min(listing.entries.len()));
     let open: HashMap<String, (u64, bool)> = env
         .documents
@@ -2270,9 +2289,10 @@ fn list_files(env: &ToolEnv<'_>, input: ListFilesInput) -> Result<ToolOutput, To
     if listing.truncated {
         // Not the whole listing: say so and how to get the rest.
         result["nextOffset"] = json!(limit);
+        result["listing"] = json!(fingerprint);
         result["note"] = json!(format!(
-            "More entries exist than are listed here. Call list_files again with offset {limit} for the next ones, \
-             or list a subfolder."
+            "More entries exist than are listed here. Call list_files again with offset {limit} and this result's \
+             listing value for the next ones, or list a subfolder."
         ));
     }
     if let Some(graph) = env.graph {
@@ -2280,6 +2300,20 @@ fn list_files(env: &ToolEnv<'_>, input: ListFilesInput) -> Result<ToolOutput, To
         result["graph"] = crate::graph::header(&status);
     }
     Ok(ToolOutput::ok(result))
+}
+
+/// An opaque fingerprint of a listing walk (its entries in order).
+fn walk_fingerprint(entries: &[workspace::FileEntry]) -> String {
+    let mut walk = String::new();
+    for entry in entries {
+        walk.push_str(entry.kind);
+        walk.push('\0');
+        walk.push_str(&entry.path);
+        walk.push('\n');
+    }
+    let mut digest = sha256_hex(walk.as_bytes());
+    digest.truncate(32);
+    digest
 }
 
 /// Resource identities of the project's files, by path (bounded).
@@ -2312,9 +2346,14 @@ fn read_file(env: &ToolEnv<'_>, seen: &mut SeenTexts, input: ReadFileInput) -> R
         )));
     }
     let lines = if partial { Some(excerpt(&snapshot.text, input.start_line, input.max_lines)?) } else { None };
-    // The whole revision is remembered either way: edit_document resolves
-    // old_text against the exact revision read, not against an excerpt.
-    seen.insert(&id, snapshot.revision, Arc::clone(&snapshot.text));
+    // The whole revision is remembered for a partial read too: edit_document
+    // resolves old_text against the exact revision read, not against an
+    // excerpt. Not for a file over the whole-read limit: it can be read in
+    // parts, but stays as it was for edits (not editable by the agent).
+    let editable = snapshot.text.len() <= MAX_READ_BYTES;
+    if editable {
+        seen.insert(&id, snapshot.revision, Arc::clone(&snapshot.text));
+    }
     // The workspace snapshot reports the hash of the exact bytes a save or a
     // build would use (the buffer encoded in its encoding).
     let content_hash = env
@@ -2342,11 +2381,19 @@ fn read_file(env: &ToolEnv<'_>, seen: &mut SeenTexts, input: ReadFileInput) -> R
         if lines.end < lines.total {
             result["nextStartLine"] = json!(lines.end + 1);
         }
-        result["note"] = json!(format!(
-            "Lines {}–{} of {} at revision {}. contentHash is the whole file's. edit_document takes this revision \
-             and looks for old_text in the whole file, so old_text must be unique in all of it.",
-            lines.start, lines.end, lines.total, snapshot.revision
-        ));
+        result["note"] = json!(if editable {
+            format!(
+                "Lines {}–{} of {} at revision {}. contentHash is the whole file's. edit_document takes this \
+                 revision and looks for old_text in the whole file, so old_text must be unique in all of it.",
+                lines.start, lines.end, lines.total, snapshot.revision
+            )
+        } else {
+            format!(
+                "Lines {}–{} of {} at revision {}. contentHash is the whole file's. The file is larger than the \
+                 {MAX_READ_BYTES}-byte limit for reading a whole file, so edit_document cannot change it.",
+                lines.start, lines.end, lines.total, snapshot.revision
+            )
+        });
     }
     if let Some(graph) = graph_info {
         result["graph"] = graph;
@@ -2474,6 +2521,19 @@ fn edit_document(
     };
     let Some(base) = seen.get(&id, input.base_revision) else {
         let current = env.documents.info(&id).map(|i| i.revision).unwrap_or_default();
+        // A file over the whole-read limit is never a revision "read": say
+        // why, so the model does not keep reading parts to make it editable.
+        // (The size is metadata; nothing here depends on the text.)
+        if env.documents.snapshot(&id).is_ok_and(|snapshot| snapshot.text.len() > MAX_READ_BYTES) {
+            return Err(ToolOutput::error_with(
+                format!(
+                    "{path} is larger than the {MAX_READ_BYTES}-byte limit for reading a whole file, and \
+                     edit_document only changes a revision that was read whole, so it cannot edit this file. \
+                     Nothing was changed."
+                ),
+                json!({"currentRevision": current}),
+            ));
+        }
         return Err(ToolOutput::error_with(
             format!(
                 "Revision {} of {path} is not a revision you have read. Call read_file and edit the revision it \

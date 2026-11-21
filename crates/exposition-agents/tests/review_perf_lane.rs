@@ -438,7 +438,7 @@ async fn summaries_agree_with_the_review_view_over_random_histories() {
                     let applied = user_patch(&h, &file, patch.clone());
                     log.push(format!("{step}: user patch on {file} ({applied}): {patch:?}"));
                 }
-                11 | 12 | 13 => {
+                11..=13 => {
                     if let Some(id) = h.documents.find_by_path(&p(&file)) {
                         let done = h.documents.undo(&id, EditOrigin::Source).is_ok();
                         log.push(format!("{step}: undo {file} ({done})"));
@@ -785,7 +785,6 @@ async fn requests_of_a_run_equal_a_fresh_read_of_the_stored_conversation() {
 /// is replayed with one text for the rest of the run and with another by the
 /// next run (and by the base, which read the store before every request).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "review: defect"]
 async fn a_number_altered_by_the_store_is_replayed_as_the_store_holds_it() {
     let float = unstable_float();
     println!("REVIEW unstable float through the JSON round trip: {float:?}");
@@ -1271,7 +1270,6 @@ async fn a_pasted_context_that_says_something_else_does_not_suppress_the_real_on
 /// refer to is the user-authored one. The base sent the real context with
 /// every follow-up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "review: defect"]
 async fn a_pasted_context_with_extra_claims_does_not_stand_in_for_the_real_one() {
     let g = graph_harness();
     let task = graph_task(&g, 4).await;
@@ -1466,9 +1464,10 @@ async fn a_refused_partial_read_leaves_no_text_for_edits_to_probe() {
 }
 
 /// AGENTS-2. A file over the whole-read limit: the whole read is still
-/// refused; pages are at most the limit each and join to the file. Then the
-/// behaviour that is new: one line read lets `edit_document` change text
-/// anywhere in a file the base could not read (and so could not edit) at all.
+/// refused; pages are at most the limit each and join to the file. Editing
+/// stays as on the base: a partial read does not make such a file editable,
+/// and the refusal says why. (Making large files editable is an open product
+/// decision.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_file_over_the_read_limit_is_paged_and_becomes_editable_characterization() {
     let h = harness();
@@ -1506,9 +1505,14 @@ async fn a_file_over_the_read_limit_is_paged_and_becomes_editable_characterizati
     assert_eq!((&pa["complete"], &pb["endLine"], &pb["totalLines"]), (&json!(false), &json!(14_000), &json!(14_000)));
     assert!(pb.get("nextStartLine").is_none());
     let (err, edit) = result(&h, &task.id, "edit");
-    println!("REVIEW edit of a >512 KiB file after a one-line read: error={err} {edit}");
-    assert!(!err, "{edit}");
-    assert!(current_text(&h, "huge.typ").unwrap().contains("ROW 13999 "));
+    assert!(err, "{edit}");
+    let why = edit["error"].as_str().unwrap();
+    assert!(why.contains("larger than the 524288-byte limit") && why.contains("cannot edit this file"), "{why}");
+    assert!(!why.contains("occurs") && !why.contains("was not found"), "the text was not consulted: {why}");
+    assert_eq!(current_text(&h, "huge.typ").unwrap(), text, "nothing was changed");
+    // The partial read itself says so.
+    let (_, one) = result(&h, &task.id, "one");
+    assert!(one["note"].as_str().unwrap().contains("edit_document cannot change it"), "{one}");
 }
 
 /// AGENTS-2. The file changes between two pages: the second page carries a
@@ -1605,27 +1609,33 @@ async fn listing_pages_show_only_the_scope_and_refuse_out_of_range_offsets() {
 /// shifts the rest, and one existing entry is on neither page. Nothing in
 /// the second page says that the listing changed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "review: defect"]
 async fn a_listing_that_changes_between_pages_loses_no_entry_silently() {
     let h = harness();
     std::fs::create_dir(h.project.path().join("many")).unwrap();
     for n in 0..620 {
         std::fs::write(h.project.path().join(format!("many/f{n:04}.txt")), "x").unwrap();
     }
-    let list =
-        |id: &str, offset: Value| tool(id, "list_files", json!({"path": "many", "recursive": false, "offset": offset}));
+    let list = |id: &str, offset: Value, listing: Value| {
+        tool(id, "list_files", json!({"path": "many", "recursive": false, "offset": offset, "listing": listing}))
+    };
     h.service
         .load_script(json!({"turns": [
-            {"steps": [list("a", json!(0))], "chunkDelayMs": 0},
-            {"steps": [{"delayMs": 1500}, list("b", json!("$ref:a/nextOffset"))], "chunkDelayMs": 0},
+            {"steps": [list("a", json!(0), json!(""))], "chunkDelayMs": 0},
+            {"steps": [{"delayMs": 1500}, list("b", json!("$ref:a/nextOffset"), json!("$ref:a/listing"))], "chunkDelayMs": 0},
+            // As the note says: again from the start, which is then complete and consistent.
+            {"steps": [list("c", json!(0), json!(""))], "chunkDelayMs": 0},
+            {"steps": [list("d", json!("$ref:c/nextOffset"), json!("$ref:c/listing"))], "chunkDelayMs": 0},
             {"steps": [{"text": "Done."}], "chunkDelayMs": 0}
         ]}))
         .unwrap();
     let task = h.service.create_task(request(&h, PermissionProfile::ReadOnly)).unwrap();
     let (_, a) = wait_result(&h, &task.id, "a").await;
+    // The fingerprint is opaque: it names no path.
+    let token = a["listing"].as_str().expect("a truncated listing gives its fingerprint");
+    assert!(token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit()), "{token}");
     std::fs::remove_file(h.project.path().join("many/f0000.txt")).unwrap();
     assert_eq!(join(&h, &task.id).await.status, TaskStatus::Completed);
-    let (_, b) = result(&h, &task.id, "b");
+    let b = result(&h, &task.id, "b").1;
     let mut seen: Vec<&str> = a["entries"]
         .as_array()
         .unwrap()
@@ -1638,11 +1648,30 @@ async fn a_listing_that_changes_between_pages_loses_no_entry_silently() {
         .map(|n| format!("many/f{n:04}.txt"))
         .filter(|path| seen.binary_search(&path.as_str()).is_err())
         .collect();
-    let signalled = b.get("changed").is_some() || b["note"].as_str().is_some_and(|n| n.contains("changed"));
-    assert!(
-        missing.is_empty() || signalled,
-        "existing files on neither page, with no signal on the second page: {missing:?}"
+    // The continuation says that the listing changed and lists nothing, instead of a clean last page.
+    let (err, b) = result(&h, &task.id, "b");
+    assert!(!err, "{b}");
+    assert_eq!(b["listingChanged"], json!(true), "{b}");
+    assert_eq!(
+        (&b["truncated"], &b["nextOffset"], b["entries"].as_array().unwrap().len()),
+        (&json!(true), &json!(0), 0)
     );
+    assert!(b["note"].as_str().unwrap().contains("changed"), "{b}");
+    assert!(!missing.is_empty(), "the shifted walk would have skipped an entry: that is what the signal is for");
+    // Listing again from the start, with the new fingerprint, gives every existing entry once.
+    let (_, c) = result(&h, &task.id, "c");
+    let (_, d) = result(&h, &task.id, "d");
+    assert!(d.get("listingChanged").is_none() && d["truncated"] == json!(false), "{d}");
+    let mut again: Vec<&str> = c["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(d["entries"].as_array().unwrap())
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    again.sort_unstable();
+    let expected: Vec<String> = (1..620).map(|n| format!("many/f{n:04}.txt")).collect();
+    assert_eq!(again, expected);
 }
 
 // ---------------------------------------------------------------- the flake
