@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { registry } from "./registry";
 
@@ -36,5 +36,29 @@ describe("workbench registry", () => {
     await registry.runCommand("t.cmd");
     expect(ran).toBe(0);
     off();
+  });
+
+  it("sorts the commands once per registration change, not per call (perf FE-10)", () => {
+    const offs = ["Zeta", "alpha", "Mid"].map((title) =>
+      registry.registerCommand({ id: `t.sort.${title}`, title, category: "T", run: () => {} }),
+    );
+    const compare = vi.spyOn(String.prototype, "localeCompare");
+    const first = registry.allCommands();
+    const sorted = compare.mock.calls.length;
+    expect(sorted).toBeGreaterThan(0);
+    // The key dispatcher asks on every key press.
+    for (let i = 0; i < 50; i++) registry.allCommands();
+    expect(compare.mock.calls.length).toBe(sorted);
+    expect(first.map((c) => c.title)).toEqual(["alpha", "Mid", "Zeta"]);
+    // Each caller gets its own array.
+    first.reverse();
+    expect(registry.allCommands().map((c) => c.title)).toEqual(["alpha", "Mid", "Zeta"]);
+    // A registration change is seen at once.
+    const off = registry.registerCommand({ id: "t.sort.beta", title: "Beta", category: "T", run: () => {} });
+    expect(registry.allCommands().map((c) => c.title)).toEqual(["alpha", "Beta", "Mid", "Zeta"]);
+    off();
+    expect(registry.allCommands().map((c) => c.title)).toEqual(["alpha", "Mid", "Zeta"]);
+    compare.mockRestore();
+    for (const dispose of offs) dispose();
   });
 });
