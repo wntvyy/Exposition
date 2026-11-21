@@ -411,6 +411,16 @@ fn rename_ids(text: &str, names: &BTreeMap<String, String>) -> String {
     let bytes = text.as_bytes();
     let mut i = 0;
     'scan: while i < bytes.len() {
+        // An overlay's relation ids are derived from the ids of its ends.
+        let unsaved = "rel-unsaved-";
+        if text[i..].starts_with(unsaved)
+            && i + unsaved.len() + 24 <= bytes.len()
+            && bytes[i + unsaved.len()..i + unsaved.len() + 24].iter().all(u8::is_ascii_hexdigit)
+        {
+            out.push_str("rel-unsaved");
+            i += unsaved.len() + 24;
+            continue 'scan;
+        }
         for prefix in ["ent-", "rel-", "evd-"] {
             let end = i + prefix.len() + 32;
             if text[i..].starts_with(prefix)
@@ -493,7 +503,18 @@ fn canonical(svc: &GraphService, evidence_order: &BTreeMap<String, usize>, overl
         {
             let report = svc.impact(&ImpactRequest { entities: vec![id.clone()], max_depth: None, max_items: None });
             lines.push(match report {
-                Ok(r) => json("impact", serde_json::to_value(&r).unwrap()),
+                Ok(r) => {
+                    // Which cycle and which path are reported first follows
+                    // the order of the (random) ids: only what is reached.
+                    let mut v = serde_json::to_value(&r).unwrap();
+                    strip(&mut v, &["cycles"]);
+                    if let Some(items) = v.get_mut("items").and_then(Value::as_array_mut) {
+                        for item in items {
+                            strip(item, &["path"]);
+                        }
+                    }
+                    json("impact", v)
+                }
                 Err(e) => canon(&format!("IMPACT-ERR {id} {}", e.code)),
             });
         }
@@ -1150,7 +1171,24 @@ impl Run {
                 ));
                 let text = lines.join("\n");
                 if let Some(file) = hashes.as_mut() {
-                    writeln!(file, "{step} {:016x} lines={} files={}", fnv(&text), lines.len(), run.files.len()).unwrap();
+                    // One hash per kind of line, so a difference names its part.
+                    let mut parts: BTreeMap<String, String> = BTreeMap::new();
+                    for line in &lines {
+                        let tag = line.split(' ').next().unwrap_or("");
+                        let key = match tag {
+                            "J" => {
+                                let at = line.rfind("\"view\":\"").map(|i| i + 8).unwrap_or(0);
+                                line[at..].trim_end_matches(['"', '}']).to_owned()
+                            }
+                            other => other.to_owned(),
+                        };
+                        let part = parts.entry(key).or_default();
+                        part.push_str(line);
+                        part.push('
+');
+                    }
+                    let parts: Vec<String> = parts.iter().map(|(k, v)| format!("{k}={:08x}", fnv(v) as u32)).collect();
+                    writeln!(file, "{step} files={} {}", run.files.len(), parts.join(" ")).unwrap();
                 }
                 if full_at == Some((seed, step))
                     && let Some(dir) = &out_dir
