@@ -902,3 +902,57 @@ fn retained_history_after_external_rewrites() {
         }),
     );
 }
+
+/// A document replaced in full again and again through transactions (an agent
+/// rewrite, a paste over everything): what its histories retain, how far undo
+/// then reaches, and what they retain once everything reachable is undone.
+#[test]
+#[ignore = "perf"]
+fn retained_history_after_full_replacements() {
+    let (size, rewrites) = match scale_name().as_str() {
+        "large" | "stress" => (2 * MIB, 50),
+        _ => (MIB, 10),
+    };
+    let docs = DocumentService::new();
+    let id = docs
+        .open(OpenDocument {
+            path: None,
+            text: text_of(size, false, 300),
+            language: "plaintext".into(),
+            encoding: TextEncoding::Utf8,
+            read_only: None,
+        })
+        .id;
+    let mut samples = Vec::new();
+    for i in 0..rewrites {
+        let (info, current) = docs.shared_state(&id).unwrap();
+        let patch = TextPatch::replace(0, utf16_len(&current) as u32, text_of(size, false, 400 + i as u64));
+        drop(current);
+        let req = request(&id, info.revision, vec![patch], UndoBehavior::NewGroup);
+        let (ms, _, _) = measure(size, || docs.apply(req).unwrap());
+        samples.push(ms);
+    }
+    let applied = docs.retained(&id).unwrap();
+    let mut undone = 0usize;
+    while docs.undo(&id, EditOrigin::Source).is_ok() {
+        undone += 1;
+    }
+    let after_undo = docs.retained(&id).unwrap();
+    perf(
+        "documents.retained_after_replacements",
+        json!({ "bytes": size, "rewrites": rewrites }),
+        &samples,
+        json!({
+            "text_bytes": size,
+            "undo_groups": applied.undo_groups,
+            "undo_bytes": applied.undo_bytes,
+            "history_entries": applied.history_entries,
+            "history_bytes": applied.history_bytes,
+            "retained_bytes": applied.undo_bytes + applied.redo_bytes + applied.history_bytes,
+            "undone_steps": undone,
+            "redo_bytes_after_undo": after_undo.redo_bytes,
+            "history_bytes_after_undo": after_undo.history_bytes,
+            "retained_bytes_after_undo": after_undo.undo_bytes + after_undo.redo_bytes + after_undo.history_bytes,
+        }),
+    );
+}
