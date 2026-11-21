@@ -119,7 +119,6 @@ async fn review_a_released_run_whose_manifest_is_gone_or_damaged_is_an_error() {
 /// read succeeds with no entries and no truncation mark, exactly like a run
 /// that printed nothing, although the manifest records three entries.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "review: defect"]
 async fn review_a_released_run_whose_transcript_is_gone_or_damaged_is_not_shown_as_no_output() {
     let f = Fixture::new();
     let service = &f._service;
@@ -150,7 +149,6 @@ async fn review_a_released_run_whose_transcript_is_gone_or_damaged_is_not_shown_
 /// transcript: it disappears when the run is released. In the base version
 /// it stayed visible for the whole session.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "review: defect"]
 async fn review_output_recorded_after_the_finish_survives_the_release() {
     let f = Fixture::new();
     let service = &f._service;

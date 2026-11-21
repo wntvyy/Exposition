@@ -28,8 +28,8 @@ use crate::store::{
 };
 use crate::types::{
     Availability, CodeOrigin, CodeProvenance, EnvironmentReport, ExecuteRequest, InterpreterProvenance, KernelChoice,
-    KernelDescriptor, OutputItem, OutputSummary, ResearchEvent, RunAuthorization, RunErrorInfo, RunManifest,
-    RunOutputPage, RunSource, RunSummary, RuntimeEnvironment, RuntimeLanguage, SessionInfo, SessionOwner,
+    KernelDescriptor, OutputEntry, OutputItem, OutputSummary, ResearchEvent, RunAuthorization, RunErrorInfo,
+    RunManifest, RunOutputPage, RunSource, RunSummary, RuntimeEnvironment, RuntimeLanguage, SessionInfo, SessionOwner,
     SessionProvenance, SessionState, StreamName, WorkspaceStatus,
 };
 
@@ -163,6 +163,8 @@ struct Shared {
     /// Finished runs that still hold their output and code in memory although
     /// their record is on disk, oldest first ([`Shared::run_stored`]).
     stored_runs: Mutex<VecDeque<String>>,
+    /// Serializes appends to the records of released runs.
+    late_writes: Mutex<()>,
     /// Workflow batch runs executing now (their manifests read "running"
     /// legitimately and are not settled as orphans).
     batches: Mutex<HashSet<String>>,
@@ -188,7 +190,7 @@ impl Shared {
     /// A finished run's manifest and transcript are on disk. Its in-memory
     /// output and code are now a derived copy: the most recent
     /// [`RECENT_RUNS_IN_MEMORY`] are kept, older ones released
-    /// ([`RunState::release`]). Runs whose record could not be written never
+    /// ([`Self::release_run`]). Runs whose record could not be written never
     /// come here and keep everything.
     fn run_stored(&self, run_id: &str) {
         let overflow: Vec<String> = {
@@ -197,31 +199,87 @@ impl Shared {
             let extra = recent.len().saturating_sub(RECENT_RUNS_IN_MEMORY);
             recent.drain(..extra).collect()
         };
-        if !overflow.is_empty() {
-            let mut runs = lock(&self.runs);
-            for id in overflow {
-                if let Some(run) = runs.get_mut(&id) {
-                    run.release();
-                }
+        for id in overflow {
+            if !self.release_run(&id) {
+                // Its record could not be brought up to date: it keeps its
+                // output and is tried again when a later run finishes.
+                lock(&self.stored_runs).push_back(id);
             }
         }
+    }
+
+    /// Release one stored run's in-memory output ([`RunState::release`]).
+    /// Output or artifacts it recorded after its final record was written
+    /// are first written to that record (manifest and transcript, verified),
+    /// so that what was shown from memory is what the record holds. Returns
+    /// `false` when the run must keep its in-memory copy for now (the record
+    /// could not be updated, or is recoverably deleted).
+    fn release_run(&self, run_id: &str) -> bool {
+        // A second pass covers output that arrived during the first write.
+        for _ in 0..2 {
+            let (root, manifest, entries) = {
+                let mut runs = lock(&self.runs);
+                let Some(run) = runs.get_mut(run_id) else { return true };
+                if !run.finished || !run.stored || run.released.is_some() {
+                    return true;
+                }
+                if !run.late {
+                    run.release();
+                    return true;
+                }
+                run.late = false;
+                (run.root.clone(), run.manifest.clone(), run.entries.iter().cloned().collect::<Vec<_>>())
+            };
+            // Written without the run table's lock, like the final record.
+            let written = !crate::records::record_deleted(&root, run_id)
+                && write_manifest(&root, &manifest).is_ok()
+                && write_transcript(&root, run_id, &entries).is_ok()
+                && store::transcript_holds(&root, run_id, &entries);
+            if !written {
+                if let Some(run) = lock(&self.runs).get_mut(run_id) {
+                    run.late = true;
+                }
+                return false;
+            }
+        }
+        false
     }
 
     /// Release the stored runs of every project but `keep` (the open project
     /// changed: their output is not reachable until that project is opened
     /// again, and then it is read from its records).
     fn release_runs_outside(&self, keep: Option<&Path>) {
-        let mut released = Vec::new();
-        {
-            let mut runs = lock(&self.runs);
-            for run in runs.values_mut().filter(|run| keep != Some(run.root.as_path())) {
-                run.release();
-                if run.released.is_some() {
-                    released.push(run.id().to_owned());
-                }
-            }
-        }
+        let candidates: Vec<String> = lock(&self.runs)
+            .values()
+            .filter(|run| keep != Some(run.root.as_path()))
+            .filter(|run| run.finished && run.stored && run.released.is_none())
+            .map(|run| run.id().to_owned())
+            .collect();
+        let released: Vec<String> = candidates.into_iter().filter(|id| self.release_run(id)).collect();
         lock(&self.stored_runs).retain(|id| !released.contains(id));
+    }
+
+    /// Record output that arrived for a run whose in-memory copy was already
+    /// released: appended to its stored transcript and counted in its
+    /// manifest (one such write at a time), so it is part of what the run
+    /// shows from now on. `None` when the record cannot take it.
+    fn append_to_record(&self, root: &Path, run_id: &str, item: OutputItem) -> Option<OutputEntry> {
+        let _one = lock(&self.late_writes);
+        if crate::records::record_deleted(root, run_id) {
+            return None;
+        }
+        let mut manifest = read_manifest(root, run_id).ok()?;
+        let mut entries = store::read_transcript_strict(root, run_id).ok()?.unwrap_or_default();
+        let seq = manifest.output.entries.max(entries.last().map_or(0, |e| e.seq)) + 1;
+        let entry = OutputEntry { seq, item };
+        if let OutputItem::Stream { text, .. } = &entry.item {
+            manifest.output.stream_chars += text.chars().count() as u64;
+        }
+        manifest.output.entries = seq;
+        entries.push(entry.clone());
+        write_transcript(root, run_id, &entries).ok()?;
+        write_manifest(root, &manifest).ok()?;
+        Some(entry)
     }
 
     fn research_dir(&self, name: &str) -> Result<PathBuf, ResearchError> {
@@ -248,6 +306,7 @@ impl ResearchService {
                 sessions: Mutex::new(HashMap::new()),
                 runs: Mutex::new(HashMap::new()),
                 stored_runs: Mutex::new(VecDeque::new()),
+                late_writes: Mutex::new(()),
                 batches: Mutex::new(HashSet::new()),
             }),
         }
@@ -891,9 +950,24 @@ impl ResearchService {
         }
         let workspace = self.current_workspace()?;
         let manifest = read_manifest(&workspace.root, run_id)?;
-        let entries = store::read_transcript(&workspace.root, run_id);
+        // The manifest counts every entry the run recorded, and entries are
+        // numbered from one: the transcript must end at that number. A
+        // transcript that is missing or damaged although the run had output
+        // is an error, and one that ends early is marked incomplete: lost
+        // output is never presented as a run that printed nothing.
+        let recorded = manifest.output.entries;
+        let entries = match store::read_transcript_strict(&workspace.root, run_id)? {
+            Some(entries) => entries,
+            None if recorded == 0 => Vec::new(),
+            None => {
+                return Err(ResearchError::Io(format!(
+                    "the stored output of run {run_id} is missing (its record lists {recorded} output entries)"
+                )));
+            }
+        };
         let last = entries.last().map(|e| e.seq).unwrap_or(0);
-        Ok(page_of(run_id, entries.iter(), after, limit, manifest.output.truncated, last))
+        let incomplete = last < recorded;
+        Ok(page_of(run_id, entries.iter(), after, limit, manifest.output.truncated || incomplete, last.max(recorded)))
     }
 
     /// Resolve an artifact of a run to its file inside the workspace.
@@ -1622,10 +1696,21 @@ impl Session {
             },
             other => other,
         };
-        let entry = {
+        let held = {
             let mut runs = lock(&shared.runs);
             let Some(run) = runs.get_mut(run_id) else { return };
-            run.push(item)
+            match run.released {
+                None => Ok(run.push(item)),
+                // Its output lives in its record now: recorded there.
+                Some(_) => Err((run.root.clone(), item)),
+            }
+        };
+        let entry = match held {
+            Ok(entry) => entry,
+            Err((root, item)) => match shared.append_to_record(&root, run_id, item) {
+                Some(entry) => entry,
+                None => return,
+            },
         };
         shared.emit(ResearchEvent::Output { run_id: RunId(run_id.to_owned()), entry });
     }
@@ -1742,6 +1827,7 @@ impl Session {
             finishing: false,
             finished: false,
             stored: false,
+            late: false,
             released: None,
         };
         let summary = run.summary();
@@ -1847,7 +1933,11 @@ impl Session {
         // run reads as finished only once its record is on disk (or could
         // not be written): until then it still counts as executing, so
         // nothing treats its stored manifest as final or as an orphan.
-        let stored = write_manifest(&root, &manifest).is_ok() & write_transcript(&root, run_id, &entries).is_ok();
+        // "Stored" means verified: the transcript read back holds exactly
+        // these entries. Only then may the in-memory copy ever be released.
+        let stored = write_manifest(&root, &manifest).is_ok()
+            && write_transcript(&root, run_id, &entries).is_ok()
+            && store::transcript_holds(&root, run_id, &entries);
         drop((manifest, entries));
         let summary = {
             let mut runs = lock(&shared.runs);

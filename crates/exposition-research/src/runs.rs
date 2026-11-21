@@ -42,6 +42,11 @@ pub(crate) struct RunState {
     /// The final manifest and transcript are on disk: the copy here is
     /// derived and can be read back.
     pub stored: bool,
+    /// Output or an artifact was recorded after the final record's snapshot
+    /// was taken (a notice racing the end of the run, late kernel output):
+    /// the record on disk does not have it yet. Such a run is written again
+    /// before it is released.
+    pub late: bool,
     /// Set once the heavy part of a finished, stored run (retained output,
     /// code, the manifest's code text) was released: what the history lists
     /// for it. Its manifest and output are then read from the project.
@@ -55,6 +60,9 @@ impl RunState {
 
     /// Append an output entry, discarding the oldest retained entries beyond the limits.
     pub fn push(&mut self, item: OutputItem) -> OutputEntry {
+        if self.finishing || self.finished {
+            self.late = true;
+        }
         self.next_seq += 1;
         let entry = OutputEntry { seq: self.next_seq, item };
         let size = entry_chars(&entry);
@@ -80,6 +88,9 @@ impl RunState {
 
     /// Record an artifact made by [`display_file_record`] for this run.
     pub fn add_output(&mut self, record: ArtifactRecord) {
+        if self.finishing || self.finished {
+            self.late = true;
+        }
         self.manifest.record.outputs.push(record);
     }
 
@@ -94,9 +105,10 @@ impl RunState {
     /// manifest and transcript are on disk. The history entry stays (the
     /// same summary); the manifest and output are read from the project from
     /// now on. A run that is not finished, or whose record could not be
-    /// written, keeps everything (this copy is then the only one).
+    /// written, or that recorded something its record does not hold yet
+    /// (`late`), keeps everything (this copy is then the only one).
     pub fn release(&mut self) {
-        if !self.finished || !self.stored || self.released.is_some() {
+        if !self.finished || !self.stored || self.late || self.released.is_some() {
             return;
         }
         self.released = Some(self.summary());
