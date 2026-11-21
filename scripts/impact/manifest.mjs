@@ -221,13 +221,14 @@ export const SCENARIO_POLICY = {
   "live-m9-agents": "live",
   "live-restricted": "live",
   "live-review-m8-agent": "live",
+  "live-tool-continuations": "live",
   "live-workflow": "live",
   "live-workflow-audit": "live",
   mathlib: "manual: needs EXPOSITION_MATHLIB_PACKAGE (a prepared Mathlib package)",
   "mathlib-setup": "manual: needs EXPOSITION_MATHLIB_SETUP=1, network, and several GB for Mathlib",
 };
 
-const LIVE_AGENTS = ["live-agents", "live-attachments", "live-agentctx", "live-a1-loop", "live-graph", "live-restricted"];
+const LIVE_AGENTS = ["live-agents", "live-attachments", "live-agentctx", "live-a1-loop", "live-graph", "live-restricted", "live-tool-continuations"];
 const LIVE_WORKFLOWS = ["live-workflow", "live-workflow-audit", "live-m9-agents", "live-review-m8-agent"];
 
 /**
