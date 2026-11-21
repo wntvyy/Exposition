@@ -75,7 +75,7 @@ has no assertion on time.
 | Setting | Value | Reason |
 |---|---|---|
 | Dev profile debug info | line tables only; none for dependencies | Cold build 1201 s → 855 s, peak memory +15.1 → +4.9 GB, build directory 40.4 → 12.4 GB, rebuild after a graph-crate edit 174 → 51 s (one run each, 3 jobs). `CARGO_PROFILE_DEV_DEBUG=full` restores full debug info for a debugger session. |
-| Release frontend | no source maps | The bundle is embedded in the executable; `dist` 33.3 → 8.1 MB. |
+| Release frontend | `--mode release`: no source maps | The bundle is embedded in the executable; `dist` 33 → 8 MB. `build:release` selects the mode through `src-tauri/tauri.release.conf.json`. |
 | Scenario concurrency | `--e2e-jobs 1` by default | See [testing.md](testing.md). Scenarios that use the desktop or the clipboard never overlap. |
 | Cargo selection | always include `-p exposition` | A different package selection changes dependency features and rebuilds the tree. |
 
