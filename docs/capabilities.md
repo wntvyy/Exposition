@@ -849,9 +849,9 @@ the most recent; when that stored output is missing or damaged the run shows
 an error, and when it ends early it is marked as incomplete, never shown as
 a run that printed nothing. The run history reaches every run stored in the
 project: it shows the 200 most recent, **Show more runs** adds earlier ones
-200 at a time, and while runs are not shown the header says how many are
-listed of how many exist. A run record that cannot be read is counted and
-named as such, not listed as a run.
+200 at a time, and while records are not shown the header says how many
+are listed of how many records exist. A run record that cannot be read is
+counted and named as such, not listed as a run.
 
 **Guided environment setup** (Python). When the selected environment is not
 usable, the Research view says why and offers the next step. **Set up
