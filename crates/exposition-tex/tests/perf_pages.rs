@@ -243,10 +243,10 @@ fn tex_page_images_and_page_map() {
             fetch_ms.push(elapsed);
             (images, bytes) = (i, b);
             let started = Instant::now();
-            assert!(env.service.page_map(&summary.result.id.0).is_some());
+            assert!(PageMapProvider::page_map(&env.service, &summary.result.id.0).is_some());
             map_first.push(ms(started));
             let started = Instant::now();
-            assert!(env.service.page_map(&summary.result.id.0).is_some());
+            assert!(PageMapProvider::page_map(&env.service, &summary.result.id.0).is_some());
             map_again.push(ms(started));
         }
         perf("tex.rebuild_draft_one_char", &scale, &build_ms, &[]);
