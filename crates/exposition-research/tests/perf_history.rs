@@ -201,6 +201,16 @@ fn run_history() {
                 "mean_manifest_bytes": manifest_bytes / runs as u64,
             }),
         );
+        // The record listing behind Storage & History (sizes and output files
+        // of every record).
+        let mut records = 0;
+        let record_samples = sample(3, || records = service.run_records().unwrap().len());
+        perf(
+            "research.records.list",
+            scale.clone(),
+            &record_samples,
+            serde_json::json!({"listed": records, "unlisted_records": runs - records}),
+        );
         // Selecting the newest run: every page of its stored transcript.
         let newest = run_id(runs - 1);
         let (mut pages, mut entries) = (0u32, 0usize);
