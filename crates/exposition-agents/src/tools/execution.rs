@@ -454,10 +454,8 @@ impl AppToolServices {
         let RunOutput { stdout, stderr, results, results_omitted, error, incomplete } =
             collect_output(|after| research.run_output(&run_id, after, OUTPUT_PAGE).ok());
         // Whether anything the run printed is missing from this result.
-        let output_truncated = incomplete
-            || results_omitted > 0
-            || stdout.len() > RESULT_TAIL_BYTES
-            || stderr.len() > RESULT_TAIL_BYTES;
+        let output_truncated =
+            incomplete || results_omitted > 0 || stdout.len() > RESULT_TAIL_BYTES || stderr.len() > RESULT_TAIL_BYTES;
         let artifacts: Vec<Value> = finished
             .outputs
             .iter()

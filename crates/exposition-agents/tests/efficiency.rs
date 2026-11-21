@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use exposition_agents::credentials::MemoryStore;
+use exposition_agents::prompt;
 use exposition_agents::store::StoreStats;
 use exposition_agents::tools::services::UnavailableServices;
 use exposition_agents::*;
-use exposition_agents::prompt;
 use exposition_core::document::{
     ConflictPolicy, DocumentEdit, EditOrigin, TextPatch, TransactionId, TransactionRequest, UndoBehavior,
 };
@@ -146,7 +146,8 @@ fn text_of(h: &Harness, path: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn summaries_read_no_review_texts_and_still_follow_content() {
     let h = harness();
-    let task = run(&h, read_then_edit("main.typ", "cat sat", "dog sat"), request(&h, PermissionProfile::AutoApply)).await;
+    let task =
+        run(&h, read_then_edit("main.typ", "cat sat", "dog sat"), request(&h, PermissionProfile::AutoApply)).await;
     assert_eq!(task.status, TaskStatus::Completed);
     assert_eq!((task.changed_files, task.pending_review), (1, 1));
 
@@ -194,13 +195,25 @@ async fn recording_an_edit_reads_one_file_record() {
     std::fs::write(h.project.path().join("big.typ"), format!("= Big\nMARK\n{big}\n")).unwrap();
     let script = turns(vec![
         tool("r1", "read_file", json!({"path": "big.typ"})),
-        tool("e1", "edit_document", json!({"path": "big.typ", "base_revision": "$ref:r1/revision",
-            "edits": [{"old_text": "MARK", "new_text": "DONE"}]})),
+        tool(
+            "e1",
+            "edit_document",
+            json!({"path": "big.typ", "base_revision": "$ref:r1/revision",
+            "edits": [{"old_text": "MARK", "new_text": "DONE"}]}),
+        ),
         tool("r2", "read_file", json!({"path": "main.typ"})),
-        tool("e2", "edit_document", json!({"path": "main.typ", "base_revision": "$ref:r2/revision",
-            "edits": [{"old_text": "cat sat", "new_text": "dog sat"}]})),
-        tool("e3", "edit_document", json!({"path": "main.typ", "base_revision": "$ref:e2/revision",
-            "edits": [{"old_text": "the mat", "new_text": "a mat"}]})),
+        tool(
+            "e2",
+            "edit_document",
+            json!({"path": "main.typ", "base_revision": "$ref:r2/revision",
+            "edits": [{"old_text": "cat sat", "new_text": "dog sat"}]}),
+        ),
+        tool(
+            "e3",
+            "edit_document",
+            json!({"path": "main.typ", "base_revision": "$ref:e2/revision",
+            "edits": [{"old_text": "the mat", "new_text": "a mat"}]}),
+        ),
     ]);
     let before = h.service.store_stats();
     let task = run(&h, script, request(&h, PermissionProfile::AutoApply)).await;
@@ -450,7 +463,10 @@ async fn detail_reads_are_bounded_and_a_partial_read_is_the_tail_of_a_full_one()
     let tail: Vec<TranscriptItem> = full.transcript.iter().filter(|item| seq_of(item) >= from).cloned().collect();
     assert!(!tail.is_empty() && tail.len() < full.transcript.len());
     assert_eq!(partial.transcript, tail);
-    assert_eq!((&partial.summary, &partial.approvals, &partial.allowances), (&full.summary, &full.approvals, &full.allowances));
+    assert_eq!(
+        (&partial.summary, &partial.approvals, &partial.allowances),
+        (&full.summary, &full.approvals, &full.allowances)
+    );
     assert_eq!(partial.questions, full.questions);
     assert_eq!(partial.graph.contexts, full.graph.contexts);
     assert!(cost.transcript_bytes < 1_000, "a partial read parsed {} bytes of the transcript", cost.transcript_bytes);
@@ -602,11 +618,19 @@ async fn a_partial_read_is_a_revisioned_excerpt_with_a_continuation() {
         read("rest", 41, 0),
         read("past", 1000, 5),
         // An edit against the revision of a partial read, to text outside the excerpt.
-        tool("edit", "edit_document", json!({"path": "long.typ", "base_revision": "$ref:part/revision",
-            "edits": [{"old_text": "line 77 of the notes", "new_text": "line seventy-seven"}]})),
+        tool(
+            "edit",
+            "edit_document",
+            json!({"path": "long.typ", "base_revision": "$ref:part/revision",
+            "edits": [{"old_text": "line 77 of the notes", "new_text": "line seventy-seven"}]}),
+        ),
         // Unique in an excerpt is not enough: old_text is looked for in the whole file.
-        tool("vague", "edit_document", json!({"path": "long.typ", "base_revision": "$ref:edit/revision",
-            "edits": [{"old_text": "line 1", "new_text": "x"}]})),
+        tool(
+            "vague",
+            "edit_document",
+            json!({"path": "long.typ", "base_revision": "$ref:edit/revision",
+            "edits": [{"old_text": "line 1", "new_text": "x"}]}),
+        ),
     ]);
     let task = run(&h, script, request(&h, PermissionProfile::AutoApply)).await;
     assert_eq!(task.status, TaskStatus::Completed);
@@ -669,9 +693,8 @@ async fn a_truncated_listing_continues_from_its_next_offset() {
     for n in 0..620 {
         std::fs::write(h.project.path().join(format!("many/f{n:04}.txt")), "x").unwrap();
     }
-    let list = |id: &str, offset: Value| {
-        tool(id, "list_files", json!({"path": "many", "recursive": false, "offset": offset}))
-    };
+    let list =
+        |id: &str, offset: Value| tool(id, "list_files", json!({"path": "many", "recursive": false, "offset": offset}));
     let script = turns(vec![
         list("a", json!(0)),
         list("b", json!("$ref:a/nextOffset")),
@@ -683,14 +706,22 @@ async fn a_truncated_listing_continues_from_its_next_offset() {
     assert_eq!(task.status, TaskStatus::Completed);
     let (err, a) = result(&h, &task.id, "a");
     assert!(!err, "{a}");
-    assert_eq!((a["entries"].as_array().unwrap().len(), &a["truncated"], &a["nextOffset"]), (500, &json!(true), &json!(500)));
+    assert_eq!(
+        (a["entries"].as_array().unwrap().len(), &a["truncated"], &a["nextOffset"]),
+        (500, &json!(true), &json!(500))
+    );
     assert!(a["note"].as_str().unwrap().contains("offset 500"));
     let (err, b) = result(&h, &task.id, "b");
     assert!(!err, "{b}");
     assert_eq!((b["entries"].as_array().unwrap().len(), &b["truncated"]), (120, &json!(false)));
     assert!(b.get("nextOffset").is_none() && b.get("note").is_none());
-    let mut paths: Vec<&str> =
-        a["entries"].as_array().unwrap().iter().chain(b["entries"].as_array().unwrap()).map(|e| e["path"].as_str().unwrap()).collect();
+    let mut paths: Vec<&str> = a["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(b["entries"].as_array().unwrap())
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
     paths.sort_unstable();
     paths.dedup();
     assert_eq!(paths.len(), 620);

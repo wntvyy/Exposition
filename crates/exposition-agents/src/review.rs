@@ -284,8 +284,7 @@ pub fn judge(
 /// unsaved changes removes a pending change, and undoing a revert brings the
 /// change back. Accepted files stay accepted whatever happens to them later.
 pub fn effective_state(row: &TaskFileRow, current: &Current) -> (ReviewState, Option<String>) {
-    let compare =
-        |text: &str| (presence(&row.baseline_text, &row.tip_text, text), text == row.baseline_text.as_str());
+    let compare = |text: &str| (presence(&row.baseline_text, &row.tip_text, text), text == row.baseline_text.as_str());
     match judge(row.kind, row.state, row.entangled, current, compare) {
         Some((state, message)) => (state, Some(message.into())),
         None => (row.state, row.message.clone()),
@@ -765,25 +764,45 @@ gamma
             (baseline, tip, tip, Presence::Present),
             (baseline, tip, baseline, Presence::Absent),
             // No net change: present whatever the file holds now.
-            (baseline, baseline, "something else
-", Presence::Present),
+            (
+                baseline,
+                baseline,
+                "something else
+",
+                Presence::Present,
+            ),
             (baseline, baseline, baseline, Presence::Present),
             // Moved on: a separate later edit beside the change, or beside its absence.
-            (baseline, tip, "alpha
+            (
+                baseline,
+                tip,
+                "alpha
 BETA
 gamma
 delta
-", Presence::Present),
-            (baseline, tip, "alpha
+",
+                Presence::Present,
+            ),
+            (
+                baseline,
+                tip,
+                "alpha
 beta
 gamma
 delta
-", Presence::Absent),
+",
+                Presence::Absent,
+            ),
             // A later edit inside the agent's region.
-            (baseline, tip, "alpha
+            (
+                baseline,
+                tip,
+                "alpha
 BxTA
 gamma
-", Presence::Overlapped),
+",
+                Presence::Overlapped,
+            ),
         ];
         for (baseline, tip, current, expected) in cases {
             assert_eq!(presence(baseline, tip, current), expected, "{current:?}");

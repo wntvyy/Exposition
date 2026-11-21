@@ -3330,8 +3330,7 @@ impl Run<'_> {
         if let Some(history) = self.history.take() {
             return Ok(history);
         }
-        let stored =
-            self.inner.store.messages(&self.id).map_err(|e| TaskStatus::Failed { message: e.to_string() })?;
+        let stored = self.inner.store.messages(&self.id).map_err(|e| TaskStatus::Failed { message: e.to_string() })?;
         self.attachment_bytes = 0;
         self.inner
             .provider_messages(kind, stored, &mut self.attachment_bytes)

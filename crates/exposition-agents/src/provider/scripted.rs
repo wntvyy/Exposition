@@ -201,9 +201,13 @@ impl Provider for ScriptedProvider {
         let mut stop_reason = stop_reason
             .or_else(|| turn.stop_reason.clone())
             .unwrap_or_else(|| if used_tools { "tool_use".into() } else { "end_turn".into() });
-        // The length of each message's content as a JSON array.
-        let input_chars: usize =
-            request.messages.iter().map(|m| serde_json::to_string(&m.content).map_or(0, |json| json.len())).sum();
+        // The length of each message's content as a JSON array (its blocks,
+        // the commas between them, and the brackets), without copying it.
+        let input_chars: usize = request
+            .messages
+            .iter()
+            .map(|m| m.content.iter().map(|block| block.to_string().len()).sum::<usize>() + m.content.len().max(1) + 1)
+            .sum();
         let output_chars = Value::Array(content.clone()).to_string().len();
         let mut output_tokens = (output_chars / 4) as u64 + 1;
         // Like the real API: output beyond max_tokens is cut off.

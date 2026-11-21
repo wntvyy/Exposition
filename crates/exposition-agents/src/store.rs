@@ -1471,11 +1471,9 @@ impl Store {
     /// The latest graph context of a task and how many were attached.
     /// How many graph contexts were attached to the task (one per run).
     pub fn graph_context_count(&self, task: &TaskId) -> StoreResult<u32> {
-        let count: i64 = self.lock().query_row(
-            "SELECT count(*) FROM task_graph_contexts WHERE task_id = ?1",
-            [&task.0],
-            |r| r.get(0),
-        )?;
+        let count: i64 =
+            self.lock()
+                .query_row("SELECT count(*) FROM task_graph_contexts WHERE task_id = ?1", [&task.0], |r| r.get(0))?;
         Ok(count as u32)
     }
 
