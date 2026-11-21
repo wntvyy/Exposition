@@ -399,6 +399,37 @@ async fn discovery_after_project_switch() {
     );
 }
 
+/// Integrity hashing throughput (measure only: every recorded check stays).
+/// One full read and SHA-256 of an input file; a forEach of 20 instances
+/// over one input does this at least 40 times (bind and stage per instance).
+#[test]
+#[ignore = "perf"]
+fn input_hashing() {
+    let mib = pick(64usize, 512, 1024);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("input.bin");
+    {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&file).unwrap());
+        let block = vec![0x5au8; 1024 * 1024];
+        for _ in 0..mib {
+            out.write_all(&block).unwrap();
+        }
+    }
+    let samples = sample(5, || exposition_research::hash_file(&file).unwrap());
+    let median = {
+        let mut s = samples.clone();
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        s[s.len() / 2]
+    };
+    perf(
+        "research.input_hash",
+        serde_json::json!({"file_mib": mib}),
+        &samples,
+        serde_json::json!({"mib_per_second": (mib as f64 / (median / 1000.0)).round()}),
+    );
+}
+
 fn entries(dir: &Path) -> usize {
     std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0)
 }

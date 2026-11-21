@@ -267,7 +267,10 @@ async fn restricted_preflight_spawns() {
     let per_preflight = invocations(tools.path()).len() as f64 / 6.0;
     let before = invocations(tools.path()).len();
     let mut spec = f.spec(&["exit", "0"]);
-    spec.policy = exposition_core::job::ExecutionPolicy::Restricted { backend: "docker".into() };
+    spec.policy = exposition_core::job::ExecutionPolicy::Restricted {
+        backend: "docker".into(),
+        image_id: Some(format!("sha256:{}", "a".repeat(64))),
+    };
     let id = f.service.launch(spec);
     let _ = f.service.wait(&id).await;
     let dispatch: Vec<String> = invocations(tools.path())[before..].to_vec();

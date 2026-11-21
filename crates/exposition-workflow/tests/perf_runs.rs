@@ -104,9 +104,6 @@ impl WorkflowHost for Host {
     ) -> Result<SavedWorkflow, WorkflowRunError> {
         self.graph.workflow(id, revision).map_err(|e| WorkflowRunError::new(&e.code, e.message))
     }
-    fn pinned_definition(&self, _root: &Path, id: &WorkflowId, revision: u64) -> Option<WorkflowDefinition> {
-        self.graph.workflow_definition(id, revision)
-    }
 }
 
 /// Writes one `dataset` file per call and reports an environment with
@@ -400,6 +397,12 @@ fn durable_writes_of_a_run() {
     let store = RunStore::open(Some(&dir.path().join("runs.sqlite3"))).unwrap();
     let put = sample(20, || store.put("project", &finished).unwrap());
     perf("workflow.store.put", scale.clone(), &put, serde_json::json!({"record_bytes": final_body}));
+    // The same durable transaction with almost nothing in it (one small
+    // column): what a write costs regardless of the record's size.
+    let floor = sample(20, || store.set_deleted(&finished.id, None).unwrap());
+    perf("workflow.store.durable_write_floor", scale.clone(), &floor, serde_json::json!({}));
+    let encode = sample(20, || serde_json::to_string(&finished).unwrap());
+    perf("workflow.store.encode_record", scale.clone(), &encode, serde_json::json!({"record_bytes": final_body}));
     let get = sample(20, || store.get(&finished.id).unwrap().unwrap());
     perf("workflow.store.get", scale.clone(), &get, serde_json::json!({"record_bytes": final_body}));
     let service_get = sample(20, || f.service.get(&finished.id).unwrap());
