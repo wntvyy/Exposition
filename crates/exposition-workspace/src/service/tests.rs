@@ -878,16 +878,29 @@ fn a_staged_journal_never_replaces_newer_state() {
     assert_eq!(journals[0].text, "four three two one = Title\n\nBody.\n");
     assert_eq!(recovery_files(&f.service).len(), 1);
 
-    // Typing that continues during the write: the staged journal (older than
-    // the buffer, newer than the journal in place) is installed as it is.
+    // Typing that continues during the write: the staged journal is not the
+    // journal of the current state, so the current text is written.
     edit(&f.service, &id, vec![TextPatch::insert(0, "five ")]);
     let staged = f.service.stage_journals(&ids);
     edit(&f.service, &id, vec![TextPatch::insert(0, "six ")]);
+    let counts = f.service.journal_write_counts();
     {
         let _io = lock(&f.service.io);
-        f.service.install_journals(&ids, staged);
+        assert_eq!(f.service.install_journals(&ids, staged), ids, "reported as outdated");
     }
-    assert_eq!(live_journals(&f.service)[0].text, "five four three two one = Title\n\nBody.\n");
+    assert_eq!(live_journals(&f.service)[0].text, "six five four three two one = Title\n\nBody.\n");
+    assert_eq!(f.service.journal_write_counts(), (counts.0, counts.1 + 1));
+    assert_eq!(recovery_files(&f.service).len(), 1);
+
+    // Nothing changed during the write: the staged journal is installed.
+    edit(&f.service, &id, vec![TextPatch::insert(0, "seven ")]);
+    let staged = f.service.stage_journals(&ids);
+    {
+        let _io = lock(&f.service.io);
+        assert!(f.service.install_journals(&ids, staged).is_empty());
+    }
+    assert_eq!(live_journals(&f.service)[0].text, "seven six five four three two one = Title\n\nBody.\n");
+    assert_eq!(f.service.journal_write_counts(), (counts.0 + 1, counts.1 + 1));
 
     // Renamed while the journal was being written: the journal follows the
     // new path and nothing is left under the old one.
@@ -900,7 +913,7 @@ fn a_staged_journal_never_replaces_newer_state() {
     let journals = live_journals(&f.service);
     assert_eq!(journals.len(), 1, "{:?}", recovery_files(&f.service));
     assert_eq!(journals[0].path, wp("renamed.typ"));
-    assert_eq!(journals[0].text, "six five four three two one = Title\n\nBody.\n");
+    assert_eq!(journals[0].text, "seven six five four three two one = Title\n\nBody.\n");
 
     // Closed while the journal was being written: nothing is installed.
     let staged = f.service.stage_journals(&ids);

@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -62,6 +62,9 @@ pub const FS_SETTLE_DELAY: Duration = Duration::from_millis(150);
 /// which is its path for missed notifications. Bulk operations inside the
 /// project (a checkout of a few thousand files) stay below it.
 pub const FS_BACKLOG_LIMIT: usize = 16_384;
+/// Journal writes made under the I/O lock at once after a document changed
+/// while its journal was being written outside the lock.
+const JOURNAL_LOCKED_WRITES: u8 = 8;
 /// Largest file read for build inputs.
 const MAX_BUILD_INPUT_BYTES: u64 = 256 * 1024 * 1024;
 const PROJECT_SETTINGS_PATH: &str = ".exposition/project.json";
@@ -181,8 +184,11 @@ struct FsIntake {
     queued: Arc<AtomicU64>,
     /// Notifications queued and not yet taken for processing.
     backlog: Arc<AtomicUsize>,
-    /// Notifications were dropped since the loop last took a batch.
-    overflowed: Arc<AtomicBool>,
+    /// The folder generation (plus one; zero: none) for which a rescan
+    /// signal was sent since the loop last took a batch. Dropped
+    /// notifications of any other generation send their own signal, so a
+    /// drop is always followed by a rescan of the folder it belongs to.
+    overflowed: Arc<AtomicU64>,
 }
 
 impl FsIntake {
@@ -191,10 +197,12 @@ impl FsIntake {
             return;
         }
         if self.backlog.load(Ordering::Acquire) >= FS_BACKLOG_LIMIT {
-            // Dropped. One error signal per overflow makes the batch that
-            // follows a rescan; it is sent after the drop was decided, so a
-            // rescan is always reported after the last dropped notification.
-            if !self.overflowed.swap(true, Ordering::AcqRel) {
+            // Dropped. One error signal per overflow and folder makes the
+            // batch that follows a rescan of that folder; it is sent after
+            // the drop was decided, so a rescan is always reported after the
+            // last dropped notification. (The backlog may still hold the
+            // notifications of a folder that was open before.)
+            if self.overflowed.swap(generation + 1, Ordering::AcqRel) != generation + 1 {
                 self.send(FsSignal { generation, event: Err(notify::Error::generic("watcher backlog limit reached")) });
             }
             return;
@@ -211,7 +219,7 @@ impl FsIntake {
     /// The loop took `count` notifications for processing.
     fn taken(&self, count: usize) {
         self.backlog.fetch_sub(count, Ordering::AcqRel);
-        self.overflowed.store(false, Ordering::Release);
+        self.overflowed.store(0, Ordering::Release);
     }
 }
 
@@ -257,6 +265,10 @@ pub struct WorkspaceService {
     events: broadcast::Sender<WorkspaceEvent>,
     fs: FsIntake,
     fs_rx: Mutex<Option<mpsc::UnboundedReceiver<FsSignal>>>,
+    /// Journals installed from a staged file, and journals written under the
+    /// I/O lock (counters for tests and benchmarks).
+    journals_installed: AtomicU64,
+    journals_written_locked: AtomicU64,
     counter: AtomicU64,
 }
 
@@ -283,9 +295,6 @@ struct OpenWorkspace {
     /// that the user has not saved or reloaded since: only the user decides
     /// whether that text replaces the file.
     recovered: HashSet<DocumentId>,
-    /// Revision held by each document's live recovery journal, so a journal
-    /// staged from an older revision never replaces a newer one.
-    journaled: HashMap<DocumentId, u64>,
     _watcher: Option<RecommendedWatcher>,
 }
 
@@ -445,9 +454,11 @@ impl WorkspaceService {
                 tx: fs_tx,
                 queued: Arc::new(AtomicU64::new(0)),
                 backlog: Arc::new(AtomicUsize::new(0)),
-                overflowed: Arc::new(AtomicBool::new(false)),
+                overflowed: Arc::new(AtomicU64::new(0)),
             },
             fs_rx: Mutex::new(Some(fs_rx)),
+            journals_installed: AtomicU64::new(0),
+            journals_written_locked: AtomicU64::new(0),
             counter: AtomicU64::new(0),
         })
     }
@@ -489,21 +500,6 @@ impl WorkspaceService {
     /// recovery entries, which reads their journals and files.
     pub fn open_display_root(&self) -> Option<String> {
         lock(&self.state).open.as_ref().map(|o| o.root.display_path())
-    }
-
-    /// The revision held by a document's live recovery journal, if one was
-    /// written in this session.
-    fn journaled_revision(&self, id: &DocumentId) -> Option<u64> {
-        lock(&self.state).open.as_ref().and_then(|o| o.journaled.get(id).copied())
-    }
-
-    fn set_journaled(&self, id: &DocumentId, revision: Option<u64>) {
-        if let Some(open) = lock(&self.state).open.as_mut() {
-            match revision {
-                Some(revision) => open.journaled.insert(id.clone(), revision),
-                None => open.journaled.remove(id),
-            };
-        }
     }
 
     fn recovery_store(&self) -> WorkspaceResult<RecoveryStore> {
@@ -594,7 +590,6 @@ impl WorkspaceService {
                 conflicts: HashMap::new(),
                 suspended: HashSet::new(),
                 recovered: HashSet::new(),
-                journaled: HashMap::new(),
                 _watcher: watcher,
             });
         }
@@ -804,7 +799,6 @@ impl WorkspaceService {
                 open.conflicts.remove(id);
                 open.suspended.remove(id);
                 open.recovered.remove(id);
-                open.journaled.remove(id);
                 open.recovery.clone()
             })
         };
@@ -845,7 +839,6 @@ impl WorkspaceService {
             let mut state = lock(&self.state);
             let open = state.open.as_mut().ok_or_else(WorkspaceError::no_workspace)?;
             open.suspended.insert(id.clone());
-            open.journaled.remove(id);
             open.recovery.clone()
         };
         if let Some(path) = info.path {
@@ -1072,7 +1065,6 @@ impl WorkspaceService {
         if info.saved_revision == Some(info.revision)
             && let Ok(store) = self.recovery_store()
         {
-            self.set_journaled(id, None);
             let _ = store.remove_live(&path);
         }
         Ok(SavedDocument { info, path, revision: doc.revision, bytes: bytes.len() as u64, content_hash })
@@ -1414,16 +1406,32 @@ impl WorkspaceService {
     /// text the document had when the call started, or a later one.
     ///
     /// The text is written and flushed to a temporary file before the I/O
-    /// lock is taken (so a save, reload, or rename never waits for a large
-    /// journal), and installed under the lock only if it is still the
-    /// journal that a write under the lock would produce for an unsaved
-    /// document: same file, base, and encoding, a revision that is not yet
-    /// saved and is newer than the journal already in place. Otherwise the
-    /// journal is written under the lock from the current state.
+    /// lock is taken (so a save, reload, or rename does not wait for a large
+    /// journal), and installed under the lock only if it is exactly the
+    /// journal that a write under the lock would produce now: the document
+    /// is unsaved and still at the staged revision, with the same file,
+    /// base, and encoding. Otherwise (the document changed while its journal
+    /// was written) the journal is written under the lock from the current
+    /// state.
     pub fn journal_documents(&self, ids: &HashSet<DocumentId>) {
-        let staged = self.stage_journals(ids);
+        self.journal_documents_staging(ids, ids);
+    }
+
+    /// [`Self::journal_documents`], staging outside the lock only the
+    /// documents in `stage`. Returns the documents whose staged journal could
+    /// not be used because they changed meanwhile (their journal was written
+    /// under the lock, a second write of the text).
+    fn journal_documents_staging(&self, ids: &HashSet<DocumentId>, stage: &HashSet<DocumentId>) -> HashSet<DocumentId> {
+        let staged = self.stage_journals(stage);
         let _io = lock(&self.io);
-        self.install_journals(ids, staged);
+        self.install_journals(ids, staged)
+    }
+
+    /// `(journals installed from a staged file, journals written under the
+    /// I/O lock)` since start.
+    #[doc(hidden)]
+    pub fn journal_write_counts(&self) -> (u64, u64) {
+        (self.journals_installed.load(Ordering::Relaxed), self.journals_written_locked.load(Ordering::Relaxed))
     }
 
     /// [`Self::journal_documents`] for a caller that holds the I/O lock.
@@ -1463,9 +1471,16 @@ impl WorkspaceService {
 
     /// Bring the live journals of `ids` up to date (the caller holds the I/O
     /// lock): removed for a saved document, otherwise the staged journal when
-    /// it is still valid, otherwise written from the current state.
-    fn install_journals(&self, ids: &HashSet<DocumentId>, mut staged: HashMap<DocumentId, StagedJournal>) {
-        let Ok(store) = self.recovery_store() else { return };
+    /// it is the journal of the document's current state, otherwise written
+    /// from the current state. Returns the unsaved documents whose staged
+    /// journal was not that.
+    fn install_journals(
+        &self,
+        ids: &HashSet<DocumentId>,
+        mut staged: HashMap<DocumentId, StagedJournal>,
+    ) -> HashSet<DocumentId> {
+        let mut outdated = HashSet::new();
+        let Ok(store) = self.recovery_store() else { return outdated };
         for id in ids {
             let prepared = staged.remove(id);
             let Ok(info) = self.documents.info(id) else { continue };
@@ -1477,22 +1492,30 @@ impl WorkspaceService {
                 continue;
             }
             let result = if info.saved_revision == Some(info.revision) {
-                self.set_journaled(id, None);
                 store.remove_live(&path)
             } else {
-                let in_place = self.journaled_revision(id);
+                // Only the journal of exactly this state is installed: the
+                // revision identifies the text, and path, base, and encoding
+                // are compared with what a write would use now. (Anything
+                // weaker has to reason about what happened since the staging;
+                // the saved revision, for one, can go back when the file is
+                // deleted.)
+                let current = prepared.as_ref().is_some_and(|journal| {
+                    journal.revision == info.revision
+                        && journal.path == path
+                        && journal.base == base
+                        && journal.encoding == info.encoding
+                });
+                if prepared.is_some() && !current {
+                    outdated.insert(id.clone());
+                }
                 let written = match prepared {
-                    Some(journal)
-                        if journal.path == path
-                            && journal.base == base
-                            && journal.encoding == info.encoding
-                            && journal.revision <= info.revision
-                            && journal.revision > info.saved_revision.unwrap_or(0)
-                            && in_place.is_none_or(|revision| journal.revision > revision) =>
-                    {
+                    Some(journal) if current => {
+                        self.journals_installed.fetch_add(1, Ordering::Relaxed);
                         journal.file.commit().map(|()| journal.revision)
                     }
                     _ => self.documents.shared_state(id).map_err(std::io::Error::other).and_then(|(info, text)| {
+                        self.journals_written_locked.fetch_add(1, Ordering::Relaxed);
                         let journal = JournalRef {
                             version: JOURNAL_VERSION,
                             path: &path,
@@ -1505,7 +1528,7 @@ impl WorkspaceService {
                         store.stage_live(&journal)?.commit().map(|()| info.revision)
                     }),
                 };
-                written.map(|revision| self.set_journaled(id, Some(revision)))
+                written.map(|_| ())
             };
             if let Err(e) = result {
                 self.emit(WorkspaceEvent::JournalFailed {
@@ -1514,6 +1537,7 @@ impl WorkspaceService {
                 });
             }
         }
+        outdated
     }
 
     /// Unsaved changes from earlier sessions. Entries whose text already
@@ -1802,6 +1826,11 @@ impl WorkspaceService {
         let mut journal_at: Option<Instant> = None;
         let mut pending_fs: Vec<FsSignal> = Vec::new();
         let mut fs_at: Option<Instant> = None;
+        // Documents edited while their journal was being written outside the
+        // lock (large documents during continuous typing): for the next few
+        // writes their journal is written under the lock at once, instead of
+        // writing the text twice each time.
+        let mut write_locked: HashMap<DocumentId, u8> = HashMap::new();
         loop {
             let next = [journal_at, fs_at].into_iter().flatten().min();
             tokio::select! {
@@ -1836,8 +1865,18 @@ impl WorkspaceService {
                     if journal_at.is_some_and(|at| at <= now) {
                         journal_at = None;
                         let ids = std::mem::take(&mut pending_docs);
+                        let stage: HashSet<DocumentId> =
+                            ids.iter().filter(|id| !write_locked.contains_key(*id)).cloned().collect();
+                        write_locked.retain(|_, writes| {
+                            *writes -= 1;
+                            *writes > 0
+                        });
                         let service = Arc::clone(&self);
-                        let _ = tokio::task::spawn_blocking(move || service.journal_documents(&ids)).await;
+                        let outdated =
+                            tokio::task::spawn_blocking(move || service.journal_documents_staging(&ids, &stage)).await;
+                        for id in outdated.unwrap_or_default() {
+                            write_locked.insert(id, JOURNAL_LOCKED_WRITES);
+                        }
                     }
                     if fs_at.is_some_and(|at| at <= now) {
                         fs_at = None;
