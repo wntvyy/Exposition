@@ -311,3 +311,75 @@ fn a_failed_coverage_read_does_not_zero_the_counts() {
     assert_eq!(after.revision, before.revision + 1);
     assert_eq!(after.coverage.resources, 0);
 }
+
+/// A second declaration of a label is a change to the references to that
+/// label, wherever they are: the pass resolves the files that refer to it
+/// again (here one file per label) and nothing else, so its cost is the
+/// same in a project three times the size.
+#[test]
+fn a_second_declaration_of_a_label_costs_the_references_to_it() {
+    let small = project(320, 20, 200);
+    let large = project(960, 200, 2_000);
+    let cost = |p: &Project| -> SqlWork {
+        let svc = &p.svc;
+        let edited = p.root.join(EDITED_FILE);
+        let original = std::fs::read_to_string(&edited).unwrap();
+        // `lem:<n>` is declared in chapter n and referred to by chapter n + 1.
+        let declare_again = |n: usize| {
+            let text = format!("{original}\\begin{{lemma}}\\label{{lem:{n}}}\nAgain.\n\\end{{lemma}}\n");
+            std::fs::write(&edited, text).unwrap();
+            let report = svc.reconcile(&one(EDITED_FILE)).unwrap();
+            assert_eq!(report.read, 1, "{report:?}");
+        };
+        let detail = |chapter: usize| -> String {
+            let at = path(&format!("chapters/c{}/ch{chapter}.tex", chapter % 20));
+            svc.with_store(|s| Ok(s.coverage(&at)?)).unwrap().unwrap().detail.unwrap_or_default()
+        };
+        declare_again(3);
+        assert!(detail(4).contains("\u{201c}lem:3\u{201d} matches 2 declarations"), "{}", detail(4));
+        svc.status();
+        // Measured: `lem:3` is unique again, `lem:9` is declared twice.
+        let (_, work) = sql_of(|| declare_again(9));
+        assert!(!detail(4).contains("lem:3"), "{}", detail(4));
+        assert!(detail(10).contains("\u{201c}lem:9\u{201d} matches 2 declarations"), "{}", detail(10));
+        work
+    };
+    let (s, l) = (cost(&small), cost(&large));
+    assert_same_cost("a pass that declares a label a second time", s, l, 2_000);
+}
+
+/// A lakefile that appears changes the module name of the Lean files
+/// beneath it and how every Lean import resolves: the pass derives those
+/// again from the stored index (no Lean file is read) and leaves the files
+/// of other kinds alone. Its statements grow with the Lean files only.
+#[test]
+fn a_lakefile_costs_the_lean_files_not_the_project() {
+    let small = project(320, 20, 200);
+    let large = project(960, 200, 2_000);
+    let lean = |p: &Project| std::fs::read_dir(p.root.join("P")).unwrap().count() as u64;
+    let cost = |p: &Project| -> SqlWork {
+        let svc = &p.svc;
+        let module = |svc: &GraphService| -> Option<String> {
+            let e = svc.formal_declaration(&path("P/L1.lean"), "P.t1").unwrap().expect("an indexed declaration");
+            e.attributes.get("lean.module").cloned()
+        };
+        assert_eq!(module(svc).as_deref(), Some("P.L1"));
+        // Warm-up: the same kind of pass (a new file in the folder).
+        std::fs::write(p.root.join("P/notes.md"), "# Notes\n").unwrap();
+        svc.reconcile(&one("P/notes.md")).unwrap();
+        svc.status();
+        std::fs::write(p.root.join("P/lakefile.toml"), "name = \"L\"\n").unwrap();
+        let (report, work) = sql_of(|| svc.reconcile(&one("P/lakefile.toml")).unwrap());
+        assert_eq!(report.read, 1, "no Lean file is read again: {report:?}");
+        assert_eq!(module(svc).as_deref(), Some("L1"));
+        work
+    };
+    let (s, l) = (cost(&small), cost(&large));
+    let more = lean(&large) - lean(&small);
+    assert!(more >= 10, "{more} more Lean files in the larger project");
+    // Per Lean file: its index record, its two declarations, its links.
+    assert!(
+        l.statements <= s.statements + 40 * more + 20,
+        "a lakefile costs more than the Lean files it concerns ({more} more in the larger project):\n small {s:?}\n large {l:?}"
+    );
+}

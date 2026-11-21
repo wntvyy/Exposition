@@ -123,9 +123,20 @@ host at the `large` scale unless a row says otherwise; release-profile figures f
 | 2,160 pending marks | one statement per batch | 3,800 → 7 ms |
 | Reads that decide (impact, removal planning) | complete, or flagged incomplete | a dependent hidden behind 20,050 rejected suggestions is now found |
 
-A scoped pass and a full reindex must produce the same files, folders, bindings
-and containment: `review_perf_differential` checks this over random operation
-sequences and is part of the normal test suite.
+A scoped pass and a full reindex must produce the same graph, record for
+record (entities, bindings, relations, coverage, awaited targets, the stored
+index) and the same overlays: `review_perf_differential` checks this over
+random operation sequences and is part of the normal test suite.
+
+A change that concerns other files costs those files and no more, each resolved
+from its stored index without being read: a label that gains or loses a
+declaration costs the files that refer to it, a file that appears on a lookup
+path costs the files waiting for that path, a lakefile costs the Lean files, a
+LaTeX main file costs the files whose paths were looked up below the main
+files' folders. `cost_bounds` asserts the first and the third by statement
+counts. The exception is stated in the store: a graph that does not record the
+current link rules has every indexed file resolved again once, by its next
+full pass.
 
 ### Pages
 

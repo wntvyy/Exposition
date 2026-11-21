@@ -69,6 +69,11 @@ pub fn scan_tree(root: &Path, start: Option<&WorkspacePath>, out: &mut ScanOutco
             if !real_dir_chain(root, dir) {
                 return;
             }
+            // Only the folder's own spelling names it: files found under
+            // another spelling would be keyed by paths no file has.
+            if on_disk_spelling(root, dir) != *dir {
+                return;
+            }
             stack.push((absolute(root, dir), Some(dir.clone()), dir.components().count()));
         }
         None => stack.push((root.to_path_buf(), None, 0)),
@@ -143,13 +148,10 @@ pub fn stat_file(root: &Path, path: &WorkspacePath) -> Option<FileMeta> {
     if meta.file_type().is_symlink() || !meta.is_file() {
         return None;
     }
-    // On a case-insensitive file system another spelling of the name reaches
-    // the file too (`a.txt` after a rename to `A.txt`): only the name as
-    // stored on disk is the file, or one file would get two resources.
-    if cfg!(windows)
-        && let Ok(real) = std::fs::canonicalize(&abs)
-        && real.file_name().and_then(|n| n.to_str()).is_some_and(|n| n != path.file_name())
-    {
+    // On a case-insensitive file system another spelling of any component
+    // reaches the file too (`notes/a.txt` for `Notes/A.txt`): only the path
+    // as stored on disk is the file, or one file would get two resources.
+    if on_disk_spelling(root, path) != *path {
         return None;
     }
     let roles = match classify(path) {
@@ -157,6 +159,56 @@ pub fn stat_file(root: &Path, path: &WorkspacePath) -> Option<FileMeta> {
         Admission::Exclude(_) => Vec::new(),
     };
     Some(FileMeta { size: meta.len(), modified_ms: modified_ms(&meta), roles })
+}
+
+fn same_ignoring_case(a: &str, b: &str) -> bool {
+    a == b || a.to_lowercase() == b.to_lowercase()
+}
+
+/// `path` as the file system spells it: every component that exists is
+/// returned with the name stored on disk, so that one file or folder has one
+/// key however a caller or a watcher wrote it (`notes/a.md` for `Notes/a.md`
+/// on a case-insensitive file system). Components that do not exist (a
+/// deleted file, the rest of a path below a missing folder) have no spelling
+/// on disk and are kept as given. On a case-sensitive file system a path is
+/// its own spelling: two names that differ in case are two files.
+///
+/// The cost is one lookup for an existing path and one more per missing
+/// trailing component; no folder is listed.
+pub fn on_disk_spelling(root: &Path, path: &WorkspacePath) -> WorkspacePath {
+    let given: Vec<&str> = path.components().collect();
+    let mut spelled: Vec<String> = given.iter().map(|c| (*c).to_owned()).collect();
+    let mut n = given.len();
+    while n > 0 {
+        let mut abs = root.to_path_buf();
+        for c in &given[..n] {
+            abs.push(c);
+        }
+        if let Ok(real) = std::fs::canonicalize(&abs) {
+            // The last `n` names of the resolved path are the components as
+            // stored. A path that resolves elsewhere (through a link) is not
+            // respelled; links are refused where files are read.
+            let mut tail: Vec<String> = real
+                .components()
+                .rev()
+                .take(n)
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(name) => name.to_str().map(str::to_owned),
+                    _ => None,
+                })
+                .collect();
+            tail.reverse();
+            if tail.len() == n && tail.iter().zip(&given[..n]).all(|(a, b)| same_ignoring_case(a, b)) {
+                spelled[..n].clone_from_slice(&tail);
+            }
+            break;
+        }
+        n -= 1;
+    }
+    if spelled.iter().map(String::as_str).eq(given.iter().copied()) {
+        return path.clone();
+    }
+    WorkspacePath::parse(&spelled.join("/")).unwrap_or_else(|_| path.clone())
 }
 
 /// Is `path` (a file or folder) present as a real folder?
