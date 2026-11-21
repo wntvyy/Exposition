@@ -21,6 +21,10 @@
 //!   in full next to the hashes.
 //! - `EXPOSITION_DIFF_SOFT`: collect differences and report them at the end
 //!   of each seed instead of stopping at the first.
+//! - `EXPOSITION_DIFF_STRICT`: compare every record and the overlays with
+//!   the full reindex (by default: files, folders, their bindings and
+//!   containment, which agreed at the base revision).
+//! - `EXPOSITION_DIFF_NO_FULL`: skip the full reindex (hashes only).
 //! - `EXPOSITION_DIFF_CASE`: also deliver events whose folder case differs
 //!   from the stored paths.
 
@@ -222,7 +226,9 @@ struct Project {
 fn open(seed_files: Option<&Path>) -> Project {
     let data = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    // A fixed folder name: the project entity is labelled with it.
+    std::fs::create_dir(dir.path().join("project")).unwrap();
+    let root = std::fs::canonicalize(dir.path().join("project")).unwrap();
     if let Some(from) = seed_files {
         copy_tree(from, &root);
     }
@@ -318,7 +324,8 @@ fn sort_arrays(value: &mut Value) {
     }
 }
 
-const TIMES: &[&str] = &["createdAtMs", "updatedAtMs", "computedAtMs", "checkpointMs", "indexedAt"];
+/// Times, and the minted project id.
+const TIMES: &[&str] = &["createdAtMs", "updatedAtMs", "computedAtMs", "checkpointMs", "indexedAt", "project"];
 /// Fields the change under review added to read models.
 const NEW_FLAGS: &[&str] = &["relationsTruncated", "neighborsTruncated", "evidenceTruncated", "entitiesTruncated"];
 
@@ -481,10 +488,9 @@ fn canonical(svc: &GraphService, evidence_order: &BTreeMap<String, usize>, overl
         .unwrap();
     lines.push(json("snapshot", serde_json::to_value(&snapshot).unwrap()));
     lines.push(json("math", serde_json::to_value(svc.math_overview().unwrap()).unwrap()));
-    // Impact of every live resource and of every fourth other entity.
-    for (i, id) in ids.iter().enumerate() {
-        let e = svc.with_store(|s| Ok(s.entity(id)?)).unwrap().unwrap();
-        if (e.kind == EntityKind::Resource && e.lifecycle != Lifecycle::Tombstoned) || i % 4 == 0 {
+    // Impact of every entity.
+    for id in &ids {
+        {
             let report = svc.impact(&ImpactRequest { entities: vec![id.clone()], max_depth: None, max_items: None });
             lines.push(match report {
                 Ok(r) => json("impact", serde_json::to_value(&r).unwrap()),
@@ -951,6 +957,10 @@ impl Run {
             let text = format!("coverage still pending after every event was reconciled: {pending:?}");
             self.finding(step, text);
         }
+        if std::env::var_os("EXPOSITION_DIFF_NO_FULL").is_some() {
+            self.overlay_lines = overlays_a;
+            return;
+        }
         let b = open(Some(&self.a.root));
         b.svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: true }).unwrap();
         let full = records(&b.svc, false);
@@ -962,6 +972,14 @@ impl Run {
             });
         }
         b.svc.detach();
+        // Without `EXPOSITION_DIFF_STRICT` only the records that agreed
+        // before the change under review are compared: files, folders,
+        // their bindings and containment. Link resolution, awaited targets
+        // and Lean module names already differed between an incremental
+        // pass and a full reindex at the base revision (see the review).
+        let strict = std::env::var_os("EXPOSITION_DIFF_STRICT").is_some();
+        let (incremental, full) =
+            if strict { (incremental, full) } else { (structure(&incremental), structure(&full)) };
         if incremental != full {
             let a: BTreeSet<&String> = incremental.iter().collect();
             let f: BTreeSet<&String> = full.iter().collect();
@@ -974,7 +992,7 @@ impl Run {
             }
             self.finding(step, text);
         }
-        if overlays_a != overlays_b {
+        if strict && overlays_a != overlays_b {
             let mut text = String::from("an overlay differs after a forced full reindex\n");
             for (x, y) in overlays_a.iter().zip(&overlays_b) {
                 if x != y {
@@ -985,6 +1003,30 @@ impl Run {
         }
         self.overlay_lines = overlays_a;
     }
+}
+
+/// The records of files and folders: their entities, bindings and containment.
+fn structure(lines: &[String]) -> Vec<String> {
+    let field = |line: &str, name: &str| -> Option<String> {
+        let v: Value = serde_json::from_str(line.split_once(' ')?.1).ok()?;
+        v.get(name)?.as_str().map(str::to_owned)
+    };
+    let ids: BTreeSet<String> = lines
+        .iter()
+        .filter(|l| l.starts_with("E "))
+        .filter(|l| matches!(field(l, "kind").as_deref(), Some("resource" | "folder" | "project")))
+        .filter_map(|l| field(l, "id"))
+        .collect();
+    lines
+        .iter()
+        .filter(|l| match l.split_once(' ').map(|(tag, _)| tag) {
+            Some("E") => field(l, "id").is_some_and(|id| ids.contains(&id)),
+            Some("B") => field(l, "entity").is_some_and(|id| ids.contains(&id)),
+            Some("R") => field(l, "kind").as_deref() == Some("contains"),
+            _ => false,
+        })
+        .cloned()
+        .collect()
 }
 
 fn clip(line: &str) -> String {
